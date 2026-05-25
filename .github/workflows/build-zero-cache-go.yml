@@ -4,10 +4,16 @@ name: Build & publish zero-cache+go image
 # binary from ghcr.io/kartikparsoya-eng/go-ivm and bundles it with
 # zero-cache. Publishes to ghcr.io/kartikparsoya-eng/zero-cache-go.
 #
-# `pull: true` forces the build to re-fetch the go-ivm image instead
-# of using a stale cached copy — so the chain "push to go-ivm → push
-# to mono" reliably ends up with the latest sidecar binary inside
-# the zero-cache image.
+# Two variants are published from the same Dockerfile + same source,
+# differing only in the SHADOW_MODE build arg:
+#   - primary: Go-primary (Go serves clients) → tags: latest, sha-...,
+#              branch name
+#   - shadow:  TS source of truth, Go in parallel for drift audit →
+#              tags: shadow-latest, shadow-sha-..., shadow-<branch>
+#
+# `pull: true` forces the build to re-fetch the go-ivm image so the
+# chain "push to go-ivm → push to mono" reliably bundles the latest
+# sidecar binary in both variants.
 
 on:
   push:
@@ -41,6 +47,19 @@ jobs:
       contents: read
       packages: write
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: primary
+            shadow_mode_arg: "false"
+            tag_prefix: ""
+          - mode: shadow
+            shadow_mode_arg: "true"
+            tag_prefix: "shadow-"
+
+    name: build (${{ matrix.mode }})
+
     steps:
       - uses: actions/checkout@v4
 
@@ -62,13 +81,18 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The prefix applies to ALL generated tags, including the raw
+          # `latest`. So the primary variant publishes `latest`, the
+          # shadow variant publishes `shadow-latest`, etc.
+          flavor: |
+            prefix=${{ matrix.tag_prefix }},onlatest=true
           tags: |
             type=ref,event=branch
             type=ref,event=tag
             type=sha,format=short
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/feat/go-ivm-sidecar-async-advance' }}
 
-      - name: Build & push image
+      - name: Build & push image (${{ matrix.mode }})
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -80,7 +104,12 @@ jobs:
           # PRs build (verifies the Dockerfile still compiles) but
           # don't push (no image churn from forks).
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            SHADOW_MODE=${{ matrix.shadow_mode_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Cache scoped per-matrix-variant so primary and shadow don't
+          # invalidate each other (they share most layers but the final
+          # ENV layer differs).
+          cache-from: type=gha,scope=${{ matrix.mode }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.mode }}

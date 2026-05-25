@@ -41,16 +41,22 @@ COPY . .
 # pattern the earlier revision used).
 COPY --from=go-ivm /usr/local/bin/go-ivm-sidecar /opt/go-ivm/go-ivm-sidecar
 
-# Default to Go-primary + shared-sidecar topology — the recommended
-# production config per go-ivm/REVIEW-final.md. All ENV defaults are
-# overridable at `docker run -e` / compose env-block time; flip
-# ZERO_GO_SIDECAR_SHADOW_MODE=true to switch to shadow-validation
-# mode (TS source of truth, Go in parallel).
+# Build-time mode selector:
+#   SHADOW_MODE=false (default) → Go-primary image (Go serves clients)
+#   SHADOW_MODE=true            → Shadow image (TS source of truth,
+#                                  Go runs in parallel for drift audit)
+# CI publishes both variants to different tags off the same Dockerfile.
+ARG SHADOW_MODE=false
+
+# All ENV defaults are overridable at `docker run -e` / compose env-block
+# time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
+# (shadow on 1 prod node → ~1 week observation → flip to primary).
 ENV NODE_ENV=production
 ENV ZERO_GO_SIDECAR_BINARY_PATH=/opt/go-ivm/go-ivm-sidecar
 ENV ZERO_GO_SIDECAR_ENABLED=true
 ENV ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=true
 ENV ZERO_GO_SIDECAR_SOCKET_PATH=/tmp/go-ivm-shared.sock
+ENV ZERO_GO_SIDECAR_SHADOW_MODE=${SHADOW_MODE}
 # workers=1 keeps cg state colocated in the single shared sidecar
 # (per feedback_shared_sidecar_tuning — bumping workers fragments
 # cgs across sidecars under per-worker mode; in shared mode it just
