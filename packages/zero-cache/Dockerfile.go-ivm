@@ -34,6 +34,16 @@ RUN find packages -maxdepth 1 -mindepth 1 -type d | while read dir; do \
 # Install all deps (including native binaries like esbuild)
 RUN npm install --prefer-offline 2>&1 | tail -5
 
+# OpenTelemetry auto-instrumentation. Packages are installed at the
+# workspace root so they're resolvable from zero-cache at runtime.
+# Always installed; SDK is wired via NODE_OPTIONS below but no-ops
+# at runtime when OTEL_EXPORTER_OTLP_ENDPOINT is unset (no perf cost
+# for operators who don't enable tracing).
+RUN npm install --no-save \
+    @opentelemetry/auto-instrumentations-node \
+    @opentelemetry/sdk-node \
+    2>&1 | tail -5
+
 # Now copy all source
 COPY . .
 
@@ -62,6 +72,13 @@ ENV ZERO_GO_SIDECAR_SHADOW_MODE=${SHADOW_MODE}
 # cgs across sidecars under per-worker mode; in shared mode it just
 # adds V8 GC overhead with no concurrency win).
 ENV ZERO_NUM_SYNC_WORKERS=1
+# Pre-wire OTel auto-instrumentation. The /register hook initializes
+# the SDK at startup; OTLP exporter no-ops when
+# OTEL_EXPORTER_OTLP_ENDPOINT is unset, so there's no cost for
+# operators who don't enable tracing. Set
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 + OTEL_SERVICE_NAME
+# at deploy time to turn it on.
+ENV NODE_OPTIONS='--require @opentelemetry/auto-instrumentations-node/register'
 
 EXPOSE 4848
 
