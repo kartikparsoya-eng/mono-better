@@ -1,5 +1,14 @@
-# Dockerfile for zero-cache with Go IVM sidecar integration
-# Builds from the mono repo source with tsx (no pre-compilation needed)
+# Dockerfile for zero-cache with the Go IVM sidecar bundled.
+# The Go binary is pulled from the published go-ivm image (built by
+# the go-ivm- repo's GitHub Actions workflow on every push to main).
+# Override GO_IVM_IMAGE to pin a specific tag (default: latest).
+
+ARG GO_IVM_IMAGE=ghcr.io/kartikparsoya-eng/go-ivm:latest
+
+# Stage 1: grab the prebuilt Go IVM binary
+FROM ${GO_IVM_IMAGE} AS go-ivm
+
+# Stage 2: zero-cache runtime
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,7 +25,7 @@ COPY packages/zero-schema/package.json packages/zero-schema/
 COPY packages/shared/package.json packages/shared/
 COPY packages/zql/package.json packages/zql/
 
-# Create stub package.json for workspace packages that might be referenced
+# Stub package.json for workspace packages that might be referenced
 RUN find packages -maxdepth 1 -mindepth 1 -type d | while read dir; do \
     if [ ! -f "$dir/package.json" ]; then \
       echo '{"name":"'$(basename $dir)'","version":"0.0.0"}' > "$dir/package.json"; \
@@ -28,10 +37,11 @@ RUN npm install --prefer-offline 2>&1 | tail -5
 # Now copy all source
 COPY . .
 
-# Go IVM binary will be mounted at /opt/go-ivm/go-ivm-sidecar
-RUN mkdir -p /opt/go-ivm
+# Bundle the Go IVM binary into the image (replaces the bind-mount
+# pattern the earlier revision used).
+COPY --from=go-ivm /usr/local/bin/go-ivm-sidecar /opt/go-ivm/go-ivm-sidecar
 
-ENV NODE_ENV=development
+ENV NODE_ENV=production
 ENV ZERO_GO_SIDECAR_BINARY_PATH=/opt/go-ivm/go-ivm-sidecar
 
 EXPOSE 4848
