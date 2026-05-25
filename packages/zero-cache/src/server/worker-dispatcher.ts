@@ -1,4 +1,5 @@
 import type {LogContext} from '@rocicorp/logger';
+import {existsSync, readFileSync, writeFileSync} from 'node:fs';
 import UrlPattern from 'url-pattern';
 import {assert} from '../../../shared/src/asserts.ts';
 import {h32} from '../../../shared/src/hash.ts';
@@ -23,17 +24,85 @@ export class WorkerDispatcher implements Service {
     syncers: Worker[],
     mutator: Worker | undefined,
     changeStreamer: Worker | undefined,
+    // When defined, switch from hash-based to least-loaded routing and
+    // persist the cg→syncer mapping to this path so assignments survive
+    // restart. Wired via ZERO_LEAST_LOADED_ROUTING=1 in main.ts.
+    assignmentsFile?: string | undefined,
   ) {
     this.#lc = lc;
+
+    // Least-loaded syncer assignment with persistence. Tracks how many
+    // client groups each syncer has and persists the mapping to disk
+    // so assignments survive restart.
+    //
+    // KNOWN LIMITATION: syncerLoad[] is never decremented when a cg
+    // is reaped — the dispatcher has no signal from the syncer about
+    // cg lifecycle. Over time the picker degrades toward the
+    // first-assigned syncer for new cgs. Acceptable for warm-start
+    // distribution; for long-running processes, restart periodically
+    // to refresh the picture (the persisted file preserves existing
+    // sticky assignments across the restart).
+    const assignments = new Map<string, number>();
+    const syncerLoad = new Array<number>(syncers.length).fill(0);
+
+    if (assignmentsFile && existsSync(assignmentsFile)) {
+      try {
+        const data = JSON.parse(readFileSync(assignmentsFile, 'utf-8'));
+        for (const [cg, idx] of Object.entries(data)) {
+          const syncerIdx = idx as number;
+          if (syncerIdx >= 0 && syncerIdx < syncers.length) {
+            assignments.set(cg, syncerIdx);
+            syncerLoad[syncerIdx]++;
+          }
+        }
+        lc.info?.(
+          `loaded ${assignments.size} syncer assignments from ${assignmentsFile}`,
+        );
+      } catch (e) {
+        lc.warn?.(`failed to load syncer assignments, starting fresh`, e);
+      }
+    }
+
+    function persistAssignments() {
+      if (!assignmentsFile) return;
+      try {
+        writeFileSync(assignmentsFile, JSON.stringify(Object.fromEntries(assignments)));
+      } catch (e) {
+        lc.warn?.(`failed to persist syncer assignments`, e);
+      }
+    }
+
+    function assignSyncer(clientGroupID: string): number {
+      if (!assignmentsFile) {
+        // Original hash-based routing — diversifies by taskID so a task
+        // shedding connections redistributes evenly across receivers.
+        return h32(taskID + '/' + clientGroupID) % syncers.length;
+      }
+      const existing = assignments.get(clientGroupID);
+      if (existing !== undefined) return existing;
+      // Pick the least-loaded syncer (first wins on tie).
+      let minLoad = syncerLoad[0];
+      let minIdx = 0;
+      for (let i = 1; i < syncerLoad.length; i++) {
+        if (syncerLoad[i] < minLoad) {
+          minLoad = syncerLoad[i];
+          minIdx = i;
+        }
+      }
+      assignments.set(clientGroupID, minIdx);
+      syncerLoad[minIdx]++;
+      persistAssignments();
+      return minIdx;
+    }
 
     function connectParams(req: IncomingMessageSubset) {
       const {headers, url: u} = req;
       const url = new URL(u ?? '', 'http://unused/');
-      const path = parsePath(url);
-      if (!path) {
+      const p = parsePath(url);
+      if (!p) {
         throw new Error(`Invalid URL: ${u}`);
       }
-      const version = Number(path.version);
+      const version = Number(p.version);
       if (Number.isNaN(version)) {
         throw new Error(`Invalid version: ${u}`);
       }
@@ -69,12 +138,9 @@ export class WorkerDispatcher implements Service {
       const {clientGroupID, protocolVersion} = params;
       maxProtocolVersion = Math.max(maxProtocolVersion, protocolVersion);
 
-      // Include the TaskID when hash-bucketting the client group to the sync
-      // worker. This diversifies the distribution of client groups (across
-      // workers) for different tasks, so that if one task sheds connections
-      // from its most heavily loaded sync worker(s), those client groups will
-      // be distributed uniformly across workers on the receiving task(s).
-      const syncer = h32(taskID + '/' + clientGroupID) % syncers.length;
+      // Routing strategy is selected by assignSyncer(): hash-based by
+      // default, least-loaded + persistent when assignmentsFile is set.
+      const syncer = assignSyncer(clientGroupID);
 
       lc.debug?.(`connecting ${clientGroupID} to syncer ${syncer}`);
       return {payload: params, sender: syncers[syncer]};

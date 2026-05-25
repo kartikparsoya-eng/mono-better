@@ -208,6 +208,15 @@ export default async function runWorker(
         syncers,
         mutator,
         changeStreamer,
+        // Opt into least-loaded routing + persistent cg→syncer mapping.
+        // File lives next to the replica so it's on the same volume as
+        // CVR data — moving them together preserves locality.
+        env.ZERO_LEAST_LOADED_ROUTING === '1'
+          ? path.join(
+              path.dirname(config.replica.file),
+              'syncer-assignments.json',
+            )
+          : undefined,
       ),
     );
   } catch (err) {
