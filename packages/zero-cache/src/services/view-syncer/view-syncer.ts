@@ -2634,6 +2634,24 @@ export class TimeSliceTimer {
     return performance.now() - this.#start;
   }
 
+  /**
+   * True iff a lap is currently in progress. Callers can use this to
+   * decide whether to invoke {@link elapsedLap}/{@link #stopLap} which
+   * would otherwise assert.
+   *
+   * Specifically: shadow-mode advance in {@link PipelineDriver} opens
+   * an async window mid-iteration (the `await goPromise` boundary) so
+   * the surrounding view-syncer's stop sequence can race in and stop
+   * the timer underneath the still-running TS advance generator. The
+   * goal state — Go-primary — does NOT hit this window because
+   * `#goAdvance` never iterates through the TS advance generator. This
+   * accessor lets shadow mode short-circuit gracefully instead of
+   * throwing.
+   */
+  running(): boolean {
+    return this.#start !== 0;
+  }
+
   #stopLap() {
     assert(this.#start !== 0, 'not running');
     this.#total += performance.now() - this.#start;

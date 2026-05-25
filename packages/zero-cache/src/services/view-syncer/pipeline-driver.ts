@@ -1903,7 +1903,16 @@ export class PipelineDriver {
 
   #shouldYield(): boolean {
     if (this.#hydrateContext) {
-      return this.#hydrateContext.timer.elapsedLap() > this.#yieldThresholdMs();
+      // Shadow-mode opens an async boundary mid-iteration (await Go
+      // RPC); the surrounding view-syncer's stop sequence can stop
+      // the timer underneath the still-running TS hydrate. Guard
+      // against the assertion — return false so the generator exits
+      // its loop cleanly on the next iteration instead of throwing.
+      // No-op in Go-primary (no TS hydrate generator interleaved with
+      // async Go calls) and TS-only (no async window inside hydrate).
+      const t = this.#hydrateContext.timer;
+      if (!t.running()) return false;
+      return t.elapsedLap() > this.#yieldThresholdMs();
     }
     if (this.#advanceContext) {
       return this.#shouldAdvanceYieldMaybeAbortAdvance();
@@ -1946,6 +1955,14 @@ export class PipelineDriver {
         'advancement-timeout',
       );
     }
+    // Same shadow-mode race as the hydrate guard above: the async
+    // `await goPromise` boundary inside #shadowAdvance lets the
+    // surrounding view-syncer stop the timer mid-iteration. Skip the
+    // elapsedLap (which would assert) and return false — the advance
+    // generator finishes its current step and exits on the next loop
+    // tick. The goal state (Go-primary via #goAdvance) does not run
+    // this generator and is unaffected.
+    if (!advanceTimer.running()) return false;
     return advanceTimer.elapsedLap() > this.#yieldThresholdMs();
   }
 
