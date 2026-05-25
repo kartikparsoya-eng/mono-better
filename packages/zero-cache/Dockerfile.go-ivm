@@ -8,7 +8,27 @@ ARG GO_IVM_IMAGE=ghcr.io/kartikparsoya-eng/go-ivm:latest
 # Stage 1: grab the prebuilt Go IVM binary
 FROM ${GO_IVM_IMAGE} AS go-ivm
 
-# Stage 2: zero-cache runtime
+# Stage 2: build litestream from rocicorp's fork (replicator role needs it
+# for continuous SQLite → S3/GCS backup so future syncers can restore
+# the replica without a multi-GB resync from upstream PG).
+FROM golang:1.23 AS litestream-builder
+WORKDIR /src
+RUN git clone --depth 1 --branch zero@v0.0.9 \
+    https://github.com/rocicorp/litestream.git /src/litestream
+WORKDIR /src/litestream
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg \
+    go build \
+      -ldflags "-s -w -extldflags '-static'" \
+      -tags osusergo,netgo,sqlite_omit_load_extension \
+      -o /usr/local/bin/litestream \
+      ./cmd/litestream
+
+# Stage 3: pull official litestream v5 binary (for backward compat with
+# older replica backups; rocicorp's pattern keeps both around).
+FROM litestream/litestream:0.5.11 AS litestream-v5
+
+# Stage 4: zero-cache runtime
 FROM node:22-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -51,6 +71,15 @@ COPY . .
 # pattern the earlier revision used).
 COPY --from=go-ivm /usr/local/bin/go-ivm-sidecar /opt/go-ivm/go-ivm-sidecar
 
+# Bundle litestream for the replicator role's SQLite backup pipeline.
+# Both v0 (rocicorp fork) and v5 (official) are kept; zero-cache picks
+# the right one based on the backup URL's storage version.
+COPY --from=litestream-builder /usr/local/bin/litestream /usr/local/bin/litestream
+COPY --from=litestream-v5      /usr/local/bin/litestream /usr/local/bin/litestream-v5
+# Litestream config lives in our source — copy it to the canonical path
+# zero-cache reads from via ZERO_LITESTREAM_CONFIG_PATH.
+RUN cp /app/packages/zero-cache/src/services/litestream/config.yml /etc/litestream.yml
+
 # Build-time mode selector:
 #   SHADOW_MODE=false (default) → Go-primary image (Go serves clients)
 #   SHADOW_MODE=true            → Shadow image (TS source of truth,
@@ -72,6 +101,12 @@ ENV ZERO_GO_SIDECAR_SHADOW_MODE=${SHADOW_MODE}
 # cgs across sidecars under per-worker mode; in shared mode it just
 # adds V8 GC overhead with no concurrency win).
 ENV ZERO_NUM_SYNC_WORKERS=1
+# Litestream paths for the replicator role's continuous backup. When
+# ZERO_LITESTREAM_BACKUP_URL is set at deploy time (e.g. an S3/GCS URL),
+# zero-cache will use these binaries; when unset, backup is skipped.
+ENV ZERO_LITESTREAM_EXECUTABLE=/usr/local/bin/litestream
+ENV ZERO_LITESTREAM_EXECUTABLE_V5=/usr/local/bin/litestream-v5
+ENV ZERO_LITESTREAM_CONFIG_PATH=/etc/litestream.yml
 # Pre-wire OTel auto-instrumentation. The /register hook initializes
 # the SDK at startup; OTLP exporter no-ops when
 # OTEL_EXPORTER_OTLP_ENDPOINT is unset, so there's no cost for
