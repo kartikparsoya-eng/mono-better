@@ -1,0 +1,86 @@
+name: Build & publish zero-cache+go image
+
+# Builds packages/zero-cache/Dockerfile.go-ivm, which pulls the Go IVM
+# binary from ghcr.io/kartikparsoya-eng/go-ivm and bundles it with
+# zero-cache. Publishes to ghcr.io/kartikparsoya-eng/zero-cache-go.
+#
+# `pull: true` forces the build to re-fetch the go-ivm image instead
+# of using a stale cached copy — so the chain "push to go-ivm → push
+# to mono" reliably ends up with the latest sidecar binary inside
+# the zero-cache image.
+
+on:
+  push:
+    branches:
+      - feat/go-ivm-sidecar-async-advance
+    tags: ['v*']
+  pull_request:
+    branches:
+      - feat/go-ivm-sidecar-async-advance
+    paths:
+      # Only run on PRs that touch files the docker build cares about,
+      # so unrelated PRs don't pay the multi-minute build cost.
+      - 'packages/zero-cache/**'
+      - 'packages/zero-protocol/**'
+      - 'packages/zero-schema/**'
+      - 'packages/zql/**'
+      - 'packages/shared/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/build-zero-cache-go.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/zero-cache-go
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Needed for both push (write) and pulling the go-ivm base image
+        # if it's private. Harmless when go-ivm image is public.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/feat/go-ivm-sidecar-async-advance' }}
+
+      - name: Build & push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: packages/zero-cache/Dockerfile.go-ivm
+          # Force-pull the go-ivm base image so we always bundle the
+          # latest sidecar binary — without this, a cached older
+          # version would silently get baked in.
+          pull: true
+          # PRs build (verifies the Dockerfile still compiles) but
+          # don't push (no image churn from forks).
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
