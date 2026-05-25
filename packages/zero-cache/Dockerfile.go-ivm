@@ -41,11 +41,29 @@ COPY . .
 # pattern the earlier revision used).
 COPY --from=go-ivm /usr/local/bin/go-ivm-sidecar /opt/go-ivm/go-ivm-sidecar
 
+# Default to Go-primary + shared-sidecar topology — the recommended
+# production config per go-ivm/REVIEW-final.md. All ENV defaults are
+# overridable at `docker run -e` / compose env-block time; flip
+# ZERO_GO_SIDECAR_SHADOW_MODE=true to switch to shadow-validation
+# mode (TS source of truth, Go in parallel).
 ENV NODE_ENV=production
 ENV ZERO_GO_SIDECAR_BINARY_PATH=/opt/go-ivm/go-ivm-sidecar
+ENV ZERO_GO_SIDECAR_ENABLED=true
+ENV ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=true
+ENV ZERO_GO_SIDECAR_SOCKET_PATH=/tmp/go-ivm-shared.sock
+# workers=1 keeps cg state colocated in the single shared sidecar
+# (per feedback_shared_sidecar_tuning — bumping workers fragments
+# cgs across sidecars under per-worker mode; in shared mode it just
+# adds V8 GC overhead with no concurrency win).
+ENV ZERO_NUM_SYNC_WORKERS=1
 
 EXPOSE 4848
 
 WORKDIR /app/packages/zero-cache
 
-CMD ["npx", "tsx", "./src/server/runner/main.ts"]
+# Custom entrypoint spawns the shared sidecar before zero-cache,
+# waits for the socket, then execs the normal zero-cache main.
+COPY packages/zero-cache/docker-entrypoint-go-primary.sh /usr/local/bin/zero-cache-entrypoint.sh
+RUN chmod +x /usr/local/bin/zero-cache-entrypoint.sh
+
+CMD ["/usr/local/bin/zero-cache-entrypoint.sh"]

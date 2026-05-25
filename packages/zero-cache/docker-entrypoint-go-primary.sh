@@ -1,0 +1,56 @@
+#!/bin/sh
+# Container entrypoint for the Go-primary zero-cache image.
+#
+# Topology: one shared go-ivm-sidecar per container, spawned here
+# before zero-cache starts. Every zero-cache syncer worker connects
+# to it via SidecarManager's externallyManaged=true path. This is
+# the recommended Go-primary deployment per
+# go-ivm/REVIEW-final.md and feedback_shared_sidecar_tuning.md
+# (workers=1 + shared sidecar — see Dockerfile.go-ivm).
+#
+# `set -e` is intentionally NOT used: the socket-poll loop below
+# uses explicit checks so a transient missing socket doesn't kill
+# the container before we've waited long enough.
+
+SOCKET_PATH="${ZERO_GO_SIDECAR_SOCKET_PATH:-/tmp/go-ivm-shared.sock}"
+SIDECAR_BIN="${ZERO_GO_SIDECAR_BINARY_PATH:-/opt/go-ivm/go-ivm-sidecar}"
+
+# Clean up any stale socket from a prior container instance with the
+# same name (rare, but cheap insurance).
+rm -f "$SOCKET_PATH"
+
+echo "[entrypoint] spawning shared sidecar: $SIDECAR_BIN $SOCKET_PATH"
+"$SIDECAR_BIN" "$SOCKET_PATH" &
+SIDECAR_PID=$!
+
+# Wait up to ~7.5s for the socket to appear before declaring failure.
+# Shared-sidecar mode init typically takes <500ms; 15 polls × 500ms
+# is conservative but bounded so a broken binary fails fast instead
+# of hanging the container.
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if [ -S "$SOCKET_PATH" ]; then
+    echo "[entrypoint] sidecar socket ready after ${i} poll(s) (pid=$SIDECAR_PID)"
+    break
+  fi
+  # If the sidecar process died, no point polling further.
+  if ! kill -0 "$SIDECAR_PID" 2>/dev/null; then
+    echo "[entrypoint] ERROR: sidecar exited before socket appeared (pid=$SIDECAR_PID)"
+    exit 1
+  fi
+  sleep 0.5
+done
+
+if [ ! -S "$SOCKET_PATH" ]; then
+  echo "[entrypoint] ERROR: sidecar socket never appeared at $SOCKET_PATH; aborting"
+  kill "$SIDECAR_PID" 2>/dev/null || true
+  exit 1
+fi
+
+# Hand off to zero-cache. exec replaces this shell with the node
+# process so signals (SIGTERM from orchestrator) reach zero-cache
+# directly. The Go sidecar continues running in the background;
+# SidecarManager in externallyManaged mode doesn't kill it on
+# shutdown (the container is the owner — kernel reaps the
+# orphaned sidecar when the container stops).
+echo "[entrypoint] starting zero-cache"
+exec npx tsx ./src/server/runner/main.ts
