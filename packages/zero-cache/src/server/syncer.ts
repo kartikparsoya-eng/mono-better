@@ -25,6 +25,10 @@ import {
 } from '../services/view-syncer/connection-context-manager.ts';
 import type {DrainCoordinator} from '../services/view-syncer/drain-coordinator.ts';
 import {PipelineDriver} from '../services/view-syncer/pipeline-driver.ts';
+import {
+  isGoSidecarEnabled,
+  SidecarManager,
+} from '../services/view-syncer/go-sidecar/index.ts';
 import {Snapshotter} from '../services/view-syncer/snapshotter.ts';
 import {ViewSyncerService} from '../services/view-syncer/view-syncer.ts';
 import {ProtocolErrorWithLevel} from '../types/error-with-level.ts';
@@ -117,6 +121,50 @@ export default function runWorker(
   );
 
   const shard = getShardID(config);
+
+  // Go IVM sidecar: one process per client group set. When
+  // goSidecar.externallyManaged is true the sidecar is shared across all
+  // workers in this zero-cache (typically spawned by the container
+  // entrypoint), and this manager just connects.
+  let sidecarManager: SidecarManager | undefined;
+  if (isGoSidecarEnabled(config)) {
+    const binaryPath = config.goSidecar.binaryPath;
+    const externallyManaged = config.goSidecar.externallyManaged ?? false;
+    const socketPath = config.goSidecar.socketPath;
+    if (externallyManaged && !socketPath) {
+      lc.error?.(
+        'goSidecar.externallyManaged=true requires goSidecar.socketPath to be set; falling back to TS',
+      );
+    } else {
+      const sidecarLc = lc.withContext('component', 'go-ivm');
+      sidecarManager = new SidecarManager({
+        binaryPath,
+        ...(socketPath ? {socketPath} : {}),
+        externallyManaged,
+        logger: (level, msg, err) => {
+          // Route sidecar stdout/stderr + manager events through LogContext
+          // instead of raw process.std{out,err}.write so structured logging
+          // stays structured. REVIEW-ts-integration LOW-2.
+          if (level === 'error') sidecarLc.error?.(msg, err ?? '');
+          else if (level === 'warn') sidecarLc.warn?.(msg, err ?? '');
+          else sidecarLc.info?.(msg);
+        },
+      });
+      void sidecarManager.start().then(
+        () =>
+          lc.info?.(
+            externallyManaged
+              ? `Connected to shared Go IVM sidecar at ${socketPath}`
+              : 'Go IVM sidecar started',
+          ),
+        err => {
+          lc.error?.('Failed to start Go IVM sidecar, falling back to TS', err);
+          sidecarManager = undefined;
+        },
+      );
+    }
+  }
+
   const customQueryConfig = getCustomQueryConfig(config);
   const pushConfig =
     config.push.url === undefined && config.mutate.url === undefined
@@ -216,6 +264,7 @@ export default function runWorker(
             : normalYieldThresholdMs,
         config.enableQueryPlanner,
         config,
+        sidecarManager,
       ),
       sub,
       drainCoordinator,
@@ -265,6 +314,13 @@ export default function runWorker(
   startAnonymousTelemetry(lc, config);
 
   void dbWarmup.then(() => parent.send(['ready', {ready: true}]));
+
+  // Stop sidecar on process exit
+  if (sidecarManager) {
+    process.on('beforeExit', () => {
+      void sidecarManager?.stop();
+    });
+  }
 
   return runUntilKilled(lc, parent, syncer);
 }

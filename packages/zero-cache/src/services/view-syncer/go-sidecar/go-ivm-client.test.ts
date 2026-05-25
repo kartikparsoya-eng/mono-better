@@ -1,0 +1,252 @@
+// Unit tests for the streaming accumulators used by GoIVMClient.
+//
+// These cover the defensive throw paths (chunk-order violation,
+// orphan queries, missing-final) that the integration soak can't
+// reliably exercise — the soak validates the happy path, but the
+// throws only fire if the Go side bugs, which it didn't during
+// soak. Without these tests the throw code would be dead until
+// the first wire-level regression.
+//
+// We test the factory functions directly rather than spinning up
+// a fake Unix socket — the accumulator is a pure state machine
+// that's already isolated from network/transport concerns.
+
+import {describe, expect, test, vi} from 'vitest';
+import {
+  createAdvanceStreamAccumulator,
+  createHydrateStreamAccumulator,
+  type RowChange,
+} from './go-ivm-client.ts';
+
+const row = (id: string): RowChange => ({
+  type: 0,
+  queryID: 'q1',
+  table: 't',
+  rowKey: {id},
+  row: null,
+});
+
+describe('createHydrateStreamAccumulator', () => {
+  test('single-chunk fast path: one frame with final=true delivers result', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({
+      queryID: 'q1',
+      changes: [row('a'), row('b')],
+      chunkIndex: 0,
+      final: true,
+      timingMs: 5,
+    });
+    h.finish();
+
+    expect(onResult).toHaveBeenCalledTimes(1);
+    expect(onResult).toHaveBeenCalledWith({
+      queryID: 'q1',
+      changes: [row('a'), row('b')],
+      timingMs: 5,
+    });
+  });
+
+  test('multi-chunk: accumulates rows in order, fires onResult only on final', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 1, final: false});
+
+    // Should not have fired yet — final hasn't arrived
+    expect(onResult).not.toHaveBeenCalled();
+
+    h.onFrame({
+      queryID: 'q1',
+      changes: [row('c')],
+      chunkIndex: 2,
+      final: true,
+      timingMs: 12,
+    });
+    h.finish();
+
+    expect(onResult).toHaveBeenCalledTimes(1);
+    expect(onResult).toHaveBeenCalledWith({
+      queryID: 'q1',
+      changes: [row('a'), row('b'), row('c')],
+      timingMs: 12,
+    });
+  });
+
+  test('multiple queries: independent per-queryID accumulation', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    // Interleave q1 and q2 frames — completion order may differ from input order
+    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({queryID: 'q2', changes: [row('x')], chunkIndex: 0, final: true, timingMs: 3});
+    h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 1, final: true, timingMs: 7});
+    h.finish();
+
+    expect(onResult).toHaveBeenCalledTimes(2);
+    // q2 finalized first
+    expect(onResult).toHaveBeenNthCalledWith(1, {
+      queryID: 'q2',
+      changes: [row('x')],
+      timingMs: 3,
+    });
+    expect(onResult).toHaveBeenNthCalledWith(2, {
+      queryID: 'q1',
+      changes: [row('a'), row('b')],
+      timingMs: 7,
+    });
+  });
+
+  test('chunk-order gap: skipped index throws immediately', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
+    // Skip chunkIndex=1, jump to 2 — should throw
+    expect(() =>
+      h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 2, final: true}),
+    ).toThrow(
+      /addQueriesStream chunk order violation for queryID=q1: expected chunkIndex=1, got 2/,
+    );
+    expect(onResult).not.toHaveBeenCalled();
+  });
+
+  test('chunk-order duplicate: same index twice throws', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
+    expect(() =>
+      h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 0, final: false}),
+    ).toThrow(/expected chunkIndex=1, got 0/);
+  });
+
+  test('orphan query: finish() throws if a queryID never received final=true', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    // q1 finalizes, q2 doesn't
+    h.onFrame({queryID: 'q1', changes: [], chunkIndex: 0, final: true, timingMs: 1});
+    h.onFrame({queryID: 'q2', changes: [row('x')], chunkIndex: 0, final: false});
+
+    expect(() => h.finish()).toThrow(
+      /addQueriesStream finished but 1 queries never received a final chunk: q2/,
+    );
+    expect(onResult).toHaveBeenCalledTimes(1);
+    expect(onResult).toHaveBeenCalledWith(expect.objectContaining({queryID: 'q1'}));
+  });
+
+  test('empty query: zero rows + final=true still delivers empty changes', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({queryID: 'q1', changes: [], chunkIndex: 0, final: true, timingMs: 0});
+    h.finish();
+
+    expect(onResult).toHaveBeenCalledWith({
+      queryID: 'q1',
+      changes: [],
+      timingMs: 0,
+    });
+  });
+
+  test('legacy sidecar compat: frame without final defaults to final=true', () => {
+    // Pre-protocol-rev-3 sidecars sent partial frames without `final` —
+    // accumulator treats them as single-frame and delivers immediately.
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({queryID: 'q1', changes: [row('a')], timingMs: 4}); // no chunkIndex, no final
+    h.finish();
+
+    expect(onResult).toHaveBeenCalledWith({
+      queryID: 'q1',
+      changes: [row('a')],
+      timingMs: 4,
+    });
+  });
+});
+
+describe('createAdvanceStreamAccumulator', () => {
+  test('single-chunk fast path: one final frame returns full AdvanceResult', () => {
+    const h = createAdvanceStreamAccumulator();
+    h.onFrame({
+      changes: [row('a'), row('b')],
+      chunkIndex: 0,
+      final: true,
+      timings: [{table: 't', type: 0, ms: 5}],
+    });
+    const result = h.finish();
+    expect(result).toEqual({
+      changes: [row('a'), row('b')],
+      timings: [{table: 't', type: 0, ms: 5}],
+    });
+  });
+
+  test('multi-chunk: accumulates, returns reassembled result', () => {
+    const h = createAdvanceStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({
+      changes: [row('c')],
+      chunkIndex: 2,
+      final: true,
+      timings: [{table: 't', type: 1, ms: 2}],
+    });
+
+    const result = h.finish();
+    expect(result.changes).toEqual([row('a'), row('b'), row('c')]);
+    expect(result.timings).toEqual([{table: 't', type: 1, ms: 2}]);
+  });
+
+  test('empty advance: one frame with empty changes + final=true', () => {
+    const h = createAdvanceStreamAccumulator();
+    h.onFrame({changes: [], chunkIndex: 0, final: true});
+    const result = h.finish();
+    expect(result.changes).toEqual([]);
+    expect(result.timings).toBeUndefined();
+  });
+
+  test('chunk-order gap throws immediately', () => {
+    const h = createAdvanceStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    expect(() =>
+      h.onFrame({changes: [row('b')], chunkIndex: 2, final: true}),
+    ).toThrow(
+      /advanceStream chunk order violation: expected chunkIndex=1, got 2/,
+    );
+  });
+
+  test('missing final: finish() throws if no frame had final=true', () => {
+    const h = createAdvanceStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    expect(() => h.finish()).toThrow(
+      /advanceStream finished without a final chunk/,
+    );
+  });
+
+  test('timings only attached on final: earlier-frame timings are ignored', () => {
+    // The Go side only emits timings on the final frame, but if a buggy
+    // sidecar sent timings on a non-final frame, we'd want them ignored
+    // rather than mixed into the final result (which could mislead
+    // downstream histograms).
+    const h = createAdvanceStreamAccumulator();
+    h.onFrame({
+      changes: [row('a')],
+      chunkIndex: 0,
+      final: false,
+      timings: [{table: 'wrong', type: 0, ms: 999}],
+    });
+    h.onFrame({
+      changes: [row('b')],
+      chunkIndex: 1,
+      final: true,
+      timings: [{table: 'right', type: 0, ms: 5}],
+    });
+    const result = h.finish();
+    expect(result.timings).toEqual([{table: 'right', type: 0, ms: 5}]);
+  });
+});

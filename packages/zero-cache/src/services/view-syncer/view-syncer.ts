@@ -1448,7 +1448,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           span.setAttribute('queryHash', queryID);
           span.setAttribute('transformationHash', transformationHash);
           span.setAttribute('table', transformedAst.table);
-          for (const change of this.#pipelines.addQuery(
+          for (const change of await this.#pipelines.addQuery(
             transformationHash,
             queryID,
             transformedAst,
@@ -1901,19 +1901,75 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // is properly processed by the time-slice queue.
       await yieldProcess(lc);
 
-      function* generateRowChanges(slowHydrateThreshold: number) {
+      async function* generateRowChanges(slowHydrateThreshold: number) {
+        // Await Go init so the first batch of queries uses the Go path
+        if (addQueries.length > 0) {
+          await pipelines.awaitGoInit();
+        }
+        // Streaming batch hydration: send all queries to Go in one RPC,
+        // yield each query's RowChanges to the WebSocket pokers AS SOON as
+        // Go finishes that query — instead of waiting for the slowest one
+        // in the batch. Tail-latency win for batches with uneven hydrate
+        // cost (REVIEW-final perf-opt streaming).
+        if (pipelines.canBatchHydrate && addQueries.length > 0) {
+          const batchStart = performance.now();
+          const byID = new Map<string, (typeof addQueries)[number]>();
+          for (const q of addQueries) byID.set(q.id, q);
+          let count = 0;
+          for await (const {queryID, changes} of pipelines.goHydrateBatchStream(
+            addQueries.map(q => ({
+              transformationHash: q.transformationHash,
+              queryID: q.id,
+              ast: q.ast,
+            })),
+          )) {
+            const q = byID.get(queryID);
+            if (!q) continue;
+            const queryStart = performance.now();
+            yield* changes as Iterable<RowChange | 'yield'>;
+            const elapsed = performance.now() - queryStart;
+            totalProcessTime += elapsed;
+            self.#addQueryMaterializationServerMetric(q.id, elapsed);
+            if (elapsed > slowHydrateThreshold) {
+              lc.warn?.('Slow query materialization', elapsed, q.ast);
+            }
+            manualSpan(tracer, 'vs.addAndConsumeQuery', elapsed, {
+              hash: q.id,
+              transformationHash: q.transformationHash,
+              ...(q.name !== undefined && {name: q.name}),
+            });
+            count++;
+          }
+          const batchElapsed = performance.now() - batchStart;
+          lc.info?.(`[batch-hydrate-stream] ${count} queries in ${batchElapsed.toFixed(2)}ms`);
+          hydrations.add(1);
+          hydrationTime.recordMs(totalProcessTime);
+          return;
+        }
+
+        // Collect TS results per query for batch shadow comparison
+        const tsResultsPerQuery = new Map<string, RowChange[]>();
         for (const q of addQueries) {
           lc = lc
             .withContext('hash', q.id)
             .withContext('transformationHash', q.transformationHash);
           lc.debug?.(`adding pipeline for query`, q.ast);
 
-          yield* pipelines.addQuery(
+          const result = pipelines.addQuery(
             q.transformationHash,
             q.id,
             q.ast,
             timer.startWithoutYielding(),
           );
+          const iterable = result instanceof Promise ? await result : result;
+          const queryChanges: RowChange[] = [];
+          for (const c of iterable) {
+            if (c !== 'yield') {
+              queryChanges.push(c);
+            }
+            yield c;
+          }
+          tsResultsPerQuery.set(q.id, queryChanges);
           const elapsed = timer.stop();
           totalProcessTime += elapsed;
 
@@ -1930,6 +1986,20 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         }
         hydrations.add(1);
         hydrationTime.recordMs(totalProcessTime);
+
+        // Shadow batch comparison: validate Go parallel hydration matches TS.
+        // Await so Go state isn't mutated by the next advance before the
+        // batch RPC completes (would surface stale-vs-current as a spurious
+        // mismatch — REVIEW-final MED-SHADOW-1). Errors are caught and
+        // logged; they never propagate out of shadow mode.
+        if (addQueries.length >= 1) {
+          await pipelines
+            .shadowBatchCompare(
+              addQueries.map(q => ({queryID: q.id, ast: q.ast})),
+              tsResultsPerQuery,
+            )
+            .catch(e => lc.error?.(`[shadow][batch] error: ${e}`));
+        }
       }
       // #processChanges does batched de-duping of rows. Wrap all pipelines in
       // a single generator in order to maximize de-duping.
@@ -2080,7 +2150,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   #processChanges(
     lc: LogContext,
     timer: TimeSliceTimer,
-    changes: Iterable<RowChange | 'yield'>,
+    changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
     updater: CVRQueryDrivenUpdater,
     pokers: PokeHandler,
   ) {
@@ -2113,7 +2183,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         });
 
       await startAsyncSpan(tracer, 'loopingChanges', async span => {
-        for (const change of changes) {
+        for await (const change of changes) {
           if (change === 'yield') {
             await timer.yieldProcess('yield in processChanges');
             continue;
@@ -2185,7 +2255,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const start = performance.now();
 
       const timer = new TimeSliceTimer(lc);
-      const {version, numChanges, changes} = this.#pipelines.advance(timer);
+      const {version, numChanges, changes} = await this.#pipelines.advance(timer);
       lc = lc.withContext('newVersion', version);
 
       // Probably need a new updater type. CVRAdvancementUpdater?

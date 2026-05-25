@@ -22,7 +22,7 @@ import {
   ReplicationMessages,
   type FakeReplicator,
 } from '../replicator/test-utils.ts';
-import {PipelineDriver} from './pipeline-driver.ts';
+import {PipelineDriver, type AdvanceResult, type RowChange} from './pipeline-driver.ts';
 import {Snapshotter} from './snapshotter.ts';
 
 describe('view-syncer/pipeline-driver', () => {
@@ -180,10 +180,10 @@ describe('view-syncer/pipeline-driver', () => {
   test('timeout on single change that causes lot of push processing and push output', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery('hash1', 'queryID1', ISSUES_WITH_CREATOR, {
+      ...(pipelines.addQuery('hash1', 'queryID1', ISSUES_WITH_CREATOR, {
         totalElapsed: () => 1000,
         elapsedLap: () => 1000,
-      }),
+      }) as Iterable<RowChange | 'yield'>),
     ];
 
     // This change will cause a child change push for each of the 1000
@@ -194,9 +194,9 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     let elapsed = 0;
+    const advResult1 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++}) as AdvanceResult;
     expect(() => [
-      ...pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++})
-        .changes,
+      ...advResult1.changes,
     ]).toThrowErrorMatchingInlineSnapshot(
       `[ResetPipelinesSignal: Advancement exceeded timeout at 0 of 1 changes after 501 ms. Advancement time limited based on total hydration time of 1000 ms.]`,
     );
@@ -205,7 +205,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('timeout on single change that causes lot of push processing but no push output', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...(pipelines.addQuery(
         'hash1',
         'queryID1',
         ISSUES_WITH_CREATOR_EXISTS_COMMENT_AST,
@@ -213,7 +213,7 @@ describe('view-syncer/pipeline-driver', () => {
           totalElapsed: () => 1000,
           elapsedLap: () => 1000,
         },
-      ),
+      ) as Iterable<RowChange | 'yield'>),
     ];
 
     // This change will fetch each of the 1000 issue related to user 'u1', but
@@ -224,9 +224,9 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     let elapsed = 0;
+    const advResult2 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++}) as AdvanceResult;
     expect(() => [
-      ...pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++})
-        .changes,
+      ...advResult2.changes,
     ]).toThrowErrorMatchingInlineSnapshot(
       `[ResetPipelinesSignal: Advancement exceeded timeout at 0 of 1 changes after 501 ms. Advancement time limited based on total hydration time of 1000 ms.]`,
     );
@@ -235,10 +235,10 @@ describe('view-syncer/pipeline-driver', () => {
   test("timeout on many changes that don't fetch any rows", () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery('hash1', 'queryID1', ISSUES_WITH_CREATOR, {
+      ...(pipelines.addQuery('hash1', 'queryID1', ISSUES_WITH_CREATOR, {
         totalElapsed: () => 1000,
         elapsedLap: () => 1000,
-      }),
+      }) as Iterable<RowChange | 'yield'>),
     ];
 
     // This change will cause a child change push for each of the 1000
@@ -251,11 +251,12 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     let changeCount = 0;
+    const advResult3 = pipelines.advance({
+      elapsedLap: () => 0,
+      totalElapsed: () => (changeCount + 1) * 100,
+    }) as AdvanceResult;
     expect(() => {
-      for (const _ of pipelines.advance({
-        elapsedLap: () => 0,
-        totalElapsed: () => (changeCount + 1) * 100,
-      }).changes) {
+      for (const _ of advResult3.changes) {
         changeCount++;
       }
     }).toThrowErrorMatchingInlineSnapshot(

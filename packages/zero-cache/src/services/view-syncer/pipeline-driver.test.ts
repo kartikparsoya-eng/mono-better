@@ -30,7 +30,7 @@ import {
   type FakeReplicator,
 } from '../replicator/test-utils.ts';
 import {getMutationResultsQuery} from './cvr.ts';
-import {PipelineDriver, type RowChange, type Timer} from './pipeline-driver.ts';
+import {PipelineDriver, type AdvanceResult, type RowChange, type Timer} from './pipeline-driver.ts';
 import {rowIDSignatureUnit} from './row-set-signature.ts';
 import type {RowID} from './schema/types.ts';
 import {ResetPipelinesSignal, Snapshotter} from './snapshotter.ts';
@@ -437,8 +437,13 @@ describe('view-syncer/pipeline-driver', () => {
     return new TimeSliceTimer(lc).startWithoutYielding();
   }
 
+  // Helper: in tests Go is never active, so addQuery always returns sync Iterable.
+  function addQuery(...args: Parameters<typeof pipelines.addQuery>): Iterable<RowChange | 'yield'> {
+    return pipelines.addQuery(...args) as Iterable<RowChange | 'yield'>;
+  }
+
   function changes(timer: Timer = NO_TIME_ADVANCEMENT_TIMER) {
-    return [...pipelines.advance(timer).changes];
+    return [...(pipelines.advance(timer) as AdvanceResult).changes];
   }
 
   test('replica version', () => {
@@ -450,7 +455,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(clientSchema);
 
     expect([
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -558,7 +563,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     // Adding a query with the same hash should be a noop.
     expect([
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -668,7 +673,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('insert', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -738,7 +743,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('delete', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -788,7 +793,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('truncate', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -804,7 +809,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('update', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -891,7 +896,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     pipelines.init(clientSchema);
     const hydrated = onlyRowChanges(
-      pipelines.addQuery(
+      addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -952,7 +957,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(clientSchema);
 
     const firstChanges = onlyRowChanges(
-      pipelines.addQuery(
+      addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -968,7 +973,7 @@ describe('view-syncer/pipeline-driver', () => {
     // from 0. If it didn't, the second hydration's XORs would cancel the
     // first's (same AST, same rows) and land at 0n.
     const secondChanges = onlyRowChanges(
-      pipelines.addQuery(
+      addQuery(
         'hash2',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -1005,7 +1010,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(clientSchema);
 
     const commentedHydrated = onlyRowChanges(
-      pipelines.addQuery(
+      addQuery(
         'hash-issues-comments',
         'qIssuesComments',
         ISSUES_AND_COMMENTS,
@@ -1013,7 +1018,7 @@ describe('view-syncer/pipeline-driver', () => {
       ),
     );
     const issuesHydrated = onlyRowChanges(
-      pipelines.addQuery(
+      addQuery(
         'hash-issues',
         'qIssuesOnly',
         ISSUES_ONLY,
@@ -1052,7 +1057,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('timeout on slow advancement', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery('hash1', 'queryID1', ISSUES_AND_COMMENTS, {
+      ...addQuery('hash1', 'queryID1', ISSUES_AND_COMMENTS, {
         // hydration time
         totalElapsed: () => 100,
         elapsedLap: () => 100,
@@ -1062,9 +1067,9 @@ describe('view-syncer/pipeline-driver', () => {
     replicator.processTransaction('134', messages.insert('issues', {id: 'i1'}));
 
     // 60ms is larger than half of the hydration time.
+    const advResult1 = pipelines.advance({totalElapsed: () => 60, elapsedLap: () => 60}) as AdvanceResult;
     expect(() => [
-      ...pipelines.advance({totalElapsed: () => 60, elapsedLap: () => 60})
-        .changes,
+      ...advResult1.changes,
     ]).toThrowErrorMatchingInlineSnapshot(
       `[ResetPipelinesSignal: Advancement exceeded timeout at 0 of 1 changes after 60 ms. Advancement time limited based on total hydration time of 100 ms.]`,
     );
@@ -1075,7 +1080,7 @@ describe('view-syncer/pipeline-driver', () => {
     expect(pipelines.queries()).toEqual(new Map());
 
     [
-      ...pipelines.addQuery('hash1', 'queryID1', ISSUES_AND_COMMENTS, {
+      ...addQuery('hash1', 'queryID1', ISSUES_AND_COMMENTS, {
         // hydration time
         totalElapsed: () => 100,
         elapsedLap: () => 100,
@@ -1084,16 +1089,16 @@ describe('view-syncer/pipeline-driver', () => {
 
     replicator.processTransaction('140', messages.insert('issues', {id: 'i1'}));
 
+    const advResult2 = pipelines.advance({totalElapsed: () => 20, elapsedLap: () => 20}) as AdvanceResult;
     expect(() => [
-      ...pipelines.advance({totalElapsed: () => 20, elapsedLap: () => 20})
-        .changes,
+      ...advResult2.changes,
     ]).not.toThrow();
   });
 
   test('advancement timeout has a minimum limit', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery('hash1', 'queryID1', ISSUES_AND_COMMENTS, {
+      ...addQuery('hash1', 'queryID1', ISSUES_AND_COMMENTS, {
         // very low hydration time
         totalElapsed: () => 25,
         elapsedLap: () => 25,
@@ -1104,16 +1109,16 @@ describe('view-syncer/pipeline-driver', () => {
 
     // 29 is larger than the hydration time but less than the minimum
     // advancement time limit
+    const advResult3 = pipelines.advance({totalElapsed: () => 29, elapsedLap: () => 29}) as AdvanceResult;
     expect(() => [
-      ...pipelines.advance({totalElapsed: () => 29, elapsedLap: () => 29})
-        .changes,
+      ...advResult3.changes,
     ]).not.toThrow();
   });
 
   test('reset', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -1159,7 +1164,7 @@ describe('view-syncer/pipeline-driver', () => {
     // The newColumn should be reflected after a reset, with the bumped
     // minRowVersion for older rows.
     expect([
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -1272,7 +1277,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('update unique non-primary key', () => {
     pipelines.init(clientSchema);
     expect([
-      ...pipelines.addQuery('hash1', 'queryID1', UNIQUES_QUERY, startTimer()),
+      ...addQuery('hash1', 'queryID1', UNIQUES_QUERY, startTimer()),
     ]).toMatchInlineSnapshot(`
       [
         {
@@ -1336,7 +1341,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('unique constraint conflict due to changelog compression', () => {
     pipelines.init(clientSchema);
     expect([
-      ...pipelines.addQuery('hash1', 'queryID1', UNIQUES_QUERY, startTimer()),
+      ...addQuery('hash1', 'queryID1', UNIQUES_QUERY, startTimer()),
     ]).toMatchInlineSnapshot(`
       [
         {
@@ -1419,7 +1424,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('whereExists query', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID',
         ISSUES_QUERY_WITH_EXISTS,
@@ -1474,7 +1479,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(subsetClientSchema);
 
     expect([
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-subset-schema-exists',
         'querySubsetSchemaExists',
         ISSUES_QUERY_WITH_EXISTS,
@@ -1529,7 +1534,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('whereExists added by permissions return no rows', () => {
     pipelines.init(clientSchema);
     expect([
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_QUERY_WITH_EXISTS_FROM_PERMISSIONS,
@@ -1554,7 +1559,7 @@ describe('view-syncer/pipeline-driver', () => {
     `);
 
     expect([
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash2',
         'queryID',
         ISSUES_QUERY_WITH_EXISTS_FROM_PERMISSIONS2,
@@ -1697,7 +1702,7 @@ describe('view-syncer/pipeline-driver', () => {
     };
 
     pipelines.init(clientSchema);
-    [...pipelines.addQuery('hash1', 'queryID1', query, startTimer())];
+    [...addQuery('hash1', 'queryID1', query, startTimer())];
 
     replicator.processTransaction(
       '134',
@@ -1848,7 +1853,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(clientSchema);
 
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -1885,7 +1890,7 @@ describe('view-syncer/pipeline-driver', () => {
     });
 
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash2',
         'queryID2',
         ISSUES_QUERY_WITH_EXISTS,
@@ -1929,7 +1934,7 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         mutationResultsQuery.id,
         'queryID1',
         mutationResultsQuery.ast,
@@ -1949,7 +1954,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('multiple advancements', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -2033,7 +2038,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('remove query', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -2067,7 +2072,7 @@ describe('view-syncer/pipeline-driver', () => {
   test('push fails on out of bounds numbers', () => {
     pipelines.init(clientSchema);
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         ISSUES_AND_COMMENTS,
@@ -2092,7 +2097,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     // Comment '10' has issueID='1', so the subquery resolves to id = '1'
     const results = [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar',
         'queryScalar',
         ISSUES_WITH_SCALAR_SUBQUERY,
@@ -2147,7 +2152,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(subsetClientSchema);
 
     expect([
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar-subset-schema',
         'queryScalarSubsetSchema',
         ISSUES_WITH_SCALAR_SUBQUERY,
@@ -2199,7 +2204,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(clientSchema);
 
     const results = [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar-none',
         'queryScalarNone',
         ISSUES_WITH_NONEXISTENT_SCALAR_SUBQUERY,
@@ -2261,7 +2266,7 @@ describe('view-syncer/pipeline-driver', () => {
     };
 
     const results = [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar-and',
         'queryScalarAnd',
         queryWithAnd,
@@ -2329,7 +2334,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     // This resolves to `issues WHERE id = '1'`
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar',
         'queryScalar',
         ISSUES_WITH_SCALAR_SUBQUERY,
@@ -2368,7 +2373,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(subsetClientSchema);
 
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar-subset-schema',
         'queryScalarSubsetSchema',
         ISSUES_WITH_SCALAR_SUBQUERY,
@@ -2406,7 +2411,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     // Resolves comment '10' (issueID='1'), so query becomes `issues WHERE id = '1'`
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar',
         'queryScalar',
         ISSUES_WITH_SCALAR_SUBQUERY,
@@ -2428,7 +2433,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     // Resolves comment '10' (issueID='1'), so query becomes `issues WHERE id = '1'`
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar',
         'queryScalar',
         ISSUES_WITH_SCALAR_SUBQUERY,
@@ -2468,7 +2473,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     // Resolves comment '10' (issueID='1'), so query becomes `issues WHERE id = '1'`
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar',
         'queryScalar',
         ISSUES_WITH_SCALAR_SUBQUERY,
@@ -2496,7 +2501,7 @@ describe('view-syncer/pipeline-driver', () => {
     changes();
 
     [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash-scalar',
         'queryScalar',
         ISSUES_WITH_SCALAR_SUBQUERY,

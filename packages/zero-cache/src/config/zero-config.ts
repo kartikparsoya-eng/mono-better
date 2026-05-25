@@ -1037,6 +1037,88 @@ export const zeroOptions = {
       ],
     },
   },
+
+  goSidecar: {
+    enabled: {
+      type: v.boolean().default(false),
+      desc: [
+        `Offload IVM compute (advance + hydrate) to the companion Go sidecar process`,
+        `instead of running the TypeScript operator tree inline. The Go path runs queries`,
+        `for each client group in parallel and is the production-ready primary path`,
+        `(see go-ivm/REVIEW-final.md).`,
+        ``,
+        `When false, all IVM compute runs in the TS path. When true, requires the`,
+        `{bold goSidecar.binaryPath} binary to be reachable; if the sidecar fails to start`,
+        `or returns an error, the PipelineDriver falls back to the TS path.`,
+      ],
+    },
+    shadowMode: {
+      type: v.boolean().default(false),
+      desc: [
+        `Run BOTH the Go and TS IVM paths and compare results. TS remains the source`,
+        `of truth; Go results are discarded after comparison. Mismatches are logged`,
+        `at error level. Used to validate the sidecar before switching to Go-primary.`,
+        ``,
+        `Requires {bold goSidecar.enabled} to also be true.`,
+      ],
+    },
+    shadowVerbose: {
+      type: v.boolean().default(false),
+      desc: [
+        `In shadow mode, include full row contents in mismatch logs. Default is to`,
+        `redact rows to {type, queryID, rowKey} for PII safety. Only enable in`,
+        `development or with explicit log-PII review.`,
+      ],
+    },
+    binaryPath: {
+      type: v.string().default('go-ivm-sidecar'),
+      desc: [
+        `Path to the compiled go-ivm-sidecar binary. The default resolves via PATH;`,
+        `override with an absolute path when the binary is not on PATH (e.g. when`,
+        `running zero-cache from a non-standard install location).`,
+      ],
+    },
+    externallyManaged: {
+      type: v.boolean().default(false),
+      desc: [
+        `When true, the Go sidecar process is owned by something outside zero-cache`,
+        `(e.g., a container entrypoint that spawns one shared sidecar across all`,
+        `worker processes). The worker's SidecarManager skips spawning and binary`,
+        `discovery — it just connects to the socket at {bold goSidecar.socketPath}`,
+        `and reconnects via a health-check ticker if the connection drops.`,
+        ``,
+        `Use this to consolidate from one-sidecar-per-worker to one-sidecar-per-cache.`,
+        `With per-worker sidecars, inter-cg parallelism is capped at`,
+        `{italic active_cgs / num_sync_workers}; with a shared sidecar it scales`,
+        `with {italic active_cgs}, so increasing worker count doesn't fragment cg`,
+        `co-location and shrink per-sidecar batches.`,
+      ],
+    },
+    socketPath: {
+      type: v.string().optional(),
+      desc: [
+        `Unix socket path the sidecar listens on. Required when`,
+        `{bold goSidecar.externallyManaged} is true (otherwise defaults to a`,
+        `per-worker /tmp/go-ivm-<pid>.sock). Both the sidecar owner and the`,
+        `connecting workers must agree on this path.`,
+      ],
+    },
+    driftAuditIntervalMs: {
+      type: v.number().default(60_000),
+      desc: [
+        `In Go-primary mode (enabled=true, shadowMode=false), how often to run a`,
+        `sampled-shadow drift audit. Each interval, the PipelineDriver picks one`,
+        `random active query and re-hydrates it on BOTH TS and Go from the current`,
+        `snapshot, comparing the results to catch silent drift. Mismatches are`,
+        `logged at error level and counted via the {bold ivm.drift-audit-mismatch}`,
+        `metric. Has no effect in shadow mode (which audits every query) or when`,
+        `Go is disabled.`,
+        ``,
+        `Set to 0 to disable. Default 60000ms (one query per minute per group).`,
+        `Lower values give faster drift detection but more sidecar load.`,
+      ],
+    },
+  },
 };
 
 export type ZeroConfig = Config<typeof zeroOptions>;
