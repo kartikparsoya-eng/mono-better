@@ -35,6 +35,14 @@ on:
       - 'package-lock.json'
       - '.github/workflows/build-zero-cache-go.yml'
   workflow_dispatch:
+  # Fired by the go-ivm "Build & publish sidecar image" workflow after a
+  # new sidecar image is pushed to GHCR. This eliminates the race where a
+  # marker commit to this repo could trigger a rebuild BEFORE go-ivm
+  # finishes publishing, causing the bundled binary to be one version
+  # stale. See go-ivm/.github/workflows/build-image.yml's
+  # `notify-downstream` job for the dispatcher.
+  repository_dispatch:
+    types: [go-ivm-published]
 
 env:
   REGISTRY: ghcr.io
