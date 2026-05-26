@@ -659,6 +659,20 @@ export class PipelineDriver {
     query: AST,
     timer: Timer,
   ): Iterable<RowChange | 'yield'> | Promise<Iterable<RowChange | 'yield'>> {
+    // Internal queries (lmids, mutationResults, queries rooted at the
+    // <appID>.permissions or <appID>_<shard>.clients tables) always
+    // run via TS — their source tables are excluded from Go's data
+    // path (Fix #1), and TS's TableSource over live SQLite self-heals
+    // any state drift. Routes regardless of mode so Go-primary doesn't
+    // break mutation acks (which depend on the lmids subscription).
+    if (
+      this.#isInternalQueryID(queryID) ||
+      this.#isInternalTable(query.table)
+    ) {
+      return this.#trackRowSetSignatures(
+        this.#addQueryImpl(transformationHash, queryID, query, timer),
+      );
+    }
     // Shadow mode: run BOTH paths, compare, return TS results
     if (this.#shadowMode && this.#goBackend?.initialized) {
       return this.#shadowAddQuery(transformationHash, queryID, query, timer);
@@ -1464,15 +1478,98 @@ export class PipelineDriver {
       return this.#shadowAdvance(diff, timer, curr.version, changes);
     }
 
-    // When Go backend is active (non-shadow), run advance asynchronously via sidecar
+    // Go-primary: dual-run TS + Go on disjoint table sets. Go gets the
+    // diff with internal tables filtered out and handles user queries.
+    // TS handles internal queries (lmids, mutationResults) via its real
+    // #addQueryImpl pipelines — those pipelines were registered through
+    // the internal-query branch of #addQueryDispatch. User-query
+    // pipelines in TS are stubs (no setOutput callback), so TS's
+    // #advance walks the full diff but only emits for internal queries.
+    // Merging is safe because the two sets are table-disjoint.
     if (this.#goBackend?.initialized) {
-      return this.#goAdvance(diff, curr.version, changes);
+      return this.#goPrimaryAdvance(diff, timer, curr.version, changes);
     }
 
     return {
       version: curr.version,
       numChanges: changes,
       changes: this.#trackRowSetSignatures(this.#advance(diff, timer, changes)),
+    };
+  }
+
+  /**
+   * Go-primary advance: runs Go's advanceStream for user queries and
+   * TS's #advance for internal queries in parallel, then concatenates
+   * the results. Same internal-table filter as #shadowAdvance so the
+   * Go side never sees control-plane diffs.
+   */
+  async #goPrimaryAdvance(
+    diff: SnapshotDiff,
+    timer: Timer,
+    version: string,
+    numChanges: number,
+  ): Promise<AdvanceResult> {
+    // Buffer the diff so both TS and Go can consume it. Filter the Go
+    // side to drop internal tables (Fix #1 invariant — those rows go
+    // through TS's TableSource which self-heals against live SQLite).
+    const buffered: Array<{
+      table: string;
+      prevValues: Readonly<Row>[];
+      nextValue: Readonly<Row> | null;
+      rowKey: RowKey;
+    }> = [];
+    const snapshotChanges: SnapshotChange[] = [];
+    for (const entry of diff) {
+      buffered.push(entry);
+      if (this.#isInternalTable(entry.table)) continue;
+      snapshotChanges.push({
+        table: entry.table,
+        prevValues: entry.prevValues as Record<string, unknown>[],
+        nextValue: entry.nextValue as Record<string, unknown> | null,
+      });
+    }
+    const replayDiff: SnapshotDiff = {
+      prev: diff.prev,
+      curr: diff.curr,
+      changes: diff.changes,
+      [Symbol.iterator]: () => buffered[Symbol.iterator](),
+    };
+
+    // Kick Go RPC in flight while TS does its work.
+    const goPromise = this.#goBackend!.advanceStream(snapshotChanges)
+      .then(r => r.changes.map(rc => this.#goRowChangeToRowChange(rc)))
+      .catch(e => {
+        this.#lc.error?.(`[go-primary] Go advance failed: ${e}`);
+        this.#scheduleGoReset('go-primary-advance-failure');
+        return [] as RowChange[];
+      });
+
+    // Run TS's #advance with the full diff. Only internal-query pipelines
+    // are connected, so user-table pushes are no-ops on TS — the iterator
+    // emits nothing for those, only events for internal queries.
+    const tsChanges: RowChange[] = [];
+    for (const change of this.#advance(replayDiff, timer, numChanges, true)) {
+      if (change === 'yield') {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      } else {
+        tsChanges.push(change);
+      }
+    }
+
+    const goResults = await goPromise;
+
+    // Merge: TS internal-query events + Go user-query events. The two
+    // sets are table-disjoint by construction (internal tables filtered
+    // out of Go; user tables have stub pipelines in TS that don't emit).
+    function* yieldMerged(): Iterable<RowChange | 'yield'> {
+      for (const c of tsChanges) yield c;
+      for (const c of goResults) yield c;
+    }
+
+    return {
+      version,
+      numChanges,
+      changes: this.#trackRowSetSignatures(yieldMerged()),
     };
   }
 
