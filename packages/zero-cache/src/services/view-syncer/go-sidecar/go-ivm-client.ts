@@ -244,6 +244,7 @@ export function createAdvanceStreamAccumulator(): {
   let timings: TableTiming[] | undefined;
   let expectedNextIndex = 0;
   let gotFinal = false;
+  let drift: DriftError | undefined;
 
   return {
     onFrame: (value: unknown) => {
@@ -252,6 +253,12 @@ export function createAdvanceStreamAccumulator(): {
         chunkIndex?: number;
         final?: boolean;
         timings?: TableTiming[];
+        drift?: {
+          table?: string;
+          op?: string;
+          pk?: Record<string, unknown>;
+          hasCount?: number;
+        };
       };
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // belt-and-braces for older sidecars
@@ -270,10 +277,18 @@ export function createAdvanceStreamAccumulator(): {
 
       for (const rc of chunk) acc.push(rc);
 
-      // Timings only travel on the final frame (Go-side invariant).
+      // Timings + drift only travel on the final frame (Go-side invariant).
       if (final) {
         timings = v.timings;
         gotFinal = true;
+        if (v.drift) {
+          drift = new DriftError({
+            table: v.drift.table,
+            op: v.drift.op,
+            pk: v.drift.pk,
+            hasCount: v.drift.hasCount,
+          });
+        }
       }
     },
 
@@ -284,6 +299,14 @@ export function createAdvanceStreamAccumulator(): {
         // even for empty advances). Surface so we don't silently return a
         // partial AdvanceResult that would corrupt the CVR.
         throw new Error('advanceStream finished without a final chunk');
+      }
+      if (drift) {
+        // Drift on Final ⇒ whole stream is discarded. Earlier chunks may
+        // have shipped real RowChanges, but TS will re-init Go from
+        // current SQLite truth and those changes will be reflected in
+        // the fresh hydration. Replaying them now would risk
+        // double-application.
+        throw drift;
       }
       return {changes: acc, timings};
     },
@@ -326,6 +349,41 @@ export class TimeoutError extends Error {
   constructor(method: string, ms: number) {
     super(`RPC ${method} timed out after ${ms}ms`);
     this.name = 'TimeoutError';
+  }
+}
+
+/**
+ * RPC error code Go uses to signal source drift — MemorySource detected
+ * an Edit/Remove against a missing row, or a duplicate Add. Surface for
+ * GoComputeBackend so it can branch on the drift recovery path instead
+ * of escalating to a generic RPC failure.
+ */
+export const RPC_CODE_DRIFT = -32100;
+
+/**
+ * Source-drift signal from the Go sidecar. Carries the offending table +
+ * op + PK so the caller can log specifics before re-init. Thrown by
+ * {@link GoIVMClient.advance} and surfaced via accumulator on
+ * {@link GoIVMClient.advanceStream} when the Final frame has drift set.
+ */
+export class DriftError extends Error {
+  readonly table: string;
+  readonly op: string;
+  readonly pk: Record<string, unknown>;
+  readonly hasCount: number;
+  constructor(data: {
+    table?: string | undefined;
+    op?: string | undefined;
+    pk?: Record<string, unknown> | undefined;
+    hasCount?: number | undefined;
+    message?: string | undefined;
+  }) {
+    super(data.message ?? `source drift: table=${data.table} op=${data.op} pk=${JSON.stringify(data.pk)}`);
+    this.name = 'DriftError';
+    this.table = data.table ?? '';
+    this.op = data.op ?? '';
+    this.pk = data.pk ?? {};
+    this.hasCount = data.hasCount ?? 0;
   }
 }
 
@@ -870,7 +928,29 @@ export class GoIVMClient {
       if (!pending) continue;
 
       if (resp.error) {
-        pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
+        if (resp.error.code === RPC_CODE_DRIFT) {
+          // Drift signal: parse the structured payload Go ships in
+          // error.data (table/op/pk/hasCount) so callers don't have to
+          // string-match the message. Caller is GoComputeBackend, which
+          // catches DriftError and triggers re-init.
+          const d = (resp.error as {data?: unknown}).data as {
+            table?: string;
+            op?: string;
+            pk?: Record<string, unknown>;
+            hasCount?: number;
+          } | undefined;
+          pending.reject(
+            new DriftError({
+              table: d?.table,
+              op: d?.op,
+              pk: d?.pk,
+              hasCount: d?.hasCount,
+              message: resp.error.message,
+            }),
+          );
+        } else {
+          pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
+        }
         continue;
       }
       // Streaming: deliver per-frame value to onPartial unless this is the

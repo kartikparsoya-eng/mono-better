@@ -965,14 +965,21 @@ export class PipelineDriver {
       // we can confirm the AST shapes Go is receiving in production.
       for (const q of queries) {
         const astStr = JSON.stringify(q.ast);
-        const interesting =
+        // Scalar-EXISTS dumps surface at error so a manual sandbox session
+        // can confirm Phase 2's resolver actually fires on the queries the
+        // ACL wraps with `{scalar: true}`. Everything else stays at debug.
+        if (astStr.includes('"scalar":true')) {
+          this.#lc.error?.(
+            `[ast-dump][SCALAR] ${q.queryID} (${q.ast.table}) ORIGINAL: ${astStr.slice(0, 4000)}`,
+          );
+        } else if (
           q.ast.table === 'conversations' ||
           q.ast.table === 'channels' ||
           q.ast.table === 'channel_user_status' ||
           q.ast.table === 'channel_stats' ||
           astStr.includes('"whereExists"') ||
-          astStr.includes('correlatedSubquery');
-        if (interesting) {
+          astStr.includes('correlatedSubquery')
+        ) {
           this.#lc.debug?.(
             `[ast-dump] ${q.queryID} (${q.ast.table}) ORIGINAL: ${astStr.slice(0, 2000)}`,
           );

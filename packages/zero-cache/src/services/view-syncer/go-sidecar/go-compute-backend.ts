@@ -12,6 +12,7 @@
 // Feature flag: ZERO_GO_SIDECAR_ENABLED=true.
 
 import type {ZeroConfig} from '../../../config/zero-config.ts';
+import {DriftError} from './go-ivm-client.ts';
 import type {
   AdvanceResult as GoAdvanceResult,
   HydrateResult as GoHydrateResult,
@@ -179,6 +180,32 @@ export class GoComputeBackend {
       return await call();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+
+      // Drift recovery (option 3 / self-heal on miss): Go detected a
+      // missing row on Edit/Remove (or duplicate Add) and bailed out of
+      // this advance BEFORE mutating any state. We treat it like a
+      // sidecar restart — force a fresh init from current SQLite truth
+      // and DROP this advance. Clients miss exactly one delta and
+      // resync against the post-init state. No retry: replaying the
+      // diff against the freshly-loaded Go state would either
+      // double-apply (the missing row is now present from SQLite) or
+      // re-trip the same drift.
+      if (err instanceof DriftError) {
+        this.#log(
+          'warn',
+          `Go drift detected (${err.op} on ${err.table} pk=${JSON.stringify(err.pk)} has=${err.hasCount}); ` +
+            `re-initing engine from current snapshot, dropping this advance`,
+        );
+        this.#initialized = false;
+        try {
+          await this.#doInit(this.#getCurrentTables());
+        } catch (initErr) {
+          this.#log('error', 're-init after drift failed', initErr);
+          throw err; // surface original drift so caller's fallback engages
+        }
+        return {changes: [], timings: []};
+      }
+
       const sidecarUnavailable =
         this.#manager.status !== 'running' ||
         msg.includes('Sidecar is not running') ||

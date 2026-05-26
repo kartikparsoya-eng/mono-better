@@ -14,7 +14,7 @@ import {GoIVMClient} from './go-ivm-client.ts';
  * `sidecarProtocolRev` in `go-ivm/cmd/sidecar/main.go`. A mismatch refuses
  * to start the manager (REVIEW-final MED-CROSS-5).
  */
-const EXPECTED_PROTOCOL_REV = 3;
+const EXPECTED_PROTOCOL_REV = 4;
 
 /**
  * Cold-start init concurrency cap. When N ViewSyncers start simultaneously,
