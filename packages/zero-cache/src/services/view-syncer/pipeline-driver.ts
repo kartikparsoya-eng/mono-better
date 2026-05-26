@@ -37,11 +37,6 @@ import {
   resolveSimpleScalarSubqueries,
   type CompanionSubquery,
 } from '../../../../zqlite/src/resolve-scalar-subqueries.ts';
-import {
-  buildSelectQuery,
-  type NoSubqueryCondition,
-} from '../../../../zqlite/src/query-builder.ts';
-import {format} from '../../../../zqlite/src/internal/sql.ts';
 import type {Condition} from '../../../../zero-protocol/src/ast.ts';
 import {createSQLiteCostModel} from '../../../../zqlite/src/sqlite-cost-model.ts';
 import {TableSource} from '../../../../zqlite/src/table-source.ts';
@@ -87,20 +82,177 @@ type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
 };
 
 /**
- * Walk a Condition tree and return true if any leaf is a correlatedSubquery.
- * Used by the drift-audit's SQL ground-truth path to decide whether the AST
- * can be flattened to a SQL SELECT (filtersToSQL needs NoSubqueryCondition).
+ * Convert an audit AST into a parameterized SQL string + values array
+ * suitable for `better-sqlite3.prepare(text).all(...values)`. Unlike
+ * zqlite's `buildSelectQuery`, this version handles correlated EXISTS /
+ * NOT EXISTS subqueries by emitting nested `EXISTS (SELECT 1 FROM ...)`
+ * with the correlation expressed via outer-alias-qualified columns.
+ *
+ * Scope: simple/and/or/correlatedSubquery in WHERE. Drops AST.related
+ * (output-only joins, no filter effect). Preserves cursor + orderBy + limit.
+ *
+ * Designed for the drift audit's SQL ground-truth comparator — produces
+ * the SAME row-key set the IVM pipeline should emit.
  */
-function hasCorrelatedSubquery(cond: Condition): boolean {
-  switch (cond.type) {
-    case 'correlatedSubquery':
-      return true;
-    case 'and':
-    case 'or':
-      return cond.conditions.some(hasCorrelatedSubquery);
-    default:
-      return false;
+function buildAuditSQL(
+  ast: AST,
+  tableSpecs: Map<string, LiteAndZqlSpec>,
+): {text: string; values: unknown[]} {
+  const values: unknown[] = [];
+  let aliasCounter = 0;
+  const nextAlias = () => `t${aliasCounter++}`;
+  const outerAlias = nextAlias();
+  const outerSpec = tableSpecs.get(ast.table);
+  if (!outerSpec) throw new Error(`no spec for table ${ast.table}`);
+
+  // Quote SQLite identifier — same approach as @databases/sql.
+  const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
+
+  function valueToSQLiteParam(v: unknown, type: string): unknown {
+    if (v === null || v === undefined) return null;
+    switch (type) {
+      case 'boolean':
+        return v ? 1 : 0;
+      case 'json':
+        return JSON.stringify(v);
+      default:
+        return v;
+    }
   }
+
+  function valuePosToSQL(
+    vp: {type: 'column'; name: string} | {type: 'literal'; value: unknown} | {type: string},
+    tableAlias: string,
+  ): string {
+    const t = vp as {type: string; name?: string; value?: unknown};
+    if (t.type === 'column') {
+      return `${tableAlias}.${q(t.name as string)}`;
+    }
+    if (t.type === 'literal') {
+      // Detect type at runtime — literals don't carry type info in the AST.
+      // SQLite can only bind number / string / bigint / Buffer / null, so
+      // convert booleans → 0/1 and other compound values to their JSON form.
+      const v = t.value;
+      if (typeof v === 'boolean') {
+        values.push(v ? 1 : 0);
+      } else if (v === null || v === undefined) {
+        values.push(null);
+      } else if (typeof v === 'number' || typeof v === 'string' || typeof v === 'bigint') {
+        values.push(v);
+      } else {
+        // arrays/objects — caller handles arrays via IN-path above; otherwise stringify.
+        values.push(JSON.stringify(v));
+      }
+      return '?';
+    }
+    throw new Error(`unsupported value position type: ${t.type}`);
+  }
+
+  function condToSQL(
+    cond: Condition,
+    tableAlias: string,
+  ): string {
+    switch (cond.type) {
+      case 'simple': {
+        const left = valuePosToSQL(cond.left, tableAlias);
+        const right = valuePosToSQL(cond.right, tableAlias);
+        // Map ZQL ops to SQLite ops. ILIKE → LIKE (SQLite LIKE is
+        // case-insensitive by default).
+        const op =
+          cond.op === 'ILIKE' ? 'LIKE' :
+          cond.op === 'NOT ILIKE' ? 'NOT LIKE' :
+          cond.op === 'IN' ? 'IN' :
+          cond.op === 'NOT IN' ? 'NOT IN' :
+          cond.op;
+        // IN/NOT IN with literal array → expand via json_each
+        if ((cond.op === 'IN' || cond.op === 'NOT IN') && cond.right.type === 'literal') {
+          // Use json_each because the literal is an array.
+          // Replace the last pushed `?` value with the JSON-encoded array.
+          values[values.length - 1] = JSON.stringify(cond.right.value);
+          return `${left} ${op} (SELECT value FROM json_each(?))`;
+        }
+        return `${left} ${op} ${right}`;
+      }
+      case 'and': {
+        if (cond.conditions.length === 0) return '1';
+        return '(' + cond.conditions.map(c => condToSQL(c, tableAlias)).join(' AND ') + ')';
+      }
+      case 'or': {
+        if (cond.conditions.length === 0) return '0';
+        return '(' + cond.conditions.map(c => condToSQL(c, tableAlias)).join(' OR ') + ')';
+      }
+      case 'correlatedSubquery': {
+        const sub = cond.related.subquery;
+        const corr = cond.related.correlation;
+        const subAlias = nextAlias();
+        const subSpec = tableSpecs.get(sub.table);
+        if (!subSpec) throw new Error(`no spec for subquery table ${sub.table}`);
+
+        // Correlation: childField on inner = parentField on outer.
+        const corrClauses: string[] = [];
+        for (let i = 0; i < corr.childField.length; i++) {
+          corrClauses.push(`${subAlias}.${q(corr.childField[i])} = ${tableAlias}.${q(corr.parentField[i])}`);
+        }
+        const corrJoin = corrClauses.join(' AND ');
+
+        const subWhere = sub.where ? condToSQL(sub.where, subAlias) : null;
+        const wherePart = subWhere ? `${corrJoin} AND ${subWhere}` : corrJoin;
+        const op = cond.op === 'EXISTS' ? 'EXISTS' : 'NOT EXISTS';
+        return `${op} (SELECT 1 FROM ${q(sub.table)} ${subAlias} WHERE ${wherePart})`;
+      }
+      default:
+        throw new Error(`unsupported condition type: ${(cond as {type: string}).type}`);
+    }
+  }
+
+  // WHERE clause assembly: main where + cursor predicate
+  const wherePieces: string[] = [];
+  if (ast.where) {
+    wherePieces.push(condToSQL(ast.where, outerAlias));
+  }
+  // Cursor: WHERE (sortField < cursor) OR (basis='at' AND sortField = cursor)
+  // For multi-field orderBy, produces lexicographic comparison.
+  if (ast.start && ast.orderBy && ast.orderBy.length > 0) {
+    const cursorRow = ast.start.row;
+    const inclusive = !ast.start.exclusive;
+    const ranges: string[] = [];
+    for (let i = 0; i < ast.orderBy.length; i++) {
+      const group: string[] = [];
+      for (let j = 0; j <= i; j++) {
+        const [field, dir] = ast.orderBy[j];
+        if (j === i) {
+          const op = dir === 'asc' ? '>' : '<';
+          values.push(cursorRow[field]);
+          group.push(`${outerAlias}.${q(field)} ${op} ?`);
+        } else {
+          values.push(cursorRow[field]);
+          group.push(`${outerAlias}.${q(ast.orderBy[j][0])} = ?`);
+        }
+      }
+      ranges.push('(' + group.join(' AND ') + ')');
+    }
+    if (inclusive) {
+      const eqs: string[] = [];
+      for (const [field] of ast.orderBy) {
+        values.push(cursorRow[field]);
+        eqs.push(`${outerAlias}.${q(field)} = ?`);
+      }
+      ranges.push('(' + eqs.join(' AND ') + ')');
+    }
+    wherePieces.push('(' + ranges.join(' OR ') + ')');
+  }
+
+  const cols = Object.keys(outerSpec.tableSpec.columns)
+    .map(c => `${outerAlias}.${q(c)}`)
+    .join(', ');
+  let sql = `SELECT ${cols} FROM ${q(ast.table)} ${outerAlias}`;
+  if (wherePieces.length > 0) sql += ` WHERE ${wherePieces.join(' AND ')}`;
+  if (ast.orderBy && ast.orderBy.length > 0) {
+    const parts = ast.orderBy.map(([f, d]) => `${outerAlias}.${q(f)} ${d.toUpperCase()}`);
+    sql += ` ORDER BY ${parts.join(', ')}`;
+  }
+  if (ast.limit !== undefined) sql += ` LIMIT ${ast.limit}`;
+  return {text: sql, values};
 }
 
 export type RowAdd = RowOp<ChangeType.ADD>;
@@ -1353,50 +1505,32 @@ export class PipelineDriver {
     | {kind: 'go-matches-sql'; sqlCount: number}
     | {kind: 'go-vs-sql-drift'; sqlCount: number; goOnly: string[]; sqlOnly: string[]}
     | {kind: 'skipped'; reason: string} {
-    // Resolve any scalar EXISTS in the AST so the remaining WHERE has only
-    // simple/and/or — what filtersToSQL can handle.
-    let resolved: AST;
-    try {
-      resolved = this.#resolveScalarSubqueries(ast).ast;
-    } catch (e) {
-      return {kind: 'skipped', reason: `resolver-failed: ${String(e)}`};
-    }
-
-    // Verify no correlatedSubquery remains in WHERE — those don't map to
-    // a flat SQL filter without a join (which we don't reproduce here).
-    if (resolved.where && hasCorrelatedSubquery(resolved.where)) {
-      return {kind: 'skipped', reason: 'unresolved-correlated-subquery'};
-    }
-
+    // The caller passes entry.transformedAst which is ALREADY post-resolution.
+    // Re-running #resolveScalarSubqueries here is redundant AND trips
+    // `shouldYield called outside of hydration` because the executor's
+    // buildPipeline fetches from a TableSource outside any hydrate context.
+    // buildAuditSQL handles correlatedSubqueries natively, so we don't need
+    // resolution either way.
+    const resolved = ast;
     const spec = this.#tableSpecs.get(resolved.table);
     if (!spec) return {kind: 'skipped', reason: 'no-table-spec'};
 
-    let sqlQuery;
+    // Walk AST → flat SQL string with `?` placeholders. Handles correlated
+    // subqueries (EXISTS / NOT EXISTS) as nested SELECT 1 with correlation
+    // expressed via outer-alias qualified columns. Hand-rolled because
+    // zqlite's buildSelectQuery rejects correlatedSubquery in NoSubqueryCondition.
+    let limitedText: string;
+    let values: unknown[];
     try {
-      sqlQuery = buildSelectQuery(
-        resolved.table,
-        spec.zqlSpec,
-        /* constraint */ undefined,
-        resolved.where as NoSubqueryCondition | undefined,
-        resolved.orderBy,
-        /* reverse */ false,
-        resolved.start
-          ? {row: resolved.start.row, basis: resolved.start.exclusive ? 'after' : 'at'}
-          : undefined,
-      );
+      const result = buildAuditSQL(resolved, this.#tableSpecs);
+      limitedText = result.text;
+      values = result.values;
     } catch (e) {
       return {kind: 'skipped', reason: `build-sql-failed: ${String(e)}`};
     }
 
     let sqlRows: Record<string, unknown>[];
     try {
-      const {text, values} = format(sqlQuery);
-      const limit = resolved.limit;
-      // The pipeline applies LIMIT via Take operator (limit+1 not applied
-      // here since hydrate's audit comparator uses pipeline counts).
-      // Apply the same LIMIT in SQL so counts match the IVM pipeline's
-      // output set.
-      const limitedText = limit !== undefined ? `${text} LIMIT ${limit}` : text;
       sqlRows = this.#snapshotter
         .current()
         .db.db.prepare(limitedText)
