@@ -37,6 +37,12 @@ import {
   resolveSimpleScalarSubqueries,
   type CompanionSubquery,
 } from '../../../../zqlite/src/resolve-scalar-subqueries.ts';
+import {
+  buildSelectQuery,
+  type NoSubqueryCondition,
+} from '../../../../zqlite/src/query-builder.ts';
+import {format} from '../../../../zqlite/src/internal/sql.ts';
+import type {Condition} from '../../../../zero-protocol/src/ast.ts';
 import {createSQLiteCostModel} from '../../../../zqlite/src/sqlite-cost-model.ts';
 import {TableSource} from '../../../../zqlite/src/table-source.ts';
 import {
@@ -79,6 +85,23 @@ type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
   readonly rowKey: Row;
   readonly row: Row;
 };
+
+/**
+ * Walk a Condition tree and return true if any leaf is a correlatedSubquery.
+ * Used by the drift-audit's SQL ground-truth path to decide whether the AST
+ * can be flattened to a SQL SELECT (filtersToSQL needs NoSubqueryCondition).
+ */
+function hasCorrelatedSubquery(cond: Condition): boolean {
+  switch (cond.type) {
+    case 'correlatedSubquery':
+      return true;
+    case 'and':
+    case 'or':
+      return cond.conditions.some(hasCorrelatedSubquery);
+    default:
+      return false;
+  }
+}
 
 export type RowAdd = RowOp<ChangeType.ADD>;
 
@@ -1260,22 +1283,158 @@ export class PipelineDriver {
       }
 
       this.#shadowCompare('drift-audit', targetID, tsRemapped, goRemapped);
-      // Increment on ANY set divergence, not just count mismatch — multi-CG
-      // soak surfaced a case where ts_count==go_count but the row sets
-      // differed at the cursor boundary; previously this was logged as "ok".
-      if (setDiffers) {
+
+      // Third opinion: run raw SQL on the snapshot's SQLite replica as
+      // ground truth and compare against Go's main-table rows. Only
+      // mark MISMATCH when Go disagrees with SQL — that's the real
+      // drift signal. Go-vs-TS-audit divergence with SQL agreeing
+      // with Go is a TS-audit-only bug (Bug #3) — demote to info.
+      const sqlVerdict = this.#sqlGroundTruthCompare(ast, goRemapped);
+
+      if (sqlVerdict.kind === 'go-vs-sql-drift') {
         this.#driftAuditMismatches.add(1);
         this.#lc.error?.(
-          `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} MISMATCH`,
+          `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL. ` +
+            `go_count=${goRemapped.length} sql_count=${sqlVerdict.sqlCount} ` +
+            `go_only=${sqlVerdict.goOnly.slice(0, 3).join(' | ')} ` +
+            `(${sqlVerdict.goOnly.length} total) ` +
+            `sql_only=${sqlVerdict.sqlOnly.slice(0, 3).join(' | ')} ` +
+            `(${sqlVerdict.sqlOnly.length} total)`,
         );
+      } else if (setDiffers && sqlVerdict.kind === 'confirmed') {
+        // TS-audit disagrees but Go matches the SQL ground truth.
+        // Known TS-audit bug (Bug #3, see #runDriftAudit doc) — info-level only.
+        this.#lc.info?.(
+          `[drift-audit] ${targetID}: ts-audit-only divergence (Go matches SQL). ` +
+            `ts=${tsRemapped.length} go=${goRemapped.length} sql=${sqlVerdict.sqlCount} — see [rowdiff]`,
+        );
+      } else if (sqlVerdict.kind === 'skipped') {
+        // Couldn't build SQL (e.g. AST has unresolvable subqueries) —
+        // fall back to original count-based signal.
+        if (setDiffers) {
+          this.#driftAuditMismatches.add(1);
+          this.#lc.error?.(
+            `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ` +
+              `MISMATCH (sql-truth unavailable: ${sqlVerdict.reason})`,
+          );
+        } else {
+          this.#lc.debug?.(
+            `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ok (sql skipped: ${sqlVerdict.reason})`,
+          );
+        }
       } else {
         this.#lc.debug?.(
-          `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ok`,
+          `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ok (sql confirmed)`,
         );
       }
     } finally {
       this.#driftAuditInFlight = false;
     }
+  }
+
+  /**
+   * SQL ground-truth comparator: builds a flat SELECT from the AST's main
+   * filter + cursor + orderBy + limit, runs it against the snapshot's
+   * SQLite replica, and compares the resulting rowKey set against Go's
+   * main-table changes. Returns one of:
+   *   - `confirmed`: Go matches SQL exactly → real source of truth agrees
+   *   - `go-matches-sql`: Go matches SQL but caller sees a divergent
+   *     TS-audit output → TS-audit-only bug (Bug #3 noise)
+   *   - `go-vs-sql-drift`: Go disagrees with SQL → REAL Go-side drift
+   *   - `skipped`: AST has constructs we can't SQL-ify (unresolved
+   *     correlatedSubquery in WHERE, etc.) — falls back to the legacy
+   *     ts-vs-go count comparison
+   */
+  #sqlGroundTruthCompare(
+    ast: AST,
+    goRemapped: RowChange[],
+  ):
+    | {kind: 'confirmed'; sqlCount: number}
+    | {kind: 'go-matches-sql'; sqlCount: number}
+    | {kind: 'go-vs-sql-drift'; sqlCount: number; goOnly: string[]; sqlOnly: string[]}
+    | {kind: 'skipped'; reason: string} {
+    // Resolve any scalar EXISTS in the AST so the remaining WHERE has only
+    // simple/and/or — what filtersToSQL can handle.
+    let resolved: AST;
+    try {
+      resolved = this.#resolveScalarSubqueries(ast).ast;
+    } catch (e) {
+      return {kind: 'skipped', reason: `resolver-failed: ${String(e)}`};
+    }
+
+    // Verify no correlatedSubquery remains in WHERE — those don't map to
+    // a flat SQL filter without a join (which we don't reproduce here).
+    if (resolved.where && hasCorrelatedSubquery(resolved.where)) {
+      return {kind: 'skipped', reason: 'unresolved-correlated-subquery'};
+    }
+
+    const spec = this.#tableSpecs.get(resolved.table);
+    if (!spec) return {kind: 'skipped', reason: 'no-table-spec'};
+
+    let sqlQuery;
+    try {
+      sqlQuery = buildSelectQuery(
+        resolved.table,
+        spec.zqlSpec,
+        /* constraint */ undefined,
+        resolved.where as NoSubqueryCondition | undefined,
+        resolved.orderBy,
+        /* reverse */ false,
+        resolved.start
+          ? {row: resolved.start.row, basis: resolved.start.exclusive ? 'after' : 'at'}
+          : undefined,
+      );
+    } catch (e) {
+      return {kind: 'skipped', reason: `build-sql-failed: ${String(e)}`};
+    }
+
+    let sqlRows: Record<string, unknown>[];
+    try {
+      const {text, values} = format(sqlQuery);
+      const limit = resolved.limit;
+      // The pipeline applies LIMIT via Take operator (limit+1 not applied
+      // here since hydrate's audit comparator uses pipeline counts).
+      // Apply the same LIMIT in SQL so counts match the IVM pipeline's
+      // output set.
+      const limitedText = limit !== undefined ? `${text} LIMIT ${limit}` : text;
+      sqlRows = this.#snapshotter
+        .current()
+        .db.db.prepare(limitedText)
+        .all(...values) as Record<string, unknown>[];
+    } catch (e) {
+      return {kind: 'skipped', reason: `sql-exec-failed: ${String(e)}`};
+    }
+
+    // Build rowKey strings from SQL rows using the table's primary key.
+    const pk = spec.tableSpec.primaryKey;
+    const sqlKeys = new Set<string>();
+    const keyType = 0; // ChangeType.ADD — hydrate emits Adds
+    for (const row of sqlRows) {
+      const rowKey: Record<string, unknown> = {};
+      for (const col of pk) rowKey[col] = row[col];
+      sqlKeys.add(`${keyType}|${resolved.table}|${stableStringify(rowKey)}`);
+    }
+
+    // Compare Go's main-table rowKeys vs SQL.
+    const goMainKeys = new Set<string>();
+    for (const c of goRemapped) {
+      if (c.table === resolved.table) {
+        goMainKeys.add(`${c.type}|${c.table}|${stableStringify(c.rowKey)}`);
+      }
+    }
+
+    const goOnly: string[] = [];
+    const sqlOnly: string[] = [];
+    for (const k of goMainKeys) if (!sqlKeys.has(k)) goOnly.push(k);
+    for (const k of sqlKeys) if (!goMainKeys.has(k)) sqlOnly.push(k);
+
+    if (goOnly.length === 0 && sqlOnly.length === 0) {
+      return {kind: 'confirmed', sqlCount: sqlKeys.size};
+    }
+    // Go differs from SQL. But we may still be in 'go-matches-sql' if the
+    // caller hasn't flagged setDiffers — caller decides which message to
+    // emit based on whether tsRemapped also differed.
+    return {kind: 'go-vs-sql-drift', sqlCount: sqlKeys.size, goOnly, sqlOnly};
   }
 
   *#addQueryImpl(
