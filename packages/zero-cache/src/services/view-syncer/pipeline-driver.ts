@@ -39,7 +39,7 @@ import {
 } from '../../../../zqlite/src/resolve-scalar-subqueries.ts';
 import type {Condition} from '../../../../zero-protocol/src/ast.ts';
 import {createSQLiteCostModel} from '../../../../zqlite/src/sqlite-cost-model.ts';
-import {TableSource} from '../../../../zqlite/src/table-source.ts';
+import {TableSource, fromSQLiteTypes} from '../../../../zqlite/src/table-source.ts';
 import {
   reloadPermissionsIfChanged,
   type LoadedPermissions,
@@ -107,18 +107,6 @@ function buildAuditSQL(
 
   // Quote SQLite identifier — same approach as @databases/sql.
   const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
-
-  function valueToSQLiteParam(v: unknown, type: string): unknown {
-    if (v === null || v === undefined) return null;
-    switch (type) {
-      case 'boolean':
-        return v ? 1 : 0;
-      case 'json':
-        return JSON.stringify(v);
-      default:
-        return v;
-    }
-  }
 
   function valuePosToSQL(
     vp: {type: 'column'; name: string} | {type: 'literal'; value: unknown} | {type: string},
@@ -1446,12 +1434,26 @@ export class PipelineDriver {
       if (sqlVerdict.kind === 'go-vs-sql-drift') {
         this.#driftAuditMismatches.add(1);
         this.#lc.error?.(
-          `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL. ` +
+          `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL (set). ` +
             `go_count=${goRemapped.length} sql_count=${sqlVerdict.sqlCount} ` +
             `go_only=${sqlVerdict.goOnly.slice(0, 3).join(' | ')} ` +
             `(${sqlVerdict.goOnly.length} total) ` +
             `sql_only=${sqlVerdict.sqlOnly.slice(0, 3).join(' | ')} ` +
             `(${sqlVerdict.sqlOnly.length} total)`,
+        );
+      } else if (sqlVerdict.kind === 'go-vs-sql-content-drift') {
+        // Same PKs but row contents differ — Go has stale/wrong values
+        // for one or more rows. This is the most insidious bug class
+        // (users see wrong data without any visible error), so escalate.
+        this.#driftAuditMismatches.add(1);
+        const sample = sqlVerdict.contentMismatches[0];
+        this.#lc.error?.(
+          `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL (content). ` +
+            `sql_count=${sqlVerdict.sqlCount} ` +
+            `mismatched_rows=${sqlVerdict.contentMismatches.length} ` +
+            `first_pk=${sample.pk} ` +
+            `sql_row=${sample.sqlRow.slice(0, 300)} ` +
+            `go_row=${sample.goRow.slice(0, 300)}`,
         );
       } else if (setDiffers && sqlVerdict.kind === 'confirmed') {
         // TS-audit disagrees but Go matches the SQL ground truth.
@@ -1502,8 +1504,12 @@ export class PipelineDriver {
     goRemapped: RowChange[],
   ):
     | {kind: 'confirmed'; sqlCount: number}
-    | {kind: 'go-matches-sql'; sqlCount: number}
     | {kind: 'go-vs-sql-drift'; sqlCount: number; goOnly: string[]; sqlOnly: string[]}
+    | {
+        kind: 'go-vs-sql-content-drift';
+        sqlCount: number;
+        contentMismatches: {pk: string; sqlRow: string; goRow: string}[];
+      }
     | {kind: 'skipped'; reason: string} {
     // The caller passes entry.transformedAst which is ALREADY post-resolution.
     // Re-running #resolveScalarSubqueries here is redundant AND trips
@@ -1539,36 +1545,70 @@ export class PipelineDriver {
       return {kind: 'skipped', reason: `sql-exec-failed: ${String(e)}`};
     }
 
-    // Build rowKey strings from SQL rows using the table's primary key.
-    const pk = spec.tableSpec.primaryKey;
-    const sqlKeys = new Set<string>();
-    const keyType = 0; // ChangeType.ADD — hydrate emits Adds
-    for (const row of sqlRows) {
-      const rowKey: Record<string, unknown> = {};
-      for (const col of pk) rowKey[col] = row[col];
-      sqlKeys.add(`${keyType}|${resolved.table}|${stableStringify(rowKey)}`);
+    // Normalize SQL rows (BigInt→Number for INTEGER columns, JSON parse,
+    // boolean coerce) so they match Go's row encoding shape.
+    let normalizedSqlRows: Record<string, unknown>[];
+    try {
+      normalizedSqlRows = sqlRows.map(
+        row => fromSQLiteTypes(spec.zqlSpec, row as Row, resolved.table) as Record<string, unknown>,
+      );
+    } catch (e) {
+      return {kind: 'skipped', reason: `normalize-failed: ${String(e)}`};
     }
 
-    // Compare Go's main-table rowKeys vs SQL.
-    const goMainKeys = new Set<string>();
+    // Build PK→full-row maps so we can do both set diff AND content diff.
+    const pk = spec.tableSpec.primaryKey;
+    const pkOf = (row: Record<string, unknown>): string => {
+      const rowKey: Record<string, unknown> = {};
+      for (const col of pk) rowKey[col] = row[col];
+      return stableStringify(rowKey);
+    };
+
+    const sqlByPK = new Map<string, Record<string, unknown>>();
+    for (const row of normalizedSqlRows) sqlByPK.set(pkOf(row), row);
+
+    const goByPK = new Map<string, Record<string, unknown>>();
     for (const c of goRemapped) {
       if (c.table === resolved.table) {
-        goMainKeys.add(`${c.type}|${c.table}|${stableStringify(c.rowKey)}`);
+        goByPK.set(stableStringify(c.rowKey), c.row);
       }
     }
 
+    // Step 1: set diff (PK presence)
     const goOnly: string[] = [];
     const sqlOnly: string[] = [];
-    for (const k of goMainKeys) if (!sqlKeys.has(k)) goOnly.push(k);
-    for (const k of sqlKeys) if (!goMainKeys.has(k)) sqlOnly.push(k);
+    for (const k of goByPK.keys()) if (!sqlByPK.has(k)) goOnly.push(k);
+    for (const k of sqlByPK.keys()) if (!goByPK.has(k)) sqlOnly.push(k);
 
-    if (goOnly.length === 0 && sqlOnly.length === 0) {
-      return {kind: 'confirmed', sqlCount: sqlKeys.size};
+    if (goOnly.length > 0 || sqlOnly.length > 0) {
+      return {kind: 'go-vs-sql-drift', sqlCount: sqlByPK.size, goOnly, sqlOnly};
     }
-    // Go differs from SQL. But we may still be in 'go-matches-sql' if the
-    // caller hasn't flagged setDiffers — caller decides which message to
-    // emit based on whether tsRemapped also differed.
-    return {kind: 'go-vs-sql-drift', sqlCount: sqlKeys.size, goOnly, sqlOnly};
+
+    // Step 2: content diff for rows present on both sides
+    const contentMismatches: {pk: string; sqlRow: string; goRow: string}[] = [];
+    for (const [pkKey, sqlRow] of sqlByPK) {
+      const goRow = goByPK.get(pkKey);
+      if (!goRow) continue;
+      // Project Go's row to the schema columns only — Go may carry extra
+      // bookkeeping fields (e.g., _0_version) that aren't in the zql spec.
+      const goRowProjected: Record<string, unknown> = {};
+      for (const col of Object.keys(spec.zqlSpec)) goRowProjected[col] = goRow[col];
+      const sqlStr = stableStringify(sqlRow);
+      const goStr = stableStringify(goRowProjected);
+      if (sqlStr !== goStr) {
+        contentMismatches.push({pk: pkKey, sqlRow: sqlStr, goRow: goStr});
+      }
+    }
+
+    if (contentMismatches.length > 0) {
+      return {
+        kind: 'go-vs-sql-content-drift',
+        sqlCount: sqlByPK.size,
+        contentMismatches,
+      };
+    }
+
+    return {kind: 'confirmed', sqlCount: sqlByPK.size};
   }
 
   *#addQueryImpl(
