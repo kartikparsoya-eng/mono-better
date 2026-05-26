@@ -1497,7 +1497,17 @@ export class PipelineDriver {
    */
   getRow(table: string, pk: RowKey): Row | undefined {
     assert(this.initialized(), 'Not yet initialized');
-    const source = must(this.#tables.get(table));
+    // Include the table name in the error message so the bare-must() failure
+    // surfaced by 14-CG soak (4 CGs hit "Unexpected undefined value" during
+    // CVR catchup → ViewSyncer's outer must wraps with "Missing row ..." but
+    // the inner must fires first and obscures which table) tells us which
+    // table source went missing. Suspect: query removed mid-CVR-catchup
+    // while view-syncer still has a refCount for one of its rows.
+    const source = must(
+      this.#tables.get(table),
+      `pipelineDriver.getRow: no TableSource for table=${table} ` +
+        `(pk=${JSON.stringify(pk)}). Known tables: ${[...this.#tables.keys()].join(',')}`,
+    );
     return source.getRow(pk as Row);
   }
 
