@@ -821,6 +821,56 @@ export class PipelineDriver {
       this.removeQuery(q.queryID);
     }
 
+    // Split internal queries (lmids, mutationResults, control-plane tables)
+    // off the batch — they must run via TS's #addQueryImpl since their
+    // source tables are excluded from Go's data path (the same invariant
+    // enforced by #addQueryDispatch for the per-query path). Without this
+    // split, the Go sidecar panics with `no source for table` on the
+    // <appID>.clients / <appID>_<shard>.permissions queries that show up
+    // in every first-time hydrate batch.
+    const internalQueries: typeof queries = [];
+    const userQueries: typeof queries = [];
+    for (const q of queries) {
+      if (this.#isInternalQueryID(q.queryID) || this.#isInternalTable(q.ast.table)) {
+        internalQueries.push(q);
+      } else {
+        userQueries.push(q);
+      }
+    }
+
+    // Run internal queries through TS first. Their results yield with the
+    // same {queryID, changes} shape the Go side does, so the caller is
+    // mode-agnostic.
+    //
+    // Yield-token caveat: #addQueryImpl emits 'yield' tokens for
+    // cooperative time-slicing, but in Go-primary the view-syncer's
+    // batch consumer never started the TimeSliceTimer — calling
+    // `timer.yieldProcess()` on a 'yield' would trip `not running`
+    // assert and crash the ViewSyncer. Internal queries are tiny
+    // (lmids/mutationResults/clients/permissions are O(rows = active
+    // connections)), so dropping the cooperative yields here is safe
+    // and contained.
+    const noopTimer = {
+      elapsedLap: () => 0,
+      totalElapsed: () => 0,
+      running: () => true,
+    } as unknown as Timer;
+    for (const q of internalQueries) {
+      const raw = this.#trackRowSetSignatures(
+        this.#addQueryImpl(q.transformationHash, q.queryID, q.ast, noopTimer),
+      );
+      function* dropYields(): Iterable<RowChange | 'yield'> {
+        for (const c of raw) {
+          if (c !== 'yield') yield c;
+        }
+      }
+      yield {queryID: q.queryID, changes: dropYields()};
+    }
+
+    if (userQueries.length === 0) {
+      return;
+    }
+
     // Buffer arrived-but-not-yet-yielded results from the streaming RPC.
     // The producer side runs in goroutines on Go; we get one onResult call
     // per query via the client's onPartial. We park each into a queue and
@@ -832,10 +882,10 @@ export class PipelineDriver {
     let error: Error | null = null;
 
     const byQueryID = new Map<string, (typeof queries)[number]>();
-    for (const q of queries) byQueryID.set(q.queryID, q);
+    for (const q of userQueries) byQueryID.set(q.queryID, q);
 
     const rpcPromise = this.#goBackend!.hydrateManyStream(
-      queries.map(q => ({queryID: q.queryID, ast: q.ast})),
+      userQueries.map(q => ({queryID: q.queryID, ast: q.ast})),
       (r: {queryID: string; changes: unknown[]; timingMs: number | undefined}) => {
         buffered.push({
           queryID: r.queryID,
@@ -883,12 +933,17 @@ export class PipelineDriver {
         });
         const self = this;
         const changesArr = r.changes;
+        // No 'yield' tokens in Go-primary batch hydrate: the view-syncer
+        // batch consumer path never starts the TimeSliceTimer, so a
+        // 'yield' would trip `not running` in TimeSliceTimer.#stopLap
+        // and tear down the ViewSyncer. The 'yield' tokens existed for
+        // cooperative scheduling against the timer; the batch path
+        // doesn't need them (rows are already chunked at the Go side via
+        // hydrateChunkSize, so we never accumulate enough in one
+        // generator to starve the event loop).
         function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
-          let j = 0;
           for (const rc of changesArr) {
-            if (j > 0 && j % 100 === 0) yield 'yield';
             yield self.#goRowChangeToRowChange(rc);
-            j++;
           }
         }
         yield {
@@ -1045,8 +1100,22 @@ export class PipelineDriver {
       }
       if (this.#pipelines.size === 0) return;
 
-      const queryIDs = [...this.#pipelines.keys()];
-      const targetID = queryIDs[Math.floor(Math.random() * queryIDs.length)];
+      // Internal queries (lmids/mutationResults) and queries rooted at
+      // internal tables can't be audited against Go — those tables are
+      // excluded from Go's data path (Fix #1), so sending the AST to
+      // Go's `hydrateManyStream` would panic with `no source for table`
+      // and crash the sidecar under load. Filter them out of the audit
+      // target pool entirely; if nothing else is hydrated this cycle,
+      // skip the audit.
+      const auditableIDs = [...this.#pipelines.entries()]
+        .filter(([qid, entry]) =>
+          !this.#isInternalQueryID(qid) &&
+          !this.#isInternalTable(entry.transformedAst.table),
+        )
+        .map(([qid]) => qid);
+      if (auditableIDs.length === 0) return;
+
+      const targetID = auditableIDs[Math.floor(Math.random() * auditableIDs.length)];
       const entry = this.#pipelines.get(targetID);
       if (!entry) return;
       // transformedAst is post-subquery-resolution — what Go was originally
@@ -1057,7 +1126,11 @@ export class PipelineDriver {
       const auditID = `__drift_audit_${Date.now().toString(36)}_${Math.floor(
         Math.random() * 0xffff_ffff,
       ).toString(36)}`;
-      const noopTimer: Timer = {elapsedLap: () => 0, totalElapsed: () => 0};
+      const noopTimer = {
+        elapsedLap: () => 0,
+        totalElapsed: () => 0,
+        running: () => true, // TableSource.#shouldYield calls this at runtime; exported Timer type omits it
+      } as unknown as Timer;
 
       // Audit must run on a stable, consistent snapshot. Three windows can
       // invalidate the comparison:
