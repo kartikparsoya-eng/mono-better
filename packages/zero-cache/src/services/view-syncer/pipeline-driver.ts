@@ -1067,6 +1067,29 @@ export class PipelineDriver {
   // Picks one random active query and re-hydrates it on TS and Go from the
   // current snapshot, comparing via #shadowCompare. Anything but a length-equal
   // sorted match means Go's incrementally-maintained state has drifted.
+  //
+  // Open issue (2026-05-26 multi-CG JWT soak — pickup TODO):
+  //   Rare false-positive drift on paginated `conversations` queries with
+  //   `EXISTS(channels)` + `start.exclusive: false` + cursor row whose
+  //   createdAt EXACTLY matches `start.row.createdAt`. The audit reports
+  //   ts=N go=N MISMATCH; the [drift-audit][rowdiff] log shows TS missing
+  //   exactly the boundary row and including one extra older row. Direct
+  //   `SELECT … WHERE createdAt <= cursor ORDER BY createdAt DESC LIMIT N`
+  //   on the replica.db returns the boundary row at position 0, so the
+  //   bug is between SQL and the audit's RowChange emission — NOT in
+  //   Go's MemorySource (Go gets the boundary right). Ruled out:
+  //     - Resolver asymmetry (drift fires whether scalar EXISTS resolved
+  //       or not — confirmed by [scalar-resolver] log instrumentation)
+  //     - View-syncer instance restart (none of the drifting CGs had
+  //       multiple instances)
+  //     - createdAt ties (verified zero ties at cursor for each repro)
+  //     - Snapshot skew (versionBefore === versionAfter on every repro)
+  //   Suspect: Skip → Exists → Take interaction at the audit's
+  //   re-hydrate path, possibly companion-pipeline state from the
+  //   executor in #resolveScalarSubqueries holding a stale Connection
+  //   on the conversations TableSource. Repro via 5-CG × 360s JWT soak
+  //   + drive-traffic.sh; fires ~1–2% of audit runs. The
+  //   [drift-audit][rowdiff] log line points to the divergent row.
   async #runDriftAudit(): Promise<void> {
     if (this.#driftAuditInFlight) {
       this.#driftAuditSkips.add(1);
