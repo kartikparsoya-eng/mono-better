@@ -1222,15 +1222,34 @@ export class PipelineDriver {
             `ts_count=${tsRemapped.length} go_count=${goRemapped.length} ` +
             `ast=${JSON.stringify(ast)}`,
         );
+        // Diagnostic: dump the symmetric difference of rowKeys so we can
+        // see exactly which row(s) each side has that the other doesn't.
+        // Avoids the indirection through #shadowCompare's sort positions.
+        const tsOnly: string[] = [];
+        const goOnly: string[] = [];
+        for (const k of tsKeys) if (!goKeys.has(k)) tsOnly.push(k);
+        for (const k of goKeys) if (!tsKeys.has(k)) goOnly.push(k);
+        this.#lc.error?.(
+          `[drift-audit][rowdiff] queryID=${targetID} ` +
+            `ts_only=${tsOnly.slice(0, 5).join(' | ')} (${tsOnly.length} total) ` +
+            `go_only=${goOnly.slice(0, 5).join(' | ')} (${goOnly.length} total)`,
+        );
       }
 
       this.#shadowCompare('drift-audit', targetID, tsRemapped, goRemapped);
-      if (tsRemapped.length !== goRemapped.length) {
+      // Increment on ANY set divergence, not just count mismatch — multi-CG
+      // soak surfaced a case where ts_count==go_count but the row sets
+      // differed at the cursor boundary; previously this was logged as "ok".
+      if (setDiffers) {
         this.#driftAuditMismatches.add(1);
+        this.#lc.error?.(
+          `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} MISMATCH`,
+        );
+      } else {
+        this.#lc.debug?.(
+          `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ok`,
+        );
       }
-      this.#lc.debug?.(
-        `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ok`,
-      );
     } finally {
       this.#driftAuditInFlight = false;
     }

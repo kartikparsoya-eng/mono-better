@@ -49,6 +49,14 @@ export class GoComputeBackend {
   readonly #loadBatchRows: number;
   #initialized = false;
   #initEpoch = -1;
+  /**
+   * Per-cgID init epoch the sidecar issues on every {@link client.init}.
+   * Threaded through every subsequent mutating RPC (loadRows / addQuery* /
+   * advance*) so the sidecar rejects calls from a torn-down instance
+   * whose RPC raced past a fresh init for the same cgID.
+   * `-1` = not yet init'd (any call would fail validation anyway).
+   */
+  #sidecarInitEpoch = -1;
   /** Promise resolving when the *current* epoch's init finishes (resolve OR reject). */
   #currentInitPromise: Promise<void> | null = null;
   /**
@@ -118,14 +126,14 @@ export class GoComputeBackend {
   async hydrate(queryID: string, ast: QueryAST): Promise<GoHydrateResult> {
     if (this.#restartGate) await this.#restartGate;
     return this.#withReinitRetry(() =>
-      this.#client().addQuery(this.#clientGroupID, queryID, ast, this.#cgOpts()),
+      this.#client().addQuery(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, this.#cgOpts()),
     );
   }
 
   async hydrateMany(queries: {queryID: string; ast: QueryAST}[]): Promise<GoHydrateResult[]> {
     if (this.#restartGate) await this.#restartGate;
     return this.#withReinitRetry(() =>
-      this.#client().addQueries(this.#clientGroupID, queries, this.#cgOpts()),
+      this.#client().addQueries(this.#clientGroupID, queries, this.#sidecarInitEpoch, this.#cgOpts()),
     );
   }
 
@@ -137,13 +145,13 @@ export class GoComputeBackend {
   ): Promise<void> {
     if (this.#restartGate) await this.#restartGate;
     await this.#withReinitRetry(() =>
-      this.#client().addQueriesStream(this.#clientGroupID, queries, onResult, this.#cgOpts()),
+      this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, onResult, this.#cgOpts()),
     );
   }
 
   advance(changes: SnapshotChange[]): Promise<GoAdvanceResult> {
     return this.#advanceWithRecovery(() =>
-      this.#client().advance(this.#clientGroupID, changes, this.#cgOpts()),
+      this.#client().advance(this.#clientGroupID, changes, this.#sidecarInitEpoch, this.#cgOpts()),
     );
   }
 
@@ -156,7 +164,7 @@ export class GoComputeBackend {
   // bytes flow as soon as `advanceChunkSize` rows accumulate on Go.
   advanceStream(changes: SnapshotChange[]): Promise<GoAdvanceResult> {
     return this.#advanceWithRecovery(() =>
-      this.#client().advanceStream(this.#clientGroupID, changes, this.#cgOpts()),
+      this.#client().advanceStream(this.#clientGroupID, changes, this.#sidecarInitEpoch, this.#cgOpts()),
     );
   }
 
@@ -319,7 +327,7 @@ export class GoComputeBackend {
 
   // Rejects on failure — callers either ignore or surface depending on context.
   async removeQuery(queryID: string): Promise<void> {
-    await this.#client().removeQuery(this.#clientGroupID, queryID, this.#cgOpts());
+    await this.#client().removeQuery(this.#clientGroupID, queryID, this.#sidecarInitEpoch, this.#cgOpts());
   }
 
   async destroy(): Promise<void> {
@@ -392,7 +400,18 @@ export class GoComputeBackend {
         rows: [],
       };
     }
-    await client.init(this.#clientGroupID, {tables: tablesNoRows}, this.#cgOpts());
+    const initResult = await client.init(
+      this.#clientGroupID,
+      {tables: tablesNoRows},
+      this.#cgOpts(),
+    );
+    // Stash the sidecar's per-cgID epoch BEFORE any loadRows so all
+    // subsequent mutating RPCs from THIS instance carry the matching
+    // epoch. A torn-down predecessor instance for the same cgID still
+    // holds an older epoch; its in-flight RPCs land on the sidecar
+    // AFTER this init and get rejected with rpcCodeStaleInitEpoch
+    // instead of corrupting state.
+    this.#sidecarInitEpoch = initResult.initEpoch;
 
     // Step 2: stream rows for each table in bounded batches. If any batch
     // fails (timeout, decode error, process didn't die but the RPC tripped),
@@ -404,7 +423,13 @@ export class GoComputeBackend {
         if (t.rows.length === 0) continue;
         for (let i = 0; i < t.rows.length; i += this.#loadBatchRows) {
           const batch = t.rows.slice(i, i + this.#loadBatchRows);
-          await client.loadRows(this.#clientGroupID, name, batch, this.#cgOpts());
+          await client.loadRows(
+            this.#clientGroupID,
+            name,
+            batch,
+            this.#sidecarInitEpoch,
+            this.#cgOpts(),
+          );
         }
       }
     } catch (err) {
@@ -446,6 +471,7 @@ export class GoComputeBackend {
           await this.#client().addQueries(
             this.#clientGroupID,
             queries,
+            this.#sidecarInitEpoch,
             this.#cgOpts(),
           );
           this.#log(

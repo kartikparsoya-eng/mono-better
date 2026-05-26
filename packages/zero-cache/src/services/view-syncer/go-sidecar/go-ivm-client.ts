@@ -361,6 +361,24 @@ export class TimeoutError extends Error {
 export const RPC_CODE_DRIFT = -32100;
 
 /**
+ * RPC error code Go uses when a mutating call (loadRows / addQuery* /
+ * advance*) carries an initEpoch that doesn't match the cgID's current
+ * epoch on the sidecar. The caller is a torn-down view-syncer instance
+ * whose RPC raced past the next instance's init for the same cgID; without
+ * this guard, Go would silently mutate the new engine's state with stale
+ * data. Surface so GoComputeBackend can no-op stale calls instead of
+ * treating them as protocol errors.
+ */
+export const RPC_CODE_STALE_INIT_EPOCH = -32101;
+
+export class StaleInitEpochError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StaleInitEpochError';
+  }
+}
+
+/**
  * Source-drift signal from the Go sidecar. Carries the offending table +
  * op + PK so the caller can log specifics before re-init. Thrown by
  * {@link GoIVMClient.advance} and surfaced via accumulator on
@@ -513,13 +531,22 @@ export class GoIVMClient {
   }
 
   /**
-   * Initialize an engine for a client group.
-   * Tables typically contain SCHEMA only; load rows via {@link loadRows}.
-   * Sending rows inline still works but risks the 64MB frame cap.
+   * Initialize an engine for a client group. Returns the new initEpoch
+   * which subsequent mutating calls (loadRows / addQuery* / advance*) MUST
+   * pass back so the sidecar can reject calls from a torn-down caller
+   * whose RPC raced past a fresh init for the same cgID.
    */
-  async init(clientGroupID: string, params: InitParams, opts?: CallOptions): Promise<void> {
+  async init(clientGroupID: string, params: InitParams, opts?: CallOptions): Promise<{initEpoch: number}> {
     // init can be slow on first start; allow longer default.
-    await this.#call('init', {clientGroupID, ...params}, {timeoutMs: opts?.timeoutMs ?? 120_000});
+    const result = (await this.#call(
+      'init',
+      {clientGroupID, ...params},
+      {timeoutMs: opts?.timeoutMs ?? 120_000},
+    )) as {status?: string; initEpoch?: number} | 'ok';
+    if (typeof result !== 'object' || typeof result.initEpoch !== 'number') {
+      throw new Error('init: sidecar did not return initEpoch — protocol mismatch');
+    }
+    return {initEpoch: result.initEpoch};
   }
 
   /**
@@ -531,11 +558,12 @@ export class GoIVMClient {
     clientGroupID: string,
     table: string,
     rows: Record<string, unknown>[],
+    initEpoch: number,
     opts?: CallOptions,
   ): Promise<void> {
     await this.#call(
       'loadRows',
-      {clientGroupID, table, rows},
+      {clientGroupID, table, rows, initEpoch},
       {timeoutMs: opts?.timeoutMs ?? 120_000},
     );
   }
@@ -546,11 +574,12 @@ export class GoIVMClient {
     clientGroupID: string,
     queryID: string,
     ast: unknown,
+    initEpoch: number,
     opts?: CallOptions,
   ): Promise<HydrateResult> {
     const result = (await this.#call(
       'addQuery',
-      {clientGroupID, queryID, ast},
+      {clientGroupID, queryID, ast, initEpoch},
       {timeoutMs: opts?.timeoutMs ?? 60_000},
     )) as {changes: RowChange[]; timingMs?: number};
     return {changes: result.changes ?? [], timingMs: result.timingMs};
@@ -561,11 +590,12 @@ export class GoIVMClient {
   async addQueries(
     clientGroupID: string,
     queries: {queryID: string; ast: unknown}[],
+    initEpoch: number,
     opts?: CallOptions,
   ): Promise<HydrateResult[]> {
     const result = (await this.#call(
       'addQueries',
-      {clientGroupID, queries},
+      {clientGroupID, queries, initEpoch},
       {timeoutMs: opts?.timeoutMs ?? 120_000},
     )) as {results: {changes: RowChange[]; timingMs?: number}[]};
     return (result.results ?? []).map(r => ({
@@ -596,13 +626,14 @@ export class GoIVMClient {
   async addQueriesStream(
     clientGroupID: string,
     queries: {queryID: string; ast: unknown}[],
+    initEpoch: number,
     onResult: (r: {queryID: string; changes: RowChange[]; timingMs: number | undefined}) => void,
     opts?: CallOptions,
   ): Promise<void> {
     const handler = createHydrateStreamAccumulator(onResult);
     await this.#call(
       'addQueriesStream',
-      {clientGroupID, queries},
+      {clientGroupID, queries, initEpoch},
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
         onPartial: handler.onFrame,
@@ -612,8 +643,8 @@ export class GoIVMClient {
   }
 
   /** Remove a query pipeline from a client group's engine. */
-  async removeQuery(clientGroupID: string, queryID: string, opts?: CallOptions): Promise<void> {
-    await this.#call('removeQuery', {clientGroupID, queryID}, opts);
+  async removeQuery(clientGroupID: string, queryID: string, initEpoch: number, opts?: CallOptions): Promise<void> {
+    await this.#call('removeQuery', {clientGroupID, queryID, initEpoch}, opts);
   }
 
   // Returns per-(table, op) wall-times so TS's `ivm.advance-time` histogram
@@ -621,11 +652,12 @@ export class GoIVMClient {
   async advance(
     clientGroupID: string,
     changes: SnapshotChange[],
+    initEpoch: number,
     opts?: CallOptions,
   ): Promise<AdvanceResult> {
     const result = (await this.#call(
       'advance',
-      {clientGroupID, changes},
+      {clientGroupID, changes, initEpoch},
       opts,
     )) as {changes: RowChange[]; timings?: TableTiming[]};
     return {changes: result.changes ?? [], timings: result.timings};
@@ -648,12 +680,13 @@ export class GoIVMClient {
   async advanceStream(
     clientGroupID: string,
     changes: SnapshotChange[],
+    initEpoch: number,
     opts?: CallOptions,
   ): Promise<AdvanceResult> {
     const handler = createAdvanceStreamAccumulator();
     await this.#call(
       'advanceStream',
-      {clientGroupID, changes},
+      {clientGroupID, changes, initEpoch},
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
         onPartial: handler.onFrame,
