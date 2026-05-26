@@ -325,6 +325,7 @@ export class PipelineDriver {
     {
       columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}>;
       primaryKey: string[];
+      uniqueKeys?: string[][] | undefined;
       rows: Record<string, unknown>[];
     }
   > {
@@ -334,6 +335,7 @@ export class PipelineDriver {
       {
         columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}>;
         primaryKey: string[];
+        uniqueKeys?: string[][] | undefined;
         rows: Record<string, unknown>[];
       }
     > = {};
@@ -362,9 +364,21 @@ export class PipelineDriver {
       } catch (e) {
         this.#lc.warn?.(`Failed to read table ${name} for Go init:`, e);
       }
+      // uniqueKeys: forward all unique-index column sets to Go so its
+      // scalar-subquery resolver can detect at-most-one-row subqueries
+      // (the Phase 2 port of resolveSimpleScalarSubqueries). Falls back to
+      // [primaryKey] when liteTableSpec didn't capture uniqueKeys, so the
+      // Go resolver still has something useful for the common pk-only
+      // case rather than treating the table as having no unique keys.
+      const tableSpec = spec.tableSpec as unknown as {uniqueKeys?: string[][]};
+      const uniqueKeys: string[][] =
+        tableSpec.uniqueKeys && tableSpec.uniqueKeys.length > 0
+          ? tableSpec.uniqueKeys.map(k => [...k])
+          : [[...spec.tableSpec.primaryKey]];
       tables[name] = {
         columns,
         primaryKey: [...(this.#primaryKeys?.get(name) ?? spec.tableSpec.primaryKey)],
+        uniqueKeys,
         rows,
       };
     }

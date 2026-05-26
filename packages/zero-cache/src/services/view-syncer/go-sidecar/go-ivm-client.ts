@@ -53,11 +53,20 @@ export type ColumnSchema = {
 export type TableSchema = {
   columns: Record<string, ColumnSchema>;
   primaryKey: string[];
+  /**
+   * All column sets that have a unique index on this table (includes
+   * primary key). Forwarded to the Go scalar-subquery resolver so it can
+   * detect subqueries returning at most one row. Optional for backward
+   * compat — when omitted, the Go resolver treats the table as having no
+   * known unique keys and leaves EXISTS rewrites unmodified.
+   */
+  uniqueKeys?: string[][] | undefined;
 };
 
 export type TableData = {
   columns: Record<string, ColumnSchema>;
   primaryKey: string[];
+  uniqueKeys?: string[][] | undefined;
   rows: Record<string, unknown>[];
 };
 

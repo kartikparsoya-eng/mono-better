@@ -358,7 +358,12 @@ export class GoComputeBackend {
     // past the 64MB frame cap on large tables (REVIEW-ts-integration CRITICAL-2).
     const tablesNoRows: Record<string, TableData> = {};
     for (const [name, t] of Object.entries(tables)) {
-      tablesNoRows[name] = {columns: t.columns, primaryKey: t.primaryKey, rows: []};
+      tablesNoRows[name] = {
+        columns: t.columns,
+        primaryKey: t.primaryKey,
+        uniqueKeys: t.uniqueKeys,
+        rows: [],
+      };
     }
     await client.init(this.#clientGroupID, {tables: tablesNoRows}, this.#cgOpts());
 
