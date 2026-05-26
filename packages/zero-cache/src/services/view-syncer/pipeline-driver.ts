@@ -300,6 +300,21 @@ export class PipelineDriver {
     }
   }
 
+  // Internal-plumbing predicates (see #currentTablesForGo for context).
+  // <appID>.permissions and <appID>_<shard>.clients are Zero's control
+  // plane; user tables live in a different schema (no app-prefix).
+  #isInternalTable(name: string): boolean {
+    const {appID, shardNum} = this.#shardID;
+    return (
+      name.startsWith(`${appID}.`) ||
+      name.startsWith(`${appID}_${shardNum}.`)
+    );
+  }
+
+  #isInternalQueryID(queryID: string): boolean {
+    return queryID === 'lmids' || queryID === 'mutationResults';
+  }
+
   /**
    * Materialize the current snapshot's tables in the shape the Go sidecar
    * wants (columns + primaryKey + rows). Used both for the initial init
@@ -325,6 +340,18 @@ export class PipelineDriver {
     const warn = (msg: string) =>
       this.#lc.warn?.(`[go-ivm pgType] ${msg}`);
     for (const [name, spec] of this.#tableSpecs.entries()) {
+      // Skip Zero-internal plumbing tables (<appID>.permissions,
+      // <appID>_<shard>.clients, etc). These are written by zero-cache
+      // itself, only feed the `lmids`/`mutationResults` internal queries
+      // that TS handles natively, and have caused Go sidecar panics when
+      // the in-memory snapshot diverges from SQLite across sidecar
+      // restarts (Pattern Z root cause, 2026-05-26). Go-primary mode is
+      // safe to skip these: internal queries always route through TS,
+      // since TS's TableSource reads live from SQLite and self-heals.
+      if (this.#isInternalTable(name)) {
+        this.#lc.debug?.(`[go-ivm] skipping internal table ${name}`);
+        continue;
+      }
       const columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}> = {};
       for (const [col, colSpec] of Object.entries(spec.tableSpec.columns)) {
         columns[col] = {type: pgTypeToGoType(colSpec.dataType, warn)};
@@ -885,9 +912,86 @@ export class PipelineDriver {
     queries: {queryID: string; ast: AST}[],
     tsResultsPerQuery: Map<string, RowChange[]>,
   ): Promise<void> {
-    if (!this.#goBackend?.initialized || queries.length === 0) return;
+    if (!this.#goBackend?.initialized) return;
+    // Internal queries (lmids, mutationResults) target Zero's control-plane
+    // tables which Go doesn't track. They always run via TS's TableSource.
+    // Drop them from the batch before dispatching to Go.
+    queries = queries.filter(q => !this.#isInternalQueryID(q.queryID));
+    if (queries.length === 0) return;
     try {
       const batchStart = performance.now();
+      // Pre-resolve scalar subqueries per query so Go gets the same
+      // resolved AST that TS's own pipeline uses (#addQueryImpl resolves
+      // them at line 1114). Without this, Go builds a regular EXISTS join
+      // for `{scalar: true}` conditions and propagates the child rows on
+      // every parent push — drift seen as Go over-producing
+      // channel_participants ADD rows for the conversations ACL EXISTS.
+      // Destroy the freshly-built companion inputs immediately: TS's main
+      // path already wired its own live companions in #addQueryImpl, and
+      // these shadow-side ones would race with those if kept alive.
+      //
+      // The resolver calls source.fetch() which routes through
+      // TableSource.shouldYield → #shouldYield (line 1951+), which throws
+      // if neither #hydrateContext nor #advanceContext is set. We pin a
+      // noop hydrate-context for the duration of resolution and restore
+      // it after so the next addQuery's assertion still holds. Same
+      // pattern the drift audit uses at line 1007.
+      //
+      // Phase 1 of the scalar-subquery handling fix (long-term: port
+      // resolveSimpleScalarSubqueries to Go).
+      const resolvedByID = new Map<
+        string,
+        {ast: AST; companionRows: {table: string; row: Row}[]}
+      >();
+      const prevHydrateContext = this.#hydrateContext;
+      // Note: Timer's exported type omits `running()` (line 131) but
+      // #shouldYield calls it at runtime (line 1976). Provide the full
+      // shape — the drift-audit's noopTimer at line 1007 predates the
+      // TimeSliceTimer-running() guard and would crash too if exercised.
+      const noopTimer = {
+        elapsedLap: () => 0,
+        totalElapsed: () => 0,
+        running: () => true,
+      } as unknown as Timer;
+      this.#hydrateContext = {timer: noopTimer};
+      try {
+        for (const q of queries) {
+          const r = this.#resolveScalarSubqueries(q.ast);
+          resolvedByID.set(q.queryID, {
+            ast: r.ast,
+            companionRows: r.companionRows,
+          });
+          for (const input of r.companionInputs) input.destroy();
+          // Pattern Z diagnostic (REMOVE after root-cause). Dump original
+          // and resolved ASTs for every query that targets the conversations
+          // table or has a whereExists chain — the production shapes that
+          // showed result-table under-produce. Filtering by table+shape
+          // (not queryID) so we catch the queries regardless of their
+          // session-scoped hash.
+          const astStr = JSON.stringify(q.ast);
+          const interesting =
+            q.ast.table === 'conversations' ||
+            q.ast.table === 'channels' ||
+            q.ast.table === 'channel_user_status' ||
+            q.ast.table === 'channel_stats' ||
+            astStr.includes('"whereExists"') ||
+            astStr.includes('correlatedSubquery');
+          if (interesting) {
+            this.#lc.error?.(
+              `[ast-dump] ${q.queryID} (${q.ast.table}) ORIGINAL: ${astStr.slice(0, 2000)}`,
+            );
+            this.#lc.error?.(
+              `[ast-dump] ${q.queryID} (${q.ast.table}) RESOLVED: ${JSON.stringify(r.ast).slice(0, 2000)}`,
+            );
+            this.#lc.error?.(
+              `[ast-dump] ${q.queryID} companionRows.count=${r.companionRows.length}`,
+            );
+          }
+        }
+      } finally {
+        this.#hydrateContext = prevHydrateContext;
+      }
+
       // Use the streaming variant so shadow mode exercises the same code
       // path Go-primary mode will use in production. Compare per-query as
       // soon as Go emits each result (REVIEW-final perf-opt streaming
@@ -895,11 +999,31 @@ export class PipelineDriver {
       const goResultsByID = new Map<string, RowChange[]>();
       let mismatches = 0;
       await this.#goBackend.hydrateManyStream(
-        queries.map(q => ({queryID: q.queryID, ast: q.ast})),
+        queries.map(q => ({
+          queryID: q.queryID,
+          ast: resolvedByID.get(q.queryID)!.ast,
+        })),
         r => {
           const goChanges = (r.changes ?? []).map(rc =>
             this.#goRowChangeToRowChange(rc as GoRowChange),
           );
+          // Append the one-time companion ADDs that TS emits at hydrate
+          // time (pipeline-driver.ts:1154-1163). With scalars resolved
+          // out of the AST sent to Go, Go's pipeline no longer emits the
+          // child rows — the companions fill that gap so the diff lines up.
+          const resolved = resolvedByID.get(r.queryID);
+          if (resolved) {
+            for (const {table, row} of resolved.companionRows) {
+              const primaryKey = mustGetPrimaryKey(this.#primaryKeys, table);
+              goChanges.push({
+                type: ChangeType.ADD,
+                queryID: r.queryID,
+                table,
+                rowKey: getRowKey(primaryKey, row),
+                row,
+              } as RowChange);
+            }
+          }
           goResultsByID.set(r.queryID, goChanges);
           const tsChanges = tsResultsPerQuery.get(r.queryID) ?? [];
           this.#shadowCompare(`batch-hydrate`, r.queryID, tsChanges, goChanges);
@@ -1357,9 +1481,16 @@ export class PipelineDriver {
     version: string,
     numChanges: number,
   ): Promise<AdvanceResult> {
-    // Convert SnapshotDiff to SnapshotChange[] for Go sidecar
+    // Convert SnapshotDiff to SnapshotChange[] for Go sidecar.
+    // Internal Zero tables (<appID>.permissions, <appID>_<shard>.clients)
+    // are excluded — they only feed internal queries (lmids etc.) which
+    // always run via TS's TableSource (self-healing over live SQLite).
+    // Sending these diffs to Go was the Pattern Z panic root cause.
     const snapshotChanges: SnapshotChange[] = [];
     for (const {table, prevValues, nextValue} of diff) {
+      if (this.#isInternalTable(table)) {
+        continue;
+      }
       snapshotChanges.push({
         table,
         prevValues: prevValues as Record<string, unknown>[],
@@ -1549,6 +1680,14 @@ export class PipelineDriver {
     const snapshotChanges: SnapshotChange[] = [];
     for (const entry of diff) {
       buffered.push(entry);
+      // TS always consumes the full diff (its source-of-truth is SQLite,
+      // and internal queries like lmids need these). Go's snapshotChanges
+      // omits internal tables — Go never loads them and an Edit on a
+      // row Go's MemorySource doesn't have would panic the sidecar
+      // (Pattern Z root cause, 2026-05-26).
+      if (this.#isInternalTable(entry.table)) {
+        continue;
+      }
       snapshotChanges.push({
         table: entry.table,
         prevValues: entry.prevValues as Record<string, unknown>[],
@@ -1576,6 +1715,26 @@ export class PipelineDriver {
         // exercise the same code path as Go-primary mode (otherwise
         // shadow would never catch streaming-specific regressions).
         const goRaw = await this.#goBackend!.advanceStream(snapshotChanges);
+        // Pattern Z diagnostic (REMOVE after root-cause). Per-(queryID,table)
+        // counts of Go's advance output. Pairs with [shadow-classify]: lets
+        // us see exactly which queries Go advanced and which it didn't.
+        // If a queryID is in shadow-classify TS-only but absent here, Go's
+        // pipeline produced nothing for that query → bug is upstream
+        // (table not loaded, pipeline not built) rather than IVM evaluation.
+        const goBreakdown: Record<string, number> = {};
+        const tableBreakdown: Record<string, number> = {};
+        for (const rc of goRaw.changes) {
+          const k = `${rc.queryID}/${rc.table}`;
+          goBreakdown[k] = (goBreakdown[k] ?? 0) + 1;
+          tableBreakdown[rc.table] = (tableBreakdown[rc.table] ?? 0) + 1;
+        }
+        this.#lc.error?.(
+          `[go-advance-out] diff=${snapshotChanges.length} ` +
+            `tables-in-diff=[${[...new Set(snapshotChanges.map(s => s.table))].join(',')}] ` +
+            `go-out=${goRaw.changes.length} ` +
+            `by-table=${JSON.stringify(tableBreakdown)} ` +
+            `by-query-table=${JSON.stringify(goBreakdown)}`,
+        );
         return {
           results: goRaw.changes.map(rc => this.#goRowChangeToRowChange(rc)),
           ms: performance.now() - goStart,
@@ -1759,6 +1918,57 @@ export class PipelineDriver {
       this.#lc.error?.(
         `[shadow] ${operation} (${context}): ${tsOnly.length} changes in TS only (first 5): ` +
           redact(tsOnly),
+      );
+      // Diagnostic classifier (REMOVE after Pattern X/Y verification).
+      // Tags each TS-only row with: internal-query | result-table | related-table |
+      // unmapped-table | no-pipeline. Lets us confirm whether 100% of advance
+      // under-produce rows fall under {internal-query, related-table} (the two
+      // expected gaps: internal queries not in Go's set, and EXISTS join-children
+      // that TS emits but Go doesn't after scalar pre-resolution).
+      const classifications = tsOnly.slice(0, 10).map(t => {
+        const labels: string[] = [];
+        if (t.queryID === 'lmids' || t.queryID === 'mutationResults') {
+          labels.push('internal-query');
+        }
+        const pipeline = this.#pipelines.get(t.queryID);
+        if (!pipeline) {
+          labels.push('no-pipeline');
+        } else {
+          const ast = pipeline.transformedAst;
+          if (t.table === ast.table) {
+            labels.push('result-table');
+          } else {
+            // Collect tables reachable through related[] (one level — enough
+            // to identify EXISTS join-children for the conversations queries).
+            const relatedTables = new Set<string>();
+            const walk = (a: typeof ast): void => {
+              for (const r of a.related ?? []) {
+                relatedTables.add(r.subquery.table);
+                walk(r.subquery);
+              }
+              // whereExists chains: condition.related is also a subquery
+              const visitCond = (c: typeof a.where): void => {
+                if (!c) return;
+                if (c.type === 'and' || c.type === 'or') {
+                  for (const sub of c.conditions) visitCond(sub);
+                } else if (c.type === 'correlatedSubquery') {
+                  relatedTables.add(c.related.subquery.table);
+                  walk(c.related.subquery);
+                }
+              };
+              visitCond(a.where);
+            };
+            walk(ast);
+            labels.push(
+              relatedTables.has(t.table) ? 'related-table' : 'unmapped-table',
+            );
+          }
+        }
+        return `${t.queryID}/${t.table}=[${labels.join(',')}]`;
+      });
+      this.#lc.error?.(
+        `[shadow-classify] ${operation} (${context}): ` +
+          classifications.join(' '),
       );
     }
     if (goOnly.length > 0) {

@@ -1434,6 +1434,17 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         `${transformedQueries.length} hydrated`,
     );
 
+    // Collect TS-hydrated changes per query so shadow mode can dispatch
+    // the same query set to Go via shadowBatchCompare at the end of the
+    // loop. Without this, queries restored from CVR on reconnect would
+    // only run on TS and never reach Go — the shadow comparator would
+    // then see TS-only events on advance, surface them as Pattern Z
+    // mismatches, and Go-primary mode would silently miss them entirely.
+    // Match the main syncQueryPipelineSet loop's batching behavior
+    // (view-syncer.ts:1995-2002).
+    const tsResultsPerQuery = new Map<string, RowChange[]>();
+    const batchedQueries: {id: string; ast: AST}[] = [];
+
     for (const {
       id: queryID,
       transformationHash,
@@ -1441,6 +1452,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     } of transformedQueries) {
       const timer = new TimeSliceTimer(lc);
       let count = 0;
+      const queryChanges: RowChange[] = [];
       await startAsyncSpan(
         tracer,
         'vs.#hydrateUnchangedQueries.addQuery',
@@ -1458,16 +1470,34 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               await timer.yieldProcess('yield in hydrateUnchangedQueries');
             } else {
               count++;
+              queryChanges.push(change);
             }
           }
         },
       );
+      tsResultsPerQuery.set(queryID, queryChanges);
+      batchedQueries.push({id: queryID, ast: transformedAst});
 
       const elapsed = timer.totalElapsed();
       this.#hydrations.add(1);
       this.#hydrationTime.recordMs(elapsed);
       this.#addQueryMaterializationServerMetric(transformationHash, elapsed);
       lc.debug?.(`hydrated ${count} rows for ${queryID} (${elapsed} ms)`);
+    }
+
+    // Shadow batch comparison for the unchanged-queries path. Mirrors the
+    // dispatch in syncQueryPipelineSet — without this, Go's engine never
+    // receives queries restored from CVR (Pattern Z dispatch divergence,
+    // diagnosed 2026-05-26).
+    if (batchedQueries.length >= 1) {
+      await this.#pipelines
+        .shadowBatchCompare(
+          batchedQueries.map(q => ({queryID: q.id, ast: q.ast})),
+          tsResultsPerQuery,
+        )
+        .catch(e =>
+          lc.error?.(`[shadow][batch][hydrateUnchanged] error: ${e}`),
+        );
     }
   }
 
