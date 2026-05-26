@@ -1770,8 +1770,64 @@ export class PipelineDriver {
         `changes=${tsChanges.length}`,
     );
 
+    // Phase 1.5: inject TS's companion-row emissions into Go's advance
+    // output. TS's live CompanionPipeline (#addQueryImpl line 1254+) emits
+    // changes from scalar-EXISTS source tables (e.g. channel_participants)
+    // whenever a relevant row enters/leaves. Go received the resolved AST
+    // with the inner scalar replaced by a literal, so its pipeline has no
+    // equivalent — those events surface as TS-only mismatches. Copy the
+    // companion-attributed TS changes into Go's output before comparison.
+    // This is the advance-time analogue of the hydrate-time injection in
+    // shadowBatchCompare (line 953+). Long term, Phase 2 ports
+    // resolveScalarSubqueries + a Go-side companion pipeline so this
+    // stopgap becomes unnecessary.
+    //
+    // Precise matching: only inject when (queryID, table) targets a
+    // known companion source for that query — never blanket-copies
+    // TS-only events, which would mask real IVM divergence.
+    const companionTablesByQuery = new Map<string, Set<string> | null>();
+    const getCompanionTables = (queryID: string): Set<string> | null => {
+      const cached = companionTablesByQuery.get(queryID);
+      if (cached !== undefined) return cached;
+      const pipeline = this.#pipelines.get(queryID);
+      if (!pipeline || pipeline.companions.length === 0) {
+        companionTablesByQuery.set(queryID, null);
+        return null;
+      }
+      const set = new Set<string>();
+      for (const c of pipeline.companions) {
+        set.add(c.input.getSchema().tableName);
+      }
+      companionTablesByQuery.set(queryID, set);
+      return set;
+    };
+    let companionInjected = 0;
+    for (const tsChange of tsChanges) {
+      const tables = getCompanionTables(tsChange.queryID);
+      if (tables?.has(tsChange.table)) {
+        goResults.push(tsChange);
+        companionInjected++;
+      }
+    }
+    if (companionInjected > 0) {
+      this.#lc.debug?.(
+        `[shadow][advance] injected ${companionInjected} companion ` +
+          `events into Go output`,
+      );
+    }
+
+    // Drop internal-query events (lmids, mutationResults) from the
+    // comparison input. Fix #1 already keeps them out of Go's data
+    // path, but TS still emits them — without this filter they'd
+    // surface as `TS produced N, Go produced N-1` mismatches forever.
+    // The return value (yieldTsResults) keeps the full set, since
+    // clients legitimately need lmid updates to ack mutations.
+    const tsChangesForCompare = tsChanges.filter(
+      c => !this.#isInternalQueryID(c.queryID),
+    );
+
     // Compare
-    this.#shadowCompare('advance', version, tsChanges, goResults);
+    this.#shadowCompare('advance', version, tsChangesForCompare, goResults);
 
     // Return TS results (already consumed, wrap in array)
     function* yieldTsResults(): Iterable<RowChange | 'yield'> {
