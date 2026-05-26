@@ -131,6 +131,15 @@ type HydrateContext = {
 export type Timer = {
   elapsedLap: () => number;
   totalElapsed: () => number;
+  /**
+   * True iff a lap is currently in progress. Called by TableSource.#shouldYield
+   * at runtime to decide whether elapsedLap is safe to invoke. Was omitted
+   * from the exported type, forcing every noop-timer site to `as unknown as
+   * Timer` to keep tsc happy. Declaring it here means tsc verifies new
+   * Timer-typed values include it — preventing the silent runtime
+   * `TypeError: t.running is not a function` we hit on the drift-audit path.
+   */
+  running: () => boolean;
 };
 
 /**
@@ -1016,31 +1025,6 @@ export class PipelineDriver {
       // so shadow comparator sees identical output on both sides without
       // injection.
       //
-      // The ast-dump diagnostic (REMOVE after root-cause) still fires so
-      // we can confirm the AST shapes Go is receiving in production.
-      for (const q of queries) {
-        const astStr = JSON.stringify(q.ast);
-        // Scalar-EXISTS dumps surface at error so a manual sandbox session
-        // can confirm Phase 2's resolver actually fires on the queries the
-        // ACL wraps with `{scalar: true}`. Everything else stays at debug.
-        if (astStr.includes('"scalar":true')) {
-          this.#lc.error?.(
-            `[ast-dump][SCALAR] ${q.queryID} (${q.ast.table}) ORIGINAL: ${astStr.slice(0, 4000)}`,
-          );
-        } else if (
-          q.ast.table === 'conversations' ||
-          q.ast.table === 'channels' ||
-          q.ast.table === 'channel_user_status' ||
-          q.ast.table === 'channel_stats' ||
-          astStr.includes('"whereExists"') ||
-          astStr.includes('correlatedSubquery')
-        ) {
-          this.#lc.debug?.(
-            `[ast-dump] ${q.queryID} (${q.ast.table}) ORIGINAL: ${astStr.slice(0, 2000)}`,
-          );
-        }
-      }
-
       // Use the streaming variant so shadow mode exercises the same code
       // path Go-primary mode will use in production. Compare per-query as
       // soon as Go emits each result (REVIEW-final perf-opt streaming
@@ -1848,25 +1832,22 @@ export class PipelineDriver {
         // shadow would never catch streaming-specific regressions).
         const goRaw = await this.#goBackend!.advanceStream(snapshotChanges);
         // Pattern Z diagnostic (REMOVE after root-cause). Per-(queryID,table)
-        // counts of Go's advance output. Pairs with [shadow-classify]: lets
-        // us see exactly which queries Go advanced and which it didn't.
-        // If a queryID is in shadow-classify TS-only but absent here, Go's
-        // pipeline produced nothing for that query → bug is upstream
-        // (table not loaded, pipeline not built) rather than IVM evaluation.
-        const goBreakdown: Record<string, number> = {};
-        const tableBreakdown: Record<string, number> = {};
-        for (const rc of goRaw.changes) {
-          const k = `${rc.queryID}/${rc.table}`;
-          goBreakdown[k] = (goBreakdown[k] ?? 0) + 1;
-          tableBreakdown[rc.table] = (tableBreakdown[rc.table] ?? 0) + 1;
+        // Per-(queryID,table) Go advance breakdown. Demoted to debug —
+        // useful when chasing a divergence, noise at error in steady-state.
+        if (this.#lc.debug) {
+          const goBreakdown: Record<string, number> = {};
+          const tableBreakdown: Record<string, number> = {};
+          for (const rc of goRaw.changes) {
+            const k = `${rc.queryID}/${rc.table}`;
+            goBreakdown[k] = (goBreakdown[k] ?? 0) + 1;
+            tableBreakdown[rc.table] = (tableBreakdown[rc.table] ?? 0) + 1;
+          }
+          this.#lc.debug?.(
+            `[go-advance-out] diff=${snapshotChanges.length} ` +
+              `go-out=${goRaw.changes.length} ` +
+              `by-table=${JSON.stringify(tableBreakdown)}`,
+          );
         }
-        this.#lc.error?.(
-          `[go-advance-out] diff=${snapshotChanges.length} ` +
-            `tables-in-diff=[${[...new Set(snapshotChanges.map(s => s.table))].join(',')}] ` +
-            `go-out=${goRaw.changes.length} ` +
-            `by-table=${JSON.stringify(tableBreakdown)} ` +
-            `by-query-table=${JSON.stringify(goBreakdown)}`,
-        );
         return {
           results: goRaw.changes.map(rc => this.#goRowChangeToRowChange(rc)),
           ms: performance.now() - goStart,
