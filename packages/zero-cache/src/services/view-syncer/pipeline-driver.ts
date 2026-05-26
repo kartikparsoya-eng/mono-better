@@ -948,76 +948,35 @@ export class PipelineDriver {
     if (queries.length === 0) return;
     try {
       const batchStart = performance.now();
-      // Pre-resolve scalar subqueries per query so Go gets the same
-      // resolved AST that TS's own pipeline uses (#addQueryImpl resolves
-      // them at line 1114). Without this, Go builds a regular EXISTS join
-      // for `{scalar: true}` conditions and propagates the child rows on
-      // every parent push — drift seen as Go over-producing
-      // channel_participants ADD rows for the conversations ACL EXISTS.
-      // Destroy the freshly-built companion inputs immediately: TS's main
-      // path already wired its own live companions in #addQueryImpl, and
-      // these shadow-side ones would race with those if kept alive.
+      // Phase 2: send the ORIGINAL AST to Go. Go's own scalar-subquery
+      // resolver (go-ivm/builder/resolve_scalar.go) walks the AST,
+      // identifies subqueries whose WHERE fully covers a unique key,
+      // executes them against the MemorySource, and replaces the EXISTS
+      // with a literal — same algorithm as TS's resolveSimpleScalarSubqueries
+      // line-for-line. It also builds a companion sub-pipeline per resolved
+      // scalar that holds a live Connection to the subquery source, so on
+      // advance the companion's source.Push fans out to it and emits the
+      // child row deltas under the parent queryID. That's what the Phase
+      // 1.5 stopgap was doing manually; Phase 2 makes Go do it natively
+      // so shadow comparator sees identical output on both sides without
+      // injection.
       //
-      // The resolver calls source.fetch() which routes through
-      // TableSource.shouldYield → #shouldYield (line 1951+), which throws
-      // if neither #hydrateContext nor #advanceContext is set. We pin a
-      // noop hydrate-context for the duration of resolution and restore
-      // it after so the next addQuery's assertion still holds. Same
-      // pattern the drift audit uses at line 1007.
-      //
-      // Phase 1 of the scalar-subquery handling fix (long-term: port
-      // resolveSimpleScalarSubqueries to Go).
-      const resolvedByID = new Map<
-        string,
-        {ast: AST; companionRows: {table: string; row: Row}[]}
-      >();
-      const prevHydrateContext = this.#hydrateContext;
-      // Note: Timer's exported type omits `running()` (line 131) but
-      // #shouldYield calls it at runtime (line 1976). Provide the full
-      // shape — the drift-audit's noopTimer at line 1007 predates the
-      // TimeSliceTimer-running() guard and would crash too if exercised.
-      const noopTimer = {
-        elapsedLap: () => 0,
-        totalElapsed: () => 0,
-        running: () => true,
-      } as unknown as Timer;
-      this.#hydrateContext = {timer: noopTimer};
-      try {
-        for (const q of queries) {
-          const r = this.#resolveScalarSubqueries(q.ast);
-          resolvedByID.set(q.queryID, {
-            ast: r.ast,
-            companionRows: r.companionRows,
-          });
-          for (const input of r.companionInputs) input.destroy();
-          // Pattern Z diagnostic (REMOVE after root-cause). Dump original
-          // and resolved ASTs for every query that targets the conversations
-          // table or has a whereExists chain — the production shapes that
-          // showed result-table under-produce. Filtering by table+shape
-          // (not queryID) so we catch the queries regardless of their
-          // session-scoped hash.
-          const astStr = JSON.stringify(q.ast);
-          const interesting =
-            q.ast.table === 'conversations' ||
-            q.ast.table === 'channels' ||
-            q.ast.table === 'channel_user_status' ||
-            q.ast.table === 'channel_stats' ||
-            astStr.includes('"whereExists"') ||
-            astStr.includes('correlatedSubquery');
-          if (interesting) {
-            this.#lc.error?.(
-              `[ast-dump] ${q.queryID} (${q.ast.table}) ORIGINAL: ${astStr.slice(0, 2000)}`,
-            );
-            this.#lc.error?.(
-              `[ast-dump] ${q.queryID} (${q.ast.table}) RESOLVED: ${JSON.stringify(r.ast).slice(0, 2000)}`,
-            );
-            this.#lc.error?.(
-              `[ast-dump] ${q.queryID} companionRows.count=${r.companionRows.length}`,
-            );
-          }
+      // The ast-dump diagnostic (REMOVE after root-cause) still fires so
+      // we can confirm the AST shapes Go is receiving in production.
+      for (const q of queries) {
+        const astStr = JSON.stringify(q.ast);
+        const interesting =
+          q.ast.table === 'conversations' ||
+          q.ast.table === 'channels' ||
+          q.ast.table === 'channel_user_status' ||
+          q.ast.table === 'channel_stats' ||
+          astStr.includes('"whereExists"') ||
+          astStr.includes('correlatedSubquery');
+        if (interesting) {
+          this.#lc.debug?.(
+            `[ast-dump] ${q.queryID} (${q.ast.table}) ORIGINAL: ${astStr.slice(0, 2000)}`,
+          );
         }
-      } finally {
-        this.#hydrateContext = prevHydrateContext;
       }
 
       // Use the streaming variant so shadow mode exercises the same code
@@ -1027,31 +986,13 @@ export class PipelineDriver {
       const goResultsByID = new Map<string, RowChange[]>();
       let mismatches = 0;
       await this.#goBackend.hydrateManyStream(
-        queries.map(q => ({
-          queryID: q.queryID,
-          ast: resolvedByID.get(q.queryID)!.ast,
-        })),
+        queries.map(q => ({queryID: q.queryID, ast: q.ast})),
         r => {
           const goChanges = (r.changes ?? []).map(rc =>
             this.#goRowChangeToRowChange(rc as GoRowChange),
           );
-          // Append the one-time companion ADDs that TS emits at hydrate
-          // time (pipeline-driver.ts:1154-1163). With scalars resolved
-          // out of the AST sent to Go, Go's pipeline no longer emits the
-          // child rows — the companions fill that gap so the diff lines up.
-          const resolved = resolvedByID.get(r.queryID);
-          if (resolved) {
-            for (const {table, row} of resolved.companionRows) {
-              const primaryKey = mustGetPrimaryKey(this.#primaryKeys, table);
-              goChanges.push({
-                type: ChangeType.ADD,
-                queryID: r.queryID,
-                table,
-                rowKey: getRowKey(primaryKey, row),
-                row,
-              } as RowChange);
-            }
-          }
+          // Phase 2: no TS-side companion injection here. Go's resolver
+          // emits companion rows itself if any scalar subquery resolved.
           goResultsByID.set(r.queryID, goChanges);
           const tsChanges = tsResultsPerQuery.get(r.queryID) ?? [];
           this.#shadowCompare(`batch-hydrate`, r.queryID, tsChanges, goChanges);
@@ -1881,52 +1822,15 @@ export class PipelineDriver {
         `changes=${tsChanges.length}`,
     );
 
-    // Phase 1.5: inject TS's companion-row emissions into Go's advance
-    // output. TS's live CompanionPipeline (#addQueryImpl line 1254+) emits
-    // changes from scalar-EXISTS source tables (e.g. channel_participants)
-    // whenever a relevant row enters/leaves. Go received the resolved AST
-    // with the inner scalar replaced by a literal, so its pipeline has no
-    // equivalent — those events surface as TS-only mismatches. Copy the
-    // companion-attributed TS changes into Go's output before comparison.
-    // This is the advance-time analogue of the hydrate-time injection in
-    // shadowBatchCompare (line 953+). Long term, Phase 2 ports
-    // resolveScalarSubqueries + a Go-side companion pipeline so this
-    // stopgap becomes unnecessary.
+    // Phase 2: no TS-side companion injection at advance time either.
+    // Go's companion sub-pipelines (built by buildAndRegisterLocked in
+    // go-ivm/engine/engine.go) hold live Connections to the scalar
+    // subquery's source. When the diff has a change on that source,
+    // source.Push fans out to the companion's Connection and emits the
+    // change under the PARENT queryID via the wired pipelineOutput — same
+    // observable behavior as TS's CompanionPipeline (pipeline-driver.ts
+    // line 1254+) without manual reconciliation.
     //
-    // Precise matching: only inject when (queryID, table) targets a
-    // known companion source for that query — never blanket-copies
-    // TS-only events, which would mask real IVM divergence.
-    const companionTablesByQuery = new Map<string, Set<string> | null>();
-    const getCompanionTables = (queryID: string): Set<string> | null => {
-      const cached = companionTablesByQuery.get(queryID);
-      if (cached !== undefined) return cached;
-      const pipeline = this.#pipelines.get(queryID);
-      if (!pipeline || pipeline.companions.length === 0) {
-        companionTablesByQuery.set(queryID, null);
-        return null;
-      }
-      const set = new Set<string>();
-      for (const c of pipeline.companions) {
-        set.add(c.input.getSchema().tableName);
-      }
-      companionTablesByQuery.set(queryID, set);
-      return set;
-    };
-    let companionInjected = 0;
-    for (const tsChange of tsChanges) {
-      const tables = getCompanionTables(tsChange.queryID);
-      if (tables?.has(tsChange.table)) {
-        goResults.push(tsChange);
-        companionInjected++;
-      }
-    }
-    if (companionInjected > 0) {
-      this.#lc.debug?.(
-        `[shadow][advance] injected ${companionInjected} companion ` +
-          `events into Go output`,
-      );
-    }
-
     // Drop internal-query events (lmids, mutationResults) from the
     // comparison input. Fix #1 already keeps them out of Go's data
     // path, but TS still emits them — without this filter they'd
