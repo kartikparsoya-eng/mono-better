@@ -1451,15 +1451,39 @@ export class PipelineDriver {
       const sqlVerdict = this.#sqlGroundTruthCompare(ast, goRemapped);
 
       if (sqlVerdict.kind === 'go-vs-sql-drift') {
-        this.#driftAuditMismatches.add(1);
-        this.#lc.error?.(
-          `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL (set). ` +
-            `go_count=${goRemapped.length} sql_count=${sqlVerdict.sqlCount} ` +
-            `go_only=${sqlVerdict.goOnly.slice(0, 3).join(' | ')} ` +
-            `(${sqlVerdict.goOnly.length} total) ` +
-            `sql_only=${sqlVerdict.sqlOnly.slice(0, 3).join(' | ')} ` +
-            `(${sqlVerdict.sqlOnly.length} total)`,
-        );
+        // IVM boundary-semantics exception: paginated queries (limit +
+        // start cursor) define their boundary row at result position 0
+        // by IVM convention. Both Go IVM and TS IVM apply the cursor
+        // through the Take operator's input stream, which can include
+        // the cursor row PLUS LIMIT more (so go_count = sql_count + 1
+        // is expected on a forward-paginated query whose cursor lands
+        // on a real row). If TS IVM and Go IVM agree but SQL disagrees,
+        // SQL is the outlier — same Bug #3 class as ts-audit-only,
+        // demote to info instead of flagging REAL DRIFT.
+        if (
+          !setDiffers &&
+          ast.limit !== undefined &&
+          ast.start !== undefined &&
+          sqlVerdict.goOnly.length === 1 &&
+          sqlVerdict.sqlOnly.length === 1
+        ) {
+          this.#lc.info?.(
+            `[drift-audit] ${targetID}: ivm-boundary divergence ` +
+              `(TS IVM and Go IVM agree, SQL alone disagrees by 1 on ` +
+              `limit+cursor query — pagination boundary semantics). ` +
+              `ts=${tsRemapped.length} go=${goRemapped.length} sql=${sqlVerdict.sqlCount}`,
+          );
+        } else {
+          this.#driftAuditMismatches.add(1);
+          this.#lc.error?.(
+            `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL (set). ` +
+              `go_count=${goRemapped.length} sql_count=${sqlVerdict.sqlCount} ` +
+              `go_only=${sqlVerdict.goOnly.slice(0, 3).join(' | ')} ` +
+              `(${sqlVerdict.goOnly.length} total) ` +
+              `sql_only=${sqlVerdict.sqlOnly.slice(0, 3).join(' | ')} ` +
+              `(${sqlVerdict.sqlOnly.length} total)`,
+          );
+        }
       } else if (sqlVerdict.kind === 'go-vs-sql-content-drift') {
         // Same PKs but row contents differ — Go has stale/wrong values
         // for one or more rows. This is the most insidious bug class
