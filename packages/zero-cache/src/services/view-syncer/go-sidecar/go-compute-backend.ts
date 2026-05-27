@@ -334,11 +334,20 @@ export class GoComputeBackend {
   // current WAL frame instead of the snapshot pinned since the last
   // Push. Called by the drift audit before its comparison reads. No-op
   // on MemorySource (sidecar handles the type switch).
+  //
+  // Long timeout because this RPC currently routes through the per-CG
+  // worker FIFO on the sidecar, so it can queue behind in-flight
+  // advance/hydrate work under heavy load. The handler itself is a
+  // cheap mutex bump; the wait is the queue. 120s budget covers a
+  // worst-case hydrate of a fat query before refresh gets its turn.
+  // If we observe persistent timeouts, the next step is to bypass the
+  // CG FIFO on the sidecar side (refreshSnapshot only touches per-source
+  // mutexes — no engine-state mutation that the FIFO is protecting).
   async refreshSnapshot(): Promise<void> {
     await this.#client().refreshSnapshot(
       this.#clientGroupID,
       this.#sidecarInitEpoch,
-      this.#cgOpts(),
+      {...this.#cgOpts(), timeoutMs: 120_000},
     );
   }
 
