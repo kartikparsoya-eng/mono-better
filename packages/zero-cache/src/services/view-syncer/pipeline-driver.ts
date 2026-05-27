@@ -1341,6 +1341,24 @@ export class PipelineDriver {
         return;
       }
 
+      // Snapshot alignment: roll the Go leaf's pinned read tx (Phase 4) so
+      // its hydrate reads at the same WAL frame the TS audit / SQL ground-
+      // truth comparator will read. Without this, Go's tx stays pinned to
+      // the last Push's snapshot and during sustained writes the audit
+      // compares stale-vs-current frames — surfaces as transient
+      // go-vs-sql set differences that aren't real drift.
+      //
+      // Best-effort: a failure here (e.g., sidecar restart mid-audit) is
+      // caught by the existing epoch/version checks below. No-op on
+      // MemorySource backends so this is safe to call unconditionally.
+      try {
+        await this.#goBackend.refreshSnapshot();
+      } catch (e) {
+        this.#lc.debug?.(
+          `[drift-audit] refreshSnapshot failed (continuing): ${String(e)}`,
+        );
+      }
+
       const goChanges: RowChange[] = [];
       try {
         await this.#goBackend.hydrateManyStream(

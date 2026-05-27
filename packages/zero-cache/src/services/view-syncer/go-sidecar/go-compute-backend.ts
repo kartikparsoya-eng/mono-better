@@ -330,6 +330,18 @@ export class GoComputeBackend {
     await this.#client().removeQuery(this.#clientGroupID, queryID, this.#sidecarInitEpoch, this.#cgOpts());
   }
 
+  // Roll the leaf source's pinned read tx so subsequent Fetches see the
+  // current WAL frame instead of the snapshot pinned since the last
+  // Push. Called by the drift audit before its comparison reads. No-op
+  // on MemorySource (sidecar handles the type switch).
+  async refreshSnapshot(): Promise<void> {
+    await this.#client().refreshSnapshot(
+      this.#clientGroupID,
+      this.#sidecarInitEpoch,
+      this.#cgOpts(),
+    );
+  }
+
   async destroy(): Promise<void> {
     this.#destroyed = true;
     if (this.#unsubscribe) {

@@ -703,6 +703,26 @@ export class GoIVMClient {
     await this.#call('destroy', {clientGroupID}, opts);
   }
 
+  /**
+   * Roll the engine's leaf sources to a fresh snapshot of underlying
+   * storage. No-op for MemorySource (it has no pinned snapshot); for
+   * tablesource.Source it commits the current read tx and opens a new
+   * one at the current WAL frame. Used by the drift audit so its
+   * comparison reads on Go see the same point-in-time as the SQL
+   * ground-truth read (avoids transient snapshot skew). protocolRev 6+.
+   */
+  async refreshSnapshot(
+    clientGroupID: string,
+    initEpoch: number,
+    opts?: CallOptions,
+  ): Promise<void> {
+    await this.#call(
+      'refreshSnapshot',
+      {clientGroupID, initEpoch},
+      opts,
+    );
+  }
+
   /** Ping the sidecar. */
   async ping(opts?: CallOptions): Promise<string> {
     return (await this.#call('ping', undefined, {timeoutMs: opts?.timeoutMs ?? 5_000})) as string;
