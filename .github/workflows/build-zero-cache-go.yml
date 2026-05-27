@@ -79,6 +79,17 @@ jobs:
             source_mode_arg: "table"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-go-tablesource-port"
             tag_prefix: "tablesrc-"
+          # Shadow + TableSource: TS serves user queries (zero risk to
+          # prod), Go runs in parallel with the TableSource leaf on
+          # every query (not just the 1/min drift-audit sample). High-
+          # coverage validation that the snapshot-pinning leaf
+          # correctly mirrors what TS computes. Use this image for
+          # pre-prod soaks before flipping to tablesrc-primary in prod.
+          - mode: shadow-tablesrc
+            shadow_mode_arg: "true"
+            source_mode_arg: "table"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-go-tablesource-port"
+            tag_prefix: "shadow-tablesrc-"
 
     name: build (${{ matrix.mode }})
 
