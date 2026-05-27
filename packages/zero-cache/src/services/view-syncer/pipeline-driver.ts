@@ -60,6 +60,7 @@ import {
   isGoShadowMode,
   isGoShadowVerbose,
   goDriftAuditIntervalMs,
+  goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {SnapshotChange, RowChange as GoRowChange} from './go-sidecar/go-ivm-client.ts';
@@ -1511,6 +1512,12 @@ export class PipelineDriver {
         contentMismatches: {pk: string; sqlRow: string; goRow: string}[];
       }
     | {kind: 'skipped'; reason: string} {
+    // Operator opt-out: when goSidecar.driftAuditSqlGroundTruth is false,
+    // skip the SQL re-query entirely. The caller's skip-handling path then
+    // falls back to the TS-vs-Go set comparison as the only drift signal.
+    if (!goDriftAuditSqlGroundTruth(this.#config)) {
+      return {kind: 'skipped', reason: 'disabled'};
+    }
     // The caller passes entry.transformedAst which is ALREADY post-resolution.
     // Re-running #resolveScalarSubqueries here is redundant AND trips
     // `shouldYield called outside of hydration` because the executor's

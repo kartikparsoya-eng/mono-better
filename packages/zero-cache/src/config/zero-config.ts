@@ -1118,6 +1118,20 @@ export const zeroOptions = {
         `Lower values give faster drift detection but more sidecar load.`,
       ],
     },
+    driftAuditSqlGroundTruth: {
+      type: v.boolean().default(true),
+      desc: [
+        `When the drift audit fires, also run a raw SQL query on the snapshot's`,
+        `SQLite replica as a third opinion and compare Go's output against SQL`,
+        `truth (in addition to the TS-audit comparison). Catches Go-vs-SQL set`,
+        `and content drift directly — without this, only Go-vs-TS-audit divergence`,
+        `is surfaced, which can be noisy (TS-audit has known boundary-drop bugs).`,
+        ``,
+        `Disable to skip the per-audit SQL re-query if it shows up in replica`,
+        `load. When off, the audit falls back to the legacy TS-vs-Go set`,
+        `comparison only.`,
+      ],
+    },
   },
 };
 

@@ -534,6 +534,15 @@ export function goDriftAuditIntervalMs(
   return ms > 0 ? ms : 0;
 }
 
+// Whether the drift audit should run a raw SQL query on the replica as a
+// third opinion. Defaults to true (matches the schema default); pass false
+// to skip the SQL re-query and fall back to TS-vs-Go set comparison only.
+export function goDriftAuditSqlGroundTruth(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): boolean {
+  return config?.goSidecar?.driftAuditSqlGroundTruth !== false;
+}
+
 // Returns null when the manager isn't `running` so the caller falls back
 // to the TS path; `getCurrentTables` is invoked both on initial init and
 // after each sidecar restart.

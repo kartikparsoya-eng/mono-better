@@ -230,6 +230,15 @@ and are validated by the same valita schema as the rest of zero-cache.
   Audit `ok` events log at `debug` level — to verify the audit is
   actually firing (and not just `enabled`), bump `ZERO_LOG_LEVEL=debug`
   and look for `[shadow] drift-audit (queryID): TS and Go match`.
+- `ZERO_GO_SIDECAR_DRIFT_AUDIT_SQL_GROUND_TRUTH=true` — within each
+  drift-audit cycle, also run a raw SQL query on the snapshot's SQLite
+  replica as a third opinion (in addition to the TS-audit comparison).
+  Catches Go-vs-SQL set and content drift directly, which is more
+  trustworthy than Go-vs-TS-audit alone (the TS audit pipeline has
+  known boundary-drop edges). Defaults to `true`; set to `false` to
+  skip the SQL re-query if it shows measurable replica load — the
+  audit then falls back to the legacy TS-vs-Go set comparison only.
+  Has no effect when the audit itself is disabled.
 - `ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=true` — opt into shared-sidecar
   mode (see "Shared sidecar mode" below). When true, the worker's
   `SidecarManager` skips spawn and binary-existence checks and just
