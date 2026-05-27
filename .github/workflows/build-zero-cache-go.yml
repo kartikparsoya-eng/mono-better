@@ -61,10 +61,24 @@ jobs:
         include:
           - mode: primary
             shadow_mode_arg: "false"
+            source_mode_arg: "memory"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:latest"
             tag_prefix: ""
           - mode: shadow
             shadow_mode_arg: "true"
+            source_mode_arg: "memory"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:latest"
             tag_prefix: "shadow-"
+          # TableSource port — Go-primary leaf reads SQLite directly
+          # (see go-ivm/DESIGN-tablesource-port.md). Bundles the sidecar
+          # built from the feat branch so the new internal/tablesource
+          # package is present in the binary. Tagged tablesrc-* so it
+          # never collides with the production primary/shadow tags.
+          - mode: tablesrc
+            shadow_mode_arg: "false"
+            source_mode_arg: "table"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-go-tablesource-port"
+            tag_prefix: "tablesrc-"
 
     name: build (${{ matrix.mode }})
 
@@ -114,6 +128,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           build-args: |
             SHADOW_MODE=${{ matrix.shadow_mode_arg }}
+            SOURCE_MODE=${{ matrix.source_mode_arg }}
+            GO_IVM_IMAGE=${{ matrix.go_ivm_image }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache scoped per-matrix-variant so primary and shadow don't

@@ -87,6 +87,16 @@ RUN cp /app/packages/zero-cache/src/services/litestream/config.yml /etc/litestre
 # CI publishes both variants to different tags off the same Dockerfile.
 ARG SHADOW_MODE=false
 
+# Leaf-source selector for the Go sidecar (see
+# go-ivm/DESIGN-tablesource-port.md). Default is "memory" so the existing
+# primary/shadow images keep their current loadRows-populated
+# MemorySource behavior unchanged. "table" switches to the read-from-
+# replica TableSource — only the tablesrc image variant sets this.
+# When SOURCE_MODE=table, the deployer must also set
+# GO_IVM_REPLICA_DB_PATH at runtime (no sensible default — the path is
+# environment-specific).
+ARG SOURCE_MODE=memory
+
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
 # (shadow on 1 prod node → ~1 week observation → flip to primary).
@@ -96,6 +106,7 @@ ENV ZERO_GO_SIDECAR_ENABLED=true
 ENV ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=true
 ENV ZERO_GO_SIDECAR_SOCKET_PATH=/tmp/go-ivm-shared.sock
 ENV ZERO_GO_SIDECAR_SHADOW_MODE=${SHADOW_MODE}
+ENV GO_IVM_SOURCE_MODE=${SOURCE_MODE}
 # workers=1 keeps cg state colocated in the single shared sidecar
 # (per feedback_shared_sidecar_tuning — bumping workers fragments
 # cgs across sidecars under per-worker mode; in shared mode it just
