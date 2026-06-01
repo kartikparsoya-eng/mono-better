@@ -27,15 +27,21 @@ SIDECAR_PID=$!
 # Shared-sidecar mode init typically takes <500ms; 15 polls × 500ms
 # is conservative but bounded so a broken binary fails fast instead
 # of hanging the container.
+#
+# Order matters: check PID *before* the socket so a sidecar that
+# refused-and-exited cannot ride a stale/half-bound socket into a
+# false success. Observed in prod (GKE 2026-06-01 09:50 IST) when
+# the sidecar refused on misconfigured env vars but entrypoint still
+# announced "sidecar socket ready" 0.5s later, letting zero-cache
+# boot with no IVM sidecar and no drift-audit running.
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  if [ -S "$SOCKET_PATH" ]; then
-    echo "[entrypoint] sidecar socket ready after ${i} poll(s) (pid=$SIDECAR_PID)"
-    break
-  fi
-  # If the sidecar process died, no point polling further.
   if ! kill -0 "$SIDECAR_PID" 2>/dev/null; then
     echo "[entrypoint] ERROR: sidecar exited before socket appeared (pid=$SIDECAR_PID)"
     exit 1
+  fi
+  if [ -S "$SOCKET_PATH" ]; then
+    echo "[entrypoint] sidecar socket ready after ${i} poll(s) (pid=$SIDECAR_PID)"
+    break
   fi
   sleep 0.5
 done
@@ -43,6 +49,15 @@ done
 if [ ! -S "$SOCKET_PATH" ]; then
   echo "[entrypoint] ERROR: sidecar socket never appeared at $SOCKET_PATH; aborting"
   kill "$SIDECAR_PID" 2>/dev/null || true
+  exit 1
+fi
+
+# Final guard: the sidecar may bind the socket and then crash during
+# its own initialization (between the last poll and exec). Verify the
+# process is still alive before handing off so a dead sidecar can't
+# be papered over by a leftover socket.
+if ! kill -0 "$SIDECAR_PID" 2>/dev/null; then
+  echo "[entrypoint] ERROR: sidecar exited after socket appeared (pid=$SIDECAR_PID)"
   exit 1
 fi
 
