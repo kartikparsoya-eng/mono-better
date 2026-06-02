@@ -363,19 +363,6 @@ export class PipelineDriver {
     'Time to advance all queries for a given client group in response to a single change.',
   );
 
-  /**
-   * Wall-time spent on the Go RPC (encode + socket + decode), measured end-
-   * to-end from the TS side. Lets operators distinguish Go's internal compute
-   * (recorded into `ivm.advance-time`) from the per-call RPC overhead — the
-   * latter is invisible in the per-table timings the sidecar returns.
-   * REVIEW-final MED-CROSS-3.
-   */
-  readonly #advanceGoRpcTime = getOrCreateLatencyHistogram(
-    'sync',
-    'ivm.advance-go-rpc-time',
-    'Wall-time of the Go advance RPC including encode/socket/decode overhead.',
-  );
-
   readonly #conflictRowsDeleted = getOrCreateCounter(
     'sync',
     'ivm.conflict-rows-deleted',
@@ -2328,82 +2315,6 @@ export class PipelineDriver {
     };
   }
 
-  async #goAdvance(
-    diff: SnapshotDiff,
-    version: string,
-    numChanges: number,
-  ): Promise<AdvanceResult> {
-    // Convert SnapshotDiff to SnapshotChange[] for Go sidecar.
-    // Internal Zero tables (<appID>.permissions, <appID>_<shard>.clients)
-    // are excluded — they only feed internal queries (lmids etc.) which
-    // always run via TS's TableSource (self-healing over live SQLite).
-    // Sending these diffs to Go was the Pattern Z panic root cause.
-    const snapshotChanges: SnapshotChange[] = [];
-    for (const {table, prevValues, nextValue} of diff) {
-      if (this.#isInternalTable(table)) {
-        continue;
-      }
-      snapshotChanges.push({
-        table,
-        prevValues: prevValues as Record<string, unknown>[],
-        nextValue: nextValue as Record<string, unknown> | null,
-      });
-    }
-
-    const goStart = performance.now();
-    // Use the streaming variant: Go ships partial frames during the call,
-    // the client reassembles into the same GoAdvanceResult shape so this
-    // call site is unchanged behaviorally. Win: large advance diffs no
-    // longer buffer as one msgpack frame on the Go side; first bytes flow
-    // as soon as advanceChunkSize (10k) rows accumulate.
-    const goResult = await this.#goBackend!.advanceStream(snapshotChanges);
-    const goRpcMs = performance.now() - goStart;
-
-    // Set the new snapshot on all TableSources (same as TS path)
-    const {curr} = diff;
-    for (const table of this.#tables.values()) {
-      table.setDB(curr.db.db);
-    }
-    this.#tableSourcesVersion = curr.version;
-    this.#ensureCostModelExistsIfEnabled(curr.db.db);
-
-    // Feed Go's per-(table, op) timings into the same `ivm.advance-time`
-    // histogram the TS path populates — keeps observability identical
-    // regardless of which backend handled the work.
-    if (goResult.timings) {
-      for (const t of goResult.timings) {
-        this.#advanceTime.recordMs(t.ms, {
-          table: t.table,
-          type: goTypeToLabel(t.type),
-        });
-      }
-    }
-    // Separately record the round-trip wall time so operators can attribute
-    // any latency gap between TS-mode and Go-mode to RPC overhead
-    // (REVIEW-final MED-CROSS-3).
-    this.#advanceGoRpcTime.recordMs(goRpcMs);
-
-    // Convert Go RowChanges to local RowChange format with yield markers
-    const self = this;
-    const changesArr = goResult.changes;
-    function* yieldGoChanges(): Iterable<RowChange | 'yield'> {
-      let i = 0;
-      for (const rc of changesArr) {
-        if (i > 0 && i % 100 === 0) {
-          yield 'yield';
-        }
-        yield self.#goRowChangeToRowChange(rc);
-        i++;
-      }
-    }
-
-    return {
-      version,
-      numChanges,
-      changes: this.#trackRowSetSignatures(yieldGoChanges()),
-    };
-  }
-
   #goRowChangeToRowChange(rc: GoRowChange): RowChange {
     const type =
       rc.type === 0
@@ -3378,14 +3289,6 @@ function stableStringify(v: unknown): string {
       .join(',') +
     '}'
   );
-}
-
-/** Map Go's numeric ivm.ChangeType to the histogram label TS uses. */
-function goTypeToLabel(t: number): 'add' | 'remove' | 'edit' | undefined {
-  if (t === 0) return 'add';
-  if (t === 1) return 'remove';
-  if (t === 2) return 'edit';
-  return undefined;
 }
 
 /**

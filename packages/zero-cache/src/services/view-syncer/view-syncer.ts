@@ -2285,7 +2285,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const start = performance.now();
 
       const timer = new TimeSliceTimer(lc);
-      const {version, numChanges, changes} = await this.#pipelines.advance(timer);
+      // GO_SIDECAR: advance() returns Promise when Go backend is active
+      const advanceResult = this.#pipelines.advance(timer);
+      const {version, numChanges, changes} =
+        advanceResult instanceof Promise ? await advanceResult : advanceResult;
       lc = lc.withContext('newVersion', version);
 
       // Probably need a new updater type. CVRAdvancementUpdater?

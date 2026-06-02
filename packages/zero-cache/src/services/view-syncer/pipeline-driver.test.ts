@@ -39,6 +39,7 @@ import {TimeSliceTimer} from './view-syncer.ts';
 const NO_TIME_ADVANCEMENT_TIMER: Timer = {
   elapsedLap: () => 0,
   totalElapsed: () => 0,
+  running: () => true,
 };
 
 describe('view-syncer/pipeline-driver', () => {
@@ -1061,13 +1062,14 @@ describe('view-syncer/pipeline-driver', () => {
         // hydration time
         totalElapsed: () => 100,
         elapsedLap: () => 100,
+        running: () => true,
       }),
     ];
 
     replicator.processTransaction('134', messages.insert('issues', {id: 'i1'}));
 
     // 60ms is larger than half of the hydration time.
-    const advResult1 = pipelines.advance({totalElapsed: () => 60, elapsedLap: () => 60}) as AdvanceResult;
+    const advResult1 = pipelines.advance({totalElapsed: () => 60, elapsedLap: () => 60, running: () => true}) as AdvanceResult;
     expect(() => [
       ...advResult1.changes,
     ]).toThrowErrorMatchingInlineSnapshot(
@@ -1084,12 +1086,13 @@ describe('view-syncer/pipeline-driver', () => {
         // hydration time
         totalElapsed: () => 100,
         elapsedLap: () => 100,
+        running: () => true,
       }),
     ];
 
     replicator.processTransaction('140', messages.insert('issues', {id: 'i1'}));
 
-    const advResult2 = pipelines.advance({totalElapsed: () => 20, elapsedLap: () => 20}) as AdvanceResult;
+    const advResult2 = pipelines.advance({totalElapsed: () => 20, elapsedLap: () => 20, running: () => true}) as AdvanceResult;
     expect(() => [
       ...advResult2.changes,
     ]).not.toThrow();
@@ -1102,6 +1105,7 @@ describe('view-syncer/pipeline-driver', () => {
         // very low hydration time
         totalElapsed: () => 25,
         elapsedLap: () => 25,
+        running: () => true,
       }),
     ];
 
@@ -1109,7 +1113,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     // 29 is larger than the hydration time but less than the minimum
     // advancement time limit
-    const advResult3 = pipelines.advance({totalElapsed: () => 29, elapsedLap: () => 29}) as AdvanceResult;
+    const advResult3 = pipelines.advance({totalElapsed: () => 29, elapsedLap: () => 29, running: () => true}) as AdvanceResult;
     expect(() => [
       ...advResult3.changes,
     ]).not.toThrow();

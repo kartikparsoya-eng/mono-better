@@ -183,6 +183,7 @@ describe('view-syncer/pipeline-driver', () => {
       ...(pipelines.addQuery('hash1', 'queryID1', ISSUES_WITH_CREATOR, {
         totalElapsed: () => 1000,
         elapsedLap: () => 1000,
+        running: () => true,
       }) as Iterable<RowChange | 'yield'>),
     ];
 
@@ -194,7 +195,7 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     let elapsed = 0;
-    const advResult1 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++}) as AdvanceResult;
+    const advResult1 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++, running: () => true}) as AdvanceResult;
     expect(() => [
       ...advResult1.changes,
     ]).toThrowErrorMatchingInlineSnapshot(
@@ -212,6 +213,7 @@ describe('view-syncer/pipeline-driver', () => {
         {
           totalElapsed: () => 1000,
           elapsedLap: () => 1000,
+          running: () => true,
         },
       ) as Iterable<RowChange | 'yield'>),
     ];
@@ -224,7 +226,7 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     let elapsed = 0;
-    const advResult2 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++}) as AdvanceResult;
+    const advResult2 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++, running: () => true}) as AdvanceResult;
     expect(() => [
       ...advResult2.changes,
     ]).toThrowErrorMatchingInlineSnapshot(
@@ -238,6 +240,7 @@ describe('view-syncer/pipeline-driver', () => {
       ...(pipelines.addQuery('hash1', 'queryID1', ISSUES_WITH_CREATOR, {
         totalElapsed: () => 1000,
         elapsedLap: () => 1000,
+        running: () => true,
       }) as Iterable<RowChange | 'yield'>),
     ];
 
@@ -254,6 +257,7 @@ describe('view-syncer/pipeline-driver', () => {
     const advResult3 = pipelines.advance({
       elapsedLap: () => 0,
       totalElapsed: () => (changeCount + 1) * 100,
+      running: () => true,
     }) as AdvanceResult;
     expect(() => {
       for (const _ of advResult3.changes) {

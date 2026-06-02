@@ -432,7 +432,7 @@ export class GoComputeBackend {
   // with TS's #pipelines.size, per-CG recovery has dropped pipeline state
   // and the client view is silently frozen — audit treats that as a
   // freeze signal and self-heals via resetEngine.
-  async pipelineCount(): Promise<number> {
+  pipelineCount(): Promise<number> {
     return this.#client().pipelineCount(this.#clientGroupID);
   }
 
