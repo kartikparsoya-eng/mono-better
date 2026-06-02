@@ -723,6 +723,23 @@ export class GoIVMClient {
     );
   }
 
+  /**
+   * Returns the number of queries currently registered on the given CG's
+   * engine. Drift audit uses this as a cross-validation health probe: if
+   * TS thinks N queries are active but Go reports 0, per-CG recovery has
+   * silently dropped pipeline state (the C2 freeze). Returns 0 cleanly
+   * when the engine isn't initialized — the absence-of-engine is the
+   * answer. No initEpoch param: we want this probe to succeed even
+   * after a stale view-syncer instance was torn down.
+   */
+  async pipelineCount(
+    clientGroupID: string,
+    opts?: CallOptions,
+  ): Promise<number> {
+    const r = await this.#call('pipelineCount', {clientGroupID}, opts);
+    return typeof r === 'number' ? r : 0;
+  }
+
   /** Ping the sidecar. */
   async ping(opts?: CallOptions): Promise<string> {
     return (await this.#call('ping', undefined, {timeoutMs: opts?.timeoutMs ?? 5_000})) as string;
@@ -1001,6 +1018,15 @@ export class GoIVMClient {
               message: resp.error.message,
             }),
           );
+        } else if (resp.error.code === RPC_CODE_STALE_INIT_EPOCH) {
+          // Stale-epoch signal: the sidecar is rejecting our call because
+          // this view-syncer instance's initEpoch is behind a successor's.
+          // Surface as StaleInitEpochError so callers (GoComputeBackend,
+          // PipelineDriver's #goPrimaryAdvance catch) can branch on
+          // instanceof instead of string-matching. Pre-fix this fell
+          // through to the generic Error path and the type existed but
+          // was never instantiated.
+          pending.reject(new StaleInitEpochError(resp.error.message));
         } else {
           pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
         }

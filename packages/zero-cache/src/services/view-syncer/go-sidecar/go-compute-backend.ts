@@ -119,8 +119,15 @@ export class GoComputeBackend {
         this.#log('warn', 'destroy before reset failed (continuing)', err);
       }
     }
-    this.#initialized = false;
-    await this.#doInit(tables);
+    // Full rebuild: init engine + re-register queries. The bare #doInit
+    // path that lived here used to leave Go with zero pipelines while TS
+    // still had registered queries — every subsequent advance returned
+    // empty changes and the client view froze silently. See
+    // #reinitPerCGAndRegisterQueries.
+    const ok = await this.#reinitPerCGAndRegisterQueries('reset', tables);
+    if (!ok) {
+      throw new Error('resetEngine: reinit + query re-registration failed');
+    }
   }
 
   async hydrate(queryID: string, ast: QueryAST): Promise<GoHydrateResult> {
@@ -204,11 +211,11 @@ export class GoComputeBackend {
           `Go drift detected (${err.op} on ${err.table} pk=${JSON.stringify(err.pk)} has=${err.hasCount}); ` +
             `re-initing engine from current snapshot, dropping this advance`,
         );
-        this.#initialized = false;
-        try {
-          await this.#doInit(this.#getCurrentTables());
-        } catch (initErr) {
-          this.#log('error', 're-init after drift failed', initErr);
+        const ok = await this.#reinitPerCGAndRegisterQueries(
+          'advance-drift',
+          this.#getCurrentTables(),
+        );
+        if (!ok) {
           throw err; // surface original drift so caller's fallback engages
         }
         return {changes: [], timings: []};
@@ -226,10 +233,11 @@ export class GoComputeBackend {
         }
         await this.whenInitialized();
         if (!this.initialized) {
-          try {
-            await this.#doInit(this.#getCurrentTables());
-          } catch (initErr) {
-            this.#log('error', 're-init after sidecar-restart failed', initErr);
+          const ok = await this.#reinitPerCGAndRegisterQueries(
+            'advance-sidecar-restart',
+            this.#getCurrentTables(),
+          );
+          if (!ok) {
             throw err;
           }
         }
@@ -240,11 +248,11 @@ export class GoComputeBackend {
         return {changes: [], timings: []};
       }
       if (msg.includes('engine not initialized')) {
-        this.#initialized = false;
-        try {
-          await this.#doInit(this.#getCurrentTables());
-        } catch (initErr) {
-          this.#log('error', 're-init after engine-not-initialized failed', initErr);
+        const ok = await this.#reinitPerCGAndRegisterQueries(
+          'advance-engine-not-initialized',
+          this.#getCurrentTables(),
+        );
+        if (!ok) {
           throw err;
         }
         return {changes: [], timings: []};
@@ -299,10 +307,11 @@ export class GoComputeBackend {
         //       so we force init ourselves (idempotent via withInitSlot).
         await this.whenInitialized();
         if (!this.initialized) {
-          try {
-            await this.#doInit(this.#getCurrentTables());
-          } catch (initErr) {
-            this.#log('error', 're-init after sidecar-restart failed', initErr);
+          const ok = await this.#reinitPerCGAndRegisterQueries(
+            'reinit-retry-sidecar-restart',
+            this.#getCurrentTables(),
+          );
+          if (!ok) {
             throw err;
           }
         }
@@ -314,11 +323,11 @@ export class GoComputeBackend {
         'warn',
         'caught "engine not initialized" from Go; forcing re-init and retrying',
       );
-      this.#initialized = false;
-      try {
-        await this.#doInit(this.#getCurrentTables());
-      } catch (initErr) {
-        this.#log('error', 're-init after engine-not-initialized failed', initErr);
+      const ok = await this.#reinitPerCGAndRegisterQueries(
+        'reinit-retry-engine-not-initialized',
+        this.#getCurrentTables(),
+      );
+      if (!ok) {
         throw err; // surface original
       }
       return await fn();
@@ -343,6 +352,15 @@ export class GoComputeBackend {
   // If we observe persistent timeouts, the next step is to bypass the
   // CG FIFO on the sidecar side (refreshSnapshot only touches per-source
   // mutexes — no engine-state mutation that the FIFO is protecting).
+  // Health probe used by the drift audit. Returns the number of queries
+  // currently registered on this CG's Go engine. If the value disagrees
+  // with TS's #pipelines.size, per-CG recovery has dropped pipeline state
+  // and the client view is silently frozen — audit treats that as a
+  // freeze signal and self-heals via resetEngine.
+  async pipelineCount(): Promise<number> {
+    return this.#client().pipelineCount(this.#clientGroupID);
+  }
+
   async refreshSnapshot(): Promise<void> {
     await this.#client().refreshSnapshot(
       this.#clientGroupID,
@@ -470,22 +488,75 @@ export class GoComputeBackend {
 
   async #onSidecarRestart(epoch: number): Promise<void> {
     if (this.#destroyed) return;
-    this.#initialized = false;
     this.#log('info', `sidecar restarted to epoch ${epoch}; re-initializing`);
-    // Block all advance / hydrate RPCs until reinit + query re-registration
-    // completes. Without this gate, an in-flight advance from PipelineDriver
-    // races against the empty-engine window and silently returns empty
-    // (the bug behind MED-CROSS-6 + the post-restart query-loss correctness gap).
+    const ok = await this.#reinitPerCGAndRegisterQueries(
+      `sidecar-restart-epoch-${epoch}`,
+      this.#getCurrentTables(),
+    );
+    if (ok) {
+      this.#log('info', `re-initialized after restart (epoch ${epoch})`);
+    }
+    // On failure, the helper already left #initialized=false so
+    // PipelineDriver falls back to TS.
+  }
+
+  // Shared per-CG reinit path. Used by:
+  //   1. #onSidecarRestart  (manager-level restart)
+  //   2. resetEngine        (intentional reset from PipelineDriver)
+  //   3. #advanceWithRecovery's three error branches (drift,
+  //      sidecar-unavailable, engine-not-initialized)
+  //   4. #withReinitRetry's two error branches (sidecar-unavailable,
+  //      engine-not-initialized)
+  //
+  // All these paths used to call only #doInit, which loads sources but
+  // does NOT re-register queries — leaving Go with zero pipelines while
+  // TS still had registered queries → every subsequent advance returned
+  // {changes:[], timings:[]} and the client view froze silently with
+  // no error logged anywhere. Only #onSidecarRestart got it right; the
+  // per-CG recovery paths shared the same bug. Centralizing here so the
+  // contract is unified.
+  //
+  // Concurrency: holds #restartGate for the duration so concurrent
+  // advance/hydrate from PipelineDriver await instead of racing the
+  // empty-engine window. If another reinit is already in flight, we
+  // await its gate and trust its outcome rather than starting a second
+  // reinit — only one rebuild is ever in progress per backend.
+  //
+  // Returns: true if reinit completed and queries are registered (or
+  // there were no queries); false if any step failed (caller decides
+  // whether to surface the original error and fall back to TS).
+  async #reinitPerCGAndRegisterQueries(
+    reason: string,
+    tables: Record<string, TableData>,
+  ): Promise<boolean> {
+    if (this.#destroyed) return false;
+
+    // Coalesce concurrent reinit requests: if another reinit set the
+    // gate, await it and report its outcome via #initialized.
+    if (this.#restartGate) {
+      await this.#restartGate;
+      return this.initialized;
+    }
+
+    this.#initialized = false;
     let resolveGate!: () => void;
     this.#restartGate = new Promise<void>(resolve => {
       resolveGate = resolve;
     });
+
     try {
-      const tables = this.#getCurrentTables();
       await this.#doInit(tables);
-      // Re-register the queries this client group had before the restart.
-      // Without this, Go has zero pipelines after reinit while TS thinks
-      // they're still registered → all advances silently return empty.
+
+      // Re-register the queries this client group had before the
+      // recovery event. Without this, Go has zero pipelines after
+      // reinit while TS thinks they're still registered.
+      //
+      // Snapshot getCurrentQueries() AFTER #doInit so any queries that
+      // were destroyed during the recovery window aren't carried
+      // forward. The hydrate result is discarded — we only need Go's
+      // internal pipeline state rebuilt; TS already owns the client
+      // view and the next advance will produce correct deltas against
+      // both sides.
       const queries = this.#getCurrentQueries();
       if (queries.length > 0) {
         try {
@@ -497,24 +568,29 @@ export class GoComputeBackend {
           );
           this.#log(
             'info',
-            `re-registered ${queries.length} queries after restart (epoch ${epoch})`,
+            `[${reason}] re-registered ${queries.length} queries`,
           );
         } catch (qerr) {
-          // Pipeline rebuild failure leaves Go inconsistent with TS state.
-          // Mark uninitialized so dispatch falls back to TS until next restart.
           this.#initialized = false;
-          this.#log('error', 're-register queries after restart failed', qerr);
-          throw qerr;
+          this.#log(
+            'error',
+            `[${reason}] re-register queries failed`,
+            qerr,
+          );
+          return false;
         }
+      } else {
+        this.#log(
+          'info',
+          `[${reason}] re-init complete (no queries to register)`,
+        );
       }
-      this.#log('info', `re-initialized after restart (epoch ${epoch})`);
+      return true;
     } catch (err) {
-      // Leave #initialized=false so PipelineDriver falls back to TS until
-      // the next restart attempt or operational intervention.
-      this.#log('error', `re-init after restart failed (epoch ${epoch})`, err);
+      this.#initialized = false;
+      this.#log('error', `[${reason}] re-init failed`, err);
+      return false;
     } finally {
-      // Release the gate so queued advance/hydrate calls can proceed
-      // (or fall back to TS based on #initialized state).
       this.#restartGate = null;
       resolveGate();
     }

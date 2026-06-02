@@ -64,6 +64,7 @@ import {
 } from './go-sidecar/go-compute-backend.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {SnapshotChange, RowChange as GoRowChange} from './go-sidecar/go-ivm-client.ts';
+import {StaleInitEpochError} from './go-sidecar/go-ivm-client.ts';
 import {type ShardID} from '../../types/shards.ts';
 import {
   getSubscriptionState,
@@ -388,6 +389,55 @@ export class PipelineDriver {
     'sync',
     'ivm.drift-audit-skips',
     'Drift audits skipped (driver busy or snapshot-skew)',
+  );
+  // Incremented at the top of #runDriftAudit before any guards, so a flat
+  // #driftAuditRuns counter (no comparisons happening) can be distinguished
+  // from a never-firing timer. Without this, an idle CG and a broken-timer
+  // CG looked identical in metrics (both at zero) — the exact visibility
+  // gap that masked the prod incident where the Go sidecar refused to
+  // start and drift-audit was silently off for hours.
+  readonly #driftAuditTicks = getOrCreateCounter(
+    'sync',
+    'ivm.drift-audit-ticks',
+    'Drift audit timer fires (regardless of skip/run outcome)',
+  );
+  // Incremented when the TS-vs-Go pipeline-count cross-check finds Go
+  // has fewer pipelines than TS expects. This is the freeze signal:
+  // per-CG recovery (drift, sidecar-unavail, engine-not-init) dropped
+  // pipeline state somewhere, so every advance returns empty changes
+  // and the client view diverges silently. Triggers self-heal via
+  // resetEngine.
+  readonly #driftAuditFreezes = getOrCreateCounter(
+    'sync',
+    'ivm.drift-audit-freezes',
+    'Audit detected Go has fewer pipelines than TS (post-C2 defense-in-depth)',
+  );
+  // Bucketed counter for advance-dropped events in Go-primary mode. Pre-C5
+  // fix, ALL errors from Go's advanceStream were silently swallowed as
+  // empty changes — the CVR committed the empty diff and the client view
+  // diverged with no operator-visible signal. The forensics gap was total:
+  // a wire-protocol violation (chunk-order, missing terminal frame),
+  // a stale-epoch error, and a sidecar restart all looked identical.
+  // Each reason gets its own counter so dashboards can distinguish them.
+  readonly #advanceDroppedProtocol = getOrCreateCounter(
+    'sync',
+    'ivm.advance-dropped-protocol',
+    'Go-primary advance dropped due to wire-protocol violation (escalated to restart)',
+  );
+  readonly #advanceDroppedSidecar = getOrCreateCounter(
+    'sync',
+    'ivm.advance-dropped-sidecar',
+    'Go-primary advance dropped due to sidecar unavailability / restart',
+  );
+  readonly #advanceDroppedStaleEpoch = getOrCreateCounter(
+    'sync',
+    'ivm.advance-dropped-stale-epoch',
+    'Go-primary advance dropped due to stale initEpoch (torn-down view-syncer)',
+  );
+  readonly #advanceDroppedOther = getOrCreateCounter(
+    'sync',
+    'ivm.advance-dropped-other',
+    'Go-primary advance dropped due to unclassified Go-side error',
   );
 
   readonly #inspectorDelegate: InspectorDelegate;
@@ -1255,6 +1305,18 @@ export class PipelineDriver {
   //   + drive-traffic.sh; fires ~1–2% of audit runs. The
   //   [drift-audit][rowdiff] log line points to the divergent row.
   async #runDriftAudit(): Promise<void> {
+    // Unconditional tick counter — fires before any guards so operators
+    // can distinguish "audit timer never fired" (broken sidecar config,
+    // missed setInterval, etc.) from "audit fired but skipped" (legitimate
+    // busy / idle CG). Without this, an audit that's silently disabled
+    // looks identical in metrics to a healthy one running against an idle
+    // CG (both stuck at runs=0). The prod incident on the morning of
+    // 2026-06-01 was exactly this gap: the Go sidecar refused to start,
+    // drift-audit hadn't run for hours, and nothing in INFO logs surfaced
+    // it. Increment this BEFORE the InFlight guard so even
+    // back-to-back-fire scenarios show ticks > runs.
+    this.#driftAuditTicks.add(1);
+
     if (this.#driftAuditInFlight) {
       this.#driftAuditSkips.add(1);
       return;
@@ -1263,6 +1325,47 @@ export class PipelineDriver {
     try {
       if (!this.initialized()) return;
       if (!this.#goBackend?.initialized) return;
+
+      // Cross-validate Go's pipeline state against TS's expected count.
+      // C2 (per-CG recovery missing query re-registration) is now fixed,
+      // but this probe is defense-in-depth: if any future regression or
+      // unanticipated code path leaves Go with fewer pipelines than TS
+      // thinks are registered, advances would silently return empty and
+      // the client view would freeze. The audit's normal hydrate path
+      // CANNOT detect this — it registers a fresh auditID query in Go
+      // that succeeds in isolation, so set comparison shows match. The
+      // count probe is independent of any audit-registered query.
+      //
+      // Self-heal on detection: kick off resetEngine asynchronously
+      // (don't block this audit cycle) — it rebuilds from current
+      // tables AND re-registers queries via the centralized recovery
+      // helper. The audit itself returns without comparing for this
+      // cycle since the state is known-divergent.
+      let goCount: number;
+      try {
+        goCount = await this.#goBackend.pipelineCount();
+      } catch (e) {
+        this.#lc.debug?.(
+          `[drift-audit] pipelineCount probe failed (continuing): ${String(e)}`,
+        );
+        goCount = -1; // unknown; skip the cross-check this cycle
+      }
+      const tsExpected = [...this.#pipelines.keys()].filter(
+        qid => !this.#isInternalQueryID(qid),
+      ).length;
+      if (goCount >= 0 && goCount < tsExpected) {
+        this.#driftAuditFreezes.add(1);
+        this.#lc.error?.(
+          `[drift-audit] FREEZE detected: TS=${tsExpected} queries registered, ` +
+            `Go=${goCount} pipelines. Per-CG recovery dropped pipeline state. ` +
+            `Triggering resetEngine to self-heal.`,
+        );
+        // Fire-and-forget. resetEngine handles its own concurrency via
+        // the gate; if it's already running, this is a no-op via the
+        // gate await in #reinitPerCGAndRegisterQueries.
+        void this.#scheduleGoReset('drift-audit-pipeline-count-mismatch');
+        return;
+      }
       // #addQueryImpl asserts #advanceContext===null, and reusing #streamer
       // mid-advance would corrupt the in-flight diff. Wait for the next tick.
       if (this.#advanceContext !== null) {
@@ -1331,6 +1434,7 @@ export class PipelineDriver {
           auditID,
           ast,
           noopTimer,
+          true, // auditMode — no-op setOutput; see #addQueryImpl
         )) {
           if (c !== 'yield') tsChanges.push(c);
         }
@@ -1460,17 +1564,33 @@ export class PipelineDriver {
         // on a real row). If TS IVM and Go IVM agree but SQL disagrees,
         // SQL is the outlier — same Bug #3 class as ts-audit-only,
         // demote to info instead of flagging REAL DRIFT.
+        //
+        // Two boundary shapes — pre-fix the classifier only matched the
+        // first, sending the second to "REAL DRIFT" and paging on-call
+        // for what was a known-benign semantic difference. Reproduced in
+        // prod 2026-06-01 with ts=51 go=51 sql=50 (asymmetric, goOnly=1,
+        // sqlOnly=0).
+        //
+        //   1. Asymmetric: IVM includes the cursor row, SQL excludes it
+        //      (or vice versa). One side has exactly 1 extra unique row.
+        //   2. Symmetric: IVM and SQL both have the cursor position
+        //      filled but with different rows (e.g., a row mutation
+        //      crossed the cursor). One row on each side disagrees.
+        const goOnly = sqlVerdict.goOnly.length;
+        const sqlOnly = sqlVerdict.sqlOnly.length;
+        const asymmetricBoundary = goOnly + sqlOnly === 1;
+        const symmetricBoundary = goOnly === 1 && sqlOnly === 1;
         if (
           !setDiffers &&
           ast.limit !== undefined &&
           ast.start !== undefined &&
-          sqlVerdict.goOnly.length === 1 &&
-          sqlVerdict.sqlOnly.length === 1
+          (asymmetricBoundary || symmetricBoundary)
         ) {
           this.#lc.info?.(
             `[drift-audit] ${targetID}: ivm-boundary divergence ` +
-              `(TS IVM and Go IVM agree, SQL alone disagrees by 1 on ` +
-              `limit+cursor query — pagination boundary semantics). ` +
+              `(TS IVM and Go IVM agree, SQL alone disagrees by ${goOnly + sqlOnly} on ` +
+              `limit+cursor query — pagination boundary semantics, ` +
+              `${asymmetricBoundary ? 'asymmetric' : 'symmetric'}). ` +
               `ts=${tsRemapped.length} go=${goRemapped.length} sql=${sqlVerdict.sqlCount}`,
           );
         } else {
@@ -1665,6 +1785,19 @@ export class PipelineDriver {
     queryID: string,
     query: AST,
     timer: Timer,
+    /**
+     * When true, the pipeline's setOutput is a no-op — source pushes still
+     * flow through the operator chain (correctness preserved), but nothing
+     * is written to the production #streamer. Used by the drift audit so
+     * its transient audit pipeline cannot leak RowChanges tagged with the
+     * synthetic auditID into a concurrent advance's output. Pre-fix, an
+     * advance landing during the audit's `await goBackend.hydrateManyStream`
+     * would fan out source changes to ALL connected pipelines including
+     * the audit's, whose setOutput wrote to #streamer with queryID=auditID
+     * — those changes either silently dropped at the view-syncer or
+     * surfaced as phantom rows in the CVR patch.
+     */
+    auditMode = false,
   ): Iterable<RowChange | 'yield'> {
     assert(
       this.initialized(),
@@ -1716,14 +1849,25 @@ export class PipelineDriver {
         costModel,
       );
       const schema = input.getSchema();
-      input.setOutput({
-        push: change => {
-          const streamer = this.#streamer;
-          assert(streamer, 'must #startAccumulating() before pushing changes');
-          streamer.accumulate(queryID, schema, [change]);
-          return [];
-        },
-      });
+      if (auditMode) {
+        // Audit-mode setOutput: source pushes still traverse the
+        // operator chain (some operators have side-effects on push
+        // that the next fetch depends on), but the change is dropped
+        // at this terminal sink instead of leaking into #streamer
+        // under the synthetic auditID.
+        input.setOutput({
+          push: () => [],
+        });
+      } else {
+        input.setOutput({
+          push: change => {
+            const streamer = this.#streamer;
+            assert(streamer, 'must #startAccumulating() before pushing changes');
+            streamer.accumulate(queryID, schema, [change]);
+            return [];
+          },
+        });
+      }
 
       yield* hydrateInternal(
         input,
@@ -1989,10 +2133,81 @@ export class PipelineDriver {
     };
 
     // Kick Go RPC in flight while TS does its work.
+    //
+    // Error classification — pre-fix this catch was a silent swallow of
+    // ALL errors, indistinguishable from a legitimately-empty advance.
+    // We now bucket by error class so dashboards can detect each
+    // failure mode and operators can take the right action:
+    //
+    //   1. Protocol violation ("chunk order violation", "finished
+    //      without a final chunk", decode failures): wire-level bug or
+    //      data corruption. Can't trust Go's state. Re-throw so the
+    //      caller's error path surfaces it instead of silently committing
+    //      an empty CVR diff. Hard escalation — a recovery reset won't
+    //      fix a wire bug.
+    //
+    //   2. StaleInitEpochError: this view-syncer instance was torn
+    //      down and a successor's epoch took over. Continuing to retry
+    //      against the stale instance is futile (-32101 will fire on
+    //      every call). Drop the advance and signal upstream caller via
+    //      throw so the instance lifecycle teardown completes.
+    //
+    //   3. Sidecar unavailable / restart-related: drop this advance
+    //      (the "miss exactly one delta" contract). The recovery
+    //      machinery in #scheduleGoReset → #reinitPerCGAndRegisterQueries
+    //      will rebuild Go's state from the next valid advance onward.
+    //
+    //   4. Other unclassified: log + drop + reset (preserves the old
+    //      best-effort behavior) but COUNT separately so we can tell
+    //      from metrics whether we're seeing many of these (signal of
+    //      an error class we should explicitly handle).
     const goPromise = this.#goBackend!.advanceStream(snapshotChanges)
       .then(r => r.changes.map(rc => this.#goRowChangeToRowChange(rc)))
       .catch(e => {
-        this.#lc.error?.(`[go-primary] Go advance failed: ${e}`);
+        const msg = e instanceof Error ? e.message : String(e);
+
+        if (
+          msg.includes('chunk order violation') ||
+          msg.includes('finished without a final chunk') ||
+          msg.includes('Frame too large') ||
+          msg.includes('protocolRev mismatch')
+        ) {
+          this.#advanceDroppedProtocol.add(1);
+          this.#lc.error?.(
+            `[go-primary] Go advance failed with PROTOCOL VIOLATION (escalating): ${msg}`,
+          );
+          // Hard escalation: re-throw. The caller's error path will
+          // surface this instead of letting an empty diff commit. A
+          // protocol violation means we cannot trust Go's state OR the
+          // wire — recovery via resetEngine won't fix it without a
+          // sidecar process restart.
+          throw e;
+        }
+
+        if (e instanceof StaleInitEpochError) {
+          this.#advanceDroppedStaleEpoch.add(1);
+          this.#lc.warn?.(
+            `[go-primary] Go advance rejected by sidecar (stale initEpoch); ` +
+              `this view-syncer instance is torn down: ${msg}`,
+          );
+          throw e;
+        }
+
+        const sidecarUnavailable =
+          msg.includes('Sidecar is not running') ||
+          msg.includes('Connection closed') ||
+          msg.includes('engine not initialized');
+        if (sidecarUnavailable) {
+          this.#advanceDroppedSidecar.add(1);
+          this.#lc.warn?.(
+            `[go-primary] Go advance dropped (sidecar restart in flight): ${msg}`,
+          );
+          this.#scheduleGoReset('go-primary-advance-sidecar-restart');
+          return [] as RowChange[];
+        }
+
+        this.#advanceDroppedOther.add(1);
+        this.#lc.error?.(`[go-primary] Go advance failed (unclassified): ${msg}`);
         this.#scheduleGoReset('go-primary-advance-failure');
         return [] as RowChange[];
       });
