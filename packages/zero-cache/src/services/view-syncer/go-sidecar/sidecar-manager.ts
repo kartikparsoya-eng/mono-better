@@ -5,6 +5,7 @@
 
 import {spawn, type ChildProcess} from 'child_process';
 import {existsSync, unlinkSync} from 'fs';
+import {createConnection} from 'net';
 import {tmpdir} from 'os';
 import {join} from 'path';
 import {GoIVMClient} from './go-ivm-client.ts';
@@ -188,6 +189,21 @@ export class SidecarManager {
    */
   async start(): Promise<void> {
     if (this.#status === 'running') return;
+    // Idempotent during 'starting': a second concurrent start() must NOT
+    // spawn a second process or replace the pending #runningPromise (which
+    // would orphan the first caller's await). Hand back the in-flight
+    // promise so both callers resolve/reject together. This matters during
+    // worker bootstrap where multiple components call start() near-
+    // simultaneously, and on the restart path if external code retries
+    // start() while #handleRestartTrigger is still respawning.
+    if (this.#status === 'starting') return this.#runningPromise;
+    // Terminal states: 'failed' is reached after the sliding-window cap
+    // exceeds; starting() again would skip the cap check and silently
+    // restart a sidecar the manager has already declared dead. Reject
+    // explicitly so callers know to stay on TS-only.
+    if (this.#status === 'failed') {
+      throw new Error('Sidecar reached terminal state: failed');
+    }
 
     // In externally-managed mode the binary path is not used by this
     // manager (some other process owns the sidecar). Skip the existence
@@ -553,7 +569,7 @@ export class SidecarManager {
     // need longer to bring up the shared sidecar than the per-worker spawn
     // path's default. Allow a generous timeout to absorb container startup
     // ordering races; the worker will block on this until the socket
-    // appears or we give up.
+    // accepts connections or we give up.
     const timeoutMs = this.#config.externallyManaged
       ? Math.max(this.#config.healthCheckTimeoutMs, 30_000)
       : this.#config.healthCheckTimeoutMs;
@@ -561,14 +577,57 @@ export class SidecarManager {
     const pollMs = 50;
 
     while (Date.now() < deadline) {
-      if (existsSync(this.#config.socketPath)) {
+      // existsSync is a fast precheck — the path must at minimum exist
+      // before we burn a connect() attempt on it. But existence alone
+      // doesn't mean the sidecar is accepting: the file may have been
+      // created (bind()) before listen()/accept() are ready, and in
+      // externally-managed mode it may also be a stale socket left over
+      // from a prior process. A connect probe is the only thing that
+      // proves the server is actually serving.
+      if (existsSync(this.#config.socketPath) && (await this.#probeSocket())) {
         return;
       }
       await new Promise(resolve => setTimeout(resolve, pollMs));
     }
 
     throw new Error(
-      `Sidecar did not create socket at ${this.#config.socketPath} within ${timeoutMs}ms`,
+      `Sidecar did not accept connections at ${this.#config.socketPath} within ${timeoutMs}ms`,
     );
+  }
+
+  /**
+   * Attempt a connect+immediate-close on the sidecar's Unix socket. Resolves
+   * true if the connection succeeded, false on any error (ECONNREFUSED, ENOENT,
+   * timeout, etc.). The socket is closed immediately — we're only probing
+   * acceptability, not opening a session. The real GoIVMClient connection
+   * happens in start() right after #waitForReady returns.
+   */
+  #probeSocket(): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+      let settled = false;
+      const settle = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(ok);
+      };
+      const sock = createConnection(this.#config.socketPath);
+      // Bounded probe: even a hung connect shouldn't stall the readiness
+      // loop. 1s is generous — a healthy Unix-socket connect on the same
+      // host is sub-millisecond.
+      const timer = setTimeout(() => {
+        sock.destroy();
+        settle(false);
+      }, 1_000);
+      sock.once('connect', () => {
+        clearTimeout(timer);
+        sock.end();
+        settle(true);
+      });
+      sock.once('error', () => {
+        clearTimeout(timer);
+        sock.destroy();
+        settle(false);
+      });
+    });
   }
 }

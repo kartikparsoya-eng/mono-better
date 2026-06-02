@@ -31,6 +31,25 @@ export interface TableSchemaSpec {
 /** Max rows per loadRows RPC. Picked so each batch stays well under 64MB. */
 const DEFAULT_LOAD_BATCH_ROWS = 5_000;
 
+/**
+ * Drift-loop circuit breaker. Without this, a pathological steady-state where
+ * every advance trips a Go DriftError → full reinit (loadRows + readdQueries
+ * for the whole CG state) → next advance trips again would peg the sidecar's
+ * IO/CPU indefinitely. Each reinit is seconds-long for large CGs so even a
+ * modest rate is destructive.
+ *
+ * Breaker semantics: count drift-driven reinit events in a sliding
+ * `DRIFT_BREAKER_WINDOW_MS` window. If the count crosses the threshold, mark
+ * the backend uninitialized for `DRIFT_BREAKER_COOLDOWN_MS` so the
+ * PipelineDriver's dispatch falls through to the TS-native path entirely.
+ * Cooldown auto-clears; legitimate Go path is restored without manual
+ * intervention. A second drift loop after cooldown trips the breaker again,
+ * giving operators a clean metric to alert on (sidecar_drift_breaker_open).
+ */
+const DRIFT_BREAKER_WINDOW_MS = 60_000;
+const DRIFT_BREAKER_THRESHOLD = 5;
+const DRIFT_BREAKER_COOLDOWN_MS = 300_000;
+
 export type GoBackendLogger = (
   level: 'info' | 'warn' | 'error',
   msg: string,
@@ -68,6 +87,10 @@ export class GoComputeBackend {
   #restartGate: Promise<void> | null = null;
   #unsubscribe: (() => void) | null = null;
   #destroyed = false;
+  /** Sliding-window timestamps of drift-driven reinits. See breaker constants. */
+  #driftReinitTimestamps: number[] = [];
+  /** When non-zero, breaker is open until Date.now() >= this value. */
+  #driftBreakerOpenUntil = 0;
 
   constructor(
     manager: SidecarManager,
@@ -89,6 +112,16 @@ export class GoComputeBackend {
   }
 
   get initialized(): boolean {
+    // Drift-loop breaker overrides ready-state: while open, callers see Go as
+    // not-initialized and the PipelineDriver dispatch falls through to TS
+    // until cooldown clears. Reading Date.now() per dispatch is cheap; the
+    // alternative (timer that flips a flag) adds setTimeout pressure.
+    if (this.#driftBreakerOpenUntil !== 0) {
+      if (Date.now() < this.#driftBreakerOpenUntil) return false;
+      this.#driftBreakerOpenUntil = 0;
+      this.#driftReinitTimestamps.length = 0;
+      this.#log('info', 'drift-loop breaker cooldown elapsed; Go path re-engaged');
+    }
     return this.#initialized && this.#initEpoch === this.#manager.epoch;
   }
 
@@ -99,12 +132,40 @@ export class GoComputeBackend {
     return this.#manager.epoch;
   }
 
-  // Restart-aware: a sidecar restart invalidates the prior init promise and
-  // starts a new one — this returns the in-flight one so callers don't get
-  // a stale "ready" mid-restart (REVIEW-final HIGH-TS-1).
+  /**
+   * Resolves when this backend is in a stable state for the current
+   * manager epoch — either initialized, or an init attempt has completed
+   * (even unsuccessfully).
+   *
+   * Contract callers MUST honor: after awaiting, check `this.initialized`
+   * before issuing RPCs. The resolution does NOT promise readiness; only
+   * that the in-flight init (if any) has settled. The four states this
+   * collapses to:
+   *
+   *   1. Currently initialized at the live epoch → resolve immediately.
+   *   2. An init is in flight → await the in-flight init's settlement
+   *      (which may resolve OR reject; we swallow rejection here so
+   *      callers don't have to wrap in try/catch — they self-check
+   *      `initialized` afterward).
+   *   3. Destroyed → resolve immediately; callers' `initialized` check
+   *      will see false and they'll fall through to TS.
+   *   4. Never inited / init failed / between-epoch quiescence
+   *      (#currentInitPromise null, #initialized false) → resolve
+   *      immediately. The caller's `initialized` check covers this.
+   *
+   * Restart awareness: a sidecar restart's onRestart listener replaces
+   * #currentInitPromise with the new epoch's init, so case 2 here waits
+   * for the NEW one — preventing a stale "ready" mid-restart.
+   * (REVIEW-final HIGH-TS-1.)
+   */
   whenInitialized(): Promise<void> {
     if (this.initialized) return Promise.resolve();
-    return this.#currentInitPromise ?? Promise.resolve();
+    if (this.#currentInitPromise) {
+      // Wrap to swallow rejection — callers self-check `initialized`
+      // afterward; we don't want them to have to try/catch.
+      return this.#currentInitPromise.catch(() => undefined);
+    }
+    return Promise.resolve();
   }
 
   async initEngine(tables: Record<string, TableData>): Promise<void> {
@@ -211,6 +272,12 @@ export class GoComputeBackend {
           `Go drift detected (${err.op} on ${err.table} pk=${JSON.stringify(err.pk)} has=${err.hasCount}); ` +
             `re-initing engine from current snapshot, dropping this advance`,
         );
+        // Record this drift in the sliding window BEFORE the reinit so
+        // breaker arithmetic reflects the true rate even if reinit hangs.
+        // Trip is checked after a successful reinit so the current advance
+        // gets its full recovery — clients are no worse off than before;
+        // the trip just suppresses Go for SUBSEQUENT advances.
+        this.#recordDriftReinit();
         const ok = await this.#reinitPerCGAndRegisterQueries(
           'advance-drift',
           this.#getCurrentTables(),
@@ -218,6 +285,7 @@ export class GoComputeBackend {
         if (!ok) {
           throw err; // surface original drift so caller's fallback engages
         }
+        this.#maybeTripDriftBreaker();
         return {changes: [], timings: []};
       }
 
@@ -495,6 +563,37 @@ export class GoComputeBackend {
 
     this.#initialized = true;
     this.#initEpoch = epoch;
+  }
+
+  /** Prune timestamps older than the window then append now. */
+  #recordDriftReinit(): void {
+    const now = Date.now();
+    const cutoff = now - DRIFT_BREAKER_WINDOW_MS;
+    // Most recent timestamps cluster at the tail, so scan from head and
+    // slice once. Array is tiny (bounded by threshold), so O(n) is fine.
+    let dropTo = 0;
+    while (
+      dropTo < this.#driftReinitTimestamps.length &&
+      this.#driftReinitTimestamps[dropTo] < cutoff
+    ) {
+      dropTo++;
+    }
+    if (dropTo > 0) {
+      this.#driftReinitTimestamps.splice(0, dropTo);
+    }
+    this.#driftReinitTimestamps.push(now);
+  }
+
+  /** Open the breaker if recent drift count crossed the threshold. */
+  #maybeTripDriftBreaker(): void {
+    if (this.#driftReinitTimestamps.length >= DRIFT_BREAKER_THRESHOLD) {
+      this.#driftBreakerOpenUntil = Date.now() + DRIFT_BREAKER_COOLDOWN_MS;
+      this.#log(
+        'error',
+        `drift-loop breaker OPEN: ${this.#driftReinitTimestamps.length} drift-driven reinits ` +
+          `within ${DRIFT_BREAKER_WINDOW_MS}ms; suppressing Go path for ${DRIFT_BREAKER_COOLDOWN_MS}ms`,
+      );
+    }
   }
 
   async #onSidecarRestart(epoch: number): Promise<void> {
