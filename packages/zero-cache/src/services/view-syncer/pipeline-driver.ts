@@ -314,6 +314,14 @@ export type Timer = {
 const MIN_ADVANCEMENT_TIME_LIMIT_MS = 50;
 
 /**
+ * Minimum gap between drift-audit "heartbeat OK" INFO lines per driver.
+ * Successful audits log at DEBUG (high cadence + low signal); a periodic
+ * INFO heartbeat gives operators a "yes the audit is firing" signal
+ * without bumping ZERO_LOG_LEVEL=debug for the whole syncer.
+ */
+const DRIFT_AUDIT_HEARTBEAT_MS = 5 * 60_000;
+
+/**
  * Manages the state of IVM pipelines for a given ViewSyncer (i.e. client group).
  */
 export class PipelineDriver {
@@ -458,6 +466,13 @@ export class PipelineDriver {
   #driftAuditTimer: ReturnType<typeof setInterval> | null = null;
   // Collapses overlapping audit ticks when one runs longer than the interval.
   #driftAuditInFlight = false;
+  // Timestamp of the last drift-audit INFO heartbeat. Each successful audit-OK
+  // path is debug-only (high noise), so without this heartbeat operators have
+  // no INFO-level signal that the audit machinery is actually firing — just
+  // metrics they have to know to look at. With a 5-minute heartbeat, the
+  // "[drift-audit] heartbeat OK" line at INFO confirms liveness without
+  // flooding logs.
+  #driftAuditLastHeartbeatMs = 0;
   // Snapshotter version that the TableSources are currently bound to. The
   // Snapshotter bumps its version BEFORE Go's advance RPC completes — during
   // that window `#snapshotter.current().version` is V_new but the TableSources
@@ -1653,15 +1668,35 @@ export class PipelineDriver {
           this.#lc.debug?.(
             `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ok (sql skipped: ${sqlVerdict.reason})`,
           );
+          this.#emitDriftAuditHeartbeat('sql-skipped');
         }
       } else {
         this.#lc.debug?.(
           `[drift-audit] ${targetID}: ts=${tsRemapped.length} go=${goRemapped.length} ok (sql confirmed)`,
         );
+        this.#emitDriftAuditHeartbeat('sql-confirmed');
       }
     } finally {
       this.#driftAuditInFlight = false;
     }
+  }
+
+  /**
+   * Emit an INFO heartbeat once per {@link DRIFT_AUDIT_HEARTBEAT_MS} per
+   * driver after a successful audit run. Reason field describes which OK
+   * path landed (sql-confirmed / sql-skipped / count-only) so operators
+   * can confirm the ground-truth comparator is active. No-op until enough
+   * time has passed since the previous heartbeat.
+   */
+  #emitDriftAuditHeartbeat(reason: string): void {
+    const now = Date.now();
+    if (now - this.#driftAuditLastHeartbeatMs < DRIFT_AUDIT_HEARTBEAT_MS) {
+      return;
+    }
+    this.#driftAuditLastHeartbeatMs = now;
+    // cgID is on this.#lc's context already (constructor's lc.withContext),
+    // so JSON-format loggers emit it as a field. Inline cgID would duplicate.
+    this.#lc.info?.(`[drift-audit] heartbeat OK (reason=${reason})`);
   }
 
   /**

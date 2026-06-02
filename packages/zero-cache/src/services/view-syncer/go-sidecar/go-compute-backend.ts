@@ -105,7 +105,14 @@ export class GoComputeBackend {
     this.#getCurrentQueries = getCurrentQueries;
     // No console fallback: callers without a logger get silence by design.
     const noop: GoBackendLogger = () => {};
-    this.#log = options?.logger ?? noop;
+    const raw = options?.logger ?? noop;
+    // Wrap caller's logger to prepend cgID on every line. Without this, drift
+    // recovery / restart / breaker logs from N concurrent backends look
+    // identical in the syncer's stdout — operators have no way to tell which
+    // CG is misbehaving. Pre-fix the only cgID hint came from the message
+    // bodies where authors happened to include it; many lines didn't.
+    const cgTag = `[cg=${clientGroupID}]`;
+    this.#log = (level, msg, err) => raw(level, `${cgTag} ${msg}`, err);
     this.#loadBatchRows = options?.loadBatchRows ?? DEFAULT_LOAD_BATCH_ROWS;
 
     this.#unsubscribe = manager.onRestart(epoch => this.#onSidecarRestart(epoch));

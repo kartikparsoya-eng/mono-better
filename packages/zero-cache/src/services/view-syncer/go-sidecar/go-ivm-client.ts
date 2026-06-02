@@ -165,6 +165,13 @@ export function createHydrateStreamAccumulator(
     string,
     {changes: RowChange[]; expectedNextIndex: number}
   >();
+  // Tracks queryIDs that already saw final=true. Without this, a duplicate
+  // final frame for the same queryID would resurrect a fresh entry (since
+  // we delete from `acc` on first final) and re-invoke onResult — silently
+  // double-resolving the caller's promise / re-firing dispatch handlers.
+  // A wire bug or a replayed frame should fail loud here, not silently
+  // mis-dispatch.
+  const finalized = new Set<string>();
 
   return {
     onFrame: (value: unknown) => {
@@ -178,6 +185,13 @@ export function createHydrateStreamAccumulator(
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // older sidecars sent unchunked frames
       const chunk = v.changes ?? [];
+
+      if (finalized.has(v.queryID)) {
+        throw new Error(
+          `addQueriesStream duplicate frame after final for queryID=${v.queryID} ` +
+            `(chunkIndex=${chunkIndex}, final=${final}): Go re-emitted post-terminal`,
+        );
+      }
 
       let entry = acc.get(v.queryID);
       if (!entry) {
@@ -206,6 +220,7 @@ export function createHydrateStreamAccumulator(
 
       if (final) {
         acc.delete(v.queryID);
+        finalized.add(v.queryID);
         onResult({
           queryID: v.queryID,
           changes: entry.changes,
@@ -359,6 +374,15 @@ export class TimeoutError extends Error {
  * of escalating to a generic RPC failure.
  */
 export const RPC_CODE_DRIFT = -32100;
+
+/**
+ * Terminal sentinel for streaming RPCs (addQueriesStream / advanceStream).
+ * Go emits this as a plain-string Result on the final frame; everything
+ * else is a partial. Reserved — handlers MUST NOT emit a string-valued
+ * partial that collides with this constant. See D6 collision defense
+ * in #onData below.
+ */
+const STREAM_DONE_SENTINEL = 'done';
 
 /**
  * RPC error code Go uses when a mutating call (loadRows / addQuery* /
@@ -980,6 +1004,28 @@ export class GoIVMClient {
 
     while (this.#recvBuf.length - this.#recvOffset >= 4) {
       const len = this.#recvBuf.readUInt32BE(this.#recvOffset);
+      // D7: minimum frame size. Wire never legitimately carries len=0
+      // (no valid msgpack response is 0 bytes). Pre-fix this would slide
+      // past the 4-byte prefix, hand an empty payload to unpack(), warn,
+      // and continue — turning a corrupted stream of `\x00\x00\x00\x00`
+      // into a fast log-flood loop. Now we close the connection (returning
+      // here breaks out; subsequent #onData calls re-enter against a
+      // buffer that still starts with the same len-0 prefix, but the
+      // outer caller closes on persistent decode failure).
+      if (len < 1) {
+        this.#log(
+          'error',
+          `Frame too small: ${len} bytes (protocol violation) — closing connection`,
+        );
+        // Force the connection closed so the SidecarManager's restart
+        // machinery takes over; the stream is desynchronized.
+        try {
+          this.#socket?.destroy(new Error(`protocol violation: zero-length frame`));
+        } catch {
+          // best-effort
+        }
+        return;
+      }
       if (len > MAX_FRAME_SIZE) {
         // H8 fix: don't close the connection — that kills every CG on
         // this socket for one bad query. The frame's body is too long
@@ -1070,6 +1116,16 @@ export class GoIVMClient {
       // terminal "done" sentinel. Go emits "done" as a plain string Result;
       // any other Result shape is a partial.
       //
+      // Sentinel collision defense (D6): partial values are ALWAYS objects
+      // (chunk-metadata records); the literal string "done" is reserved as
+      // the terminal sentinel. If a partial were ever emitted as the string
+      // "done" (Go-side bug or replay), the equality check below would
+      // silently terminate the stream — caller's onResult never fires for
+      // the missing query, and the accumulator's `finish()` then throws
+      // "queries never received a final chunk", obscuring the real cause.
+      // We assert partial shape here so the failure surfaces with the
+      // useful error.
+      //
       // try/catch around onPartial is load-bearing: accumulators (e.g.
       // createAdvanceStreamAccumulator) throw on chunk-order violations
       // or missing-final invariants. A synchronous throw from this
@@ -1080,7 +1136,20 @@ export class GoIVMClient {
       // protocol bug. Now we reject the offending RPC with the throw
       // and continue draining other pending entries; the connection
       // stays up and other CGs' RPCs flow normally.
-      if (pending.onPartial && resp.result !== 'done') {
+      const isStreamTerminal = resp.result === STREAM_DONE_SENTINEL;
+      if (pending.onPartial && !isStreamTerminal) {
+        if (typeof resp.result !== 'object' || resp.result === null) {
+          if (pending.timer) clearTimeout(pending.timer);
+          this.#pending.delete(respId);
+          pending.reject(
+            new Error(
+              `Streaming RPC received non-object partial: ` +
+                `typeof=${typeof resp.result} value=${JSON.stringify(resp.result)}; ` +
+                `partials must be records, "${STREAM_DONE_SENTINEL}" is reserved as terminal sentinel`,
+            ),
+          );
+          continue;
+        }
         try {
           pending.onPartial(resp.result);
         } catch (err) {

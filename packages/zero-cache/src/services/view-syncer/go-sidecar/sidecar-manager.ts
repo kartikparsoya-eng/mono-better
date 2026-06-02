@@ -422,6 +422,15 @@ export class SidecarManager {
 
     this.#status = 'running';
     this.#epoch++;
+    // Explicit startup line: operators grep for this to confirm the Go path
+    // is engaged on a fresh deploy. Pre-fix only the version banner logged
+    // here, leaving "is the manager actually ready?" ambiguous when version
+    // RPC silently failed.
+    this.#config.logger(
+      'info',
+      `Go sidecar manager running at ${this.#config.socketPath} ` +
+        `(epoch ${this.#epoch}${this.#config.externallyManaged ? ', externally-managed' : ''})`,
+    );
     this.#runningResolve();
 
     // In externallyManaged mode there is no proc.on('exit') hook to detect
