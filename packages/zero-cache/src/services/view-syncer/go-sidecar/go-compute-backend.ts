@@ -361,6 +361,17 @@ export class GoComputeBackend {
     return this.#client().pipelineCount(this.#clientGroupID);
   }
 
+  // Resolves when no per-CG recovery is in flight. Callers that dispatch
+  // a new query/advance can await this BEFORE deciding TS vs Go, so a
+  // brief recovery window doesn't cause a fall-through to TS that
+  // creates a phantom TS pipeline (audit H7). Resolves immediately when
+  // no recovery is active.
+  async whenRecovered(): Promise<void> {
+    if (this.#restartGate) {
+      await this.#restartGate;
+    }
+  }
+
   async refreshSnapshot(): Promise<void> {
     await this.#client().refreshSnapshot(
       this.#clientGroupID,

@@ -435,6 +435,12 @@ export class GoIVMClient {
   // then compacting once.
   #recvBuf: Buffer = Buffer.alloc(0);
   #recvOffset = 0;
+  // Bytes remaining to discard as part of skipping past an oversized frame.
+  // When > 0, #onData consumes incoming bytes without parsing instead of
+  // closing the entire connection (audit H8). The orphaned RPC for the
+  // bad frame times out naturally; healthy CGs on the same connection
+  // keep flowing.
+  #skipRemaining = 0;
 
   // Backpressure (global cap): awaiters waiting for any in-flight slot.
   #slotWaiters: Array<() => void> = [];
@@ -510,6 +516,7 @@ export class GoIVMClient {
     }
     this.#recvBuf = Buffer.alloc(0);
     this.#recvOffset = 0;
+    this.#skipRemaining = 0;
     // Reject anything still pending so callers don't hang.
     const err = new Error('Client closed');
     for (const [, p] of this.#pending) {
@@ -927,6 +934,16 @@ export class GoIVMClient {
   }
 
   #onData(chunk: Buffer): void {
+    // Skip-mode (H8): when a previous frame was rejected as too large
+    // we discard its remaining bytes from the stream instead of closing
+    // the entire connection. Other CGs' RPCs continue normally; the
+    // orphaned RPC times out via its own timer.
+    if (this.#skipRemaining > 0) {
+      const discard = Math.min(chunk.length, this.#skipRemaining);
+      this.#skipRemaining -= discard;
+      if (discard === chunk.length) return;
+      chunk = chunk.subarray(discard);
+    }
     // Append: if we have unconsumed data, splice it together with the new
     // chunk. Optimisation for the case where we already know the next
     // frame's length and it's larger than the new chunk: pre-allocate a
@@ -964,15 +981,32 @@ export class GoIVMClient {
     while (this.#recvBuf.length - this.#recvOffset >= 4) {
       const len = this.#recvBuf.readUInt32BE(this.#recvOffset);
       if (len > MAX_FRAME_SIZE) {
-        const err = new Error(`Frame too large: ${len}`);
-        this.#log('error', err.message);
-        for (const [, p] of this.#pending) {
-          if (p.timer) clearTimeout(p.timer);
-          p.reject(err);
+        // H8 fix: don't close the connection — that kills every CG on
+        // this socket for one bad query. The frame's body is too long
+        // to parse (we can't know the RPC id without decoding), so we
+        // can't selectively reject the offending pending entry. Skip-
+        // read its bytes instead; the orphaned RPC times out via its
+        // own timer while other CGs' traffic flows uninterrupted.
+        this.#log(
+          'error',
+          `Frame too large: ${len} bytes — skipping past it (orphan RPC will time out)`,
+        );
+        // Step past the 4-byte length prefix. Any frame body bytes
+        // already buffered get discarded inline; remaining bytes are
+        // discarded on subsequent #onData chunks via #skipRemaining.
+        this.#recvOffset += 4;
+        const bufferedBody = this.#recvBuf.length - this.#recvOffset;
+        if (bufferedBody >= len) {
+          // Whole body already in buffer — advance past it.
+          this.#recvOffset += len;
+        } else {
+          // Discard the buffered portion now; consume the rest from
+          // upcoming chunks.
+          this.#skipRemaining = len - bufferedBody;
+          this.#recvBuf = Buffer.alloc(0);
+          this.#recvOffset = 0;
         }
-        this.#pending.clear();
-        this.close();
-        return;
+        continue;
       }
       if (this.#recvBuf.length - this.#recvOffset < 4 + len) {
         // Wait for more bytes; preserve the partial frame.
@@ -1035,8 +1069,29 @@ export class GoIVMClient {
       // Streaming: deliver per-frame value to onPartial unless this is the
       // terminal "done" sentinel. Go emits "done" as a plain string Result;
       // any other Result shape is a partial.
+      //
+      // try/catch around onPartial is load-bearing: accumulators (e.g.
+      // createAdvanceStreamAccumulator) throw on chunk-order violations
+      // or missing-final invariants. A synchronous throw from this
+      // socket data handler propagates to Node's EventEmitter, which
+      // emits 'error' on the socket — without an explicit listener
+      // that triggers uncaughtException and crashes the worker.
+      // Pre-fix this took down the entire view-syncer process on any
+      // protocol bug. Now we reject the offending RPC with the throw
+      // and continue draining other pending entries; the connection
+      // stays up and other CGs' RPCs flow normally.
       if (pending.onPartial && resp.result !== 'done') {
-        pending.onPartial(resp.result);
+        try {
+          pending.onPartial(resp.result);
+        } catch (err) {
+          if (pending.timer) clearTimeout(pending.timer);
+          this.#pending.delete(respId);
+          pending.reject(
+            err instanceof Error
+              ? err
+              : new Error(`onPartial threw: ${String(err)}`),
+          );
+        }
         continue;
       }
       pending.resolve(resp.result);

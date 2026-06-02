@@ -887,6 +887,21 @@ export class PipelineDriver {
         this.#addQueryDispatch(transformationHash, queryID, query, timer),
       );
     }
+    // If a per-CG recovery is in flight (drift, sidecar-restart, etc.),
+    // wait for it to finish before deciding TS vs Go. Pre-fix the
+    // dispatch checked initialized synchronously and fell through to
+    // TS-native during the recovery window — that created a phantom
+    // TS pipeline (rooted at a user-table TableSource) that persisted
+    // beyond the recovery and emitted duplicate RowChanges on every
+    // subsequent advance. The new query sees up to ~tens of ms extra
+    // latency in exchange for routing to Go correctly.
+    if (this.#goBackend) {
+      return this.#goBackend
+        .whenRecovered()
+        .then(() =>
+          this.#addQueryDispatch(transformationHash, queryID, query, timer),
+        );
+    }
     return this.#addQueryDispatch(transformationHash, queryID, query, timer);
   }
 
@@ -2864,6 +2879,32 @@ export class PipelineDriver {
       this.#lc.debug?.(`Advanced to ${curr.version}`);
     } finally {
       this.#advanceContext = null;
+      // If the advance loop threw (ResetPipelinesSignal or unexpected
+      // error in #push), the success-path setDB + version update above
+      // never ran — TableSources stay bound to the old snapshot while
+      // the snapshotter has already moved forward. The drift audit's
+      // first guard (#tableSourcesVersion !== snapshotter.version)
+      // then skips EVERY subsequent cycle silently until the next
+      // successful advance happens to land. Without this finally that
+      // could be hours of effectively-disabled audit, with the metric
+      // counter idling at zero — operators would think the audit is
+      // healthy when it's actually offline.
+      //
+      // Realign now: bind TableSources to the current snapshot and
+      // sync the version field. The advance's diff wasn't fully
+      // applied, but the post-advance state is still the snapshotter's
+      // current snapshot — TableSources reading at that frame is
+      // correct (their next fetch sees the same point-in-time the
+      // snapshotter exposes). The caller's restart machinery is
+      // responsible for rebuilding any operator state that depends
+      // on the dropped diff.
+      const {curr} = diff;
+      if (this.#tableSourcesVersion !== curr.version) {
+        for (const table of this.#tables.values()) {
+          table.setDB(curr.db.db);
+        }
+        this.#tableSourcesVersion = curr.version;
+      }
     }
   }
 
