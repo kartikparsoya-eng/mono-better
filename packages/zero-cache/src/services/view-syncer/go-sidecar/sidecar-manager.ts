@@ -8,7 +8,32 @@ import {existsSync, unlinkSync} from 'fs';
 import {createConnection} from 'net';
 import {tmpdir} from 'os';
 import {join} from 'path';
+import {getOrCreateCounter} from '../../../observability/metrics.ts';
 import {GoIVMClient} from './go-ivm-client.ts';
+
+/**
+ * D5: Protocol-version fallback counter. Pre-fix the catch-and-warn path
+ * for "version RPC not implemented" left no metric — operators couldn't
+ * tell whether a deployed sidecar was actually using the new wire protocol
+ * or silently running in compatibility mode. Now every fallback bumps
+ * this counter; non-zero on a dashboard means an older sidecar is in
+ * the field and the next protocol-breaking change will need migration.
+ *
+ * D10: Sidecar init-failure counter with {reason} label. Each failure mode
+ * (binary-missing, waitForReady timeout, ping fail, version mismatch,
+ * spawn exit during startup) increments with its own label so dashboards
+ * can attribute initial-spawn failures vs mid-flight crashes.
+ */
+const protocolFallbackCounter = getOrCreateCounter(
+  'sync',
+  'ivm.sidecar-protocol-fallback',
+  'Sidecar version RPC failed; client fell back to assumed-compatible mode',
+);
+const initFailureCounter = getOrCreateCounter(
+  'sync',
+  'ivm.sidecar-init-failure',
+  'Sidecar initial-start or restart attempt failed (label: reason)',
+);
 
 /**
  * Wire protocol revision this client expects. Bumped in lockstep with
@@ -25,6 +50,23 @@ const EXPECTED_PROTOCOL_REV = 6;
  * (REVIEW-final MED-CROSS-1).
  */
 const INIT_CONCURRENCY = 4;
+
+/**
+ * Pattern-match common init-failure error messages to a stable {reason}
+ * label for the initFailureCounter. Unknown messages get "other" — a
+ * non-zero rate of "other" on dashboards means a new failure mode appeared
+ * and operators should add a bucket here.
+ */
+function classifyInitFailure(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes('binary not found')) return 'binary-missing';
+  if (msg.includes('did not accept connections')) return 'waitForReady-timeout';
+  if (msg.includes('socket')) return 'socket-error';
+  if (msg.includes('protocol revision mismatch')) return 'protocol-mismatch';
+  if (msg.includes('health check failed')) return 'health-check-fail';
+  if (msg.includes('terminal state: failed')) return 'sliding-window-exceeded';
+  return 'other';
+}
 
 export type SidecarLogger = (
   level: 'info' | 'warn' | 'error',
@@ -211,6 +253,7 @@ export class SidecarManager {
     // deployment.
     if (!this.#config.externallyManaged) {
       if (!existsSync(this.#config.binaryPath)) {
+        initFailureCounter.add(1, {reason: 'binary-missing'});
         throw new Error(
           `Go IVM sidecar binary not found at: ${this.#config.binaryPath}. ` +
             `Build it with: cd go-ivm && go build -o ${this.#config.binaryPath} ./cmd/sidecar/`,
@@ -248,6 +291,12 @@ export class SidecarManager {
       // #runningPromise. Now we transition to 'failed' and surface the
       // error so callers can fall back to TS.
       this.#status = 'failed';
+      // D10: classify the spawn failure. Most paths in #spawn end up here
+      // via #waitForReady-timeout, version-mismatch throw, or ping-fail
+      // throw — those throw their own Error with a recognizable message;
+      // we bucket here by inspecting it. Unknown error texts get "other".
+      const reason = classifyInitFailure(err);
+      initFailureCounter.add(1, {reason});
       this.#runningReject(
         err instanceof Error
           ? err
@@ -413,6 +462,9 @@ export class SidecarManager {
     } catch (err) {
       // If the version RPC isn't implemented (older sidecar), warn loudly
       // but don't refuse — operators can roll out a new client first.
+      // D5: also bump the fallback counter so dashboards can detect this
+      // (operators kept missing the warn log in busy stdout).
+      protocolFallbackCounter.add(1);
       this.#config.logger(
         'warn',
         'Sidecar does not implement version RPC; assuming compatibility (consider upgrading)',
@@ -565,6 +617,9 @@ export class SidecarManager {
       );
     } else {
       this.#status = 'failed';
+      // D10: bump init-failure with sliding-window-exceeded so the
+      // terminal-state transition is visible in metrics, not just logs.
+      initFailureCounter.add(1, {reason: 'sliding-window-exceeded'});
       this.#runningReject(new Error('Sidecar reached terminal state: failed'));
       this.#config.logger(
         'error',

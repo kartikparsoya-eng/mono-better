@@ -447,6 +447,18 @@ export class PipelineDriver {
     'ivm.advance-dropped-other',
     'Go-primary advance dropped due to unclassified Go-side error',
   );
+  /**
+   * D11: per-reason counter for #scheduleGoReset. Pre-fix every reset
+   * looked the same in metrics — a burst of shadow-batch-failure resets
+   * was indistinguishable from a drift-audit-pipeline-count-mismatch
+   * burst. Now each call increments with a {reason} attribute so dashboards
+   * can attribute restarts to the trigger.
+   */
+  readonly #goResetScheduled = getOrCreateCounter(
+    'sync',
+    'ivm.go-reset-scheduled',
+    'Go engine resets scheduled (label: reason)',
+  );
 
   readonly #inspectorDelegate: InspectorDelegate;
   readonly #goBackend: GoComputeBackend | null = null;
@@ -2400,6 +2412,11 @@ export class PipelineDriver {
    */
   #scheduleGoReset(reason: string): void {
     if (!this.#goBackend) return;
+    // Record EVERY caller (even ones we coalesce with #goResetDirty) so the
+    // metric reflects the real trigger rate, not just the post-dedup
+    // executed-resets count. Dashboard queries that want executed count can
+    // sum minus dirty-coalesced count separately.
+    this.#goResetScheduled.add(1, {reason});
     if (this.#goResetInFlight) {
       // Don't drop the request — record it so we re-fire after the in-flight
       // reset completes (REVIEW-final MED-SHADOW-2).
