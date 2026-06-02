@@ -78,6 +78,13 @@ export class SidecarManager {
   #status: SidecarStatus = 'stopped';
   #restartTimestamps: number[] = []; // for sliding-window cap
   #shutdownRequested = false;
+  // Set true immediately before the manager issues a deliberate SIGKILL
+  // (post-spawn-failure cleanup in #handleRestartTrigger's catch path).
+  // The exit handler reads this to pass isRetrigger=true and avoid
+  // counting the manager-induced exit as a fresh failure. Reset after
+  // consumption so a subsequent natural process death is counted
+  // normally.
+  #suppressNextExitCount = false;
   #epoch = 0;
   #firstStartComplete = false;
   #listeners = new Set<RestartListener>();
@@ -197,7 +204,41 @@ export class SidecarManager {
 
     this.#shutdownRequested = false;
     this.#status = 'starting';
-    await this.#spawn();
+
+    // Initialize #runningPromise to a fresh pending promise BEFORE
+    // calling #spawn. The constructor defaults it to Promise.resolve()
+    // (sentinel), and pre-fix start() never replaced it — so any caller
+    // who invoked waitForRunning() between start()-set-status-to-starting
+    // and #spawn-completes-and-replaces-the-promise would receive the
+    // resolved sentinel and proceed as if the sidecar were ready. The
+    // resolve/reject hooks let #spawn fire them when status transitions
+    // to running (line ~373) or, on initial-start failure, here in the
+    // catch block below.
+    this.#runningPromise = new Promise<void>((res, rej) => {
+      this.#runningResolve = res;
+      this.#runningReject = rej;
+    });
+
+    try {
+      await this.#spawn();
+    } catch (err) {
+      // Pre-fix the throw propagated to the caller without transitioning
+      // the manager state machine. #status stayed at 'starting' forever
+      // because terminal-state checks in waitForRunning() look for
+      // 'failed' or 'stopped', and the post-spawn-failure restart
+      // machinery is wired to proc.on('exit') or the catch in
+      // #handleRestartTrigger — neither fires for the initial start()
+      // call. Result: every subsequent caller hung on a resolved-sentinel
+      // #runningPromise. Now we transition to 'failed' and surface the
+      // error so callers can fall back to TS.
+      this.#status = 'failed';
+      this.#runningReject(
+        err instanceof Error
+          ? err
+          : new Error(`Initial sidecar start failed: ${String(err)}`),
+      );
+      throw err;
+    }
   }
 
   /**
@@ -300,7 +341,12 @@ export class SidecarManager {
           `Sidecar exited unexpectedly (code=${code}, signal=${signal})`,
         );
 
-        this.#handleRestartTrigger();
+        // If the manager itself issued the SIGKILL (cleanup after a
+        // spawn-attempt failure), pass isRetrigger so the failure
+        // counter doesn't double-count the same logical failure.
+        const isRetrigger = this.#suppressNextExitCount;
+        this.#suppressNextExitCount = false;
+        this.#handleRestartTrigger(isRetrigger);
       });
 
       // ChildProcess 'error' fires when spawn itself fails (ENOENT, EACCES,
@@ -409,13 +455,25 @@ export class SidecarManager {
    * (`#spawn`) or marks the manager `failed` so callers can fall back to
    * the TS-native IVM path.
    */
-  #handleRestartTrigger(): void {
+  // isRetrigger: true when invoked from within #handleRestartTrigger's
+  // own catch path (after a spawn-attempt failure routed through
+  // SIGKILL/exit or explicit re-entry). Pre-fix every such re-entry
+  // pushed a fresh timestamp, so one logical spawn failure consumed
+  // TWO budget slots — operators who set maxRestartsInWindow=5 saw
+  // the cap trip at 2-3 real failures instead of the expected 5.
+  // The retrigger represents the FOLLOW-UP attempt to the same
+  // already-counted failure; only natural process-exit events and
+  // external triggers (initial start, externally-managed reconnect)
+  // count as a new failure.
+  #handleRestartTrigger(isRetrigger = false): void {
     // Sliding-window restart cap: count failures in the last
     // restartWindowMs and bail if we exceed the cap.
     const now = Date.now();
     const cutoff = now - this.#config.restartWindowMs;
     this.#restartTimestamps = this.#restartTimestamps.filter(t => t > cutoff);
-    this.#restartTimestamps.push(now);
+    if (!isRetrigger) {
+      this.#restartTimestamps.push(now);
+    }
 
     if (this.#restartTimestamps.length <= this.#config.maxRestartsInWindow) {
       this.#status = 'restarting';
@@ -449,18 +507,30 @@ export class SidecarManager {
             // In externallyManaged mode there is no proc.on('exit') at all,
             // so we re-trigger explicitly to advance the state machine.
             if (this.#config.externallyManaged) {
-              this.#handleRestartTrigger();
+              // Retrigger: don't bump the failure counter for the same
+              // spawn attempt that just failed; we already counted it
+              // on entry to this trigger.
+              this.#handleRestartTrigger(true);
             } else if (this.#proc && this.#proc.exitCode === null) {
               try {
+                // Signal the exit handler that the upcoming death is
+                // our doing, not a natural process exit, so it doesn't
+                // double-count the same logical spawn failure.
+                this.#suppressNextExitCount = true;
                 this.#proc.kill('SIGKILL');
               } catch (killErr) {
+                this.#suppressNextExitCount = false;
                 this.#config.logger(
                   'error',
                   'failed to kill wedged sidecar process',
                   killErr,
                 );
-                this.#handleRestartTrigger();
+                this.#handleRestartTrigger(true);
               }
+              // Note: when SIGKILL succeeds, proc.on('exit') will fire
+              // and call #handleRestartTrigger again. That path used
+              // to double-count too — see #onProcExit's isRetrigger
+              // wiring below.
             } else {
               // Spawned mode, process already dead — proc.on('exit') will
               // have queued #handleRestartTrigger; nothing to do here.
