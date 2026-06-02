@@ -7,6 +7,8 @@ import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts'
 import type {Row} from '../../../../zero-protocol/src/data.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
 import {buildPipeline} from '../../../../zql/src/builder/builder.ts';
+import {planQuery} from '../../../../zql/src/planner/planner-builder.ts';
+import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
 import {
   Debug,
   runtimeDebugFlags,
@@ -808,6 +810,28 @@ export class PipelineDriver {
     return undefined;
   }
 
+  // Plans an AST through the same completeOrdering + cost-model planner pass
+  // that buildPipeline applies internally for TS. Used to keep the AST sent
+  // to Go in sync with the AST TS materializes against — without this the
+  // planner's `flip: true` decorations (which route OR-with-CSQ through
+  // FlippedJoin + UnionFanIn merge-with-dedup) never reach Go, so Go's plain
+  // Join + applyOr path attaches the inner-CSQ relationship and the streamer
+  // over-emits it (H18-cont).
+  #planAstForGo(ast: AST): AST {
+    const planned = completeOrdering(ast, tableName =>
+      must(this.#getSource(tableName)).tableSchema.primaryKey,
+    );
+    if (!this.#costModels) {
+      return planned;
+    }
+    const db = this.#snapshotter.current().db.db;
+    const costModel = this.#ensureCostModelExistsIfEnabled(db);
+    if (!costModel) {
+      return planned;
+    }
+    return planQuery(planned, costModel);
+  }
+
   /**
    * Clears storage used for the pipelines. Call this when the
    * PipelineDriver will no longer be used.
@@ -1021,9 +1045,10 @@ export class PipelineDriver {
       this.removeQuery(q.queryID);
     }
 
-    // Single RPC for all queries
+    // Single RPC for all queries. Plan the AST so Go gets the same
+    // flip-aware AST TS materializes against (H18-cont).
     const batchResults = await this.#goBackend!.hydrateMany(
-      queries.map(q => ({queryID: q.queryID, ast: q.ast})),
+      queries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
     );
 
     // Register pipelines and convert results
@@ -1150,7 +1175,7 @@ export class PipelineDriver {
     for (const q of userQueries) byQueryID.set(q.queryID, q);
 
     const rpcPromise = this.#goBackend!.hydrateManyStream(
-      userQueries.map(q => ({queryID: q.queryID, ast: q.ast})),
+      userQueries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
       (r: {queryID: string; changes: unknown[]; timingMs: number | undefined}) => {
         buffered.push({
           queryID: r.queryID,
@@ -1288,7 +1313,7 @@ export class PipelineDriver {
       const goResultsByID = new Map<string, RowChange[]>();
       let mismatches = 0;
       await this.#goBackend.hydrateManyStream(
-        queries.map(q => ({queryID: q.queryID, ast: q.ast})),
+        queries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
         r => {
           const goChanges = (r.changes ?? []).map(rc =>
             this.#goRowChangeToRowChange(rc as GoRowChange),
@@ -1508,7 +1533,7 @@ export class PipelineDriver {
       const goChanges: RowChange[] = [];
       try {
         await this.#goBackend.hydrateManyStream(
-          [{queryID: auditID, ast}],
+          [{queryID: auditID, ast: this.#planAstForGo(ast)}],
           r => {
             for (const rc of r.changes ?? []) {
               goChanges.push(this.#goRowChangeToRowChange(rc as GoRowChange));
