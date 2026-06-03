@@ -316,11 +316,16 @@ export function createAdvanceStreamAccumulator(): {
         throw new Error('advanceStream finished without a final chunk');
       }
       if (drift) {
-        // Drift on Final ⇒ whole stream is discarded. Earlier chunks may
-        // have shipped real RowChanges, but TS will re-init Go from
-        // current SQLite truth and those changes will be reflected in
-        // the fresh hydration. Replaying them now would risk
-        // double-application.
+        // Drift on Final — attach the partial-output the Go sidecar
+        // produced from Pushes that succeeded BEFORE the panic to the
+        // DriftError. GoComputeBackend's recovery path forwards them
+        // alongside the re-init so the view-syncer + clients see the
+        // same partial-emit-then-rehydrate sequence TS's assert-and-
+        // throw path produces. Without this, Go silently dropped
+        // RowChanges that TS would have emitted — the divergence
+        // observed in shadow soaks.
+        drift.partialChanges = acc;
+        drift.partialTimings = timings;
         throw drift;
       }
       return {changes: acc, timings};
@@ -407,12 +412,24 @@ export class StaleInitEpochError extends Error {
  * op + PK so the caller can log specifics before re-init. Thrown by
  * {@link GoIVMClient.advance} and surfaced via accumulator on
  * {@link GoIVMClient.advanceStream} when the Final frame has drift set.
+ *
+ * partialChanges + partialTimings carry the output produced by Push calls
+ * that successfully completed BEFORE the panic-and-drift fired in this
+ * advance batch. Matches TS view-syncer behavior: assert-and-throw streams
+ * whatever was already pushed to the output before snapshot revert +
+ * re-hydrate. Previously Go's drift recovery discarded these (the comment
+ * at the discard site cited "Replaying them now would risk double-
+ * application" — but partial emission + re-hydrate is precisely TS's path,
+ * so dropping the partial only widened the TS/Go output divergence
+ * observed in shadow soaks).
  */
 export class DriftError extends Error {
   readonly table: string;
   readonly op: string;
   readonly pk: Record<string, unknown>;
   readonly hasCount: number;
+  partialChanges: RowChange[] = [];
+  partialTimings: TableTiming[] | undefined = undefined;
   constructor(data: {
     table?: string | undefined;
     op?: string | undefined;
@@ -1083,21 +1100,28 @@ export class GoIVMClient {
           // error.data (table/op/pk/hasCount) so callers don't have to
           // string-match the message. Caller is GoComputeBackend, which
           // catches DriftError and triggers re-init.
+          // partialChanges + partialTimings carry the RowChanges produced
+          // by Pushes that completed BEFORE the panic; the recovery path
+          // emits them to clients matching TS's "stream-pre-throw-output-
+          // then-revert" behavior.
           const d = (resp.error as {data?: unknown}).data as {
             table?: string;
             op?: string;
             pk?: Record<string, unknown>;
             hasCount?: number;
+            partialChanges?: RowChange[];
+            partialTimings?: TableTiming[];
           } | undefined;
-          pending.reject(
-            new DriftError({
-              table: d?.table,
-              op: d?.op,
-              pk: d?.pk,
-              hasCount: d?.hasCount,
-              message: resp.error.message,
-            }),
-          );
+          const drift = new DriftError({
+            table: d?.table,
+            op: d?.op,
+            pk: d?.pk,
+            hasCount: d?.hasCount,
+            message: resp.error.message,
+          });
+          drift.partialChanges = d?.partialChanges ?? [];
+          drift.partialTimings = d?.partialTimings;
+          pending.reject(drift);
         } else if (resp.error.code === RPC_CODE_STALE_INIT_EPOCH) {
           // Stale-epoch signal: the sidecar is rejecting our call because
           // this view-syncer instance's initEpoch is behind a successor's.

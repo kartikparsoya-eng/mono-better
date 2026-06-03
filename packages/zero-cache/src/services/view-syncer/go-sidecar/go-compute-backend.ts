@@ -274,10 +274,11 @@ export class GoComputeBackend {
       // double-apply (the missing row is now present from SQLite) or
       // re-trip the same drift.
       if (err instanceof DriftError) {
+        const partialCount = err.partialChanges?.length ?? 0;
         this.#log(
           'warn',
           `Go drift detected (${err.op} on ${err.table} pk=${JSON.stringify(err.pk)} has=${err.hasCount}); ` +
-            `re-initing engine from current snapshot, dropping this advance`,
+            `re-initing engine from current snapshot, forwarding ${partialCount} partial RowChanges`,
         );
         // Record this drift in the sliding window BEFORE the reinit so
         // breaker arithmetic reflects the true rate even if reinit hangs.
@@ -293,7 +294,17 @@ export class GoComputeBackend {
           throw err; // surface original drift so caller's fallback engages
         }
         this.#maybeTripDriftBreaker();
-        return {changes: [], timings: []};
+        // Forward partial output produced by Pushes that completed before
+        // the drift panic. Matches TS view-syncer's assert-and-throw path
+        // where the pre-throw RowChanges already streamed to pokers; the
+        // CVR is then rebuilt against the re-initialized state. Without
+        // this, Go silently swallowed RowChanges that TS would have
+        // emitted, producing the observable TS/Go output divergence seen
+        // in 20-user 30-min shadow soaks.
+        return {
+          changes: err.partialChanges ?? [],
+          timings: err.partialTimings ?? [],
+        };
       }
 
       const sidecarUnavailable =
