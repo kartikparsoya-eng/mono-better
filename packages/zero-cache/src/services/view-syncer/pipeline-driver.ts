@@ -529,7 +529,7 @@ export class PipelineDriver {
             // filter (see #goHydrate, addQueries, the drift-audit picker);
             // the reset re-register callback was the one that missed it.
             () =>
-              Array.from(this.#pipelines.entries())
+              [...this.#pipelines.entries()]
                 .filter(
                   ([queryID, p]) =>
                     !this.#isInternalQueryID(queryID) &&
@@ -585,6 +585,15 @@ export class PipelineDriver {
       rows: Record<string, unknown>[];
     }
   > {
+    // MED-8 (dispatch) invariant: this method is called from the Go backend's
+    // (re-)init callback, which can run from the restart handler OUTSIDE the
+    // ViewSyncer lock. It is safe ONLY because it is fully SYNCHRONOUS — the
+    // snapshot reference captured here is read consistently through to the end
+    // with no intervening `await`, so a concurrent advance (which can only run
+    // between awaits, JS being single-threaded) cannot swap the snapshot
+    // mid-build. DO NOT introduce an `await` into this method; if row reads
+    // ever need to go async, snapshot `db`/`version` first and pin them, or
+    // hoist the call back under the lock.
     const {db} = this.#snapshotter.current();
     const tables: Record<
       string,
@@ -849,22 +858,43 @@ export class PipelineDriver {
     if (!costModel) {
       return planned;
     }
-    return planQuery(planned, costModel);
+    // MED-10 (dispatch): cost-model planning is an optimisation, not a
+    // correctness requirement — the ordering-completed `planned` AST already
+    // runs correctly on Go. A planner fault on a skewed/edge-case schema
+    // previously threw out of here and killed the whole hydrate/advance
+    // dispatch. Degrade gracefully to the unplanned AST instead, warning once
+    // so the gap stays visible.
+    try {
+      return planQuery(planned, costModel);
+    } catch (e) {
+      this.#lc.warn?.(
+        `[go-ivm] cost-model planning failed; falling back to unplanned ` +
+          `ordering for this query`,
+        e,
+      );
+      return planned;
+    }
   }
 
   /**
    * Clears storage used for the pipelines. Call this when the
    * PipelineDriver will no longer be used.
    */
-  destroy() {
+  destroy(): Promise<void> {
     if (this.#driftAuditTimer) {
       clearInterval(this.#driftAuditTimer);
       this.#driftAuditTimer = null;
     }
     this.#storage.destroy();
     this.#snapshotter.destroy();
-    // Fire-and-forget: tear down Go engine for this group
-    this.#goBackend?.destroy().catch(() => {});
+    // MED-5 (dispatch): await the Go engine teardown rather than fire-and-
+    // forget. On a shared sidecar a rapid recycle — a new ViewSyncer for the
+    // SAME client group starting before this one's teardown lands — could
+    // otherwise race this group's destroy RPC against the new engine's init,
+    // tearing down freshly-initialised state. Awaiting serialises destroy
+    // before any recreate. Errors are swallowed (teardown is best-effort and
+    // the Go side evicts idle groups regardless).
+    return this.#goBackend?.destroy().catch(() => {}) ?? Promise.resolve();
   }
 
   /** @return Map from query ID to PipelineInfo for all added queries. */
@@ -1453,8 +1483,18 @@ export class PipelineDriver {
         );
         goCount = -1; // unknown; skip the cross-check this cycle
       }
-      const tsExpected = [...this.#pipelines.keys()].filter(
-        qid => !this.#isInternalQueryID(qid),
+      // MED-7 (dispatch): count ONLY the queries Go actually registers a
+      // pipeline for. Queries rooted at an internal table always run via TS
+      // and are never sent to Go (see #goHydrate / addQueries gate above), so
+      // Go's pipelineCount() excludes them. The old filter dropped only
+      // internal *query IDs* — an internal-table-rooted query then inflated
+      // tsExpected past goCount and tripped a FALSE freeze, firing a spurious
+      // resetEngine (the CRIT-5 drift-loop amplifier). Match the exact
+      // predicate auditableIDs uses below.
+      const tsExpected = [...this.#pipelines.entries()].filter(
+        ([qid, entry]) =>
+          !this.#isInternalQueryID(qid) &&
+          !this.#isInternalTable(entry.transformedAst.table),
       ).length;
       if (goCount >= 0 && goCount < tsExpected) {
         this.#driftAuditFreezes.add(1);
@@ -2420,7 +2460,7 @@ export class PipelineDriver {
     let row: Row | undefined;
     if (type === ChangeType.REMOVE) {
       row = undefined;
-    } else if (rc.row == null) {
+    } else if (rc.row === null || rc.row === undefined) {
       // ADD/EDIT MUST carry a full row — Go's streamNodes sets rc.Row =
       // node.Row for every non-REMOVE change. A missing row here is a
       // Go-side wire/serialization bug. Previously we silently substituted
@@ -3435,25 +3475,48 @@ function pgTypeToGoType(
   pgType: string,
   warn?: (msg: string) => void,
 ): 'string' | 'number' | 'boolean' | 'null' | 'json' {
-  // dataType may be in "lite type string" format: "bool|nn", "int4|nn", etc.
-  // Extract just the upstream type (before any pipe delimiter).
+  // dataType may be in "lite type string" format: "bool|nn", "int4|nn",
+  // "varchar(255)|nn" etc. Extract the upstream type (before any pipe
+  // delimiter), strip any "(N)" args (e.g. char(32) → char), and lowercase —
+  // exactly mirroring `formatTypeForLookup` in types/pg-data-type.ts so this
+  // Go-dispatch mapping stays in lock-step with the canonical
+  // `pgToZqlTypeMap`. MED-5/6/7/9: the previous hand-rolled list was a
+  // divergent copy that dropped TIME/TIMETZ, bare INT, the SERIAL family,
+  // bare FLOAT, and never stripped `(N)` (so `varchar(255)` fell through to
+  // the unknown→string warn path). Keep this list byte-for-byte aligned with
+  // pgToZqlTypeMap — if a type is added there, add it here too.
   const delim = pgType.indexOf('|');
-  const t = (delim > 0 ? pgType.substring(0, delim) : pgType).toUpperCase();
+  const upstream = delim > 0 ? pgType.substring(0, delim) : pgType;
+  const argStart = upstream.indexOf('(');
+  const t = (argStart > 0 ? upstream.substring(0, argStart) : upstream)
+    .trim()
+    .toUpperCase();
   if (t === 'BOOL' || t === 'BOOLEAN') return 'boolean';
   if (
-    t === 'INT2' || t === 'INT4' || t === 'INT8' ||
-    t === 'SMALLINT' || t === 'INTEGER' || t === 'BIGINT' ||
-    t === 'FLOAT4' || t === 'FLOAT8' ||
+    // Integer + serial families (PG rewrites SERIAL → INTEGER, but the
+    // declared type may still surface as serial in a lite type string).
+    t === 'SMALLINT' || t === 'INTEGER' || t === 'INT' ||
+    t === 'INT2' || t === 'INT4' || t === 'INT8' || t === 'BIGINT' ||
+    t === 'SMALLSERIAL' || t === 'SERIAL' ||
+    t === 'SERIAL2' || t === 'SERIAL4' || t === 'SERIAL8' ||
+    t === 'BIGSERIAL' ||
+    // Real / floating / fixed-point.
     t === 'REAL' || t === 'DOUBLE PRECISION' ||
+    t === 'FLOAT' || t === 'FLOAT4' || t === 'FLOAT8' ||
     t === 'NUMERIC' || t === 'DECIMAL' ||
+    // Date / time — all mapped to number (epoch-ish) like the canonical map.
+    t === 'DATE' ||
+    t === 'TIME' || t === 'TIMETZ' ||
+    t === 'TIME WITH TIME ZONE' || t === 'TIME WITHOUT TIME ZONE' ||
     t === 'TIMESTAMP' || t === 'TIMESTAMPTZ' ||
-    t === 'TIMESTAMP WITHOUT TIME ZONE' || t === 'TIMESTAMP WITH TIME ZONE' ||
-    t === 'DATE'
+    t === 'TIMESTAMP WITH TIME ZONE' ||
+    t === 'TIMESTAMP WITHOUT TIME ZONE'
   ) return 'number';
   if (t === 'JSON' || t === 'JSONB') return 'json';
   // Explicitly recognised string-shaped types — keep this list growing.
   if (
-    t === 'TEXT' || t === 'VARCHAR' || t === 'CHAR' || t === 'BPCHAR' ||
+    t === 'TEXT' || t === 'VARCHAR' || t === 'CHARACTER VARYING' ||
+    t === 'CHAR' || t === 'CHARACTER' || t === 'BPCHAR' ||
     t === 'UUID' || t === 'CITEXT' || t === 'NAME'
   ) return 'string';
   // Postgres array types (e.g. INT4[], TEXT[]) — Postgres emits them as

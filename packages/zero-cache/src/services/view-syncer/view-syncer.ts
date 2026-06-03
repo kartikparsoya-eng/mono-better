@@ -2511,7 +2511,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     // Wait for existing lock logic to complete before
     // cleaning up the pipelines and closing db connections.
     await this.#lock.withLock(() => {});
-    this.#pipelines.destroy();
+    // Await the Go engine teardown (MED-5) so a same-cg recycle can't race a
+    // destroy RPC against a new engine's init on the shared sidecar.
+    await this.#pipelines.destroy();
   }
 
   /**
