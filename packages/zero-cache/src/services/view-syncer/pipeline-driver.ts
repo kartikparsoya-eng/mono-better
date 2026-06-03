@@ -2049,9 +2049,11 @@ export class PipelineDriver {
         liveCompanions.push({input: companionInput, childField, resolvedValue});
       }
 
-      // Note: This hydrationTime is a wall-clock overestimate, as it does
-      // not take time slicing into account. The view-syncer resets this
-      // to a more precise processing-time measurement with setHydrationTime().
+      // Note: hydrationTimeMs is a wall-clock measurement taken across the
+      // (time-sliced, yield-punctuated) hydrate, so it can overestimate pure
+      // processing time. It is the value stored on the pipeline and used by
+      // the adaptive hydrate circuit-breaker math and the slow-hydrate
+      // warning; there is no separate precise-reset pass.
       this.#pipelines.set(queryID, {
         input,
         hydrationTimeMs,
@@ -2260,7 +2262,21 @@ export class PipelineDriver {
     //      from metrics whether we're seeing many of these (signal of
     //      an error class we should explicitly handle).
     const goPromise = this.#goBackend!.advanceStream(snapshotChanges)
-      .then(r => r.changes.map(rc => this.#goRowChangeToRowChange(rc)))
+      .then(r => {
+        // Record Go-side per-(table,op) advance timings into the same
+        // #advanceTime histogram the TS-native path populates
+        // (pipeline-driver.ts:2914), so Go-primary has table/op timing
+        // attribution parity instead of dropping r.timings on the floor.
+        if (r.timings) {
+          for (const t of r.timings) {
+            this.#advanceTime.recordMs(t.ms, {
+              table: t.table,
+              type: t.type === 0 ? 'add' : t.type === 1 ? 'remove' : 'edit',
+            });
+          }
+        }
+        return r.changes.map(rc => this.#goRowChangeToRowChange(rc));
+      })
       .catch(e => {
         const msg = e instanceof Error ? e.message : String(e);
 
@@ -2352,12 +2368,32 @@ export class PipelineDriver {
     // an intentional shape match, not a bug. Setting `row = rc.rowKey` here
     // diverged from TS and broke shadow-compare on every REMOVE (Bug #23
     // regression caught in soak; my prior MEDIUM-2 "fix" was wrong).
+    let row: Row | undefined;
+    if (type === ChangeType.REMOVE) {
+      row = undefined;
+    } else if (rc.row == null) {
+      // ADD/EDIT MUST carry a full row — Go's streamNodes sets rc.Row =
+      // node.Row for every non-REMOVE change. A missing row here is a
+      // Go-side wire/serialization bug. Previously we silently substituted
+      // rc.rowKey, shipping a PK-only row that corrupts the client view
+      // invisibly. Surface it at error level (the rowKey fallback is kept
+      // only so one wire glitch doesn't crash the merge), so the bug is
+      // diagnosable instead of hidden.
+      this.#lc.error?.(
+        `[go-primary] ${type === ChangeType.ADD ? 'ADD' : 'EDIT'} RowChange ` +
+          `missing row for ${rc.table} ${JSON.stringify(rc.rowKey)} — Go wire ` +
+          `bug; falling back to rowKey (PK-only row)`,
+      );
+      row = rc.rowKey as Row;
+    } else {
+      row = rc.row as Row;
+    }
     return {
       type,
       queryID: rc.queryID,
       table: rc.table,
       rowKey: rc.rowKey as Row,
-      row: type === ChangeType.REMOVE ? undefined : ((rc.row ?? rc.rowKey) as Row),
+      row,
     } as RowChange;
   }
 
