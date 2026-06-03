@@ -581,6 +581,7 @@ export class PipelineDriver {
       columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}>;
       primaryKey: string[];
       uniqueKeys?: string[][] | undefined;
+      minRowVersion?: string | null | undefined;
       rows: Record<string, unknown>[];
     }
   > {
@@ -591,6 +592,7 @@ export class PipelineDriver {
         columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}>;
         primaryKey: string[];
         uniqueKeys?: string[][] | undefined;
+        minRowVersion?: string | null | undefined;
         rows: Record<string, unknown>[];
       }
     > = {};
@@ -634,6 +636,9 @@ export class PipelineDriver {
         columns,
         primaryKey: [...(this.#primaryKeys?.get(name) ?? spec.tableSpec.primaryKey)],
         uniqueKeys,
+        // Forward minRowVersion so the Go streamer can bump emitted rows'
+        // _0_version when below it (audit item K).
+        minRowVersion: spec.tableSpec.minRowVersion,
         rows,
       };
     }

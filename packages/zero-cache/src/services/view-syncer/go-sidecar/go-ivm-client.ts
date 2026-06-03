@@ -67,6 +67,13 @@ export type TableData = {
   columns: Record<string, ColumnSchema>;
   primaryKey: string[];
   uniqueKeys?: string[][] | undefined;
+  /**
+   * Table's minRowVersion (liteTableSpec.minRowVersion), set after a RESET
+   * during incremental catchup. Forwarded so the Go streamer can bump an
+   * emitted row's _0_version up to it when below — port of streamNodes
+   * (pipeline-driver.ts:3172-3178). Omitted/undefined means no bump.
+   */
+  minRowVersion?: string | null | undefined;
   rows: Record<string, unknown>[];
 };
 

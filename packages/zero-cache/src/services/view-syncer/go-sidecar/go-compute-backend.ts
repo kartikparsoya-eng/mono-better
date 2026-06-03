@@ -533,6 +533,7 @@ export class GoComputeBackend {
         columns: t.columns,
         primaryKey: t.primaryKey,
         uniqueKeys: t.uniqueKeys,
+        minRowVersion: t.minRowVersion,
         rows: [],
       };
     }
