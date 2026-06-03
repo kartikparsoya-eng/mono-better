@@ -982,7 +982,15 @@ export class PipelineDriver {
     query: AST,
   ): Promise<Iterable<RowChange | 'yield'>> {
     this.removeQuery(queryID);
-    const goResult = await this.#goBackend!.hydrate(queryID, query);
+    // Plan the AST the same way the batch path does so Go's pipeline
+    // gets the planner's flip:true annotation and the side-effect of
+    // creating TableSources in this.#tables (via #planAstForGo →
+    // completeOrdering → #getSource). Without this, single-query
+    // hydrate fed Go a raw AST → H18-class over-emit on OR-with-CSQ
+    // shapes, and post-reconnect getRow() panicked because the
+    // TableSource was never created. (Audit fix F.)
+    const planned = this.#planAstForGo(query);
+    const goResult = await this.#goBackend!.hydrate(queryID, planned);
 
     // Store a minimal pipeline entry for queries() map and hydration time tracking
     // (no TS pipeline needed — Go handles push processing). The real
@@ -997,7 +1005,7 @@ export class PipelineDriver {
         setOutput: () => {},
       } as unknown as Input,
       hydrationTimeMs: goResult.timingMs ?? 0,
-      transformedAst: query,
+      transformedAst: planned,
       transformationHash,
       companions: [],
     });
