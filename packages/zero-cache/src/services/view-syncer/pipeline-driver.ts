@@ -518,11 +518,27 @@ export class PipelineDriver {
             // Re-register the active queries after a restart-driven reinit,
             // otherwise Go would have empty pipelines while TS thinks they
             // exist (REVIEW-final restart-correctness gap).
+            //
+            // Filter out internal control-plane queries (permissions /
+            // clients / mutations). Go never registers a Source for those
+            // tables (#currentTablesForGo skips them), so re-registering an
+            // internal query during reset makes engine.AddQueries panic
+            // "no source for table <appID>_<shard>.clients" → resetEngine
+            // throws → the drift recovery cascades into client-connection
+            // failures. Every other dispatch site already applies this
+            // filter (see #goHydrate, addQueries, the drift-audit picker);
+            // the reset re-register callback was the one that missed it.
             () =>
-              Array.from(this.#pipelines.entries(), ([queryID, p]) => ({
-                queryID,
-                ast: p.transformedAst,
-              })),
+              Array.from(this.#pipelines.entries())
+                .filter(
+                  ([queryID, p]) =>
+                    !this.#isInternalQueryID(queryID) &&
+                    !this.#isInternalTable(p.transformedAst.table),
+                )
+                .map(([queryID, p]) => ({
+                  queryID,
+                  ast: p.transformedAst,
+                })),
           )
         : null;
 
