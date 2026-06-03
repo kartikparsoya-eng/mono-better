@@ -179,7 +179,7 @@ export class GoComputeBackend {
     await this.#doInit(tables);
   }
 
-  async resetEngine(tables: Record<string, TableData>): Promise<void> {
+  async resetEngine(): Promise<void> {
     if (this.#initialized) {
       try {
         await this.#client().destroy(this.#clientGroupID, this.#cgOpts());
@@ -187,6 +187,15 @@ export class GoComputeBackend {
         this.#log('warn', 'destroy before reset failed (continuing)', err);
       }
     }
+    // CRIT-5: read the snapshot HERE — after the destroy round-trip and
+    // immediately before reinit — not at schedule time. Capturing it early
+    // (in #scheduleGoReset / #maybeResetGoBackend) meant mutations that
+    // landed during the destroy + network window were missing from the
+    // loaded rows, so the next #snapshotter.advance() diff applied against
+    // state that didn't match the just-loaded data → drift → another reset
+    // → loop. The other #reinitPerCGAndRegisterQueries call sites already
+    // capture via #getCurrentTables() at reinit time; this matches them.
+    const tables = this.#getCurrentTables();
     // Full rebuild: init engine + re-register queries. The bare #doInit
     // path that lived here used to leave Go with zero pipelines while TS
     // still had registered queries — every subsequent advance returned
@@ -277,7 +286,13 @@ export class GoComputeBackend {
         const partialCount = err.partialChanges?.length ?? 0;
         this.#log(
           'warn',
-          `Go drift detected (${err.op} on ${err.table} pk=${JSON.stringify(err.pk)} has=${err.hasCount}); ` +
+          `Go drift detected (${err.op} on ${err.table} pk=${JSON.stringify(
+            err.pk,
+            // HIGH-9: msgpackr decodes int64 PKs > 2^32 as BigInt, which
+            // plain JSON.stringify throws on — crashing drift RECOVERY itself
+            // with a misleading error instead of recovering. Stringify BigInt.
+            (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
+          )} has=${err.hasCount}); ` +
             `re-initing engine from current snapshot, forwarding ${partialCount} partial RowChanges`,
         );
         // Record this drift in the sliding window BEFORE the reinit so

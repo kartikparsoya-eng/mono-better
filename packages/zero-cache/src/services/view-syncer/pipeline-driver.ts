@@ -578,7 +578,7 @@ export class PipelineDriver {
   #currentTablesForGo(): Record<
     string,
     {
-      columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}>;
+      columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean}>;
       primaryKey: string[];
       uniqueKeys?: string[][] | undefined;
       minRowVersion?: string | null | undefined;
@@ -589,7 +589,7 @@ export class PipelineDriver {
     const tables: Record<
       string,
       {
-        columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}>;
+        columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean}>;
         primaryKey: string[];
         uniqueKeys?: string[][] | undefined;
         minRowVersion?: string | null | undefined;
@@ -611,9 +611,20 @@ export class PipelineDriver {
         this.#lc.debug?.(`[go-ivm] skipping internal table ${name}`);
         continue;
       }
-      const columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'}> = {};
+      const columns: Record<
+        string,
+        {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean}
+      > = {};
       for (const [col, colSpec] of Object.entries(spec.tableSpec.columns)) {
-        columns[col] = {type: pgTypeToGoType(colSpec.dataType, warn)};
+        // HIGH-1: forward nullability so Go's nullable-aware SQL (IS NULL /
+        // (? IS NULL OR field > ?)) fires for cursor pagination through a NULL
+        // on a nullable order column — otherwise Go yields 0 rows where TS
+        // yields N. notNull may be true/false/null/undefined; only an explicit
+        // true means non-nullable.
+        columns[col] = {
+          type: pgTypeToGoType(colSpec.dataType, warn),
+          optional: colSpec.notNull !== true,
+        };
       }
       let rows: Record<string, unknown>[] = [];
       try {
@@ -685,9 +696,10 @@ export class PipelineDriver {
    */
   #maybeResetGoBackend() {
     if (!this.#goBackend || !this.#goBackend.initialized) return;
-    const tables = this.#currentTablesForGo();
     this.#lc.info?.('Resetting Go backend (snapshot leapfrog)');
-    const promise = this.#goBackend.resetEngine(tables);
+    // CRIT-5: resetEngine reads the snapshot itself at reinit time (after
+    // its destroy await) — do not pre-capture here.
+    const promise = this.#goBackend.resetEngine();
     this.#goInitPromise = promise;
     promise
       .then(() => this.#lc.info?.('Go backend reset complete'))
@@ -1301,7 +1313,15 @@ export class PipelineDriver {
     queries: {queryID: string; ast: AST}[],
     tsResultsPerQuery: Map<string, RowChange[]>,
   ): Promise<void> {
-    if (!this.#goBackend?.initialized) return;
+    // HIGH-5: this is a SHADOW-only comparison. It previously returned only on
+    // !initialized, so in Go-primary it ran a second full hydrateManyStream
+    // against Go (Go-vs-Go, always matches) — wasted work. It also used to be
+    // load-bearing because its #planAstForGo created the TableSources that the
+    // per-query #goHydrate path skipped (CRIT-3); that's fixed (#goHydrate now
+    // plans the AST itself), so gating on shadow mode no longer re-exposes the
+    // getRow panic. In Go-primary, Go IS the source of truth — nothing to
+    // compare against.
+    if (!this.#shadowMode || !this.#goBackend?.initialized) return;
     // Internal queries (lmids, mutationResults) target Zero's control-plane
     // tables which Go doesn't track. They always run via TS's TableSource.
     // Drop them from the batch before dispatching to Go.
@@ -2273,11 +2293,35 @@ export class PipelineDriver {
         // (pipeline-driver.ts:2914), so Go-primary has table/op timing
         // attribution parity instead of dropping r.timings on the floor.
         if (r.timings) {
+          // HIGH-3: feed the per-query `query-update-server` inspector metric
+          // (the TS-native path populates it via MeasurePushOperator, which
+          // can't exist across the RPC boundary). Go only reports per-(table,
+          // op) timings, so attribute each table's time to every user query
+          // whose top-level table matches. This is an APPROXIMATION: a query
+          // reading a table only through a related/CSQ subquery isn't
+          // attributed, and a table feeding N queries credits all N — but it
+          // makes the metric non-zero and directionally useful instead of
+          // permanently empty. Built once per advance.
+          const tableToQueries = new Map<string, string[]>();
+          for (const [qid, p] of this.#pipelines) {
+            if (this.#isInternalQueryID(qid)) continue;
+            const t = p.transformedAst.table;
+            const list = tableToQueries.get(t);
+            if (list) list.push(qid);
+            else tableToQueries.set(t, [qid]);
+          }
           for (const t of r.timings) {
             this.#advanceTime.recordMs(t.ms, {
               table: t.table,
               type: t.type === 0 ? 'add' : t.type === 1 ? 'remove' : 'edit',
             });
+            for (const qid of tableToQueries.get(t.table) ?? []) {
+              this.#inspectorDelegate.addMetric(
+                'query-update-server',
+                t.ms,
+                qid,
+              );
+            }
           }
         }
         return r.changes.map(rc => this.#goRowChangeToRowChange(rc));
@@ -2426,9 +2470,11 @@ export class PipelineDriver {
     }
     this.#goResetInFlight = true;
     const MAX_RESET_RETRIES = 3;
-    const tables = this.#currentTablesForGo();
     this.#lc.warn?.(`[shadow] Scheduling Go reset (${reason})`);
-    this.#goInitPromise = this.#goBackend.resetEngine(tables);
+    // CRIT-5: resetEngine reads the snapshot at reinit time (after its
+    // destroy await), not now — pre-capturing here loaded a stale snapshot
+    // and amplified drift into a reset loop.
+    this.#goInitPromise = this.#goBackend.resetEngine();
     this.#goInitPromise
       .then(() => {
         this.#lc.info?.(`[shadow] Go reset complete (${reason})`);
