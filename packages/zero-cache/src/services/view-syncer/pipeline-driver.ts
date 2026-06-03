@@ -66,7 +66,7 @@ import {
 } from './go-sidecar/go-compute-backend.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {SnapshotChange, RowChange as GoRowChange} from './go-sidecar/go-ivm-client.ts';
-import {StaleInitEpochError} from './go-sidecar/go-ivm-client.ts';
+import {DriftError, StaleInitEpochError} from './go-sidecar/go-ivm-client.ts';
 import {type ShardID} from '../../types/shards.ts';
 import {
   getSubscriptionState,
@@ -2507,6 +2507,20 @@ export class PipelineDriver {
       } catch (e) {
         this.#lc.error?.(`[shadow] Go advance failed: ${e}`);
         this.#scheduleGoReset('shadow-advance-failure');
+        // If the failure was a DriftError carrying partial RowChanges from
+        // Pushes that completed before the panic, surface them to the
+        // shadow comparator so its diff against TS reflects the actual
+        // mid-advance divergence (which row/op caused the drift) instead
+        // of "TS=N rows, Go=0 rows" (every row of the drift'd advance
+        // appearing as a Go-side miss). Matches the post-drift partial-
+        // emit semantics now shipped end-to-end (Go engine.Advance →
+        // RPC drift data → DriftError.partialChanges).
+        if (e instanceof DriftError && e.partialChanges.length > 0) {
+          return {
+            results: e.partialChanges.map((rc: GoRowChange) => this.#goRowChangeToRowChange(rc)),
+            ms: performance.now() - goStart,
+          };
+        }
         return {results: [], ms: performance.now() - goStart};
       }
     })();
