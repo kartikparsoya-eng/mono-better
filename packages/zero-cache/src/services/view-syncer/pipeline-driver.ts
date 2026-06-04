@@ -367,6 +367,17 @@ const MIN_ADVANCEMENT_TIME_LIMIT_MS = 50;
 const DRIFT_AUDIT_HEARTBEAT_MS = 5 * 60_000;
 
 /**
+ * Consecutive drift-audit cycles a Go-pipeline-count shortfall must persist
+ * before the audit fires a (full, expensive) resetEngine. The check is racy —
+ * Go registers queries via async addQueriesStream that can take hundreds of ms
+ * under load, so an audit firing mid-registration sees a transient shortfall.
+ * 2 means "seen on two consecutive audits" (≈ two audit intervals apart), which
+ * a registration lag cannot survive; a genuine freeze persists and heals one
+ * cycle later. See {@link PipelineDriver.#driftCountMismatchStreak}.
+ */
+const DRIFT_COUNT_MISMATCH_GRACE = 2;
+
+/**
  * Manages the state of IVM pipelines for a given ViewSyncer (i.e. client group).
  */
 export class PipelineDriver {
@@ -517,6 +528,19 @@ export class PipelineDriver {
   #goResetDirty = false;
   /** Retry attempts of the current reset cycle; resets to 0 on success. */
   #goResetRetries = 0;
+  /**
+   * Consecutive drift-audit cycles where Go's pipelineCount < tsExpected. The
+   * count check is racy: Go registers queries via async addQueriesStream
+   * (hundreds of ms under load), so an audit firing mid-registration sees a
+   * transient shortfall that self-resolves by the next cycle. Resetting on the
+   * FIRST shortfall churned ~4-6 needless full re-registrations per soak in
+   * Go-primary mode. We now require the shortfall to PERSIST across
+   * `DRIFT_COUNT_MISMATCH_GRACE` consecutive audits (cycles are ~auditInterval
+   * apart, so a registration lag can't survive the grace) before resetting; a
+   * genuine freeze persists and still self-heals, just one cycle later. Resets
+   * to 0 the moment goCount catches up.
+   */
+  #driftCountMismatchStreak = 0;
 
   #driftAuditTimer: ReturnType<typeof setInterval> | null = null;
   // Collapses overlapping audit ticks when one runs longer than the interval.
@@ -1574,10 +1598,28 @@ export class PipelineDriver {
           !this.#isInternalTable(entry.transformedAst.table),
       ).length;
       if (goCount >= 0 && goCount < tsExpected) {
+        // Grace: a shortfall on a SINGLE audit is almost always async
+        // registration lag (addQueriesStream in flight), which self-resolves by
+        // the next cycle. Only a shortfall that PERSISTS across
+        // DRIFT_COUNT_MISMATCH_GRACE consecutive audits is a real freeze worth a
+        // full resetEngine. This stops the ~4-6 needless re-registrations per
+        // soak observed in Go-primary mode (P2c soak finding) while still
+        // self-healing a genuine freeze one cycle later.
+        this.#driftCountMismatchStreak++;
+        if (this.#driftCountMismatchStreak < DRIFT_COUNT_MISMATCH_GRACE) {
+          this.#lc.debug?.(
+            `[drift-audit] pipeline-count shortfall TS=${tsExpected} Go=${goCount} ` +
+              `(streak ${this.#driftCountMismatchStreak}/${DRIFT_COUNT_MISMATCH_GRACE}) — ` +
+              `likely registration lag; deferring reset`,
+          );
+          return;
+        }
+        this.#driftCountMismatchStreak = 0;
         this.#driftAuditFreezes.add(1);
         this.#lc.error?.(
           `[drift-audit] FREEZE detected: TS=${tsExpected} queries registered, ` +
-            `Go=${goCount} pipelines. Per-CG recovery dropped pipeline state. ` +
+            `Go=${goCount} pipelines for ${DRIFT_COUNT_MISMATCH_GRACE} consecutive ` +
+            `audits. Per-CG recovery dropped pipeline state. ` +
             `Triggering resetEngine to self-heal.`,
         );
         // Fire-and-forget. resetEngine handles its own concurrency via
@@ -1585,6 +1627,13 @@ export class PipelineDriver {
         // gate await in #reinitPerCGAndRegisterQueries.
         void this.#scheduleGoReset('drift-audit-pipeline-count-mismatch');
         return;
+      }
+      // Go's count caught up (or overtook) — clear any pending shortfall streak
+      // so a fresh transient lag later starts its grace window from zero. Only
+      // on a SUCCESSFUL probe (goCount >= 0); a failed probe (-1) is "unknown"
+      // and must not clear a genuine persisting shortfall.
+      if (goCount >= 0) {
+        this.#driftCountMismatchStreak = 0;
       }
       // #addQueryImpl asserts #advanceContext===null, and reusing #streamer
       // mid-advance would corrupt the in-flight diff. Wait for the next tick.
