@@ -662,6 +662,15 @@ export class PipelineDriver {
     // mid-build. DO NOT introduce an `await` into this method; if row reads
     // ever need to go async, snapshot `db`/`version` first and pin them, or
     // hoist the call back under the lock.
+    //
+    // Bail fast if the snapshotter was torn down (CG eviction / worker
+    // reassignment): current() still returns the old Snapshot (destroy() closes
+    // the connection but doesn't clear #curr), so reads below would throw
+    // "database connection is not open" once per table. One typed throw lets the
+    // caller (resetEngine / #scheduleGoReset) abandon the reset cleanly.
+    if (this.#snapshotter.destroyed) {
+      throw new Error('snapshotter destroyed — CG torn down; aborting Go (re-)init');
+    }
     const {db} = this.#snapshotter.current();
     const tables: Record<
       string,
@@ -2624,6 +2633,16 @@ export class PipelineDriver {
    */
   #scheduleGoReset(reason: string): void {
     if (!this.#goBackend) return;
+    // If the snapshotter has been torn down (CG eviction / worker reassignment),
+    // there is nothing to reset — resetEngine would re-read a CLOSED snapshot
+    // connection in #currentTablesForGo and fail-loop ("database connection is
+    // not open" per table, ×N, then a failed reset that retries). The CG is
+    // gone; skip cleanly. (More likely under the P2c trigger path, whose longer
+    // advanceToHead window widens the reset-vs-teardown overlap.)
+    if (this.#snapshotter.destroyed) {
+      this.#lc.debug?.(`[go-reset] snapshotter torn down; skipping reset (${reason})`);
+      return;
+    }
     // Record EVERY caller (even ones we coalesce with #goResetDirty) so the
     // metric reflects the real trigger rate, not just the post-dedup
     // executed-resets count. Dashboard queries that want executed count can
@@ -2648,6 +2667,18 @@ export class PipelineDriver {
         this.#goResetRetries = 0;
       })
       .catch(err => {
+        // If the snapshotter was torn down DURING the reset (destroy raced the
+        // resetEngine destroy-await → #currentTablesForGo read a closed conn),
+        // the CG is gone — abandon cleanly instead of logging an error and
+        // retrying into the same closed connection.
+        if (this.#snapshotter.destroyed) {
+          this.#lc.debug?.(
+            `[go-reset] snapshotter torn down during reset; abandoning (${reason})`,
+          );
+          this.#goResetRetries = 0;
+          this.#goResetDirty = false;
+          return;
+        }
         this.#lc.error?.(`[shadow] Go reset failed (${reason}):`, err);
         // Reset itself failed — retry with bounded attempts. After cap,
         // give up and let the system stay in TS-only fallback until the

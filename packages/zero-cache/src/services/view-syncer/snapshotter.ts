@@ -95,6 +95,14 @@ export class Snapshotter {
   readonly #pageCacheSizeKib: number | undefined;
   #curr: Snapshot | undefined;
   #prev: Snapshot | undefined;
+  // Set once destroy() closes the connections. initialized() still reports true
+  // (it only checks #curr !== undefined and destroy() doesn't clear it), so a
+  // fire-and-forget reader (e.g. the Go reset's table re-read, which can run
+  // outside the ViewSyncer lock and outlive a CG teardown / worker reassignment)
+  // needs this flag to tell "snapshot is gone" from "snapshot is live but empty"
+  // — otherwise it reads a closed connection and throws "database connection is
+  // not open" per table.
+  #destroyed = false;
 
   constructor(
     lc: LogContext,
@@ -127,6 +135,16 @@ export class Snapshotter {
 
   initialized(): boolean {
     return this.#curr !== undefined;
+  }
+
+  /**
+   * True once {@link destroy()} has closed the underlying connections. Unlike
+   * {@link initialized()}, this distinguishes a torn-down snapshotter (whose
+   * `current().db` reads would throw "database connection is not open") from a
+   * live one. Reset/re-init readers that can race teardown check this first.
+   */
+  get destroyed(): boolean {
+    return this.#destroyed;
   }
 
   /** Returns the current snapshot. Asserts if {@link initialized()} is false. */
@@ -200,6 +218,7 @@ export class Snapshotter {
    * no longer needed.
    */
   destroy() {
+    this.#destroyed = true;
     this.#curr?.db.db.close();
     this.#prev?.db.db.close();
     this.#lc.debug?.('closed database connections');
