@@ -277,6 +277,33 @@ export type AdvanceResult = {
   goVersion?: string | undefined;
 };
 
+/**
+ * P2c watermark reconciliation (DESIGN-snapshotter-port.md §10). In Go-primary
+ * trigger mode the user-query data is at Go's `goVersion` (V_go) while
+ * internal/control-plane data is at TS's `tsVersion` (V_ts). The CVR
+ * stateVersion is a COMPLETENESS FLOOR — client catchup/poke keys off the
+ * `patchVersion` stamped at the committed CVR version, not the row's own
+ * `_0_version` — so it may only be committed at a version BOTH authorities have
+ * crossed: min(V_ts, V_go). Under-claiming is safe (the ahead side's extra rows
+ * are an idempotent superset, re-delivered next cycle at the committed
+ * patchVersion); over-claiming would let a client miss a change in the gap.
+ *
+ * In push mode `goVersion` is undefined (Go applied TS's diff, so its version is
+ * TS's by construction) and the watermark is simply V_ts.
+ *
+ * `min` is monotone in each argument and each authority only advances, so the
+ * reconciled watermark is non-decreasing — the CVR monotonicity invariant holds.
+ */
+export function reconcileGoPrimaryWatermark(
+  tsVersion: string,
+  goVersion: string | undefined,
+): {version: string; tsVersion: string; goVersion: string | undefined} {
+  if (goVersion === undefined) {
+    return {version: tsVersion, tsVersion, goVersion: undefined};
+  }
+  return {version: minLexiVersion(tsVersion, goVersion), tsVersion, goVersion};
+}
+
 type CompanionPipeline = {
   readonly input: Input;
   readonly childField: string;
@@ -2418,21 +2445,16 @@ export class PipelineDriver {
     // side's extra rows are an idempotent superset delivered at the committed
     // patchVersion), over-claiming risks a client missing a change in the gap.
     // In push mode `goVersion` is undefined and the watermark is simply V_ts.
-    let reconciledVersion = version;
-    let goVersionForResult: string | undefined;
-    if (goVersion !== undefined) {
-      reconciledVersion = minLexiVersion(version, goVersion);
-      goVersionForResult = goVersion;
-      if (reconciledVersion !== version) {
-        // The common path is V_go ≥ V_ts (Go reads head after TS), so the
-        // floor lands on V_ts and this branch is quiet. A lower min means Go
-        // read an OLDER head than TS (e.g. Go re-init left it pinned behind) —
-        // the floor correctly holds the CVR back. Surface it for visibility.
-        this.#lc.debug?.(
-          `[go-primary] reconciled CVR watermark to ${reconciledVersion} ` +
-            `(V_ts=${version}, V_go=${goVersion}) — Go behind TS`,
-        );
-      }
+    const reconciled = reconcileGoPrimaryWatermark(version, goVersion);
+    if (goVersion !== undefined && reconciled.version !== version) {
+      // The common path is V_go ≥ V_ts (Go reads head after TS), so the floor
+      // lands on V_ts and this branch is quiet. A lower min means Go read an
+      // OLDER head than TS (e.g. Go re-init left it pinned behind) — the floor
+      // correctly holds the CVR back. Surface it for visibility.
+      this.#lc.debug?.(
+        `[go-primary] reconciled CVR watermark to ${reconciled.version} ` +
+          `(V_ts=${version}, V_go=${goVersion}) — Go behind TS`,
+      );
     }
 
     // Merge: TS internal-query events + Go user-query events. The two
@@ -2444,11 +2466,11 @@ export class PipelineDriver {
     }
 
     return {
-      version: reconciledVersion,
+      version: reconciled.version,
       numChanges,
       changes: this.#trackRowSetSignatures(yieldMerged()),
-      tsVersion: version,
-      goVersion: goVersionForResult,
+      tsVersion: reconciled.tsVersion,
+      goVersion: reconciled.goVersion,
     };
   }
 
