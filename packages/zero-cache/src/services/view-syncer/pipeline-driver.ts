@@ -64,6 +64,7 @@ import {
   isGoDerivedDiff,
   isGoAdvanceDrive,
   isGoPrimaryTrigger,
+  isGoLeanPrimary,
   goDriftAuditIntervalMs,
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
@@ -517,6 +518,10 @@ export class PipelineDriver {
   // (trigger) instead of advanceStream (push), making Go self-consistent and
   // stamping the CVR at min(V_ts, V_go). Only ever true when !shadowMode.
   readonly #goPrimaryTrigger: boolean;
+  // P3: in Go-PRIMARY mode, skip walking USER-table changes in TS's #advance
+  // (TS holds only stub user pipelines; user TableSources stay current via
+  // snapshot setDB, not these pushes). Only ever true when !shadowMode.
+  readonly #goLeanPrimary: boolean;
   #goInitPromise: Promise<void> | null = null;
   /** Set while #scheduleGoReset is running; collapses concurrent reset requests. */
   #goResetInFlight = false;
@@ -596,6 +601,9 @@ export class PipelineDriver {
       !this.#shadowMode &&
       isGoSidecarEnabled(config) &&
       isGoPrimaryTrigger(config);
+    // P3 lean primary: only in Go-primary mode (TS authoritative in shadow).
+    this.#goLeanPrimary =
+      !this.#shadowMode && isGoSidecarEnabled(config) && isGoLeanPrimary(config);
     // shadowMode already implies isGoSidecarEnabled, so checking the flag
     // alone is sufficient (REVIEW-ts-integration LOW-1).
     this.#goBackend =
@@ -2408,13 +2416,30 @@ export class PipelineDriver {
     }> = [];
     const snapshotChanges: SnapshotChange[] = [];
     for (const entry of diff) {
-      buffered.push(entry);
-      if (this.#isInternalTable(entry.table)) continue;
-      snapshotChanges.push({
-        table: entry.table,
-        prevValues: entry.prevValues as Record<string, unknown>[],
-        nextValue: entry.nextValue as Record<string, unknown> | null,
-      });
+      if (this.#isInternalTable(entry.table)) {
+        // TS advances its real internal-query pipelines from these
+        // (lmids / mutationResults); always replay them.
+        buffered.push(entry);
+        continue;
+      }
+      // User-table change. P3 lean primary: TS holds only STUB user pipelines
+      // (Go owns them) and keeps its user TableSources current via the snapshot
+      // setDB in #advance — NOT via these pushes — so replaying user changes on
+      // TS is pure redundant work. When lean, drop them from TS's replay
+      // buffer. When NOT lean, keep the historical behaviour (replay the full
+      // diff; user pushes are no-ops against stub pipelines).
+      if (!this.#goLeanPrimary) {
+        buffered.push(entry);
+      }
+      // Push mode still ships user changes to Go via advanceStream. Trigger
+      // mode derives its own diff, so Go needs nothing here.
+      if (!this.#goPrimaryTrigger) {
+        snapshotChanges.push({
+          table: entry.table,
+          prevValues: entry.prevValues as Record<string, unknown>[],
+          nextValue: entry.nextValue as Record<string, unknown> | null,
+        });
+      }
     }
     const replayDiff: SnapshotDiff = {
       prev: diff.prev,
@@ -2482,11 +2507,13 @@ export class PipelineDriver {
             goVersion: undefined,
           }));
 
-    // Run TS's #advance with the full diff. Only internal-query pipelines
+    // Run TS's #advance over the replay buffer. Only internal-query pipelines
     // are connected, so user-table pushes are no-ops on TS — the iterator
-    // emits nothing for those, only events for internal queries.
+    // emits nothing for those, only events for internal queries. When lean,
+    // the buffer already excludes user changes, so pass its actual length for
+    // the advance-time heuristic instead of the full diff's numChanges.
     const tsChanges: RowChange[] = [];
-    for (const change of this.#advance(replayDiff, timer, numChanges, true)) {
+    for (const change of this.#advance(replayDiff, timer, buffered.length, true)) {
       if (change === 'yield') {
         await new Promise<void>(resolve => setImmediate(resolve));
       } else {

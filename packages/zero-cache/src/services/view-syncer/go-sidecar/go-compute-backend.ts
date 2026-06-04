@@ -809,6 +809,16 @@ export function isGoPrimaryTrigger(
   return config?.goSidecar?.goPrimaryTrigger === true;
 }
 
+// P3 lean primary: whether TS should skip walking USER-table changes during a
+// Go-primary advance (TS holds only stub user pipelines and keeps user
+// TableSources current via snapshot setDB, so the walk is redundant). Only
+// meaningful in Go-primary mode (enabled && !shadowMode).
+export function isGoLeanPrimary(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): boolean {
+  return config?.goSidecar?.leanPrimary === true;
+}
+
 // Returns 0 when the audit should be off — either Go is disabled, shadow mode
 // already covers it, or the interval is explicitly zeroed in config.
 export function goDriftAuditIntervalMs(

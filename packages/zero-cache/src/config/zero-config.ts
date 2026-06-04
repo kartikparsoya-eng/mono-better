@@ -1181,6 +1181,25 @@ export const zeroOptions = {
         `(advanceStream) path and the CVR stamps at TS's version.`,
       ],
     },
+    leanPrimary: {
+      type: v.boolean().default(false),
+      desc: [
+        `Snapshotter-in-Go (P3): in Go-PRIMARY mode (enabled=true,`,
+        `shadowMode=false), stop TS from walking USER-table changes during`,
+        `advance. TS already holds only no-op STUB pipelines for user queries`,
+        `(Go owns them) and keeps its user TableSources current via the snapshot`,
+        `setDB on every advance — NOT via these pushes — so the walk is pure`,
+        `redundant work. With this on, TS's #advance processes only`,
+        `internal/control-plane changes (lmids, mutationResults); user-table`,
+        `changes are dropped from TS's replay (and, in trigger mode, never`,
+        `materialized at all). The drift audit and cold fallback still`,
+        `re-hydrate user queries on demand from the snapshot-backed TableSources,`,
+        `so correctness is preserved.`,
+        ``,
+        `Has no effect in shadow mode (TS is authoritative there and must walk`,
+        `the full diff). Safe to combine with {bold goSidecar.goPrimaryTrigger}.`,
+      ],
+    },
   },
 };
 
