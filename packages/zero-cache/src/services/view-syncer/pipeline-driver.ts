@@ -69,6 +69,7 @@ import {
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
 import {min as minLexiVersion} from '../../types/lexi-version.ts';
+import {isEnum as isLiteEnum} from '../../types/lite.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {
   SnapshotChange,
@@ -3818,7 +3819,7 @@ function stableStringify(v: unknown): string {
  * 50-table schema doesn't produce 50 lines for the same unknown type.
  */
 const pgTypeWarningsSeen = new Set<string>();
-function pgTypeToGoType(
+export function pgTypeToGoType(
   pgType: string,
   warn?: (msg: string) => void,
 ): 'string' | 'number' | 'boolean' | 'null' | 'json' {
@@ -3838,6 +3839,15 @@ function pgTypeToGoType(
   const t = (argStart > 0 ? upstream.substring(0, argStart) : upstream)
     .trim()
     .toUpperCase();
+  // Enums: the LiteTypeString carries a `|TEXT_ENUM` attribute (e.g.
+  // `TicketPriority|NOT_NULL|TEXT_ENUM`) that the upstream-name extraction above
+  // strips, so a user-defined enum name fell through to the "unrecognised type"
+  // warning. Enums are TEXT-backed and compared as their string labels on BOTH
+  // sides (the SQLite replica stores them as TEXT); the canonical TS mapper
+  // (`dataTypeToZqlValueType`) likewise returns 'string' for enums. Map to
+  // 'string' WITHOUT a warning — this is correct, not a gap. Checked before the
+  // name lookups so an enum named like a builtin can't be mis-typed.
+  if (isLiteEnum(pgType)) return 'string';
   if (t === 'BOOL' || t === 'BOOLEAN') return 'boolean';
   if (
     // Integer + serial families (PG rewrites SERIAL → INTEGER, but the
