@@ -1132,6 +1132,21 @@ export const zeroOptions = {
         `comparison only.`,
       ],
     },
+    advanceToHead: {
+      type: v.boolean().default(false),
+      desc: [
+        `Snapshotter-in-Go (P1): on each shadow advance, ALSO call the sidecar's`,
+        `advanceToHead RPC so the Go side derives its OWN snapshot diff from the`,
+        `replica's changeLog2, then compare it against the diff TS computed for the`,
+        `same advance. This validates the ported Go Snapshotter's fidelity before`,
+        `Go-derived diffs feed the CVR (P2).`,
+        ``,
+        `Requires {bold goSidecar.shadowMode} (the comparison runs in the shadow`,
+        `advance path), a sidecar built with protocolRev>=7 launched with`,
+        `{bold GO_IVM_ADVANCE_TO_HEAD=true} and {bold GO_IVM_SOURCE_MODE=table}.`,
+        `Mismatches are logged at error level under the {italic [go-diff-shadow]} tag.`,
+      ],
+    },
   },
 };
 

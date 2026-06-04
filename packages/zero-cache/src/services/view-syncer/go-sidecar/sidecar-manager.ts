@@ -40,7 +40,7 @@ const initFailureCounter = getOrCreateCounter(
  * `sidecarProtocolRev` in `go-ivm/cmd/sidecar/main.go`. A mismatch refuses
  * to start the manager (REVIEW-final MED-CROSS-5).
  */
-const EXPECTED_PROTOCOL_REV = 6;
+const EXPECTED_PROTOCOL_REV = 7;
 
 /**
  * Cold-start init concurrency cap. When N ViewSyncers start simultaneously,

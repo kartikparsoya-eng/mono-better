@@ -61,11 +61,16 @@ import {
   isGoSidecarEnabled,
   isGoShadowMode,
   isGoShadowVerbose,
+  isGoDerivedDiff,
   goDriftAuditIntervalMs,
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
-import type {SnapshotChange, RowChange as GoRowChange} from './go-sidecar/go-ivm-client.ts';
+import type {
+  SnapshotChange,
+  RowChange as GoRowChange,
+  AdvanceToHeadResult,
+} from './go-sidecar/go-ivm-client.ts';
 import {DriftError, StaleInitEpochError} from './go-sidecar/go-ivm-client.ts';
 import {type ShardID} from '../../types/shards.ts';
 import {
@@ -452,6 +457,10 @@ export class PipelineDriver {
   readonly #inspectorDelegate: InspectorDelegate;
   readonly #goBackend: GoComputeBackend | null = null;
   readonly #shadowMode: boolean;
+  // When true (and shadowMode), each shadow advance also asks Go to derive its
+  // own snapshot diff (advanceToHead) and compares it to TS's. Snapshotter-in-Go
+  // P1 fidelity gate.
+  readonly #goDerivedDiff: boolean;
   #goInitPromise: Promise<void> | null = null;
   /** Set while #scheduleGoReset is running; collapses concurrent reset requests. */
   #goResetInFlight = false;
@@ -504,6 +513,8 @@ export class PipelineDriver {
     this.#costModels = enablePlanner ? new WeakMap() : undefined;
     this.#yieldThresholdMs = yieldThresholdMs;
     this.#shadowMode = isGoShadowMode(config) && isGoSidecarEnabled(config);
+    // advanceToHead diff-shadow only runs inside the shadow advance path.
+    this.#goDerivedDiff = this.#shadowMode && isGoDerivedDiff(config);
     // shadowMode already implies isGoSidecarEnabled, so checking the flag
     // alone is sufficient (REVIEW-ts-integration LOW-1).
     this.#goBackend =
@@ -2722,6 +2733,19 @@ export class PipelineDriver {
     // Compare
     this.#shadowCompare('advance', version, tsChangesForCompare, goResults);
 
+    // Snapshotter-in-Go P1: also have Go derive its OWN diff (advanceToHead)
+    // and compare it to TS's computed snapshotChanges for this same advance.
+    // Best-effort + isolated from the RowChange comparison above; a failure
+    // here never affects the returned (TS) results.
+    if (this.#goDerivedDiff && this.#goBackend?.initialized) {
+      try {
+        const goDerived = await this.#goBackend.advanceToHead();
+        this.#compareGoDerivedDiff(version, snapshotChanges, goDerived);
+      } catch (e) {
+        this.#lc.warn?.(`[go-diff-shadow] advanceToHead failed: ${e}`);
+      }
+    }
+
     // Return TS results (already consumed, wrap in array)
     function* yieldTsResults(): Iterable<RowChange | 'yield'> {
       for (const change of tsChanges) {
@@ -2830,6 +2854,91 @@ export class PipelineDriver {
       `[shadow] ${operation} (${context}): TS and Go match ` +
         `(${tsNorm.length} changes)`,
     );
+  }
+
+  /**
+   * Snapshotter-in-Go P1: compare the diff Go DERIVED itself (advanceToHead)
+   * against the diff TS computed for the same advance (`tsChanges`, already
+   * filtered to non-internal tables). This is a DIFF-level comparison (table +
+   * prevValues + nextValue), distinct from #shadowCompare's RowChange-level one.
+   *
+   * Each change is reduced to an order-independent signature so the comparison
+   * is insensitive to emission order and to prevValues ordering. Mismatches are
+   * logged at error under [go-diff-shadow]; matches at debug. A Go-side reset
+   * (schema/truncate/permissions) is logged and the comparison skipped — TS's
+   * shadow advance suppresses resets, so the two aren't comparable that cycle.
+   */
+  #compareGoDerivedDiff(
+    context: string,
+    tsChanges: SnapshotChange[],
+    goDerived: AdvanceToHeadResult,
+  ): void {
+    if (goDerived.reset) {
+      this.#lc.info?.(
+        `[go-diff-shadow] (${context}): Go reported reset ` +
+          `${goDerived.reset.reason} (${goDerived.reset.msg}) — skipping diff compare`,
+      );
+      return;
+    }
+
+    const sigOf = (
+      table: string,
+      prevValues: Record<string, unknown>[],
+      nextValue: Record<string, unknown> | null,
+    ): string => {
+      const prev = (prevValues ?? [])
+        .map(r => stableStringify(r))
+        .sort()
+        .join(',');
+      return `${table}|next=${stableStringify(nextValue ?? null)}|prev=[${prev}]`;
+    };
+
+    const tsSigs = tsChanges
+      .map(c => sigOf(c.table, c.prevValues, c.nextValue))
+      .sort();
+    // Filter Go's changes to non-internal tables to match tsChanges (which the
+    // caller already filtered). Go normally never sees internal tables, but
+    // filtering defensively keeps the comparison apples-to-apples.
+    const goSigs = goDerived.changes
+      .filter(c => !this.#isInternalTable(c.table))
+      .map(c => sigOf(c.table, c.prevValues, c.nextValue))
+      .sort();
+
+    if (tsSigs.length !== goSigs.length) {
+      this.#lc.error?.(
+        `[go-diff-shadow] MISMATCH (${context}): TS derived ${tsSigs.length} ` +
+          `changes, Go derived ${goSigs.length} (ver=${goDerived.version}, ` +
+          `rawChangeLog=${goDerived.numChanges})`,
+      );
+      this.#logGoDiffMismatch(tsSigs, goSigs);
+      return;
+    }
+    for (let i = 0; i < tsSigs.length; i++) {
+      if (tsSigs[i] !== goSigs[i]) {
+        this.#lc.error?.(
+          `[go-diff-shadow] MISMATCH (${context}) at #${i}: ` +
+            `TS=${tsSigs[i]} Go=${goSigs[i]}`,
+        );
+        return;
+      }
+    }
+    this.#lc.debug?.(
+      `[go-diff-shadow] (${context}): TS and Go derived identical diffs ` +
+        `(${tsSigs.length} changes)`,
+    );
+  }
+
+  #logGoDiffMismatch(tsSigs: string[], goSigs: string[]): void {
+    const tsSet = new Set(tsSigs);
+    const goSet = new Set(goSigs);
+    const onlyTS = tsSigs.filter(s => !goSet.has(s)).slice(0, 5);
+    const onlyGo = goSigs.filter(s => !tsSet.has(s)).slice(0, 5);
+    if (onlyTS.length) {
+      this.#lc.error?.(`[go-diff-shadow] in TS not Go: ${JSON.stringify(onlyTS)}`);
+    }
+    if (onlyGo.length) {
+      this.#lc.error?.(`[go-diff-shadow] in Go not TS: ${JSON.stringify(onlyGo)}`);
+    }
   }
 
   #logShadowDiff(

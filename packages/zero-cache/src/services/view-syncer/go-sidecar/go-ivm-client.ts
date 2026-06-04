@@ -89,6 +89,27 @@ export type SnapshotChange = {
   nextValue: Record<string, unknown> | null;
 };
 
+/**
+ * A SnapshotChange the Go sidecar DERIVED itself (advanceToHead), carrying the
+ * rowKey TS uses to align it with its own diff. Mirrors snapshotChangeWire on
+ * the Go side (cmd/sidecar/advance_to_head.go).
+ */
+export type DerivedSnapshotChange = SnapshotChange & {
+  rowKey: Record<string, unknown>;
+};
+
+/**
+ * Result of the advanceToHead RPC: the Go-derived diff + Go's new stateVersion.
+ * `reset` is set when the diff aborted on a reset/truncate/permissions-change,
+ * in which case `changes` is empty and the caller re-hydrates at `version`.
+ */
+export type AdvanceToHeadResult = {
+  changes: DerivedSnapshotChange[];
+  version: string;
+  numChanges: number;
+  reset?: {reason: string; msg: string} | undefined;
+};
+
 export type RowChange = {
   type: 0 | 1 | 2; // add, remove, edit
   queryID: string;
@@ -748,6 +769,32 @@ export class GoIVMClient {
       },
     );
     return handler.finish();
+  }
+
+  /**
+   * advanceToHead: the Go sidecar derives its OWN snapshot diff from the
+   * replica's changeLog2 (via internal/snapshotter) instead of consuming a
+   * TS-shipped SnapshotChange[]. Carries NO changes payload — only the cgID +
+   * epoch. Returns Go's derived diff + its new stateVersion. Used (in P1) to
+   * shadow-compare Go's diff against TS's own computed one. Requires a
+   * protocolRev>=7 sidecar with GO_IVM_ADVANCE_TO_HEAD=true + table mode.
+   */
+  async advanceToHead(
+    clientGroupID: string,
+    initEpoch: number,
+    opts?: CallOptions,
+  ): Promise<AdvanceToHeadResult> {
+    const result = (await this.#call(
+      'advanceToHead',
+      {clientGroupID, initEpoch},
+      opts,
+    )) as Partial<AdvanceToHeadResult>;
+    return {
+      changes: result.changes ?? [],
+      version: result.version ?? '',
+      numChanges: result.numChanges ?? 0,
+      reset: result.reset,
+    };
   }
 
   /**

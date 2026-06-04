@@ -15,6 +15,7 @@ import type {ZeroConfig} from '../../../config/zero-config.ts';
 import {DriftError} from './go-ivm-client.ts';
 import type {
   AdvanceResult as GoAdvanceResult,
+  AdvanceToHeadResult,
   HydrateResult as GoHydrateResult,
   SnapshotChange,
   TableData,
@@ -249,6 +250,17 @@ export class GoComputeBackend {
   advanceStream(changes: SnapshotChange[]): Promise<GoAdvanceResult> {
     return this.#advanceWithRecovery(() =>
       this.#client().advanceStream(this.#clientGroupID, changes, this.#sidecarInitEpoch, this.#cgOpts()),
+    );
+  }
+
+  // advanceToHead: ask Go to derive its OWN snapshot diff (no changes payload).
+  // Read-only on the Go side (it only leapfrogs the Snapshotter; it does NOT
+  // drive the engine), so it does NOT go through #advanceWithRecovery's
+  // drop-the-advance drift handling — a failure just surfaces to the caller,
+  // which (in the P1 shadow compare) logs it and skips the comparison.
+  advanceToHead(): Promise<AdvanceToHeadResult> {
+    return this.#withReinitRetry(() =>
+      this.#client().advanceToHead(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts()),
     );
   }
 
@@ -763,6 +775,17 @@ export function isGoShadowVerbose(
   config: Pick<ZeroConfig, 'goSidecar'> | undefined,
 ): boolean {
   return config?.goSidecar?.shadowVerbose === true;
+}
+
+// Whether to run the advanceToHead Go-derived-diff shadow: each shadow advance
+// also asks Go to derive its OWN snapshot diff and compares it against TS's
+// computed diff (design §7 P1). Only meaningful alongside shadowMode (the
+// comparison runs in #shadowAdvance) and requires a protocolRev>=7 sidecar with
+// GO_IVM_ADVANCE_TO_HEAD=true.
+export function isGoDerivedDiff(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): boolean {
+  return config?.goSidecar?.advanceToHead === true;
 }
 
 // Returns 0 when the audit should be off — either Go is disabled, shadow mode
