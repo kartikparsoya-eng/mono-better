@@ -1162,6 +1162,25 @@ export const zeroOptions = {
         `Mismatches are logged at error level under the {italic [go-diff-shadow]} tag.`,
       ],
     },
+    goPrimaryTrigger: {
+      type: v.boolean().default(false),
+      desc: [
+        `Snapshotter-in-Go (P2c): in Go-PRIMARY mode (enabled=true,`,
+        `shadowMode=false), source the user-query advance via the sidecar's`,
+        `advanceToHead RPC (Go derives its OWN diff + drives its OWN engine,`,
+        `frame-coordinated) instead of shipping it the TS-derived diff via`,
+        `advanceStream. This makes Go self-consistent (no frame-timing drift) and`,
+        `moves user-query CVR version authority to Go: the CVR stateVersion is`,
+        `stamped at {bold min(V_ts, V_go)} — the completeness floor both the`,
+        `TS-internal and Go-user pipelines have crossed (see`,
+        `{bold go-ivm/DESIGN-snapshotter-port.md} §10).`,
+        ``,
+        `Has no effect in shadow mode. Requires a sidecar launched with`,
+        `{bold GO_IVM_ADVANCE_TO_HEAD=true} + {bold GO_IVM_ADVANCE_DRIVE=true} +`,
+        `{bold GO_IVM_SOURCE_MODE=table}. When off, Go-primary keeps the push`,
+        `(advanceStream) path and the CVR stamps at TS's version.`,
+      ],
+    },
   },
 };
 

@@ -798,6 +798,17 @@ export function isGoAdvanceDrive(
   return config?.goSidecar?.advanceDrive === true;
 }
 
+// Whether Go-PRIMARY serving should source the user-query advance via
+// advanceToHead (P2c trigger) instead of advanceStream (push). Only meaningful
+// in Go-primary mode (enabled && !shadowMode); makes Go self-consistent and
+// moves the user-query CVR watermark to min(V_ts, V_go). Implies a sidecar
+// launched with GO_IVM_ADVANCE_TO_HEAD=true + GO_IVM_ADVANCE_DRIVE=true.
+export function isGoPrimaryTrigger(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): boolean {
+  return config?.goSidecar?.goPrimaryTrigger === true;
+}
+
 // Returns 0 when the audit should be off — either Go is disabled, shadow mode
 // already covers it, or the interval is explicitly zeroed in config.
 export function goDriftAuditIntervalMs(

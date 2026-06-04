@@ -63,14 +63,17 @@ import {
   isGoShadowVerbose,
   isGoDerivedDiff,
   isGoAdvanceDrive,
+  isGoPrimaryTrigger,
   goDriftAuditIntervalMs,
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
+import {min as minLexiVersion} from '../../types/lexi-version.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {
   SnapshotChange,
   RowChange as GoRowChange,
   AdvanceToHeadResult,
+  TableTiming,
 } from './go-sidecar/go-ivm-client.ts';
 import {DriftError, StaleInitEpochError} from './go-sidecar/go-ivm-client.ts';
 import {type ShardID} from '../../types/shards.ts';
@@ -265,6 +268,13 @@ export type AdvanceResult = {
   version: string;
   numChanges: number;
   changes: Iterable<RowChange | 'yield'>;
+  // P2c observability: when Go-primary serves user queries via advanceToHead,
+  // `version` above is the RECONCILED watermark min(tsVersion, goVersion). These
+  // expose the two un-reconciled authorities so the view-syncer can assert
+  // monotonicity / log the split. Both undefined on the TS-only and push paths
+  // (where the watermark is simply TS's version).
+  tsVersion?: string | undefined;
+  goVersion?: string | undefined;
 };
 
 type CompanionPipeline = {
@@ -465,6 +475,10 @@ export class PipelineDriver {
   // P2: drive Go's engine from its own derived diff (advanceToHead) instead of
   // shipping it the TS diff, and compare its RowChanges to TS's.
   readonly #goAdvanceDrive: boolean;
+  // P2c: in Go-PRIMARY mode, source the user-query advance via advanceToHead
+  // (trigger) instead of advanceStream (push), making Go self-consistent and
+  // stamping the CVR at min(V_ts, V_go). Only ever true when !shadowMode.
+  readonly #goPrimaryTrigger: boolean;
   #goInitPromise: Promise<void> | null = null;
   /** Set while #scheduleGoReset is running; collapses concurrent reset requests. */
   #goResetInFlight = false;
@@ -525,6 +539,12 @@ export class PipelineDriver {
     // separate derive-only compare is redundant — skip it.
     this.#goDerivedDiff =
       this.#shadowMode && isGoDerivedDiff(config) && !this.#goAdvanceDrive;
+    // P2c: Go-primary trigger is mutually exclusive with shadow mode — it only
+    // applies when Go's output is actually committed (enabled && !shadowMode).
+    this.#goPrimaryTrigger =
+      !this.#shadowMode &&
+      isGoSidecarEnabled(config) &&
+      isGoPrimaryTrigger(config);
     // shadowMode already implies isGoSidecarEnabled, so checking the flag
     // alone is sufficient (REVIEW-ts-integration LOW-1).
     this.#goBackend =
@@ -2318,123 +2338,64 @@ export class PipelineDriver {
       [Symbol.iterator]: () => buffered[Symbol.iterator](),
     };
 
-    // Kick Go RPC in flight while TS does its work.
+    // Kick the Go RPC in flight while TS does its work. Two sourcing modes:
     //
-    // Error classification — pre-fix this catch was a silent swallow of
-    // ALL errors, indistinguishable from a legitimately-empty advance.
-    // We now bucket by error class so dashboards can detect each
-    // failure mode and operators can take the right action:
+    //  - PUSH (default): advanceStream(snapshotChanges) — Go applies the
+    //    TS-derived diff. Go's version is TS's version by construction, so the
+    //    CVR stamps at `version` (= curr.version) unchanged.
     //
-    //   1. Protocol violation ("chunk order violation", "finished
-    //      without a final chunk", decode failures): wire-level bug or
-    //      data corruption. Can't trust Go's state. Re-throw so the
-    //      caller's error path surfaces it instead of silently committing
-    //      an empty CVR diff. Hard escalation — a recovery reset won't
-    //      fix a wire bug.
+    //  - TRIGGER (P2c, #goPrimaryTrigger): advanceToHead() — Go independently
+    //    leapfrogs its OWN Snapshotter, derives its OWN diff, and drives its OWN
+    //    engine frame-coordinated. Go is self-consistent (no frame-timing
+    //    drift). Go reports its own watermark V_go, which we reconcile with TS's
+    //    V_ts below (§10: CVR stamps at min(V_ts, V_go)).
     //
-    //   2. StaleInitEpochError: this view-syncer instance was torn
-    //      down and a successor's epoch took over. Continuing to retry
-    //      against the stale instance is futile (-32101 will fire on
-    //      every call). Drop the advance and signal upstream caller via
-    //      throw so the instance lifecycle teardown completes.
-    //
-    //   3. Sidecar unavailable / restart-related: drop this advance
-    //      (the "miss exactly one delta" contract). The recovery
-    //      machinery in #scheduleGoReset → #reinitPerCGAndRegisterQueries
-    //      will rebuild Go's state from the next valid advance onward.
-    //
-    //   4. Other unclassified: log + drop + reset (preserves the old
-    //      best-effort behavior) but COUNT separately so we can tell
-    //      from metrics whether we're seeing many of these (signal of
-    //      an error class we should explicitly handle).
-    const goPromise = this.#goBackend!.advanceStream(snapshotChanges)
-      .then(r => {
-        // Record Go-side per-(table,op) advance timings into the same
-        // #advanceTime histogram the TS-native path populates
-        // (pipeline-driver.ts:2914), so Go-primary has table/op timing
-        // attribution parity instead of dropping r.timings on the floor.
-        if (r.timings) {
-          // HIGH-3: feed the per-query `query-update-server` inspector metric
-          // (the TS-native path populates it via MeasurePushOperator, which
-          // can't exist across the RPC boundary). Go only reports per-(table,
-          // op) timings, so attribute each table's time to every user query
-          // whose top-level table matches. This is an APPROXIMATION: a query
-          // reading a table only through a related/CSQ subquery isn't
-          // attributed, and a table feeding N queries credits all N — but it
-          // makes the metric non-zero and directionally useful instead of
-          // permanently empty. Built once per advance.
-          const tableToQueries = new Map<string, string[]>();
-          for (const [qid, p] of this.#pipelines) {
-            if (this.#isInternalQueryID(qid)) continue;
-            const t = p.transformedAst.table;
-            const list = tableToQueries.get(t);
-            if (list) list.push(qid);
-            else tableToQueries.set(t, [qid]);
-          }
-          for (const t of r.timings) {
-            this.#advanceTime.recordMs(t.ms, {
-              table: t.table,
-              type: t.type === 0 ? 'add' : t.type === 1 ? 'remove' : 'edit',
-            });
-            for (const qid of tableToQueries.get(t.table) ?? []) {
-              this.#inspectorDelegate.addMetric(
-                'query-update-server',
-                t.ms,
-                qid,
+    // Error classification is shared via #classifyGoPrimaryAdvanceError: bucket
+    // by failure mode so each is observable; protocol/stale-epoch escalate
+    // (re-throw), restart/unclassified drop the delta + schedule a reset (the
+    // "miss exactly one delta" contract; recovery rebuilds Go's state).
+    const goPromise: Promise<{
+      changes: RowChange[];
+      goVersion: string | undefined;
+    }> = this.#goPrimaryTrigger
+      ? this.#goBackend!.advanceToHead()
+          .then(goDerived => {
+            if (goDerived.reset) {
+              // Reset signal (truncate/permissions/reset): Go's user pipelines
+              // must full-re-hydrate. Drop the user delta this cycle and let
+              // the reset re-establish rows at head (≥ V_ts, still a superset
+              // of the V_ts floor we stamp). Mirrors the drop-on-failure path.
+              this.#lc.info?.(
+                `[go-primary] Go reported reset ${goDerived.reset.reason} ` +
+                  `(${goDerived.reset.msg}); scheduling reset, dropping user delta`,
               );
+              this.#scheduleGoReset('go-primary-advanceToHead-reset');
+              return {changes: [] as RowChange[], goVersion: undefined};
             }
-          }
-        }
-        return r.changes.map(rc => this.#goRowChangeToRowChange(rc));
-      })
-      .catch(e => {
-        const msg = e instanceof Error ? e.message : String(e);
-
-        if (
-          msg.includes('chunk order violation') ||
-          msg.includes('finished without a final chunk') ||
-          msg.includes('Frame too large') ||
-          msg.includes('protocolRev mismatch')
-        ) {
-          this.#advanceDroppedProtocol.add(1);
-          this.#lc.error?.(
-            `[go-primary] Go advance failed with PROTOCOL VIOLATION (escalating): ${msg}`,
-          );
-          // Hard escalation: re-throw. The caller's error path will
-          // surface this instead of letting an empty diff commit. A
-          // protocol violation means we cannot trust Go's state OR the
-          // wire — recovery via resetEngine won't fix it without a
-          // sidecar process restart.
-          throw e;
-        }
-
-        if (e instanceof StaleInitEpochError) {
-          this.#advanceDroppedStaleEpoch.add(1);
-          this.#lc.warn?.(
-            `[go-primary] Go advance rejected by sidecar (stale initEpoch); ` +
-              `this view-syncer instance is torn down: ${msg}`,
-          );
-          throw e;
-        }
-
-        const sidecarUnavailable =
-          msg.includes('Sidecar is not running') ||
-          msg.includes('Connection closed') ||
-          msg.includes('engine not initialized');
-        if (sidecarUnavailable) {
-          this.#advanceDroppedSidecar.add(1);
-          this.#lc.warn?.(
-            `[go-primary] Go advance dropped (sidecar restart in flight): ${msg}`,
-          );
-          this.#scheduleGoReset('go-primary-advance-sidecar-restart');
-          return [] as RowChange[];
-        }
-
-        this.#advanceDroppedOther.add(1);
-        this.#lc.error?.(`[go-primary] Go advance failed (unclassified): ${msg}`);
-        this.#scheduleGoReset('go-primary-advance-failure');
-        return [] as RowChange[];
-      });
+            this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
+            return {
+              changes: goDerived.rowChanges.map(rc =>
+                this.#goRowChangeToRowChange(rc),
+              ),
+              goVersion: goDerived.version,
+            };
+          })
+          .catch(e => ({
+            changes: this.#classifyGoPrimaryAdvanceError(e),
+            goVersion: undefined,
+          }))
+      : this.#goBackend!.advanceStream(snapshotChanges)
+          .then(r => {
+            this.#recordGoPrimaryAdvanceTimings(r.timings);
+            return {
+              changes: r.changes.map(rc => this.#goRowChangeToRowChange(rc)),
+              goVersion: undefined,
+            };
+          })
+          .catch(e => ({
+            changes: this.#classifyGoPrimaryAdvanceError(e),
+            goVersion: undefined,
+          }));
 
     // Run TS's #advance with the full diff. Only internal-query pipelines
     // are connected, so user-table pushes are no-ops on TS — the iterator
@@ -2448,7 +2409,31 @@ export class PipelineDriver {
       }
     }
 
-    const goResults = await goPromise;
+    const {changes: goResults, goVersion} = await goPromise;
+
+    // P2c reconciliation: the CVR stateVersion is a completeness floor, so it
+    // may only be committed at a version BOTH authorities have crossed. TS's
+    // internal data is at `version` (V_ts); Go's user data is at `goVersion`
+    // (V_go). Stamp at min(V_ts, V_go) — under-claiming is safe (the ahead
+    // side's extra rows are an idempotent superset delivered at the committed
+    // patchVersion), over-claiming risks a client missing a change in the gap.
+    // In push mode `goVersion` is undefined and the watermark is simply V_ts.
+    let reconciledVersion = version;
+    let goVersionForResult: string | undefined;
+    if (goVersion !== undefined) {
+      reconciledVersion = minLexiVersion(version, goVersion);
+      goVersionForResult = goVersion;
+      if (reconciledVersion !== version) {
+        // The common path is V_go ≥ V_ts (Go reads head after TS), so the
+        // floor lands on V_ts and this branch is quiet. A lower min means Go
+        // read an OLDER head than TS (e.g. Go re-init left it pinned behind) —
+        // the floor correctly holds the CVR back. Surface it for visibility.
+        this.#lc.debug?.(
+          `[go-primary] reconciled CVR watermark to ${reconciledVersion} ` +
+            `(V_ts=${version}, V_go=${goVersion}) — Go behind TS`,
+        );
+      }
+    }
 
     // Merge: TS internal-query events + Go user-query events. The two
     // sets are table-disjoint by construction (internal tables filtered
@@ -2459,10 +2444,109 @@ export class PipelineDriver {
     }
 
     return {
-      version,
+      version: reconciledVersion,
       numChanges,
       changes: this.#trackRowSetSignatures(yieldMerged()),
+      tsVersion: version,
+      goVersion: goVersionForResult,
     };
+  }
+
+  /**
+   * Record Go-side per-(table,op) advance timings into the same #advanceTime
+   * histogram the TS-native path populates, so Go-primary has table/op timing
+   * attribution parity instead of dropping `timings` on the floor. Also feeds
+   * the per-query `query-update-server` inspector metric (the TS-native path
+   * populates it via MeasurePushOperator, which can't exist across the RPC
+   * boundary): Go only reports per-(table, op) timings, so attribute each
+   * table's time to every user query whose top-level table matches. This is an
+   * APPROXIMATION — a query reading a table only through a related/CSQ subquery
+   * isn't attributed, and a table feeding N queries credits all N — but it makes
+   * the metric non-zero and directionally useful instead of permanently empty.
+   */
+  #recordGoPrimaryAdvanceTimings(timings: TableTiming[] | undefined): void {
+    if (!timings) return;
+    const tableToQueries = new Map<string, string[]>();
+    for (const [qid, p] of this.#pipelines) {
+      if (this.#isInternalQueryID(qid)) continue;
+      const t = p.transformedAst.table;
+      const list = tableToQueries.get(t);
+      if (list) list.push(qid);
+      else tableToQueries.set(t, [qid]);
+    }
+    for (const t of timings) {
+      this.#advanceTime.recordMs(t.ms, {
+        table: t.table,
+        type: t.type === 0 ? 'add' : t.type === 1 ? 'remove' : 'edit',
+      });
+      for (const qid of tableToQueries.get(t.table) ?? []) {
+        this.#inspectorDelegate.addMetric('query-update-server', t.ms, qid);
+      }
+    }
+  }
+
+  /**
+   * Classify a Go-primary advance RPC failure (advanceStream OR advanceToHead).
+   * Pre-fix the catch was a silent swallow of ALL errors, indistinguishable
+   * from a legitimately-empty advance. Bucket by class so dashboards detect each
+   * failure mode and operators take the right action:
+   *
+   *   1. Protocol violation (chunk order, missing final chunk, decode/frame):
+   *      wire-level bug or corruption — can't trust Go's state. RE-THROW so the
+   *      caller surfaces it instead of committing an empty CVR diff. A reset
+   *      won't fix a wire bug without a sidecar process restart.
+   *   2. StaleInitEpochError: this instance was torn down and a successor's
+   *      epoch took over. Retrying is futile — RE-THROW so teardown completes.
+   *   3. Sidecar unavailable / restart-related: drop this advance (miss exactly
+   *      one delta). #scheduleGoReset → reinit rebuilds Go's state next advance.
+   *   4. Other unclassified: log + drop + reset (best-effort), counted
+   *      separately so metrics reveal an error class we should handle explicitly.
+   *
+   * Returns the (empty) user-query changes for the drop cases; throws for the
+   * escalation cases.
+   */
+  #classifyGoPrimaryAdvanceError(e: unknown): RowChange[] {
+    const msg = e instanceof Error ? e.message : String(e);
+
+    if (
+      msg.includes('chunk order violation') ||
+      msg.includes('finished without a final chunk') ||
+      msg.includes('Frame too large') ||
+      msg.includes('protocolRev mismatch')
+    ) {
+      this.#advanceDroppedProtocol.add(1);
+      this.#lc.error?.(
+        `[go-primary] Go advance failed with PROTOCOL VIOLATION (escalating): ${msg}`,
+      );
+      throw e;
+    }
+
+    if (e instanceof StaleInitEpochError) {
+      this.#advanceDroppedStaleEpoch.add(1);
+      this.#lc.warn?.(
+        `[go-primary] Go advance rejected by sidecar (stale initEpoch); ` +
+          `this view-syncer instance is torn down: ${msg}`,
+      );
+      throw e;
+    }
+
+    const sidecarUnavailable =
+      msg.includes('Sidecar is not running') ||
+      msg.includes('Connection closed') ||
+      msg.includes('engine not initialized');
+    if (sidecarUnavailable) {
+      this.#advanceDroppedSidecar.add(1);
+      this.#lc.warn?.(
+        `[go-primary] Go advance dropped (sidecar restart in flight): ${msg}`,
+      );
+      this.#scheduleGoReset('go-primary-advance-sidecar-restart');
+      return [];
+    }
+
+    this.#advanceDroppedOther.add(1);
+    this.#lc.error?.(`[go-primary] Go advance failed (unclassified): ${msg}`);
+    this.#scheduleGoReset('go-primary-advance-failure');
+    return [];
   }
 
   #goRowChangeToRowChange(rc: GoRowChange): RowChange {

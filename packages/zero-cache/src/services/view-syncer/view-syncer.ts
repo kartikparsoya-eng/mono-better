@@ -2287,9 +2287,27 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const timer = new TimeSliceTimer(lc);
       // GO_SIDECAR: advance() returns Promise when Go backend is active
       const advanceResult = this.#pipelines.advance(timer);
-      const {version, numChanges, changes} =
+      const {version, numChanges, changes, tsVersion, goVersion} =
         advanceResult instanceof Promise ? await advanceResult : advanceResult;
       lc = lc.withContext('newVersion', version);
+
+      // P2c: in Go-primary trigger mode `version` is the RECONCILED watermark
+      // min(tsVersion, goVersion) — user-query data comes from Go (at goVersion)
+      // while internal/control-plane data comes from TS (at tsVersion). The
+      // CVR stateVersion is a completeness floor, so it must never exceed either
+      // authority (over-claiming risks a client missing a gap change). Assert
+      // that invariant defensively before stamping it into the CVR below.
+      if (tsVersion !== undefined && goVersion !== undefined) {
+        assert(
+          version <= tsVersion && version <= goVersion,
+          () =>
+            `reconciled CVR watermark ${version} must be <= both authorities ` +
+            `(V_ts=${tsVersion}, V_go=${goVersion})`,
+        );
+        lc.debug?.(
+          `[go-primary] CVR watermark ${version} (V_ts=${tsVersion}, V_go=${goVersion})`,
+        );
+      }
 
       // Probably need a new updater type. CVRAdvancementUpdater?
       const updater = new CVRQueryDrivenUpdater(
