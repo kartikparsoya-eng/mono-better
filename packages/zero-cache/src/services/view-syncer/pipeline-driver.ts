@@ -433,6 +433,16 @@ export class PipelineDriver {
     'ivm.drift-audit-mismatches',
     'TS/Go divergences detected by the Go-primary drift audit',
   );
+  // Per-class breakout: ORDER divergences (Go returns the right ROWS in the
+  // WRONG sequence vs the SQL ORDER BY oracle). Invisible to the set/content
+  // checks and to #shadowCompare (which sorts by rowKey). Counted separately
+  // from #driftAuditMismatches so dashboards can distinguish "wrong rows/values"
+  // from "wrong order" (e.g. enum definition-order vs TEXT collation).
+  readonly #driftAuditOrderMismatches = getOrCreateCounter(
+    'sync',
+    'ivm.drift-audit-order-mismatches',
+    'Row-order divergences (Go vs SQL ORDER BY) detected by the drift audit',
+  );
   readonly #driftAuditRuns = getOrCreateCounter(
     'sync',
     'ivm.drift-audit-runs',
@@ -551,6 +561,9 @@ export class PipelineDriver {
   #driftAuditTimer: ReturnType<typeof setInterval> | null = null;
   // Collapses overlapping audit ticks when one runs longer than the interval.
   #driftAuditInFlight = false;
+  // Round-robin cursor over the sorted auditable queries, so the audit covers
+  // every active query within N cycles instead of sampling one at random.
+  #driftAuditCursor = 0;
   // Timestamp of the last drift-audit INFO heartbeat. Each successful audit-OK
   // path is debug-only (high noise), so without this heartbeat operators have
   // no INFO-level signal that the audit machinery is actually firing — just
@@ -1664,10 +1677,19 @@ export class PipelineDriver {
           !this.#isInternalQueryID(qid) &&
           !this.#isInternalTable(entry.transformedAst.table),
         )
-        .map(([qid]) => qid);
+        .map(([qid]) => qid)
+        // Stable order so the round-robin cursor maps to a consistent query
+        // across cycles even as the pipeline set changes.
+        .sort();
       if (auditableIDs.length === 0) return;
 
-      const targetID = auditableIDs[Math.floor(Math.random() * auditableIDs.length)];
+      // Round-robin instead of random pick: a uniform-random choice leaves most
+      // queries un-audited for long stretches (coupon-collector: ~N·lnN cycles
+      // to hit all N), so a query-specific divergence can hide for many minutes.
+      // Cycling the cursor guarantees every active query is audited within
+      // auditableIDs.length cycles. (`%` re-bounds when the set shrank.)
+      const targetID = auditableIDs[this.#driftAuditCursor % auditableIDs.length];
+      this.#driftAuditCursor++;
       const entry = this.#pipelines.get(targetID);
       if (!entry) return;
       // transformedAst is post-subquery-resolution — what Go was originally
@@ -1896,6 +1918,22 @@ export class PipelineDriver {
             `sql_row=${sample.sqlRow.slice(0, 300)} ` +
             `go_row=${sample.goRow.slice(0, 300)}`,
         );
+      } else if (sqlVerdict.kind === 'go-vs-sql-order-drift') {
+        // Right rows, WRONG ORDER vs the SQL ORDER BY oracle. Invisible to the
+        // set/content checks and to #shadowCompare — and a real client-visible
+        // bug for ordered queries (the user's list is in the wrong sequence).
+        // Counted in its own metric so order bugs are distinguishable from
+        // row/value drift on dashboards.
+        this.#driftAuditOrderMismatches.add(1);
+        const at = sqlVerdict.orderDiffAt;
+        const window = (seq: string[]) =>
+          seq.slice(Math.max(0, at - 1), at + 2).join(' > ');
+        this.#lc.error?.(
+          `[drift-audit] ${targetID}: REAL DRIFT — Go row ORDER disagrees with ` +
+            `SQL ORDER BY at position ${at} (sql_count=${sqlVerdict.sqlCount}). ` +
+            `sql_seq=[…${window(sqlVerdict.sqlSeq)}…] ` +
+            `go_seq=[…${window(sqlVerdict.goSeq)}…] ast=${JSON.stringify(ast.orderBy)}`,
+        );
       } else if (setDiffers && sqlVerdict.kind === 'confirmed') {
         // TS-audit disagrees but Go matches the SQL ground truth.
         // Known TS-audit bug (Bug #3, see #runDriftAudit doc) — info-level only.
@@ -1970,6 +2008,13 @@ export class PipelineDriver {
         kind: 'go-vs-sql-content-drift';
         sqlCount: number;
         contentMismatches: {pk: string; sqlRow: string; goRow: string}[];
+      }
+    | {
+        kind: 'go-vs-sql-order-drift';
+        sqlCount: number;
+        orderDiffAt: number;
+        sqlSeq: string[];
+        goSeq: string[];
       }
     | {kind: 'skipped'; reason: string} {
     // Operator opt-out: when goSidecar.driftAuditSqlGroundTruth is false,
@@ -2073,6 +2118,39 @@ export class PipelineDriver {
         sqlCount: sqlByPK.size,
         contentMismatches,
       };
+    }
+
+    // Step 3: ORDER diff. The set + content checks above are PK-keyed, so they
+    // pass even when Go returns the right rows in the WRONG sequence — e.g. an
+    // enum column sorted by TEXT collation instead of PG definition order, a
+    // NULL-ordering or multi-key tie-break divergence. #shadowCompare can't see
+    // it either (it sorts both sides by rowKey). `normalizedSqlRows` is already
+    // in the AST's ORDER BY order (the true oracle); `goRemapped` is Go's
+    // emission order. Compare the main-table PK sequences positionally.
+    //
+    // Gate: only when the query has an EXPLICIT orderBy (otherwise result order
+    // is semantically undefined and both engines' arbitrary orders are valid),
+    // and skip cursor-paginated queries (`ast.start`) whose boundary row has
+    // IVM-specific positioning the set check already special-cases. Sets are
+    // known equal here (we'd have returned go-vs-sql-drift otherwise).
+    if (ast.orderBy && ast.orderBy.length > 0 && ast.start === undefined) {
+      const sqlSeq = normalizedSqlRows.map(pkOf);
+      const goSeq = goRemapped
+        .filter(c => c.table === resolved.table)
+        .map(c => stableStringify(c.rowKey));
+      if (sqlSeq.length === goSeq.length) {
+        for (let i = 0; i < sqlSeq.length; i++) {
+          if (sqlSeq[i] !== goSeq[i]) {
+            return {
+              kind: 'go-vs-sql-order-drift',
+              sqlCount: sqlByPK.size,
+              orderDiffAt: i,
+              sqlSeq,
+              goSeq,
+            };
+          }
+        }
+      }
     }
 
     return {kind: 'confirmed', sqlCount: sqlByPK.size};
