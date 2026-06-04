@@ -104,9 +104,14 @@ export type DerivedSnapshotChange = SnapshotChange & {
  * in which case `changes` is empty and the caller re-hydrates at `version`.
  */
 export type AdvanceToHeadResult = {
+  // P1 (derive-only): the Go-derived diff for the TS-vs-Go shadow compare.
   changes: DerivedSnapshotChange[];
   version: string;
   numChanges: number;
+  // P2 (drive): the engine RowChanges produced by applying Go's OWN derived
+  // diff to Go's engine (frame-coordinated). Empty in derive-only mode.
+  rowChanges: RowChange[];
+  timings?: TableTiming[] | undefined;
   reset?: {reason: string; msg: string} | undefined;
 };
 
@@ -793,6 +798,8 @@ export class GoIVMClient {
       changes: result.changes ?? [],
       version: result.version ?? '',
       numChanges: result.numChanges ?? 0,
+      rowChanges: result.rowChanges ?? [],
+      timings: result.timings,
       reset: result.reset,
     };
   }

@@ -62,6 +62,7 @@ import {
   isGoShadowMode,
   isGoShadowVerbose,
   isGoDerivedDiff,
+  isGoAdvanceDrive,
   goDriftAuditIntervalMs,
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
@@ -461,6 +462,9 @@ export class PipelineDriver {
   // own snapshot diff (advanceToHead) and compares it to TS's. Snapshotter-in-Go
   // P1 fidelity gate.
   readonly #goDerivedDiff: boolean;
+  // P2: drive Go's engine from its own derived diff (advanceToHead) instead of
+  // shipping it the TS diff, and compare its RowChanges to TS's.
+  readonly #goAdvanceDrive: boolean;
   #goInitPromise: Promise<void> | null = null;
   /** Set while #scheduleGoReset is running; collapses concurrent reset requests. */
   #goResetInFlight = false;
@@ -513,8 +517,14 @@ export class PipelineDriver {
     this.#costModels = enablePlanner ? new WeakMap() : undefined;
     this.#yieldThresholdMs = yieldThresholdMs;
     this.#shadowMode = isGoShadowMode(config) && isGoSidecarEnabled(config);
+    // P2 drive: source the shadow Go advance via advanceToHead. Implies (and
+    // supersedes) the P1 derive-only compare.
+    this.#goAdvanceDrive = this.#shadowMode && isGoAdvanceDrive(config);
     // advanceToHead diff-shadow only runs inside the shadow advance path.
-    this.#goDerivedDiff = this.#shadowMode && isGoDerivedDiff(config);
+    // In drive mode the engine is already driven via advanceToHead, so the
+    // separate derive-only compare is redundant — skip it.
+    this.#goDerivedDiff =
+      this.#shadowMode && isGoDerivedDiff(config) && !this.#goAdvanceDrive;
     // shadowMode already implies isGoSidecarEnabled, so checking the flag
     // alone is sufficient (REVIEW-ts-integration LOW-1).
     this.#goBackend =
@@ -2641,29 +2651,44 @@ export class PipelineDriver {
     const goStart = performance.now();
     const goPromise: Promise<{results: RowChange[]; ms: number}> = (async () => {
       try {
-        // Use the streaming variant in shadow mode too, so shadow runs
-        // exercise the same code path as Go-primary mode (otherwise
-        // shadow would never catch streaming-specific regressions).
-        const goRaw = await this.#goBackend!.advanceStream(snapshotChanges);
-        // Pattern Z diagnostic (REMOVE after root-cause). Per-(queryID,table)
+        // P2 drive: source the Go advance from Go's OWN derived diff
+        // (advanceToHead, frame-coordinated) instead of shipping it the TS
+        // diff. Otherwise (P1/legacy) ship the diff via the streaming advance
+        // so shadow exercises the same path as Go-primary.
+        let goChanges: GoRowChange[];
+        if (this.#goAdvanceDrive) {
+          const goDerived = await this.#goBackend!.advanceToHead();
+          if (goDerived.reset) {
+            this.#lc.info?.(
+              `[go-drive-shadow] Go reported reset ${goDerived.reset.reason} ` +
+                `(${goDerived.reset.msg}); scheduling Go reset, skipping compare`,
+            );
+            this.#scheduleGoReset('advanceToHead-reset');
+            return {results: [], ms: performance.now() - goStart};
+          }
+          goChanges = goDerived.rowChanges;
+        } else {
+          // Use the streaming variant in shadow mode too, so shadow runs
+          // exercise the same code path as Go-primary mode (otherwise
+          // shadow would never catch streaming-specific regressions).
+          const goRaw = await this.#goBackend!.advanceStream(snapshotChanges);
+          goChanges = goRaw.changes;
+        }
         // Per-(queryID,table) Go advance breakdown. Demoted to debug —
         // useful when chasing a divergence, noise at error in steady-state.
         if (this.#lc.debug) {
-          const goBreakdown: Record<string, number> = {};
           const tableBreakdown: Record<string, number> = {};
-          for (const rc of goRaw.changes) {
-            const k = `${rc.queryID}/${rc.table}`;
-            goBreakdown[k] = (goBreakdown[k] ?? 0) + 1;
+          for (const rc of goChanges) {
             tableBreakdown[rc.table] = (tableBreakdown[rc.table] ?? 0) + 1;
           }
           this.#lc.debug?.(
             `[go-advance-out] diff=${snapshotChanges.length} ` +
-              `go-out=${goRaw.changes.length} ` +
+              `go-out=${goChanges.length} drive=${this.#goAdvanceDrive} ` +
               `by-table=${JSON.stringify(tableBreakdown)}`,
           );
         }
         return {
-          results: goRaw.changes.map(rc => this.#goRowChangeToRowChange(rc)),
+          results: goChanges.map(rc => this.#goRowChangeToRowChange(rc)),
           ms: performance.now() - goStart,
         };
       } catch (e) {

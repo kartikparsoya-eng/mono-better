@@ -788,6 +788,16 @@ export function isGoDerivedDiff(
   return config?.goSidecar?.advanceToHead === true;
 }
 
+// Whether to DRIVE Go's engine from its own derived diff (P2): in shadow mode
+// the Go advance is sourced via advanceToHead (frame-coordinated, no TS-shipped
+// SnapshotChange[]) and its RowChanges are compared to TS's. Implies a sidecar
+// launched with GO_IVM_ADVANCE_DRIVE=true.
+export function isGoAdvanceDrive(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): boolean {
+  return config?.goSidecar?.advanceDrive === true;
+}
+
 // Returns 0 when the audit should be off — either Go is disabled, shadow mode
 // already covers it, or the interval is explicitly zeroed in config.
 export function goDriftAuditIntervalMs(

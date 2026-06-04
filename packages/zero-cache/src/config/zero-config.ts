@@ -1132,6 +1132,21 @@ export const zeroOptions = {
         `comparison only.`,
       ],
     },
+    advanceDrive: {
+      type: v.boolean().default(false),
+      desc: [
+        `Snapshotter-in-Go (P2): DRIVE Go's engine from its own derived diff.`,
+        `In shadow mode the Go advance is sourced via the sidecar's advanceToHead`,
+        `RPC (frame-coordinated against the Snapshotter's pinned frame — no`,
+        `TS-shipped SnapshotChange[]) and the resulting RowChanges are compared`,
+        `against TS's. This validates the self-consistent Go-primary advance path`,
+        `end-to-end before CVR version authority moves to Go.`,
+        ``,
+        `Requires {bold goSidecar.shadowMode} and a sidecar launched with`,
+        `{bold GO_IVM_ADVANCE_DRIVE=true} (which implies advanceToHead) +`,
+        `{bold GO_IVM_SOURCE_MODE=table}. Implies {bold goSidecar.advanceToHead}.`,
+      ],
+    },
     advanceToHead: {
       type: v.boolean().default(false),
       desc: [
