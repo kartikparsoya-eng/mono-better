@@ -2601,32 +2601,74 @@ export class PipelineDriver {
     }
 
     const {changes: goResults, goVersion} = await goPromise;
+    let goVersionFinal = goVersion;
+    let goResultsFinal = goResults;
+
+    // P2c clamp (inverted-edge guard): if Go came back BEHIND TS
+    // (V_go < V_ts — rare; Go re-init/lag left its snapshotter pinned behind),
+    // committing now stamps the CVR at min=V_go while TS's internal changes
+    // (lmid / mutationResults) already reflect V_ts > V_go — an lmid ack AHEAD
+    // of its user data, i.e. a torn cross-engine view. We can't clamp the
+    // internal changes DOWN to min (they're already derived, version-less, and
+    // would be LOST — the snapshotter consumed to V_ts), so instead LIFT Go UP
+    // to V_ts: re-run advanceToHead (Go leapfrogs further toward head, which is
+    // ≥ V_ts since the replica head only grows) and accumulate its extra user
+    // RowChanges, until V_go ≥ V_ts. Bounded; only fires in the inverted edge,
+    // so the common path (V_go ≥ V_ts) is untouched. If Go still can't catch up
+    // (genuinely wedged), we fall through to min() — the watermark stays safe,
+    // the torn window persists one cycle until the breaker/audit heals Go.
+    if (
+      this.#goPrimaryTrigger &&
+      goVersionFinal !== undefined &&
+      goVersionFinal < version
+    ) {
+      const MAX_CATCHUP = 3;
+      for (let i = 0; i < MAX_CATCHUP && goVersionFinal < version; i++) {
+        let next: AdvanceToHeadResult;
+        try {
+          next = await this.#goBackend!.advanceToHead();
+        } catch (e) {
+          this.#lc.warn?.(
+            `[go-primary] catch-up advanceToHead failed: ${String(e)}; ` +
+              `committing at min`,
+          );
+          break;
+        }
+        if (next.reset) {
+          this.#scheduleGoReset('go-primary-catchup-reset');
+          break;
+        }
+        this.#recordGoPrimaryAdvanceTimings(next.timings);
+        goResultsFinal = [
+          ...goResultsFinal,
+          ...next.rowChanges.map(rc => this.#goRowChangeToRowChange(rc)),
+        ];
+        goVersionFinal = next.version;
+      }
+      if (goVersionFinal < version) {
+        this.#lc.warn?.(
+          `[go-primary] Go still behind TS after catch-up ` +
+            `(V_ts=${version}, V_go=${goVersionFinal}); committing at min — ` +
+            `rare transient, control-plane ack may lead data by one cycle`,
+        );
+      }
+    }
 
     // P2c reconciliation: the CVR stateVersion is a completeness floor, so it
     // may only be committed at a version BOTH authorities have crossed. TS's
-    // internal data is at `version` (V_ts); Go's user data is at `goVersion`
-    // (V_go). Stamp at min(V_ts, V_go) — under-claiming is safe (the ahead
-    // side's extra rows are an idempotent superset delivered at the committed
-    // patchVersion), over-claiming risks a client missing a change in the gap.
-    // In push mode `goVersion` is undefined and the watermark is simply V_ts.
-    const reconciled = reconcileGoPrimaryWatermark(version, goVersion);
-    if (goVersion !== undefined && reconciled.version !== version) {
-      // The common path is V_go ≥ V_ts (Go reads head after TS), so the floor
-      // lands on V_ts and this branch is quiet. A lower min means Go read an
-      // OLDER head than TS (e.g. Go re-init left it pinned behind) — the floor
-      // correctly holds the CVR back. Surface it for visibility.
-      this.#lc.debug?.(
-        `[go-primary] reconciled CVR watermark to ${reconciled.version} ` +
-          `(V_ts=${version}, V_go=${goVersion}) — Go behind TS`,
-      );
-    }
+    // internal data is at `version` (V_ts); Go's user data is at `goVersionFinal`
+    // (V_go, post-catch-up). Stamp at min(V_ts, V_go) — under-claiming is safe
+    // (the ahead side's extra rows are an idempotent superset delivered at the
+    // committed patchVersion), over-claiming risks a client missing a change in
+    // the gap. In push mode `goVersion` is undefined and the watermark is V_ts.
+    const reconciled = reconcileGoPrimaryWatermark(version, goVersionFinal);
 
     // Merge: TS internal-query events + Go user-query events. The two
     // sets are table-disjoint by construction (internal tables filtered
     // out of Go; user tables have stub pipelines in TS that don't emit).
     function* yieldMerged(): Iterable<RowChange | 'yield'> {
       for (const c of tsChanges) yield c;
-      for (const c of goResults) yield c;
+      for (const c of goResultsFinal) yield c;
     }
 
     return {
