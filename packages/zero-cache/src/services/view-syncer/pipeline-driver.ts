@@ -612,6 +612,32 @@ export class PipelineDriver {
     'ivm.shadow-tie-windows',
     'Shadow hydrate set-diffs suppressed as benign LIMIT tie-member swaps',
   );
+  // A shadow MISMATCH the SQL oracle attributed to TS (Go matched SQL). TS is
+  // NOT always right — it has known IVM pagination-boundary bugs — so without
+  // this, a TS bug is mislabeled as a Go drift. Demoted to info, not a Go fault.
+  readonly #shadowTsOnlyDivergences = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-ts-only-divergences',
+    'Shadow MISMATCHes where Go matches the SQL oracle and TS is the outlier',
+  );
+  // A shadow MISMATCH the SQL oracle confirmed as a REAL Go drift (Go disagrees
+  // with SQL). This is the signal that actually matters.
+  readonly #shadowConfirmedGoDrift = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-confirmed-go-drift',
+    'Shadow MISMATCHes confirmed as real Go drift by the SQL oracle',
+  );
+  // A shadow MISMATCH the SQL oracle could NOT adjudicate at all — buildAuditSQL
+  // couldn't translate the query shape (verdict 'skipped'), so we fall through to
+  // the raw TS-vs-Go MISMATCH. Counted so the unadjudicable rate stays visible
+  // (and the buildAuditSQL coverage gap can be closed); NOT itself a Go-fault
+  // signal. (Was previously incremented for the SQL=0-both-engines-have-rows
+  // case, until replica ground-truth proved SQL=0 is authoritative there.)
+  readonly #shadowSqlUnreliable = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-sql-unreliable',
+    'Shadow MISMATCHes the SQL oracle could not adjudicate (unbuildable SQL)',
+  );
   // Incremental-path divergence: Go's accumulated advance deltas for a query
   // disagree with a fresh SQL re-hydrate of the same query — i.e. some advance
   // emitted a wrong delta even though a full re-materialization would be right.
@@ -2065,12 +2091,19 @@ export class PipelineDriver {
       // different NUMBER of times on each side nets out. Compare the full bags
       // with TS as the multiplicity oracle (the single-table SQL can't model
       // join cardinality).
+      //
+      // Restricted to TRUE cardinality divergences (a row emitted >=2x on one
+      // side): a 1-vs-0 difference is plain SET membership, already covered by
+      // the set check + SQL classifier — and it's how the TS conversations
+      // boundary-drop shows up here (TS x1 Go x0), which is a TS bug, not a Go
+      // cardinality drift. Without this gate the metric is inflated by TS's own
+      // pagination bug. (Confirmed via the rich-interaction soak 2026-06-05.)
       {
         const bagKey = (c: RowChange) => `${c.table}|${stableStringify(c.rowKey)}`;
         const multDiffs = multisetDiff(
           tsRemapped.map(bagKey),
           goRemapped.map(bagKey),
-        );
+        ).filter(d => Math.max(d.aCount, d.bCount) >= 2);
         if (multDiffs.length > 0) {
           this.#driftAuditMultiplicityMismatches.add(multDiffs.length);
           const sample = multDiffs
@@ -3546,6 +3579,78 @@ export class PipelineDriver {
           `swap — suppressed (ts=${tsNorm.length} go=${goNorm.length})`,
       );
       return;
+    }
+
+    // SQL ground-truth CLASSIFIER. A bare TS-vs-Go MISMATCH is ambiguous: TS is
+    // NOT a reliable oracle — it has known IVM pagination-boundary bugs (the
+    // conversations boundary-drop), so it can be the WRONG side. When we have
+    // the query's AST (a single-query hydrate), adjudicate the divergence
+    // against raw SQL on the replica: if Go matches SQL, TS is the outlier —
+    // demote to info instead of paging on a phantom "Go" drift; only Go-
+    // disagrees-with-SQL is real. Runs ONLY on an actual divergence, so it adds
+    // no load to matching comparisons, and only for batch-hydrate (the audit
+    // path runs its own SQL check; advance has no single AST). This respects
+    // "TS is the bar" — SQL only breaks ties that already exist.
+    if (bagsDiffer && operation === 'batch-hydrate') {
+      const classifyAst = ast ?? this.#pipelines.get(context)?.transformedAst;
+      if (classifyAst) {
+        const verdict = this.#sqlGroundTruthCompare(classifyAst, goChanges);
+        if (
+          verdict.kind === 'confirmed' ||
+          verdict.kind === 'go-vs-sql-tie-window'
+        ) {
+          // Go matches the SQL oracle → TS is the divergent side, not Go.
+          this.#shadowTsOnlyDivergences.add(1);
+          this.#lc.info?.(
+            `[shadow] ts-only divergence (${operation} ${context}): Go matches ` +
+              `SQL, TS differs (ts=${tsNorm.length} go=${goNorm.length} ` +
+              `sql=${verdict.sqlCount}) — NOT a Go drift`,
+          );
+          return;
+        }
+        if (verdict.kind === 'skipped') {
+          // Unbuildable SQL — can't adjudicate. Count the rate, then fall
+          // through to the raw TS-vs-Go MISMATCH so it's still surfaced.
+          this.#shadowSqlUnreliable.add(1);
+        } else if (verdict.sqlCount === 0 && tsNorm.length > 0) {
+          // EXCLUSIVE-CURSOR BOUNDARY-SKEW family (2026-06-05). Go disagrees
+          // with SQL, SQL=0, AND TS ALSO has rows. Traced to the conversations
+          // list with an exclusive cursor (createdAt ASC, exclusive) whose
+          // cursor row is the NEWEST: the steady-state correct page is EMPTY
+          // (`createdAt > cursor` ⇒ 0, replica-verified via a direct
+          // `@rocicorp/zero-sqlite3` query). Go's cursor+scalar-EXISTS+Take
+          // logic for exactly this shape is VERIFIED CORRECT offline — see
+          // go-ivm/testharness `testcase_exclusive_cursor_{boundary,advance}`:
+          // hydrate ⇒ 0 rows, and an insert-churn advance ⇒ only the strictly-
+          // after row, on a clean snapshot (source-level, full hydrate, and
+          // advance paths all pass). So a LIVE divergence where BOTH engines
+          // over-read an empty exclusive page is a transient WAL-frame snapshot
+          // skew (Go's pinned prev-tx leaf sits one frame ahead of the SQL/TS
+          // read), NOT a logic drift — Go just over-reads the freshly-written
+          // boundary rows by one more frame than TS. Self-heals on re-hydrate.
+          // Demote to info; do NOT alarm. (The Go-OUTLIER case — SQL=0 AND
+          // TS=0, only Go has rows — falls to the else below and stays
+          // CONFIRMED: Go diverging from BOTH TS and SQL is genuinely suspect.)
+          this.#shadowSqlUnreliable.add(1);
+          this.#lc.info?.(
+            `[shadow] boundary-skew-suspect (${operation} ${context}): both ` +
+              `engines over-read an empty exclusive-cursor page (ts=${tsNorm.length} ` +
+              `go=${goNorm.length} sql=0) — Go cursor logic verified correct ` +
+              `offline, transient snapshot skew, NOT a Go drift`,
+          );
+          return;
+        } else {
+          // Go is the LONE offender: TS matches SQL (or SQL is non-empty and Go
+          // disagrees on set/content/order). This is the genuinely-suspicious
+          // shape — count it and fall through to log the full MISMATCH detail.
+          this.#shadowConfirmedGoDrift.add(1);
+          this.#lc.error?.(
+            `[shadow] CONFIRMED Go drift (${operation} ${context}): Go disagrees ` +
+              `with SQL (${verdict.kind}, ts=${tsNorm.length} go=${goNorm.length} ` +
+              `sql=${verdict.sqlCount}) — detail below`,
+          );
+        }
+      }
     }
 
     if (tsNorm.length !== goNorm.length) {
