@@ -273,6 +273,20 @@ match, OR rely on the appID/mode now carried on the `advanceToHead` wire.
 
 #### Sidecar-side env (read by the `go-ivm-sidecar` binary itself)
 
+- `GO_IVM_GOGC=200` — GC target percent (`debug.SetGCPercent`). The sidecar is
+  allocation-heavy (~8.6k objects per ~1k-row hydrate, dominated by the per-row
+  `Row` map), and at the Go default `GOGC=100` the GC — not the cores — caps
+  multi-CG parallel scaling: the cross-CG parallel speedup measured **2.6× at 16
+  CGs at GOGC=100 vs 4.9× at GOGC=800** (`engine/tablesource_bench_test.go`
+  `TableSourceMulti`). The sidecar therefore defaults to a moderate `GOGC=200`
+  (2×). Set `GO_IVM_GOGC=off` to disable GC, or any integer to tune. The
+  standard `GOGC` env takes precedence when `GO_IVM_GOGC` is unset.
+- `GO_IVM_GOMEMLIMIT=<bytes>` — soft memory cap (`debug.SetMemoryLimit`). The
+  principled high-throughput config: set this to the container's memory budget
+  and run a high/off `GOGC` so GC only fires near the cap — maximizing multi-core
+  throughput while never OOMing.
+
+
 - `GO_IVM_PARALLEL_THRESHOLD=2` — min connection count per MemorySource
   at which `genPushAndWriteParallel` (per-pipeline goroutine fan-out)
   kicks in for an advance push. The engine default is **2** (lowered
