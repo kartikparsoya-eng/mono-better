@@ -279,7 +279,12 @@ export type ResetPipelinesReason =
   | 'scalar-subquery'
   | 'schema-change'
   | 'truncation'
-  | 'permissions-change';
+  | 'permissions-change'
+  // Go-primary watermark reconciliation produced a version below the committed
+  // CVR (should be unreachable — each authority only advances — but a
+  // non-monotone reconcile would otherwise trip a hard assert and tear down the
+  // client group; recover via a full re-hydrate instead).
+  | 'watermark-regression';
 
 export class ResetPipelinesSignal extends Error {
   readonly name = 'ResetPipelinesSignal';

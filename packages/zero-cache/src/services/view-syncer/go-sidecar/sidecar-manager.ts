@@ -108,6 +108,15 @@ export type SidecarConfig = {
    * with the number of active cgs, not workers.
    */
   externallyManaged?: boolean;
+  /**
+   * Extra environment variables to set on the spawned sidecar process (merged
+   * over the inherited env). Used to derive the sidecar-side `GO_IVM_*` flags
+   * (advance-to-head / advance-drive / app-id) from the SAME zero-cache config
+   * that drives the TS dispatch decision, so the two processes can't silently
+   * disagree on mode (O1). Ignored when `externallyManaged` is true — the owner
+   * sets the env on the shared process it spawns.
+   */
+  spawnEnv?: Record<string, string>;
 };
 
 export type SidecarStatus = 'stopped' | 'starting' | 'running' | 'restarting' | 'failed';
@@ -120,6 +129,14 @@ export class SidecarManager {
   #client: GoIVMClient | null = null;
   #status: SidecarStatus = 'stopped';
   #restartTimestamps: number[] = []; // for sliding-window cap
+  // M2: retriggers (a follow-up to an already-counted failure) deliberately do
+  // NOT push a sliding-window timestamp. But a PERSISTENT mid-handshake failure
+  // — a sidecar that spawns then hangs (or a permanently-down externally-managed
+  // one) — manifests ONLY as retriggers, so the timestamp-based cap would never
+  // trip and the manager would retry forever, never reaching 'failed'. This
+  // separate counter bounds consecutive retriggers; it resets to 0 on a
+  // successful spawn (status → 'running').
+  #consecutiveRetriggers = 0;
   #shutdownRequested = false;
   // Set true immediately before the manager issues a deliberate SIGKILL
   // (post-spawn-failure cleanup in #handleRestartTrigger's catch path).
@@ -164,6 +181,7 @@ export class SidecarManager {
       healthCheckTimeoutMs: config.healthCheckTimeoutMs ?? 5000,
       verbose: config.verbose ?? true,
       externallyManaged: config.externallyManaged ?? false,
+      spawnEnv: config.spawnEnv ?? {},
       logger,
     };
   }
@@ -239,6 +257,12 @@ export class SidecarManager {
     // simultaneously, and on the restart path if external code retries
     // start() while #handleRestartTrigger is still respawning.
     if (this.#status === 'starting') return this.#runningPromise;
+    // Same idempotency during 'restarting': #handleRestartTrigger is already
+    // driving a respawn and has installed a fresh #runningPromise that
+    // waitForRunning() callers are blocked on. A concurrent start() must hand
+    // that promise back rather than spawn a second process and orphan those
+    // awaiters (LOW-2).
+    if (this.#status === 'restarting') return this.#runningPromise;
     // Terminal states: 'failed' is reached after the sliding-window cap
     // exceeds; starting() again would skip the cap check and silently
     // restart a sidecar the manager has already declared dead. Reject
@@ -384,6 +408,10 @@ export class SidecarManager {
 
       const proc = spawn(this.#config.binaryPath, [this.#config.socketPath], {
         stdio: ['ignore', 'pipe', 'pipe'],
+        // O1: derive the sidecar's GO_IVM_* mode flags from the same config the
+        // TS dispatch uses, so a spawned sidecar can't be armed differently than
+        // the worker expects. Merged over the inherited env.
+        env: {...process.env, ...this.#config.spawnEnv},
       });
 
       this.#proc = proc;
@@ -474,6 +502,9 @@ export class SidecarManager {
 
     this.#status = 'running';
     this.#epoch++;
+    // M2: a clean handshake clears the consecutive-retrigger streak so a later
+    // transient restart starts from a full budget again.
+    this.#consecutiveRetriggers = 0;
     // Explicit startup line: operators grep for this to confirm the Go path
     // is engaged on a fresh deploy. Pre-fix only the version banner logged
     // here, leaving "is the manager actually ready?" ambiguous when version
@@ -550,9 +581,20 @@ export class SidecarManager {
     this.#restartTimestamps = this.#restartTimestamps.filter(t => t > cutoff);
     if (!isRetrigger) {
       this.#restartTimestamps.push(now);
+      // A genuinely new failure breaks any consecutive-retrigger streak.
+      this.#consecutiveRetriggers = 0;
+    } else {
+      this.#consecutiveRetriggers++;
     }
 
-    if (this.#restartTimestamps.length <= this.#config.maxRestartsInWindow) {
+    // M2: trip the cap on EITHER too many windowed failures OR too many
+    // consecutive retriggers (a persistent mid-handshake failure that never
+    // surfaces as a fresh windowed failure). Either way we reach 'failed' and
+    // dispatch falls through to TS instead of looping forever.
+    if (
+      this.#restartTimestamps.length <= this.#config.maxRestartsInWindow &&
+      this.#consecutiveRetriggers <= this.#config.maxRestartsInWindow
+    ) {
       this.#status = 'restarting';
       // Future waitForRunning() calls block on this fresh promise until the
       // restart settles. Without this, callers throw immediately and the

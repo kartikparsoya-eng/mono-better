@@ -131,16 +131,62 @@ export default function runWorker(
     const binaryPath = config.goSidecar.binaryPath;
     const externallyManaged = config.goSidecar.externallyManaged ?? false;
     const socketPath = config.goSidecar.socketPath;
+    // M4: the goSidecar flags are independent booleans whose valid combinations
+    // are resolved by precedence at dispatch time (shadow wins; primary flags
+    // imply others). Warn on contradictory/incomplete combinations that would
+    // otherwise silently degrade, so an operator isn't left wondering why a mode
+    // they configured isn't running.
+    {
+      const sc = config.goSidecar;
+      const anyPrimary =
+        (sc.advanceToHead ?? false) ||
+        (sc.advanceDrive ?? false) ||
+        (sc.goPrimaryTrigger ?? false) ||
+        (sc.leanPrimary ?? false);
+      if ((sc.shadowMode ?? false) && anyPrimary) {
+        lc.warn?.(
+          'goSidecar: shadowMode and a go-primary flag are both set; shadow ' +
+            'mode wins and the primary flags are ignored this run.',
+        );
+      }
+      if ((sc.leanPrimary ?? false) && !(sc.goPrimaryTrigger ?? false)) {
+        lc.warn?.(
+          'goSidecar.leanPrimary=true without goSidecar.goPrimaryTrigger=true ' +
+            'has no effect (lean only applies to the trigger-primary path).',
+        );
+      }
+    }
     if (externallyManaged && !socketPath) {
       lc.error?.(
         'goSidecar.externallyManaged=true requires goSidecar.socketPath to be set; falling back to TS',
       );
     } else {
       const sidecarLc = lc.withContext('component', 'go-ivm');
+      // O1: derive the sidecar's GO_IVM_* mode env from the SAME goSidecar
+      // config that drives the TS dispatch, so a spawned sidecar is armed
+      // exactly as the worker expects (advanceToHead / advanceDrive both require
+      // the sidecar's snapshotter + table source mode). Without this the two
+      // processes are configured independently and a mismatch silently drops
+      // every user delta. (Ignored for externallyManaged — the owner sets env on
+      // the shared process; a startup mode handshake there is a follow-up.)
+      const sc = config.goSidecar;
+      const wantsAdvanceToHead =
+        (sc.advanceToHead ?? false) ||
+        (sc.advanceDrive ?? false) ||
+        (sc.goPrimaryTrigger ?? false);
+      const spawnEnv: Record<string, string> = {GO_IVM_APP_ID: shard.appID};
+      if (wantsAdvanceToHead) {
+        spawnEnv.GO_IVM_ADVANCE_TO_HEAD = 'true';
+        spawnEnv.GO_IVM_SOURCE_MODE = 'table';
+      }
+      if (sc.advanceDrive ?? false) {
+        spawnEnv.GO_IVM_ADVANCE_DRIVE = 'true';
+      }
       sidecarManager = new SidecarManager({
         binaryPath,
         ...(socketPath ? {socketPath} : {}),
         externallyManaged,
+        spawnEnv,
         logger: (level, msg, err) => {
           // Route sidecar stdout/stderr + manager events through LogContext
           // instead of raw process.std{out,err}.write so structured logging

@@ -249,6 +249,28 @@ and are validated by the same valita schema as the rest of zero-cache.
   `externallyManaged=true`. Without it, each worker spawns its own
   sidecar at `/tmp/go-ivm-<pid>.sock`.
 
+##### Go-primary cutover flags (TS-side; resolved by precedence at dispatch)
+
+These select how Go participates beyond shadow mode. They are independent
+booleans whose valid combinations are resolved in `pipeline-driver.ts`
+(shadow wins over any primary flag). For a SPAWNED sidecar, zero-cache now
+derives the matching `GO_IVM_*` env automatically (see "Sidecar-side env");
+for an `externallyManaged` sidecar the owner must set the `GO_IVM_*` env to
+match, OR rely on the appID/mode now carried on the `advanceToHead` wire.
+
+- `ZERO_GO_SIDECAR_ADVANCE_TO_HEAD=true` — Go derives its OWN snapshot
+  diff via the `advanceToHead` RPC (requires the sidecar armed with
+  `GO_IVM_ADVANCE_TO_HEAD=true` + table mode).
+- `ZERO_GO_SIDECAR_ADVANCE_DRIVE=true` — Go drives its OWN engine
+  frame-coordinated (implies `advanceToHead`; needs `GO_IVM_ADVANCE_DRIVE`
+  + `GO_IVM_SOURCE_MODE=table` on the sidecar).
+- `ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=true` — Go-primary serving via the
+  trigger path (Go derives its own diff + drives its own engine). The CVR
+  watermark is committed at `min(V_ts, V_go)` (see pipeline-driver
+  `reconcileGoPrimaryWatermark`).
+- `ZERO_GO_SIDECAR_LEAN_PRIMARY=true` — TS holds only STUB user pipelines
+  (Go owns them); only meaningful with `goPrimaryTrigger`.
+
 #### Sidecar-side env (read by the `go-ivm-sidecar` binary itself)
 
 - `GO_IVM_PARALLEL_THRESHOLD=2` — min connection count per MemorySource
@@ -386,7 +408,7 @@ followed by exactly one `"done"` terminal frame. The TS client routes
 partial frames to an `onPartial` callback; the call promise resolves on
 `"done"`.
 
-**Chunking contract** (protocol rev 3+): partial frames carry
+**Chunking contract** (protocol rev 7+): partial frames carry
 `chunkIndex` (monotonically increasing) and `final` (bool, true on the
 last frame). The Go side chunks at 10,000 RowChanges per frame
 (`hydrateChunkSize` / `advanceChunkSize`, matching the view-syncer's
@@ -408,7 +430,7 @@ Defensive invariants enforced by the TS client (throws on violation):
 - every `advanceStream` call sees at least one `final=true` before "done"
 
 The TS client refuses to talk to a sidecar reporting a different
-`protocolRev` than its constant in `sidecar-manager.ts` (currently 3).
+`protocolRev` than its constant in `sidecar-manager.ts` (currently 7).
 
 ### Operational concerns
 

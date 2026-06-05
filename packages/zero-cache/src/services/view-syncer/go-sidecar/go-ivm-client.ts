@@ -787,11 +787,15 @@ export class GoIVMClient {
   async advanceToHead(
     clientGroupID: string,
     initEpoch: number,
+    appID: string,
     opts?: CallOptions,
   ): Promise<AdvanceToHeadResult> {
+    // O2: forward the shard's appID so the sidecar's snapshotter watches the
+    // correct `<appID>.permissions` table. Omitted when empty so the Go side
+    // keeps its GO_IVM_APP_ID env fallback (p.AppID is `omitempty`).
     const result = (await this.#call(
       'advanceToHead',
-      {clientGroupID, initEpoch},
+      appID ? {clientGroupID, initEpoch, appID} : {clientGroupID, initEpoch},
       opts,
     )) as Partial<AdvanceToHeadResult>;
     return {

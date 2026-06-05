@@ -2309,6 +2309,24 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         );
       }
 
+      // H2: the reconciled Go-primary watermark must never regress below the
+      // committed CVR version — CVRQueryDrivenUpdater asserts `stateVersion >=
+      // cvr.version.stateVersion` and throws a bare Error otherwise, which would
+      // escape as an unrecoverable CG teardown. This should be unreachable (each
+      // authority only advances, and H1 removed the full-V_ts reset excursion),
+      // but if a non-monotone reconcile ever slips through, convert it into a
+      // recoverable full re-hydrate instead of crashing.
+      if (version < cvr.version.stateVersion) {
+        lc.warn?.(
+          `[go-primary] reconciled watermark ${version} regressed below ` +
+            `committed CVR ${cvr.version.stateVersion}; resetting pipelines`,
+        );
+        return new ResetPipelinesSignal(
+          `watermark regression ${version} < ${cvr.version.stateVersion}`,
+          'watermark-regression',
+        );
+      }
+
       // Probably need a new updater type. CVRAdvancementUpdater?
       const updater = new CVRQueryDrivenUpdater(
         this.#cvrStore,

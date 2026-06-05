@@ -67,6 +67,7 @@ export class GoComputeBackend {
   readonly #getCurrentQueries: GetCurrentQueries;
   readonly #log: GoBackendLogger;
   readonly #loadBatchRows: number;
+  readonly #appID: string;
   #initialized = false;
   #initEpoch = -1;
   /**
@@ -98,12 +99,21 @@ export class GoComputeBackend {
     clientGroupID: string,
     getCurrentTables: () => Record<string, TableData>,
     getCurrentQueries: GetCurrentQueries,
-    options?: {logger?: GoBackendLogger; loadBatchRows?: number},
+    options?: {
+      logger?: GoBackendLogger;
+      loadBatchRows?: number;
+      appID?: string;
+    },
   ) {
     this.#manager = manager;
     this.#clientGroupID = clientGroupID;
     this.#getCurrentTables = getCurrentTables;
     this.#getCurrentQueries = getCurrentQueries;
+    // O2: send the appID on the advanceToHead wire so the sidecar uses the
+    // SHARD's appID for its snapshotter's permissions-table watch instead of
+    // relying solely on the GO_IVM_APP_ID env (which an externally-managed
+    // owner could set inconsistently). Empty string ⇒ Go falls back to its env.
+    this.#appID = options?.appID ?? '';
     // No console fallback: callers without a logger get silence by design.
     const noop: GoBackendLogger = () => {};
     const raw = options?.logger ?? noop;
@@ -260,7 +270,12 @@ export class GoComputeBackend {
   // which (in the P1 shadow compare) logs it and skips the comparison.
   advanceToHead(): Promise<AdvanceToHeadResult> {
     return this.#withReinitRetry(() =>
-      this.#client().advanceToHead(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts()),
+      this.#client().advanceToHead(
+        this.#clientGroupID,
+        this.#sidecarInitEpoch,
+        this.#appID,
+        this.#cgOpts(),
+      ),
     );
   }
 
@@ -846,7 +861,7 @@ export function createGoComputeBackend(
   clientGroupID: string,
   getCurrentTables: () => Record<string, TableData>,
   getCurrentQueries: GetCurrentQueries,
-  options?: {logger?: GoBackendLogger; loadBatchRows?: number},
+  options?: {logger?: GoBackendLogger; loadBatchRows?: number; appID?: string},
 ): GoComputeBackend | null {
   try {
     if (sidecarManager.status !== 'running') return null;

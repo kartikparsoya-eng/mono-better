@@ -879,6 +879,10 @@ export class PipelineDriver {
                   queryID,
                   ast: p.transformedAst,
                 })),
+            // O2: make the shard's appID authoritative on the advanceToHead
+            // wire so the sidecar watches the right permissions table even if
+            // its GO_IVM_APP_ID env was set inconsistently (externally-managed).
+            {appID: this.#shardID.appID},
           )
         : null;
 
@@ -2917,7 +2921,19 @@ export class PipelineDriver {
                   `(${goDerived.reset.msg}); scheduling reset, dropping user delta`,
               );
               this.#scheduleGoReset('go-primary-advanceToHead-reset');
-              return {changes: [] as RowChange[], goVersion: undefined};
+              // H1: drop the user delta but DON'T stamp at full V_ts. Go's user
+              // pipelines did NOT advance this cycle, so their data is still at
+              // the prev snapshot version. Returning `undefined` here would make
+              // reconcileGoPrimaryWatermark fall through to full V_ts — an
+              // OVER-claim (cookie says V_ts while user rows are at prev) until
+              // the async reset re-hydrates. Stamp Go's actual floor (prev) so
+              // the watermark is min(V_ts, prev)=prev — a safe under-claim the
+              // view-syncer assert validates; the reset re-delivers at a later
+              // patchVersion as an idempotent superset.
+              return {
+                changes: [] as RowChange[],
+                goVersion: diff.prev.version,
+              };
             }
             this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
             return {
@@ -2928,8 +2944,13 @@ export class PipelineDriver {
             };
           })
           .catch(e => ({
+            // H1: on a dropped advance (classify returns [] rather than
+            // re-throwing), Go's user data stayed at prev — stamp prev so the
+            // reconciled watermark under-claims instead of over-claiming V_ts.
+            // (A re-thrown protocol/stale error rejects goPromise and never
+            // reaches here.)
             changes: this.#classifyGoPrimaryAdvanceError(e),
-            goVersion: undefined,
+            goVersion: diff.prev.version,
           }))
       : this.#goBackend!.advanceStream(snapshotChanges)
           .then(r => {
