@@ -19,10 +19,12 @@ on:
   push:
     branches:
       - feat/go-ivm-sidecar-async-advance
+      - feat/snapshotter-in-go
     tags: ['v*']
   pull_request:
     branches:
       - feat/go-ivm-sidecar-async-advance
+      - feat/snapshotter-in-go
     paths:
       # Only run on PRs that touch files the docker build cares about,
       # so unrelated PRs don't pay the multi-minute build cost.
@@ -62,11 +64,15 @@ jobs:
           - mode: primary
             shadow_mode_arg: "false"
             source_mode_arg: "memory"
+            go_primary_trigger_arg: "false"
+            lean_primary_arg: "false"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:latest"
             tag_prefix: ""
           - mode: shadow
             shadow_mode_arg: "true"
             source_mode_arg: "memory"
+            go_primary_trigger_arg: "false"
+            lean_primary_arg: "false"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:latest"
             tag_prefix: "shadow-"
           # TableSource port — Go-primary leaf reads SQLite directly
@@ -77,7 +83,12 @@ jobs:
           - mode: tablesrc
             shadow_mode_arg: "false"
             source_mode_arg: "table"
-            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-go-tablesource-port"
+            # Go-primary serving: Go derives its own diff (trigger) and TS
+            # walks internal tables only (lean). Baked so the image is
+            # run-and-go — see Dockerfile.go-ivm GO_PRIMARY_TRIGGER/LEAN_PRIMARY.
+            go_primary_trigger_arg: "true"
+            lean_primary_arg: "true"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
             tag_prefix: "tablesrc-"
           # Shadow + TableSource: TS serves user queries (zero risk to
           # prod), Go runs in parallel with the TableSource leaf on
@@ -88,7 +99,10 @@ jobs:
           - mode: shadow-tablesrc
             shadow_mode_arg: "true"
             source_mode_arg: "table"
-            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-go-tablesource-port"
+            # Shadow keeps TS authoritative — no trigger, no lean.
+            go_primary_trigger_arg: "false"
+            lean_primary_arg: "false"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
             tag_prefix: "shadow-tablesrc-"
 
     name: build (${{ matrix.mode }})
@@ -140,6 +154,8 @@ jobs:
           build-args: |
             SHADOW_MODE=${{ matrix.shadow_mode_arg }}
             SOURCE_MODE=${{ matrix.source_mode_arg }}
+            GO_PRIMARY_TRIGGER=${{ matrix.go_primary_trigger_arg }}
+            LEAN_PRIMARY=${{ matrix.lean_primary_arg }}
             GO_IVM_IMAGE=${{ matrix.go_ivm_image }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

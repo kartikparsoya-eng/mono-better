@@ -97,6 +97,17 @@ ARG SHADOW_MODE=false
 # environment-specific).
 ARG SOURCE_MODE=memory
 
+# Go-primary serving selectors (snapshotter-in-go port). Both default
+# false so the existing memory primary/shadow images are unchanged; only
+# the table-mode Go-primary variant sets them true:
+#   GO_PRIMARY_TRIGGER=true → Go derives its OWN diff via advanceToHead
+#                             (self-consistent V_go), not push-applies TS's.
+#   LEAN_PRIMARY=true       → TS walks INTERNAL/control-plane tables only;
+#                             Go owns all user-table changes.
+# Shadow variants keep both false (TS stays source of truth).
+ARG GO_PRIMARY_TRIGGER=false
+ARG LEAN_PRIMARY=false
+
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
 # (shadow on 1 prod node → ~1 week observation → flip to primary).
@@ -107,6 +118,8 @@ ENV ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=true
 ENV ZERO_GO_SIDECAR_SOCKET_PATH=/tmp/go-ivm-shared.sock
 ENV ZERO_GO_SIDECAR_SHADOW_MODE=${SHADOW_MODE}
 ENV GO_IVM_SOURCE_MODE=${SOURCE_MODE}
+ENV ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=${GO_PRIMARY_TRIGGER}
+ENV ZERO_GO_SIDECAR_LEAN_PRIMARY=${LEAN_PRIMARY}
 # workers=1 keeps cg state colocated in the single shared sidecar
 # (per feedback_shared_sidecar_tuning — bumping workers fragments
 # cgs across sidecars under per-worker mode; in shared mode it just
