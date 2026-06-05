@@ -258,6 +258,140 @@ function buildAuditSQL(
   return {text: sql, values};
 }
 
+/**
+ * Multiset (bag) diff over a string key. Returns the keys whose occurrence
+ * COUNT differs between the two lists, with each side's count. Unlike a
+ * Set-based diff this catches MULTIPLICITY divergence — e.g. a join fan-out
+ * that emits a row N times on one side and M on the other — which every
+ * PK-keyed (deduping) comparison in the audit is structurally blind to.
+ */
+export function multisetDiff(
+  a: readonly string[],
+  b: readonly string[],
+): {key: string; aCount: number; bCount: number}[] {
+  const count = (xs: readonly string[]) => {
+    const m = new Map<string, number>();
+    for (const x of xs) m.set(x, (m.get(x) ?? 0) + 1);
+    return m;
+  };
+  const ca = count(a);
+  const cb = count(b);
+  const out: {key: string; aCount: number; bCount: number}[] = [];
+  for (const k of new Set([...ca.keys(), ...cb.keys()])) {
+    const av = ca.get(k) ?? 0;
+    const bv = cb.get(k) ?? 0;
+    if (av !== bv) out.push({key: k, aCount: av, bCount: bv});
+  }
+  return out;
+}
+
+/**
+ * Op-kind parity: for each (table,rowKey) touched by an advance, the SET of
+ * change types each engine emitted. A row that TS expresses as a single
+ * `edit` while Go expresses as `remove`+`add` (or vice versa) yields the SAME
+ * final row — so #shadowCompare's positional row compare and every PK-set
+ * check pass — but is a genuinely different client-visible wire sequence
+ * (edit patches in place; remove+add flickers the row out and back). Returns
+ * the rowKeys whose type-multiset differs between the two sides.
+ */
+export function opKindDiff(
+  tsChanges: readonly RowChange[],
+  goChanges: readonly RowChange[],
+): {key: string; tsTypes: number[]; goTypes: number[]}[] {
+  const byKey = (changes: readonly RowChange[]) => {
+    const m = new Map<string, number[]>();
+    for (const c of changes) {
+      const k = `${c.table}|${stableStringify(c.rowKey)}`;
+      let arr = m.get(k);
+      if (!arr) {
+        arr = [];
+        m.set(k, arr);
+      }
+      arr.push(c.type);
+    }
+    for (const v of m.values()) v.sort((x, y) => x - y);
+    return m;
+  };
+  const ts = byKey(tsChanges);
+  const go = byKey(goChanges);
+  const out: {key: string; tsTypes: number[]; goTypes: number[]}[] = [];
+  for (const k of new Set([...ts.keys(), ...go.keys()])) {
+    const tt = ts.get(k) ?? [];
+    const gt = go.get(k) ?? [];
+    if (tt.length !== gt.length || tt.some((t, i) => t !== gt[i])) {
+      out.push({key: k, tsTypes: tt, goTypes: gt});
+    }
+  }
+  return out;
+}
+
+/**
+ * True when a TS-vs-Go set difference is a benign LIMIT tie-member swap rather
+ * than a real divergence (used by shadow mode to suppress nondeterministic
+ * MISMATCHes). TS-vs-TS-window — no oracle. An ordered + LIMITed query whose
+ * sort lacks a unique tiebreaker has nondeterministic window membership when a
+ * tie group straddles the boundary, so TS and Go can legitimately keep
+ * different members of that tie.
+ *
+ * Conservative by construction — returns false (keeps the MISMATCH) on: no
+ * orderBy / no limit; any child/related-table rows present (a root tie-swap
+ * drags children we can't reason about, and single-root-table keeps the diff
+ * PK-unique with no multiplicity ambiguity); any common row whose content or
+ * change-kind differs (real value drift); any differing row that is NOT a
+ * boundary tie member (its ORDER BY key value present on BOTH sides). So it
+ * never suppresses a genuine row/value/multiplicity divergence.
+ */
+export function isShadowTieWindow(
+  ast: AST | undefined,
+  tsChanges: readonly RowChange[],
+  goChanges: readonly RowChange[],
+): boolean {
+  if (!ast?.orderBy?.length || ast.limit === undefined) return false;
+  // Symmetric swaps only: a clean tie-window cut leaves both windows FULL at the
+  // same row count (a tie group straddling the boundary, different members
+  // kept). Unequal counts mean one side dropped/added a row — not a boundary
+  // swap — so keep it as a MISMATCH (also avoids masking a real row-drop).
+  if (tsChanges.length !== goChanges.length) return false;
+  const rootTable = ast.table;
+  if (
+    tsChanges.some(c => c.table !== rootTable) ||
+    goChanges.some(c => c.table !== rootTable)
+  ) {
+    return false;
+  }
+  const orderFields = ast.orderBy.map(([fld]) => fld);
+  const keyTuple = (row: Record<string, unknown>) =>
+    stableStringify(orderFields.map(fld => row[fld]));
+  const index = (changes: readonly RowChange[]) => {
+    const m = new Map<string, RowChange>();
+    for (const c of changes) m.set(stableStringify(c.rowKey), c);
+    return m;
+  };
+  const ts = index(tsChanges);
+  const go = index(goChanges);
+  const tsKeys = new Set(Array.from(ts.values(), c => keyTuple(c.row)));
+  const goKeys = new Set(Array.from(go.values(), c => keyTuple(c.row)));
+  const isTie = (c: RowChange) => {
+    const k = keyTuple(c.row);
+    return tsKeys.has(k) && goKeys.has(k);
+  };
+  let anySetDiff = false;
+  for (const k of new Set([...ts.keys(), ...go.keys()])) {
+    const t = ts.get(k);
+    const g = go.get(k);
+    if (t && g) {
+      if (t.type !== g.type || stableStringify(t.row) !== stableStringify(g.row)) {
+        return false; // real content / op-kind drift, not a tie swap
+      }
+    } else {
+      const c = t ?? g;
+      if (!c || !isTie(c)) return false; // a non-tie set difference is real
+      anySetDiff = true;
+    }
+  }
+  return anySetDiff;
+}
+
 export type RowAdd = RowOp<ChangeType.ADD>;
 
 export type RowRemove = RowOp<ChangeType.REMOVE>;
@@ -443,6 +577,51 @@ export class PipelineDriver {
     'ivm.drift-audit-order-mismatches',
     'Row-order divergences (Go vs SQL ORDER BY) detected by the drift audit',
   );
+  // Multiplicity divergence: same DISTINCT rows on both sides but a different
+  // emission COUNT for some (table,rowKey) — a join fan-out cardinality bug
+  // the PK-keyed set/content checks can't see.
+  readonly #driftAuditMultiplicityMismatches = getOrCreateCounter(
+    'sync',
+    'ivm.drift-audit-multiplicity-mismatches',
+    'TS/Go row-multiplicity divergences detected by the drift audit',
+  );
+  // Op-kind divergence (advance only): TS and Go agree on the final row but
+  // disagree on the change TYPE (e.g. edit vs remove+add). Client-visible wire
+  // difference invisible to the row/value compare.
+  readonly #shadowOpKindMismatches = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-opkind-mismatches',
+    'TS/Go change-kind (edit vs remove+add) divergences in shadow advance',
+  );
+  // Result-ORDER divergence between TS and Go for an ordered hydrate. The set/
+  // value compare in #shadowCompare sorts both sides by rowKey, so it's blind to
+  // emission order — this is the only check that verifies Go reproduces TS's
+  // wire ORDER (what clients render). Tie-aware: reorderings within an equal
+  // ORDER BY key-value group don't count.
+  readonly #shadowOrderMismatches = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-order-mismatches',
+    'TS/Go result-order divergences detected in shadow-mode hydrate',
+  );
+  // Shadow MISMATCHes suppressed as benign tie-window (single-root-table
+  // ordered+LIMITed result where TS and Go picked different members of a tie
+  // group at the boundary — nondeterministic, not a Go bug). Counted so the
+  // suppression rate is visible rather than silent.
+  readonly #shadowTieWindows = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-tie-windows',
+    'Shadow hydrate set-diffs suppressed as benign LIMIT tie-member swaps',
+  );
+  // Incremental-path divergence: Go's accumulated advance deltas for a query
+  // disagree with a fresh SQL re-hydrate of the same query — i.e. some advance
+  // emitted a wrong delta even though a full re-materialization would be right.
+  // This is the only check that validates the INCREMENTAL path; every other
+  // layer compares point-in-time materialized state.
+  readonly #driftAuditIncrementalMismatches = getOrCreateCounter(
+    'sync',
+    'ivm.drift-audit-incremental-mismatches',
+    'Go advance-delta accumulation vs SQL re-hydrate divergences',
+  );
   readonly #driftAuditRuns = getOrCreateCounter(
     'sync',
     'ivm.drift-audit-runs',
@@ -564,6 +743,27 @@ export class PipelineDriver {
   // Round-robin cursor over the sorted auditable queries, so the audit covers
   // every active query within N cycles instead of sampling one at random.
   #driftAuditCursor = 0;
+
+  // Incremental-correctness accumulator (item #2). Per queryID, the main-table
+  // PK set as built by APPLYING Go's emitted advance deltas (add→insert,
+  // remove→delete, edit→no-op on PK membership). Seeded from each drift audit's
+  // SQL hydrate, then reconciled against the next SQL hydrate of the same query
+  // — so a wrong advance delta surfaces even when a full re-hydrate is correct.
+  // Self-healing: re-seeded every audit cycle, so any false desync clears in one
+  // cycle. `#goDeltaAccumDirty` marks queries whose stream was interrupted
+  // (reset / dropped advance / eviction) so the incremental check is skipped
+  // until the next clean seed.
+  readonly #goDeltaAccum = new Map<string, Set<string>>();
+  readonly #goDeltaAccumDirty = new Set<string>();
+
+  // Schema-type coverage (item #5): the set of column pgTypes that audited
+  // queries have actually SORTED by and FILTERED on. A comparator bug for one
+  // type (bytea / numeric / enum / array / timestamp …) only surfaces if some
+  // audited query exercises it; this tracks what's been hit so gaps are
+  // visible rather than silently untested.
+  readonly #auditTypesSorted = new Set<string>();
+  readonly #auditTypesFiltered = new Set<string>();
+  #auditTypeCovLastReportMs = 0;
   // Timestamp of the last drift-audit INFO heartbeat. Each successful audit-OK
   // path is debug-only (high noise), so without this heartbeat operators have
   // no INFO-level signal that the audit machinery is actually firing — just
@@ -1500,6 +1700,9 @@ export class PipelineDriver {
       // soon as Go emits each result (REVIEW-final perf-opt streaming
       // validation in shadow).
       const goResultsByID = new Map<string, RowChange[]>();
+      // queryID → original (pre-planForGo) AST, so #shadowCompare's result-ORDER
+      // check has the orderBy without depending on #pipelines registration.
+      const astByID = new Map(queries.map(q => [q.queryID, q.ast]));
       let mismatches = 0;
       await this.#goBackend.hydrateManyStream(
         queries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
@@ -1511,7 +1714,13 @@ export class PipelineDriver {
           // emits companion rows itself if any scalar subquery resolved.
           goResultsByID.set(r.queryID, goChanges);
           const tsChanges = tsResultsPerQuery.get(r.queryID) ?? [];
-          this.#shadowCompare(`batch-hydrate`, r.queryID, tsChanges, goChanges);
+          this.#shadowCompare(
+            `batch-hydrate`,
+            r.queryID,
+            tsChanges,
+            goChanges,
+            astByID.get(r.queryID),
+          );
           if (tsChanges.length !== goChanges.length) mismatches++;
         },
       );
@@ -1520,7 +1729,7 @@ export class PipelineDriver {
       for (const q of queries) {
         if (!goResultsByID.has(q.queryID)) {
           const tsChanges = tsResultsPerQuery.get(q.queryID) ?? [];
-          this.#shadowCompare('batch-hydrate', q.queryID, tsChanges, []);
+          this.#shadowCompare('batch-hydrate', q.queryID, tsChanges, [], q.ast);
           if (tsChanges.length !== 0) mismatches++;
         }
       }
@@ -1845,7 +2054,68 @@ export class PipelineDriver {
         );
       }
 
-      this.#shadowCompare('drift-audit', targetID, tsRemapped, goRemapped);
+      this.#shadowCompare('drift-audit', targetID, tsRemapped, goRemapped, ast);
+
+      // Item #5: record which column types this audited shape sorts/filters on,
+      // and periodically log coverage gaps.
+      this.#recordAuditTypeCoverage(ast);
+
+      // Item #1: multiplicity (multiset) compare. #shadowCompare and the SQL
+      // checks are PK/rowKey-keyed; a fan-out that emits a (table,rowKey) a
+      // different NUMBER of times on each side nets out. Compare the full bags
+      // with TS as the multiplicity oracle (the single-table SQL can't model
+      // join cardinality).
+      {
+        const bagKey = (c: RowChange) => `${c.table}|${stableStringify(c.rowKey)}`;
+        const multDiffs = multisetDiff(
+          tsRemapped.map(bagKey),
+          goRemapped.map(bagKey),
+        );
+        if (multDiffs.length > 0) {
+          this.#driftAuditMultiplicityMismatches.add(multDiffs.length);
+          const sample = multDiffs
+            .slice(0, 5)
+            .map(d => `${d.key}: TS×${d.aCount} Go×${d.bCount}`)
+            .join(' ; ');
+          this.#lc.error?.(
+            `[drift-audit][multiplicity] ${targetID}: ${multDiffs.length} row(s) ` +
+              `with divergent emission count — ${sample}`,
+          );
+        }
+      }
+
+      // Item #2: reconcile Go's ACCUMULATED advance deltas against this fresh
+      // full hydrate (goRemapped is all-ADD, so its main-table PK set is Go's
+      // current full materialization). A divergence means some advance emitted
+      // a wrong delta that a from-scratch re-hydrate masks — the incremental
+      // operator path disagreeing with the hydrate path. The existing SQL check
+      // separately ties this hydrate to ground truth, so accum==hydrate==SQL
+      // gives accum==SQL transitively. Skip when tainted; always RE-SEED after.
+      {
+        const goHydratePks = new Set<string>();
+        for (const c of goRemapped) {
+          if (c.table === ast.table) goHydratePks.add(stableStringify(c.rowKey));
+        }
+        const accum = this.#goDeltaAccum.get(targetID);
+        if (accum && !this.#goDeltaAccumDirty.has(targetID)) {
+          const accumOnly: string[] = [];
+          const hydrateOnly: string[] = [];
+          for (const k of accum) if (!goHydratePks.has(k)) accumOnly.push(k);
+          for (const k of goHydratePks) if (!accum.has(k)) hydrateOnly.push(k);
+          if (accumOnly.length > 0 || hydrateOnly.length > 0) {
+            this.#driftAuditIncrementalMismatches.add(1);
+            this.#lc.error?.(
+              `[drift-audit][incremental] ${targetID}: REAL DRIFT — Go advance-delta ` +
+                `accumulation diverged from a fresh hydrate. ` +
+                `accum_only=${accumOnly.slice(0, 3).join(' | ')} (${accumOnly.length}) ` +
+                `hydrate_only=${hydrateOnly.slice(0, 3).join(' | ')} (${hydrateOnly.length}) ` +
+                `version=${versionAfter} ast=${JSON.stringify(ast)}`,
+            );
+          }
+        }
+        this.#goDeltaAccum.set(targetID, goHydratePks);
+        this.#goDeltaAccumDirty.delete(targetID);
+      }
 
       // Third opinion: run raw SQL on the snapshot's SQLite replica as
       // ground truth and compare against Go's main-table rows. Only
@@ -1934,6 +2204,17 @@ export class PipelineDriver {
             `sql_seq=[…${window(sqlVerdict.sqlSeq)}…] ` +
             `go_seq=[…${window(sqlVerdict.goSeq)}…] ast=${JSON.stringify(ast.orderBy)}`,
         );
+      } else if (sqlVerdict.kind === 'go-vs-sql-tie-window') {
+        // Ordered+limited query whose ORDER BY lacks a unique tiebreaker: Go
+        // and SQL picked different members of a tie group straddling the LIMIT
+        // boundary, but both windows carry the SAME ordered key VALUES. Not a
+        // bug — nondeterministic window membership (real Zero appends the PK so
+        // this can't happen in prod; raw audit ASTs may omit it). Info-level.
+        this.#lc.info?.(
+          `[drift-audit] ${targetID}: tie-window (nondeterministic LIMIT boundary, ` +
+            `same ordered key values, ${sqlVerdict.goOnly.length} tie members swapped). ` +
+            `go=${goRemapped.length} sql=${sqlVerdict.sqlCount} ast=${JSON.stringify(ast.orderBy)}`,
+        );
       } else if (setDiffers && sqlVerdict.kind === 'confirmed') {
         // TS-audit disagrees but Go matches the SQL ground truth.
         // Known TS-audit bug (Bug #3, see #runDriftAudit doc) — info-level only.
@@ -2004,6 +2285,7 @@ export class PipelineDriver {
   ):
     | {kind: 'confirmed'; sqlCount: number}
     | {kind: 'go-vs-sql-drift'; sqlCount: number; goOnly: string[]; sqlOnly: string[]}
+    | {kind: 'go-vs-sql-tie-window'; sqlCount: number; goOnly: string[]; sqlOnly: string[]}
     | {
         kind: 'go-vs-sql-content-drift';
         sqlCount: number;
@@ -2086,6 +2368,13 @@ export class PipelineDriver {
       }
     }
 
+    // ORDER BY key-tuple of a row (used by the tie-window set check and the
+    // tie-aware order check). Real Zero appends the PK so the sort is total;
+    // raw audit ASTs may not, so equal key tuples = an unordered tie group.
+    const orderFields = (ast.orderBy ?? []).map(([fld]) => fld);
+    const keyTupleOf = (row: Record<string, unknown>) =>
+      stableStringify(orderFields.map(fld => row[fld]));
+
     // Step 1: set diff (PK presence)
     const goOnly: string[] = [];
     const sqlOnly: string[] = [];
@@ -2093,6 +2382,32 @@ export class PipelineDriver {
     for (const k of sqlByPK.keys()) if (!goByPK.has(k)) sqlOnly.push(k);
 
     if (goOnly.length > 0 || sqlOnly.length > 0) {
+      // Tie-window benign case: an ordered + LIMITED query whose ORDER BY lacks
+      // a unique tiebreaker has NONDETERMINISTIC window membership when a tie
+      // group straddles the LIMIT boundary — Go and SQL legitimately pick
+      // different members of that tie. It's benign IFF every differing row is a
+      // tie member: its ORDER BY key-VALUE appears in BOTH windows (so the row
+      // is interchangeable with one the other side kept). With NO orderBy the
+      // whole limited result is one unordered "tie" (every row's empty key
+      // tuple matches), so a no-orderBy LIMIT diff is benign too. The LIMIT
+      // guard is load-bearing: without a limit both engines return the full
+      // filtered set, so any set diff there is a REAL bug, not a tie. (Real Zero
+      // appends the PK making the sort total; raw audit ASTs may omit it.)
+      if (resolved.limit !== undefined) {
+        const sqlKeysPresent = new Set(normalizedSqlRows.map(keyTupleOf));
+        const goKeysPresent = new Set(Array.from(goByPK.values(), keyTupleOf));
+        const isTieMember = (row: Record<string, unknown> | undefined) => {
+          if (!row) return false;
+          const k = keyTupleOf(row);
+          return sqlKeysPresent.has(k) && goKeysPresent.has(k);
+        };
+        const allTies =
+          goOnly.every(pk => isTieMember(goByPK.get(pk))) &&
+          sqlOnly.every(pk => isTieMember(sqlByPK.get(pk)));
+        if (allTies) {
+          return {kind: 'go-vs-sql-tie-window', sqlCount: sqlByPK.size, goOnly, sqlOnly};
+        }
+      }
       return {kind: 'go-vs-sql-drift', sqlCount: sqlByPK.size, goOnly, sqlOnly};
     }
 
@@ -2129,15 +2444,25 @@ export class PipelineDriver {
     // emission order. Compare the main-table PK sequences positionally.
     //
     // Gate: only when the query has an EXPLICIT orderBy (otherwise result order
-    // is semantically undefined and both engines' arbitrary orders are valid),
-    // and skip cursor-paginated queries (`ast.start`) whose boundary row has
-    // IVM-specific positioning the set check already special-cases. Sets are
-    // known equal here (we'd have returned go-vs-sql-drift otherwise).
-    if (ast.orderBy && ast.orderBy.length > 0 && ast.start === undefined) {
-      const sqlSeq = normalizedSqlRows.map(pkOf);
+    // is semantically undefined and both engines' arbitrary orders are valid).
+    // Sets are known EQUAL here (we'd have returned go-vs-sql-drift otherwise),
+    // so cursor-paginated queries (`ast.start`) ARE checked too (item #4):
+    // buildAuditSQL applies the same cursor predicate + ORDER BY + LIMIT, so
+    // `normalizedSqlRows` is the correct ordered WINDOW, and the off-by-one
+    // boundary case the caller special-cases only arises when sets DIFFER —
+    // which never reaches here. The length-equal guard below keeps it sound if
+    // an IVM boundary row still slips one side's count.
+    if (orderFields.length > 0) {
+      // Compare the ORDER BY key-VALUE sequences, NOT the PK sequences: a
+      // reordering WITHIN a tie group (equal key tuples) is a semantically
+      // valid permutation and must not flag. Only a position where the actual
+      // key VALUES differ is a real sort violation (enum/collation/NULL-order/
+      // direction bug). This is what makes the order check sound on sorts that
+      // lack a unique tiebreaker.
+      const sqlSeq = normalizedSqlRows.map(keyTupleOf);
       const goSeq = goRemapped
         .filter(c => c.table === resolved.table)
-        .map(c => stableStringify(c.rowKey));
+        .map(c => keyTupleOf(c.row));
       if (sqlSeq.length === goSeq.length) {
         for (let i = 0; i < sqlSeq.length; i++) {
           if (sqlSeq[i] !== goSeq[i]) {
@@ -2651,8 +2976,17 @@ export class PipelineDriver {
             `(V_ts=${version}, V_go=${goVersionFinal}); committing at min — ` +
             `rare transient, control-plane ack may lead data by one cycle`,
         );
+        // Go's user-data delta is incomplete this cycle — taint the
+        // incremental accumulators so the reconcile waits for a clean re-seed.
+        this.#markAllDeltaAccumDirty();
       }
     }
+
+    // Item #2: fold Go's emitted advance deltas into the per-query incremental
+    // accumulator (Go-primary path — the mirror of the shadow-advance feed).
+    // The drift audit reconciles this against a fresh hydrate to catch a wrong
+    // delta that a full re-materialization would mask.
+    this.#accumulateGoDelta(goResultsFinal);
 
     // P2c reconciliation: the CVR stateVersion is a completeness floor, so it
     // may only be committed at a version BOTH authorities have crossed. TS's
@@ -2830,6 +3164,10 @@ export class PipelineDriver {
    */
   #scheduleGoReset(reason: string): void {
     if (!this.#goBackend) return;
+    // A Go reset rebuilds engine state from scratch, so any in-flight
+    // incremental accumulation is no longer continuous — taint it so the
+    // incremental reconcile waits for a clean re-seed (item #2).
+    this.#markAllDeltaAccumDirty();
     // If the snapshotter has been torn down (CG eviction / worker reassignment),
     // there is nothing to reset — resetEngine would re-read a CLOSED snapshot
     // connection in #currentTablesForGo and fail-loop ("database connection is
@@ -3092,6 +3430,21 @@ export class PipelineDriver {
     // Compare
     this.#shadowCompare('advance', version, tsChangesForCompare, goResults);
 
+    // Item #2: fold Go's emitted advance deltas into the per-query incremental
+    // accumulator so the next drift audit can reconcile the accumulated stream
+    // against a fresh SQL hydrate (catches a wrong delta that a full
+    // re-materialization would mask). If this cycle's Go output is already
+    // suspect (count diverged from TS, or Go produced nothing while TS did),
+    // taint all accumulators — they'll re-seed cleanly on the next audit
+    // rather than reconcile against a known-incomplete stream.
+    if (
+      tsChangesForCompare.length !== goResults.length ||
+      (tsChangesForCompare.length > 0 && goResults.length === 0)
+    ) {
+      this.#markAllDeltaAccumDirty();
+    }
+    this.#accumulateGoDelta(goResults);
+
     // Snapshotter-in-Go P1: also have Go derive its OWN diff (advanceToHead)
     // and compare it to TS's computed snapshotChanges for this same advance.
     // Best-effort + isolated from the RowChange comparison above; a failure
@@ -3129,6 +3482,11 @@ export class PipelineDriver {
     context: string,
     tsChanges: RowChange[],
     goChanges: RowChange[],
+    // Optional AST for the query under comparison — supplied by callers that
+    // have it inline (batch-hydrate, drift-audit) so the result-ORDER check
+    // doesn't depend on `context` being registered in #pipelines yet (it may
+    // not be at hydrate time). Falls back to the #pipelines lookup.
+    ast?: AST | undefined,
   ): void {
     const normalize = (changes: RowChange[]) =>
       changes
@@ -3155,6 +3513,40 @@ export class PipelineDriver {
 
     const tsNorm = normalize(tsChanges);
     const goNorm = normalize(goChanges);
+
+    // Tie-window suppression. Before reporting ANY divergence, check whether the
+    // bags differ ONLY by a benign tie-member swap in a single-root-table
+    // ordered+LIMITed result (Go and TS legitimately pick different members of a
+    // tie group at the LIMIT boundary; real Zero appends the PK so the sort is
+    // total, raw test ASTs may not). Suppressing keeps shadow MISMATCH a
+    // trustworthy signal. Only runs when the bags actually diverge.
+    const bagsDiffer =
+      tsNorm.length !== goNorm.length ||
+      tsNorm.some((t, i) => {
+        const g = goNorm[i];
+        return (
+          t.type !== g.type ||
+          t.queryID !== g.queryID ||
+          t.table !== g.table ||
+          t.rowKey !== g.rowKey ||
+          t.row !== g.row
+        );
+      });
+    if (
+      bagsDiffer &&
+      isShadowTieWindow(
+        ast ?? this.#pipelines.get(context)?.transformedAst,
+        tsChanges,
+        goChanges,
+      )
+    ) {
+      this.#shadowTieWindows.add(1);
+      this.#lc.debug?.(
+        `[shadow] tie-window (${operation} ${context}): benign LIMIT tie-member ` +
+          `swap — suppressed (ts=${tsNorm.length} go=${goNorm.length})`,
+      );
+      return;
+    }
 
     if (tsNorm.length !== goNorm.length) {
       this.#lc.error?.(
@@ -3206,12 +3598,146 @@ export class PipelineDriver {
     }
     if (mismatches > 0) return;
 
+    // Op-kind parity (item #3). The row compare above is order-blind and keyed
+    // by (type,queryID,table,rowKey) — so a row TS emits as `edit` while Go
+    // emits as `remove`+`add` nets to the same final row and passes. That's a
+    // real client-visible wire difference. Only meaningful for advances (a
+    // hydrate is all-ADD on both sides, so opKindDiff is empty and this is a
+    // cheap no-op).
+    if (operation === 'advance') {
+      const opDiffs = opKindDiff(tsChanges, goChanges);
+      if (opDiffs.length > 0) {
+        this.#shadowOpKindMismatches.add(opDiffs.length);
+        const sample = opDiffs
+          .slice(0, MAX_MISMATCH_LOG)
+          .map(
+            d => `${d.key}: TS[${d.tsTypes.join(',')}] Go[${d.goTypes.join(',')}]`,
+          )
+          .join(' ; ');
+        this.#lc.error?.(
+          `[shadow][opkind] ${operation} (${context}): ${opDiffs.length} row(s) ` +
+            `with same final value but divergent change-kind — ${sample}`,
+        );
+      }
+    }
+
+    // Result-ORDER parity (TS reference, hydrate only). The set/value compare
+    // above sorts both sides by rowKey, so it CANNOT see whether Go emits the
+    // query's rows in the same ORDER TS does — which is exactly what the client
+    // renders. Only meaningful for a hydrate (emission order == result order);
+    // advance deltas have no result order, so skip them. `context` is the
+    // queryID for hydrate ops, so the ORDER BY comes from the live pipeline.
+    // Tie-aware: compare ORDER BY key-VALUE tuples of the ROOT-table rows, so a
+    // permutation within an equal-key tie group (valid, and unspecified when the
+    // sort lacks a PK tiebreak) does NOT fire. Reached only when the set/value
+    // compare already matched, so a divergence here is purely positional.
+    if (operation !== 'advance') {
+      const orderAst = ast ?? this.#pipelines.get(context)?.transformedAst;
+      if (orderAst?.orderBy && orderAst.orderBy.length > 0) {
+        const orderFields = orderAst.orderBy.map(([fld]) => fld);
+        const keyTuple = (c: RowChange) =>
+          stableStringify(orderFields.map(fld => c.row[fld]));
+        const tsSeq = tsChanges.filter(c => c.table === orderAst.table).map(keyTuple);
+        const goSeq = goChanges.filter(c => c.table === orderAst.table).map(keyTuple);
+        if (tsSeq.length === goSeq.length) {
+          for (let i = 0; i < tsSeq.length; i++) {
+            if (tsSeq[i] !== goSeq[i]) {
+              this.#shadowOrderMismatches.add(1);
+              const w = (s: string[]) =>
+                s.slice(Math.max(0, i - 1), i + 2).join(' > ');
+              this.#lc.error?.(
+                `[shadow][order] ${operation} (${context}): Go result ORDER ` +
+                  `diverges from TS at position ${i} — ts=[…${w(tsSeq)}…] ` +
+                  `go=[…${w(goSeq)}…] orderBy=${JSON.stringify(orderAst.orderBy)}`,
+              );
+              break;
+            }
+          }
+        }
+      }
+    }
+
     // Success matches are demoted to debug — at soak rates (~47/sec) this
     // info-level log was swamping production log pipelines and obscuring
     // real errors. REVIEW-final LOW-SHADOW-1.
     this.#lc.debug?.(
       `[shadow] ${operation} (${context}): TS and Go match ` +
         `(${tsNorm.length} changes)`,
+    );
+  }
+
+  /**
+   * Item #2 helper: apply Go's emitted advance deltas to the per-query
+   * incremental accumulator. Only MAIN-table membership is tracked (matching
+   * buildAuditSQL's single-table oracle) and only for queries the audit has
+   * already SEEDED (no entry ⇒ skip; the audit seeds from SQL). A dirty entry
+   * (stream interrupted) is left untouched until the next clean reseed.
+   */
+  #accumulateGoDelta(goChanges: RowChange[]): void {
+    for (const c of goChanges) {
+      const qid = c.queryID;
+      const set = this.#goDeltaAccum.get(qid);
+      if (!set || this.#goDeltaAccumDirty.has(qid)) continue;
+      const entry = this.#pipelines.get(qid);
+      if (!entry || c.table !== entry.transformedAst.table) continue;
+      const pk = stableStringify(c.rowKey);
+      if (c.type === ChangeType.ADD) set.add(pk);
+      else if (c.type === ChangeType.REMOVE) set.delete(pk);
+      // EDIT: PK membership unchanged (content drift is caught by the audit's
+      // per-PK content compare, not the membership accumulator).
+    }
+  }
+
+  /**
+   * Taint every incremental accumulator. Called when a cycle's Go output is
+   * untrustworthy (advance mismatch, Go reset) so the incremental reconcile is
+   * skipped until each query is cleanly re-seeded from SQL on its next audit.
+   */
+  #markAllDeltaAccumDirty(): void {
+    for (const qid of this.#goDeltaAccum.keys()) this.#goDeltaAccumDirty.add(qid);
+  }
+
+  /**
+   * Item #5 helper: record which column pgTypes an audited query SORTED by and
+   * FILTERED on, then periodically log the coverage so untested type×operation
+   * combinations are visible rather than silently never exercised.
+   */
+  #recordAuditTypeCoverage(ast: AST): void {
+    const spec = this.#tableSpecs.get(ast.table);
+    if (!spec) return;
+    const typeOf = (col: string): string | undefined =>
+      (spec.tableSpec.columns[col] as {dataType?: string} | undefined)?.dataType;
+    for (const [field] of ast.orderBy ?? []) {
+      const t = typeOf(field);
+      if (t) this.#auditTypesSorted.add(t);
+    }
+    const walkWhere = (cond: Condition | undefined): void => {
+      if (!cond) return;
+      if (cond.type === 'simple') {
+        if (cond.left.type === 'column') {
+          const t = typeOf(cond.left.name);
+          if (t) this.#auditTypesFiltered.add(t);
+        }
+      } else if (cond.type === 'and' || cond.type === 'or') {
+        for (const c of cond.conditions) walkWhere(c);
+      }
+    };
+    walkWhere(ast.where);
+
+    const now = Date.now();
+    if (now - this.#auditTypeCovLastReportMs < DRIFT_AUDIT_HEARTBEAT_MS) return;
+    this.#auditTypeCovLastReportMs = now;
+    const allTypes = new Set<string>();
+    for (const col of Object.values(spec.tableSpec.columns)) {
+      const t = (col as {dataType?: string}).dataType;
+      if (t) allTypes.add(t);
+    }
+    const sortGaps = [...allTypes].filter(t => !this.#auditTypesSorted.has(t));
+    const filterGaps = [...allTypes].filter(t => !this.#auditTypesFiltered.has(t));
+    this.#lc.info?.(
+      `[drift-audit][type-coverage] sorted={${[...this.#auditTypesSorted].join(',')}} ` +
+        `filtered={${[...this.#auditTypesFiltered].join(',')}} ` +
+        `UNSORTED_GAPS={${sortGaps.join(',')}} UNFILTERED_GAPS={${filterGaps.join(',')}}`,
     );
   }
 
