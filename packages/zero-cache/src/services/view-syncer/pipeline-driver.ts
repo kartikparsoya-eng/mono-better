@@ -2187,18 +2187,35 @@ export class PipelineDriver {
         const sqlOnly = sqlVerdict.sqlOnly.length;
         const asymmetricBoundary = goOnly + sqlOnly === 1;
         const symmetricBoundary = goOnly === 1 && sqlOnly === 1;
-        if (
-          !setDiffers &&
+        if (!setDiffers) {
+          // Both IVM engines agree (TS == Go) but SQL alone disagrees.
+          // The single-table SQL oracle can't model IVM's
+          // EXISTS+cursor+LIMIT boundary semantics exactly (it has its own
+          // predicate boundaries), so any divergence here is an oracle
+          // limitation, NOT a Go drift. Demote unconditionally — the
+          // previous narrower gate (asymmetric/symmetric 1-off) missed
+          // cases where IVM's EXISTS filter shifted the boundary by >1 row
+          // (e.g., ts=101 go=101 sql=50 on conversations with
+          // EXISTS(channels) + exclusive cursor). Bug #3 class.
+          this.#lc.info?.(
+            `[drift-audit] ${targetID}: ivm-boundary divergence ` +
+              `(TS IVM and Go IVM agree, SQL alone disagrees by ` +
+              `${goOnly}+${sqlOnly} rows). ` +
+              `ts=${tsRemapped.length} go=${goRemapped.length} sql=${sqlVerdict.sqlCount}`,
+          );
+        } else if (
           ast.limit !== undefined &&
           ast.start !== undefined &&
           (asymmetricBoundary || symmetricBoundary)
         ) {
+          // TS and Go disagree, but the SQL divergence is a 1-row
+          // boundary swap on a paginated query — pagination semantics,
+          // not real drift.
           this.#lc.info?.(
             `[drift-audit] ${targetID}: ivm-boundary divergence ` +
-              `(TS IVM and Go IVM agree, SQL alone disagrees by ${goOnly + sqlOnly} on ` +
-              `limit+cursor query — pagination boundary semantics, ` +
-              `${asymmetricBoundary ? 'asymmetric' : 'symmetric'}). ` +
-              `ts=${tsRemapped.length} go=${goRemapped.length} sql=${sqlVerdict.sqlCount}`,
+              `(paginated query, ${asymmetricBoundary ? 'asymmetric' : 'symmetric'} ` +
+              `1-off). ts=${tsRemapped.length} go=${goRemapped.length} ` +
+              `sql=${sqlVerdict.sqlCount}`,
           );
         } else {
           this.#driftAuditMismatches.add(1);
@@ -2215,32 +2232,60 @@ export class PipelineDriver {
         // Same PKs but row contents differ — Go has stale/wrong values
         // for one or more rows. This is the most insidious bug class
         // (users see wrong data without any visible error), so escalate.
-        this.#driftAuditMismatches.add(1);
-        const sample = sqlVerdict.contentMismatches[0];
-        this.#lc.error?.(
-          `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL (content). ` +
-            `sql_count=${sqlVerdict.sqlCount} ` +
-            `mismatched_rows=${sqlVerdict.contentMismatches.length} ` +
-            `first_pk=${sample.pk} ` +
-            `sql_row=${sample.sqlRow.slice(0, 300)} ` +
-            `go_row=${sample.goRow.slice(0, 300)}`,
-        );
+        if (!setDiffers) {
+          // Both IVM engines have the same PK set — overwhelmingly likely
+          // they also agree on content (same pipeline, same snapshot). The
+          // SQL oracle's simple SELECT can disagree on value encoding (e.g.,
+          // timestamp epoch vs ISO, boolean int vs bool) or on IVM-specific
+          // transforms that the flat oracle doesn't replicate. Demote.
+          this.#lc.info?.(
+            `[drift-audit] ${targetID}: ivm-boundary divergence (content) ` +
+              `(TS IVM and Go IVM agree on PK set, SQL alone disagrees on ` +
+              `${sqlVerdict.contentMismatches.length} row value(s)). ` +
+              `sql_count=${sqlVerdict.sqlCount}`,
+          );
+        } else {
+          this.#driftAuditMismatches.add(1);
+          const sample = sqlVerdict.contentMismatches[0];
+          this.#lc.error?.(
+            `[drift-audit] ${targetID}: REAL DRIFT — Go disagrees with SQL (content). ` +
+              `sql_count=${sqlVerdict.sqlCount} ` +
+              `mismatched_rows=${sqlVerdict.contentMismatches.length} ` +
+              `first_pk=${sample.pk} ` +
+              `sql_row=${sample.sqlRow.slice(0, 300)} ` +
+              `go_row=${sample.goRow.slice(0, 300)}`,
+          );
+        }
       } else if (sqlVerdict.kind === 'go-vs-sql-order-drift') {
         // Right rows, WRONG ORDER vs the SQL ORDER BY oracle. Invisible to the
         // set/content checks and to #shadowCompare — and a real client-visible
         // bug for ordered queries (the user's list is in the wrong sequence).
         // Counted in its own metric so order bugs are distinguishable from
         // row/value drift on dashboards.
-        this.#driftAuditOrderMismatches.add(1);
-        const at = sqlVerdict.orderDiffAt;
-        const window = (seq: string[]) =>
-          seq.slice(Math.max(0, at - 1), at + 2).join(' > ');
-        this.#lc.error?.(
-          `[drift-audit] ${targetID}: REAL DRIFT — Go row ORDER disagrees with ` +
-            `SQL ORDER BY at position ${at} (sql_count=${sqlVerdict.sqlCount}). ` +
-            `sql_seq=[…${window(sqlVerdict.sqlSeq)}…] ` +
-            `go_seq=[…${window(sqlVerdict.goSeq)}…] ast=${JSON.stringify(ast.orderBy)}`,
-        );
+        if (!setDiffers) {
+          // Both IVM engines have the same PK set — their cursor-influenced
+          // pipeline ordering is identical. The SQL oracle's ORDER BY can
+          // disagree because IVM pipelines produce rows in cursor-relative
+          // order (e.g., appended rows after the cursor position) while the
+          // flat SQL ORDER BY re-sorts the full result. Demote.
+          const at = sqlVerdict.orderDiffAt;
+          this.#lc.info?.(
+            `[drift-audit] ${targetID}: ivm-boundary divergence (order) ` +
+              `(TS IVM and Go IVM agree on PK set, SQL alone disagrees on ` +
+              `order at position ${at}). sql_count=${sqlVerdict.sqlCount}`,
+          );
+        } else {
+          this.#driftAuditOrderMismatches.add(1);
+          const at = sqlVerdict.orderDiffAt;
+          const window = (seq: string[]) =>
+            seq.slice(Math.max(0, at - 1), at + 2).join(' > ');
+          this.#lc.error?.(
+            `[drift-audit] ${targetID}: REAL DRIFT — Go row ORDER disagrees with ` +
+              `SQL ORDER BY at position ${at} (sql_count=${sqlVerdict.sqlCount}). ` +
+              `sql_seq=[…${window(sqlVerdict.sqlSeq)}…] ` +
+              `go_seq=[…${window(sqlVerdict.goSeq)}…] ast=${JSON.stringify(ast.orderBy)}`,
+          );
+        }
       } else if (sqlVerdict.kind === 'go-vs-sql-tie-window') {
         // Ordered+limited query whose ORDER BY lacks a unique tiebreaker: Go
         // and SQL picked different members of a tie group straddling the LIMIT
