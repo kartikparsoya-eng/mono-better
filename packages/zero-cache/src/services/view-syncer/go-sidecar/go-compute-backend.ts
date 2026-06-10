@@ -225,14 +225,7 @@ export class GoComputeBackend {
     );
   }
 
-  async hydrateMany(queries: {queryID: string; ast: QueryAST}[]): Promise<GoHydrateResult[]> {
-    if (this.#restartGate) await this.#restartGate;
-    return this.#withReinitRetry(() =>
-      this.#client().addQueries(this.#clientGroupID, queries, this.#sidecarInitEpoch, this.#cgOpts()),
-    );
-  }
-
-  // Like {@link hydrateMany} but `onResult` fires per query as each Go
+  // Batch-hydrate `queries`; `onResult` fires per query as each Go
   // goroutine finishes. Resolves on the terminal "done" frame.
   async hydrateManyStream(
     queries: {queryID: string; ast: QueryAST}[],
@@ -244,13 +237,7 @@ export class GoComputeBackend {
     );
   }
 
-  advance(changes: SnapshotChange[]): Promise<GoAdvanceResult> {
-    return this.#advanceWithRecovery(() =>
-      this.#client().advance(this.#clientGroupID, changes, this.#sidecarInitEpoch, this.#cgOpts()),
-    );
-  }
-
-  // Streaming variant of {@link advance}. Same on-the-wire semantics but
+  // Push-mode advance (streaming): ship a SnapshotChange diff to Go.
   // Go ships partial frames during the call; the underlying client
   // reassembles into the same {@link GoAdvanceResult} shape so callers
   // (PipelineDriver#goAdvance) see no behavioral difference.
@@ -331,7 +318,7 @@ export class GoComputeBackend {
     }
   }
 
-  // Shared recovery path for both advance and advanceStream. Two error
+  // Recovery path for advanceStream (push mode). Two error
   // classes:
   //   1. Sidecar died/disconnected mid-call. Wait for re-init via the
   //      onRestart listener, then DROP this advance — Go's new state

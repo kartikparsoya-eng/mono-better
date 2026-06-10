@@ -1590,77 +1590,11 @@ export class PipelineDriver {
   }
 
   /**
-   * Batch hydrate multiple queries via Go sidecar in a single RPC call.
-   * Go builds pipelines serially, then fetches all in parallel (goroutines).
-   * Returns results in the same order as input.
-   * Only used in Go-primary mode (non-shadow).
-   */
-  async goHydrateBatch(
-    queries: {transformationHash: string; queryID: string; ast: AST}[],
-  ): Promise<{queryID: string; changes: Iterable<RowChange | 'yield'>}[]> {
-    // Remove old pipelines
-    for (const q of queries) {
-      this.removeQuery(q.queryID);
-    }
-
-    // Single RPC for all queries. Plan the AST so Go gets the same
-    // flip-aware AST TS materializes against (H18-cont).
-    const batchResults = await this.#goBackend!.hydrateMany(
-      queries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
-    );
-
-    // Register pipelines and convert results
-    // F1: these are Go-owned stub pipelines — record the build mode.
-    if (queries.some(q => !this.#isInternalQueryID(q.queryID) && !this.#isInternalTable(q.ast.table))) {
-      this.#goUserPipelineMode = 'go';
-    }
-    const results: {queryID: string; changes: Iterable<RowChange | 'yield'>}[] = [];
-    for (let i = 0; i < queries.length; i++) {
-      const q = queries[i];
-      const goResult = batchResults[i] ?? {changes: [], timingMs: undefined};
-
-      this.#pipelines.set(q.queryID, {
-        input: {
-          destroy() {},
-          fetch: () => ({} as never),
-          cleanup: () => ({} as never),
-          getSchema: () => ({} as never),
-          setOutput: () => {},
-        } as unknown as Input,
-        hydrationTimeMs: goResult.timingMs ?? 0,
-        transformedAst: q.ast,
-        transformationHash: q.transformationHash,
-        companions: [],
-      });
-
-      const self = this;
-      const qID = q.queryID;
-      const changes = goResult.changes;
-      function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
-        let j = 0;
-        for (const rc of changes) {
-          if (j > 0 && j % 100 === 0) {
-            yield 'yield';
-          }
-          yield self.#goRowChangeToRowChange(rc);
-          j++;
-        }
-      }
-
-      results.push({
-        queryID: qID,
-        changes: this.#trackRowSetSignatures(yieldGoHydration()),
-      });
-    }
-
-    return results;
-  }
-
-  /**
-   * Streaming variant of {@link goHydrateBatch}. Yields per-query results
-   * AS SOON as Go finishes that query. Tail-latency optimisation: fast
-   * queries reach the WebSocket client before slow queries in the same
-   * batch complete (REVIEW-final perf-opt streaming).
+   * Batch hydrate multiple queries via the Go sidecar (Go-primary mode),
+   * streaming per-query results AS SOON as Go finishes that query.
+   * Tail-latency optimisation: fast queries reach the WebSocket client
+   * before slow queries in the same batch complete (REVIEW-final perf-opt
+   * streaming).
    *
    * The returned iterable yields entries in COMPLETION order, not input
    * order — callers must not rely on positional correspondence with

@@ -836,33 +836,18 @@ export class GoIVMClient {
     await this.#call('removeQuery', {clientGroupID, queryID, initEpoch}, opts);
   }
 
-  // Returns per-(table, op) wall-times so TS's `ivm.advance-time` histogram
-  // keeps the native-path granularity (vs one opaque RPC duration).
-  async advance(
-    clientGroupID: string,
-    changes: SnapshotChange[],
-    initEpoch: number,
-    opts?: CallOptions,
-  ): Promise<AdvanceResult> {
-    const result = (await this.#call(
-      'advance',
-      {clientGroupID, changes, initEpoch},
-      opts,
-    )) as {changes: RowChange[]; timings?: TableTiming[]};
-    return {changes: result.changes ?? [], timings: result.timings};
-  }
-
-  // Streaming variant of {@link advance}. Go emits one or more partial
-  // frames (chunked at advanceChunkSize on the Go side); this method
-  // accumulates them and returns the same {@link AdvanceResult} shape as
-  // {@link advance} — caller is unaware of chunking.
+  // Push mode: ship a SnapshotChange diff to Go, which applies it and
+  // streams the resulting RowChanges back as one or more partial frames
+  // (chunked at advanceChunkSize on the Go side). This method accumulates
+  // them and returns an {@link AdvanceResult}, including per-(table, op)
+  // wall-times so TS's `ivm.advance-time` histogram keeps native-path
+  // granularity.
   //
-  // Wins over the non-streaming `advance`:
-  //   - Go-side memory pressure relieved on large diffs (each chunk is
-  //     encoded + flushed + freed before the next accumulates instead of
-  //     being buffered into a single msgpack frame).
-  //   - First chunk hits the socket as soon as advanceChunkSize rows
-  //     accumulate, so TTFB on big advances drops.
+  // Streaming wins: Go-side memory pressure relieved on large diffs (each
+  // chunk is encoded + flushed + freed before the next accumulates instead
+  // of being buffered into a single msgpack frame); first chunk hits the
+  // socket as soon as advanceChunkSize rows accumulate, so TTFB on big
+  // advances drops.
   //
   // Same defensive invariants as {@link addQueriesStream}: chunk-order
   // gaps throw; missing terminal `final: true` throws.
