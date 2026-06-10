@@ -108,6 +108,24 @@ ARG SOURCE_MODE=memory
 ARG GO_PRIMARY_TRIGGER=false
 ARG LEAN_PRIMARY=false
 
+# Frame-coordinated advance (snapshotter-in-go P2). ONE arg arms both sides:
+#   sidecar: GO_IVM_ADVANCE_DRIVE=true (implies GO_IVM_ADVANCE_TO_HEAD — the
+#            sidecar builds per-CG Snapshotters and binds tablesource leaves
+#            to the pinned frame; without it, advanceToHead RPCs fail and a
+#            trigger-baked image can never serve Go-primary).
+#   mono:    ZERO_GO_SIDECAR_ADVANCE_DRIVE=true — shadow-only gate: in shadow
+#            mode the Go advance is sourced via advanceToHead and compared to
+#            TS (validated 2026-06-10: same-seed soak, push-mode drift=140
+#            FAIL vs drive-mode drift=0 PASS — push-applying TS's diff to an
+#            independently-pinned snapshot frame-skews during mutation
+#            bursts). In primary mode (shadowMode=false) it is a no-op; the
+#            trigger path is selected by GO_PRIMARY_TRIGGER instead.
+# true for tablesrc (Go-primary needs the sidecar armed) and shadow-tablesrc
+# (pre-prod soak validates the same frame-coordinated path that deploys).
+# Requires SOURCE_MODE=table — the sidecar ignores it (with a warning) in
+# memory mode, so the memory primary/shadow images keep it false.
+ARG ADVANCE_DRIVE=false
+
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
 # (shadow on 1 prod node → ~1 week observation → flip to primary).
@@ -120,6 +138,8 @@ ENV ZERO_GO_SIDECAR_SHADOW_MODE=${SHADOW_MODE}
 ENV GO_IVM_SOURCE_MODE=${SOURCE_MODE}
 ENV ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=${GO_PRIMARY_TRIGGER}
 ENV ZERO_GO_SIDECAR_LEAN_PRIMARY=${LEAN_PRIMARY}
+ENV GO_IVM_ADVANCE_DRIVE=${ADVANCE_DRIVE}
+ENV ZERO_GO_SIDECAR_ADVANCE_DRIVE=${ADVANCE_DRIVE}
 # workers=1 keeps cg state colocated in the single shared sidecar
 # (per feedback_shared_sidecar_tuning — bumping workers fragments
 # cgs across sidecars under per-worker mode; in shared mode it just
