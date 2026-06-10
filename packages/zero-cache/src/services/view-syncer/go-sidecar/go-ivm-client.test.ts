@@ -14,7 +14,9 @@
 import {describe, expect, test, vi} from 'vitest';
 import {
   createAdvanceStreamAccumulator,
+  createAdvanceToHeadStreamAccumulator,
   createHydrateStreamAccumulator,
+  DriftError,
   type RowChange,
 } from './go-ivm-client.ts';
 
@@ -248,5 +250,142 @@ describe('createAdvanceStreamAccumulator', () => {
     });
     const result = h.finish();
     expect(result.timings).toEqual([{table: 'right', type: 0, ms: 5}]);
+  });
+});
+
+describe('createAdvanceToHeadStreamAccumulator', () => {
+  test('single-chunk: one final frame yields full AdvanceToHeadResult', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({
+      changes: [row('a'), row('b')],
+      chunkIndex: 0,
+      final: true,
+      timings: [{table: 't', type: 0, ms: 5}],
+      version: '0000000009',
+      numChanges: 2,
+    });
+    // Drive-mode RowChanges land in `rowChanges`; the derive-only `changes`
+    // field is always [] for the streaming variant.
+    expect(h.finish()).toEqual({
+      changes: [],
+      version: '0000000009',
+      numChanges: 2,
+      rowChanges: [row('a'), row('b')],
+      timings: [{table: 't', type: 0, ms: 5}],
+      reset: undefined,
+    });
+  });
+
+  test('multi-chunk: rowChanges accumulate; version+numChanges ride the final frame', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({
+      changes: [row('c')],
+      chunkIndex: 2,
+      final: true,
+      timings: [{table: 't', type: 1, ms: 2}],
+      version: '0000000010',
+      numChanges: 3,
+    });
+
+    const result = h.finish();
+    expect(result.rowChanges).toEqual([row('a'), row('b'), row('c')]);
+    expect(result.version).toBe('0000000010');
+    expect(result.numChanges).toBe(3);
+    expect(result.timings).toEqual([{table: 't', type: 1, ms: 2}]);
+    expect(result.changes).toEqual([]);
+  });
+
+  test('version/numChanges on a non-final frame are ignored — only final counts', () => {
+    // A buggy sidecar that stamped metadata on a non-final frame must not
+    // corrupt the watermark: the final frame is authoritative.
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({
+      changes: [row('a')],
+      chunkIndex: 0,
+      final: false,
+      version: 'WRONG',
+      numChanges: 999,
+    });
+    h.onFrame({
+      changes: [row('b')],
+      chunkIndex: 1,
+      final: true,
+      version: '0000000011',
+      numChanges: 2,
+    });
+    const result = h.finish();
+    expect(result.version).toBe('0000000011');
+    expect(result.numChanges).toBe(2);
+    expect(result.rowChanges).toEqual([row('a'), row('b')]);
+  });
+
+  test('reset frame: single final frame with reset + version, no rowChanges', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({
+      changes: [],
+      chunkIndex: 0,
+      final: true,
+      version: '0000000012',
+      reset: {reason: 'truncation', msg: 'table issue has been truncated'},
+    });
+    const result = h.finish();
+    expect(result.reset).toEqual({
+      reason: 'truncation',
+      msg: 'table issue has been truncated',
+    });
+    expect(result.version).toBe('0000000012');
+    expect(result.rowChanges).toEqual([]);
+  });
+
+  test('empty advance: one final frame with no changes', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({changes: [], chunkIndex: 0, final: true, version: '0000000013'});
+    const result = h.finish();
+    expect(result.rowChanges).toEqual([]);
+    expect(result.version).toBe('0000000013');
+    expect(result.reset).toBeUndefined();
+    expect(result.timings).toBeUndefined();
+  });
+
+  test('chunk-order gap throws immediately', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    expect(() =>
+      h.onFrame({changes: [row('b')], chunkIndex: 2, final: true}),
+    ).toThrow(
+      /advanceToHeadStream chunk order violation: expected chunkIndex=1, got 2/,
+    );
+  });
+
+  test('missing final: finish() throws if no frame had final=true', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    expect(() => h.finish()).toThrow(
+      /advanceToHeadStream finished without a final chunk/,
+    );
+  });
+
+  test('drift on final: finish() throws DriftError carrying accumulated partial rowChanges', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({
+      changes: [row('b')],
+      chunkIndex: 1,
+      final: true,
+      drift: {table: 't', op: 'edit', pk: {id: 'b'}, hasCount: 0},
+    });
+    let thrown: unknown;
+    try {
+      h.finish();
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DriftError);
+    // The pre-drift partial output rides the DriftError so GoComputeBackend's
+    // recovery forwards it alongside the re-init (F2/drift contract).
+    expect((thrown as DriftError).partialChanges).toEqual([row('a'), row('b')]);
   });
 });

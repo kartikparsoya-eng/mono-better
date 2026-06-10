@@ -284,7 +284,20 @@ export type ResetPipelinesReason =
   // CVR (should be unreachable — each authority only advances — but a
   // non-monotone reconcile would otherwise trip a hard assert and tear down the
   // client group; recover via a full re-hydrate instead).
-  | 'watermark-regression';
+  | 'watermark-regression'
+  // Go-primary mode but the Go backend is unavailable at advance time (sidecar
+  // restart in flight, drift-breaker cooldown, reset pending). Falling through
+  // to a TS-native advance would commit the CVR at full version while the
+  // user-query pipelines are stubs that emit nothing — a silent client-view
+  // freeze. Reset + re-register instead (rebuilds real TS pipelines).
+  | 'go-primary-unavailable'
+  // Go-primary advance dropped a user delta (sidecar restart, engine not
+  // initialized, RPC timeout/unclassified, or a Go-reported truncate/reset).
+  // The legacy "return [] + schedule a Go reset" path floored the watermark at
+  // prev but the Go reset discarded its hydrate output, so the (prev→head] gap
+  // was never delivered (permanent). Escalate to a full re-hydrate that heals
+  // the gap as an idempotent superset.
+  | 'go-primary-drop';
 
 export class ResetPipelinesSignal extends Error {
   readonly name = 'ResetPipelinesSignal';

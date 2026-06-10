@@ -2287,8 +2287,18 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const timer = new TimeSliceTimer(lc);
       // GO_SIDECAR: advance() returns Promise when Go backend is active
       const advanceResult = this.#pipelines.advance(timer);
-      const {version, numChanges, changes, tsVersion, goVersion} =
+      const resolved =
         advanceResult instanceof Promise ? await advanceResult : advanceResult;
+      // F1/F2/F3 keystone: in Go-primary mode advance() RETURNS a
+      // ResetPipelinesSignal (instead of throwing it) when the Go backend is
+      // unavailable, a user delta was dropped, or a truncate/schema-change
+      // aborted the diff. Returning it here (rather than letting it escape as a
+      // throw, which the OUTER catch in run() turns into a full client-group
+      // teardown) routes through the graceful reset+re-hydrate path below.
+      if (resolved instanceof ResetPipelinesSignal) {
+        return resolved;
+      }
+      const {version, numChanges, changes, tsVersion, goVersion} = resolved;
       lc = lc.withContext('newVersion', version);
 
       // P2c: in Go-primary trigger mode `version` is the RECONCILED watermark

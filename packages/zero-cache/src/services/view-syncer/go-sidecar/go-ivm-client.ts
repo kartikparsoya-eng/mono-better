@@ -366,6 +366,114 @@ export function createAdvanceStreamAccumulator(): {
   };
 }
 
+/**
+ * Accumulator for `advanceToHeadStream` partial frames (the DRIVE-mode
+ * streaming variant of advanceToHead). Reassembles into one
+ * {@link AdvanceToHeadResult}. Mirrors {@link createAdvanceStreamAccumulator}
+ * for the chunked RowChanges (→ `rowChanges`) but additionally captures the
+ * advanceToHead-specific `version` + `numChanges` + `reset`, which ride the
+ * final frame only.
+ *
+ * The derive-only `changes` field is always `[]` here — the streaming variant
+ * only carries the engine's RowChanges (drive mode); the P1 derive-only diff
+ * uses the non-streaming `advanceToHead`.
+ *
+ * Returned object is stateful — do not reuse across calls.
+ */
+export function createAdvanceToHeadStreamAccumulator(): {
+  onFrame: (value: unknown) => void;
+  finish: () => AdvanceToHeadResult;
+} {
+  const acc: RowChange[] = [];
+  let timings: TableTiming[] | undefined;
+  let expectedNextIndex = 0;
+  let gotFinal = false;
+  let drift: DriftError | undefined;
+  let version = '';
+  let numChanges = 0;
+  let reset: {reason: string; msg: string} | undefined;
+
+  return {
+    onFrame: (value: unknown) => {
+      const v = value as {
+        changes?: RowChange[];
+        chunkIndex?: number;
+        final?: boolean;
+        timings?: TableTiming[];
+        drift?: {
+          table?: string;
+          op?: string;
+          pk?: Record<string, unknown>;
+          hasCount?: number;
+        };
+        version?: string;
+        numChanges?: number;
+        reset?: {reason: string; msg: string};
+      };
+      const chunkIndex = v.chunkIndex ?? 0;
+      const final = v.final ?? true; // belt-and-braces for older sidecars
+      const chunk = v.changes ?? [];
+
+      // Single sender goroutine on the Go side → strict in-order delivery.
+      // A gap is a wire-level bug; fail loud rather than silently committing
+      // a partial advance to the CVR.
+      if (chunkIndex !== expectedNextIndex) {
+        throw new Error(
+          `advanceToHeadStream chunk order violation: ` +
+            `expected chunkIndex=${expectedNextIndex}, got ${chunkIndex}`,
+        );
+      }
+      expectedNextIndex++;
+
+      for (const rc of chunk) acc.push(rc);
+
+      // version + numChanges + timings + reset + drift travel on the final
+      // frame only (Go-side invariant).
+      if (final) {
+        timings = v.timings;
+        version = v.version ?? '';
+        numChanges = v.numChanges ?? 0;
+        reset = v.reset;
+        gotFinal = true;
+        if (v.drift) {
+          drift = new DriftError({
+            table: v.drift.table,
+            op: v.drift.op,
+            pk: v.drift.pk,
+            hasCount: v.drift.hasCount,
+          });
+        }
+      }
+    },
+
+    finish: (): AdvanceToHeadResult => {
+      if (!gotFinal) {
+        // `done` arrived without any frame carrying final=true — a Go-side bug
+        // (AdvanceStream MUST always emit a terminal frame). Surface so we
+        // don't silently return a partial result that would corrupt the CVR.
+        throw new Error('advanceToHeadStream finished without a final chunk');
+      }
+      if (drift) {
+        // Same contract as createAdvanceStreamAccumulator: attach the
+        // partial-output the sidecar produced before the drift panic so
+        // GoComputeBackend's recovery forwards it alongside the re-init.
+        drift.partialChanges = acc;
+        drift.partialTimings = timings;
+        throw drift;
+      }
+      return {
+        // Derive-only diff is never streamed (drive mode carries RowChanges).
+        changes: [],
+        version,
+        numChanges,
+        rowChanges: acc,
+        timings,
+        reset,
+      };
+    },
+  };
+}
+
 // --- RPC (msgpack) ---
 
 type RPCRequest = {
@@ -806,6 +914,46 @@ export class GoIVMClient {
       timings: result.timings,
       reset: result.reset,
     };
+  }
+
+  /**
+   * Streaming variant of {@link advanceToHead} for DRIVE mode (P2 / Go-primary
+   * trigger). Go derives its own diff, drives its engine, and emits the
+   * resulting RowChanges as chunked partial frames (at `advanceChunkSize` on
+   * the Go side) instead of one msgpack frame. This method reassembles them
+   * into the same {@link AdvanceToHeadResult} shape `advanceToHead` returns, so
+   * the caller is unaware of chunking.
+   *
+   * Why this exists (finding F5): the non-streaming `advanceToHead` carries all
+   * drive-mode RowChanges in a single frame under the 64MB cap. A bulk backfill
+   * or mass UPDATE blows the cap; the TS receive loop SKIPS the oversized frame,
+   * orphaning the RPC until it times out. Streaming bounds per-frame size the
+   * same way push-mode already uses {@link advanceStream}.
+   *
+   * Requires a protocolRev>=8 sidecar with GO_IVM_ADVANCE_TO_HEAD=true,
+   * GO_IVM_ADVANCE_DRIVE=true, + table mode. Same defensive invariants as
+   * {@link advanceStream}: chunk-order gaps throw; missing terminal `final:true`
+   * throws; drift on the final frame re-throws as a {@link DriftError}.
+   */
+  async advanceToHeadStream(
+    clientGroupID: string,
+    initEpoch: number,
+    appID: string,
+    opts?: CallOptions,
+  ): Promise<AdvanceToHeadResult> {
+    const handler = createAdvanceToHeadStreamAccumulator();
+    await this.#call(
+      'advanceToHeadStream',
+      appID ? {clientGroupID, initEpoch, appID} : {clientGroupID, initEpoch},
+      {
+        timeoutMs: opts?.timeoutMs ?? 120_000,
+        // Forward the group for in-flight fairness (advanceStream omits this;
+        // we keep it so a single group can't starve others — CROSS-2).
+        clientGroupID: opts?.clientGroupID ?? clientGroupID,
+        onPartial: handler.onFrame,
+      },
+    );
+    return handler.finish();
   }
 
   /**

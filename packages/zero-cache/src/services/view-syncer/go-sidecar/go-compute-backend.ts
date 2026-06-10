@@ -268,15 +268,67 @@ export class GoComputeBackend {
   // drive the engine), so it does NOT go through #advanceWithRecovery's
   // drop-the-advance drift handling — a failure just surfaces to the caller,
   // which (in the P1 shadow compare) logs it and skips the comparison.
-  advanceToHead(): Promise<AdvanceToHeadResult> {
-    return this.#withReinitRetry(() =>
-      this.#client().advanceToHead(
-        this.#clientGroupID,
-        this.#sidecarInitEpoch,
-        this.#appID,
-        this.#cgOpts(),
-      ),
-    );
+  async advanceToHead(): Promise<AdvanceToHeadResult> {
+    try {
+      return await this.#withReinitRetry(() =>
+        this.#client().advanceToHead(
+          this.#clientGroupID,
+          this.#sidecarInitEpoch,
+          this.#appID,
+          this.#cgOpts(),
+        ),
+      );
+    } catch (err) {
+      // F4: drive-mode (advanceToHead) drift must feed the SAME drift-loop
+      // circuit breaker as push-mode advance. #advanceWithRecovery records +
+      // trips the breaker on DriftError, but advanceToHead routes through
+      // #withReinitRetry — which only handles sidecar-restart / not-initialized
+      // and re-throws everything else — so a drive-mode DriftError escaped
+      // unaccounted and the breaker was DEAD in the deployed trigger mode (a
+      // pathological drift loop would reset-loop forever with nothing
+      // tripping). Record the drift + trip the breaker if the rate is
+      // pathological, then re-throw so the caller's classify path escalates to
+      // a full pipeline reset (F2) — which both reinits Go AND re-hydrates the
+      // client view (a bare Go reinit would leave the F2 gap). No separate
+      // reinit here: the reset path owns the rebuild, avoiding a double reinit.
+      // When the breaker trips, `initialized` flips false and the next advance
+      // degrades to TS via the F1 path.
+      if (err instanceof DriftError) {
+        this.#recordDriftReinit();
+        this.#maybeTripDriftBreaker();
+      }
+      throw err;
+    }
+  }
+
+  // advanceToHeadStream: streaming variant of {@link advanceToHead} for DRIVE
+  // mode (finding F5). Identical contract — same #withReinitRetry wrapper and
+  // the SAME F4 drift-breaker accounting on DriftError — but the client chunks
+  // the engine RowChanges over the wire so a bulk backfill / mass UPDATE can't
+  // blow the 64MB single-frame cap (which the TS receive loop SKIPS, orphaning
+  // the RPC into a timeout). Reassembles into the same AdvanceToHeadResult, so
+  // PipelineDriver#goPrimaryAdvance consumes it identically.
+  async advanceToHeadStream(): Promise<AdvanceToHeadResult> {
+    try {
+      return await this.#withReinitRetry(() =>
+        this.#client().advanceToHeadStream(
+          this.#clientGroupID,
+          this.#sidecarInitEpoch,
+          this.#appID,
+          this.#cgOpts(),
+        ),
+      );
+    } catch (err) {
+      // F4: drive-mode drift must feed the SAME drift-loop circuit breaker as
+      // push-mode advance (see advanceToHead for the full rationale). Record +
+      // maybe-trip, then re-throw so the caller's classify path escalates to a
+      // full pipeline reset (F2).
+      if (err instanceof DriftError) {
+        this.#recordDriftReinit();
+        this.#maybeTripDriftBreaker();
+      }
+      throw err;
+    }
   }
 
   // Shared recovery path for both advance and advanceStream. Two error

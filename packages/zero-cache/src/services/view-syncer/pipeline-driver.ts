@@ -440,6 +440,125 @@ export function reconcileGoPrimaryWatermark(
   return {version: minLexiVersion(tsVersion, goVersion), tsVersion, goVersion};
 }
 
+/**
+ * F1 advance-dispatch decision (non-shadow Go-primary mode only). Given the LIVE
+ * Go backend availability and the mode the CURRENT user-query pipelines were
+ * built in (#goUserPipelineMode), decide how advance() must proceed. The two
+ * reset outcomes make advance() RETURN a ResetPipelinesSignal (never throw it)
+ * so the view-syncer rebuilds the pipelines for the live Go state before the
+ * next advance.
+ *
+ *   'go-advance'      Go UP and the user pipelines are Go-owned stubs (or none
+ *                     yet) → run the Go-primary advance (Go owns user queries).
+ *   'reset-recovered' Go UP but the pipelines were degraded to real TS while Go
+ *                     was down → rebuild as Go-owned stubs first, else real TS
+ *                     pipelines AND Go would both emit user rows (double-count).
+ *   'reset-degrade'   Go DOWN and the pipelines are Go-owned stubs → the
+ *                     TS-native advance emits NOTHING for them: a silent client
+ *                     freeze with the cookie advancing past the gap (watermark
+ *                     over-claim). Reset so re-registration builds REAL TS
+ *                     pipelines (graceful degradation to TS-serving). This fires
+ *                     on routine sidecar restarts and the drift-breaker cooldown,
+ *                     not just terminal failure.
+ *   'ts-native'       Go DOWN and the pipelines are already real TS (or none) →
+ *                     the TS-native advance serves correctly; do NOT reset (that
+ *                     would loop every advance for the whole outage / cooldown).
+ */
+export type GoPrimaryDispatchDecision =
+  | 'go-advance'
+  | 'reset-recovered'
+  | 'reset-degrade'
+  | 'ts-native';
+
+export function decideGoPrimaryDispatch(
+  goInitialized: boolean,
+  pipelineMode: 'go' | 'ts' | undefined,
+): GoPrimaryDispatchDecision {
+  if (goInitialized) {
+    return pipelineMode === 'ts' ? 'reset-recovered' : 'go-advance';
+  }
+  return pipelineMode === 'go' ? 'reset-degrade' : 'ts-native';
+}
+
+/**
+ * F2 classification of a Go-primary advance RPC failure (advanceStream OR
+ * advanceToHead) as a PURE decision — the metric counters and logging live in
+ * the #classifyGoPrimaryAdvanceError method that wraps this.
+ *
+ *   'protocol'     wire-level violation/corruption (chunk order, missing final
+ *                  chunk, oversized frame, protocolRev mismatch) — RE-THROW; a
+ *                  reset can't fix a wire bug without a sidecar process restart.
+ *   'stale-epoch'  this instance was superseded by a successor's initEpoch —
+ *                  RE-THROW so teardown completes.
+ *   'sidecar'      sidecar unavailable / restart in flight — DROP → reset.
+ *   'unclassified' anything else (incl. RPC timeouts under load) — DROP → reset.
+ *
+ * The two DROP buckets escalate to a ResetPipelinesSignal (full re-hydrate)
+ * instead of the legacy "return [] + #scheduleGoReset", which left a permanent
+ * (prev→head] gap: the async reset rebuilt Go at head and DISCARDED its hydrate
+ * output, so the dropped user delta was never delivered. The order matters —
+ * protocol message patterns are checked before the stale-epoch instance so a
+ * protocol violation that also happens to be a stale-epoch error escalates as a
+ * protocol violation (both re-throw, so the buckets are observably distinct but
+ * behaviourally identical here).
+ */
+export type GoAdvanceErrorClass =
+  | 'protocol'
+  | 'stale-epoch'
+  | 'sidecar'
+  | 'unclassified';
+
+export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (
+    msg.includes('chunk order violation') ||
+    msg.includes('finished without a final chunk') ||
+    msg.includes('Frame too large') ||
+    msg.includes('protocolRev mismatch')
+  ) {
+    return 'protocol';
+  }
+  if (e instanceof StaleInitEpochError) {
+    return 'stale-epoch';
+  }
+  if (
+    msg.includes('Sidecar is not running') ||
+    msg.includes('Connection closed') ||
+    msg.includes('engine not initialized')
+  ) {
+    return 'sidecar';
+  }
+  return 'unclassified';
+}
+
+/**
+ * F3 (keystone): eagerly drain a snapshotter diff, invoking `onEntry` for each
+ * change, but CATCH the ResetPipelinesSignal the diff iterator throws on a
+ * truncate / schema change and RETURN it instead of letting it propagate. The
+ * Go-primary advance paths buffer the diff eagerly (so both TS and Go can
+ * consume it); without this catch the throw escapes #advancePipelines and lands
+ * in run()'s outer catch — a full client-group teardown (all clients
+ * disconnected) on every truncate or schema change. Returning the signal routes
+ * through the view-syncer's graceful reset + re-hydrate (the same self-heal the
+ * TS-native lazy path gets). Any non-reset error propagates unchanged.
+ */
+export function drainDiffCatchingReset<T>(
+  diff: Iterable<T>,
+  onEntry: (entry: T) => void,
+): ResetPipelinesSignal | undefined {
+  try {
+    for (const entry of diff) {
+      onEntry(entry);
+    }
+    return undefined;
+  } catch (e) {
+    if (e instanceof ResetPipelinesSignal) {
+      return e;
+    }
+    throw e;
+  }
+}
+
 type CompanionPipeline = {
   readonly input: Input;
   readonly childField: string;
@@ -739,6 +858,22 @@ export class PipelineDriver {
   // snapshot setDB, not these pushes). Only ever true when !shadowMode.
   readonly #goLeanPrimary: boolean;
   #goInitPromise: Promise<void> | null = null;
+  /**
+   * F1: how the CURRENT user-query pipelines were built, so the advance
+   * dispatch can detect a Go-availability flip and rebuild in the right mode.
+   *   'go'      — Go-owned stubs (TS emits nothing for user queries).
+   *   'ts'      — real TS pipelines (degraded because Go was unavailable at
+   *               build time, or a pure-TS deployment).
+   *   undefined — no user pipelines built yet (or only internal queries).
+   * Only consulted in non-shadow Go-primary mode. A mismatch — Go DOWN with
+   * 'go' stubs (would silently freeze + over-claim the watermark), or Go UP
+   * with 'ts' pipelines (real TS + Go would both emit → double-count) — makes
+   * #advanceDispatch return a ResetPipelinesSignal so re-registration rebuilds
+   * for the live Go state. Tracking the mode (rather than resetting on every
+   * Go-down advance) is what keeps the degradation a ONE-TIME event instead of
+   * a reset loop for the whole outage / drift-breaker cooldown.
+   */
+  #goUserPipelineMode: 'go' | 'ts' | undefined = undefined;
   /** Set while #scheduleGoReset is running; collapses concurrent reset requests. */
   #goResetInFlight = false;
   /**
@@ -1094,6 +1229,9 @@ export class PipelineDriver {
     this.#tables.clear();
     this.#allTableNames.clear();
     this.#rowSetSignatures.clear();
+    // F1: pipelines are gone; the next (re-)registration sets the mode afresh
+    // for the live Go state.
+    this.#goUserPipelineMode = undefined;
     this.#initAndResetCommon(clientSchema);
     // Re-initialize Go sidecar with fresh snapshot (leapfrog)
     this.#maybeResetGoBackend();
@@ -1383,9 +1521,18 @@ export class PipelineDriver {
     if (this.#shadowMode && this.#goBackend?.initialized) {
       return this.#shadowAddQuery(transformationHash, queryID, query, timer);
     }
-    // When Go backend is active (non-shadow), hydrate via sidecar
+    // When Go backend is active (non-shadow), hydrate via sidecar (Go-owned
+    // stub pipeline). F1: record the build mode so a later Go-availability flip
+    // triggers a rebuild instead of a silent freeze / double-emit.
     if (this.#goBackend?.initialized) {
+      this.#goUserPipelineMode = 'go';
       return this.#goHydrate(transformationHash, queryID, query);
+    }
+    // Real TS pipeline. In a Go-primary deployment this is the DEGRADED path
+    // (Go unavailable at build time); mark it so advance() serves TS-native and
+    // rebuilds Go-owned stubs once Go recovers (F1).
+    if (this.#goBackend && !this.#shadowMode) {
+      this.#goUserPipelineMode = 'ts';
     }
     return this.#trackRowSetSignatures(
       this.#addQueryImpl(transformationHash, queryID, query, timer),
@@ -1463,6 +1610,10 @@ export class PipelineDriver {
     );
 
     // Register pipelines and convert results
+    // F1: these are Go-owned stub pipelines — record the build mode.
+    if (queries.some(q => !this.#isInternalQueryID(q.queryID) && !this.#isInternalTable(q.ast.table))) {
+      this.#goUserPipelineMode = 'go';
+    }
     const results: {queryID: string; changes: Iterable<RowChange | 'yield'>}[] = [];
     for (let i = 0; i < queries.length; i++) {
       const q = queries[i];
@@ -1571,6 +1722,8 @@ export class PipelineDriver {
     if (userQueries.length === 0) {
       return;
     }
+    // F1: about to register Go-owned user stubs — record the build mode.
+    this.#goUserPipelineMode = 'go';
 
     // Buffer arrived-but-not-yet-yielded results from the streaming RPC.
     // The producer side runs in goroutines on Go; we get one onResult call
@@ -2833,7 +2986,12 @@ export class PipelineDriver {
    *         `changes` must be iterated over in their entirety in order to
    *         advance the database snapshot.
    */
-  advance(timer: Timer): AdvanceResult | Promise<AdvanceResult> {
+  advance(
+    timer: Timer,
+  ):
+    | AdvanceResult
+    | ResetPipelinesSignal
+    | Promise<AdvanceResult | ResetPipelinesSignal> {
     assert(
       this.initialized(),
       'Pipeline driver must be initialized before advancing',
@@ -2845,7 +3003,12 @@ export class PipelineDriver {
     return this.#advanceDispatch(timer);
   }
 
-  #advanceDispatch(timer: Timer): AdvanceResult | Promise<AdvanceResult> {
+  #advanceDispatch(
+    timer: Timer,
+  ):
+    | AdvanceResult
+    | ResetPipelinesSignal
+    | Promise<AdvanceResult | ResetPipelinesSignal> {
     const diff = this.#snapshotter.advance(
       this.#tableSpecs,
       this.#allTableNames,
@@ -2855,21 +3018,60 @@ export class PipelineDriver {
       `advance ${prev.version} => ${curr.version}: ${changes} changes`,
     );
 
-    // Shadow mode: run TS path as source of truth, also run Go, compare
+    // Shadow mode: run TS path as source of truth, also run Go, compare.
+    // Shadow always builds real TS user pipelines (#shadowAddQuery) and serves
+    // via #shadowAdvance, so the Go-primary mode reconciliation below does not
+    // apply to it.
     if (this.#shadowMode && this.#goBackend?.initialized) {
       return this.#shadowAdvance(diff, timer, curr.version, changes);
     }
 
-    // Go-primary: dual-run TS + Go on disjoint table sets. Go gets the
-    // diff with internal tables filtered out and handles user queries.
-    // TS handles internal queries (lmids, mutationResults) via its real
-    // #addQueryImpl pipelines — those pipelines were registered through
-    // the internal-query branch of #addQueryDispatch. User-query
-    // pipelines in TS are stubs (no setOutput callback), so TS's
-    // #advance walks the full diff but only emits for internal queries.
-    // Merging is safe because the two sets are table-disjoint.
-    if (this.#goBackend?.initialized) {
-      return this.#goPrimaryAdvance(diff, timer, curr.version, changes);
+    // Non-shadow Go-primary: reconcile the LIVE Go availability against the
+    // mode the current user pipelines were built in (#goUserPipelineMode). A
+    // flip in either direction must rebuild the pipelines (via a returned
+    // ResetPipelinesSignal) before we can safely advance. See
+    // decideGoPrimaryDispatch for the full decision matrix and rationale.
+    if (this.#goBackend && !this.#shadowMode) {
+      switch (
+        decideGoPrimaryDispatch(
+          this.#goBackend.initialized,
+          this.#goUserPipelineMode,
+        )
+      ) {
+        case 'go-advance':
+          // Go-primary: dual-run TS + Go on disjoint table sets. Go gets the
+          // diff with internal tables filtered out and handles user queries.
+          // TS handles internal queries (lmids, mutationResults) via its real
+          // #addQueryImpl pipelines. User-query pipelines in TS are stubs (no
+          // setOutput callback), so TS's #advance walks the full diff but only
+          // emits for internal queries. Merging is safe (table-disjoint sets).
+          return this.#goPrimaryAdvance(diff, timer, curr.version, changes);
+        case 'reset-recovered':
+          // Go recovered but user pipelines were degraded to real TS while it
+          // was down — running #goPrimaryAdvance now would DOUBLE-emit user
+          // rows (TS's real pipelines AND Go both emit). Rebuild as stubs.
+          return new ResetPipelinesSignal(
+            'Go backend recovered; rebuilding Go-owned pipelines ' +
+              '(were degraded to TS while Go was unavailable)',
+            'go-primary-unavailable',
+          );
+        case 'reset-degrade':
+          // Go is DOWN in primary mode with Go-owned STUB pipelines; the
+          // TS-native advance below would emit NOTHING for them — a silent
+          // freeze with the cookie advancing past the gap (watermark
+          // over-claim). Reset so re-registration (which checks `initialized`)
+          // rebuilds REAL TS pipelines → graceful TS-serving.
+          return new ResetPipelinesSignal(
+            'Go backend unavailable in primary mode at advance time; ' +
+              'rebuilding TS pipelines (avoids silent watermark over-claim)',
+            'go-primary-unavailable',
+          );
+        case 'ts-native':
+          // Pipelines are already real TS (or none) — the TS-native advance
+          // below serves correctly; do NOT reset (that would loop every advance
+          // for the whole outage / drift-breaker cooldown).
+          break;
+      }
     }
 
     return {
@@ -2890,7 +3092,7 @@ export class PipelineDriver {
     timer: Timer,
     version: string,
     numChanges: number,
-  ): Promise<AdvanceResult> {
+  ): Promise<AdvanceResult | ResetPipelinesSignal> {
     // Buffer the diff so both TS and Go can consume it. Filter the Go
     // side to drop internal tables (Fix #1 invariant — those rows go
     // through TS's TableSource which self-heals against live SQLite).
@@ -2901,12 +3103,17 @@ export class PipelineDriver {
       rowKey: RowKey;
     }> = [];
     const snapshotChanges: SnapshotChange[] = [];
-    for (const entry of diff) {
+    // F3 (keystone): consume the diff EAGERLY to buffer it for both engines, but
+    // route through drainDiffCatchingReset so the ResetPipelinesSignal the diff
+    // iterator throws on a truncate / schema change is RETURNED (graceful
+    // view-syncer reset + re-hydrate) instead of escaping #advancePipelines into
+    // run()'s outer catch (full client-group teardown on every truncate).
+    const resetSignal = drainDiffCatchingReset(diff, entry => {
       if (this.#isInternalTable(entry.table)) {
         // TS advances its real internal-query pipelines from these
         // (lmids / mutationResults); always replay them.
         buffered.push(entry);
-        continue;
+        return;
       }
       // User-table change. P3 lean primary: TS holds only STUB user pipelines
       // (Go owns them) and keeps its user TableSources current via the snapshot
@@ -2926,6 +3133,9 @@ export class PipelineDriver {
           nextValue: entry.nextValue as Record<string, unknown> | null,
         });
       }
+    });
+    if (resetSignal) {
+      return resetSignal;
     }
     const replayDiff: SnapshotDiff = {
       prev: diff.prev,
@@ -2950,34 +3160,33 @@ export class PipelineDriver {
     // by failure mode so each is observable; protocol/stale-epoch escalate
     // (re-throw), restart/unclassified drop the delta + schedule a reset (the
     // "miss exactly one delta" contract; recovery rebuilds Go's state).
-    const goPromise: Promise<{
-      changes: RowChange[];
-      goVersion: string | undefined;
-    }> = this.#goPrimaryTrigger
-      ? this.#goBackend!.advanceToHead()
+    const goPromise: Promise<
+      | {changes: RowChange[]; goVersion: string | undefined}
+      | {reset: ResetPipelinesSignal}
+    > = this.#goPrimaryTrigger
+      ? this.#goBackend!.advanceToHeadStream()
           .then(goDerived => {
-            if (goDerived.reset) {
-              // Reset signal (truncate/permissions/reset): Go's user pipelines
-              // must full-re-hydrate. Drop the user delta this cycle and let
-              // the reset re-establish rows at head (≥ V_ts, still a superset
-              // of the V_ts floor we stamp). Mirrors the drop-on-failure path.
+          if (goDerived.reset) {
+            // F2: a Go-reported reset (truncate / permissions change / engine
+              // reset) means Go's user pipelines must full-re-hydrate. The
+              // legacy path (#scheduleGoReset + stamp prev) floored THIS cycle's
+              // watermark safely, but the async Go reset rebuilds at head and
+              // DISCARDS its hydrate output — so the (prev→head] user delta is
+              // never delivered. For a TRUNCATE that means the deleted rows stay
+              // on every client's screen indefinitely (TS-native does a full
+              // re-hydrate for the same signal). Escalate to a full pipeline
+              // reset so the view-syncer re-hydrates at head, re-delivering the
+              // current state as an idempotent superset.
               this.#lc.info?.(
                 `[go-primary] Go reported reset ${goDerived.reset.reason} ` +
-                  `(${goDerived.reset.msg}); scheduling reset, dropping user delta`,
+                  `(${goDerived.reset.msg}); escalating to pipeline reset`,
               );
-              this.#scheduleGoReset('go-primary-advanceToHead-reset');
-              // H1: drop the user delta but DON'T stamp at full V_ts. Go's user
-              // pipelines did NOT advance this cycle, so their data is still at
-              // the prev snapshot version. Returning `undefined` here would make
-              // reconcileGoPrimaryWatermark fall through to full V_ts — an
-              // OVER-claim (cookie says V_ts while user rows are at prev) until
-              // the async reset re-hydrates. Stamp Go's actual floor (prev) so
-              // the watermark is min(V_ts, prev)=prev — a safe under-claim the
-              // view-syncer assert validates; the reset re-delivers at a later
-              // patchVersion as an idempotent superset.
               return {
-                changes: [] as RowChange[],
-                goVersion: diff.prev.version,
+                reset: new ResetPipelinesSignal(
+                  `Go reported reset ${goDerived.reset.reason} ` +
+                    `(${goDerived.reset.msg})`,
+                  'go-primary-drop',
+                ),
               };
             }
             this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
@@ -2988,15 +3197,19 @@ export class PipelineDriver {
               goVersion: goDerived.version,
             };
           })
-          .catch(e => ({
-            // H1: on a dropped advance (classify returns [] rather than
-            // re-throwing), Go's user data stayed at prev — stamp prev so the
-            // reconciled watermark under-claims instead of over-claiming V_ts.
-            // (A re-thrown protocol/stale error rejects goPromise and never
-            // reaches here.)
-            changes: this.#classifyGoPrimaryAdvanceError(e),
-            goVersion: diff.prev.version,
-          }))
+          .catch(e => {
+            // F2: a dropped advance (sidecar restart / engine not initialized /
+            // RPC timeout / unclassified) escalates to a full pipeline reset
+            // rather than committing an empty delta floored at prev — the
+            // latter permanently skips the (prev→head] user changes because the
+            // scheduled Go reset rebuilds at head and discards its hydrate
+            // output (see #classifyGoPrimaryAdvanceError). Protocol/stale errors
+            // still reject goPromise (re-thrown) and never reach here.
+            const classified = this.#classifyGoPrimaryAdvanceError(e);
+            return classified instanceof ResetPipelinesSignal
+              ? {reset: classified}
+              : {changes: classified, goVersion: diff.prev.version};
+          })
       : this.#goBackend!.advanceStream(snapshotChanges)
           .then(r => {
             this.#recordGoPrimaryAdvanceTimings(r.timings);
@@ -3005,10 +3218,12 @@ export class PipelineDriver {
               goVersion: undefined,
             };
           })
-          .catch(e => ({
-            changes: this.#classifyGoPrimaryAdvanceError(e),
-            goVersion: undefined,
-          }));
+          .catch(e => {
+            const classified = this.#classifyGoPrimaryAdvanceError(e);
+            return classified instanceof ResetPipelinesSignal
+              ? {reset: classified}
+              : {changes: classified, goVersion: undefined};
+          });
 
     // Run TS's #advance over the replay buffer. Only internal-query pipelines
     // are connected, so user-table pushes are no-ops on TS — the iterator
@@ -3024,7 +3239,15 @@ export class PipelineDriver {
       }
     }
 
-    const {changes: goResults, goVersion} = await goPromise;
+    const goOutcome = await goPromise;
+    if ('reset' in goOutcome) {
+      // F2: the Go advance dropped a user delta or reported a truncate/reset.
+      // Return the signal so the view-syncer re-hydrates every query at head
+      // (the gap heals as an idempotent superset). The TS internal-query work
+      // above is discarded — the reset re-establishes it. Correct over fast.
+      return goOutcome.reset;
+    }
+    const {changes: goResults, goVersion} = goOutcome;
     let goVersionFinal = goVersion;
     let goResultsFinal = goResults;
 
@@ -3050,7 +3273,7 @@ export class PipelineDriver {
       for (let i = 0; i < MAX_CATCHUP && goVersionFinal < version; i++) {
         let next: AdvanceToHeadResult;
         try {
-          next = await this.#goBackend!.advanceToHead();
+          next = await this.#goBackend!.advanceToHeadStream();
         } catch (e) {
           this.#lc.warn?.(
             `[go-primary] catch-up advanceToHead failed: ${String(e)}; ` +
@@ -3059,8 +3282,19 @@ export class PipelineDriver {
           break;
         }
         if (next.reset) {
-          this.#scheduleGoReset('go-primary-catchup-reset');
-          break;
+          // F2: a reset during catch-up (truncate/permissions) leaves the same
+          // permanent gap as the main reset branch — the async Go reset rebuilds
+          // at head and discards its hydrate output. Escalate to a full pipeline
+          // reset so the view-syncer re-hydrates at head.
+          this.#lc.info?.(
+            `[go-primary] Go reported reset during catch-up ` +
+              `(${next.reset.reason}); escalating to pipeline reset`,
+          );
+          return new ResetPipelinesSignal(
+            `Go reported reset during catch-up ${next.reset.reason} ` +
+              `(${next.reset.msg})`,
+            'go-primary-drop',
+          );
         }
         this.#recordGoPrimaryAdvanceTimings(next.timings);
         goResultsFinal = [
@@ -3158,56 +3392,56 @@ export class PipelineDriver {
    *      won't fix a wire bug without a sidecar process restart.
    *   2. StaleInitEpochError: this instance was torn down and a successor's
    *      epoch took over. Retrying is futile — RE-THROW so teardown completes.
-   *   3. Sidecar unavailable / restart-related: drop this advance (miss exactly
-   *      one delta). #scheduleGoReset → reinit rebuilds Go's state next advance.
-   *   4. Other unclassified: log + drop + reset (best-effort), counted
-   *      separately so metrics reveal an error class we should handle explicitly.
+   *   3. Sidecar unavailable / restart-related: the advance can't be trusted.
+   *      F2: return a ResetPipelinesSignal so the view-syncer re-hydrates all
+   *      pipelines at head. The legacy "return [] + #scheduleGoReset" path
+   *      floored this cycle's watermark at prev but the async Go reset rebuilt
+   *      at head with its hydrate output DISCARDED — the (prev→head] user delta
+   *      was never delivered (permanent gap). A full re-hydrate heals it.
+   *   4. Other unclassified (incl. RPC timeouts under load): same F2 escalation.
    *
-   * Returns the (empty) user-query changes for the drop cases; throws for the
-   * escalation cases.
+   * Returns a ResetPipelinesSignal for the drop cases (caller RETURNS it from
+   * #goPrimaryAdvance → graceful re-hydrate); throws for the escalation cases
+   * (protocol/stale → caller surfaces it → teardown + reconnect).
    */
-  #classifyGoPrimaryAdvanceError(e: unknown): RowChange[] {
+  #classifyGoPrimaryAdvanceError(e: unknown): RowChange[] | ResetPipelinesSignal {
     const msg = e instanceof Error ? e.message : String(e);
 
-    if (
-      msg.includes('chunk order violation') ||
-      msg.includes('finished without a final chunk') ||
-      msg.includes('Frame too large') ||
-      msg.includes('protocolRev mismatch')
-    ) {
-      this.#advanceDroppedProtocol.add(1);
-      this.#lc.error?.(
-        `[go-primary] Go advance failed with PROTOCOL VIOLATION (escalating): ${msg}`,
-      );
-      throw e;
+    switch (classifyGoPrimaryAdvanceError(e)) {
+      case 'protocol':
+        this.#advanceDroppedProtocol.add(1);
+        this.#lc.error?.(
+          `[go-primary] Go advance failed with PROTOCOL VIOLATION (escalating): ${msg}`,
+        );
+        throw e;
+      case 'stale-epoch':
+        this.#advanceDroppedStaleEpoch.add(1);
+        this.#lc.warn?.(
+          `[go-primary] Go advance rejected by sidecar (stale initEpoch); ` +
+            `this view-syncer instance is torn down: ${msg}`,
+        );
+        throw e;
+      case 'sidecar':
+        this.#advanceDroppedSidecar.add(1);
+        this.#lc.warn?.(
+          `[go-primary] Go advance dropped (sidecar restart in flight); ` +
+            `escalating to pipeline reset: ${msg}`,
+        );
+        return new ResetPipelinesSignal(
+          `Go advance dropped (sidecar restart): ${msg}`,
+          'go-primary-drop',
+        );
+      case 'unclassified':
+        this.#advanceDroppedOther.add(1);
+        this.#lc.error?.(
+          `[go-primary] Go advance failed (unclassified); escalating to pipeline ` +
+            `reset: ${msg}`,
+        );
+        return new ResetPipelinesSignal(
+          `Go advance failed (unclassified): ${msg}`,
+          'go-primary-drop',
+        );
     }
-
-    if (e instanceof StaleInitEpochError) {
-      this.#advanceDroppedStaleEpoch.add(1);
-      this.#lc.warn?.(
-        `[go-primary] Go advance rejected by sidecar (stale initEpoch); ` +
-          `this view-syncer instance is torn down: ${msg}`,
-      );
-      throw e;
-    }
-
-    const sidecarUnavailable =
-      msg.includes('Sidecar is not running') ||
-      msg.includes('Connection closed') ||
-      msg.includes('engine not initialized');
-    if (sidecarUnavailable) {
-      this.#advanceDroppedSidecar.add(1);
-      this.#lc.warn?.(
-        `[go-primary] Go advance dropped (sidecar restart in flight): ${msg}`,
-      );
-      this.#scheduleGoReset('go-primary-advance-sidecar-restart');
-      return [];
-    }
-
-    this.#advanceDroppedOther.add(1);
-    this.#lc.error?.(`[go-primary] Go advance failed (unclassified): ${msg}`);
-    this.#scheduleGoReset('go-primary-advance-failure');
-    return [];
   }
 
   #goRowChangeToRowChange(rc: GoRowChange): RowChange {
@@ -3380,7 +3614,7 @@ export class PipelineDriver {
     timer: Timer,
     version: string,
     numChanges: number,
-  ): Promise<AdvanceResult> {
+  ): Promise<AdvanceResult | ResetPipelinesSignal> {
     // Buffer diff entries so both paths can consume them
     const buffered: Array<{
       table: string;
@@ -3389,7 +3623,11 @@ export class PipelineDriver {
       rowKey: RowKey;
     }> = [];
     const snapshotChanges: SnapshotChange[] = [];
-    for (const entry of diff) {
+    // F3: same eager-buffer hazard as #goPrimaryAdvance — route through
+    // drainDiffCatchingReset so a truncate / schema-change ResetPipelinesSignal
+    // is RETURNED (graceful reset + re-hydrate) instead of escaping into the
+    // outer-catch teardown.
+    const resetSignal = drainDiffCatchingReset(diff, entry => {
       buffered.push(entry);
       // TS always consumes the full diff (its source-of-truth is SQLite,
       // and internal queries like lmids need these). Go's snapshotChanges
@@ -3397,13 +3635,16 @@ export class PipelineDriver {
       // row Go's MemorySource doesn't have would panic the sidecar
       // (Pattern Z root cause, 2026-05-26).
       if (this.#isInternalTable(entry.table)) {
-        continue;
+        return;
       }
       snapshotChanges.push({
         table: entry.table,
         prevValues: entry.prevValues as Record<string, unknown>[],
         nextValue: entry.nextValue as Record<string, unknown> | null,
       });
+    });
+    if (resetSignal) {
+      return resetSignal;
     }
 
     // Create a replay diff for TS path
