@@ -3706,15 +3706,38 @@ export class PipelineDriver {
           );
           return;
         } else {
-          // Go is the LONE offender: TS matches SQL (or SQL is non-empty and Go
-          // disagrees on set/content/order). This is the genuinely-suspicious
-          // shape — count it and fall through to log the full MISMATCH detail.
-          this.#shadowConfirmedGoDrift.add(1);
-          this.#lc.error?.(
-            `[shadow] CONFIRMED Go drift (${operation} ${context}): Go disagrees ` +
-              `with SQL (${verdict.kind}, ts=${tsNorm.length} go=${goNorm.length} ` +
-              `sql=${verdict.sqlCount}) — detail below`,
-          );
+          // Go disagrees with SQL. Before declaring Go the LONE offender,
+          // verify that TS actually matches SQL — the previous code asserted
+          // "TS matches SQL" in a comment without checking, so the known
+          // buildAuditSQL under-count families (main-table-only counting,
+          // its own EXISTS+limit boundary handling) produced CONFIRMED
+          // verdicts when the oracle in fact disagreed with BOTH engines.
+          // One extra SQL re-query, only on this already-rare mismatch path.
+          const tsVerdict = this.#sqlGroundTruthCompare(classifyAst, tsChanges);
+          if (
+            tsVerdict.kind === 'confirmed' ||
+            tsVerdict.kind === 'go-vs-sql-tie-window'
+          ) {
+            // TS matches SQL, Go doesn't: Go is genuinely the lone offender.
+            this.#shadowConfirmedGoDrift.add(1);
+            this.#lc.error?.(
+              `[shadow] CONFIRMED Go drift (${operation} ${context}): Go disagrees ` +
+                `with SQL while TS matches it (${verdict.kind}, ts=${tsNorm.length} ` +
+                `go=${goNorm.length} sql=${verdict.sqlCount}) — detail below`,
+            );
+          } else {
+            // The SQL oracle disagrees with BOTH engines (or can't adjudicate
+            // TS). That's an oracle/audit-SQL divergence, not a confirmed Go
+            // drift — demote to info and fall through so the raw TS-vs-Go
+            // MISMATCH detail below still surfaces the difference.
+            this.#shadowSqlUnreliable.add(1);
+            this.#lc.info?.(
+              `[shadow] ts/sql-oracle-divergence (${operation} ${context}): SQL ` +
+                `disagrees with BOTH engines (go=${verdict.kind}, ts=${tsVerdict.kind}, ` +
+                `ts=${tsNorm.length} go=${goNorm.length} sql=${verdict.sqlCount}) — ` +
+                `NOT a confirmed Go drift; raw mismatch detail below`,
+            );
+          }
         }
       }
     }
