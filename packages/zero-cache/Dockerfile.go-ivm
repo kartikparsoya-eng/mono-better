@@ -140,6 +140,34 @@ ENV ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=${GO_PRIMARY_TRIGGER}
 ENV ZERO_GO_SIDECAR_LEAN_PRIMARY=${LEAN_PRIMARY}
 ENV GO_IVM_ADVANCE_DRIVE=${ADVANCE_DRIVE}
 ENV ZERO_GO_SIDECAR_ADVANCE_DRIVE=${ADVANCE_DRIVE}
+# --- Production-scale memory/connection guards (2026-06-11 audit) ---
+# Replica read+writable pool ceilings. The sidecar's package default (256)
+# is sized for ~36 push-mode CGs / ~128 drive-mode CGs (2 pinned snapshotter
+# conns per CG); production runs hundreds of CGs per shared sidecar, and
+# pool exhaustion surfaces as silent Conn() blocking → TS-side RPC timeouts
+# → CG reset storms. 1024 supports ~400 drive-mode CGs with headroom; each
+# SQLite conn costs ~2MB page cache (~2GB worst case at full utilization).
+# The sidecar logs "replica pool pressure" every 10s when conns start
+# queueing — raise this if that line appears.
+ENV GO_IVM_MAX_OPEN_CONNS=1024
+ENV GO_IVM_MAX_IDLE_CONNS=128
+# Soft Go heap ceiling as a percentage of the container's cgroup memory
+# limit (GOMEMLIMIT). The sidecar shares the container with the node
+# syncer workers, so it must not claim the whole budget. Soft limit: GC
+# works harder near the cap instead of the kernel OOM-killing the whole
+# container (which takes down every CG plus the node workers). Explicit
+# GO_IVM_GOMEMLIMIT / GOMEMLIMIT override the percentage.
+ENV GO_IVM_GOMEMLIMIT_PERCENT=40
+# Cap on change-log entries advanceToHead[Stream] will materialize for a
+# single catch-up diff (entries carry full row values). Above this the RPC
+# errors and TS resets/re-hydrates with bounded memory — replaying a diff
+# that big is slower than a re-hydrate anyway.
+ENV GO_IVM_MAX_DIFF_CHANGES=50000
+# Estimated-bytes budget per streamed partial frame. Row-count chunk caps
+# alone let 10k fat rows (>6.4KB avg: message bodies, canvas JSON) encode
+# past the 64MB wire frame cap — a deterministic hydrate failure loop.
+# 8MB leaves ample margin for msgpack overhead under the 64MB cap.
+ENV GO_IVM_CHUNK_SOFT_BYTES=8388608
 # workers=1 keeps cg state colocated in the single shared sidecar
 # (per feedback_shared_sidecar_tuning — bumping workers fragments
 # cgs across sidecars under per-worker mode; in shared mode it just
