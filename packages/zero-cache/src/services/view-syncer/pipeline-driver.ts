@@ -3610,8 +3610,15 @@ export class PipelineDriver {
     // ResetPipelinesSignal, driving the proven F2 machinery
     // (pipelines.reset → hydrateUnchangedQueries → CVR updater → correcting
     // patches poked to clients) — the only path that converges the client
-    // view. The F2 reset re-inits Go again; that second re-init is
-    // idempotent and collapsed by #scheduleGoReset's in-flight dedupe.
+    // view.
+    //
+    // No double engine-init: the F2 reset() path re-inits Go via
+    // #maybeResetGoBackend, which no-ops while this reset is mid-reinit
+    // (its `!initialized` guard — #reinitPerCGAndRegisterQueries flips
+    // initialized=false for the duration). The re-hydrate's addQueries then
+    // serialize behind this reset via the backend's #restartGate /
+    // #currentInitPromise. (NOT #scheduleGoReset's in-flight flag — reset()
+    // bypasses #scheduleGoReset entirely.)
     this.#scheduleGoReset(reason);
     this.#pendingClientResetReason ??= reason;
   }
