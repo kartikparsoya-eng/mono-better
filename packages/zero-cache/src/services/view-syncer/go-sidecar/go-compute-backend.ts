@@ -150,6 +150,14 @@ export class GoComputeBackend {
     return this.#manager.epoch;
   }
 
+  // Source mode the sidecar reported at handshake ('memory' | 'table';
+  // undefined = older sidecar, treat as memory). In table mode the init
+  // path must NOT materialize + ship row contents — the sidecar reads
+  // SQLite directly and discards them (loadRows is a no-op).
+  get sidecarSourceMode(): string | undefined {
+    return this.#manager.sidecarSourceMode;
+  }
+
   /**
    * Resolves when this backend is in a stable state for the current
    * manager epoch — either initialized, or an init attempt has completed

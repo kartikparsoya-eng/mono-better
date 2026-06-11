@@ -146,6 +146,13 @@ export class SidecarManager {
   // normally.
   #suppressNextExitCount = false;
   #epoch = 0;
+  // Source mode reported by the sidecar's version RPC at handshake:
+  // 'table' means its leaves read SQLite directly and loadRows is a no-op,
+  // so the init path can skip materializing + shipping row contents
+  // (a full-DB `SELECT *` per table — OOMs the syncer on real datasets).
+  // undefined = older sidecar without the field, or version RPC failed →
+  // callers must assume memory mode and ship rows.
+  #sidecarSourceMode: string | undefined = undefined;
   #firstStartComplete = false;
   #listeners = new Set<RestartListener>();
   // Resolves the next time status transitions to 'running'. Replaced with a
@@ -208,6 +215,14 @@ export class SidecarManager {
   }
 
   /** Monotonic counter incremented each time the sidecar process is (re)started. */
+  /**
+   * Source mode the sidecar reported at handshake ('memory' | 'table'),
+   * or undefined for older sidecars / failed version RPC (treat as memory).
+   */
+  get sidecarSourceMode(): string | undefined {
+    return this.#sidecarSourceMode;
+  }
+
   get epoch(): number {
     return this.#epoch;
   }
@@ -483,13 +498,17 @@ export class SidecarManager {
         this.#config.logger('error', msg);
         throw new Error(msg);
       }
+      this.#sidecarSourceMode = v.sourceMode;
       this.#config.logger(
         'info',
-        `Sidecar version ${v.version} (protocol rev ${v.protocolRev})`,
+        `Sidecar version ${v.version} (protocol rev ${v.protocolRev}, ` +
+          `source mode ${v.sourceMode ?? 'unreported'})`,
       );
     } catch (err) {
       // If the version RPC isn't implemented (older sidecar), warn loudly
       // but don't refuse — operators can roll out a new client first.
+      // Source mode stays undefined → init ships rows (memory-mode behavior).
+      this.#sidecarSourceMode = undefined;
       // D5: also bump the fallback counter so dashboards can detect this
       // (operators kept missing the warn log in busy stdout).
       protocolFallbackCounter.add(1);

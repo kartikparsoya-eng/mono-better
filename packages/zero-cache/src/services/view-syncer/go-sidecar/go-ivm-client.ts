@@ -995,11 +995,18 @@ export class GoIVMClient {
    * Query sidecar version and protocol revision. Used by `SidecarManager`
    * to refuse to talk to an incompatible build during rolling deploys
    * (REVIEW-final MED-CROSS-5).
+   *
+   * `sourceMode` ('memory' | 'table') is reported by newer sidecars so the
+   * init path can skip shipping row contents when the sidecar reads SQLite
+   * directly (loadRows is a no-op in table mode). Absent on older builds —
+   * callers must treat undefined as memory mode (ship rows).
    */
-  async version(opts?: CallOptions): Promise<{version: string; protocolRev: number}> {
+  async version(
+    opts?: CallOptions,
+  ): Promise<{version: string; protocolRev: number; sourceMode?: string}> {
     return (await this.#call('version', undefined, {
       timeoutMs: opts?.timeoutMs ?? 5_000,
-    })) as {version: string; protocolRev: number};
+    })) as {version: string; protocolRev: number; sourceMode?: string};
   }
 
   // --- Private ---

@@ -97,6 +97,17 @@ type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
 };
 
 /**
+ * Hard cap on rows the SQL ground-truth oracle will materialize. The audit
+ * SQL only carries a LIMIT when the query AST has one, so an unlimited query
+ * over a large table would otherwise read the entire table into the JS heap.
+ * Past the cap the oracle returns `skipped` (row-cap-exceeded) and the caller
+ * falls back to the TS-vs-Go set comparison. 20k rows ≈ tens of MB worst
+ * case — large enough for every sandbox-scale query, small enough to never
+ * threaten the heap.
+ */
+const SQL_ORACLE_ROW_CAP = 20_000;
+
+/**
  * Convert an audit AST into a parameterized SQL string + values array
  * suitable for `better-sqlite3.prepare(text).all(...values)`. Unlike
  * zqlite's `buildSelectQuery`, this version handles correlated EXISTS /
@@ -1082,6 +1093,13 @@ export class PipelineDriver {
     if (this.#snapshotter.destroyed) {
       throw new Error('snapshotter destroyed — CG torn down; aborting Go (re-)init');
     }
+    // Table mode: the sidecar's leaves read SQLite directly and its loadRows
+    // is a no-op, so shipping row contents is pure waste — and materializing
+    // every user table via `SELECT *` .all() in one synchronous pass OOMs the
+    // syncer worker on real datasets (4GB heap death in Statement::JS_all,
+    // observed on first client connect in the official sandbox, 2026-06-11).
+    // Schemas/PKs/uniqueKeys still ship; rows stay empty.
+    const skipRows = this.#goBackend?.sidecarSourceMode === 'table';
     const {db} = this.#snapshotter.current();
     const tables: Record<
       string,
@@ -1124,10 +1142,12 @@ export class PipelineDriver {
         };
       }
       let rows: Record<string, unknown>[] = [];
-      try {
-        rows = db.all(`SELECT * FROM "${name}"`) as Record<string, unknown>[];
-      } catch (e) {
-        this.#lc.warn?.(`Failed to read table ${name} for Go init:`, e);
+      if (!skipRows) {
+        try {
+          rows = db.all(`SELECT * FROM "${name}"`) as Record<string, unknown>[];
+        } catch (e) {
+          this.#lc.warn?.(`Failed to read table ${name} for Go init:`, e);
+        }
       }
       // uniqueKeys: forward all unique-index column sets to Go so its
       // scalar-subquery resolver can detect at-most-one-row subqueries
@@ -1169,8 +1189,15 @@ export class PipelineDriver {
   #maybeInitGoBackend(_clientSchema: ClientSchema) {
     if (!this.#goBackend) return;
     const tables = this.#currentTablesForGo();
-    for (const [name, t] of Object.entries(tables)) {
-      this.#lc.info?.(`init table ${name}: ${t.rows.length} rows loaded from SQLite`);
+    if (this.#goBackend.sidecarSourceMode === 'table') {
+      this.#lc.info?.(
+        `init ${Object.keys(tables).length} tables (schemas only — ` +
+          `table-mode sidecar reads rows from SQLite directly)`,
+      );
+    } else {
+      for (const [name, t] of Object.entries(tables)) {
+        this.#lc.info?.(`init table ${name}: ${t.rows.length} rows loaded from SQLite`);
+      }
     }
     const promise = this.#goBackend.initEngine(tables);
     this.#goInitPromise = promise;
@@ -2498,12 +2525,27 @@ export class PipelineDriver {
       return {kind: 'skipped', reason: `build-sql-failed: ${String(e)}`};
     }
 
+    // Stream rows with a hard cap instead of .all(): buildAuditSQL only
+    // emits a LIMIT when the AST has one, so an unlimited query over a
+    // production-sized table would otherwise materialize the whole table
+    // as JS objects (4GB heap death in Statement::JS_all — official
+    // sandbox, 2026-06-11). Overflow returns the existing `skipped` shape;
+    // callers fall back to the TS-vs-Go set comparison.
     let sqlRows: Record<string, unknown>[];
     try {
-      sqlRows = this.#snapshotter
-        .current()
-        .db.db.prepare(limitedText)
-        .all(...values) as Record<string, unknown>[];
+      sqlRows = [];
+      const stmt = this.#snapshotter.current().db.db.prepare(limitedText);
+      for (const row of stmt.iterate(...values)) {
+        if (sqlRows.length >= SQL_ORACLE_ROW_CAP) {
+          // Early return triggers the iterator's return() — better-sqlite3
+          // resets the statement, so no open-cursor leak.
+          return {
+            kind: 'skipped',
+            reason: `row-cap-exceeded: >${SQL_ORACLE_ROW_CAP} rows`,
+          };
+        }
+        sqlRows.push(row as Record<string, unknown>);
+      }
     } catch (e) {
       return {kind: 'skipped', reason: `sql-exec-failed: ${String(e)}`};
     }
