@@ -297,7 +297,15 @@ export type ResetPipelinesReason =
   // prev but the Go reset discarded its hydrate output, so the (prev→head] gap
   // was never delivered (permanent). Escalate to a full re-hydrate that heals
   // the gap as an idempotent superset.
-  | 'go-primary-drop';
+  | 'go-primary-drop'
+  // Go-primary drift audit CONFIRMED client-visible drift (Go disagrees with
+  // the SQL ground-truth oracle while serving). resetEngine alone rebuilds
+  // Go's internal pipelines but discards the hydrate output, so rows already
+  // DELIVERED to connected clients stay wrong. Returning this signal from the
+  // next advance drives the proven reset path (pipelines.reset →
+  // hydrateUnchangedQueries → CVR updater → correcting patches poked to
+  // clients), actually converging the client view.
+  | 'drift-audit-heal';
 
 export class ResetPipelinesSignal extends Error {
   readonly name = 'ResetPipelinesSignal';

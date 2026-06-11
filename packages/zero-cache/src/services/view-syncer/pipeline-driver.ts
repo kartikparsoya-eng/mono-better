@@ -941,6 +941,15 @@ export class PipelineDriver {
   #driftAuditTimer: ReturnType<typeof setInterval> | null = null;
   // Collapses overlapping audit ticks when one runs longer than the interval.
   #driftAuditInFlight = false;
+  /**
+   * Set by #healConfirmedDrift (Go-primary only): the detached drift-audit
+   * timer cannot return a ResetPipelinesSignal itself, so it parks the heal
+   * request here and the next advance() returns the signal — the view-syncer
+   * then runs the full pipelines.reset → re-hydrate → CVR-diff path that
+   * corrects rows already delivered to clients. Cleared on consumption and
+   * on reset/init (a fresh hydrate makes the pending heal moot).
+   */
+  #pendingClientResetReason: string | null = null;
   // Round-robin cursor over the sorted auditable queries, so the audit covers
   // every active query within N cycles instead of sampling one at random.
   #driftAuditCursor = 0;
@@ -1294,6 +1303,9 @@ export class PipelineDriver {
   }
 
   #initAndResetCommon(clientSchema: ClientSchema) {
+    // A (re)init re-hydrates everything — any parked drift-audit heal is
+    // moot, and carrying it over would force a needless second reset.
+    this.#pendingClientResetReason = null;
     const {db, version} = this.#snapshotter.current();
     this.#tableSourcesVersion = version;
     const fullTables = new Map<string, LiteTableSpec>();
@@ -3064,6 +3076,21 @@ export class PipelineDriver {
       this.initialized(),
       'Pipeline driver must be initialized before advancing',
     );
+    // Drift-audit heal, part 2 (see #healConfirmedDrift): the audit runs in
+    // a detached setInterval and structurally cannot return a
+    // ResetPipelinesSignal itself, so it parks the request here and the
+    // next advance returns it — driving the view-syncer's proven reset path
+    // (pipelines.reset → hydrateUnchangedQueries → CVR updater) that
+    // corrects rows already delivered to clients.
+    if (this.#pendingClientResetReason !== null) {
+      const why = this.#pendingClientResetReason;
+      this.#pendingClientResetReason = null;
+      return new ResetPipelinesSignal(
+        `drift-audit confirmed client-visible drift (${why}) — ` +
+          `full re-hydrate to heal delivered rows`,
+        'drift-audit-heal',
+      );
+    }
     // If Go backend init is pending, await it first
     if (this.#goInitPromise && this.#goBackend && !this.#goBackend.initialized) {
       return this.#goInitPromise.then(() => this.#advanceDispatch(timer));
@@ -3572,9 +3599,21 @@ export class PipelineDriver {
   #healConfirmedDrift(reason: string): void {
     if (this.#shadowMode) return;
     this.#lc.warn?.(
-      `[drift-audit] Go-primary confirmed drift → scheduling engine reset (${reason})`,
+      `[drift-audit] Go-primary confirmed drift → engine reset now + ` +
+        `client re-hydrate on next advance (${reason})`,
     );
+    // Two-part heal. The engine reset fixes Go's pipelines IMMEDIATELY so
+    // drift stops compounding into subsequent advances — but resetEngine
+    // discards its hydrate output (go-compute-backend: "TS already owns the
+    // client view"), so rows ALREADY DELIVERED to connected clients stay
+    // wrong. The pending flag makes the next advance() return a
+    // ResetPipelinesSignal, driving the proven F2 machinery
+    // (pipelines.reset → hydrateUnchangedQueries → CVR updater → correcting
+    // patches poked to clients) — the only path that converges the client
+    // view. The F2 reset re-inits Go again; that second re-init is
+    // idempotent and collapsed by #scheduleGoReset's in-flight dedupe.
     this.#scheduleGoReset(reason);
+    this.#pendingClientResetReason ??= reason;
   }
 
   /**
