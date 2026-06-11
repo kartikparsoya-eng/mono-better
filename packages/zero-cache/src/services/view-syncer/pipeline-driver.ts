@@ -2430,6 +2430,7 @@ export class PipelineDriver {
               `sql_only=${sqlVerdict.sqlOnly.slice(0, 3).join(' | ')} ` +
               `(${sqlVerdict.sqlOnly.length} total)`,
           );
+          this.#healConfirmedDrift('drift-audit-confirmed-set-drift');
         }
       } else if (sqlVerdict.kind === 'go-vs-sql-content-drift') {
         // Same PKs but row contents differ — Go has stale/wrong values
@@ -2458,6 +2459,7 @@ export class PipelineDriver {
               `sql_row=${sample.sqlRow.slice(0, 300)} ` +
               `go_row=${sample.goRow.slice(0, 300)}`,
           );
+          this.#healConfirmedDrift('drift-audit-confirmed-content-drift');
         }
       } else if (sqlVerdict.kind === 'go-vs-sql-order-drift') {
         // Right rows, WRONG ORDER vs the SQL ORDER BY oracle. Invisible to the
@@ -2488,6 +2490,7 @@ export class PipelineDriver {
               `sql_seq=[…${window(sqlVerdict.sqlSeq)}…] ` +
               `go_seq=[…${window(sqlVerdict.goSeq)}…] ast=${JSON.stringify(ast.orderBy)}`,
           );
+          this.#healConfirmedDrift('drift-audit-confirmed-order-drift');
         }
       } else if (sqlVerdict.kind === 'go-vs-sql-tie-window') {
         // Ordered+limited query whose ORDER BY lacks a unique tiebreaker: Go
@@ -3549,6 +3552,29 @@ export class PipelineDriver {
       rowKey: rc.rowKey as Row,
       row,
     } as RowChange;
+  }
+
+  /**
+   * Heal a SQL-oracle-CONFIRMED drift found by the sampled drift audit.
+   * In Go-primary mode Go is SERVING the drifted rows — leaving this
+   * log-only means clients keep wrong data until manual action, while the
+   * count-freeze probe already self-heals via reset. Escalate confirmed
+   * set/content/order drift the same way. In shadow mode TS is
+   * authoritative (nothing wrong reaches clients), so stay log-only and
+   * keep the drift signal observable across audits instead of wiping the
+   * evidence with a reset.
+   *
+   * Safe against oracle false-positives: a reset rebuilds Go from SQLite
+   * truth, so a spurious trigger costs one re-init and the next audit
+   * passes; repeated resets are bounded by #scheduleGoReset's retry cap
+   * and the drift-loop breaker.
+   */
+  #healConfirmedDrift(reason: string): void {
+    if (this.#shadowMode) return;
+    this.#lc.warn?.(
+      `[drift-audit] Go-primary confirmed drift → scheduling engine reset (${reason})`,
+    );
+    this.#scheduleGoReset(reason);
   }
 
   /**
