@@ -108,6 +108,24 @@ type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
 const SQL_ORACLE_ROW_CAP = 20_000;
 
 /**
+ * Hard cap on TS hydrate rows retained per query for the shadow batch
+ * comparison. Past the cap the view-syncer keeps counting but stops
+ * buffering, and {@link PipelineDriver.shadowBatchCompare} degrades that
+ * query to a count-only compare. Without this, shadow mode retained every
+ * CG's entire hydrate result set (TS side AND Go side) in the JS heap for
+ * the duration of the batch RPC — a reconnect-storm OOM at production
+ * scale (hydration p95 ~0.9s ⇒ result sets are large).
+ */
+export const SHADOW_COMPARE_ROW_CAP = 20_000;
+
+/**
+ * Per-query TS hydrate results collected for {@link PipelineDriver.shadowBatchCompare}.
+ * `changes` is capped at {@link SHADOW_COMPARE_ROW_CAP}; `total` is the true
+ * row count (so `total > changes.length` marks a truncated entry).
+ */
+export type ShadowHydrateResult = {changes: RowChange[]; total: number};
+
+/**
  * Convert an audit AST into a parameterized SQL string + values array
  * suitable for `better-sqlite3.prepare(text).all(...values)`. Unlike
  * zqlite's `buildSelectQuery`, this version handles correlated EXISTS /
@@ -1777,6 +1795,17 @@ export class PipelineDriver {
   }
 
   /**
+   * Whether the view-syncer should collect per-query TS hydrate results
+   * for {@link shadowBatchCompare}. False in Go-primary, Go-disabled, or
+   * non-shadow deployments — collecting unconditionally retained every
+   * CG's ENTIRE hydrate result set in the JS heap on each (re)connect,
+   * which is a reconnect-storm OOM at production scale.
+   */
+  get shadowCompareActive(): boolean {
+    return this.#shadowMode && this.#goBackend !== null;
+  }
+
+  /**
    * Await Go backend initialization if pending. Call before checking
    * canBatchHydrate to ensure the initial batch of queries uses the
    * Go path instead of falling through to per-query TS hydration.
@@ -1808,7 +1837,7 @@ export class PipelineDriver {
    */
   async shadowBatchCompare(
     queries: {queryID: string; ast: AST}[],
-    tsResultsPerQuery: Map<string, RowChange[]>,
+    tsResultsPerQuery: Map<string, ShadowHydrateResult>,
   ): Promise<void> {
     // HIGH-5: this is a SHADOW-only comparison. It previously returned only on
     // !initialized, so in Go-primary it ran a second full hydrateManyStream
@@ -1843,7 +1872,12 @@ export class PipelineDriver {
       // path Go-primary mode will use in production. Compare per-query as
       // soon as Go emits each result (REVIEW-final perf-opt streaming
       // validation in shadow).
-      const goResultsByID = new Map<string, RowChange[]>();
+      // Retain only per-query COUNTS for Go results — the full change arrays
+      // were previously kept for the whole batch ("goResultsByID") even
+      // though they were only read inside the per-query callback. At
+      // production result-set sizes that doubled the batch's heap footprint
+      // for no benefit.
+      const goCountsByID = new Map<string, number>();
       // queryID → original (pre-planForGo) AST, so #shadowCompare's result-ORDER
       // check has the orderBy without depending on #pipelines registration.
       const astByID = new Map(queries.map(q => [q.queryID, q.ast]));
@@ -1856,25 +1890,47 @@ export class PipelineDriver {
           );
           // Phase 2: no TS-side companion injection here. Go's resolver
           // emits companion rows itself if any scalar subquery resolved.
-          goResultsByID.set(r.queryID, goChanges);
-          const tsChanges = tsResultsPerQuery.get(r.queryID) ?? [];
+          goCountsByID.set(r.queryID, goChanges.length);
+          const ts = tsResultsPerQuery.get(r.queryID) ?? {changes: [], total: 0};
+          // Free the TS-side buffer as soon as this query is compared —
+          // no need to hold the whole batch's results until the RPC ends.
+          tsResultsPerQuery.delete(r.queryID);
+          if (ts.total > ts.changes.length) {
+            // TS side was truncated at SHADOW_COMPARE_ROW_CAP — a content
+            // compare is impossible; degrade to a count compare.
+            if (ts.total !== goChanges.length) {
+              this.#lc.error?.(
+                `[shadow] batch-hydrate (${r.queryID}): COUNT mismatch on ` +
+                  `capped result (ts=${ts.total} go=${goChanges.length}, ` +
+                  `cap=${SHADOW_COMPARE_ROW_CAP})`,
+              );
+              mismatches++;
+            } else {
+              this.#lc.info?.(
+                `[shadow] batch-hydrate (${r.queryID}): count-only compare ` +
+                  `(${ts.total} rows > cap ${SHADOW_COMPARE_ROW_CAP}) — counts match`,
+              );
+            }
+            return;
+          }
           this.#shadowCompare(
             `batch-hydrate`,
             r.queryID,
-            tsChanges,
+            ts.changes,
             goChanges,
             astByID.get(r.queryID),
           );
-          if (tsChanges.length !== goChanges.length) mismatches++;
+          if (ts.changes.length !== goChanges.length) mismatches++;
         },
       );
       const batchMs = performance.now() - batchStart;
       // Account for queries Go never emitted (size mismatch detected).
       for (const q of queries) {
-        if (!goResultsByID.has(q.queryID)) {
-          const tsChanges = tsResultsPerQuery.get(q.queryID) ?? [];
-          this.#shadowCompare('batch-hydrate', q.queryID, tsChanges, [], q.ast);
-          if (tsChanges.length !== 0) mismatches++;
+        if (!goCountsByID.has(q.queryID)) {
+          const ts = tsResultsPerQuery.get(q.queryID) ?? {changes: [], total: 0};
+          tsResultsPerQuery.delete(q.queryID);
+          this.#shadowCompare('batch-hydrate', q.queryID, ts.changes, [], q.ast);
+          if (ts.total !== 0) mismatches++;
         }
       }
       this.#lc.info?.(

@@ -88,7 +88,11 @@ import {
 import type {DrainCoordinator} from './drain-coordinator.ts';
 import {handleInspect} from './inspect-handler.ts';
 import type {PipelineDriver} from './pipeline-driver.ts';
-import {type RowChange} from './pipeline-driver.ts';
+import {
+  SHADOW_COMPARE_ROW_CAP,
+  type RowChange,
+  type ShadowHydrateResult,
+} from './pipeline-driver.ts';
 import {
   cmpVersions,
   EMPTY_CVR_VERSION,
@@ -1442,7 +1446,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     // mismatches, and Go-primary mode would silently miss them entirely.
     // Match the main syncQueryPipelineSet loop's batching behavior
     // (view-syncer.ts:1995-2002).
-    const tsResultsPerQuery = new Map<string, RowChange[]>();
+    //
+    // Collection is gated on shadowCompareActive and capped at
+    // SHADOW_COMPARE_ROW_CAP per query: this method runs on EVERY
+    // reconnect (the post-deploy connection-storm path), and retaining
+    // each CG's full hydrate result set unconditionally OOMs the syncer
+    // worker at production scale.
+    const collectForShadow = this.#pipelines.shadowCompareActive;
+    const tsResultsPerQuery = new Map<string, ShadowHydrateResult>();
     const batchedQueries: {id: string; ast: AST}[] = [];
 
     for (const {
@@ -1470,13 +1481,17 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               await timer.yieldProcess('yield in hydrateUnchangedQueries');
             } else {
               count++;
-              queryChanges.push(change);
+              if (collectForShadow && queryChanges.length < SHADOW_COMPARE_ROW_CAP) {
+                queryChanges.push(change);
+              }
             }
           }
         },
       );
-      tsResultsPerQuery.set(queryID, queryChanges);
-      batchedQueries.push({id: queryID, ast: transformedAst});
+      if (collectForShadow) {
+        tsResultsPerQuery.set(queryID, {changes: queryChanges, total: count});
+        batchedQueries.push({id: queryID, ast: transformedAst});
+      }
 
       const elapsed = timer.totalElapsed();
       this.#hydrations.add(1);
@@ -1977,8 +1992,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           return;
         }
 
-        // Collect TS results per query for batch shadow comparison
-        const tsResultsPerQuery = new Map<string, RowChange[]>();
+        // Collect TS results per query for batch shadow comparison.
+        // Gated + capped (see SHADOW_COMPARE_ROW_CAP): unconditional
+        // collection retained every CG's full hydrate result set in heap
+        // even with shadow off — a reconnect-storm OOM at prod scale.
+        const collectForShadow = pipelines.shadowCompareActive;
+        const tsResultsPerQuery = new Map<string, ShadowHydrateResult>();
         for (const q of addQueries) {
           lc = lc
             .withContext('hash', q.id)
@@ -1993,13 +2012,19 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           );
           const iterable = result instanceof Promise ? await result : result;
           const queryChanges: RowChange[] = [];
+          let queryTotal = 0;
           for (const c of iterable) {
             if (c !== 'yield') {
-              queryChanges.push(c);
+              queryTotal++;
+              if (collectForShadow && queryChanges.length < SHADOW_COMPARE_ROW_CAP) {
+                queryChanges.push(c);
+              }
             }
             yield c;
           }
-          tsResultsPerQuery.set(q.id, queryChanges);
+          if (collectForShadow) {
+            tsResultsPerQuery.set(q.id, {changes: queryChanges, total: queryTotal});
+          }
           const elapsed = timer.stop();
           totalProcessTime += elapsed;
 
