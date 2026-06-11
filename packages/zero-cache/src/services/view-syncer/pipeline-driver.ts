@@ -126,6 +126,17 @@ export const SHADOW_COMPARE_ROW_CAP = 20_000;
 export type ShadowHydrateResult = {changes: RowChange[]; total: number};
 
 /**
+ * Queries per hydrateManyStream RPC in the Go-primary batch-hydrate path
+ * ({@link PipelineDriver.goHydrateBatchStream}). The socket delivers Go's
+ * results with no backpressure while the consumer drains into (slow) CVR
+ * flushes, so the sub-batch size bounds how many queries' full result sets
+ * can sit buffered in the JS heap at once. Drive mode serializes per-CG
+ * hydrates on the snapshotter's single conn, so small sub-batches cost
+ * little parallelism.
+ */
+const GO_HYDRATE_SUB_BATCH = 8;
+
+/**
  * Convert an audit AST into a parameterized SQL string + values array
  * suitable for `better-sqlite3.prepare(text).all(...values)`. Unlike
  * zqlite's `buildSelectQuery`, this version handles correlated EXISTS /
@@ -1708,85 +1719,107 @@ export class PipelineDriver {
     // The producer side runs in goroutines on Go; we get one onResult call
     // per query via the client's onPartial. We park each into a queue and
     // wake the async iterator's resolver.
+    //
+    // BACKPRESSURE: the socket delivers results as fast as Go produces
+    // them, while this iterator's consumer drains one query at a time into
+    // CVR flushes — far slower. A single hydrateManyStream over the whole
+    // query set would buffer the CG's ENTIRE hydrate result set in heap
+    // (the Go-primary twin of the shadow-collection OOM). Sub-batch the
+    // RPC instead: at most GO_HYDRATE_SUB_BATCH queries' results are
+    // buffered at once, and the next sub-batch isn't requested until the
+    // previous one is fully consumed. Costs little parallelism: in drive
+    // mode the per-CG hydrate is serialized on the snapshotter's single
+    // conn anyway.
     type Entry = {queryID: string; changes: RowChange[]; timingMs: number | undefined};
-    const buffered: Entry[] = [];
-    let wake: (() => void) | null = null;
-    let done = false;
-    let error: Error | null = null;
 
     const byQueryID = new Map<string, (typeof queries)[number]>();
     for (const q of userQueries) byQueryID.set(q.queryID, q);
 
-    const rpcPromise = this.#goBackend!.hydrateManyStream(
-      userQueries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
-      (r: {queryID: string; changes: unknown[]; timingMs: number | undefined}) => {
-        buffered.push({
-          queryID: r.queryID,
-          changes: (r.changes ?? []) as RowChange[],
-          timingMs: r.timingMs,
-        });
-        wake?.();
-        wake = null;
-      },
-    )
-      .catch((e: unknown) => {
-        error = e instanceof Error ? e : new Error(String(e));
-        wake?.();
-        wake = null;
-      })
-      .finally(() => {
-        done = true;
-        wake?.();
-        wake = null;
-      });
+    for (
+      let batchStart = 0;
+      batchStart < userQueries.length;
+      batchStart += GO_HYDRATE_SUB_BATCH
+    ) {
+      const subBatch = userQueries.slice(
+        batchStart,
+        batchStart + GO_HYDRATE_SUB_BATCH,
+      );
+      const buffered: Entry[] = [];
+      let wake: (() => void) | null = null;
+      let done = false;
+      let error: Error | null = null;
 
-    while (true) {
-      if (buffered.length === 0 && !done && !error) {
-        await new Promise<void>(resolve => {
-          wake = resolve;
+      const rpcPromise = this.#goBackend!.hydrateManyStream(
+        subBatch.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
+        (r: {queryID: string; changes: unknown[]; timingMs: number | undefined}) => {
+          buffered.push({
+            queryID: r.queryID,
+            changes: (r.changes ?? []) as RowChange[],
+            timingMs: r.timingMs,
+          });
+          wake?.();
+          wake = null;
+        },
+      )
+        .catch((e: unknown) => {
+          error = e instanceof Error ? e : new Error(String(e));
+          wake?.();
+          wake = null;
+        })
+        .finally(() => {
+          done = true;
+          wake?.();
+          wake = null;
         });
-      }
-      if (error) throw error;
-      while (buffered.length > 0) {
-        const r = buffered.shift()!;
-        const q = byQueryID.get(r.queryID);
-        if (!q) continue;
-        this.#pipelines.set(q.queryID, {
-          input: {
-            destroy() {},
-            fetch: () => ({} as never),
-            cleanup: () => ({} as never),
-            getSchema: () => ({} as never),
-            setOutput: () => {},
-          } as unknown as Input,
-          hydrationTimeMs: r.timingMs ?? 0,
-          transformedAst: q.ast,
-          transformationHash: q.transformationHash,
-          companions: [],
-        });
-        const self = this;
-        const changesArr = r.changes;
-        // No 'yield' tokens in Go-primary batch hydrate: the view-syncer
-        // batch consumer path never starts the TimeSliceTimer, so a
-        // 'yield' would trip `not running` in TimeSliceTimer.#stopLap
-        // and tear down the ViewSyncer. The 'yield' tokens existed for
-        // cooperative scheduling against the timer; the batch path
-        // doesn't need them (rows are already chunked at the Go side via
-        // hydrateChunkSize, so we never accumulate enough in one
-        // generator to starve the event loop).
-        function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
-          for (const rc of changesArr) {
-            yield self.#goRowChangeToRowChange(rc);
-          }
+
+      while (true) {
+        if (buffered.length === 0 && !done && !error) {
+          await new Promise<void>(resolve => {
+            wake = resolve;
+          });
         }
-        yield {
-          queryID: q.queryID,
-          changes: this.#trackRowSetSignatures(yieldGoHydration()),
-        };
+        if (error) throw error;
+        while (buffered.length > 0) {
+          const r = buffered.shift()!;
+          const q = byQueryID.get(r.queryID);
+          if (!q) continue;
+          this.#pipelines.set(q.queryID, {
+            input: {
+              destroy() {},
+              fetch: () => ({} as never),
+              cleanup: () => ({} as never),
+              getSchema: () => ({} as never),
+              setOutput: () => {},
+            } as unknown as Input,
+            hydrationTimeMs: r.timingMs ?? 0,
+            transformedAst: q.ast,
+            transformationHash: q.transformationHash,
+            companions: [],
+          });
+          const self = this;
+          const changesArr = r.changes;
+          // No 'yield' tokens in Go-primary batch hydrate: the view-syncer
+          // batch consumer path never starts the TimeSliceTimer, so a
+          // 'yield' would trip `not running` in TimeSliceTimer.#stopLap
+          // and tear down the ViewSyncer. The 'yield' tokens existed for
+          // cooperative scheduling against the timer; the batch path
+          // doesn't need them (rows are already chunked at the Go side via
+          // hydrateChunkSize, so we never accumulate enough in one
+          // generator to starve the event loop).
+          function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
+            for (const rc of changesArr) {
+              yield self.#goRowChangeToRowChange(rc);
+            }
+          }
+          yield {
+            queryID: q.queryID,
+            changes: this.#trackRowSetSignatures(yieldGoHydration()),
+          };
+        }
+        if (done) break;
       }
-      if (done) break;
+      await rpcPromise;
     }
-    await rpcPromise;
   }
 
   /** Whether batch hydration is available (Go-primary, non-shadow). */
