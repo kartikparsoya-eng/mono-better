@@ -1442,7 +1442,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     // the same query set to Go via shadowBatchCompare at the end of the
     // loop. Without this, queries restored from CVR on reconnect would
     // only run on TS and never reach Go — the shadow comparator would
-    // then see TS-only events on advance, surface them as Pattern Z
+    // then see TS-only events on advance, surface them as spurious
     // mismatches, and Go-primary mode would silently miss them entirely.
     // Match the main syncQueryPipelineSet loop's batching behavior
     // (view-syncer.ts:1995-2002).
@@ -1503,8 +1503,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
     // Shadow batch comparison for the unchanged-queries path. Mirrors the
     // dispatch in syncQueryPipelineSet — without this, Go's engine never
-    // receives queries restored from CVR (Pattern Z dispatch divergence,
-    // diagnosed 2026-05-26).
+    // receives queries restored from CVR, so shadow/Go-primary mode would
+    // silently diverge on reconnect.
     if (batchedQueries.length >= 1) {
       await this.#pipelines
         .shadowBatchCompare(

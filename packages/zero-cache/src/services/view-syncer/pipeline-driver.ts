@@ -929,8 +929,8 @@ export class PipelineDriver {
    * count check is racy: Go registers queries via async addQueriesStream
    * (hundreds of ms under load), so an audit firing mid-registration sees a
    * transient shortfall that self-resolves by the next cycle. Resetting on the
-   * FIRST shortfall churned ~4-6 needless full re-registrations per soak in
-   * Go-primary mode. We now require the shortfall to PERSIST across
+   * FIRST shortfall churns needless full re-registrations in Go-primary mode,
+   * so we require the shortfall to PERSIST across
    * `DRIFT_COUNT_MISMATCH_GRACE` consecutive audits (cycles are ~auditInterval
    * apart, so a registration lag can't survive the grace) before resetting; a
    * genuine freeze persists and still self-heals, just one cycle later. Resets
@@ -1134,9 +1134,9 @@ export class PipelineDriver {
     // Table mode: the sidecar's leaves read SQLite directly and its loadRows
     // is a no-op, so shipping row contents is pure waste — and materializing
     // every user table via `SELECT *` .all() in one synchronous pass OOMs the
-    // syncer worker on real datasets (4GB heap death in Statement::JS_all,
-    // observed on first client connect in the official sandbox, 2026-06-11).
-    // Schemas/PKs/uniqueKeys still ship; rows stay empty.
+    // syncer worker on real datasets (the buffered .all() can exhaust the heap
+    // inside Statement::JS_all). Schemas/PKs/uniqueKeys still ship; rows stay
+    // empty.
     const skipRows = this.#goBackend?.sidecarSourceMode === 'table';
     const {db} = this.#snapshotter.current();
     const tables: Record<
@@ -1157,7 +1157,7 @@ export class PipelineDriver {
       // itself, only feed the `lmids`/`mutationResults` internal queries
       // that TS handles natively, and have caused Go sidecar panics when
       // the in-memory snapshot diverges from SQLite across sidecar
-      // restarts (Pattern Z root cause, 2026-05-26). Go-primary mode is
+      // restarts. Go-primary mode is
       // safe to skip these: internal queries always route through TS,
       // since TS's TableSource reads live from SQLite and self-heals.
       if (this.#isInternalTable(name)) {
@@ -1992,38 +1992,35 @@ export class PipelineDriver {
   // current snapshot, comparing via #shadowCompare. Anything but a length-equal
   // sorted match means Go's incrementally-maintained state has drifted.
   //
-  // Open issue (2026-05-26 multi-CG JWT soak — pickup TODO):
-  //   Rare false-positive drift on paginated `conversations` queries with
-  //   `EXISTS(channels)` + `start.exclusive: false` + cursor row whose
-  //   createdAt EXACTLY matches `start.row.createdAt`. The audit reports
-  //   ts=N go=N MISMATCH; the [drift-audit][rowdiff] log shows TS missing
-  //   exactly the boundary row and including one extra older row. Direct
+  // Known false-positive:
+  //   Paginated `conversations` queries with `EXISTS(channels)` +
+  //   `start.exclusive: false` + a cursor row whose createdAt EXACTLY
+  //   matches `start.row.createdAt` can report ts=N go=N MISMATCH, with
+  //   the [drift-audit][rowdiff] log showing TS missing the boundary row
+  //   and including one extra older row. A direct
   //   `SELECT … WHERE createdAt <= cursor ORDER BY createdAt DESC LIMIT N`
-  //   on the replica.db returns the boundary row at position 0, so the
-  //   bug is between SQL and the audit's RowChange emission — NOT in
-  //   Go's MemorySource (Go gets the boundary right). Ruled out:
-  //     - Resolver asymmetry (drift fires whether scalar EXISTS resolved
-  //       or not — confirmed by [scalar-resolver] log instrumentation)
-  //     - View-syncer instance restart (none of the drifting CGs had
-  //       multiple instances)
-  //     - createdAt ties (verified zero ties at cursor for each repro)
-  //     - Snapshot skew (versionBefore === versionAfter on every repro)
-  //   Suspect: Skip → Exists → Take interaction at the audit's
-  //   re-hydrate path, possibly companion-pipeline state from the
-  //   executor in #resolveScalarSubqueries holding a stale Connection
-  //   on the conversations TableSource. Repro via 5-CG × 360s JWT soak
-  //   + drive-traffic.sh; fires ~1–2% of audit runs. The
-  //   [drift-audit][rowdiff] log line points to the divergent row.
+  //   on the replica returns the boundary row at position 0, so the
+  //   divergence is between SQL and the audit's RowChange emission — NOT
+  //   in Go's MemorySource (Go gets the boundary right). Ruled out:
+  //     - Resolver asymmetry (drift fires whether or not scalar EXISTS
+  //       resolved)
+  //     - View-syncer instance restart (drifting CGs had a single instance)
+  //     - createdAt ties (none present at the cursor)
+  //     - Snapshot skew (versionBefore === versionAfter)
+  //   Suspect: the Skip → Exists → Take interaction on the audit's
+  //   re-hydrate path, possibly companion-pipeline state from the executor
+  //   in #resolveScalarSubqueries holding a stale Connection on the
+  //   conversations TableSource. The [drift-audit][rowdiff] log line points
+  //   to the divergent row.
   async #runDriftAudit(): Promise<void> {
     // Unconditional tick counter — fires before any guards so operators
     // can distinguish "audit timer never fired" (broken sidecar config,
     // missed setInterval, etc.) from "audit fired but skipped" (legitimate
     // busy / idle CG). Without this, an audit that's silently disabled
     // looks identical in metrics to a healthy one running against an idle
-    // CG (both stuck at runs=0). The prod incident on the morning of
-    // 2026-06-01 was exactly this gap: the Go sidecar refused to start,
-    // drift-audit hadn't run for hours, and nothing in INFO logs surfaced
-    // it. Increment this BEFORE the InFlight guard so even
+    // CG (both stuck at runs=0) — e.g. a sidecar that refused to start
+    // leaves drift-audit silent for hours with nothing in INFO logs to
+    // surface it. Increment this BEFORE the InFlight guard so even
     // back-to-back-fire scenarios show ticks > runs.
     this.#driftAuditTicks.add(1);
 
@@ -2078,9 +2075,9 @@ export class PipelineDriver {
         // registration lag (addQueriesStream in flight), which self-resolves by
         // the next cycle. Only a shortfall that PERSISTS across
         // DRIFT_COUNT_MISMATCH_GRACE consecutive audits is a real freeze worth a
-        // full resetEngine. This stops the ~4-6 needless re-registrations per
-        // soak observed in Go-primary mode (P2c soak finding) while still
-        // self-healing a genuine freeze one cycle later.
+        // full resetEngine. This avoids needless re-registrations on
+        // transient single-cycle shortfalls while still self-healing a
+        // genuine freeze one cycle later.
         this.#driftCountMismatchStreak++;
         if (this.#driftCountMismatchStreak < DRIFT_COUNT_MISMATCH_GRACE) {
           this.#lc.debug?.(
@@ -2316,7 +2313,7 @@ export class PipelineDriver {
       // the set check + SQL classifier — and it's how the TS conversations
       // boundary-drop shows up here (TS x1 Go x0), which is a TS bug, not a Go
       // cardinality drift. Without this gate the metric is inflated by TS's own
-      // pagination bug. (Confirmed via the rich-interaction soak 2026-06-05.)
+      // pagination bug.
       {
         const bagKey = (c: RowChange) => `${c.table}|${stableStringify(c.rowKey)}`;
         const multDiffs = multisetDiff(
@@ -2387,11 +2384,10 @@ export class PipelineDriver {
         // SQL is the outlier — same Bug #3 class as ts-audit-only,
         // demote to info instead of flagging REAL DRIFT.
         //
-        // Two boundary shapes — pre-fix the classifier only matched the
-        // first, sending the second to "REAL DRIFT" and paging on-call
-        // for what was a known-benign semantic difference. Reproduced in
-        // prod 2026-06-01 with ts=51 go=51 sql=50 (asymmetric, goOnly=1,
-        // sqlOnly=0).
+        // Two boundary shapes — a classifier that only matches the first
+        // sends the second to "REAL DRIFT" and pages on-call for what is a
+        // known-benign semantic difference (e.g. ts=51 go=51 sql=50,
+        // asymmetric with goOnly=1, sqlOnly=0).
         //
         //   1. Asymmetric: IVM includes the cursor row, SQL excludes it
         //      (or vice versa). One side has exactly 1 extra unique row.
@@ -2632,9 +2628,9 @@ export class PipelineDriver {
     // Stream rows with a hard cap instead of .all(): buildAuditSQL only
     // emits a LIMIT when the AST has one, so an unlimited query over a
     // production-sized table would otherwise materialize the whole table
-    // as JS objects (4GB heap death in Statement::JS_all — official
-    // sandbox, 2026-06-11). Overflow returns the existing `skipped` shape;
-    // callers fall back to the TS-vs-Go set comparison.
+    // as JS objects and can exhaust the heap inside Statement::JS_all.
+    // Overflow returns the existing `skipped` shape; callers fall back to
+    // the TS-vs-Go set comparison.
     let sqlRows: Record<string, unknown>[];
     try {
       sqlRows = [];
@@ -3041,11 +3037,10 @@ export class PipelineDriver {
    */
   getRow(table: string, pk: RowKey): Row | undefined {
     assert(this.initialized(), 'Not yet initialized');
-    // Include the table name in the error message so the bare-must() failure
-    // surfaced by 14-CG soak (4 CGs hit "Unexpected undefined value" during
-    // CVR catchup → ViewSyncer's outer must wraps with "Missing row ..." but
-    // the inner must fires first and obscures which table) tells us which
-    // table source went missing. Suspect: query removed mid-CVR-catchup
+    // Include the table name in the error message. Without it a bare-must()
+    // failure during CVR catchup ("Unexpected undefined value") fires before
+    // ViewSyncer's outer must can wrap it with "Missing row ...", obscuring
+    // which table source went missing. Suspect: query removed mid-CVR-catchup
     // while view-syncer still has a refCount for one of its rows.
     const source = must(
       this.#tables.get(table),
@@ -3550,8 +3545,7 @@ export class PipelineDriver {
     // `row: undefined` for REMOVE. The RowChange type declares row as Row
     // but in practice REMOVE rows carry undefined on both paths — this is
     // an intentional shape match, not a bug. Setting `row = rc.rowKey` here
-    // diverged from TS and broke shadow-compare on every REMOVE (Bug #23
-    // regression caught in soak; my prior MEDIUM-2 "fix" was wrong).
+    // diverges from TS and breaks shadow-compare on every REMOVE.
     let row: Row | undefined;
     if (type === ChangeType.REMOVE) {
       row = undefined;
@@ -3769,8 +3763,7 @@ export class PipelineDriver {
       // TS always consumes the full diff (its source-of-truth is SQLite,
       // and internal queries like lmids need these). Go's snapshotChanges
       // omits internal tables — Go never loads them and an Edit on a
-      // row Go's MemorySource doesn't have would panic the sidecar
-      // (Pattern Z root cause, 2026-05-26).
+      // row Go's MemorySource doesn't have would panic the sidecar.
       if (this.#isInternalTable(entry.table)) {
         return;
       }
@@ -4057,7 +4050,7 @@ export class PipelineDriver {
           // through to the raw TS-vs-Go MISMATCH so it's still surfaced.
           this.#shadowSqlUnreliable.add(1);
         } else if (verdict.sqlCount === 0 && tsNorm.length > 0) {
-          // EXCLUSIVE-CURSOR BOUNDARY-SKEW family (2026-06-05). Go disagrees
+          // EXCLUSIVE-CURSOR BOUNDARY-SKEW family. Go disagrees
           // with SQL, SQL=0, AND TS ALSO has rows. Traced to the conversations
           // list with an exclusive cursor (createdAt ASC, exclusive) whose
           // cursor row is the NEWEST: the steady-state correct page is EMPTY
