@@ -1269,7 +1269,7 @@ describe('view-syncer/service', () => {
             "clientID": "foo",
             "insertionOrder": 1,
             "profileID": "p0000g00000003203",
-            "protocolVersion": 50,
+            "protocolVersion": 51,
             "pushContext": {
               "allowedUrlPatterns": undefined,
               "headerOptions": {
@@ -1561,7 +1561,7 @@ describe('view-syncer/service', () => {
             "clientID": "foo",
             "insertionOrder": 1,
             "profileID": "p0000g00000003203",
-            "protocolVersion": 50,
+            "protocolVersion": 51,
             "pushContext": {
               "allowedUrlPatterns": undefined,
               "headerOptions": {
@@ -2241,7 +2241,7 @@ describe('view-syncer/service', () => {
             "clientID": "foo",
             "insertionOrder": 1,
             "profileID": "p0000g00000003203",
-            "protocolVersion": 50,
+            "protocolVersion": 51,
             "pushContext": {
               "allowedUrlPatterns": undefined,
               "headerOptions": {
@@ -2462,7 +2462,7 @@ describe('view-syncer/service', () => {
             "clientID": "cq-c2-client",
             "insertionOrder": 2,
             "profileID": "p0000g00000003203",
-            "protocolVersion": 50,
+            "protocolVersion": 51,
             "pushContext": {
               "allowedUrlPatterns": undefined,
               "headerOptions": {
