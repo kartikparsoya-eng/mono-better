@@ -1,5 +1,5 @@
 import type {LogContext} from '@rocicorp/logger';
-import {afterEach, beforeEach, describe, expect, test} from 'vitest';
+import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
@@ -30,11 +30,32 @@ import {
   type FakeReplicator,
 } from '../replicator/test-utils.ts';
 import {getMutationResultsQuery} from './cvr.ts';
+import type * as GoComputeBackendModule from './go-sidecar/go-compute-backend.ts';
 import {PipelineDriver, type AdvanceResult, type RowChange, type Timer} from './pipeline-driver.ts';
 import {rowIDSignatureUnit} from './row-set-signature.ts';
 import type {RowID} from './schema/types.ts';
 import {ResetPipelinesSignal, Snapshotter} from './snapshotter.ts';
 import {TimeSliceTimer} from './view-syncer.ts';
+
+// Seam for injecting a fake GoComputeBackend without a live sidecar.
+// `PipelineDriver` builds its (truly private) #goBackend inside the
+// constructor via createGoComputeBackend(); the only way to substitute a
+// fake is to mock that factory. We preserve every other export (the
+// isGo*/goDriftAudit* config helpers the constructor depends on) and
+// override just the factory, which returns whatever the active test parks
+// on `goBackendMock.backend`. Existing tests pass no config/sidecarManager,
+// so the constructor short-circuits before the factory is ever called —
+// this mock is inert for them (backend stays null).
+const goBackendMock = vi.hoisted(() => ({backend: null as unknown}));
+
+vi.mock('./go-sidecar/go-compute-backend.ts', async importOriginal => {
+  const actual = await importOriginal<typeof GoComputeBackendModule>();
+  return {
+    ...actual,
+    createGoComputeBackend: (() =>
+      goBackendMock.backend) as typeof actual.createGoComputeBackend,
+  };
+});
 
 const NO_TIME_ADVANCEMENT_TIMER: Timer = {
   elapsedLap: () => 0,
@@ -442,6 +463,272 @@ describe('view-syncer/pipeline-driver', () => {
   function addQuery(...args: Parameters<typeof pipelines.addQuery>): Iterable<RowChange | 'yield'> {
     return pipelines.addQuery(...args) as Iterable<RowChange | 'yield'>;
   }
+
+  // Regression gate for the Go-primary batch-hydrate backpressure bound
+  // (pipeline-driver.ts goHydrateBatchStream, GO_HYDRATE_SUB_BATCH=8).
+  //
+  // The socket delivers Go's per-query results with no backpressure while the
+  // consumer drains them one query at a time into (slow) CVR flushes. A single
+  // hydrateManyStream over the whole query set would buffer the CG's ENTIRE
+  // hydrate result set in the JS heap — a reconnect-storm OOM at scale. The fix
+  // sub-batches the RPC: at most GO_HYDRATE_SUB_BATCH queries are requested at
+  // once, and the next sub-batch isn't issued until the previous one's results
+  // have been fully drained. This proves that bound (previously only "trusted
+  // the soak" with zero automated coverage).
+  test('goHydrateBatchStream bounds in-flight queries to GO_HYDRATE_SUB_BATCH and drains each sub-batch before the next RPC', async () => {
+    type GoQuery = {queryID: string; ast: AST};
+    type RpcResult = {
+      queryID: string;
+      changes: unknown[];
+      timingMs: number | undefined;
+    };
+    type RpcCall = {
+      size: number;
+      queryIDs: string[];
+      // How many results the consumer had drained when this RPC was issued.
+      consumedAtStart: number;
+      // How many RPCs were still unsettled when this one was issued.
+      inFlightAtStart: number;
+    };
+
+    const calls: RpcCall[] = [];
+    const seen: string[] = [];
+    let drainedChanges = 0;
+    let inFlight = 0;
+
+    const fakeBackend = {
+      sidecarSourceMode: 'table' as const,
+      initialized: true,
+      initEngine: () => Promise.resolve(),
+      resetEngine: () => Promise.resolve(),
+      removeQuery: () => Promise.resolve(),
+      destroy: () => Promise.resolve(),
+      hydrateManyStream(
+        qs: GoQuery[],
+        onResult: (r: RpcResult) => void,
+      ): Promise<void> {
+        calls.push({
+          size: qs.length,
+          queryIDs: qs.map(q => q.queryID),
+          consumedAtStart: seen.length,
+          inFlightAtStart: inFlight,
+        });
+        inFlight++;
+        return (async () => {
+          for (const q of qs) {
+            // Force a real async boundary between results so the drain loop
+            // parks on its wake promise — exercises the backpressure path
+            // rather than a synchronous fast-track.
+            await Promise.resolve();
+            onResult({queryID: q.queryID, changes: [], timingMs: 1});
+          }
+        })().finally(() => {
+          inFlight--;
+        });
+      },
+    };
+    goBackendMock.backend = fakeBackend;
+
+    const goStorageDb = new Database(lc, ':memory:');
+    goStorageDb.prepare(CREATE_STORAGE_TABLE).run();
+
+    const goPrimary = new PipelineDriver(
+      lc,
+      testLogConfig,
+      new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
+      shardID,
+      new DatabaseStorage(goStorageDb).createClientGroupStorage(
+        'go-primary-client-group',
+      ),
+      'pipeline-driver.test.ts',
+      new InspectorDelegate(undefined),
+      () => 200,
+      // Planner OFF: keeps #planAstForGo on the ordering-only path (no
+      // cost-model DB needed) while still exercising the real dispatch.
+      false,
+      // Go-primary, non-shadow: enables the batch-hydrate path.
+      {
+        goSidecar: {enabled: true, goPrimaryTrigger: true},
+      } as unknown as ConstructorParameters<typeof PipelineDriver>[9],
+      // Truthy sidecarManager so the constructor reaches createGoComputeBackend
+      // (mocked above to return our fake); its contents are unused.
+      {} as unknown as ConstructorParameters<typeof PipelineDriver>[10],
+    );
+
+    try {
+      goPrimary.init(clientSchema);
+
+      // 20 user queries → windows of [8, 8, 4].
+      const queries = Array.from({length: 20}, (_, i) => ({
+        transformationHash: `hash${i}`,
+        queryID: `q${i}`,
+        ast: UNIQUES_QUERY,
+      }));
+
+      for await (const entry of goPrimary.goHydrateBatchStream(queries)) {
+        // Drain the per-query change generator like the real view-syncer does.
+        for (const c of entry.changes) {
+          if (c !== 'yield') drainedChanges++;
+        }
+        seen.push(entry.queryID);
+      }
+
+      // Every query hydrated exactly once (empty result sets → no changes).
+      expect(seen.length).toBe(20);
+      expect(new Set(seen)).toEqual(new Set(queries.map(q => q.queryID)));
+      expect(drainedChanges).toBe(0);
+
+      // Sub-batched into windows of 8: [8, 8, 4]. No RPC ever carries more
+      // than GO_HYDRATE_SUB_BATCH queries.
+      expect(calls.map(c => c.size)).toEqual([8, 8, 4]);
+
+      // Bound #1: at most one Go hydrate RPC in flight per CG — the prior RPC
+      // is fully settled before the next is issued.
+      expect(calls.map(c => c.inFlightAtStart)).toEqual([0, 0, 0]);
+
+      // Bound #2: the prior sub-batch is FULLY drained into the consumer
+      // before the next RPC is requested (k*8 results consumed at window k),
+      // so at most one sub-batch's results sit buffered in the heap at once.
+      expect(calls.map(c => c.consumedAtStart)).toEqual([0, 8, 16]);
+
+      // Windows partition the input in order.
+      expect(calls[0].queryIDs).toEqual(
+        queries.slice(0, 8).map(q => q.queryID),
+      );
+      expect(calls[1].queryIDs).toEqual(
+        queries.slice(8, 16).map(q => q.queryID),
+      );
+      expect(calls[2].queryIDs).toEqual(
+        queries.slice(16, 20).map(q => q.queryID),
+      );
+    } finally {
+      goBackendMock.backend = null;
+      await goPrimary.destroy();
+    }
+  });
+
+  // H2-heal end-to-end wiring (pipeline-driver.ts #healConfirmedDrift):
+  //
+  // The detached drift-audit timer cannot return a ResetPipelinesSignal itself,
+  // so a confirmed Go-primary drift is a TWO-PART heal:
+  //   1. #scheduleGoReset → goBackend.resetEngine() rebuilds Go's pipelines
+  //      IMMEDIATELY so drift stops compounding into subsequent advances.
+  //   2. #pendingClientResetReason is parked; the NEXT advance() returns a
+  //      ResetPipelinesSignal tagged 'drift-audit-heal' which drives the
+  //      view-syncer's F2 reset path (pipelines.reset → hydrateUnchangedQueries
+  //      → CVR poke) to correct rows ALREADY delivered to clients.
+  //
+  // The heal gate fires ONLY when Go disagrees with BOTH ground truths: the
+  // TS-IVM pipeline (setDiffers) AND the SQL oracle (go-vs-sql-drift). This
+  // test makes Go return an EMPTY audit hydrate while the real SQLite replica
+  // (issues 1/2/3) backs both the TS-IVM audit and the SQL oracle, so the
+  // confirmed-set-drift branch fires. Previously this path had ZERO automated
+  // coverage — only ever exercised by the live soak.
+  test('drift-audit confirmed Go-vs-SQL drift triggers engine reset + drift-audit-heal signal', async () => {
+    // Fake timers must be installed BEFORE the driver is constructed so the
+    // audit's setInterval (pipeline-driver.ts #runDriftAudit) is captured.
+    vi.useFakeTimers();
+
+    const DRIFT_AUDIT_INTERVAL_MS = 8000;
+    const ISSUES_ONLY: AST = {table: 'issues', orderBy: [['id', 'asc']]};
+
+    const resetEngine = vi.fn(() => Promise.resolve());
+    // Go hydrate returns EMPTY for the audit's transient query → Go's row set
+    // differs from the TS-IVM pipeline AND the SQL oracle (both see 3 issues).
+    const fakeBackend = {
+      sidecarSourceMode: 'table' as const,
+      initialized: true,
+      epoch: 0,
+      initEngine: () => Promise.resolve(),
+      resetEngine,
+      removeQuery: () => Promise.resolve(),
+      destroy: () => Promise.resolve(),
+      whenRecovered: () => Promise.resolve(),
+      refreshSnapshot: () => Promise.resolve(),
+      // >= tsExpected so the pipeline-count FREEZE path (which would reset for a
+      // different reason and never park the client-reset flag) is NOT taken.
+      pipelineCount: () => Promise.resolve(1),
+      // Go-primary addQuery routes through #goHydrate, which parks a stub
+      // pipeline whose transformedAst the audit re-hydrates against SQLite.
+      hydrate: () => Promise.resolve({changes: [], timingMs: 0}),
+      hydrateManyStream(
+        qs: {queryID: string; ast: AST}[],
+        onResult: (r: {
+          queryID: string;
+          changes: unknown[];
+          timingMs: number;
+        }) => void,
+      ): Promise<void> {
+        for (const q of qs) {
+          onResult({queryID: q.queryID, changes: [], timingMs: 1});
+        }
+        return Promise.resolve();
+      },
+    };
+    goBackendMock.backend = fakeBackend;
+
+    const goStorageDb = new Database(lc, ':memory:');
+    goStorageDb.prepare(CREATE_STORAGE_TABLE).run();
+
+    const goPrimary = new PipelineDriver(
+      lc,
+      testLogConfig,
+      new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
+      shardID,
+      new DatabaseStorage(goStorageDb).createClientGroupStorage(
+        'heal-client-group',
+      ),
+      'pipeline-driver.test.ts',
+      new InspectorDelegate(undefined),
+      () => 200,
+      // Planner OFF: #planAstForGo stays on the ordering-only path (no
+      // cost-model DB needed).
+      false,
+      // Go-primary, non-shadow, audit enabled (driftAuditIntervalMs > 0). The
+      // shadow gate in #healConfirmedDrift is OPEN only in this mode.
+      {
+        goSidecar: {
+          enabled: true,
+          goPrimaryTrigger: true,
+          driftAuditIntervalMs: DRIFT_AUDIT_INTERVAL_MS,
+        },
+      } as unknown as ConstructorParameters<typeof PipelineDriver>[9],
+      {} as unknown as ConstructorParameters<typeof PipelineDriver>[10],
+    );
+
+    try {
+      goPrimary.init(clientSchema);
+
+      // Register one user query so the round-robin audit has a target. In
+      // Go-primary mode addQuery is async (gated on whenRecovered).
+      const stream = await goPrimary.addQuery(
+        'hash-issues',
+        'q-issues',
+        ISSUES_ONLY,
+        NO_TIME_ADVANCEMENT_TIMER,
+      );
+      for (const _ of stream) {
+        // drain
+      }
+
+      // Fire the detached audit once. Flushes the audit's async chain
+      // (pipelineCount → refreshSnapshot → hydrateManyStream → compare).
+      await vi.advanceTimersByTimeAsync(DRIFT_AUDIT_INTERVAL_MS);
+
+      // Part 1: engine rebuilt immediately so drift stops compounding.
+      expect(resetEngine).toHaveBeenCalledTimes(1);
+
+      // Part 2: the next advance() returns the client re-hydrate signal,
+      // tagged 'drift-audit-heal'.
+      const result = goPrimary.advance(NO_TIME_ADVANCEMENT_TIMER);
+      expect(result).toBeInstanceOf(ResetPipelinesSignal);
+      expect((result as ResetPipelinesSignal).reason).toBe('drift-audit-heal');
+    } finally {
+      goBackendMock.backend = null;
+      vi.useRealTimers();
+      await goPrimary.destroy();
+    }
+  });
 
   function changes(timer: Timer = NO_TIME_ADVANCEMENT_TIMER) {
     return [...(pipelines.advance(timer) as AdvanceResult).changes];
