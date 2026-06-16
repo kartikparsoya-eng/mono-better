@@ -18,6 +18,7 @@ import {
   createHydrateStreamAccumulator,
   DriftError,
   type RowChange,
+  unpack,
 } from './go-ivm-client.ts';
 
 const row = (id: string): RowChange => ({
@@ -387,5 +388,140 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     // The pre-drift partial output rides the DriftError so GoComputeBackend's
     // recovery forwards it alongside the re-init (F2/drift contract).
     expect((thrown as DriftError).partialChanges).toEqual([row('a'), row('b')]);
+  });
+});
+
+// Cross-language contract: a positional (protocolRev 9) frame — as produced by
+// the Go side's toPositional (positional.go) — must decode through the
+// accumulator into the same RowChange[] the legacy map-keyed frame produced.
+// Column order in `c` is sorted (matching Go's sortedSetKeys), so the value
+// arrays follow that order; rowKey is derived from `k`.
+describe('positional (rev 9) frame decoding', () => {
+  test('hydrate accumulator decodes a positional frame (add/remove, 2 tables)', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({
+      queryID: 'q1',
+      d: [
+        {
+          q: 'q1',
+          t: 'conversations',
+          c: ['_0_version', 'channelId', 'conversationId', 'createdAt'],
+          k: ['conversationId'],
+        },
+        {
+          q: 'q1',
+          t: 'channel_user_status',
+          c: ['_0_version', 'channelId', 'userId'],
+          k: ['channelId', 'userId'],
+        },
+      ],
+      r: [
+        [0, 0, '0abc', 'ch1', 'c1', 1779813865070], // add conversations c1
+        [1, 0, '0abe', 'ch1', 'u1'], // add channel_user_status
+        [0, 1, 'c3'], // remove conversations c3 (PK only)
+      ],
+      chunkIndex: 0,
+      final: true,
+    });
+
+    expect(onResult).toHaveBeenCalledTimes(1);
+    const {changes} = onResult.mock.calls[0][0] as {changes: RowChange[]};
+    expect(changes).toEqual([
+      {
+        type: 0,
+        queryID: 'q1',
+        table: 'conversations',
+        rowKey: {conversationId: 'c1'},
+        row: {
+          _0_version: '0abc',
+          channelId: 'ch1',
+          conversationId: 'c1',
+          createdAt: 1779813865070,
+        },
+      },
+      {
+        type: 0,
+        queryID: 'q1',
+        table: 'channel_user_status',
+        rowKey: {channelId: 'ch1', userId: 'u1'},
+        row: {_0_version: '0abe', channelId: 'ch1', userId: 'u1'},
+      },
+      // remove carries no row (rowKey only)
+      {
+        type: 1,
+        queryID: 'q1',
+        table: 'conversations',
+        rowKey: {conversationId: 'c3'},
+      },
+    ]);
+  });
+
+  test('empty positional frame (no r) yields no changes', () => {
+    const acc = createAdvanceStreamAccumulator();
+    acc.onFrame({chunkIndex: 0, final: true}); // neither `changes` nor `r`
+    expect(acc.finish().changes).toEqual([]);
+  });
+
+  // Wire-level contract: the bytes below are EXACTLY what the Go sidecar's
+  // production mpMarshal (vmihailenco/msgpack, UseCompactInts, json tags)
+  // emits for the canonical hydrate frame — captured from positionalWireFixture
+  // in positional_wire_test.go. Decoding them here through the PRODUCTION
+  // msgpackr `unpack` crosses the real vmihailenco-encode → msgpackr-decode
+  // boundary that the object-level tests above (which start from hand-built
+  // {d, r}) never touch; until now only the ephemeral shadow soak exercised it.
+  //
+  // The expected RowChange[] is identical to the hand-built test above — that's
+  // the point: it proves the hand-built objects faithfully model Go's real bytes.
+  //
+  // To regenerate after an intentional wire-format change, run:
+  //   cd go-ivm && go test ./cmd/sidecar -run TestPositionalWireFixture -v
+  // and copy the printed FIXTURE_BASE64 here AND into goldenHydrateFrameB64.
+  const GO_WIRE_FIXTURE_B64 =
+    'hqdxdWVyeUlEonExoWSShKFxonExoXStY29udmVyc2F0aW9uc6FjlKpfMF92ZXJzaW9uqWNoYW5uZWxJZK5jb252ZXJzYXRpb25JZKljcmVhdGVkQXSha5GuY29udmVyc2F0aW9uSWSEoXGicTGhdLNjaGFubmVsX3VzZXJfc3RhdHVzoWOTql8wX3ZlcnNpb26pY2hhbm5lbElkpnVzZXJJZKFrkqljaGFubmVsSWSmdXNlcklkoXKTlgAApDBhYmOjY2gxomMxy0J55lLFZuAAlQEApDBhYmWjY2gxonUxkwABomMzqmNodW5rSW5kZXgApWZpbmFsw6h0aW1pbmdNc8s/+AAAAAAAAA==';
+
+  test('decodes REAL Go-encoded wire bytes through the production unpack', () => {
+    const frame = unpack(Buffer.from(GO_WIRE_FIXTURE_B64, 'base64')) as {
+      queryID: string;
+      final: boolean;
+    };
+    // Sanity: the envelope round-tripped (drives the accumulator's final path).
+    expect(frame.queryID).toBe('q1');
+    expect(frame.final).toBe(true);
+
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+    h.onFrame(frame);
+
+    expect(onResult).toHaveBeenCalledTimes(1);
+    const {changes} = onResult.mock.calls[0][0] as {changes: RowChange[]};
+    expect(changes).toEqual([
+      {
+        type: 0,
+        queryID: 'q1',
+        table: 'conversations',
+        rowKey: {conversationId: 'c1'},
+        row: {
+          _0_version: '0abc',
+          channelId: 'ch1',
+          conversationId: 'c1',
+          createdAt: 1779813865070,
+        },
+      },
+      {
+        type: 0,
+        queryID: 'q1',
+        table: 'channel_user_status',
+        rowKey: {channelId: 'ch1', userId: 'u1'},
+        row: {_0_version: '0abe', channelId: 'ch1', userId: 'u1'},
+      },
+      {
+        type: 1,
+        queryID: 'q1',
+        table: 'conversations',
+        rowKey: {conversationId: 'c3'},
+      },
+    ]);
   });
 });

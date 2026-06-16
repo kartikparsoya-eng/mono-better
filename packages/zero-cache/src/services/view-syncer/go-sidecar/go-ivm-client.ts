@@ -41,7 +41,12 @@ const codec = {
   }),
 };
 const pack = (v: unknown) => codec.packr.pack(v);
-const unpack = (buf: Buffer | Uint8Array) => codec.unpackr.unpack(buf as Buffer);
+// Exported as a test seam: the wire-contract test (go-ivm-client.test.ts)
+// decodes REAL Go-emitted msgpack bytes through this exact production Unpackr,
+// pinning the vmihailenco-encode → msgpackr-decode boundary that the
+// object-level frame tests never cross. Not intended for other callers.
+export const unpack = (buf: Buffer | Uint8Array) =>
+  codec.unpackr.unpack(buf as Buffer);
 
 // --- Types ---
 
@@ -160,6 +165,66 @@ export type AdvanceResult = {
   timings: TableTiming[] | undefined;
 };
 
+// --- Positional (protocolRev 9) RowChange decoding ---
+//
+// Streamed RowChange chunks arrive in the positional wire form (see the Go
+// side's positional.go): column-name keys are sent ONCE per (queryID,table)
+// group in a dictionary, and each row is a value-only array referencing its
+// group. This decodes that frame back into the RowChange[] the rest of the
+// view-syncer consumes — identical objects to the legacy map-keyed decode.
+
+type PositionalDictEntry = {
+  q: string; // queryID
+  t: string; // table
+  c: string[]; // column order for add/edit rows
+  k: string[]; // primary-key column names
+};
+
+function decodePositionalChanges(
+  dict: PositionalDictEntry[],
+  rows: unknown[][],
+): RowChange[] {
+  const out: RowChange[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const arr = rows[i];
+    const e = dict[arr[0] as number];
+    const type = arr[1] as 0 | 1 | 2;
+    if (type === 1 /* remove */) {
+      const rowKey: Record<string, unknown> = {};
+      for (let j = 0; j < e.k.length; j++) rowKey[e.k[j]] = arr[2 + j];
+      // A remove carries no row — matches the legacy decode where the omitted
+      // `row` field left rc.row undefined (downstream keys removes by rowKey).
+      out[i] = {type, queryID: e.q, table: e.t, rowKey} as unknown as RowChange;
+    } else {
+      const row: Record<string, unknown> = {};
+      for (let j = 0; j < e.c.length; j++) row[e.c[j]] = arr[2 + j];
+      // rowKey is derived from the row's PK columns; the Go side's pkValue is a
+      // pure lookup so rowKey[pk] === row[pk].
+      const rowKey: Record<string, unknown> = {};
+      for (let j = 0; j < e.k.length; j++) rowKey[e.k[j]] = row[e.k[j]];
+      out[i] = {type, queryID: e.q, table: e.t, rowKey, row};
+    }
+  }
+  return out;
+}
+
+/**
+ * Extract a stream frame's RowChanges. Tolerant of both encodings: positional
+ * (`{d, r}`, protocolRev 9) when present, else the legacy `changes` array.
+ * Empty frames (no `r` and no `changes`) yield `[]`.
+ */
+function extractChanges(value: unknown): RowChange[] {
+  const v = value as {
+    changes?: RowChange[];
+    d?: PositionalDictEntry[];
+    r?: unknown[][];
+  };
+  if (v.r !== undefined) {
+    return decodePositionalChanges(v.d ?? [], v.r);
+  }
+  return v.changes ?? [];
+}
+
 // --- Streaming accumulators ---
 //
 // Both `addQueriesStream` and `advanceStream` receive partial frames from
@@ -217,7 +282,7 @@ export function createHydrateStreamAccumulator(
       };
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // older sidecars sent unchunked frames
-      const chunk = v.changes ?? [];
+      const chunk = extractChanges(value);
 
       if (finalized.has(v.queryID)) {
         throw new Error(
@@ -310,7 +375,7 @@ export function createAdvanceStreamAccumulator(): {
       };
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // belt-and-braces for older sidecars
-      const chunk = v.changes ?? [];
+      const chunk = extractChanges(value);
 
       // Single sender goroutine on the Go side → strict in-order delivery.
       // A gap is a wire-level bug; fail loud rather than silently
@@ -412,7 +477,7 @@ export function createAdvanceToHeadStreamAccumulator(): {
       };
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // belt-and-braces for older sidecars
-      const chunk = v.changes ?? [];
+      const chunk = extractChanges(value);
 
       // Single sender goroutine on the Go side → strict in-order delivery.
       // A gap is a wire-level bug; fail loud rather than silently committing
