@@ -464,6 +464,17 @@ describe('positional (rev 9) frame decoding', () => {
     expect(acc.finish().changes).toEqual([]);
   });
 
+  test('positional frame with r: null (msgpack-null) yields no changes', () => {
+    // Simulates a Go encoder that dropped `omitempty` on the Rows field: a nil
+    // slice then encodes as msgpack-null, so the decoded frame carries
+    // r === null rather than r omitted. Before extractChanges guarded null
+    // (not just undefined) this reached decodePositionalChanges(…, null) ->
+    // null.length -> TypeError, orphaning the advance RPC. Must be inert.
+    const acc = createAdvanceStreamAccumulator();
+    acc.onFrame({chunkIndex: 0, final: true, r: null});
+    expect(acc.finish().changes).toEqual([]);
+  });
+
   // Wire-level contract: the bytes below are EXACTLY what the Go sidecar's
   // production mpMarshal (vmihailenco/msgpack, UseCompactInts, json tags)
   // emits for the canonical hydrate frame — captured from positionalWireFixture

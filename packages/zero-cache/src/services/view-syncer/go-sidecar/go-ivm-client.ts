@@ -219,7 +219,15 @@ function extractChanges(value: unknown): RowChange[] {
     d?: PositionalDictEntry[];
     r?: unknown[][];
   };
-  if (v.r !== undefined) {
+  // Guard BOTH undefined and null (not just `!== undefined`): a wire-encoded
+  // msgpack-null `r` must also be treated as "no positional payload". This
+  // defends the decode against a future Go-side drop of `omitempty` on the
+  // Rows field (nil -> msgpack-null on the wire): without the null check,
+  // `null !== undefined` is true and we'd reach
+  // decodePositionalChanges(…, null) -> null.length -> TypeError. The Go side
+  // currently emits `r,omitempty` (positional.go / *StreamPartial structs), so
+  // empty frames already omit `r`; this is belt-and-suspenders.
+  if (v.r !== undefined && v.r !== null) {
     return decodePositionalChanges(v.d ?? [], v.r);
   }
   return v.changes ?? [];
