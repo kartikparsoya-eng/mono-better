@@ -113,6 +113,11 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       for (const msg of [
         'Sidecar is not running',
         'Connection closed before response',
+        // The socket-null race: go-ivm-client throws "Not connected" when the
+        // socket is nulled between slot-acquire and write. Pre-fix this missed
+        // both the classifier and #onAdvanceFailure's sidecarUnavailable check,
+        // surfacing as 'unclassified' instead of a retried 'sidecar' drop.
+        'Not connected',
         'engine not initialized',
       ]) {
         expect(classifyGoPrimaryAdvanceError(new Error(msg))).toBe('sidecar');

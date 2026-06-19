@@ -17,6 +17,21 @@ describe('view-syncer/pipeline-driver: P2c watermark reconciliation', () => {
     expect(r.goVersion).toBeUndefined();
   });
 
+  test('empty-string goVersion → treated as undefined (NOT min()-ed into the watermark)', () => {
+    // Go omits `version` on the final advance frame, which go-ivm-client.ts
+    // decodes to '' via `version = v.version ?? ''`. Pre-fix '' flowed into
+    // lexi min(), where '' sorts BELOW "00" (versionToLexi(0)), so the CVR
+    // watermark regressed to '' and forced a full re-hydration for every
+    // client every cycle. The guard treats '' identically to undefined.
+    const r = reconcileGoPrimaryWatermark(v(7), '');
+    expect(r.version).toBe(v(7));
+    expect(r.tsVersion).toBe(v(7));
+    expect(r.goVersion).toBeUndefined();
+    // Pin the regression mechanism itself: '' really is the value that would
+    // have won the min and corrupted the floor, so the guard is load-bearing.
+    expect('' < v(0)).toBe(true);
+  });
+
   test('Go ahead (V_go > V_ts) → floor lands on V_ts (the common path)', () => {
     // TS reads head before Go each cycle, so a commit landing in between gives
     // V_go > V_ts. The floor holds the CVR at V_ts; Go's extra user rows up to

@@ -123,6 +123,21 @@ export type SidecarStatus = 'stopped' | 'starting' | 'running' | 'restarting' | 
 
 export type RestartListener = (epoch: number) => void | Promise<void>;
 
+/**
+ * True iff `err` is the wire-protocol-revision mismatch raised during the
+ * version handshake (#start). That handshake's catch intentionally SWALLOWS a
+ * "method not found" error so a pre-version-RPC sidecar stays usable, but it
+ * MUST re-throw a genuine revision mismatch — silently accepting an
+ * incompatible wire protocol corrupts every subsequent RPC. This predicate is
+ * the seam that splits "swallow" from "escalate"; pinned by sidecar-manager.test.ts.
+ */
+export function isProtocolMismatchError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    err.message.includes('protocol revision mismatch')
+  );
+}
+
 export class SidecarManager {
   readonly #config: Required<Omit<SidecarConfig, 'logger'>> & {logger: SidecarLogger};
   #proc: ChildProcess | null = null;
@@ -508,10 +523,7 @@ export class SidecarManager {
       // Re-throw protocol mismatches — an incompatible sidecar MUST NOT be
       // accepted. Only swallow "method not found" errors from older sidecars
       // that don't implement the version RPC at all.
-      if (
-        err instanceof Error &&
-        err.message.includes('protocol revision mismatch')
-      ) {
+      if (isProtocolMismatchError(err)) {
         throw err;
       }
       // If the version RPC isn't implemented (older sidecar), warn loudly
