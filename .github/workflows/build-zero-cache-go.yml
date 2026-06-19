@@ -61,66 +61,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - mode: primary
-            shadow_mode_arg: "false"
-            source_mode_arg: "memory"
-            go_primary_trigger_arg: "false"
-            lean_primary_arg: "false"
-            # advanceToHead requires SOURCE_MODE=table; keep memory
-            # variants on the legacy TS-shipped advance.
-            advance_drive_arg: "false"
-            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:latest"
-            tag_prefix: ""
-          - mode: shadow
-            shadow_mode_arg: "true"
-            source_mode_arg: "memory"
-            go_primary_trigger_arg: "false"
-            lean_primary_arg: "false"
-            advance_drive_arg: "false"
-            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:latest"
-            tag_prefix: "shadow-"
-          # TableSource port — Go-primary leaf reads SQLite directly
-          # (see go-ivm/DESIGN-tablesource-port.md). Bundles the sidecar
-          # built from the feat branch so the new internal/tablesource
-          # package is present in the binary. Tagged tablesrc-* so it
-          # never collides with the production primary/shadow tags.
+          # TableSource Go-primary — Go reads SQLite directly, derives
+          # its own diff (trigger), TS walks internal tables only (lean).
+          # Run-and-go image for production Go-primary deployment.
           - mode: tablesrc
             shadow_mode_arg: "false"
             source_mode_arg: "table"
-            # Go-primary serving: Go derives its own diff (trigger) and TS
-            # walks internal tables only (lean). Baked so the image is
-            # run-and-go — see Dockerfile.go-ivm GO_PRIMARY_TRIGGER/LEAN_PRIMARY.
             go_primary_trigger_arg: "true"
             lean_primary_arg: "true"
-            # Trigger mode is served by the sidecar's advanceToHead RPC,
-            # which only arms when the sidecar boots with
-            # GO_IVM_ADVANCE_DRIVE=true. Without this the trigger-baked
-            # image could never actually serve Go-primary (the per-CG
-            # Snapshotter is never built and every advanceToHead fails).
             advance_drive_arg: "true"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
             tag_prefix: "tablesrc-"
-          # Shadow + TableSource: TS serves user queries (zero risk to
-          # prod), Go runs in parallel with the TableSource leaf on
-          # every query (not just the 1/min drift-audit sample). High-
-          # coverage validation that the snapshot-pinning leaf
-          # correctly mirrors what TS computes. Use this image for
-          # pre-prod soaks before flipping to tablesrc-primary in prod.
+          # Shadow + TableSource — TS serves (zero risk), Go runs in
+          # parallel for high-coverage drift validation. Use for pre-prod
+          # soaks before flipping to tablesrc-primary.
           - mode: shadow-tablesrc
             shadow_mode_arg: "true"
             source_mode_arg: "table"
-            # Shadow keeps TS authoritative — no trigger, no lean.
             go_primary_trigger_arg: "false"
             lean_primary_arg: "false"
-            # Drive-mode shadow: Go sources its advance via the same
-            # frame-coordinated advanceToHead path that tablesrc deploys,
-            # and shadow-compares the result against TS. Validated
-            # 2026-06-10 (same-seed soak: push drift=140 FAIL vs drive
-            # drift=0 PASS — push-applying TS's diff frame-skews against
-            # Go's independently-pinned snapshot during mutation bursts).
-            # To soak the legacy push path instead, override both
-            # GO_IVM_ADVANCE_DRIVE=false and
-            # ZERO_GO_SIDECAR_ADVANCE_DRIVE=false at runtime.
             advance_drive_arg: "true"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
             tag_prefix: "shadow-tablesrc-"

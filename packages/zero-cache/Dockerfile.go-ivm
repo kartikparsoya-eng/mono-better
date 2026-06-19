@@ -173,11 +173,16 @@ ENV GO_IVM_MAX_DIFF_CHANGES=50000
 # past the 64MB wire frame cap — a deterministic hydrate failure loop.
 # 8MB leaves ample margin for msgpack overhead under the 64MB cap.
 ENV GO_IVM_CHUNK_SOFT_BYTES=8388608
-# workers=1 keeps cg state colocated in the single shared sidecar
-# (per feedback_shared_sidecar_tuning — bumping workers fragments
-# cgs across sidecars under per-worker mode; in shared mode it just
-# adds V8 GC overhead with no concurrency win).
-ENV ZERO_NUM_SYNC_WORKERS=1
+# workers=8: the shared externally-managed sidecar handles all CGs
+# regardless of worker count (goroutine-per-CG, shared socket), so
+# multiple relay workers add V8 event-loop parallelism for poke/cvr/
+# websocket work that stays TS-side — essential to avoid funneling
+# ~7.7 core-equiv of TS work onto a single loop. Prod Grafana shows
+# ELU headroom supports ~24 workers; 8 is the correctness-gated
+# minimum (sandbox soak: 0 drift mismatches, bounded memory, no
+# socket contention across workers 0-7). Code defaults for
+# upstream.maxConns (20) and cvr.maxConns (30) are both >= 8.
+ENV ZERO_NUM_SYNC_WORKERS=8
 # Litestream paths for the replicator role's continuous backup. When
 # ZERO_LITESTREAM_BACKUP_URL is set at deploy time (e.g. an S3/GCS URL),
 # zero-cache will use these binaries; when unset, backup is skipped.
