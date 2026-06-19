@@ -396,6 +396,14 @@ export function createAdvanceStreamAccumulator(): {
       }
       expectedNextIndex++;
 
+      // Reject chunks arriving after the terminal frame — a Go-side wire bug
+      // that would silently corrupt the accumulated result.
+      if (gotFinal) {
+        throw new Error(
+          `advanceStream received chunk (index=${chunkIndex}) after final frame`,
+        );
+      }
+
       for (const rc of chunk) acc.push(rc);
 
       // Timings + drift only travel on the final frame (Go-side invariant).
@@ -497,6 +505,14 @@ export function createAdvanceToHeadStreamAccumulator(): {
         );
       }
       expectedNextIndex++;
+
+      // Reject chunks arriving after the terminal frame — a Go-side wire bug
+      // that would silently corrupt the accumulated result.
+      if (gotFinal) {
+        throw new Error(
+          `advanceToHeadStream received chunk (index=${chunkIndex}) after final frame`,
+        );
+      }
 
       for (const rc of chunk) acc.push(rc);
 

@@ -3902,8 +3902,14 @@ export class PipelineDriver {
       c => !this.#isInternalQueryID(c.queryID),
     );
 
-    // Compare
-    this.#shadowCompare('advance', version, tsChangesForCompare, goResults);
+    // Compare — try/catch because stableStringify inside #shadowCompare can
+    // throw on malformed row data; must not kill the advance pipeline when
+    // both TS and Go results are already computed and ready to yield.
+    try {
+      this.#shadowCompare('advance', version, tsChangesForCompare, goResults);
+    } catch (e) {
+      this.#lc.error?.(`[shadow] advance compare threw: ${e}`);
+    }
 
     // Item #2: fold Go's emitted advance deltas into the per-query incremental
     // accumulator so the next drift audit can reconcile the accumulated stream

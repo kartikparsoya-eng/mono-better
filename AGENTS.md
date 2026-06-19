@@ -444,7 +444,7 @@ Defensive invariants enforced by the TS client (throws on violation):
 - every `advanceStream` call sees at least one `final=true` before "done"
 
 The TS client refuses to talk to a sidecar reporting a different
-`protocolRev` than its constant in `sidecar-manager.ts` (currently 7).
+`protocolRev` than its constant in `sidecar-manager.ts` (currently 9).
 
 ### Operational concerns
 

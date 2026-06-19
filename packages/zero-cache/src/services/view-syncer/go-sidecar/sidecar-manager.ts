@@ -576,6 +576,7 @@ export class SidecarManager {
           this.#handleRestartTrigger();
         }
       }, SidecarManager.#HEALTH_CHECK_MS);
+      this.#healthTimer?.unref();
     }
 
     if (this.#firstStartComplete) {
