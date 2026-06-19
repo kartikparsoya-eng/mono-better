@@ -231,6 +231,19 @@ describe('createAdvanceStreamAccumulator', () => {
     );
   });
 
+  test('post-final frame throws (audit fix #18)', () => {
+    // A chunk arriving AFTER the terminal frame is a Go-side wire bug
+    // that would silently corrupt accumulated results. Pre-fix, the
+    // accumulator kept pushing rows unconditionally.
+    const h = createAdvanceStreamAccumulator();
+    h.onFrame({changes: [row('a')], chunkIndex: 0, final: true});
+    expect(() =>
+      h.onFrame({changes: [row('b')], chunkIndex: 1, final: false}),
+    ).toThrow(
+      /advanceStream received chunk \(index=1\) after final frame/,
+    );
+  });
+
   test('timings only attached on final: earlier-frame timings are ignored', () => {
     // The Go side only emits timings on the final frame, but if a buggy
     // sidecar sent timings on a non-final frame, we'd want them ignored
@@ -366,6 +379,22 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
     expect(() => h.finish()).toThrow(
       /advanceToHeadStream finished without a final chunk/,
+    );
+  });
+
+  test('post-final frame throws (audit fix #18)', () => {
+    // Same as advanceStream: a chunk after the terminal frame must throw.
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({
+      changes: [row('a')],
+      chunkIndex: 0,
+      final: true,
+      version: '0000000005',
+    });
+    expect(() =>
+      h.onFrame({changes: [row('b')], chunkIndex: 1, final: false}),
+    ).toThrow(
+      /advanceToHeadStream received chunk \(index=1\) after final frame/,
     );
   });
 
