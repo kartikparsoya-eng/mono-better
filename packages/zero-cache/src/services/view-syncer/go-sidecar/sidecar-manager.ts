@@ -505,6 +505,15 @@ export class SidecarManager {
           `source mode ${v.sourceMode ?? 'unreported'})`,
       );
     } catch (err) {
+      // Re-throw protocol mismatches — an incompatible sidecar MUST NOT be
+      // accepted. Only swallow "method not found" errors from older sidecars
+      // that don't implement the version RPC at all.
+      if (
+        err instanceof Error &&
+        err.message.includes('protocol revision mismatch')
+      ) {
+        throw err;
+      }
       // If the version RPC isn't implemented (older sidecar), warn loudly
       // but don't refuse — operators can roll out a new client first.
       // Source mode stays undefined → init ships rows (memory-mode behavior).

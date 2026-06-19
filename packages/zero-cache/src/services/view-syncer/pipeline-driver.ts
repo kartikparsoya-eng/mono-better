@@ -474,7 +474,11 @@ export function reconcileGoPrimaryWatermark(
   tsVersion: string,
   goVersion: string | undefined,
 ): {version: string; tsVersion: string; goVersion: string | undefined} {
-  if (goVersion === undefined) {
+  // Treat empty string same as undefined — Go omitting `version` on the
+  // final frame decodes as '' via `v.version ?? ''` in go-ivm-client.ts.
+  // Without this guard, '' < "00" in lexi-version min() regresses the
+  // CVR watermark to '' causing full re-hydration for all clients.
+  if (goVersion === undefined || goVersion === '') {
     return {version: tsVersion, tsVersion, goVersion: undefined};
   }
   return {version: minLexiVersion(tsVersion, goVersion), tsVersion, goVersion};
@@ -564,6 +568,7 @@ export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   if (
     msg.includes('Sidecar is not running') ||
     msg.includes('Connection closed') ||
+    msg.includes('Not connected') ||
     msg.includes('engine not initialized')
   ) {
     return 'sidecar';

@@ -399,7 +399,8 @@ export class GoComputeBackend {
       const sidecarUnavailable =
         this.#manager.status !== 'running' ||
         msg.includes('Sidecar is not running') ||
-        msg.includes('Connection closed');
+        msg.includes('Connection closed') ||
+        msg.includes('Not connected');
       if (sidecarUnavailable) {
         try {
           await this.#manager.waitForRunning();
@@ -456,14 +457,16 @@ export class GoComputeBackend {
       const msg = err instanceof Error ? err.message : String(err);
 
       // Restart-window detection: when the sidecar dies, RPCs surface as
-      // one of "Sidecar is not running" (getClient threw) or "Connection
-      // closed" (socket dropped mid-RPC). Don't string-match every variant
+      // one of "Sidecar is not running" (getClient threw), "Connection
+      // closed" (socket dropped mid-RPC), or "Not connected" (socket nulled
+      // between slot acquire and write). Don't string-match every variant
       // — if the manager isn't `running` right now, treat any error as
       // restart-related and retry once the engine is rebuilt.
       const sidecarUnavailable =
         this.#manager.status !== 'running' ||
         msg.includes('Sidecar is not running') ||
-        msg.includes('Connection closed');
+        msg.includes('Connection closed') ||
+        msg.includes('Not connected');
       if (sidecarUnavailable) {
         try {
           await this.#manager.waitForRunning();
@@ -707,6 +710,7 @@ export class GoComputeBackend {
   async #onSidecarRestart(epoch: number): Promise<void> {
     if (this.#destroyed) return;
     this.#log('info', `sidecar restarted to epoch ${epoch}; re-initializing`);
+    this.#currentInitPromise = null;
     const ok = await this.#reinitPerCGAndRegisterQueries(
       `sidecar-restart-epoch-${epoch}`,
       this.#getCurrentTables(),
