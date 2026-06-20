@@ -477,8 +477,6 @@ class PushWorker {
           connectionTerminations.push(() =>
             this.#failDownstream(client.downstream, failure),
           );
-        } else {
-          client.downstream.push(['pushResponse', {mutations}]);
         }
       }
     }
