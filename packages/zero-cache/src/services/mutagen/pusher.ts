@@ -516,7 +516,7 @@ class PushWorker {
         clientID: m.clientID,
       }));
 
-      const response = await fetchFromAPIServer(
+      let response = await fetchFromAPIServer(
         pushResponseSchema,
         'push',
         this.#lc,
@@ -527,6 +527,9 @@ class PushWorker {
         },
         entry.push,
       );
+      if ('kind' in response && response.kind === 'MutateResponse') {
+        response = {mutations: response.mutations};
+      }
       if ('kind' in response || 'error' in response) {
         if (isAuthErrorBody(response)) {
           this.#lc.warn?.('Push auth failed; invalidating connection', {
