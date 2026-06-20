@@ -172,6 +172,12 @@ const pushOkSchema = v.object({
   mutations: v.array(mutationResponseSchema),
 });
 
+const mutateResponseObjectSchema = v.object({
+  kind: v.literal('MutateResponse'),
+  mutations: v.array(mutationResponseSchema),
+  userID: v.string().optional(),
+});
+
 /**
  * @deprecated push errors are now represented as ['error', { ... }] messages
  */
@@ -229,6 +235,7 @@ export const pushResponseBodySchema = v.union(pushOkSchema, pushErrorSchema);
 export const pushResponseSchema = v.union(
   pushResponseBodySchema,
   pushFailedBodySchema,
+  mutateResponseObjectSchema,
 );
 export const pushResponseMessageSchema = v.tuple([
   v.literal('pushResponse'),
