@@ -175,7 +175,13 @@ export class CustomQueryTransformer {
           ),
       );
 
-      return transformResponse[1];
+      if (Array.isArray(transformResponse)) {
+        return transformResponse[1];
+      }
+      if (transformResponse.kind === 'QueryResponse') {
+        return transformResponse.queries;
+      }
+      return transformResponse;
     } catch (e) {
       if (
         isProtocolError(e) &&

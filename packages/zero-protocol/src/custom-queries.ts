@@ -66,9 +66,16 @@ const transformOkMessageSchema = v.tuple([
   transformResponseBodySchema,
 ]);
 
+const queryResponseObjectSchema = v.object({
+  kind: v.literal('QueryResponse'),
+  queries: transformResponseBodySchema,
+});
+
 export const transformResponseMessageSchema = v.union(
   transformOkMessageSchema,
   transformFailedMessageSchema,
+  queryResponseObjectSchema,
+  transformFailedBodySchema,
 );
 export type TransformResponseMessage = v.Infer<
   typeof transformResponseMessageSchema
