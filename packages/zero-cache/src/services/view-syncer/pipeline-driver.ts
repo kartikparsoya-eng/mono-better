@@ -5098,16 +5098,19 @@ export function pgTypeToGoType(
     t === 'CHAR' || t === 'CHARACTER' || t === 'BPCHAR' ||
     t === 'UUID' || t === 'CITEXT' || t === 'NAME'
   ) return 'string';
-  // Postgres array types (e.g. INT4[], TEXT[]) — Postgres emits them as
-  // text-encoded array literals ("{1,2,3}"); both sides currently treat as
-  // string. Document the convention rather than mis-claiming json.
-  if (t.endsWith('[]')) {
-    if (warn && !pgTypeWarningsSeen.has(t)) {
-      pgTypeWarningsSeen.add(t);
-      warn(`PostgreSQL array type ${t} treated as opaque text — Go-side IVM cannot index inside`);
-    }
-    return 'string';
-  }
+  // Postgres array types (e.g. INT4[], TEXT[]) — the replicator stores
+  // these in the SQLite replica as JSON text via toSQLiteType('json', v) →
+  // JSON.stringify(v). The Zero client schema types all array columns as
+  // json<T[]>(...), so TS's fromSQLiteType('json', ...) JSON.parses the text
+  // into a real array. Map to 'json' so Go's FromSQLiteType('json', ...)
+  // does the same via json.Unmarshal — matching TS exactly.
+  //
+  // Previously mapped to 'string' (commit 9a501aa7f5) under the assumption
+  // that "both sides treat as string" — but TS actually parses the JSON.
+  // The mismatch produced a consistent +2-byte drift per array column in
+  // shadow comparisons (two extra \" quote chars from JSON.stringify on
+  // the Go side vs a bare array on the TS side).
+  if (t.endsWith('[]')) return 'json';
   // BYTEA: text-encoded binary (hex on PG side via SQLite replica). Both
   // sides treat as string for now; document the limitation.
   if (t === 'BYTEA') {

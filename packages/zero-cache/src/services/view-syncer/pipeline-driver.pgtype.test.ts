@@ -38,6 +38,21 @@ describe('view-syncer/pipeline-driver: pgTypeToGoType', () => {
     expect(pgTypeToGoType('jsonb')).toBe('json');
   });
 
+  test('PG array types map to json (matches Zero schema json<T[]>()', () => {
+    // The Zero client schema types all PG array columns as json<T[]>(...):
+    //   onCallSetNumbers: json<number[]>()  (PG: int4[])
+    //   referenceTicket:  json<string[]>()  (PG: text[])
+    //   to/cc/bcc/replyTo: json<string[]>() (PG: text[])
+    //   deliveryMethods:  json<Enum[]>()     (PG: enum[])
+    // The replicator stores these as JSON.stringify'd text in SQLite; both
+    // sides must JSON.parse them into real arrays to match.
+    expect(pgTypeToGoType('int4[]')).toBe('json');
+    expect(pgTypeToGoType('text[]')).toBe('json');
+    expect(pgTypeToGoType('varchar[]')).toBe('json');
+    expect(pgTypeToGoType('int8[]')).toBe('json');
+    expect(pgTypeToGoType('bool[]')).toBe('json');
+  });
+
   test('a genuinely unknown NON-enum type still warns', () => {
     const warn = vi.fn();
     // A custom domain/composite that is not flagged as an enum: still falls
@@ -45,5 +60,11 @@ describe('view-syncer/pipeline-driver: pgTypeToGoType', () => {
     expect(pgTypeToGoType('SomeUnmappedDomainType_xyz', warn)).toBe('string');
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0][0]).toContain('unrecognised');
+  });
+
+  test('PG array types no longer emit a warning (correctly mapped to json)', () => {
+    const warn = vi.fn();
+    expect(pgTypeToGoType('int4[]', warn)).toBe('json');
+    expect(warn).not.toHaveBeenCalled();
   });
 });
