@@ -1,7 +1,7 @@
-import type {LogContext} from '@rocicorp/logger';
+import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
-import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
+import {createSilentLogContext, TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import {createSchema} from '../../../../zero-schema/src/builder/schema-builder.ts';
 import {
@@ -31,7 +31,7 @@ import {
 } from '../replicator/test-utils.ts';
 import {getMutationResultsQuery} from './cvr.ts';
 import type * as GoComputeBackendModule from './go-sidecar/go-compute-backend.ts';
-import {PipelineDriver, type AdvanceResult, type RowChange, type Timer} from './pipeline-driver.ts';
+import {PipelineDriver, type AdvanceResult, type RowChange, type ShadowHydrateResult, type Timer} from './pipeline-driver.ts';
 import {rowIDSignatureUnit} from './row-set-signature.ts';
 import type {RowID} from './schema/types.ts';
 import {ResetPipelinesSignal, Snapshotter} from './snapshotter.ts';
@@ -727,6 +727,109 @@ describe('view-syncer/pipeline-driver', () => {
       goBackendMock.backend = null;
       vi.useRealTimers();
       await goPrimary.destroy();
+    }
+  });
+
+  // Oracle-blind divergence: when BOTH Go and TS match the SQL oracle on the
+  // main table but differ in related-table (join fan-out) rows, the divergence
+  // is in a dimension the single-table oracle CANNOT adjudicate. The patched
+  // classifier (pipeline-driver.ts ~4065) runs #sqlGroundTruthCompare on TS's
+  // changes too (not just Go's) and, when both match, logs "oracle-blind
+  // divergence" (info) and falls through to the raw MISMATCH detail — instead
+  // of the old path which returned early blaming TS without checking TS vs SQL.
+  test('shadow classifier: oracle-blind divergence when both Go and TS match SQL on main table but differ in related-table fan-out', async () => {
+    const sink = new TestLogSink();
+    const shadowLc = new LogContext('info', undefined, sink);
+
+    // Go changes: 3 issues (main table) + 4 comments (related table).
+    // Issues emitted in id DESC order (matching AST orderBy).
+    const goRowChanges = [
+      {type: 0, queryID: 'q-oracle-blind', table: 'issues', rowKey: {id: '3'}, row: {id: '3', closed: false, _0_version: '123'}},
+      {type: 0, queryID: 'q-oracle-blind', table: 'issues', rowKey: {id: '2'}, row: {id: '2', closed: true, _0_version: '123'}},
+      {type: 0, queryID: 'q-oracle-blind', table: 'issues', rowKey: {id: '1'}, row: {id: '1', closed: false, _0_version: '123'}},
+      {type: 0, queryID: 'q-oracle-blind', table: 'comments', rowKey: {id: '10'}, row: {id: '10', issueID: '1', upvotes: 0, _0_version: '123'}},
+      {type: 0, queryID: 'q-oracle-blind', table: 'comments', rowKey: {id: '20'}, row: {id: '20', issueID: '2', upvotes: 1, _0_version: '123'}},
+      {type: 0, queryID: 'q-oracle-blind', table: 'comments', rowKey: {id: '21'}, row: {id: '21', issueID: '2', upvotes: 10000, _0_version: '123'}},
+      {type: 0, queryID: 'q-oracle-blind', table: 'comments', rowKey: {id: '22'}, row: {id: '22', issueID: '2', upvotes: 20000, _0_version: '123'}},
+    ];
+
+    const fakeBackend = {
+      sidecarSourceMode: 'table' as const,
+      initialized: true,
+      initEngine: () => Promise.resolve(),
+      resetEngine: () => Promise.resolve(),
+      removeQuery: () => Promise.resolve(),
+      destroy: () => Promise.resolve(),
+      hydrateManyStream(
+        qs: {queryID: string; ast: AST}[],
+        onResult: (r: {queryID: string; changes: unknown[]; timingMs: number}) => void,
+      ): Promise<void> {
+        for (const q of qs) {
+          onResult({queryID: q.queryID, changes: goRowChanges, timingMs: 1});
+        }
+        return Promise.resolve();
+      },
+    };
+    // MUST be set before PipelineDriver constructor — the constructor calls
+    // createGoComputeBackend() (mocked to return goBackendMock.backend).
+    goBackendMock.backend = fakeBackend;
+
+    const goStorageDb = new Database(lc, ':memory:');
+    goStorageDb.prepare(CREATE_STORAGE_TABLE).run();
+
+    const shadowDriver = new PipelineDriver(
+      shadowLc,
+      testLogConfig,
+      new Snapshotter(shadowLc, dbFile.path, {appID: shardID.appID}),
+      shardID,
+      new DatabaseStorage(goStorageDb).createClientGroupStorage(
+        'shadow-oracle-blind-cg',
+      ),
+      'pipeline-driver.test.ts',
+      new InspectorDelegate(undefined),
+      () => 200,
+      false,
+      {
+        goSidecar: {enabled: true, shadowMode: true},
+      } as unknown as ConstructorParameters<typeof PipelineDriver>[9],
+      {} as unknown as ConstructorParameters<typeof PipelineDriver>[10],
+    );
+
+    try {
+      shadowDriver.init(clientSchema);
+
+      // TS changes: 3 issues (same main-table rows as Go) + 2 comments (fewer
+      // related-table rows — join fan-out difference the oracle can't see).
+      const tsChanges: RowChange[] = [
+        {type: ChangeType.ADD, queryID: 'q-oracle-blind', table: 'issues', rowKey: {id: '3'}, row: {id: '3', closed: false, _0_version: '123'}},
+        {type: ChangeType.ADD, queryID: 'q-oracle-blind', table: 'issues', rowKey: {id: '2'}, row: {id: '2', closed: true, _0_version: '123'}},
+        {type: ChangeType.ADD, queryID: 'q-oracle-blind', table: 'issues', rowKey: {id: '1'}, row: {id: '1', closed: false, _0_version: '123'}},
+        {type: ChangeType.ADD, queryID: 'q-oracle-blind', table: 'comments', rowKey: {id: '10'}, row: {id: '10', issueID: '1', upvotes: 0, _0_version: '123'}},
+        {type: ChangeType.ADD, queryID: 'q-oracle-blind', table: 'comments', rowKey: {id: '20'}, row: {id: '20', issueID: '2', upvotes: 1, _0_version: '123'}},
+      ];
+
+      const tsResultsPerQuery = new Map<string, ShadowHydrateResult>([
+        ['q-oracle-blind', {changes: tsChanges, total: tsChanges.length}],
+      ]);
+
+      await shadowDriver.shadowBatchCompare(
+        [{queryID: 'q-oracle-blind', ast: ISSUES_AND_COMMENTS}],
+        tsResultsPerQuery,
+      );
+
+      const logText = sink.messages.map(m => m[2].join(' ')).join('\n');
+
+      // The patched classifier should recognize both engines match SQL on the
+      // main table and attribute the divergence to oracle-blind join fan-out.
+      expect(logText).toContain('oracle-blind divergence');
+      expect(logText).toContain('BOTH engines match SQL');
+      // It should NOT blame TS (the old buggy behavior).
+      expect(logText).not.toContain('ts-only divergence');
+      // The raw MISMATCH detail should still surface (fall-through).
+      expect(logText).toContain('MISMATCH in batch-hydrate');
+    } finally {
+      goBackendMock.backend = null;
+      await shadowDriver.destroy();
     }
   });
 

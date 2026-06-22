@@ -4030,12 +4030,18 @@ export class PipelineDriver {
     }
 
     // SQL ground-truth CLASSIFIER. A bare TS-vs-Go MISMATCH is ambiguous: TS is
-    // NOT a reliable oracle — it has known IVM pagination-boundary bugs (the
-    // conversations boundary-drop), so it can be the WRONG side. When we have
-    // the query's AST (a single-query hydrate), adjudicate the divergence
-    // against raw SQL on the replica: if Go matches SQL, TS is the outlier —
-    // demote to info instead of paging on a phantom "Go" drift; only Go-
-    // disagrees-with-SQL is real. Runs ONLY on an actual divergence, so it adds
+    // NOT axiomatically the oracle — it can be the wrong side (suspected IVM
+    // pagination-boundary divergences, e.g. the conversations boundary-drop;
+    // unverified upstream, so treated as a hypothesis, not an established fact).
+    // When we have the query's AST (a single-query hydrate), adjudicate against
+    // raw SQL on the replica. CAVEAT — this oracle is MAIN-TABLE-ONLY:
+    // buildAuditSQL SELECTs FROM the outer table (related tables appear only as
+    // EXISTS filters, never as returned rows) and #sqlGroundTruthCompare filters
+    // changes to `c.table === ast.table`, so it can confirm MAIN-table parity
+    // but is structurally BLIND to related-table (join fan-out) rows. Therefore
+    // "Go matches SQL" does not by itself convict TS: we verify TS against the
+    // SAME oracle too (below), and attribute the divergence to TS only when Go
+    // matches SQL and TS does NOT. Runs ONLY on an actual divergence, so it adds
     // no load to matching comparisons, and only for batch-hydrate (the audit
     // path runs its own SQL check; advance has no single AST). This respects
     // "TS is the bar" — SQL only breaks ties that already exist.
@@ -4047,16 +4053,47 @@ export class PipelineDriver {
           verdict.kind === 'confirmed' ||
           verdict.kind === 'go-vs-sql-tie-window'
         ) {
-          // Go matches the SQL oracle → TS is the divergent side, not Go.
-          this.#shadowTsOnlyDivergences.add(1);
-          this.#lc.info?.(
-            `[shadow] ts-only divergence (${operation} ${context}): Go matches ` +
-              `SQL, TS differs (ts=${tsNorm.length} go=${goNorm.length} ` +
-              `sql=${verdict.sqlCount}) — NOT a Go drift`,
-          );
-          return;
-        }
-        if (verdict.kind === 'skipped') {
+          // Go matches the SQL oracle — but ONLY on the main table (goByPK is
+          // filtered to c.table === ast.table; buildAuditSQL returns outer-table
+          // rows only). That alone does NOT make TS the outlier: the ts-vs-go
+          // count gap is dominated by related-table (join fan-out) rows the
+          // oracle never sees. Before demoting to "TS differs", verify TS against
+          // the SAME oracle — symmetric with the Go-disagrees branch below, which
+          // added this exact check because the old code asserted TS parity in a
+          // comment without testing it. One extra SQL re-query on an already-rare
+          // mismatch path.
+          const tsVerdict = this.#sqlGroundTruthCompare(classifyAst, tsChanges);
+          if (
+            tsVerdict.kind === 'confirmed' ||
+            tsVerdict.kind === 'go-vs-sql-tie-window'
+          ) {
+            // BOTH engines match SQL on the main table. The ts-vs-go divergence
+            // therefore lives in a dimension this single-table oracle CANNOT see
+            // (related-table fan-out multiplicity) — it is NOT attributable to
+            // TS, and Go (the heavier side) is at least as suspect. Count it as
+            // unadjudicable and FALL THROUGH (no return) so the raw TS-vs-Go
+            // MISMATCH detail below surfaces the off-table rows for triage.
+            this.#shadowSqlUnreliable.add(1);
+            this.#lc.info?.(
+              `[shadow] oracle-blind divergence (${operation} ${context}): ` +
+                `BOTH engines match SQL on the main table; ts-vs-go differs ` +
+                `off-table (likely related-table join fan-out) (go=${verdict.kind}, ` +
+                `ts=${tsVerdict.kind}, ts=${tsNorm.length} go=${goNorm.length} ` +
+                `sql=${verdict.sqlCount}) — NOT attributable to TS; raw detail below`,
+            );
+            // fall through to the raw mismatch detail below (do NOT return).
+          } else {
+            // Go matches SQL, TS does NOT → TS is genuinely the divergent side.
+            this.#shadowTsOnlyDivergences.add(1);
+            this.#lc.info?.(
+              `[shadow] ts-only divergence (${operation} ${context}): Go ` +
+                `matches SQL, TS differs from it (go=${verdict.kind}, ` +
+                `ts=${tsVerdict.kind}, ts=${tsNorm.length} go=${goNorm.length} ` +
+                `sql=${verdict.sqlCount}) — NOT a Go drift`,
+            );
+            return;
+          }
+        } else if (verdict.kind === 'skipped') {
           // Unbuildable SQL — can't adjudicate. Count the rate, then fall
           // through to the raw TS-vs-Go MISMATCH so it's still surfaced.
           this.#shadowSqlUnreliable.add(1);
