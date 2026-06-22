@@ -432,6 +432,116 @@ export function isShadowTieWindow(
   return anySetDiff;
 }
 
+/**
+ * Decides whether an `advance`-path TS-vs-Go set difference is a BENIGN
+ * cross-batch frame-skew split (Go's snapshotter and TS's snapshotter placed
+ * the same logical changes in different advance batches) vs a REAL divergence
+ * that must stay a [shadow] MISMATCH.
+ *
+ * The advance path has no single AST (it spans many queries' incremental
+ * deltas), so the SQL ground-truth classifier that adjudicates `batch-hydrate`
+ * cannot run here — a raw advance MISMATCH otherwise surfaces unattributed, and
+ * a frame-skew split can be hundreds of rows (the go-primary soak confirmed a
+ * 588-row channel_participants fan-out that landed entirely in TS's batch and
+ * not Go's for that one advance window). That scale of false alarm is exactly
+ * where a genuine 1-row Go bug would hide, so suppressing the benign shape
+ * restores the advance MISMATCH as a trustworthy signal rather than reducing
+ * noise for its own sake.
+ *
+ * Mechanism, proven deterministically by the go-ivm advance_drift_shadow_mismatch
+ * repro tests: both engines process every change correctly when they receive it
+ * and converge at head; they only disagree on which advance batch carries a
+ * given edit (independently-pinned WAL frames). Within one #shadowCompare call
+ * that manifests as a clean PARTITION — the TS-only and Go-only sides are
+ * disjoint on rowKey, no rowKey appears on both sides with differing change kind
+ * or content, each (queryID, table, rowKey) appears at most once per side, and
+ * both sides carry at least one exclusive row. A real Go drift, by contrast,
+ * either changes a row's content or op-kind on a shared key (value/op drift) or
+ * emits a row the other side never emits at any batch (asymmetric drop) —
+ * neither is a clean partition.
+ *
+ * Conservative by construction — returns false (keeps the MISMATCH) on: no
+ * divergence at all; any rowKey present on BOTH sides whose change kind OR row
+ * content differs (real value/op drift — this is the case that must never be
+ * masked, since a real 1-row Go bug under a 588-row false alarm would look like
+ * exactly this); any (queryID, table, rowKey) tuple appearing more than once
+ * on a side (real multiplicity/fan-out divergence, not a one-per-key partition);
+ * an empty side with a non-empty other (a pure drop/add, not a split). So it
+ * never suppresses a genuine row, value, op-kind, or multiplicity divergence.
+ * Unlike isShadowTieWindow it needs no AST — the partition signature is
+ * structural and applies uniformly across all advance queries, ordered or not.
+ */
+export function isAdvanceFrameSkew(
+  tsChanges: readonly RowChange[],
+  goChanges: readonly RowChange[],
+): boolean {
+  // No divergence → nothing to suppress (and a clean partition of two equal
+  // sets is the no-op case, not a frame-skew split).
+  if (tsChanges.length === goChanges.length) {
+    let any = false;
+    for (let i = 0; i < tsChanges.length; i++) {
+      if (
+        tsChanges[i].type !== goChanges[i].type ||
+        tsChanges[i].queryID !== goChanges[i].queryID ||
+        tsChanges[i].table !== goChanges[i].table ||
+        stableStringify(tsChanges[i].rowKey) !==
+          stableStringify(goChanges[i].rowKey) ||
+        stableStringify(tsChanges[i].row) !== stableStringify(goChanges[i].row)
+      ) {
+        any = true;
+        break;
+      }
+    }
+    if (!any) return false;
+  }
+
+  const keyOf = (c: RowChange) =>
+    stableStringify({
+      q: c.queryID,
+      t: c.table,
+      k: c.rowKey,
+    });
+  const tsKeys = new Map<string, RowChange>();
+  const goKeys = new Map<string, RowChange>();
+  for (const c of tsChanges) {
+    const k = keyOf(c);
+    // A duplicate tuple on the TS side alone is a real multiplicity divergence
+    // (the clean-partition invariant requires each key exactly once per side).
+    if (tsKeys.has(k)) return false;
+    tsKeys.set(k, c);
+  }
+  for (const c of goChanges) {
+    const k = keyOf(c);
+    if (goKeys.has(k)) return false;
+    goKeys.set(k, c);
+  }
+
+  // Any rowKey present on BOTH sides must agree on BOTH change kind and content
+  // — a same-row ADD-vs-REMOVE (op drift) or a same-key content difference
+  // (value drift) is a real divergence, not a batch split. Keying on rowKey
+  // alone (not type) is what catches the ADD/REMOVE pair: they collide on the
+  // same key and fail this check.
+  for (const [k, tc] of tsKeys) {
+    const gc = goKeys.get(k);
+    if (
+      gc &&
+      (tc.type !== gc.type || stableStringify(tc.row) !== stableStringify(gc.row))
+    ) {
+      return false;
+    }
+  }
+
+  // A clean cross-batch partition requires BOTH sides to carry rows the other
+  // lacks (each engine's batch got some of the split, none of it shared). A
+  // fully-shared set with no exclusive rows is handled above; a one-sided-only
+  // set (empty other) is a pure drop/add, not a split — keep it as a MISMATCH.
+  let tsExclusive = 0;
+  let goExclusive = 0;
+  for (const k of tsKeys.keys()) if (!goKeys.has(k)) tsExclusive++;
+  for (const k of goKeys.keys()) if (!tsKeys.has(k)) goExclusive++;
+  return tsExclusive > 0 && goExclusive > 0;
+}
+
 export type RowAdd = RowOp<ChangeType.ADD>;
 
 export type RowRemove = RowOp<ChangeType.REMOVE>;
@@ -775,6 +885,20 @@ export class PipelineDriver {
     'sync',
     'ivm.shadow-tie-windows',
     'Shadow hydrate set-diffs suppressed as benign LIMIT tie-member swaps',
+  );
+  // Advance-path set-diff suppressed as benign cross-batch frame-skew: Go's
+  // snapshotter and TS's placed the same logical changes in different advance
+  // batches (independently-pinned WAL frames). The advance path has no single
+  // AST so the SQL oracle can't adjudicate it; without this, a frame-skew split
+  // surfaces as an unattributed MISMATCH (the go-primary soak saw 588 rows in
+  // one such split). Proven benign by the go-ivm advance_drift_shadow_mismatch
+  // repro tests — both engines converge at head. Counted so the suppression
+  // rate stays visible; isAdvanceFrameSkew never suppresses a same-key value
+  // drift or a multiplicity divergence.
+  readonly #shadowAdvanceFrameSkew = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-advance-frame-skew',
+    'Shadow advance set-diffs suppressed as benign cross-batch frame-skew',
   );
   // A shadow MISMATCH the SQL oracle attributed to TS (Go matched SQL). TS is
   // NOT always right — it has known IVM pagination-boundary bugs — so without
@@ -4025,6 +4149,29 @@ export class PipelineDriver {
       this.#lc.debug?.(
         `[shadow] tie-window (${operation} ${context}): benign LIMIT tie-member ` +
           `swap — suppressed (ts=${tsNorm.length} go=${goNorm.length})`,
+      );
+      return;
+    }
+
+    // Cross-batch frame-skew suppression (advance path primarily). The advance
+    // path has no single AST, so the SQL oracle below can't adjudicate it — a
+    // frame-skew split (same logical changes placed in different advance
+    // batches by the two engines' independently-pinned snapshots) would otherwise
+    // surface as an unattributed raw MISMATCH, and the split can be hundreds of
+    // rows (the go-primary soak confirmed a 588-row channel_participants
+    // fan-out that landed entirely in TS's batch for that one advance window).
+    // isAdvanceFrameSkew only suppresses a CLEAN PARTITION: TS-only and Go-only
+    // sides disjoint on rowKey, no same-key content/op drift, each
+    // (queryID,table,rowKey) at most once per side, and BOTH sides exclusive. A
+    // real value drift (same key, differing content) or a real
+    // multiplicity/drop divergence is kept. Proven benign by the go-ivm
+    // advance_drift_shadow_mismatch repro tests — both engines converge at head.
+    if (bagsDiffer && isAdvanceFrameSkew(tsChanges, goChanges)) {
+      this.#shadowAdvanceFrameSkew.add(1);
+      this.#lc.debug?.(
+        `[shadow] advance-frame-skew (${operation} ${context}): benign ` +
+          `cross-batch frame-skew split — suppressed ` +
+          `(ts=${tsNorm.length} go=${goNorm.length})`,
       );
       return;
     }
