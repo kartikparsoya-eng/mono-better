@@ -10,6 +10,7 @@ import {
   otelMetricsEnabled,
   otelTracesEnabled,
 } from '../../../otel/src/enabled.ts';
+import {setMetricWorkerAttributes} from '../observability/metrics.ts';
 import {setupOtelDiagnosticLogger} from './otel-diag-logger.ts';
 
 class OtelManager {
@@ -57,6 +58,16 @@ class OtelManager {
       'process.worker': workerName,
       'process.worker_index': workerIndex,
     });
+
+    // ALSO stamp the worker identity as a per-measurement metric attribute
+    // (data-point dimension), not only a resource attribute. Resource → label
+    // promotion depends on the collector's resource_to_telemetry_conversion,
+    // which was observed dropping process.worker for the syncer histograms in
+    // the sandbox — collapsing two forked syncers onto one identity and
+    // corrupting every zero.sync.* percentile (non-monotonic, last-write-wins).
+    // A data-point attribute is a Prometheus label unconditionally, so this
+    // keeps worker 0 / worker 1 distinct regardless of collector config.
+    setMetricWorkerAttributes(workerName, workerIndex);
 
     // Set defaults to be backwards compatible with the previously
     // hard-coded exporters

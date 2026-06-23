@@ -1,4 +1,5 @@
 import type {
+  Attributes,
   Counter,
   Histogram,
   Meter,
@@ -9,6 +10,36 @@ import type {
 import {metrics} from '@opentelemetry/api';
 
 // intentional lazy initialization so it is not started before the SDK is started.
+
+// Per-process worker identity, attached as a metric ATTRIBUTE (data-point
+// dimension) to every histogram measurement — see setMetricWorkerAttributes.
+let workerAttributes: Attributes = {};
+
+/**
+ * Stamp the calling process's worker identity onto every metric it records.
+ *
+ * The worker name + index are ALSO set as OTel *resource* attributes in
+ * `startOtelAuto` (process.worker / process.worker_index), but resource
+ * attributes only become per-series labels via the collector's
+ * `resource_to_telemetry_conversion`, which is environment-dependent and was
+ * observed dropping them for the syncer histograms in the sandbox. When two
+ * `fork()`ed syncer workers emit `zero.sync.*` histograms with no
+ * worker-distinguishing label, their series share one identity and collide
+ * (last-write-wins) in the metric store — the merged cumulative counter steps
+ * DOWN, which makes every `histogram_quantile` percentile garbage.
+ *
+ * A *data-point* attribute is part of the series identity in EVERY export/scrape
+ * path unconditionally (it becomes a Prometheus label directly, no `target_info`
+ * join), so attaching the worker here guarantees worker 0 and worker 1 are
+ * distinct, monotonic series regardless of collector config. Called once per
+ * process from `startOtelAuto` with the same name/index used for the resource.
+ */
+export function setMetricWorkerAttributes(
+  workerName: string,
+  workerIndex: number,
+): void {
+  workerAttributes = {worker: workerName, worker_index: String(workerIndex)};
+}
 
 export type Category =
   | 'replication' // postgres to replica
@@ -142,8 +173,11 @@ export function getOrCreateLatencyHistogram(
     }),
   );
   return {
+    // Merge the per-process worker identity into every observation so two
+    // forked syncer workers produce DISTINCT series instead of colliding into
+    // one flickering series (caller-supplied attributes win on key conflict).
     recordMs: (durationMs, attributes) =>
-      h.record(durationMs / 1000, attributes),
+      h.record(durationMs / 1000, {...workerAttributes, ...attributes}),
   };
 }
 
