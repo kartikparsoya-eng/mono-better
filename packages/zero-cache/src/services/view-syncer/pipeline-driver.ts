@@ -1,4 +1,6 @@
 import type {LogContext} from '@rocicorp/logger';
+import {mkdir, writeFile} from 'node:fs/promises';
+import {join} from 'node:path';
 import {assert, unreachable} from '../../../../shared/src/asserts.ts';
 import {deepEqual, type JSONValue} from '../../../../shared/src/json.ts';
 import {must} from '../../../../shared/src/must.ts';
@@ -61,7 +63,7 @@ import {
   isGoSidecarEnabled,
   isGoShadowMode,
   isGoShadowVerbose,
-  isGoDerivedDiff,
+  goDivergenceCaptureDir,  isGoDerivedDiff,
   isGoAdvanceDrive,
   isGoPrimaryTrigger,
   isGoLeanPrimary,
@@ -87,6 +89,7 @@ import {checkClientSchema} from './client-schema.ts';
 import {rowIDSignatureUnit} from './row-set-signature.ts';
 import type {Snapshotter} from './snapshotter.ts';
 import {ResetPipelinesSignal, type SnapshotDiff} from './snapshotter.ts';
+import type {StatementRunner} from '../../db/statements.ts';
 
 type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
   readonly type: Op;
@@ -542,6 +545,258 @@ export function isAdvanceFrameSkew(
   return tsExclusive > 0 && goExclusive > 0;
 }
 
+/**
+ * Cross-batch frame-skew suppression for the EMPTY-SIDE case.
+ * `isAdvanceFrameSkew` only suppresses a CLEAN PARTITION where BOTH sides carry
+ * exclusive rows (:534-542) — so it KEEPs (as a MISMATCH) any advance batch
+ * where one engine's side is empty and the other's is not. But the same WAL
+ * frame-skew that produces a both-sides-exclusive split can also place ALL of
+ * a logical change in one engine's batch and NONE in the other's, with the
+ * missing rows appearing on the OTHER engine in the adjacent advance batch
+ * (live-proven 2026-06-22: frames 81b3tyfhi0 TS=1/Go=4 and 81b3tyh9ug TS=3/Go=0,
+ * byte-identical rows — the intra-frame classifier ran but the empty-side guard
+ * at :534-542 blocked suppression). This classifier closes that gap by looking
+ * at the poke-paired NEIGHBOR advance: if this batch has one empty side and the
+ * other side's rows appear byte-identical on the OPPOSITE engine in the
+ * neighbor batch, it's the same cross-batch frame-skew split — suppress.
+ *
+ * Strict invariants (mirroring isAdvanceFrameSkew :4163-4168) so a REAL
+ * one-sided drop is never silenced:
+ *   - This batch must be one-sided (one side empty, the other non-empty).
+ *   - Every row on the non-empty side must appear on the OPPOSITE engine's side
+ *     in the neighbor batch, byte-identical (full RowChange: type + queryID +
+ *     table + rowKey + row — NOT just PK; this is what distinguishes "rows
+ *     moved to the neighbor frame" from "rows genuinely dropped").
+ *   - No (queryID, table, rowKey, type) tuple may appear more than once across
+ *     the union of this batch's non-empty side and the neighbor's matched side
+ *     (no multiplicity divergence hiding behind the match).
+ *   - The match is full-content. A same-PK different-content row in the
+ *     neighbor is NOT a match — falls through to MISMATCH (the real value-drift
+ *     case that must always survive).
+ *
+ * `neighbor` is the prior advance batch's (ts, go); the caller threads a
+ * 1-deep rolling buffer so only the immediately-adjacent batch is consulted —
+ * a stale match two batches back cannot trigger suppression.
+ */
+export function isAdvanceFrameSkewCrossBatch(
+  tsChanges: readonly RowChange[],
+  goChanges: readonly RowChange[],
+  neighbor: {ts: readonly RowChange[]; go: readonly RowChange[]} | null,
+): boolean {
+  // No neighbor → can't look across batches; defer to isAdvanceFrameSkew.
+  // Also bail when the current batch is itself a clean both-sides partition —
+  // the intra-frame classifier already handles that, and running the cross-batch
+  // check would be redundant (and could double-suppress).
+  if (!neighbor) return false;
+  if (tsChanges.length > 0 && goChanges.length > 0) return false;
+  if (tsChanges.length === 0 && goChanges.length === 0) return false;
+
+  // This batch is one-sided. Determine which engine has the rows here, and
+  // which engine's neighbor side they must match against.
+  const tsEmpty = tsChanges.length === 0;
+  const hereChanges = tsEmpty ? goChanges : tsChanges;
+  // Rows present HERE on engine X must appear on engine Y (the OTHER engine)
+  // in the NEIGHBOR batch — the frame-skew split put them in X's batch this
+  // advance and Y's batch the adjacent advance.
+  const neighborOtherSide = tsEmpty ? neighbor.ts : neighbor.go;
+
+  if (neighborOtherSide.length === 0) return false;
+
+  // Full-content key: byte-identical match requires type + queryID + table +
+  // rowKey + row to all agree. This is the false-negative guard — a real drop
+  // whose PK happens to match a neighbor re-emit but with different content
+  // must NOT suppress.
+  const fullKey = (c: RowChange) =>
+    stableStringify({
+      type: c.type,
+      queryID: c.queryID,
+      table: c.table,
+      rowKey: c.rowKey,
+      row: c.row,
+    });
+  const hereKeys = new Map<string, RowChange>();
+  for (const c of hereChanges) {
+    const k = fullKey(c);
+    // A duplicate on the non-empty side is a multiplicity divergence — keep.
+    if (hereKeys.has(k)) return false;
+    hereKeys.set(k, c);
+  }
+  const neighborKeys = new Set<string>();
+  for (const c of neighborOtherSide) {
+    const k = fullKey(c);
+    if (neighborKeys.has(k)) return false; // multiplicity in the neighbor — keep.
+    neighborKeys.add(k);
+  }
+  // Every row here must be present byte-identical on the other engine's
+  // neighbor side. Any missing (or content-different) row → real drop → keep.
+  for (const k of hereKeys.keys()) {
+    if (!neighborKeys.has(k)) return false;
+  }
+  return true;
+}
+
+/**
+ * Verdict shape for the advance-path SQL ground-truth oracle. Mirrors
+ * {@link #sqlGroundTruthCompare}'s hydrate verdict EXCEPT: no `go-vs-sql-
+ * tie-window` (a delta bag has no LIMIT window — order is meaningless for
+ * ADD/EDIT/REMOVE) and an added `oracle-blind` (the divergence is entirely
+ * off-table fan-out for this queryID — no main-table delta to adjudicate).
+ * The classify logic in {@link #shadowCompare}'s advance branch consumes
+ * `confirmed | go-vs-sql-drift | go-vs-sql-content-drift | oracle-blind |
+ * skipped` and reuses the SAME counters as the hydrate oracle.
+ */
+export type AdvanceSqlOracleVerdict =
+  | {kind: 'confirmed'; sqlCount: number}
+  | {kind: 'go-vs-sql-drift'; sqlCount: number; goOnly: string[]; sqlOnly: string[]}
+  | {
+      kind: 'go-vs-sql-content-drift';
+      sqlCount: number;
+      contentMismatches: {pk: string; sqlRow: string; goRow: string}[];
+    }
+  | {kind: 'oracle-blind'; sqlCount: number}
+  | {kind: 'skipped'; reason: string};
+
+/**
+ * Pure core of the advance-path SQL ground-truth oracle. Given the ALREADY-
+ * QUERIED + NORMALIZED rows from the snapshotter's prev/curr snapshots for
+ * one query's main table, derive the expected prev→curr delta (ADD / REMOVE
+ * / EDIT) and compare it to Go's emitted changes for that query (filtered to
+ * the main table). Returns the verdict; the SQL I/O + normalization wrapper
+ * {@link #sqlGroundTruthAdvanceCompare} delegates here.
+ *
+ * Extracted as an exported pure function (mirroring {@link isAdvanceFrameSkew})
+ * so the delta-derivation + comparison logic is unit-testable without a live
+ * SQLite replica — the test feeds `prevRows` / `currRows` directly.
+ *
+ * `pk` is the table's primary-key columns; `zqlColumns` is the schema column
+ * names used to project Go's row (Go may carry extra bookkeeping fields like
+ * `_0_version` that the oracle must drop — same projection as the hydrate
+ * oracle's `:2969-2970`). `sqlCount` in the verdict is `currRows.length`
+ * (the post-snapshot main-table row count — matches the hydrate oracle's
+ * `sqlByPK.size`).
+ */
+export function compareAdvanceDeltaToSqlDelta(
+  table: string,
+  pk: readonly string[],
+  zqlColumns: readonly string[],
+  prevRows: Record<string, unknown>[],
+  currRows: Record<string, unknown>[],
+  goChanges: RowChange[],
+): AdvanceSqlOracleVerdict {
+  const pkOf = (row: Record<string, unknown>): string => {
+    const rowKey: Record<string, unknown> = {};
+    for (const col of pk) rowKey[col] = row[col];
+    return stableStringify(rowKey);
+  };
+
+  const prevByPK = new Map<string, Record<string, unknown>>();
+  for (const row of prevRows) prevByPK.set(pkOf(row), row);
+  const currByPK = new Map<string, Record<string, unknown>>();
+  for (const row of currRows) currByPK.set(pkOf(row), row);
+
+  // Derive the EXPECTED delta from prev→curr. A row in curr not in prev is an
+  // ADD; a row in prev not in curr is a REMOVE; a row in both whose content
+  // differs is an EDIT. StableStringify (deep-sorted keys) for content
+  // comparison matches #sqlGroundTruthCompare's :2971-2972.
+  type ExpectedEntry = {type: 'add' | 'remove' | 'edit'; pk: string; rowStr: string};
+  const expected = new Map<string, ExpectedEntry>(); // pk → entry
+  for (const [pkKey, currRow] of currByPK) {
+    const prevRow = prevByPK.get(pkKey);
+    if (!prevRow) {
+      expected.set(pkKey, {type: 'add', pk: pkKey, rowStr: stableStringify(currRow)});
+    } else {
+      const prevStr = stableStringify(prevRow);
+      const currStr = stableStringify(currRow);
+      if (prevStr !== currStr) {
+        expected.set(pkKey, {type: 'edit', pk: pkKey, rowStr: currStr});
+      }
+      // else: unchanged — no delta, not in `expected`.
+    }
+  }
+  for (const [pkKey] of prevByPK) {
+    if (!currByPK.has(pkKey)) {
+      expected.set(pkKey, {type: 'remove', pk: pkKey, rowStr: ''});
+    }
+  }
+
+  // Go's RowChange.type → the expected map's stringified type. ChangeType.ADD
+  // = 0, REMOVE = 1, EDIT = 2 (CHILD = 3 extends ChangeType but advances
+  // never emit CHILD for the main table; the spec filter + c.table === ast.table
+  // already excludes fan-out children, and a CHILD here would be an oracle
+  // miss, not a drift we can adjudicate → null → treated as go-vs-sql-drift.)
+  const goTypeStr = (t: number): 'add' | 'remove' | 'edit' | null => {
+    switch (t) {
+      case ChangeType.ADD:
+        return 'add';
+      case ChangeType.REMOVE:
+        return 'remove';
+      case ChangeType.EDIT:
+        return 'edit';
+      default:
+        return null;
+    }
+  };
+
+  const goByPK = new Map<string, {type: 'add' | 'remove' | 'edit' | null; rowStr: string}>();
+  for (const c of goChanges) {
+    if (c.table !== table) continue;
+    const pkKey = stableStringify(c.rowKey);
+    const goRowProjected: Record<string, unknown> = {};
+    for (const col of zqlColumns) goRowProjected[col] = c.row[col];
+    goByPK.set(pkKey, {
+      type: goTypeStr(c.type),
+      rowStr: c.type === ChangeType.REMOVE ? '' : stableStringify(goRowProjected),
+    });
+  }
+
+  // If Go has NO main-table changes for this query AND the expected delta is
+  // empty, the divergence lives entirely off-table (fan-out) — oracle-blind.
+  // (Only reached when bagsDiffer already held in #shadowCompare, so an
+  // all-empty main-table is oracle-blind, not a true `confirmed`.)
+  const sqlCount = currByPK.size;
+  if (goByPK.size === 0 && expected.size === 0) {
+    return {kind: 'oracle-blind', sqlCount};
+  }
+
+  // Set + type + content compare: every expected entry must be matched by a
+  // Go entry of the same type+content, and vice versa.
+  const goOnly: string[] = [];
+  const sqlOnly: string[] = [];
+  const contentMismatches: {pk: string; sqlRow: string; goRow: string}[] = [];
+
+  for (const [pkKey, exp] of expected) {
+    const go = goByPK.get(pkKey);
+    if (!go) {
+      sqlOnly.push(pkKey); // SQL expects a delta here, Go emitted none.
+      continue;
+    }
+    if (go.type !== exp.type) {
+      // Same PK, different op kind (e.g. SQL says edit, Go says add) — a real
+      // divergence on the main table.
+      contentMismatches.push({
+        pk: pkKey,
+        sqlRow: `${exp.type}:${exp.rowStr}`,
+        goRow: `${go.type}:${go.rowStr}`,
+      });
+      continue;
+    }
+    if (exp.type !== 'remove' && go.rowStr !== exp.rowStr) {
+      contentMismatches.push({pk: pkKey, sqlRow: exp.rowStr, goRow: go.rowStr});
+    }
+  }
+  for (const [pkKey] of goByPK) {
+    if (!expected.has(pkKey)) goOnly.push(pkKey); // Go emitted a delta SQL doesn't expect.
+  }
+
+  if (goOnly.length > 0 || sqlOnly.length > 0) {
+    return {kind: 'go-vs-sql-drift', sqlCount, goOnly, sqlOnly};
+  }
+  if (contentMismatches.length > 0) {
+    return {kind: 'go-vs-sql-content-drift', sqlCount, contentMismatches};
+  }
+  return {kind: 'confirmed', sqlCount};
+}
+
 export type RowAdd = RowOp<ChangeType.ADD>;
 
 export type RowRemove = RowOp<ChangeType.REMOVE>;
@@ -900,6 +1155,17 @@ export class PipelineDriver {
     'ivm.shadow-advance-frame-skew',
     'Shadow advance set-diffs suppressed as benign cross-batch frame-skew',
   );
+  // Cross-batch (empty-side) frame-skew: the adjacent-batch variant where one
+  // engine's side of an advance batch is empty and the rows appear on the
+  // other engine in the poke-paired neighbor batch. Counted separately so the
+  // empty-side suppression rate is observable independently of the
+  // both-sides-exclusive case above (the two are different shapes of the same
+  // underlying WAL frame-skew, but only the empty-side one was uncaught before).
+  readonly #shadowAdvanceFrameSkewCrossBatch = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-advance-frame-skew-cross-batch',
+    'Shadow advance empty-side set-diffs suppressed as benign cross-batch frame-skew',
+  );
   // A shadow MISMATCH the SQL oracle attributed to TS (Go matched SQL). TS is
   // NOT always right — it has known IVM pagination-boundary bugs — so without
   // this, a TS bug is mislabeled as a Go drift. Demoted to info, not a Go fault.
@@ -926,6 +1192,20 @@ export class PipelineDriver {
     'ivm.shadow-sql-unreliable',
     'Shadow MISMATCHes the SQL oracle could not adjudicate (unbuildable SQL)',
   );
+  // The advance path's SQL ground-truth oracle (#sqlGroundTruthAdvanceCompare)
+  // was actually run — i.e. a diverged advance per-queryID had a recoverable
+  // AST + a live SnapshotDiff, so we could re-query prev/curr to derive the
+  // expected delta and adjudicate. Counted separately from the hydrate oracle
+  // runs so advance-oracle coverage is observable on its own; the verdict
+  // breakdown (confirmed / go-vs-sql-drift / oracle-blind / skipped) flows
+  // through the SAME counters as the hydrate oracle (#shadowTsOnlyDivergences,
+  // #shadowConfirmedGoDrift, #shadowSqlUnreliable), reusing the existing
+  // classification — this counter is purely "the advance oracle fired".
+  readonly #shadowAdvanceSqlOracleRuns = getOrCreateCounter(
+    'sync',
+    'ivm.shadow-advance-sql-oracle-runs',
+    'Shadow advance per-queryID divergences the SQL ground-truth oracle adjudicated',
+  );
   // Incremental-path divergence: Go's accumulated advance deltas for a query
   // disagree with a fresh SQL re-hydrate of the same query — i.e. some advance
   // emitted a wrong delta even though a full re-materialization would be right.
@@ -935,6 +1215,18 @@ export class PipelineDriver {
     'sync',
     'ivm.drift-audit-incremental-mismatches',
     'Go advance-delta accumulation vs SQL re-hydrate divergences',
+  );
+  // #4b: a same-PK content drift that persists between audit cycles with stable
+  // membership — the gap the PK-set-only accumulator missed. Surfaced by the
+  // content-aware reconcile (same PK, differing stored content vs the fresh
+  // hydrate row). The per-batch #shadowCompare catches content drift WITHIN an
+  // advance; this catches it ACROSS the audit-cycle boundary when no ADD/REMOVE
+  // touched the PK (so membership stayed stable and the old accumulator saw no
+  // change). Defense-in-depth; cheap (the accumulator already stores the row).
+  readonly #driftAuditIncrementalContentMismatches = getOrCreateCounter(
+    'sync',
+    'ivm.drift-audit-incremental-content-mismatches',
+    'Go advance-delta same-PK content drift across audit cycles (between-cycle window)',
   );
   readonly #driftAuditRuns = getOrCreateCounter(
     'sync',
@@ -1084,16 +1376,40 @@ export class PipelineDriver {
   #driftAuditCursor = 0;
 
   // Incremental-correctness accumulator (item #2). Per queryID, the main-table
-  // PK set as built by APPLYING Go's emitted advance deltas (add→insert,
-  // remove→delete, edit→no-op on PK membership). Seeded from each drift audit's
-  // SQL hydrate, then reconciled against the next SQL hydrate of the same query
-  // — so a wrong advance delta surfaces even when a full re-hydrate is correct.
+  // state as built by APPLYING Go's emitted advance deltas: a Map from PK →
+  // `stableStringify(projectedRow)` (the projected row content, schema columns
+  // only — same projection as the SQL oracle). ADD inserts, REMOVE deletes,
+  // EDIT updates the stored content. Seeded from each drift audit's SQL hydrate,
+  // then reconciled against the next SQL hydrate of the same query — so a wrong
+  // advance delta surfaces even when a full re-hydrate is correct, AND (since
+  // #4b stores content, not just PK membership) a same-PK content drift that
+  // persists between audit cycles with stable membership is caught too — closing
+  // the window the PK-set-only accumulator missed (#shadowCompare already
+  // catches content drift per-batch; this catches the between-cycle case).
   // Self-healing: re-seeded every audit cycle, so any false desync clears in one
   // cycle. `#goDeltaAccumDirty` marks queries whose stream was interrupted
   // (reset / dropped advance / eviction) so the incremental check is skipped
-  // until the next clean seed.
-  readonly #goDeltaAccum = new Map<string, Set<string>>();
+  // until the next clean seed. Each query's Map is capped at
+  // SQL_ORACLE_ROW_CAP entries with LRU eviction (dirty-on-evict: evicting a
+  // row we can no longer reconcile taints the query so the next audit re-seeds
+  // cleanly rather than reconciling against a truncated accumulator).
+  readonly #goDeltaAccum = new Map<string, Map<string, string>>();
   readonly #goDeltaAccumDirty = new Set<string>();
+
+  // 1-deep rolling buffer of the prior advance batch's (ts, go) changes for
+  // cross-batch frame-skew suppression (isAdvanceFrameSkewCrossBatch). Only the
+  // immediately-adjacent batch is kept on purpose: a stale match from two
+  // batches back must not trigger suppression (a real drop that re-emits later
+  // would otherwise be silenced). Overwritten each advance so it never grows.
+  #advanceFrameSkewNeighbor: {ts: RowChange[]; go: RowChange[]} | null = null;
+
+  // #2: divergence-capture rate cap. Map from capture-key (operation+queryID+
+  // drift-kind) → last-fire timestamp (ms). One capture per key per minute —
+  // VACUUM INTO copies the whole replica on the divergence hot path, so even
+  // with the config gate ON we bound the cost under a sustained divergence
+  // storm. Patterned on #driftAuditInFlight (collapses overlapping work) +
+  // the drift-audit heartbeat rate-limit (#driftAuditLastHeartbeatMs).
+  readonly #divergenceCaptureLastFire = new Map<string, number>();
 
   // Schema-type coverage (item #5): the set of column pgTypes that audited
   // queries have actually SORTED by and FILTERED on. A comparator bug for one
@@ -2463,23 +2779,56 @@ export class PipelineDriver {
       }
 
       // Item #2: reconcile Go's ACCUMULATED advance deltas against this fresh
-      // full hydrate (goRemapped is all-ADD, so its main-table PK set is Go's
-      // current full materialization). A divergence means some advance emitted
-      // a wrong delta that a from-scratch re-hydrate masks — the incremental
-      // operator path disagreeing with the hydrate path. The existing SQL check
-      // separately ties this hydrate to ground truth, so accum==hydrate==SQL
-      // gives accum==SQL transitively. Skip when tainted; always RE-SEED after.
+      // full hydrate (goRemapped is all-ADD, so its main-table PK→content map is
+      // Go's current full materialization). A divergence means some advance
+      // emitted a wrong delta that a from-scratch re-hydrate masks — the
+      // incremental operator path disagreeing with the hydrate path. The existing
+      // SQL check separately ties this hydrate to ground truth, so
+      // accum==hydrate==SQL gives accum==SQL transitively. Skip when tainted;
+      // always RE-SEED after.
+      //
+      // #4b: the accumulator stores CONTENT (PK→projected row), not just PK
+      // membership, so the reconcile diffs BOTH — `accumOnly`/`hydrateOnly`
+      // (membership, the original item-#2 check) AND `contentMismatch` (same PK,
+      // differing stored content vs the fresh hydrate row). The content check
+      // closes the between-cycle window: a same-PK content drift that persists
+      // across audit cycles with no ADD/REMOVE touching the PK kept stable
+      // membership in the old PK-set accumulator and slipped through; #shadowCompare
+      // catches content drift per-batch but only WITHIN an advance.
       {
-        const goHydratePks = new Set<string>();
+        const spec = this.#tableSpecs.get(ast.table);
+        // Seed: PK → projected row content (schema columns only, matching the
+        // accumulator's #accumulateGoDelta projection).
+        const goHydrateByPK = new Map<string, string>();
         for (const c of goRemapped) {
-          if (c.table === ast.table) goHydratePks.add(stableStringify(c.rowKey));
+          if (c.table !== ast.table) continue;
+          const pk = stableStringify(c.rowKey);
+          let rowStr: string;
+          if (spec) {
+            const projected: Record<string, unknown> = {};
+            for (const col of Object.keys(spec.zqlSpec)) projected[col] = c.row[col];
+            rowStr = stableStringify(projected);
+          } else {
+            rowStr = stableStringify(c.row);
+          }
+          goHydrateByPK.set(pk, rowStr);
         }
         const accum = this.#goDeltaAccum.get(targetID);
         if (accum && !this.#goDeltaAccumDirty.has(targetID)) {
           const accumOnly: string[] = [];
           const hydrateOnly: string[] = [];
-          for (const k of accum) if (!goHydratePks.has(k)) accumOnly.push(k);
-          for (const k of goHydratePks) if (!accum.has(k)) hydrateOnly.push(k);
+          const contentMismatch: {pk: string; accum: string; hydrate: string}[] = [];
+          for (const [k, accumRow] of accum) {
+            const hydrateRow = goHydrateByPK.get(k);
+            if (hydrateRow === undefined) {
+              accumOnly.push(k);
+            } else if (hydrateRow !== accumRow) {
+              // Same PK, differing content — the between-cycle content drift
+              // the PK-set-only accumulator missed (#4b).
+              contentMismatch.push({pk: k, accum: accumRow, hydrate: hydrateRow});
+            }
+          }
+          for (const k of goHydrateByPK.keys()) if (!accum.has(k)) hydrateOnly.push(k);
           if (accumOnly.length > 0 || hydrateOnly.length > 0) {
             this.#driftAuditIncrementalMismatches.add(1);
             this.#lc.error?.(
@@ -2490,8 +2839,21 @@ export class PipelineDriver {
                 `version=${versionAfter} ast=${JSON.stringify(ast)}`,
             );
           }
+          if (contentMismatch.length > 0) {
+            this.#driftAuditIncrementalContentMismatches.add(contentMismatch.length);
+            const sample = contentMismatch
+              .slice(0, 3)
+              .map(m => `pk=${m.pk.slice(0, 40)}`)
+              .join(' ; ');
+            this.#lc.error?.(
+              `[drift-audit][incremental-content] ${targetID}: REAL DRIFT — Go ` +
+                `advance-delta accumulated content diverged from a fresh hydrate on ` +
+                `${contentMismatch.length} same-PK row(s) (${sample}) — between-cycle ` +
+                `content drift with stable membership; version=${versionAfter}`,
+            );
+          }
         }
-        this.#goDeltaAccum.set(targetID, goHydratePks);
+        this.#goDeltaAccum.set(targetID, goHydrateByPK);
         this.#goDeltaAccumDirty.delete(targetID);
       }
 
@@ -2919,6 +3281,113 @@ export class PipelineDriver {
     }
 
     return {kind: 'confirmed', sqlCount: sqlByPK.size};
+  }
+
+  /**
+   * SQL ground-truth oracle for the ADVANCE path — the delta-derived analog of
+   * {@link #sqlGroundTruthCompare}. The hydrate oracle compares Go's point-in-
+   * time materialization to a single SQL SELECT on the replica; the advance
+   * path compares a DELTA (Go's emitted RowChange[] for one advance) to the
+   * SQL-derived delta between the snapshotter's `prev` and `curr` snapshots
+   * (both pinned via BEGIN CONCURRENT and live through #shadowAdvance — see
+   * snapshotter.ts:177, valid "until the next call to advance()").
+   *
+   * For one query (caller groups Go's advance changes by queryID and looks up
+   * the AST via #pipelines), this:
+   *   1. buildAuditSQL(ast) → flat SELECT (reused unchanged — handles EXISTS).
+   *   2. Runs it on BOTH prevDb and currDb (streamed + SQL_ORACLE_ROW_CAP).
+   *   3. Normalizes via fromSQLiteTypes, builds prevByPK / currByPK.
+   *   4. Derives the expected delta: curr\prev → ADD, prev\curr → REMOVE,
+   *      intersect → content-diff → EDIT.
+   *   5. Compares to Go's main-table changes for this query (filter
+   *      c.table === ast.table, same as #sqlGroundTruthCompare :2914).
+   *
+   * Returns the SAME verdict shape as #sqlGroundTruthCompare so the existing
+   * classify logic (ts-only / oracle-blind / go-vs-sql-drift / skipped) in
+   * #shadowCompare's advance branch reuses it verbatim. Order is MEANINGLESS
+   * for a delta bag (a RowChange[] is not a result sequence — ADD/EDIT/REMOVE
+   * is a set), so unlike the hydrate oracle this skips the ORDER stage; the
+   * advance op-kind check at :~4514 already catches edit-vs-add+remove wire
+   * differences separately. MAIN-TABLE-ONLY caveat is inherited from the
+   * hydrate oracle (buildAuditSQL returns outer-table rows only); the
+   * `oracle-blind` fall-through handles off-table (fan-out) divergences.
+   */
+  #sqlGroundTruthAdvanceCompare(
+    ast: AST,
+    prevDb: StatementRunner,
+    currDb: StatementRunner,
+    goChanges: RowChange[],
+  ): AdvanceSqlOracleVerdict {
+    if (!goDriftAuditSqlGroundTruth(this.#config)) {
+      return {kind: 'skipped', reason: 'disabled'};
+    }
+    const spec = this.#tableSpecs.get(ast.table);
+    if (!spec) return {kind: 'skipped', reason: 'no-table-spec'};
+
+    // Same buildAuditSQL path as the hydrate oracle.
+    let text: string;
+    let values: unknown[];
+    try {
+      const result = buildAuditSQL(ast, this.#tableSpecs);
+      text = result.text;
+      values = result.values;
+    } catch (e) {
+      return {kind: 'skipped', reason: `build-sql-failed: ${String(e)}`};
+    }
+
+    // Stream rows from BOTH endpoints with the same cap + early-return guard
+    // as the hydrate oracle (:2872-2888). prevDb/currDb are pinned BEGIN
+    // CONCURRENT handles (snapshotter.ts:248) — readable concurrently with
+    // the advance that produced them.
+    const queryRows = (db: StatementRunner): {
+      rows: Record<string, unknown>[] | null;
+      reason?: string;
+    } => {
+      const rows: Record<string, unknown>[] = [];
+      try {
+        const stmt = db.db.prepare(text);
+        for (const row of stmt.iterate(...values)) {
+          if (rows.length >= SQL_ORACLE_ROW_CAP) {
+            return {rows: null, reason: `row-cap-exceeded: >${SQL_ORACLE_ROW_CAP} rows`};
+          }
+          rows.push(row as Record<string, unknown>);
+        }
+      } catch (e) {
+        return {rows: null, reason: `sql-exec-failed: ${String(e)}`};
+      }
+      return {rows};
+    };
+
+    const prevQ = queryRows(prevDb);
+    if (prevQ.rows === null) return {kind: 'skipped', reason: `prev: ${prevQ.reason}`};
+    const currQ = queryRows(currDb);
+    if (currQ.rows === null) return {kind: 'skipped', reason: `curr: ${currQ.reason}`};
+
+    // Normalize to Go's row encoding shape (BigInt→Number, JSON parse, etc.).
+    let prevRows: Record<string, unknown>[];
+    let currRows: Record<string, unknown>[];
+    try {
+      prevRows = prevQ.rows.map(
+        row => fromSQLiteTypes(spec.zqlSpec, row as Row, ast.table) as Record<string, unknown>,
+      );
+      currRows = currQ.rows.map(
+        row => fromSQLiteTypes(spec.zqlSpec, row as Row, ast.table) as Record<string, unknown>,
+      );
+    } catch (e) {
+      return {kind: 'skipped', reason: `normalize-failed: ${String(e)}`};
+    }
+
+    // Delegate the delta-derivation + comparison to the exported pure core
+    // (unit-tested directly via compareAdvanceDeltaToSqlDelta). The wrapper
+    // above owns the SQL I/O + normalization; this owns the verdict logic.
+    return compareAdvanceDeltaToSqlDelta(
+      ast.table,
+      spec.tableSpec.primaryKey,
+      Object.keys(spec.zqlSpec),
+      prevRows,
+      currRows,
+      goChanges,
+    );
   }
 
   *#addQueryImpl(
@@ -4030,10 +4499,18 @@ export class PipelineDriver {
     // throw on malformed row data; must not kill the advance pipeline when
     // both TS and Go results are already computed and ready to yield.
     try {
-      this.#shadowCompare('advance', version, tsChangesForCompare, goResults);
+      this.#shadowCompare('advance', version, tsChangesForCompare, goResults, undefined, diff);
     } catch (e) {
       this.#lc.error?.(`[shadow] advance compare threw: ${e}`);
     }
+
+    // Roll the 1-deep neighbor buffer: this advance's compare-filtered changes
+    // become the NEXT advance's neighbor for isAdvanceFrameSkewCrossBatch.
+    // Kept 1-deep (overwrite, no append) so a stale match from >1 batch back
+    // can never trigger suppression. Internal-query events are already filtered
+    // out of both sides (tsChangesForCompare / goResults are what the classifier
+    // saw), keeping the neighbor consistent with the compare's view.
+    this.#advanceFrameSkewNeighbor = {ts: tsChangesForCompare, go: goResults};
 
     // Item #2: fold Go's emitted advance deltas into the per-query incremental
     // accumulator so the next drift audit can reconcile the accumulated stream
@@ -4078,6 +4555,110 @@ export class PipelineDriver {
   }
 
   /**
+   * #2: capture a divergence to disk for offline replay. Gated by
+   * `goSidecar.divergenceCaptureDir` (off by default) and rate-capped at one
+   * capture per (operation+queryID+kind) per minute. Writes:
+   *   <dir>/<timestamp>_<op>_<queryID>_<kind>_<hash>.db  — VACUUM INTO copy of
+   *     the snapshotter's CURRENT replica (the post state; for advance the
+   *     caller also passes `diff` so prev/curr are both available offline).
+   *   <dir>/<...>.json — {ast, queryID, operation, kind, tsChanges, goChanges,
+   *     sqlVerdict, stateVersion}.
+   *
+   * MUST be called BEFORE the divergence branch returns, while the snapshotter's
+   * prev/curr are still live (snapshotter only advances on the next advance()).
+   * Best-effort: any I/O error is logged + swallowed — capture must never kill
+   * the compare or affect the returned (TS) results. The fire-and-forget writes
+   * are NOT awaited on the compare hot path (the JSON write is a microtask; the
+   * VACUUM INTO is synchronous against the replica but non-blocking to readers).
+   */
+  #captureDivergence(
+    kind: string,
+    operation: string,
+    context: string,
+    ast: AST | undefined,
+    tsChanges: RowChange[],
+    goChanges: RowChange[],
+    sqlVerdict: unknown,
+    diff: SnapshotDiff | undefined,
+  ): void {
+    const dir = goDivergenceCaptureDir(this.#config);
+    if (!dir) return; // capture off (default).
+    // Rate cap: one per (op+queryID+kind) per minute. Under a divergence storm
+    // VACUUM INTO would copy the whole DB on every MISMATCH; this bounds it.
+    const capKey = `${operation}|${context}|${kind}`;
+    const now = Date.now();
+    const last = this.#divergenceCaptureLastFire.get(capKey) ?? 0;
+    if (now - last < 60_000) return;
+    this.#divergenceCaptureLastFire.set(capKey, now);
+
+    // Best-effort: a thrown error here must not escape into the compare.
+    try {
+      // The snapshot to freeze: for advance, `diff.curr` is the post-advance
+      // snapshot (prev is `diff.prev`); for hydrate/drift-audit, the
+      // snapshotter's current snapshot is the right post state. Both expose
+      // `.db` (StatementRunner) and `.version`.
+      const snap = diff?.curr ?? this.#snapshotter.current();
+      const stateVersion = snap.version;
+      // Hash the inputs for a short, collision-likely-unique filename. Use the
+      // normalized lengths + a sample of row keys (NOT the full content — PII).
+      const tsSample = tsChanges.slice(0, 3).map(c => `${c.table}:${stableStringify(c.rowKey)}`).join(',');
+      const goSample = goChanges.slice(0, 3).map(c => `${c.table}:${stableStringify(c.rowKey)}`).join(',');
+      const hash = (str: string): string => {
+        let h = 0;
+        for (let i = 0; i < str.length; i++) {
+          h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
+        }
+        return (h >>> 0).toString(36);
+      };
+      const fileHash = hash(`${operation}|${context}|${stateVersion}|${tsChanges.length}|${goChanges.length}|${tsSample}|${goSample}`);
+      const safeContext = context.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32);
+      const safeKind = kind.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 32);
+      const base = `${now.toString(36)}_${operation}_${safeContext}_${safeKind}_${fileHash}`;
+      const dbPath = join(dir, `${base}.db`);
+      const jsonPath = join(dir, `${base}.json`);
+
+      // VACUUM INTO freezes a point-in-time copy. Non-blocking to readers of
+      // the source replica. Synchronous but bounded by DB size — the rate cap
+      // + off-by-default gate contain it.
+      snap.db.db.prepare(`VACUUM INTO ?`).run(dbPath);
+
+      // Fire-and-forget the JSON write (do NOT block the compare on disk I/O).
+      // The metadata carries everything the offline oracle + Go harness need to
+      // replay: the AST (JSON-serializable), both sides' changes, the SQL
+      // verdict, and the state version. For advance, `diff.prev.version` /
+      // `diff.curr.version` give both endpoints; the .db above is the post copy.
+      void (async () => {
+        try {
+          await mkdir(dir, {recursive: true});
+          const payload = {
+            ast,
+            queryID: context,
+            operation,
+            kind,
+            tsChanges,
+            goChanges,
+            sqlVerdict,
+            stateVersion,
+            prevVersion: diff?.prev.version,
+            currVersion: diff?.curr.version,
+            snapshotFile: `${base}.db`,
+            capturedAt: new Date(now).toISOString(),
+          };
+          await writeFile(jsonPath, JSON.stringify(payload));
+        } catch (e) {
+          this.#lc.warn?.(`[divergence-capture] json write failed for ${base}: ${String(e)}`);
+        }
+      })();
+      this.#lc.info?.(
+        `[divergence-capture] captured ${kind} (${operation} ${context}) ` +
+          `→ ${base}.{db,json} (stateVersion=${stateVersion})`,
+      );
+    } catch (e) {
+      this.#lc.warn?.(`[divergence-capture] failed (${operation} ${context} ${kind}): ${String(e)}`);
+    }
+  }
+
+  /**
    * Compare TS and Go results for shadow mode.
    * Normalizes ordering (sort by queryID + table + rowKey) since
    * Go may process pipelines in different order than TS.
@@ -4092,6 +4673,13 @@ export class PipelineDriver {
     // doesn't depend on `context` being registered in #pipelines yet (it may
     // not be at hydrate time). Falls back to the #pipelines lookup.
     ast?: AST | undefined,
+    // Optional SnapshotDiff — supplied ONLY by the advance caller
+    // (#shadowAdvance). Carries the pinned prev/curr StatementRunners the
+    // advance SQL oracle (#sqlGroundTruthAdvanceCompare) re-queries to derive
+    // the expected delta. The hydrate/drift-audit callers pass nothing — the
+    // advance oracle is gated on `diff` being present AND `operation === 'advance'`,
+    // so this stays a pure additive param for the non-advance paths.
+    diff?: SnapshotDiff | undefined,
   ): void {
     const normalize = (changes: RowChange[]) =>
       changes
@@ -4176,6 +4764,37 @@ export class PipelineDriver {
       return;
     }
 
+    // Cross-batch frame-skew, EMPTY-SIDE variant (advance path only). The
+    // intra-frame classifier above requires BOTH sides to carry exclusive rows
+    // (:4271-4274), so a one-sided batch (one engine empty) falls through as a
+    // raw MISMATCH. But the same WAL frame-skew can put ALL of a logical change
+    // in one engine's batch here and NONE in the other's, with the missing rows
+    // appearing on the OTHER engine in the adjacent advance batch (live-proven
+    // 2026-06-22: frames 81b3tyfhi0 / 81b3tyh9ug, byte-identical rows). The
+    // 1-deep neighbor buffer (#advanceFrameSkewNeighbor, updated at the end of
+    // each #shadowAdvance) supplies that adjacent batch; the classifier
+    // suppresses ONLY when the non-empty side's rows appear byte-identical on
+    // the opposite engine in the neighbor (full RowChange content equality — a
+    // same-PK different-content neighbor row is NOT a match, so a real drop is
+    // kept). See isAdvanceFrameSkewCrossBatch for the invariants.
+    if (
+      bagsDiffer &&
+      operation === 'advance' &&
+      isAdvanceFrameSkewCrossBatch(
+        tsChanges,
+        goChanges,
+        this.#advanceFrameSkewNeighbor,
+      )
+    ) {
+      this.#shadowAdvanceFrameSkewCrossBatch.add(1);
+      this.#lc.debug?.(
+        `[shadow] advance-frame-skew-cross-batch (${operation} ${context}): ` +
+          `benign empty-side cross-batch frame-skew split — suppressed ` +
+          `(ts=${tsNorm.length} go=${goNorm.length})`,
+      );
+      return;
+    }
+
     // SQL ground-truth CLASSIFIER. A bare TS-vs-Go MISMATCH is ambiguous: TS is
     // NOT axiomatically the oracle — it can be the wrong side (suspected IVM
     // pagination-boundary divergences, e.g. the conversations boundary-drop;
@@ -4238,6 +4857,16 @@ export class PipelineDriver {
                 `ts=${tsVerdict.kind}, ts=${tsNorm.length} go=${goNorm.length} ` +
                 `sql=${verdict.sqlCount}) — NOT a Go drift`,
             );
+            this.#captureDivergence(
+              'ts-only',
+              operation,
+              context,
+              classifyAst,
+              tsChanges,
+              goChanges,
+              {go: verdict, ts: tsVerdict},
+              diff,
+            );
             return;
           }
         } else if (verdict.kind === 'skipped') {
@@ -4291,6 +4920,16 @@ export class PipelineDriver {
                 `with SQL while TS matches it (${verdict.kind}, ts=${tsNorm.length} ` +
                 `go=${goNorm.length} sql=${verdict.sqlCount}) — detail below`,
             );
+            this.#captureDivergence(
+              'go-vs-sql-drift',
+              operation,
+              context,
+              classifyAst,
+              tsChanges,
+              goChanges,
+              {go: verdict, ts: tsVerdict},
+              diff,
+            );
           } else {
             // The SQL oracle disagrees with BOTH engines (or can't adjudicate
             // TS). That's an oracle/audit-SQL divergence, not a confirmed Go
@@ -4308,12 +4947,226 @@ export class PipelineDriver {
       }
     }
 
+    // SQL ground-truth oracle for the ADVANCE path (#1). The hydrate block
+    // above adjudicates a SINGLE query whose AST is in scope; an advance has
+    // no single AST — it carries changes for MANY queryIDs at once. So we
+    // group the diverged changes by queryID, look up each query's AST via
+    // #pipelines, and run #sqlGroundTruthAdvanceCompare (which re-queries the
+    // snapshotter's pinned prev/curr to derive the expected delta per query)
+    // — one per diverged queryID that has a recoverable AST.
+    //
+    // Reuses the SAME verdict-classification shape as the hydrate oracle
+    // (confirmed / go-vs-sql-drift / oracle-blind / skipped), and the SAME
+    // counters (#shadowTsOnlyDivergences, #shadowConfirmedGoDrift,
+    // #shadowSqlUnreliable) so advance + hydrate drift rates aggregate
+    // naturally. The advance path's verdict has no `go-vs-sql-tie-window` (a
+    // delta has no LIMIT window) and adds `oracle-blind` (the divergence is
+    // entirely off-table fan-out for this queryID). The TS-vs-SQL cross-check
+    // is symmetric with hydrate: Go confirmed alone is not a TS fault (the
+    // gap may be fan-out the oracle can't see), so we re-query TS against the
+    // same derived delta before demoting to ts-only.
+    //
+    // Gating: runs ONLY when (a) bagsDiffer, (b) operation === 'advance',
+    // (c) `diff` is present (only #shadowAdvance passes it — hydrate/drift-
+    // audit callers don't), and (d) at least one diverged queryID has a
+    // registered AST. Zero cost on matching advances (bagsDiffer short-
+    // circuits). 2 SQL re-queries (prev + curr) per diverged queryID.
+    if (bagsDiffer && operation === 'advance' && diff) {
+      // Partition the diverged changes by queryID on BOTH sides so we can
+      // cross-check TS against the same derived delta before attributing.
+      const byQueryID = (changes: RowChange[]): Map<string, RowChange[]> => {
+        const m = new Map<string, RowChange[]>();
+        for (const c of changes) {
+          let bucket = m.get(c.queryID);
+          if (!bucket) {
+            bucket = [];
+            m.set(c.queryID, bucket);
+          }
+          bucket.push(c);
+        }
+        return m;
+      };
+      const goByQuery = byQueryID(goChanges);
+      // Only queryIDs that actually diverge warrant an oracle run. A queryID
+      // present on only one side, or present on both with differing content,
+      // is diverged; a queryID whose TS+Go changes are byte-identical is not.
+      const tsByQuery = byQueryID(tsChanges);
+      const divergedIDs = new Set<string>();
+      const allIDs = new Set<string>([...goByQuery.keys(), ...tsByQuery.keys()]);
+      for (const id of allIDs) {
+        const tsQ = tsByQuery.get(id) ?? [];
+        const goQ = goByQuery.get(id) ?? [];
+        if (tsQ.length !== goQ.length) {
+          divergedIDs.add(id);
+          continue;
+        }
+        // Same-length: compare as sorted strings (cheap; reuse the normalize
+        // shape — type/queryID/table/rowKey/row). A divergence on any row
+        // marks this queryID diverged.
+        const sig = (arr: RowChange[]) =>
+          arr
+            .map(c =>
+              stableStringify({
+                type: c.type,
+                table: c.table,
+                rowKey: c.rowKey,
+                row: c.row,
+              }),
+            )
+            .sort();
+        const tsSig = sig(tsQ);
+        const goSig = sig(goQ);
+        if (tsSig.some((s, i) => s !== goSig[i])) divergedIDs.add(id);
+      }
+
+      for (const qid of divergedIDs) {
+        const pipeline = this.#pipelines.get(qid);
+        if (!pipeline?.transformedAst) continue;
+        this.#shadowAdvanceSqlOracleRuns.add(1);
+        const goQ = goByQuery.get(qid) ?? [];
+        const tsQ = tsByQuery.get(qid) ?? [];
+        let verdict;
+        try {
+          verdict = this.#sqlGroundTruthAdvanceCompare(
+            pipeline.transformedAst,
+            diff.prev.db,
+            diff.curr.db,
+            goQ,
+          );
+        } catch (e) {
+          // The oracle must never kill the advance compare — a thrown error
+          // (e.g. a stale db handle) degrades to oracle-blind / fall-through.
+          this.#shadowSqlUnreliable.add(1);
+          this.#lc.info?.(
+            `[shadow] advance-sql-oracle threw (${operation} ${qid}): ${String(e)} — ` +
+              `falling through to raw mismatch detail`,
+          );
+          continue;
+        }
+        if (verdict.kind === 'confirmed') {
+          // Go's main-table delta matches the SQL-derived delta. Before
+          // attributing to TS, cross-check TS against the same delta — the
+          // ts-vs-go gap for this queryID may be fan-out the oracle can't see.
+          let tsVerdict;
+          try {
+            tsVerdict = this.#sqlGroundTruthAdvanceCompare(
+              pipeline.transformedAst,
+              diff.prev.db,
+              diff.curr.db,
+              tsQ,
+            );
+          } catch {
+            tsVerdict = {kind: 'skipped' as const, reason: 'ts-oracle-threw'};
+          }
+          if (tsVerdict.kind === 'confirmed') {
+            // Both engines match SQL on the main table → divergence is off-
+            // table (fan-out); NOT attributable to TS. Fall through to raw
+            // mismatch detail so the off-table rows still surface.
+            this.#shadowSqlUnreliable.add(1);
+            this.#lc.info?.(
+              `[shadow] oracle-blind divergence (${operation} ${qid}): both ` +
+                `engines' deltas match SQL on the main table; ts-vs-go differs ` +
+                `off-table (go=${verdict.kind}, ts=${tsVerdict.kind}, ` +
+                `ts=${tsQ.length} go=${goQ.length} sql=${verdict.sqlCount}) — ` +
+                `NOT attributable to TS; raw detail below`,
+            );
+            // fall through (do NOT return).
+          } else {
+            // Go matches the SQL delta, TS does NOT → TS is the divergent side.
+            this.#shadowTsOnlyDivergences.add(1);
+            this.#lc.info?.(
+              `[shadow] ts-only divergence (${operation} ${qid}): Go delta ` +
+                `matches SQL, TS delta differs (go=${verdict.kind}, ` +
+                `ts=${tsVerdict.kind}, ts=${tsQ.length} go=${goQ.length} ` +
+                `sql=${verdict.sqlCount}) — NOT a Go drift`,
+            );
+            this.#captureDivergence(
+              'ts-only',
+              operation,
+              qid,
+              pipeline.transformedAst,
+              tsQ,
+              goQ,
+              {go: verdict, ts: tsVerdict},
+              diff,
+            );
+            return;
+          }
+        } else if (verdict.kind === 'oracle-blind') {
+          // This queryID's divergence is entirely off-table (no main-table
+          // delta on either side). Can't adjudicate; fall through to raw detail.
+          this.#shadowSqlUnreliable.add(1);
+          this.#lc.info?.(
+            `[shadow] oracle-blind divergence (${operation} ${qid}): no ` +
+              `main-table delta for this queryID (ts=${tsQ.length} go=${goQ.length} ` +
+              `sql=${verdict.sqlCount}) — divergence is off-table; raw detail below`,
+          );
+          // fall through.
+        } else if (verdict.kind === 'skipped') {
+          this.#shadowSqlUnreliable.add(1);
+          // fall through.
+        } else {
+          // go-vs-sql-drift or go-vs-sql-content-drift: Go's delta disagrees
+          // with SQL. Cross-check TS before convicting Go (symmetric with the
+          // hydrate branch) — if TS ALSO disagrees with SQL, it's an oracle/
+          // audit-SQL issue, not a lone Go fault.
+          let tsVerdict;
+          try {
+            tsVerdict = this.#sqlGroundTruthAdvanceCompare(
+              pipeline.transformedAst,
+              diff.prev.db,
+              diff.curr.db,
+              tsQ,
+            );
+          } catch {
+            tsVerdict = {kind: 'skipped' as const, reason: 'ts-oracle-threw'};
+          }
+          if (tsVerdict.kind === 'confirmed') {
+            this.#shadowConfirmedGoDrift.add(1);
+            this.#lc.error?.(
+              `[shadow] CONFIRMED Go drift (${operation} ${qid}): Go delta ` +
+                `disagrees with SQL while TS matches it (${verdict.kind}, ` +
+                `ts=${tsQ.length} go=${goQ.length} sql=${verdict.sqlCount}) — detail below`,
+            );
+            this.#captureDivergence(
+              'go-vs-sql-drift',
+              operation,
+              qid,
+              pipeline.transformedAst,
+              tsQ,
+              goQ,
+              {go: verdict, ts: tsVerdict},
+              diff,
+            );
+          } else {
+            this.#shadowSqlUnreliable.add(1);
+            this.#lc.info?.(
+              `[shadow] ts/sql-oracle-divergence (${operation} ${qid}): SQL ` +
+                `delta disagrees with BOTH engines (go=${verdict.kind}, ` +
+                `ts=${tsVerdict.kind}, ts=${tsQ.length} go=${goQ.length} ` +
+                `sql=${verdict.sqlCount}) — NOT a confirmed Go drift; raw detail below`,
+            );
+          }
+        }
+      }
+    }
+
     if (tsNorm.length !== goNorm.length) {
       this.#lc.error?.(
         `[shadow] MISMATCH in ${operation} (${context}): ` +
           `TS produced ${tsNorm.length} changes, Go produced ${goNorm.length} changes`,
       );
       this.#logShadowDiff(operation, context, tsNorm, goNorm);
+      this.#captureDivergence(
+        'raw-mismatch',
+        operation,
+        context,
+        ast ?? this.#pipelines.get(context)?.transformedAst,
+        tsChanges,
+        goChanges,
+        undefined,
+        diff,
+      );
       return;
     }
 
@@ -4356,7 +5209,19 @@ export class PipelineDriver {
           `(showed first ${MAX_MISMATCH_LOG})`,
       );
     }
-    if (mismatches > 0) return;
+    if (mismatches > 0) {
+      this.#captureDivergence(
+        'raw-mismatch',
+        operation,
+        context,
+        ast ?? this.#pipelines.get(context)?.transformedAst,
+        tsChanges,
+        goChanges,
+        undefined,
+        diff,
+      );
+      return;
+    }
 
     // Op-kind parity (item #3). The row compare above is order-blind and keyed
     // by (type,queryID,table,rowKey) — so a row TS emits as `edit` while Go
@@ -4428,23 +5293,60 @@ export class PipelineDriver {
 
   /**
    * Item #2 helper: apply Go's emitted advance deltas to the per-query
-   * incremental accumulator. Only MAIN-table membership is tracked (matching
+   * incremental accumulator. Tracks MAIN-table PK→projectedRow content (matching
    * buildAuditSQL's single-table oracle) and only for queries the audit has
    * already SEEDED (no entry ⇒ skip; the audit seeds from SQL). A dirty entry
    * (stream interrupted) is left untouched until the next clean reseed.
+   *
+   * #4b: ADD stores the projected row content (re-deleting + re-inserting the PK
+   * to move it to MRU for LRU recency), EDIT updates the stored content, REMOVE
+   * deletes. The Map is capped at {@link SQL_ORACLE_ROW_CAP} per query with LRU
+   * eviction — evicting the OLDEST entry on overflow taints the query (dirty-on-
+   * evict) so the next audit re-seeds cleanly rather than reconciling against a
+   * truncated accumulator (a truncated membership/content set would produce false
+   * `accumOnly` drift signals).
    */
   #accumulateGoDelta(goChanges: RowChange[]): void {
     for (const c of goChanges) {
       const qid = c.queryID;
-      const set = this.#goDeltaAccum.get(qid);
-      if (!set || this.#goDeltaAccumDirty.has(qid)) continue;
+      const map = this.#goDeltaAccum.get(qid);
+      if (!map || this.#goDeltaAccumDirty.has(qid)) continue;
       const entry = this.#pipelines.get(qid);
       if (!entry || c.table !== entry.transformedAst.table) continue;
       const pk = stableStringify(c.rowKey);
-      if (c.type === ChangeType.ADD) set.add(pk);
-      else if (c.type === ChangeType.REMOVE) set.delete(pk);
-      // EDIT: PK membership unchanged (content drift is caught by the audit's
-      // per-PK content compare, not the membership accumulator).
+      const spec = this.#tableSpecs.get(entry.transformedAst.table);
+      if (c.type === ChangeType.ADD || c.type === ChangeType.EDIT) {
+        // Project to schema columns (drop Go bookkeeping like _0_version) —
+        // same projection as the SQL oracle. REMOVE carries no row content.
+        let rowStr: string;
+        if (spec) {
+          const projected: Record<string, unknown> = {};
+          for (const col of Object.keys(spec.zqlSpec)) projected[col] = c.row[col];
+          rowStr = stableStringify(projected);
+        } else {
+          rowStr = stableStringify(c.row);
+        }
+        // LRU recency: re-insert at MRU. Map preserves insertion order, and
+        // delete-then-set moves an existing key to the end (newest).
+        map.delete(pk);
+        map.set(pk, rowStr);
+        // Cap with LRU eviction: evict the OLDEST entry on overflow.
+        if (map.size > SQL_ORACLE_ROW_CAP) {
+          // The first key is the least-recently-used.
+          const oldest = map.keys().next().value;
+          if (oldest !== undefined) {
+            map.delete(oldest);
+            // Dirty-on-evict: a truncated accumulator can't reconcile correctly
+            // (the evicted row would later appear as a spurious `accumOnly` or
+            // `contentMismatch`). Taint so the next audit re-seeds cleanly.
+            this.#goDeltaAccumDirty.add(qid);
+          }
+        }
+      } else if (c.type === ChangeType.REMOVE) {
+        map.delete(pk);
+      }
+      // CHILD: not a main-table delta; ignored (the c.table === ast.table guard
+      // already filters fan-out children, which carry the PARENT queryID).
     }
   }
 

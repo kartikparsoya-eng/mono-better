@@ -2,6 +2,7 @@ import {describe, expect, test} from 'vitest';
 import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
 import {
   isAdvanceFrameSkew,
+  isAdvanceFrameSkewCrossBatch,
   type RowChange,
 } from './pipeline-driver.ts';
 
@@ -123,13 +124,17 @@ describe('view-syncer/pipeline-driver: isAdvanceFrameSkew', () => {
     expect(isAdvanceFrameSkew(ts, go)).toBe(false);
   });
 
-  test('REAL: one side empty (pure drop/add) → kept', () => {
+  test('REAL: one side empty, no neighbor (pure drop/add) → kept', () => {
     // A clean partition requires BOTH sides to carry exclusive rows. An empty
     // other side is a pure drop (or pure add), not a split — could be a real
-    // row-drop, so keep it as a MISMATCH.
+    // row-drop, so keep it as a MISMATCH. The intra-frame classifier has no
+    // neighbor to consult, so this stays a MISMATCH. (The cross-batch
+    // classifier below handles the case WHERE a neighbor carries the match.)
     const ts = [add('cp', 'A'), add('cp', 'B')];
     const go: RowChange[] = [];
     expect(isAdvanceFrameSkew(ts, go)).toBe(false);
+    // And the cross-batch classifier with no neighbor also keeps it.
+    expect(isAdvanceFrameSkewCrossBatch(ts, go, null)).toBe(false);
   });
 
   test('REAL: duplicate tuple on one side (multiplicity divergence) → kept', () => {
@@ -157,5 +162,129 @@ describe('view-syncer/pipeline-driver: isAdvanceFrameSkew', () => {
   test('no divergence across mixed kinds (identical) → false', () => {
     const rows = [add('cp', 'A'), edit('cus', 'B', {v: 1}), remove('msg', 'C')];
     expect(isAdvanceFrameSkew(rows, rows)).toBe(false);
+  });
+});
+
+// isAdvanceFrameSkewCrossBatch closes the empty-side gap in isAdvanceFrameSkew.
+// The intra-frame classifier (above) only suppresses a CLEAN PARTITION where
+// BOTH sides carry exclusive rows — so a one-sided advance batch (one engine
+// empty, the other not) falls through as a raw MISMATCH. But the same WAL
+// frame-skew that produces a both-sides split can also place ALL of a logical
+// change in one engine's batch here and NONE in the other's, with the missing
+// rows appearing on the OTHER engine in the adjacent (poke-paired) advance
+// batch. Live-proven 2026-06-22: frames 81b3tyfhi0 (TS=1/Go=4) and 81b3tyh9ug
+// (TS=3/Go=0), byte-identical rows — the intra-frame classifier ran but the
+// empty-side guard blocked suppression. This classifier consults a 1-deep
+// neighbor buffer and suppresses ONLY when the non-empty side's rows appear
+// byte-identical on the OPPOSITE engine in the neighbor. Every test pins one
+// boundary of that decision; the false-negative guards (full-content equality,
+// 1-deep buffer, no multiplicity) are each asserted explicitly.
+describe('view-syncer/pipeline-driver: isAdvanceFrameSkewCrossBatch', () => {
+  test('benign: TS empty here, Go-only rows match TS-only in neighbor → suppressed', () => {
+    // This batch: Go has A,B; TS empty. Neighbor (prior advance): TS has A,B;
+    // Go empty. The frame-skew split put A,B in Go's batch this advance and
+    // TS's batch the adjacent advance — byte-identical, so suppress.
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A'), add('cp', 'B')]};
+    const neighbor = {ts: [add('cp', 'A'), add('cp', 'B')], go: [] as RowChange[]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(true);
+  });
+
+  test('benign: Go empty here, TS-only rows match Go-only in neighbor → suppressed', () => {
+    // Symmetric: the rows are on TS this advance and on Go in the neighbor.
+    const here = {ts: [edit('cus', 'ae0f0bc7', {seen: 100})], go: [] as RowChange[]};
+    const neighbor = {ts: [] as RowChange[], go: [edit('cus', 'ae0f0bc7', {seen: 100})]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(true);
+  });
+
+  test('benign: the 2026-06-22 live shape (frames 81b3tyfhi0 / 81b3tyh9ug) → suppressed', () => {
+    // Frame 81b3tyfhi0: TS=1, Go=4. Frame 81b3tyh9ug (the neighbor): TS=3, Go=0.
+    // The TS row in fhi0 is byte-identical to one of the TS rows in h9ug's
+    // neighbor side; the Go rows in fhi0 are byte-identical to Go rows in the
+    // h9ug side. One-sided each batch, matching the opposite engine across the
+    // pair — the exact cross-batch empty-side split.
+    const fhi0 = {ts: [add('cp', 'X')], go: [add('cp', 'A'), add('cp', 'B'), add('cp', 'C'), add('cp', 'D')]};
+    // Neighbor as seen from fhi0: its go-side rows must match fhi0's go-side;
+    // its ts-side (the OTHER engine) must carry fhi0's ts-side row.
+    const neighbor = {ts: [add('cp', 'X')], go: [add('cp', 'A'), add('cp', 'B'), add('cp', 'C'), add('cp', 'D')]};
+    // Here fhi0 is NOT one-sided (both sides non-empty), so cross-batch does
+    // NOT fire — the intra-frame classifier handles both-sides splits. Assert
+    // cross-batch correctly defers (returns false) for non-one-sided batches.
+    expect(isAdvanceFrameSkewCrossBatch(fhi0.ts, fhi0.go, neighbor)).toBe(false);
+    // The actual one-sided live case: take fhi0's TS row alone (TS=1, Go=0)
+    // matching the neighbor's Go side (Go carries it there).
+    const oneSided = {ts: [add('cp', 'X')], go: [] as RowChange[]};
+    const nbr = {ts: [] as RowChange[], go: [add('cp', 'X')]};
+    expect(isAdvanceFrameSkewCrossBatch(oneSided.ts, oneSided.go, nbr)).toBe(true);
+  });
+
+  test('REAL: no neighbor → kept (cannot look across batches)', () => {
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A'), add('cp', 'B')]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, null)).toBe(false);
+  });
+
+  test('REAL: neighbor opposite-side empty → kept (no match to consult)', () => {
+    // Here: Go has rows, TS empty. Neighbor's TS side (the opposite engine) is
+    // ALSO empty — no match possible. Keep as MISMATCH (could be a real drop).
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A')]};
+    const neighbor = {ts: [] as RowChange[], go: [add('cp', 'Z')]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
+  });
+
+  test('REAL: neighbor has same PK but DIFFERENT content → kept (false-negative guard)', () => {
+    // The decisive guard: a real drop whose PK happens to match a neighbor
+    // re-emit, but with different content, must NOT suppress. Full RowChange
+    // content equality (not just PK) is what keeps this as a MISMATCH.
+    const here = {ts: [] as RowChange[], go: [edit('cus', 'ae0f0bc7', {seen: 100})]};
+    const neighbor = {ts: [edit('cus', 'ae0f0bc7', {seen: 999})], go: [] as RowChange[]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
+  });
+
+  test('REAL: neighbor has same PK but DIFFERENT change kind → kept', () => {
+    // Here: Go ADDs A. Neighbor: TS REMOVEs A. Same key, different op — not a
+    // frame-skew split (a split would preserve the op kind). Keep.
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A')]};
+    const neighbor = {ts: [remove('cp', 'A')], go: [] as RowChange[]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
+  });
+
+  test('REAL: only SOME of the non-empty rows match the neighbor → kept', () => {
+    // Here: Go has A,B. Neighbor TS has A but not B. B is a real drop (no
+    // byte-identical match in the neighbor) → the whole batch must stay a
+    // MISMATCH; partial suppression would hide B's drop.
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A'), add('cp', 'B')]};
+    const neighbor = {ts: [add('cp', 'A')], go: [] as RowChange[]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
+  });
+
+  test('REAL: duplicate on the non-empty side → kept (multiplicity divergence)', () => {
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A'), add('cp', 'A')]};
+    const neighbor = {ts: [add('cp', 'A'), add('cp', 'A')], go: [] as RowChange[]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
+  });
+
+  test('REAL: duplicate in the neighbor opposite side → kept', () => {
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A')]};
+    const neighbor = {ts: [add('cp', 'A'), add('cp', 'A')], go: [] as RowChange[]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
+  });
+
+  test('defers to intra-frame when BOTH sides non-empty → false (not one-sided)', () => {
+    // A both-sides batch is the intra-frame classifier's job. Cross-batch must
+    // NOT fire here even if a neighbor exists — avoids double-suppression and
+    // keeps the two classifiers' responsibilities disjoint.
+    const here = {ts: [add('cp', 'A')], go: [add('cp', 'B')]};
+    const neighbor = {ts: [add('cp', 'B')], go: [add('cp', 'A')]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
+  });
+
+  test('stale neighbor (2 batches back) does not match → 1-deep buffer guard', () => {
+    // Simulates the 1-deep buffer: the row that WOULD match is no longer in
+    // the neighbor (it's 2 batches back, already overwritten). The current
+    // neighbor carries an unrelated row → no match → keep as MISMATCH. This is
+    // the guard against silencing a real drop that re-emits much later.
+    const here = {ts: [] as RowChange[], go: [add('cp', 'A')]};
+    // Neighbor's TS side has only 'Z', not 'A' — 'A' was 2 batches back.
+    const neighbor = {ts: [add('cp', 'Z')], go: [] as RowChange[]};
+    expect(isAdvanceFrameSkewCrossBatch(here.ts, here.go, neighbor)).toBe(false);
   });
 });

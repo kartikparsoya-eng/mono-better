@@ -730,6 +730,128 @@ describe('view-syncer/pipeline-driver', () => {
     }
   });
 
+  // #4b: content-aware incremental reconcile. The accumulator stores PK→row
+  // CONTENT (not just PK membership), so a same-PK content drift that persists
+  // across audit cycles with stable membership (no ADD/REMOVE touching the PK)
+  // is caught — the window the PK-set-only accumulator missed (#shadowCompare
+  // catches content drift per-batch but only WITHIN one advance). This test
+  // drives two audit cycles with a MUTABLE fake hydrate that returns issue 1
+  // closed=false on cycle 1 (seeds the accumulator with `false`) then closed=true
+  // on cycle 2 (the "fresh hydrate" disagrees with the accumulated `false` on the
+  // SAME PK, stable membership) → the reconcile logs
+  // `[drift-audit][incremental-content]`.
+  test('drift-audit incremental-content: same-PK content drift across cycles logs [drift-audit][incremental-content]', async () => {
+    vi.useFakeTimers();
+    const DRIFT_AUDIT_INTERVAL_MS = 8000;
+    const ISSUES_ONLY: AST = {table: 'issues', orderBy: [['id', 'asc']]};
+
+    const sink = new TestLogSink();
+    const auditLc = new LogContext('info', undefined, sink);
+
+    // Mutable hydrate: returns all 3 issues matching the SQLite replica on
+    // cycle 1 (so the SQL oracle confirms and does NOT heal/taint the
+    // accumulator), then flips issue 1's `closed` false→true on cycle 2 — a
+    // content drift on a stable-PK row between audit cycles. Membership stays
+    // {1,2,3} on both cycles, so only the content reconcile fires.
+    let auditCallCount = 0;
+    const fakeBackend = {
+      sidecarSourceMode: 'table' as const,
+      initialized: true,
+      epoch: 0,
+      initEngine: () => Promise.resolve(),
+      resetEngine: () => Promise.resolve(),
+      removeQuery: () => Promise.resolve(),
+      destroy: () => Promise.resolve(),
+      whenRecovered: () => Promise.resolve(),
+      refreshSnapshot: () => Promise.resolve(),
+      pipelineCount: () => Promise.resolve(1),
+      hydrate: () => Promise.resolve({changes: [], timingMs: 0}),
+      hydrateManyStream(
+        qs: {queryID: string; ast: AST}[],
+        onResult: (r: {queryID: string; changes: unknown[]; timingMs: number}) => void,
+      ): Promise<void> {
+        auditCallCount++;
+        // Replica: issue 1 closed=false, 2=true, 3=false. Cycle 1 matches the
+        // replica exactly (SQL oracle confirms → no heal → no taint). Cycle 2
+        // flips issue 1 to true — same PK set, differing content on issue 1.
+        const issue1Closed = auditCallCount === 1 ? false : true;
+        const rowChanges = [
+          {type: 0, queryID: qs[0]!.queryID, table: 'issues', rowKey: {id: '1'}, row: {id: '1', closed: issue1Closed, _0_version: '123'}},
+          {type: 0, queryID: qs[0]!.queryID, table: 'issues', rowKey: {id: '2'}, row: {id: '2', closed: true, _0_version: '123'}},
+          {type: 0, queryID: qs[0]!.queryID, table: 'issues', rowKey: {id: '3'}, row: {id: '3', closed: false, _0_version: '123'}},
+        ];
+        for (const q of qs) {
+          onResult({queryID: q.queryID, changes: rowChanges, timingMs: 1});
+        }
+        return Promise.resolve();
+      },
+    };
+    goBackendMock.backend = fakeBackend;
+
+    const goStorageDb = new Database(lc, ':memory:');
+    goStorageDb.prepare(CREATE_STORAGE_TABLE).run();
+
+    const goPrimary = new PipelineDriver(
+      auditLc,
+      testLogConfig,
+      new Snapshotter(auditLc, dbFile.path, {appID: shardID.appID}),
+      shardID,
+      new DatabaseStorage(goStorageDb).createClientGroupStorage(
+        'incremental-content-cg',
+      ),
+      'pipeline-driver.test.ts',
+      new InspectorDelegate(undefined),
+      () => 200,
+      false,
+      {
+        goSidecar: {
+          enabled: true,
+          goPrimaryTrigger: true,
+          driftAuditIntervalMs: DRIFT_AUDIT_INTERVAL_MS,
+        },
+      } as unknown as ConstructorParameters<typeof PipelineDriver>[9],
+      {} as unknown as ConstructorParameters<typeof PipelineDriver>[10],
+    );
+
+    try {
+      goPrimary.init(clientSchema);
+
+      const stream = await goPrimary.addQuery(
+        'hash-issues-content',
+        'q-issues-content',
+        ISSUES_ONLY,
+        NO_TIME_ADVANCEMENT_TIMER,
+      );
+      for (const _ of stream) {
+        // drain
+      }
+
+      // Cycle 1: seeds the accumulator with issues {1:false, 2:true, 3:false}
+      // (matching the replica, so the SQL oracle confirms and does NOT taint
+      // the accumulator via a heal). No incremental-content mismatch yet (the
+      // accumulator was empty before this seed).
+      await vi.advanceTimersByTimeAsync(DRIFT_AUDIT_INTERVAL_MS);
+
+      // Cycle 2: hydrate returns issue 1 closed=true; the accumulator still
+      // holds closed=false (no advance between cycles). Same PK set {1,2,3},
+      // differing content on issue 1 → [drift-audit][incremental-content].
+      await vi.advanceTimersByTimeAsync(DRIFT_AUDIT_INTERVAL_MS);
+
+      const logText = sink.messages.map(m => m[2].join(' ')).join('\n');
+      expect(logText).toContain('[drift-audit][incremental-content]');
+      expect(logText).toContain('q-issues-content');
+      // Membership is stable (issue 1 present on both cycles) → the
+      // membership-only incremental log must NOT fire. Distinguish it from the
+      // content log by its unique tail ("accumulation diverged from a fresh
+      // hydrate" vs the content log's "accumulated content diverged").
+      expect(logText).not.toContain('accumulation diverged from a fresh hydrate');
+    } finally {
+      goBackendMock.backend = null;
+      vi.useRealTimers();
+      await goPrimary.destroy();
+    }
+  });
+
   // Oracle-blind divergence: when BOTH Go and TS match the SQL oracle on the
   // main table but differ in related-table (join fan-out) rows, the divergence
   // is in a dimension the single-table oracle CANNOT adjudicate. The patched

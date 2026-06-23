@@ -904,6 +904,16 @@ export function goDriftAuditSqlGroundTruth(
   return config?.goSidecar?.driftAuditSqlGroundTruth !== false;
 }
 
+// Directory to write divergence capture repro bundles to (VACUUM INTO snapshot
+// .db + .json metadata). Empty string / undefined = capture OFF (the default —
+// VACUUM INTO copies the whole replica on the divergence hot path, so capture
+// is opt-in and rate-capped). See goSidecar.divergenceCaptureDir in zero-config.
+export function goDivergenceCaptureDir(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): string {
+  return config?.goSidecar?.divergenceCaptureDir ?? '';
+}
+
 // Returns null when the manager isn't `running` so the caller falls back
 // to the TS path; `getCurrentTables` is invoked both on initial init and
 // after each sidecar restart.

@@ -1132,6 +1132,22 @@ export const zeroOptions = {
         `comparison only.`,
       ],
     },
+    divergenceCaptureDir: {
+      type: v.string().optional(),
+      desc: [
+        `When set, the shadow comparator captures a reproducible snapshot of`,
+        `each divergence it can't adjudicate (ts-only / oracle-blind /`,
+        `go-vs-sql-drift / raw MISMATCH) to this directory: a VACUUM INTO copy`,
+        `of the SQLite replica at that stateVersion plus a JSON file with the`,
+        `AST, queryID, operation, both sides' changes, and the SQL verdict.`,
+        `Captures are rate-capped (one per queryID per minute) and gated off`,
+        `by default (empty/unset = no capture) because VACUUM INTO copies the`,
+        `whole DB on the divergence hot path. Intended for offline replay via`,
+        `the go-ivm testharness RunTestCaseFromSnapshot loader. NEVER point`,
+        `this at a directory inside the public go-ivm repo — real prod rows`,
+        `have PII; sanitize captures before committing any repro.`,
+      ],
+    },
     advanceDrive: {
       type: v.boolean().default(false),
       desc: [
