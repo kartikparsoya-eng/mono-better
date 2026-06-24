@@ -571,6 +571,12 @@ describe('view-syncer/pipeline-driver', () => {
           if (c !== 'yield') drainedChanges++;
         }
         seen.push(entry.queryID);
+        // Contract: the envelope surfaces Go's per-query engine-compute
+        // timingMs (undefined only for internal queries run through TS).
+        // These are all user queries (UNIQUES_QUERY), so the fake backend's
+        // timingMs: 1 must be forwarded verbatim — the view-syncer records
+        // this into hydration_time as the apples-to-apples engine span.
+        expect(entry.timingMs).toBe(1);
       }
 
       // Every query hydrated exactly once (empty result sets → no changes).

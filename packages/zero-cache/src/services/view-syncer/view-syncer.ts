@@ -272,6 +272,21 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     'hydration-time',
     'Time to hydrate a query.',
   );
+  // End-to-end hydrate wall-clock: engine compute + RPC + delivery of the
+  // hydrated rows. On the TS path there is no sidecar RPC, so this is the
+  // SAME span as #hydrationTime (TS compute == TS e2e). It exists for the
+  // Go-primary path, where #hydrationTime is deliberately the pure-engine
+  // compute span (Go-reported `timingMs`) and this histogram carries the
+  // batchElapsed that also pays the sidecar RPC + TS-side consumption tax.
+  // The gap between the two on Go is the serialization/RPC cost — see
+  // the positional wire-format work. Comparing Go hydration-e2e-time vs TS
+  // hydration-time is a FAIR e2e test that is Go-pessimistic (Go's span
+  // includes the RPC tax, TS's has none).
+  readonly #hydrationE2ETime = getOrCreateLatencyHistogram(
+    'sync',
+    'hydration-e2e-time',
+    'Time to hydrate a query end-to-end (engine compute + RPC + delivery).',
+  );
   readonly #transactionAdvanceTime = getOrCreateLatencyHistogram(
     'sync',
     'advance-time',
@@ -1962,7 +1977,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           const byID = new Map<string, (typeof addQueries)[number]>();
           for (const q of addQueries) byID.set(q.id, q);
           let count = 0;
-          for await (const {queryID, changes} of pipelines.goHydrateBatchStream(
+          let goComputeMs = 0;
+          for await (const {queryID, changes, timingMs} of pipelines.goHydrateBatchStream(
             addQueries.map(q => ({
               transformationHash: q.transformationHash,
               queryID: q.id,
@@ -1971,15 +1987,29 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           )) {
             const q = byID.get(queryID);
             if (!q) continue;
-            const queryStart = performance.now();
+            const consumeStart = performance.now();
             yield* changes as Iterable<RowChange | 'yield'>;
-            const elapsed = performance.now() - queryStart;
-            totalProcessTime += elapsed;
-            self.#addQueryMaterializationServerMetric(q.id, elapsed);
-            if (elapsed > slowHydrateThreshold) {
-              lc.warn?.('Slow query materialization', elapsed, q.ast);
+            const consumeElapsed = performance.now() - consumeStart;
+            // `timingMs` is Go's per-query engine COMPUTE (engine.go
+            // hydrateEntry, `time.Since(start)` — excludes RPC/serialize).
+            // It is undefined for internal queries (lmids/clients/...)
+            // that ran through TS's #addQueryImpl, whose compute happens
+            // lazily during the yield* above — so consumeElapsed IS their
+            // compute. Either way `computeMs` is this query's hydrate
+            // compute, which is the span #hydrationTime measures on the TS
+            // path. Recording this (not the TS-side consumption of
+            // already-computed Go rows) keeps hydration_time apples-to-apples
+            // across engines; the old code recorded consumeElapsed
+            // for Go user queries, which excluded Go's own compute and
+            // understated Go.
+            const computeMs = timingMs ?? consumeElapsed;
+            totalProcessTime += computeMs;
+            goComputeMs += computeMs;
+            self.#addQueryMaterializationServerMetric(q.id, computeMs);
+            if (computeMs > slowHydrateThreshold) {
+              lc.warn?.('Slow query materialization', computeMs, q.ast);
             }
-            manualSpan(tracer, 'vs.addAndConsumeQuery', elapsed, {
+            manualSpan(tracer, 'vs.addAndConsumeQuery', computeMs, {
               hash: q.id,
               transformationHash: q.transformationHash,
               ...(q.name !== undefined && {name: q.name}),
@@ -1987,9 +2017,21 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             count++;
           }
           const batchElapsed = performance.now() - batchStart;
-          lc.info?.(`[batch-hydrate-stream] ${count} queries in ${batchElapsed.toFixed(2)}ms`);
+          lc.info?.(
+            `[batch-hydrate-stream] ${count} queries in ${batchElapsed.toFixed(2)}ms (go compute ${goComputeMs.toFixed(2)}ms)`,
+          );
           hydrations.add(1);
+          // hydration_time = engine COMPUTE (Go timingMs / TS lazy consume),
+          // the apples-to-apples match to TS's hydration_time (full TS
+          // materialization compute, no sidecar RPC).
           hydrationTime.recordMs(totalProcessTime);
+          // hydration_e2e_time = whole-batch wall-clock: Go compute + RPC +
+          // TS-side consumption. The fair END-TO-END headline — Go-
+          // pessimistic, since this span includes the sidecar RPC tax that
+          // TS's hydration_time (recorded above as the same compute span)
+          // does not pay. The gap between the two on Go is the serialization
+          // cost (see positional wire-format work).
+          self.#hydrationE2ETime.recordMs(batchElapsed);
           return;
         }
 

@@ -2115,7 +2115,19 @@ export class PipelineDriver {
    */
   async *goHydrateBatchStream(
     queries: {transformationHash: string; queryID: string; ast: AST}[],
-  ): AsyncIterable<{queryID: string; changes: Iterable<RowChange | 'yield'>}> {
+  ): AsyncIterable<{
+    queryID: string;
+    changes: Iterable<RowChange | 'yield'>;
+    // Go's per-query engine COMPUTE wall-time (engine.go hydrateEntry,
+    // `time.Since(start)` — fetch+materialize, excludes RPC/serialize).
+    // Surfaced so the view-syncer records the engine-compute span into
+    // hydration_time (apples-to-apples with TS) instead of the TS-side
+    // consumption of already-computed rows. `undefined` for internal
+    // queries (lmids/clients/permissions) that run through TS's
+    // #addQueryImpl — their compute is lazy in the yielded generator, so
+    // the consumer times it during drain.
+    timingMs: number | undefined;
+  }> {
     for (const q of queries) {
       this.removeQuery(q.queryID);
     }
@@ -2163,7 +2175,7 @@ export class PipelineDriver {
           if (c !== 'yield') yield c;
         }
       }
-      yield {queryID: q.queryID, changes: dropYields()};
+      yield {queryID: q.queryID, changes: dropYields(), timingMs: undefined};
     }
 
     if (userQueries.length === 0) {
@@ -2271,6 +2283,7 @@ export class PipelineDriver {
           yield {
             queryID: q.queryID,
             changes: this.#trackRowSetSignatures(yieldGoHydration()),
+            timingMs: r.timingMs,
           };
         }
         if (done) break;
