@@ -17,6 +17,7 @@ import {
   createAdvanceToHeadStreamAccumulator,
   createHydrateStreamAccumulator,
   DriftError,
+  GoIVMClient,
   type RowChange,
   unpack,
 } from './go-ivm-client.ts';
@@ -563,5 +564,37 @@ describe('positional (rev 9) frame decoding', () => {
         rowKey: {conversationId: 'c3'},
       },
     ]);
+  });
+});
+
+describe('addQueryStream (single-query streaming hydrate)', () => {
+  test('routes one query through addQueriesStream and returns its result', async () => {
+    const client = new GoIVMClient('/tmp/unused-addquerystream-test.sock');
+    const changes = [row('r1')];
+    const spy = vi
+      .spyOn(client, 'addQueriesStream')
+      .mockImplementation((_cg, queries, _epoch, onResult) => {
+        // The single query is forwarded as a one-element batch.
+        expect(queries).toEqual([{queryID: 'q1', ast: {table: 't'}}]);
+        onResult({queryID: queries[0].queryID, changes, timingMs: 12});
+        return Promise.resolve();
+      });
+
+    const res = await client.addQueryStream('cg1', 'q1', {table: 't'}, 3);
+
+    expect(spy).toHaveBeenCalledOnce();
+    expect(res).toEqual({changes, timingMs: 12});
+  });
+
+  test('throws if the stream completes without a result frame', async () => {
+    const client = new GoIVMClient('/tmp/unused-addquerystream-test.sock');
+    // onResult never fires — defensive guard must reject.
+    vi.spyOn(client, 'addQueriesStream').mockImplementation(() =>
+      Promise.resolve(),
+    );
+
+    await expect(client.addQueryStream('cg1', 'qX', {}, 1)).rejects.toThrow(
+      /no result frame for query qX/,
+    );
   });
 });

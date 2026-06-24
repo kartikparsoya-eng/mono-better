@@ -228,8 +228,12 @@ export class GoComputeBackend {
 
   async hydrate(queryID: string, ast: QueryAST): Promise<GoHydrateResult> {
     if (this.#restartGate) await this.#restartGate;
+    // Route through the STREAMING single-query path: a wide-result query
+    // hydrated via non-streaming addQuery encodes to one unbounded frame that
+    // can exceed the wire cap, get SKIPPED by the TS reader, and orphan the RPC
+    // into a 60s timeout (the cold-hydrate freeze). addQueryStream chunks it.
     return this.#withReinitRetry(() =>
-      this.#client().addQuery(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, this.#cgOpts()),
+      this.#client().addQueryStream(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, this.#cgOpts()),
     );
   }
 
@@ -782,10 +786,16 @@ export class GoComputeBackend {
       const queries = this.#getCurrentQueries();
       if (queries.length > 0) {
         try {
-          await this.#client().addQueries(
+          // STREAMING re-register: the result is discarded (we only need Go's
+          // pipeline state rebuilt), but non-streaming addQueries would still
+          // ship every query's full result as one unbounded frame just to throw
+          // it away — a fat-frame orphan risk on a CG with large queries. The
+          // chunked stream bounds the frame; the no-op onResult drops the rows.
+          await this.#client().addQueriesStream(
             this.#clientGroupID,
             queries,
             this.#sidecarInitEpoch,
+            () => {},
             this.#cgOpts(),
           );
           this.#log(

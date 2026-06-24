@@ -920,6 +920,38 @@ export class GoIVMClient {
     handler.finish();
   }
 
+  // Single-query hydrate over the STREAMING path. Identical return contract to
+  // {@link addQuery}, but routes through addQueriesStream so the result is
+  // chunked on the Go side (byte-aware, softChunkBytes ~8MB) instead of shipped
+  // as one unbounded msgpack frame. A wide-result query (e.g. allTickets) can
+  // encode to >MAX_FRAME_SIZE, which the receive loop SKIPS — orphaning the RPC
+  // into a 60s timeout that freezes the client group. Non-streaming addQuery
+  // has no such bound; this is its safe replacement for the hydrate hot path.
+  async addQueryStream(
+    clientGroupID: string,
+    queryID: string,
+    ast: unknown,
+    initEpoch: number,
+    opts?: CallOptions,
+  ): Promise<HydrateResult> {
+    let result: HydrateResult | undefined;
+    await this.addQueriesStream(
+      clientGroupID,
+      [{queryID, ast}],
+      initEpoch,
+      r => {
+        result = {changes: r.changes, timingMs: r.timingMs};
+      },
+      opts,
+    );
+    if (result === undefined) {
+      // The Go engine always emits a terminal Final frame per query (even
+      // empty), so onResult must have fired exactly once. Defensive.
+      throw new Error(`addQueryStream: no result frame for query ${queryID}`);
+    }
+    return result;
+  }
+
   /** Remove a query pipeline from a client group's engine. */
   async removeQuery(clientGroupID: string, queryID: string, initEpoch: number, opts?: CallOptions): Promise<void> {
     await this.#call('removeQuery', {clientGroupID, queryID, initEpoch}, opts);
