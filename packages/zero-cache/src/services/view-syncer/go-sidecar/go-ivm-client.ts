@@ -1065,9 +1065,19 @@ export class GoIVMClient {
   /**
    * Destroy a client group's engine.
    * Call when the client disconnects to free memory.
+   *
+   * initEpoch must match the sidecar's current epoch for the cgID — a
+   * stale destroy from a torn-down view-syncer must not tear down the
+   * live successor's engine (D2 fix, protocolRev 9+). The sidecar
+   * rejects with rpcCodeStaleInitEpoch; callers already catch and
+   * best-effort-ignore errors from destroy.
    */
-  async destroy(clientGroupID: string, opts?: CallOptions): Promise<void> {
-    await this.#call('destroy', {clientGroupID}, opts);
+  async destroy(
+    clientGroupID: string,
+    initEpoch: number,
+    opts?: CallOptions,
+  ): Promise<void> {
+    await this.#call('destroy', {clientGroupID, initEpoch}, opts);
   }
 
   /**

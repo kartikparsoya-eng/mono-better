@@ -71,7 +71,7 @@ import {
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
 import {min as minLexiVersion} from '../../types/lexi-version.ts';
-import {isEnum as isLiteEnum} from '../../types/lite.ts';
+import {isEnum as isLiteEnum, isArray} from '../../types/lite.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {
   SnapshotChange,
@@ -6160,6 +6160,19 @@ export function pgTypeToGoType(
   const t = (argStart > 0 ? upstream.substring(0, argStart) : upstream)
     .trim()
     .toUpperCase();
+  // Arrays (including enum-arrays) map to 'json': the replicator stores ALL
+  // array columns as JSON.stringify'd text in SQLite, and both sides must
+  // JSON.parse them into real arrays. This MUST be checked before the enum
+  // check below — an enum-ARRAY (e.g. `TicketPriority[]|TEXT_ENUM|TEXT_ARRAY`)
+  // carries BOTH the |TEXT_ENUM and |TEXT_ARRAY attributes (plus `[]`), but
+  // the CONTAINER is JSON, so the array property takes precedence over the
+  // enum-ness (which only affects how individual elements are compared).
+  // Without this, enum-arrays hit isLiteEnum → 'string', causing Go's
+  // FromSQLiteType('string', ...) to skip JSON parsing → a +2-byte drift
+  // per enum-array column (two extra `\"` chars from JSON.stringify on the
+  // Go side vs a bare array on the TS side). isArray also catches the legacy
+  // `|TEXT_ARRAY[]` form that the plain `t.endsWith('[]')` missed.
+  if (isArray(pgType)) return 'json';
   // Enums: the LiteTypeString carries a `|TEXT_ENUM` attribute (e.g.
   // `TicketPriority|NOT_NULL|TEXT_ENUM`) that the upstream-name extraction above
   // strips, so a user-defined enum name fell through to the "unrecognised type"
@@ -6197,19 +6210,10 @@ export function pgTypeToGoType(
     t === 'CHAR' || t === 'CHARACTER' || t === 'BPCHAR' ||
     t === 'UUID' || t === 'CITEXT' || t === 'NAME'
   ) return 'string';
-  // Postgres array types (e.g. INT4[], TEXT[]) — the replicator stores
-  // these in the SQLite replica as JSON text via toSQLiteType('json', v) →
-  // JSON.stringify(v). The Zero client schema types all array columns as
-  // json<T[]>(...), so TS's fromSQLiteType('json', ...) JSON.parses the text
-  // into a real array. Map to 'json' so Go's FromSQLiteType('json', ...)
-  // does the same via json.Unmarshal — matching TS exactly.
-  //
-  // Previously mapped to 'string' (commit 9a501aa7f5) under the assumption
-  // that "both sides treat as string" — but TS actually parses the JSON.
-  // The mismatch produced a consistent +2-byte drift per array column in
-  // shadow comparisons (two extra \" quote chars from JSON.stringify on
-  // the Go side vs a bare array on the TS side).
-  if (t.endsWith('[]')) return 'json';
+  // Postgres array types (e.g. INT4[], TEXT[]) are handled by the early
+  // `isArray` check above (which also catches enum-arrays and the legacy
+  // |TEXT_ARRAY[] form). The previous `t.endsWith('[]')` here was redundant
+  // and missed the enum-array case (isLiteEnum fired first → 'string').
   // BYTEA: text-encoded binary (hex on PG side via SQLite replica). Both
   // sides treat as string for now; document the limitation.
   if (t === 'BYTEA') {

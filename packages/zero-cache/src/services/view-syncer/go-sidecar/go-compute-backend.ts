@@ -201,7 +201,7 @@ export class GoComputeBackend {
   async resetEngine(): Promise<void> {
     if (this.#initialized) {
       try {
-        await this.#client().destroy(this.#clientGroupID, this.#cgOpts());
+        await this.#client().destroy(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts());
       } catch (err) {
         this.#log('warn', 'destroy before reset failed (continuing)', err);
       }
@@ -571,7 +571,7 @@ export class GoComputeBackend {
     if (this.#initialized) {
       this.#initialized = false;
       try {
-        await this.#client().destroy(this.#clientGroupID, this.#cgOpts());
+        await this.#client().destroy(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts());
       } catch (err) {
         // Best-effort: the sidecar may already be gone.
         this.#log('warn', 'destroy failed (ignoring)', err);
@@ -668,7 +668,7 @@ export class GoComputeBackend {
     } catch (err) {
       this.#log('warn', 'loadRows failed mid-init; destroying partial engine to clear state', err);
       try {
-        await client.destroy(this.#clientGroupID, this.#cgOpts());
+        await client.destroy(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts());
       } catch (destroyErr) {
         // Best-effort — surface the original error regardless.
         this.#log('warn', 'destroy after partial init also failed', destroyErr);

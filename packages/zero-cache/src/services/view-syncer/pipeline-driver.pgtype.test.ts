@@ -67,4 +67,43 @@ describe('view-syncer/pipeline-driver: pgTypeToGoType', () => {
     expect(pgTypeToGoType('int4[]', warn)).toBe('json');
     expect(warn).not.toHaveBeenCalled();
   });
+
+  test('enum-ARRAY columns map to json, NOT string (the array wins over the enum)', () => {
+    // An enum-array LiteTypeString carries BOTH |TEXT_ENUM and |TEXT_ARRAY
+    // (plus `[]`), e.g. `TicketPriority[]|TEXT_ENUM|TEXT_ARRAY`. The
+    // replicator stores ALL array columns as JSON.stringify'd text, so the
+    // container is json regardless of the element type. Previously isLiteEnum
+    // fired first → 'string', causing Go's FromSQLiteType('string', ...) to
+    // skip JSON parsing → +2-byte drift per enum-array column. The fix checks
+    // isArray before isLiteEnum.
+    const warn = vi.fn();
+    expect(pgTypeToGoType('TicketPriority[]|TEXT_ENUM|TEXT_ARRAY', warn)).toBe(
+      'json',
+    );
+    expect(
+      pgTypeToGoType('TicketPriority[]|NOT_NULL|TEXT_ENUM|TEXT_ARRAY', warn),
+    ).toBe('json');
+    expect(
+      pgTypeToGoType('ActivityClassification[]|TEXT_ENUM|TEXT_ARRAY', warn),
+    ).toBe('json');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('legacy |TEXT_ARRAY[] form is detected as array → json', () => {
+    // The legacy format puts `[]` in the attribute suffix rather than the
+    // upstream type name (e.g. `int8|TEXT_ARRAY[]`). The old `t.endsWith('[]')`
+    // check missed this because it tested the upstream name only. isArray
+    // checks the full LiteTypeString for `|TEXT_ARRAY`, so it catches it.
+    expect(pgTypeToGoType('int8|TEXT_ARRAY[]')).toBe('json');
+    expect(pgTypeToGoType('text|TEXT_ARRAY[]')).toBe('json');
+  });
+
+  test('plain enum (non-array) still maps to string (no regression from the array-first reorder)', () => {
+    const warn = vi.fn();
+    expect(pgTypeToGoType('TicketPriority|TEXT_ENUM', warn)).toBe('string');
+    expect(pgTypeToGoType('TicketPriority|NOT_NULL|TEXT_ENUM', warn)).toBe(
+      'string',
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
 });
