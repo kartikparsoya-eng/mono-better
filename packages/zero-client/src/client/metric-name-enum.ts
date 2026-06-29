@@ -4,6 +4,7 @@ export const TimeToConnectMsV2 = 'time_to_connect_ms_v2';
 export const LastConnectErrorV2 = 'last_connect_error_v2';
 export const TotalTimeToConnectMs = 'total_time_to_connect_ms';
 export const NotConnected = 'not_connected';
+export const PokeLatencyMs = 'poke_latency_ms';
 
 export type TimeToConnectMs = typeof TimeToConnectMs;
 export type LastConnectError = typeof LastConnectError;
@@ -11,3 +12,4 @@ export type TimeToConnectMsV2 = typeof TimeToConnectMsV2;
 export type LastConnectErrorV2 = typeof LastConnectErrorV2;
 export type TotalTimeToConnectMs = typeof TotalTimeToConnectMs;
 export type NotConnected = typeof NotConnected;
+export type PokeLatencyMs = typeof PokeLatencyMs;

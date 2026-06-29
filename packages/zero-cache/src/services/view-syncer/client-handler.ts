@@ -196,7 +196,9 @@ export class ClientHandler {
 
     const start = performance.now();
 
-    const pokeStart: PokeStartBody = {pokeID, baseCookie};
+    // Stamp server-produce time so the client can measure end-to-end poke
+    // latency (server-produce -> client-apply). See zero-poke-handler.ts.
+    const pokeStart: PokeStartBody = {pokeID, baseCookie, timestamp: Date.now()};
 
     let pokeStarted = false;
     let body: PokePartBody | undefined;

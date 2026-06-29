@@ -1784,9 +1784,18 @@ export class Zero<
     }
   }
 
-  #handlePokeStart(_lc: LogContext, pokeMessage: PokeStartMessage): void {
+  #handlePokeStart(lc: LogContext, pokeMessage: PokeStartMessage): void {
     this.#abortPingTimeout();
-    this.#pokeHandler.handlePokeStart(pokeMessage[1]);
+    const pokeStart = pokeMessage[1];
+    if (pokeStart.timestamp !== undefined) {
+      // End-to-end poke latency: server-produce time (stamped in
+      // client-handler.ts) -> client-receive. Includes server/client clock
+      // skew (same caveat as connectMsgLatencyMs).
+      const pokeLatencyMs = Date.now() - pokeStart.timestamp;
+      this.#metrics.pokeLatencyMs.record(pokeLatencyMs);
+      lc.debug?.('poke latency ms', pokeLatencyMs);
+    }
+    this.#pokeHandler.handlePokeStart(pokeStart);
   }
 
   #handlePokePart(_lc: LogContext, pokeMessage: PokePartMessage): void {

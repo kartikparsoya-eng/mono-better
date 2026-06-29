@@ -8,6 +8,7 @@ import {ClientError, type ZeroError} from './error.ts';
 import {
   DID_NOT_CONNECT_VALUE,
   Gauge,
+  Histogram,
   MetricManager,
   type Point,
   REPORT_INTERVAL_MS,
@@ -139,6 +140,42 @@ test('State', () => {
     const s4 = m2.flush();
     expect(s4, c.name).toEqual(undefined);
   }
+});
+
+test('Histogram', () => {
+  const clock = vi.useFakeTimers();
+
+  const h = new Histogram('mylatency');
+
+  // No samples => nothing reported.
+  expect(h.flush()).toBeUndefined();
+
+  // Record several samples within one period; flush emits them all as a
+  // single point's value array, timestamped at flush time.
+  clock.setSystemTime(200 * 1000);
+  h.record(10);
+  h.record(20);
+  h.record(30);
+  expect(h.flush()).toEqual({
+    metric: 'mylatency',
+    points: [[200, [10, 20, 30]]],
+  });
+
+  // Flush clears: a second flush with no new samples reports nothing.
+  expect(h.flush()).toBeUndefined();
+
+  // A fresh period accumulates independently.
+  clock.setSystemTime(500 * 1000);
+  h.record(5);
+  expect(h.flush()).toEqual({
+    metric: 'mylatency',
+    points: [[500, [5]]],
+  });
+
+  // clear() drops pending samples without reporting.
+  h.record(99);
+  h.clear();
+  expect(h.flush()).toBeUndefined();
 });
 
 test('MetricManager v1 connect metrics', async () => {

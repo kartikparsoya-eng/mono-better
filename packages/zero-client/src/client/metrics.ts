@@ -161,6 +161,15 @@ export class MetricManager {
     new Gauge(MetricName.TotalTimeToConnectMs),
   );
 
+  // pokeLatencyMs records the distribution of end-to-end poke latency: the
+  // delta between the server-produce timestamp stamped on pokeStart
+  // (client-handler.ts) and client-receive time. One sample per received poke.
+  // NOTE: this is Date.now() on two machines, so it includes server/client
+  // clock skew (same caveat as connectMsgLatencyMs).
+  readonly pokeLatencyMs = this.#register(
+    new Histogram(MetricName.PokeLatencyMs),
+  );
+
   #setNotConnectedReason(reason: NotConnectedReason) {
     this.#notConnected.set(reason);
   }
@@ -322,6 +331,43 @@ export class Gauge implements Flushable {
 
 function t() {
   return Math.round(Date.now() / 1000);
+}
+
+/**
+ * Histogram is a metric type that records a distribution of values over a
+ * reporting period. Unlike Gauge (which keeps only the latest value), Histogram
+ * accumulates every recorded sample and flushes them all as the value array of
+ * a single Point, then clears. This maps directly onto the Datadog distribution
+ * shape (Point = [ts, number[]]), so percentiles (p50/p95/p99) are computed
+ * server-side from the raw samples. If no samples were recorded during the
+ * period, nothing is reported.
+ */
+export class Histogram implements Flushable {
+  readonly #name: string;
+  #values: number[] = [];
+
+  constructor(name: string) {
+    this.#name = name;
+  }
+
+  record(value: number) {
+    this.#values.push(value);
+  }
+
+  clear() {
+    this.#values = [];
+  }
+
+  flush() {
+    if (this.#values.length === 0) {
+      return undefined;
+    }
+    // Histogram reports the timestamp at flush time and all samples recorded
+    // since the last flush as the point's value array.
+    const points: Point[] = [[t(), this.#values]];
+    this.#values = [];
+    return {metric: this.#name, points};
+  }
 }
 
 /**
