@@ -151,6 +151,17 @@ ENV ZERO_GO_SIDECAR_ADVANCE_DRIVE=${ADVANCE_DRIVE}
 # queueing — raise this if that line appears.
 ENV GO_IVM_MAX_OPEN_CONNS=1024
 ENV GO_IVM_MAX_IDLE_CONNS=128
+# Parallel-hydrate defaults (drive-mode only; both matrix variants set
+# ADVANCE_DRIVE=true). GO_IVM_HYDRATE_READERS=8 builds an 8-conn co-read pool
+# pinned to curr's frame so a CG's cold-hydrate queries fetch in parallel
+# instead of serializing on one connection. GO_IVM_WARM_HYDRATE_POOL=true
+# extends that same parallel pool to WARM hydrates (addQueries on a CG that
+# already has live pipelines) — co-read-only, never converging to head, so it
+# can't desync live pipelines. Validated in sandbox: pin-rate 100%, serial 0.
+# Override per-deployment if a pod is memory-constrained (each reader conn
+# costs ~GO_IVM_CONN_CACHE_KB of SQLite page cache).
+ENV GO_IVM_HYDRATE_READERS=8
+ENV GO_IVM_WARM_HYDRATE_POOL=true
 # Per-conn SQLite page cache in KB. This is C-side malloc — OUTSIDE
 # GOMEMLIMIT's view — and scales as pools × conns × cache: at 1024 conns
 # the SQLite default (~2MB) is up to ~4GB of invisible memory. 1MB/conn
