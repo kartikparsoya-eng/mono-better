@@ -107,15 +107,25 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # The prefix applies to ALL generated tags, including the raw
-          # `latest`. So the primary variant publishes `latest`, the
-          # shadow variant publishes `shadow-latest`, etc.
+          # The flavor prefix is applied to tags that DON'T set their own
+          # prefix (type=ref, type=raw, latest). type=sha sets its own
+          # prefix=sha- by default, which would OVERRIDE the flavor prefix —
+          # so we set its prefix explicitly below to keep the variant prefix.
           flavor: |
             prefix=${{ matrix.tag_prefix }},onlatest=true
           tags: |
             type=ref,event=branch
             type=ref,event=tag
-            type=sha,format=short
+            # Variant-prefixed sha tag. Without the explicit prefix, both
+            # tablesrc and shadow-tablesrc emit the SAME unprefixed
+            # `sha-<commit>` tag and clobber each other (last build wins) —
+            # so it could not be used to pin a specific variant.
+            type=sha,format=short,prefix=${{ matrix.tag_prefix }}sha-
+            # Guaranteed-unique-per-build handle. The same mono commit is
+            # rebuilt by the downstream go-ivm dispatch with a fresh sidecar
+            # binary, so a commit sha alone is NOT unique per build; the run
+            # id is. Pin deploys to `<prefix>run-<id>` for an immutable image.
+            type=raw,value=run-${{ github.run_id }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/feat/go-ivm-sidecar-async-advance' }}
 
       - name: Build & push image (${{ matrix.mode }})
