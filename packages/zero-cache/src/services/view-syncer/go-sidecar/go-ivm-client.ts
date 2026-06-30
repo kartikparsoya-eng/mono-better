@@ -638,6 +638,26 @@ export class StaleInitEpochError extends Error {
 }
 
 /**
+ * RPC error code Go uses when a panic was a DETERMINISTIC, NON-RETRYABLE data
+ * (or schema) error — bad replica data the sidecar cannot represent in the JS
+ * value model: a non-JSON string in a json/array column, an integer beyond JS
+ * MAX_SAFE_INTEGER, or a cross-type comparison (ivm.DataError, recovered in the
+ * sidecar's panic handler). Surface so #classifyGoPrimaryAdvanceError can tear
+ * down the CG — matching TS-native's UnsupportedValueError throw — instead of
+ * escalating to a pipeline reset. Reset CANNOT fix bad data: it re-hydrates,
+ * re-reads the same row, re-panics, resets again → an infinite reset storm
+ * that also re-pays every CG's hydrate cost (the 5–8s p99 incident).
+ */
+export const RPC_CODE_DATA_ERROR = -32102;
+
+export class PermanentDataError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PermanentDataError';
+  }
+}
+
+/**
  * Source-drift signal from the Go sidecar. Carries the offending table +
  * op + PK so the caller can log specifics before re-init. Thrown by
  * {@link GoIVMClient.advance} and surfaced via accumulator on
@@ -1467,6 +1487,15 @@ export class GoIVMClient {
           // through to the generic Error path and the type existed but
           // was never instantiated.
           pending.reject(new StaleInitEpochError(resp.error.message));
+        } else if (resp.error.code === RPC_CODE_DATA_ERROR) {
+          // Permanent data error: the sidecar hit bad replica data it cannot
+          // represent (non-JSON in a json/array column, int beyond
+          // MAX_SAFE_INTEGER, cross-type compare). Surface as
+          // PermanentDataError so #classifyGoPrimaryAdvanceError TEARS DOWN
+          // the CG (like TS-native's UnsupportedValueError throw) instead of
+          // escalating to a pipeline reset — a reset re-reads the same bad
+          // row and re-panics forever (reset storm).
+          pending.reject(new PermanentDataError(resp.error.message));
         } else {
           pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
         }

@@ -183,6 +183,30 @@ export const TTL_CLOCK_INTERVAL = 60_000;
  */
 export const TTL_TIMER_HYSTERESIS = 50; // ms
 
+// Reset circuit breaker: at most RESET_CIRCUIT_LIMIT pipeline resets are
+// allowed within RESET_CIRCUIT_WINDOW_MS before the CG is torn down instead of
+// reset again. A deterministic, reset-proof error (e.g. an unclassified Go
+// panic that survives a rebuild) otherwise loops reset→re-hydrate→re-panic
+// forever, sustaining p99 at 5–8s and re-paying every CG's hydrate. Teardown
+// breaks the loop loudly; the client reconnects into a fresh view-syncer.
+export const RESET_CIRCUIT_LIMIT = 2;
+export const RESET_CIRCUIT_WINDOW_MS = 20_000;
+
+/**
+ * Pure decision for the reset circuit breaker. Prunes reset timestamps older
+ * than the window and reports whether a new reset would exceed the limit (i.e.
+ * the caller should tear down instead of resetting again).
+ */
+export function resetCircuitDecision(
+  recentResetTimes: readonly number[],
+  nowMs: number,
+  limit: number = RESET_CIRCUIT_LIMIT,
+  windowMs: number = RESET_CIRCUIT_WINDOW_MS,
+): {trip: boolean; pruned: number[]} {
+  const pruned = recentResetTimes.filter(t => nowMs - t < windowMs);
+  return {trip: pruned.length >= limit, pruned};
+}
+
 type CustomQueryTransformMode = 'all' | 'missing';
 
 export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
@@ -206,6 +230,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   //
   // Note: It is fine to update this variable outside of the lock.
   #lastConnectTime = Date.now();
+  // Sliding window of recent pipeline-reset timestamps (ms) for the reset
+  // circuit breaker. More than RESET_CIRCUIT_LIMIT resets within
+  // RESET_CIRCUIT_WINDOW_MS means a reset-proof error is looping → tear down
+  // the CG (loud) instead of resetting again. Per-instance: a fresh
+  // view-syncer after reconnect starts clean, so the cost of a persistent
+  // failure is a slow reconnect cycle, not a tight reset storm.
+  #recentResetTimes: number[] = [];
 
   /**
    * The TTL clock is used to determine the time at which queries are considered
@@ -321,6 +352,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     'sync',
     'pipeline-resets',
     'Number of pipeline resets',
+  );
+  // Circuit breaker: a reset-proof error (deterministic panic that survives a
+  // rebuild) would otherwise reset → re-hydrate → re-panic → reset forever
+  // (the 5–8s p99 storm). Counts how often the breaker tripped and forced a CG
+  // teardown instead of an N+1th reset. See #recentResetTimes / RESET_CIRCUIT_*.
+  readonly #pipelineResetCircuitTripped = getOrCreateCounter(
+    'sync',
+    'pipeline-reset-circuit-tripped',
+    'CG torn down because resets exceeded the circuit-breaker rate (reset storm)',
   );
 
   readonly #inspectorDelegate: InspectorDelegate;
@@ -496,6 +536,27 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             if (result === 'success') {
               return;
             }
+            // Reset circuit breaker: if we've already reset
+            // RESET_CIRCUIT_LIMIT times in the last RESET_CIRCUIT_WINDOW_MS,
+            // this error is reset-proof (deterministic — survives the rebuild).
+            // Resetting again would loop forever (the p99 storm). Tear down the
+            // CG loudly instead; the client reconnects into a fresh instance.
+            const nowMs = Date.now();
+            const {trip, pruned} = resetCircuitDecision(
+              this.#recentResetTimes,
+              nowMs,
+            );
+            this.#recentResetTimes = pruned;
+            if (trip) {
+              this.#pipelineResetCircuitTripped.add(1, {reason: result.reason});
+              throw new Error(
+                `reset circuit breaker tripped: ${pruned.length + 1} pipeline ` +
+                  `resets within ${RESET_CIRCUIT_WINDOW_MS}ms ` +
+                  `(reason=${result.reason}) — tearing down CG instead of ` +
+                  `reset-looping on a reset-proof error: ${result.message}`,
+              );
+            }
+            this.#recentResetTimes.push(nowMs);
             lc.info?.(`resetting pipelines: ${result.message}`);
             this.#pipelineResets.add(1, {reason: result.reason});
             this.#pipelines.reset(clientSchema);

@@ -1,5 +1,8 @@
 import {describe, expect, test} from 'vitest';
-import {StaleInitEpochError} from './go-sidecar/go-ivm-client.ts';
+import {
+  PermanentDataError,
+  StaleInitEpochError,
+} from './go-sidecar/go-ivm-client.ts';
 import {
   classifyGoPrimaryAdvanceError,
   decideGoPrimaryDispatch,
@@ -107,6 +110,32 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
     test('StaleInitEpochError instance → stale-epoch (this instance was superseded)', () => {
       const e = new StaleInitEpochError('initEpoch 7 < current 8');
       expect(classifyGoPrimaryAdvanceError(e)).toBe('stale-epoch');
+    });
+
+    test('PermanentDataError instance → data-error (teardown, NOT reset)', () => {
+      const e = new PermanentDataError(
+        'panic: FromSQLiteType(json): parse failed for "bullet": invalid character \'b\'',
+      );
+      expect(classifyGoPrimaryAdvanceError(e)).toBe('data-error');
+    });
+
+    test('data-error message fallback (plain Error) → data-error', () => {
+      // Defense in depth: even if a DataError reaches us as a plain Error
+      // (not via RPC_CODE_DATA_ERROR), the message fallback must still keep it
+      // OUT of the unclassified→reset bucket that caused the reset storm.
+      for (const msg of [
+        'panic: FromSQLiteType(json): parse failed for "NA": invalid character',
+        'panic: FromSQLiteType(number): int64 9999999999999999 exceeds JS MAX_SAFE_INTEGER',
+        'panic: cannot compare values of different types: string(x) and float64(1)',
+      ]) {
+        expect(classifyGoPrimaryAdvanceError(new Error(msg))).toBe('data-error');
+      }
+    });
+
+    test('data-error takes precedence over sidecar/unclassified (no reset loop)', () => {
+      const e = new PermanentDataError('FromSQLiteType(json): parse failed');
+      expect(classifyGoPrimaryAdvanceError(e)).not.toBe('unclassified');
+      expect(classifyGoPrimaryAdvanceError(e)).not.toBe('sidecar');
     });
 
     test('sidecar-unavailable messages → sidecar (drop → reset)', () => {

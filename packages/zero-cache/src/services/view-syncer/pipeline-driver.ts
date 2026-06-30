@@ -79,7 +79,11 @@ import type {
   AdvanceToHeadResult,
   TableTiming,
 } from './go-sidecar/go-ivm-client.ts';
-import {DriftError, StaleInitEpochError} from './go-sidecar/go-ivm-client.ts';
+import {
+  DriftError,
+  PermanentDataError,
+  StaleInitEpochError,
+} from './go-sidecar/go-ivm-client.ts';
 import {type ShardID} from '../../types/shards.ts';
 import {
   getSubscriptionState,
@@ -899,6 +903,9 @@ export function decideGoPrimaryDispatch(
  *                  reset can't fix a wire bug without a sidecar process restart.
  *   'stale-epoch'  this instance was superseded by a successor's initEpoch —
  *                  RE-THROW so teardown completes.
+ *   'data-error'   permanent, non-retryable bad replica data (ivm.DataError /
+ *                  RPC_CODE_DATA_ERROR) — RE-THROW (teardown), NEVER reset: a
+ *                  reset re-reads the same bad row and loops forever.
  *   'sidecar'      sidecar unavailable / restart in flight — DROP → reset.
  *   'unclassified' anything else (incl. RPC timeouts under load) — DROP → reset.
  *
@@ -914,6 +921,7 @@ export function decideGoPrimaryDispatch(
 export type GoAdvanceErrorClass =
   | 'protocol'
   | 'stale-epoch'
+  | 'data-error'
   | 'sidecar'
   | 'unclassified';
 
@@ -929,6 +937,18 @@ export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   }
   if (e instanceof StaleInitEpochError) {
     return 'stale-epoch';
+  }
+  // Permanent data error (RPC_CODE_DATA_ERROR → PermanentDataError): bad
+  // replica data the sidecar can't represent. Checked before the 'sidecar' /
+  // 'unclassified' DROP buckets so a poison row tears down ONCE instead of
+  // reset-looping. The `instanceof` is the robust path; the message fallback
+  // catches any DataError that reached us as a plain Error (defense in depth).
+  if (
+    e instanceof PermanentDataError ||
+    msg.includes('FromSQLiteType') ||
+    msg.includes('cannot compare values of different types')
+  ) {
+    return 'data-error';
   }
   if (
     msg.includes('Sidecar is not running') ||
@@ -1271,6 +1291,11 @@ export class PipelineDriver {
     'sync',
     'ivm.advance-dropped-protocol',
     'Go-primary advance dropped due to wire-protocol violation (escalated to restart)',
+  );
+  readonly #advanceDroppedDataError = getOrCreateCounter(
+    'sync',
+    'ivm.advance-dropped-data-error',
+    'Go-primary advance hit permanent bad replica data (CG torn down, NOT reset — prevents reset storm)',
   );
   readonly #advanceDroppedSidecar = getOrCreateCounter(
     'sync',
@@ -4120,6 +4145,18 @@ export class PipelineDriver {
         this.#lc.warn?.(
           `[go-primary] Go advance rejected by sidecar (stale initEpoch); ` +
             `this view-syncer instance is torn down: ${msg}`,
+        );
+        throw e;
+      case 'data-error':
+        // Permanent bad replica data — re-throw (CG teardown) like
+        // TS-native's UnsupportedValueError. NEVER reset: a reset re-reads the
+        // same row and re-panics, looping forever AND re-paying every CG's
+        // hydrate (the sustained 5–8s p99 reset storm). One poison row drops
+        // ONE CG, not the whole pod.
+        this.#advanceDroppedDataError.add(1);
+        this.#lc.error?.(
+          `[go-primary] Go advance hit PERMANENT data error (tearing down CG, ` +
+            `NOT resetting — bad replica data, retry cannot fix): ${msg}`,
         );
         throw e;
       case 'sidecar':
