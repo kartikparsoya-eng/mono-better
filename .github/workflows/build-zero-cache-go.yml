@@ -4,16 +4,24 @@ name: Build & publish zero-cache+go image
 # binary from ghcr.io/kartikparsoya-eng/go-ivm and bundles it with
 # zero-cache. Publishes to ghcr.io/kartikparsoya-eng/zero-cache-go.
 #
-# Two variants are published from the same Dockerfile + same source,
-# differing only in the SHADOW_MODE build arg:
-#   - primary: Go-primary (Go serves clients) → tags: latest, sha-...,
-#              branch name
-#   - shadow:  TS source of truth, Go in parallel for drift audit →
-#              tags: shadow-latest, shadow-sha-..., shadow-<branch>
+# Three variants are published from the same Dockerfile + same mono
+# source, differing in build args (SHADOW_MODE / GO_PRIMARY_TRIGGER /
+# LEAN_PRIMARY / ...) and the bundled go-ivm sidecar binary (GO_IVM_IMAGE):
+#   - tablesrc:           Go-primary, table source, full parallel hydrate.
+#                         Bundles go-ivm:feat-snapshotter-in-go.
+#                         tags: tablesrc-...
+#   - shadow-tablesrc:    TS source of truth, Go in parallel for drift
+#                         audit. Bundles go-ivm:feat-snapshotter-in-go.
+#                         tags: shadow-tablesrc-...
+#   - streaming-tablesrc: Same Go-primary + full parallelization config as
+#                         tablesrc, but bundles the streaming-hydrate
+#                         sidecar (go-ivm:feat-streaming-hydrate — true
+#                         streaming hydrate, K=P×Cmax parallel reader pool).
+#                         tags: streaming-tablesrc-...
 #
 # `pull: true` forces the build to re-fetch the go-ivm image so the
 # chain "push to go-ivm → push to mono" reliably bundles the latest
-# sidecar binary in both variants.
+# sidecar binary in every variant.
 
 on:
   push:
@@ -83,6 +91,21 @@ jobs:
             advance_drive_arg: "true"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
             tag_prefix: "shadow-tablesrc-"
+          # Streaming-hydrate Go-primary — identical Go-primary serving +
+          # full parallelization config as `tablesrc`, but bundles the
+          # sidecar binary built from the go-ivm feat/streaming-hydrate
+          # branch (true streaming hydrate with a K=P×Cmax parallel reader
+          # pool). Requires the go-ivm build workflow to publish the
+          # feat-streaming-hydrate tag (its push-branch list must include
+          # feat/streaming-hydrate), else this variant's FROM pull fails.
+          - mode: streaming-tablesrc
+            shadow_mode_arg: "false"
+            source_mode_arg: "table"
+            go_primary_trigger_arg: "true"
+            lean_primary_arg: "true"
+            advance_drive_arg: "true"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-streaming-hydrate"
+            tag_prefix: "streaming-tablesrc-"
 
     name: build (${{ matrix.mode }})
 
