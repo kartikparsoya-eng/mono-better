@@ -80,6 +80,9 @@ jobs:
             advance_drive_arg: "true"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
             tag_prefix: "tablesrc-"
+            hydrate_chunk_size_arg: "10000"
+            advance_chunk_size_arg: "10000"
+            cursor_page_size_arg: "10000"
           # Shadow + TableSource — TS serves (zero risk), Go runs in
           # parallel for high-coverage drift validation. Use for pre-prod
           # soaks before flipping to tablesrc-primary.
@@ -91,6 +94,9 @@ jobs:
             advance_drive_arg: "true"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
             tag_prefix: "shadow-tablesrc-"
+            hydrate_chunk_size_arg: "10000"
+            advance_chunk_size_arg: "10000"
+            cursor_page_size_arg: "10000"
           # Streaming-hydrate Go-primary — identical Go-primary serving +
           # full parallelization config as `tablesrc`, but bundles the
           # sidecar binary built from the go-ivm feat/streaming-hydrate
@@ -106,6 +112,13 @@ jobs:
             advance_drive_arg: "true"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-streaming-hydrate"
             tag_prefix: "streaming-tablesrc-"
+            # Fine-grained streaming: 100-row frames (vs 10000 baseline) so
+            # large hydrates emit progressive partial frames on the Go->TS RPC,
+            # AND a matching 100-row view-syncer cursor page so the client is
+            # poked early (both levers required for a client-visible win).
+            hydrate_chunk_size_arg: "100"
+            advance_chunk_size_arg: "100"
+            cursor_page_size_arg: "100"
 
     name: build (${{ matrix.mode }})
 
@@ -170,6 +183,9 @@ jobs:
             LEAN_PRIMARY=${{ matrix.lean_primary_arg }}
             ADVANCE_DRIVE=${{ matrix.advance_drive_arg }}
             GO_IVM_IMAGE=${{ matrix.go_ivm_image }}
+            HYDRATE_CHUNK_SIZE=${{ matrix.hydrate_chunk_size_arg }}
+            ADVANCE_CHUNK_SIZE=${{ matrix.advance_chunk_size_arg }}
+            CURSOR_PAGE_SIZE=${{ matrix.cursor_page_size_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache scoped per-matrix-variant so primary and shadow don't

@@ -126,6 +126,24 @@ ARG LEAN_PRIMARY=false
 # memory mode, so the memory primary/shadow images keep it false.
 ARG ADVANCE_DRIVE=false
 
+# Streaming granularity levers. A client-VISIBLE progressive-render win needs
+# BOTH sides lowered together (proven by go-ivm engine_streaming_test.go's
+# TestClientFlushSimulation_BothLeversRequired: lowering only one keeps
+# time-to-first-row pinned at full-hydrate time):
+#   - HYDRATE/ADVANCE_CHUNK_SIZE cap each Go->TS streamed partial frame at N
+#     RowChanges (the sidecar EMIT side: GO_IVM_HYDRATE_CHUNK_SIZE /
+#     GO_IVM_ADVANCE_CHUNK_SIZE).
+#   - CURSOR_PAGE_SIZE gates how many deduped rows the view-syncer buffers
+#     before poking the client (the TS CONSUMER side: ZERO_CURSOR_PAGE_SIZE,
+#     view-syncer.ts:2708).
+# Default 10000 on all three matches the sidecar + view-syncer code defaults,
+# so tablesrc/shadow-tablesrc emit one frame per query and poke once at
+# end-of-hydrate. streaming-tablesrc lowers ALL THREE to 100 (via the build
+# matrix) for true fine-grained streaming to the client.
+ARG HYDRATE_CHUNK_SIZE=10000
+ARG ADVANCE_CHUNK_SIZE=10000
+ARG CURSOR_PAGE_SIZE=10000
+
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
 # (shadow on 1 prod node → ~1 week observation → flip to primary).
@@ -140,6 +158,12 @@ ENV ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=${GO_PRIMARY_TRIGGER}
 ENV ZERO_GO_SIDECAR_LEAN_PRIMARY=${LEAN_PRIMARY}
 ENV GO_IVM_ADVANCE_DRIVE=${ADVANCE_DRIVE}
 ENV ZERO_GO_SIDECAR_ADVANCE_DRIVE=${ADVANCE_DRIVE}
+# Streaming granularity (variant-scoped via the ARGs above; streaming-tablesrc
+# =100, tablesrc/shadow-tablesrc=10000). Chunk sizes cap the Go->TS emit
+# frames; cursor page size gates the view-syncer's client-poke cadence.
+ENV GO_IVM_HYDRATE_CHUNK_SIZE=${HYDRATE_CHUNK_SIZE}
+ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
+ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
 # --- Production-scale memory/connection guards (2026-06-11 audit) ---
 # Replica read+writable pool ceilings. The sidecar's package default (256)
 # is sized for ~36 push-mode CGs / ~128 drive-mode CGs (2 pinned snapshotter
