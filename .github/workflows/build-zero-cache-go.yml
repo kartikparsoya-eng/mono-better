@@ -83,6 +83,8 @@ jobs:
             hydrate_chunk_size_arg: "10000"
             advance_chunk_size_arg: "10000"
             cursor_page_size_arg: "10000"
+            # Per-chunk TS delivery off -> flag-off path stays byte-identical.
+            perchunk_hydrate_arg: "false"
           # Shadow + TableSource — TS serves (zero risk), Go runs in
           # parallel for high-coverage drift validation. Use for pre-prod
           # soaks before flipping to tablesrc-primary.
@@ -97,6 +99,8 @@ jobs:
             hydrate_chunk_size_arg: "10000"
             advance_chunk_size_arg: "10000"
             cursor_page_size_arg: "10000"
+            # Per-chunk TS delivery off -> flag-off path stays byte-identical.
+            perchunk_hydrate_arg: "false"
           # Streaming-hydrate Go-primary — identical Go-primary serving +
           # full parallelization config as `tablesrc`, but bundles the
           # sidecar binary built from the go-ivm feat/streaming-hydrate
@@ -119,6 +123,12 @@ jobs:
             hydrate_chunk_size_arg: "100"
             advance_chunk_size_arg: "100"
             cursor_page_size_arg: "100"
+            # Arm the TS-side per-chunk delivery flag (pipeline-driver.ts:158)
+            # so goHydrateBatchStream yields each 100-row Go frame to the poke
+            # pipeline as it arrives -- the third lever required for a
+            # client-visible progressive-render win alongside the 100-row
+            # chunk/cursor sizes above.
+            perchunk_hydrate_arg: "true"
 
     name: build (${{ matrix.mode }})
 
@@ -186,6 +196,7 @@ jobs:
             HYDRATE_CHUNK_SIZE=${{ matrix.hydrate_chunk_size_arg }}
             ADVANCE_CHUNK_SIZE=${{ matrix.advance_chunk_size_arg }}
             CURSOR_PAGE_SIZE=${{ matrix.cursor_page_size_arg }}
+            PERCHUNK_HYDRATE=${{ matrix.perchunk_hydrate_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache scoped per-matrix-variant so primary and shadow don't

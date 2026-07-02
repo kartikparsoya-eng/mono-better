@@ -143,6 +143,14 @@ ARG ADVANCE_DRIVE=false
 ARG HYDRATE_CHUNK_SIZE=10000
 ARG ADVANCE_CHUNK_SIZE=10000
 ARG CURSOR_PAGE_SIZE=10000
+# TS-side per-chunk delivery lever (pipeline-driver.ts:158 reads
+# GO_IVM_PERCHUNK_HYDRATE === 'true'). When true, goHydrateBatchStream yields
+# each Go partial frame to the poke pipeline as it arrives instead of buffering
+# the query to its terminal frame, so a query's chunk#1 delivery overlaps the
+# remaining chunks' Go compute (intra-query pipelining). Default false keeps the
+# flag-off path byte-identical for tablesrc/shadow-tablesrc; only
+# streaming-tablesrc arms it (paired with the 100-row chunk/cursor levers above).
+ARG PERCHUNK_HYDRATE=false
 
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
@@ -164,6 +172,7 @@ ENV ZERO_GO_SIDECAR_ADVANCE_DRIVE=${ADVANCE_DRIVE}
 ENV GO_IVM_HYDRATE_CHUNK_SIZE=${HYDRATE_CHUNK_SIZE}
 ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
 ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
+ENV GO_IVM_PERCHUNK_HYDRATE=${PERCHUNK_HYDRATE}
 # --- Production-scale memory/connection guards (2026-06-11 audit) ---
 # Replica read+writable pool ceilings. The sidecar's package default (256)
 # is sized for ~36 push-mode CGs / ~128 drive-mode CGs (2 pinned snapshotter
