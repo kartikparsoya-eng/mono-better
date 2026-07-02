@@ -18,6 +18,14 @@
 // only valid during the call — cgo pointer rules); the JS-side callback
 // wraps it in an external Buffer whose finalizer free()s it. One copy
 // Go→JS, zero syscalls, no framing, no reassembly.
+//
+// External-memory accounting is LOAD-BEARING: the malloc'd payloads live
+// outside the V8 heap, and the Buffer handles V8 sees are tiny — without
+// napi_adjust_external_memory, GC feels no pressure from gigabytes of
+// pending payloads, finalizers run arbitrarily late, and RSS floats up
+// under sustained row traffic (ART memory-growth finding: RSS +500MB in
+// 147s while both the Go and JS heaps stayed flat). Adjusting ±len on
+// create/finalize makes V8 collect promptly under load.
 
 #include <assert.h>
 #include <dlfcn.h>
@@ -56,10 +64,13 @@ typedef struct {
 } delivery_item;
 
 // Finalizer for the external Buffer handed to JS — frees the malloc'd copy
-// once V8 GCs the Buffer.
+// once V8 GCs the Buffer, and reverses the external-memory accounting the
+// create side registered (hint carries the byte length).
 static void free_delivery_buffer(napi_env env, void* data, void* hint) {
-  (void)env;
-  (void)hint;
+  if (env != NULL && hint != NULL) {
+    int64_t adjusted;
+    napi_adjust_external_memory(env, -(int64_t)(uintptr_t)hint, &adjusted);
+  }
   free(data);
 }
 
@@ -81,11 +92,17 @@ static void call_js_deliver(napi_env env, napi_value js_cb, void* ctx,
   assert(status == napi_ok);
   if (item->len > 0) {
     // External buffer: zero-copy handoff of the malloc'd bytes; finalizer
-    // frees. (If the platform/Node build refuses external buffers, fall
-    // back to a copy.)
+    // frees + un-accounts (hint = len). (If the platform/Node build refuses
+    // external buffers, fall back to a copy.)
     status = napi_create_external_buffer(env, item->len, item->data,
-                                         free_delivery_buffer, NULL, &buf_val);
-    if (status != napi_ok) {
+                                         free_delivery_buffer,
+                                         (void*)(uintptr_t)item->len, &buf_val);
+    if (status == napi_ok) {
+      // Tell V8 how much C heap this Buffer pins so GC pressure scales
+      // with the real footprint (see file header).
+      int64_t adjusted;
+      napi_adjust_external_memory(env, (int64_t)item->len, &adjusted);
+    } else {
       status = napi_create_buffer_copy(env, item->len, item->data, NULL, &buf_val);
       assert(status == napi_ok);
       free(item->data);
