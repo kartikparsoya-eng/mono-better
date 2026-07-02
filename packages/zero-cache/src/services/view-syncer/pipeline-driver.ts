@@ -2346,6 +2346,15 @@ export class PipelineDriver {
             timingMs: r.timingMs,
             final: r.final,
           };
+          // P3 (REVIEW-napi-transport): drop the query once its terminal
+          // chunk is delivered. `buffered`/`byQueryID` are shared across
+          // #withReinitRetry attempts (socket mode only — napi is terminal,
+          // no retry); without this prune, a restart mid-hydrateManyStream
+          // replays the whole stream and re-yields already-final queries
+          // (duplicate CVR rows + double final-gated metrics). The
+          // captured `changesArr` above keeps the current query's iterable
+          // valid after the delete.
+          if (r.final) byQueryID.delete(q.queryID);
         }
         if (done) break;
       }
