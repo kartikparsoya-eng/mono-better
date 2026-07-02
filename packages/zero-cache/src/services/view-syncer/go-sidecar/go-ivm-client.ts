@@ -1803,13 +1803,10 @@ export class GoIVMClient {
     // overload that caused the timeout; and a late kind-2 def RE-ADDS a
     // registry entry after clearRequest already ran — a permanent per-request
     // leak (nothing ever clears it again). Every record's first 8 bytes are
-    // the f64 reqID, so the peek is cheap and decode-free.
+    // the f64 reqID; Buffer.readDoubleLE reads it without allocating a
+    // DataView (perf #3 — this runs on EVERY record, the hot path).
     if (payload.length >= 8) {
-      const reqID = new DataView(
-        payload.buffer,
-        payload.byteOffset,
-        8,
-      ).getFloat64(0, true);
+      const reqID = payload.readDoubleLE(0);
       if (!this.#pending.has(reqID)) return;
     }
     try {
@@ -1835,7 +1832,7 @@ export class GoIVMClient {
       // every record are the f64 reqID); otherwise just log.
       let reqID: number | undefined;
       if (payload.length >= 8) {
-        reqID = new DataView(payload.buffer, payload.byteOffset, 8).getFloat64(0, true);
+        reqID = payload.readDoubleLE(0);
       }
       const pending = reqID !== undefined ? this.#pending.get(reqID) : undefined;
       if (pending && reqID !== undefined) {
