@@ -4,9 +4,10 @@ name: Build & publish zero-cache+go image
 # binary from ghcr.io/kartikparsoya-eng/go-ivm and bundles it with
 # zero-cache. Publishes to ghcr.io/kartikparsoya-eng/zero-cache-go.
 #
-# Three variants are published from the same Dockerfile + same mono
+# Four variants are published from the same Dockerfile + same mono
 # source, differing in build args (SHADOW_MODE / GO_PRIMARY_TRIGGER /
-# LEAN_PRIMARY / ...) and the bundled go-ivm sidecar binary (GO_IVM_IMAGE):
+# LEAN_PRIMARY / TRANSPORT / ...) and the bundled go-ivm sidecar
+# (GO_IVM_IMAGE):
 #   - tablesrc:           Go-primary, table source, full parallel hydrate.
 #                         Bundles go-ivm:feat-snapshotter-in-go.
 #                         tags: tablesrc-...
@@ -18,6 +19,15 @@ name: Build & publish zero-cache+go image
 #                         sidecar (go-ivm:feat-streaming-hydrate — true
 #                         streaming hydrate, K=P×Cmax parallel reader pool).
 #                         tags: streaming-tablesrc-...
+#   - napi-tablesrc:      Go-primary over the IN-PROCESS (NAPI) transport:
+#                         each syncer worker dlopens libgoivm.so — no
+#                         socket, no per-frame syscalls, per-row Go→JS
+#                         delivery, streaming+parallel engine defaults
+#                         (chunk 100 / parallelism 4 / warm pool / lazy +
+#                         parallel advance). Bundles
+#                         go-ivm:feat-napi-transport (which carries
+#                         libgoivm.so alongside the binary).
+#                         tags: napi-tablesrc-...
 #
 # `pull: true` forces the build to re-fetch the go-ivm image so the
 # chain "push to go-ivm → push to mono" reliably bundles the latest
@@ -28,11 +38,13 @@ on:
     branches:
       - feat/go-ivm-sidecar-async-advance
       - feat/snapshotter-in-go
+      - feat/napi-transport
     tags: ['v*']
   pull_request:
     branches:
       - feat/go-ivm-sidecar-async-advance
       - feat/snapshotter-in-go
+      - feat/napi-transport
     paths:
       # Only run on PRs that touch files the docker build cares about,
       # so unrelated PRs don't pay the multi-minute build cost.
@@ -85,6 +97,8 @@ jobs:
             cursor_page_size_arg: "10000"
             # Per-chunk TS delivery off -> flag-off path stays byte-identical.
             perchunk_hydrate_arg: "false"
+            transport_arg: "socket"
+            externally_managed_arg: "true"
           # Shadow + TableSource — TS serves (zero risk), Go runs in
           # parallel for high-coverage drift validation. Use for pre-prod
           # soaks before flipping to tablesrc-primary.
@@ -101,6 +115,8 @@ jobs:
             cursor_page_size_arg: "10000"
             # Per-chunk TS delivery off -> flag-off path stays byte-identical.
             perchunk_hydrate_arg: "false"
+            transport_arg: "socket"
+            externally_managed_arg: "true"
           # Streaming-hydrate Go-primary — identical Go-primary serving +
           # full parallelization config as `tablesrc`, but bundles the
           # sidecar binary built from the go-ivm feat/streaming-hydrate
@@ -129,6 +145,36 @@ jobs:
             # client-visible progressive-render win alongside the 100-row
             # chunk/cursor sizes above.
             perchunk_hydrate_arg: "true"
+            transport_arg: "socket"
+            externally_managed_arg: "true"
+          # In-process (NAPI) Go-primary — the feat/napi-transport lineage.
+          # Same trigger/lean/drive serving shape as tablesrc, but each
+          # syncer worker loads the Go engine IN-PROCESS (dlopen
+          # libgoivm.so via the goivm_napi addon): no socket, no per-frame
+          # syscalls, per-row Go→JS delivery (napiRowMode default true).
+          # EXTERNALLY_MANAGED=false — an in-process engine is per-worker
+          # by construction. Chunk/parallelism args left EMPTY so the
+          # streaming+parallel code defaults apply (GO_IVM_CHUNK_SIZE=100,
+          # GO_IVM_PARALLELISM=4, warm pool + lazy/parallel advance ON —
+          # the 2026-07-02 consolidation); CURSOR_PAGE_SIZE=100 pairs the
+          # TS consumer side with the 100-row emit default. Requires the
+          # go-ivm build workflow to publish feat-napi-transport (its
+          # Dockerfile ships libgoivm.so alongside the binary), else the
+          # bundled lib is missing and napi startup fails → TS fallback.
+          - mode: napi-tablesrc
+            shadow_mode_arg: "false"
+            source_mode_arg: "table"
+            go_primary_trigger_arg: "true"
+            lean_primary_arg: "true"
+            advance_drive_arg: "true"
+            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-napi-transport"
+            tag_prefix: "napi-tablesrc-"
+            hydrate_chunk_size_arg: ""
+            advance_chunk_size_arg: ""
+            cursor_page_size_arg: "100"
+            perchunk_hydrate_arg: "true"
+            transport_arg: "napi"
+            externally_managed_arg: "false"
 
     name: build (${{ matrix.mode }})
 
@@ -197,6 +243,8 @@ jobs:
             ADVANCE_CHUNK_SIZE=${{ matrix.advance_chunk_size_arg }}
             CURSOR_PAGE_SIZE=${{ matrix.cursor_page_size_arg }}
             PERCHUNK_HYDRATE=${{ matrix.perchunk_hydrate_arg }}
+            TRANSPORT=${{ matrix.transport_arg }}
+            EXTERNALLY_MANAGED=${{ matrix.externally_managed_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache scoped per-matrix-variant so primary and shadow don't
