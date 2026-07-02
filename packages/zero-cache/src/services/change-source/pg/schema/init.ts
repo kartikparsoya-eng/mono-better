@@ -234,24 +234,41 @@ function getIncrementalMigrations(
 
     // v16: Upgrade DDL trigger to fire on all ALTER TABLE statements
     // to catch the *removal* of a table from the published set.
-    // (subsumed by v17)
-
-    // v17: Upgrade DDL triggers to support the COMMENT ON PUBLICATION hook for
+    // v17 (1.0.0): Upgrade DDL triggers to support the COMMENT ON PUBLICATION hook for
     // working around the lack of event trigger support for PUBLICATION
     // changes in supabase.
-    //
     // This also adds forwards-compatible support for hierarchical logical
     // message prefixes and unknown ddl event types.
-    // (subsumed by v18)
-
     // v18: Pure refactoring of event trigger code.
-    // (subsumed by v19)
+    // v19 (1.4.0): Correctly handle concurrently issued DDL statements.
+    // v20 (1.4.0): Handle nested DDL triggers
+    // v21 (1.5.0): Handle cross-transaction DDL operations (i.e. concurrent
+    // index operations), and support manual invocation of update_schemas().
 
-    // v19: Correctly handle concurrently issued DDL statements.
-    // (subsumed by v20)
+    22: {
+      migrateSchema: async (_, sql) => {
+        await sql`
+          ALTER TABLE ${sql(upstreamSchema(shard))}.replicas 
+            ALTER "initialSchema" DROP NOT NULL;
+        `;
+        await sql`
+          ALTER TABLE ${sql(upstreamSchema(shard))}.replicas 
+            DROP CONSTRAINT replicas_pkey;
+        `;
+        await sql`
+          ALTER TABLE ${sql(upstreamSchema(shard))}.replicas 
+            ADD COLUMN id TEXT PRIMARY KEY DEFAULT replace(gen_random_uuid()::text, '-', '');
+        `;
+        await sql`
+          ALTER TABLE ${sql(upstreamSchema(shard))}.replicas 
+            ADD COLUMN rank BIGSERIAL;
+        `;
+      },
+    },
 
-    // v20: Handle nested DDL triggers
-    20: {
+    // v23 (1.6.0): Event triggers: Handle the case where current_query()
+    // returns NULL. Add more logging to debug unexpected messages
+    23: {
       migrateSchema: async (lc, sql) => {
         const [{publications}] = await sql<{publications: string[]}[]>`
           SELECT publications FROM ${sql(shardConfigTable)}`;

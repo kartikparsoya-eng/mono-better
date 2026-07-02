@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {pid} from 'node:process';
+import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {assert} from '../../../shared/src/asserts.ts';
 import {must} from '../../../shared/src/must.ts';
 import {randInt} from '../../../shared/src/rand.ts';
@@ -32,7 +33,7 @@ import {
 import {Snapshotter} from '../services/view-syncer/snapshotter.ts';
 import {ViewSyncerService} from '../services/view-syncer/view-syncer.ts';
 import {ProtocolErrorWithLevel} from '../types/error-with-level.ts';
-import {pgClient} from '../types/pg.ts';
+import {connectPgClient} from '../types/pg.ts';
 import {
   parentWorker,
   singleProcessMode,
@@ -69,7 +70,10 @@ function getCustomQueryConfig(
   };
 }
 
-export default function runWorker(
+// Default LogContext, overridden in runWorker
+let lc = new LogContext('info', {}, consoleLogSink);
+
+export default async function runWorker(
   parent: Worker,
   env: NodeJS.ProcessEnv,
   ...args: string[]
@@ -84,7 +88,7 @@ export default function runWorker(
     'syncer',
     workerIndex,
   );
-  const lc = createLogContext(config, 'syncer', workerIndex);
+  lc = createLogContext(config, 'syncer', workerIndex);
   initEventSink(lc, config);
 
   const {cvr, upstream, enableCrudMutations} = config;
@@ -92,18 +96,19 @@ export default function runWorker(
   const replicaFile = replicaFileName(config.replica.file, fileMode);
   lc.debug?.(`running view-syncer on ${replicaFile}`);
 
-  const cvrDB = pgClient(lc, cvr.db, `sync-worker-${pid}-cvr`, {
+  const cvrDB = await connectPgClient(lc, cvr.db, `sync-worker-${pid}-cvr`, {
     max: must(cvr.maxConnsPerWorker, 'cvr.maxConnsPerWorker must be set'),
   });
 
-  const upstreamDB = enableCrudMutations
-    ? pgClient(lc, upstream.db, `sync-worker-${pid}-upstream`, {
-        max: must(
-          upstream.maxConnsPerWorker,
-          'upstream.maxConnsPerWorker must be set',
-        ),
-      })
-    : undefined;
+  const upstreamDB =
+    enableCrudMutations && upstream.type === 'pg'
+      ? await connectPgClient(lc, upstream.db, `sync-worker-${pid}-upstream`, {
+          max: must(
+            upstream.maxConnsPerWorker,
+            'upstream.maxConnsPerWorker must be set',
+          ),
+        })
+      : undefined;
 
   const dbWarmup = Promise.allSettled([
     warmupConnections(lc, cvrDB, 'cvr'),
@@ -287,7 +292,7 @@ export default function runWorker(
 
     const customQueryTransformer =
       customQueryConfig && new CustomQueryTransformer(logger, shard);
-    const contextManager = new ConnectionContextManagerImpl(
+    const connContextManager = new ConnectionContextManagerImpl(
       logger,
       config.auth.revalidateIntervalSeconds,
       config.auth.retransformIntervalSeconds,
@@ -335,7 +340,7 @@ export default function runWorker(
       drainCoordinator,
       config.log.slowHydrateThreshold,
       inspectorDelegate,
-      contextManager,
+      connContextManager,
       customQueryTransformer,
       runPriorityOp,
     );
@@ -358,12 +363,12 @@ export default function runWorker(
   const pusherFactory =
     pushConfig === undefined
       ? undefined
-      : (id: string, contextManager: ConnectionContextManager) =>
+      : (id: string, connContextManager: ConnectionContextManager) =>
           new PusherService(
             config,
             lc.withContext('clientGroupID', id),
             id,
-            contextManager,
+            connContextManager,
           );
 
   const syncer = new Syncer(
@@ -392,7 +397,7 @@ export default function runWorker(
 
 // fork()
 if (!singleProcessMode()) {
-  void exitAfter(() =>
+  void exitAfter(lc, () =>
     runWorker(must(parentWorker), process.env, ...process.argv.slice(2)),
   );
 }

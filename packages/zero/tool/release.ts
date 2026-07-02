@@ -5,10 +5,6 @@ import {stdin as input, stdout as output} from 'node:process';
 import {createInterface} from 'node:readline/promises';
 import * as path from 'path';
 import commandLineArgs from 'command-line-args';
-import {
-  MIN_SERVER_SUPPORTED_SYNC_PROTOCOL,
-  PROTOCOL_VERSION,
-} from '../../zero-protocol/src/protocol-version.ts';
 
 void main();
 
@@ -51,17 +47,6 @@ async function main() {
         'retry mode requires <from> to be an existing release tag (e.g. zero/v0.24.0-canary.3)',
       );
     }
-
-    // For stable releases, we need to know the base version early
-    // Read it from the current working directory before we chdir
-    const zeroPackageJsonPath = path.join(
-      gitRoot,
-      'packages',
-      'zero',
-      'package.json',
-    );
-    const packageData = getPackageData(zeroPackageJsonPath);
-    const currentVersion = packageData.version;
 
     // Check that the ref we're building from exists both locally and remotely
     // and that they point to the same commit
@@ -111,17 +96,17 @@ async function main() {
 
     console.log(`✓ Ref ${from} matches between local and remote`);
 
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zero-build-'));
+    // In CI we build in the current directory. Locally, use a temp worktree to
+    // avoid copying the developer checkout and live .git files.
+    if (process.env.CI) {
+      process.chdir(gitRoot);
+    } else {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zero-build-'));
+      console.log(`Creating temp worktree at ${tempDir}...`);
+      execute(`git worktree add --detach ${tempDir} ${localRefHash}`);
+      process.chdir(tempDir);
+    }
 
-    // Copy the working directory to temp dir (faster than cloning)
-    console.log(`Copying repo from ${gitRoot} to ${tempDir}...`);
-    execute(
-      `rsync -a --progress --exclude=node_modules --exclude=.turbo ${gitRoot}/ ${tempDir}/`,
-    );
-    process.chdir(tempDir);
-
-    // Discard any local changes and checkout the correct ref
-    execute('git reset --hard');
     execute(`git fetch ${remote}`);
 
     // Try to checkout as remote/branch first, fall back to tag/commit
@@ -130,6 +115,10 @@ async function main() {
     } catch {
       execute(`git checkout ${from}`);
     }
+
+    const zeroPackageJsonPath = basePath('packages', 'zero', 'package.json');
+    const packageData = getPackageData(zeroPackageJsonPath);
+    const currentVersion = packageData.version;
 
     let result: Release;
     if (mode === 'canary') {
@@ -636,8 +625,6 @@ async function pushDocker(version: string) {
         `docker buildx build \\
     --platform linux/amd64,linux/arm64 \\
     --build-arg=ZERO_VERSION=${version} \\
-    --build-arg=ZERO_SYNC_PROTOCOL_VERSION=${PROTOCOL_VERSION} \\
-    --build-arg=ZERO_MIN_SUPPORTED_SYNC_PROTOCOL_VERSION=${MIN_SERVER_SUPPORTED_SYNC_PROTOCOL} \\
     -t rocicorp/zero:${version} \\
     --push .`,
         {cwd: basePath('packages', 'zero')},

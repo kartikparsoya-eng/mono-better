@@ -3,6 +3,7 @@ import {pid} from 'node:process';
 import type {EventEmitter} from 'stream';
 import type {LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
+import {ConfigurationError} from '../types/configuration-error.ts';
 import {
   singleProcessMode,
   type Subprocess,
@@ -302,20 +303,20 @@ export async function runUntilKilled(
   }
 }
 
-export async function exitAfter(run: () => Promise<void>) {
+export async function exitAfter(lc: LogContext, run: () => Promise<void>) {
   try {
     await run();
-    // oxlint-disable-next-line no-console
-    console.info(`pid ${pid} exiting normally`);
+    lc.info?.(`pid ${pid} exiting normally`);
     process.exit(0);
   } catch (e) {
-    // oxlint-disable-next-line no-console
-    console.error(`pid ${pid} exiting with error`, e);
+    if (e instanceof ConfigurationError) {
+      lc.error?.(`exiting with configuration error: ${String(e)}`, e);
+      process.exit(0);
+    }
+    lc.error?.(`exiting with error: ${String(e)}`, e);
     process.exit(-1);
   }
 }
-
-const DEFAULT_STOP_INTERVAL_MS = 20_000;
 
 /**
  * The HeartbeatMonitor monitors the cadence heartbeats (e.g. "/keepalive"
@@ -336,7 +337,7 @@ export class HeartbeatMonitor {
   #checkImmediateTimer: NodeJS.Immediate | undefined;
   #lastHeartbeat = 0;
 
-  constructor(lc: LogContext, stopInterval = DEFAULT_STOP_INTERVAL_MS) {
+  constructor(lc: LogContext, stopInterval: number) {
     this.#lc = lc;
     this.#stopInterval = stopInterval;
   }

@@ -2,11 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sqlite3 from '@rocicorp/zero-sqlite3';
 import {expect, test, vi} from 'vitest';
-import {
-  withRead,
-  withWrite,
-  withWriteNoImplicitCommit,
-} from '../../with-transactions.ts';
+import {withRead, withWrite} from '../../with-transactions.ts';
 import {
   registerCreatedFile,
   runSQLiteStoreTests,
@@ -53,19 +49,17 @@ vi.mock('expo-sqlite', () => ({
             try {
               const isSelectQuery = /^\s*select/i.test(sql);
               if (isSelectQuery) {
-                const result = stmt.all(...params);
+                const rows = stmt.raw(true).all(...params) as unknown[][];
                 return Promise.resolve({
                   getFirstAsync: () =>
-                    Promise.resolve(
-                      result.length > 0
-                        ? Object.values(result[0] as Record<string, unknown>)
-                        : null,
-                    ),
+                    Promise.resolve(rows.length > 0 ? rows[0] : null),
+                  getAllAsync: () => Promise.resolve(rows),
                 });
               }
               stmt.run(...params);
               return Promise.resolve({
                 getFirstAsync: () => Promise.resolve(null),
+                getAllAsync: () => Promise.resolve([]),
               });
             } catch (error) {
               return Promise.reject(error);
@@ -142,7 +136,7 @@ test('different configuration options', async () => {
   await storeWithOptions.close();
 });
 
-test('withWriteNoImplicitCommit reports both operation and rollback errors', async () => {
+test('withWrite reports both operation and rollback errors', async () => {
   const storeName = 'auto-rollback-expo';
   const store = createStore(storeName);
   const filename = path.resolve(
@@ -161,7 +155,7 @@ test('withWriteNoImplicitCommit reports both operation and rollback errors', asy
   `);
   triggerDb.close();
 
-  const err = await withWriteNoImplicitCommit(store, async write => {
+  const err = await withWrite(store, async write => {
     await write.put('trigger-rollback', 'value');
   }).then(
     () => undefined,

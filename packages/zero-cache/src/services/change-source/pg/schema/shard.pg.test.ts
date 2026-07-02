@@ -2,12 +2,20 @@ import {LogContext} from '@rocicorp/logger';
 import {beforeEach, describe, expect} from 'vitest';
 import {TestLogSink} from '../../../../../../shared/src/logging-test-utils.ts';
 import {Index} from '../../../../db/postgres-replica-identity-enum.ts';
-import {expectTables, initDB, type PgTest, test} from '../../../../test/db.ts';
+import {
+  expectTables,
+  expectTablesToMatch,
+  initDB,
+  type PgTest,
+  test,
+} from '../../../../test/db.ts';
 import type {PostgresDB} from '../../../../types/pg.ts';
 import {getPublicationInfo} from './published.ts';
 import {
-  addReplica,
+  createReplica,
+  initReplica,
   setupTablesAndReplication,
+  setupTriggers,
   validatePublicationName,
   validatePublications,
 } from './shard.ts';
@@ -44,11 +52,17 @@ describe('change-source/pg', () => {
         shardNum: 0,
         publications: [],
       });
-      await addReplica(
+      await createReplica(
         tx,
         {appID: APP_ID, shardNum: 0},
+        '12345',
         'zro_0_1234',
         '0wdfj02',
+      );
+      await initReplica(
+        tx,
+        {appID: APP_ID, shardNum: 0},
+        '12345',
         {tables: [], indexes: []},
         {foo: 'bar'},
       );
@@ -61,7 +75,7 @@ describe('change-source/pg', () => {
       ['_zro_public_0', null, null, null],
     ]);
 
-    await expectTables(db, {
+    await expectTablesToMatch(db, {
       ['zro.permissions']: [{lock: true, permissions: null, hash: null}],
       ['zro_0.shardConfig']: [
         {
@@ -72,6 +86,7 @@ describe('change-source/pg', () => {
       ],
       ['zro_0.replicas']: [
         {
+          id: /\d{10,}/,
           slot: 'zro_0_1234',
           version: '0wdfj02',
           initialSchema: {tables: [], indexes: []},
@@ -342,6 +357,44 @@ describe('change-source/pg', () => {
     `);
 
     expect(await db`SELECT evtname from pg_event_trigger`.values()).toEqual([]);
+  });
+
+  test('trigger upgrade failure detected', async () => {
+    const shardConfig = {
+      appID: 'woo',
+      shardNum: 0,
+      publications: ['zero_foo'],
+    };
+
+    await db /*sql*/ `
+      CREATE TABLE foo(id INT4 PRIMARY KEY);
+      CREATE PUBLICATION zero_foo FOR TABLE foo;
+    `.simple();
+    await db.begin(tx => setupTablesAndReplication(lc, tx, shardConfig));
+    await expectTables(db, {
+      ['woo_0.shardConfig']: [
+        {
+          lock: true,
+          publications: ['_woo_metadata_0', 'zero_foo'],
+          ddlDetection: true,
+        },
+      ],
+    });
+    expect(
+      await db`SELECT evtname from pg_event_trigger`.values(),
+    ).toMatchObject([['woo_ddl_start_0'], ['woo_ddl_end_0']]);
+
+    // Now try to upgrade as a different user.
+    await db /*sql*/ `
+      CREATE ROLE different_user IN ROLE current_user;
+      SET ROLE different_user;
+    `.simple();
+
+    await expect(
+      db.begin(tx => setupTriggers(lc, tx, shardConfig)),
+    ).rejects.toThrowErrorMatchingInlineSnapshot(
+      `[PostgresError: permission denied to create event trigger "woo_ddl_start_0"]`,
+    );
   });
 
   test('permissions hash trigger', async () => {

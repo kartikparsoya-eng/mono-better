@@ -63,7 +63,7 @@
     "check-types:watch": "tsc -p tsconfig.json  --watch",
     "check-types:build:watch": "tsc -p tsconfig.build.json --watch",
     "check-types:tool:watch": "tsc -p tool/tsconfig.json --watch",
-    "lint": "oxlint --type-aware src/",
+    "lint": "oxlint --quiet --config ../../oxlint.config.ts src/",
     "build": "rm -rf out && tsc -p tsconfig.build.json && npx tsx tool/build.ts",
     "build-bundle-sizes": "rm -rf out && npx tsx tool/build.ts --bundle-sizes",
     "prepack": "npm run lint && npm run test && npm run build && mv README.md README-org.md && mv README-external.md README.md",
@@ -79,9 +79,9 @@
   },
   "devDependencies": {
     "@op-engineering/op-sqlite": ">=15",
-    "@rocicorp/zero-sqlite3": "^1.0.17",
+    "@rocicorp/zero-sqlite3": "^1.1.2",
     "@types/command-line-usage": "^5.0.2",
-    "@vitest/runner": "4.1.3",
+    "@vitest/runner": "^4.1.5",
     "command-line-args": "^6.0.1",
     "command-line-usage": "^7.0.3",
     "compare-utf8": "^0.2.0",
@@ -91,11 +91,11 @@
     "playwright": "^1.53.2",
     "shared": "0.0.0",
     "typescript": "~6.0.2",
-    "vitest": "4.1.3"
+    "vitest": "^4.1.5"
   },
   "peerDependencies": {
     "@op-engineering/op-sqlite": ">=15",
-    "@rocicorp/zero-sqlite3": "^1.0.17",
+    "@rocicorp/zero-sqlite3": "^1.1.2",
     "expo-sqlite": ">=15"
   },
   "peerDependenciesMeta": {
