@@ -198,6 +198,138 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     expect(resA.every(ch => ch.queryID === 'q-conc-a')).toBe(true);
     expect(resB.every(ch => ch.queryID === 'q-conc-b')).toBe(true);
   });
+
+  // --- boundary type-conversion correctness (review 2026-07-02) ---
+  //
+  // CROSS-PLANE CONSISTENCY is the invariant: for identical engine rows,
+  // rowMode (flat records: f64/i64/str/blob tags decoded by napi-records)
+  // and frame mode (msgpack positional decode) must produce deep-equal JS
+  // values — downstream (view-syncer, CVR signatures, client pokes) must
+  // not be able to tell which plane a value crossed on. SQLite-provenance
+  // coercion (bool/time.Time/json parse) is covered on the Go side by
+  // TestABIHost_RowModeTableModeCoercion; this covers the JS decode half
+  // with hostile values.
+  test('cross-plane: rowMode and frame mode decode identical edge values', async () => {
+    const c = ensureStarted();
+    const {initEpoch} = await c.init('cg-edge', {
+      tables: {
+        edge: {
+          columns: {
+            id: {type: 'string'},
+            num: {type: 'number'},
+            flag: {type: 'boolean'},
+            meta: {type: 'json'},
+            label: {type: 'string'},
+          },
+          primaryKey: ['id'],
+          rows: [],
+        },
+      },
+    });
+    const rows = [
+      // max exact integer, negative zero, subnormal, ±Infinity.
+      {id: 'e01', num: 9007199254740991, flag: true, meta: null, label: ''},
+      {id: 'e02', num: -0, flag: false, meta: {a: [1, 'x', null], b: {c: true}}, label: 'plain'},
+      {id: 'e03', num: 5e-324, flag: true, meta: [1, 2, 3], label: '🎯emoji🚀'},
+      {id: 'e04', num: Infinity, flag: false, meta: {nested: {deep: 'ok'}}, label: 'a'.repeat(70_000)},
+      {id: 'e05', num: -Infinity, flag: true, meta: null, label: '\u0000null-byte'},
+      {id: 'e06', num: -123456.789, flag: false, meta: {emoji: '💥'}, label: 'ünïcødé'},
+    ];
+    await c.loadRows('cg-edge', 'edge', rows, initEpoch);
+
+    const hydrate = async (queryID: string, rowMode: boolean) => {
+      const out: RowChange[] = [];
+      await c.addQueriesStream(
+        'cg-edge',
+        [{queryID, ast: {table: 'edge', orderBy: [['id', 'asc']]}}],
+        initEpoch,
+        r => out.push(...r.changes),
+        {rowMode},
+      );
+      return out;
+    };
+    const viaRecords = await hydrate('q-edge-rows', true);
+    const viaFrames = await hydrate('q-edge-frames', false);
+
+    expect(viaRecords).toHaveLength(rows.length);
+    // Strip queryID (differs by construction); everything else must be
+    // deep-equal across planes.
+    const norm = (chs: RowChange[]) =>
+      chs.map(ch => ({...ch, queryID: 'x'}));
+    expect(norm(viaRecords)).toEqual(norm(viaFrames));
+
+    // Spot-check the values against the source rows (both planes already
+    // proven equal — this pins them to the TRUTH, not just to each other).
+    const byID = new Map(
+      viaRecords.map(ch => [(ch.row as {id: string}).id, ch.row as Record<string, unknown>]),
+    );
+    expect(byID.get('e01')?.num).toBe(9007199254740991);
+    expect(byID.get('e02')?.meta).toEqual({a: [1, 'x', null], b: {c: true}});
+    expect(byID.get('e03')?.num).toBe(5e-324);
+    expect(byID.get('e03')?.label).toBe('🎯emoji🚀');
+    expect(byID.get('e04')?.num).toBe(Infinity);
+    expect((byID.get('e04')?.label as string).length).toBe(70_000);
+    expect(byID.get('e05')?.num).toBe(-Infinity);
+    expect(byID.get('e05')?.label).toBe('\u0000null-byte');
+    expect(byID.get('e06')?.meta).toEqual({emoji: '💥'});
+  });
+
+  // --- lifecycle: RPC timeout mid-row-stream (review 2026-07-02) ---
+  //
+  // When a rowMode RPC times out, the pending entry is deleted while Go is
+  // still streaming records. #handleDelivery must DROP the late records
+  // (unknown reqID) without throwing — an uncaught throw from the TSFN
+  // callback would crash the whole worker — and the client must remain
+  // fully functional for subsequent RPCs.
+  test('lifecycle: rowMode timeout mid-stream drops late records, client stays usable', async () => {
+    const c = ensureStarted();
+    const {initEpoch} = await c.init('cg-late', {
+      tables: {
+        bulk: {
+          columns: {id: {type: 'string'}, n: {type: 'number'}},
+          primaryKey: ['id'],
+          rows: [],
+        },
+      },
+    });
+    // Enough rows that hydrate + 5000 TSFN crossings cannot finish in 1ms.
+    const bulk = Array.from({length: 5000}, (_, i) => ({
+      id: `k${String(i).padStart(5, '0')}`,
+      n: i,
+    }));
+    await c.loadRows('cg-late', 'bulk', bulk, initEpoch);
+
+    await expect(
+      c.addQueriesStream(
+        'cg-late',
+        [{queryID: 'q-timeout', ast: {table: 'bulk', orderBy: [['id', 'asc']]}}],
+        initEpoch,
+        () => {},
+        {rowMode: true, timeoutMs: 1},
+      ),
+    ).rejects.toThrow(/timed out/);
+
+    // Go keeps streaming the dead RPC's records for a while; every one of
+    // them lands in #handleDelivery with no pending entry. Give that tail
+    // time to flush THROUGH the delivery queue, then prove the client is
+    // intact: ping + a fresh rowMode hydrate on the same cg.
+    await new Promise(r => setTimeout(r, 250));
+    expect(await c.ping()).toBe('pong');
+
+    const out: RowChange[] = [];
+    await c.addQueriesStream(
+      'cg-late',
+      [{queryID: 'q-after-timeout', ast: {table: 'bulk', orderBy: [['id', 'asc']], limit: 3}}],
+      initEpoch,
+      r => out.push(...r.changes),
+      {rowMode: true},
+    );
+    expect(out.map(ch => (ch.row as {id: string}).id)).toEqual([
+      'k00000',
+      'k00001',
+      'k00002',
+    ]);
+  });
 });
 
 if (!available) {
