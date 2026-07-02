@@ -1,5 +1,5 @@
 import {resolver} from '@rocicorp/resolver';
-import {beforeEach, describe, expect, test} from 'vitest';
+import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import type {JSONObject} from '../../../../shared/src/bigint-json.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import type {Downstream} from '../../../../zero-protocol/src/down.ts';
@@ -97,6 +97,7 @@ describe('view-syncer/client-handler', () => {
         {
           baseCookie: '121',
           pokeID: '123',
+          timestamp: expect.any(Number),
         },
       ],
       [
@@ -111,6 +112,7 @@ describe('view-syncer/client-handler', () => {
         {
           baseCookie: '123',
           pokeID: '129',
+          timestamp: expect.any(Number),
         },
       ],
       [
@@ -280,7 +282,7 @@ describe('view-syncer/client-handler', () => {
     expect(results[0].received).toEqual([
       [
         'pokeStart',
-        {pokeID: '123', baseCookie: '121'},
+        {pokeID: '123', baseCookie: '121', timestamp: expect.any(Number)},
       ] satisfies PokeStartMessage,
       ['pokeEnd', {pokeID: '123', cookie: '123'}] satisfies PokeEndMessage,
     ]);
@@ -289,7 +291,7 @@ describe('view-syncer/client-handler', () => {
     expect(results[1].received).toEqual([
       [
         'pokeStart',
-        {pokeID: '121', baseCookie: '120:01'},
+        {pokeID: '121', baseCookie: '120:01', timestamp: expect.any(Number)},
       ] satisfies PokeStartMessage,
       [
         'pokePart',
@@ -319,7 +321,7 @@ describe('view-syncer/client-handler', () => {
       // Second poke
       [
         'pokeStart',
-        {pokeID: '123', baseCookie: '121'},
+        {pokeID: '123', baseCookie: '121', timestamp: expect.any(Number)},
       ] satisfies PokeStartMessage,
       ['pokeEnd', {pokeID: '123', cookie: '123'}] satisfies PokeEndMessage,
     ]);
@@ -328,7 +330,7 @@ describe('view-syncer/client-handler', () => {
     expect(results[2].received).toEqual([
       [
         'pokeStart',
-        {pokeID: '121', baseCookie: '11z'},
+        {pokeID: '121', baseCookie: '11z', timestamp: expect.any(Number)},
       ] satisfies PokeStartMessage,
       [
         'pokePart',
@@ -365,7 +367,7 @@ describe('view-syncer/client-handler', () => {
       // Second poke
       [
         'pokeStart',
-        {pokeID: '123', baseCookie: '121'},
+        {pokeID: '123', baseCookie: '121', timestamp: expect.any(Number)},
       ] satisfies PokeStartMessage,
       ['pokeEnd', {pokeID: '123', cookie: '123'}] satisfies PokeEndMessage,
     ]);
@@ -376,6 +378,12 @@ describe('view-syncer/client-handler', () => {
     let closer: ReturnType<typeof createSubscription>['close'];
 
     beforeEach(() => {
+      // Freeze Date so pokeStart's `timestamp: Date.now()` is deterministic
+      // for the inline snapshots below. Only Date is faked, so the async poke
+      // flush's real setTimeouts still fire.
+      vi.useFakeTimers({toFake: ['Date']});
+      vi.setSystemTime(new Date('2024-01-01T00:00:00.000Z'));
+
       const {subscription, close} = createSubscription();
 
       const handler = new ClientHandler(
@@ -389,6 +397,10 @@ describe('view-syncer/client-handler', () => {
       );
       poker = handler.startPoke({stateVersion: '123'});
       closer = close;
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
     });
 
     test('successful mutation result', async () => {
@@ -421,6 +433,7 @@ describe('view-syncer/client-handler', () => {
             {
               "baseCookie": "121",
               "pokeID": "123",
+              "timestamp": 1704067200000,
             },
           ],
           [
@@ -486,6 +499,7 @@ describe('view-syncer/client-handler', () => {
             {
               "baseCookie": "121",
               "pokeID": "123",
+              "timestamp": 1704067200000,
             },
           ],
           [
@@ -548,6 +562,7 @@ describe('view-syncer/client-handler', () => {
             {
               "baseCookie": "121",
               "pokeID": "123",
+              "timestamp": 1704067200000,
             },
           ],
           [
