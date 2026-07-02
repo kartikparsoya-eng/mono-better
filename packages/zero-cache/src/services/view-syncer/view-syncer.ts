@@ -2039,7 +2039,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           for (const q of addQueries) byID.set(q.id, q);
           let count = 0;
           let goComputeMs = 0;
-          for await (const {queryID, changes, timingMs} of pipelines.goHydrateBatchStream(
+          for await (const {queryID, changes, timingMs, final} of pipelines.goHydrateBatchStream(
             addQueries.map(q => ({
               transformationHash: q.transformationHash,
               queryID: q.id,
@@ -2051,6 +2051,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             const consumeStart = performance.now();
             yield* changes as Iterable<RowChange | 'yield'>;
             const consumeElapsed = performance.now() - consumeStart;
+            // Per-chunk streaming: this loop body runs once per CHUNK, so the
+            // yield* above delivers each chunk's rows to the pokers as soon as
+            // Go produces them. Per-QUERY bookkeeping (hydration_time, span,
+            // count) must fire exactly once — gate it on the terminal chunk.
+            // In the default (accumulate-to-final) mode every entry is
+            // terminal, so this is a no-op guard and behavior is unchanged.
+            if (!final) {
+              continue;
+            }
             // `timingMs` is Go's per-query engine COMPUTE (engine.go
             // hydrateEntry, `time.Since(start)` — excludes RPC/serialize).
             // It is undefined for internal queries (lmids/clients/...)

@@ -241,11 +241,12 @@ export class GoComputeBackend {
   // goroutine finishes. Resolves on the terminal "done" frame.
   async hydrateManyStream(
     queries: {queryID: string; ast: QueryAST}[],
-    onResult: (r: {queryID: string; changes: unknown[]; timingMs: number | undefined}) => void,
+    onResult: (r: {queryID: string; changes: unknown[]; timingMs: number | undefined; final?: boolean; chunkIndex?: number}) => void,
+    opts?: {chunked?: boolean},
   ): Promise<void> {
     if (this.#restartGate) await this.#restartGate;
     await this.#withReinitRetry(() =>
-      this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, onResult, this.#cgOpts()),
+      this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, onResult, {...this.#cgOpts(), chunked: opts?.chunked}),
     );
   }
 

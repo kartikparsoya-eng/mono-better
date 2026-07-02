@@ -262,11 +262,22 @@ export function createHydrateStreamAccumulator(
     queryID: string;
     changes: RowChange[];
     timingMs: number | undefined;
+    final?: boolean;
+    chunkIndex?: number;
   }) => void,
+  opts?: {chunked?: boolean},
 ): {
   onFrame: (value: unknown) => void;
   finish: () => void;
 } {
+  // When true, deliver each partial frame straight to onResult (carrying its
+  // own final/chunkIndex) instead of buffering per queryID until final. Lets
+  // the caller start poke delivery on the FIRST chunk instead of waiting for
+  // the whole query. The ordering + duplicate-final guards below still apply.
+  // Default false = original accumulate-until-final behavior (unit tests and
+  // all non-streaming callers rely on the exact {queryID,changes,timingMs}
+  // shape emitted in that branch).
+  const chunked = opts?.chunked === true;
   const acc = new Map<
     string,
     {changes: RowChange[]; expectedNextIndex: number}
@@ -317,6 +328,25 @@ export function createHydrateStreamAccumulator(
         );
       }
       entry.expectedNextIndex++;
+
+      if (chunked) {
+        // Per-chunk delivery: hand this frame straight through (no per-queryID
+        // accumulation). timingMs is only meaningful on the terminal frame
+        // (Go sets it there — see engine.go flush()), so pass it only when
+        // final; non-final chunks carry undefined.
+        if (final) {
+          acc.delete(v.queryID);
+          finalized.add(v.queryID);
+        }
+        onResult({
+          queryID: v.queryID,
+          changes: chunk,
+          timingMs: final ? v.timingMs : undefined,
+          final,
+          chunkIndex,
+        });
+        return;
+      }
 
       if (chunk.length > 0) {
         // Push instead of concat: concat allocates a new array each call,
@@ -925,10 +955,10 @@ export class GoIVMClient {
     clientGroupID: string,
     queries: {queryID: string; ast: unknown}[],
     initEpoch: number,
-    onResult: (r: {queryID: string; changes: RowChange[]; timingMs: number | undefined}) => void,
-    opts?: CallOptions,
+    onResult: (r: {queryID: string; changes: RowChange[]; timingMs: number | undefined; final?: boolean; chunkIndex?: number}) => void,
+    opts?: CallOptions & {chunked?: boolean},
   ): Promise<void> {
-    const handler = createHydrateStreamAccumulator(onResult);
+    const handler = createHydrateStreamAccumulator(onResult, {chunked: opts?.chunked});
     await this.#call(
       'addQueriesStream',
       {clientGroupID, queries, initEpoch},

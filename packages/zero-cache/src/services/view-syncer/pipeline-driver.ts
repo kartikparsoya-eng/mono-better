@@ -144,6 +144,20 @@ export type ShadowHydrateResult = {changes: RowChange[]; total: number};
 const GO_HYDRATE_SUB_BATCH = 8;
 
 /**
+ * Per-chunk streaming hydrate (env-gated). When GO_IVM_PERCHUNK_HYDRATE=true,
+ * goHydrateBatchStream requests chunked delivery from the Go sidecar and
+ * yields each chunk to the view-syncer as it arrives — so query#1's poke
+ * delivery overlaps the remaining chunks' Go compute (intra-query pipelining),
+ * extending the existing inter-query overlap. When false (default) the
+ * accumulator buffers each query to its terminal frame and yields once,
+ * byte-identical to the pre-experiment path. Safe on cold hydrate: every
+ * change is an ADD and #trackRowSetSignatures XORs per row (associative), so
+ * splitting a query across chunk-boundaried onResult calls produces the
+ * identical final signature.
+ */
+const GO_PERCHUNK_HYDRATE = process.env.GO_IVM_PERCHUNK_HYDRATE === 'true';
+
+/**
  * Convert an audit AST into a parameterized SQL string + values array
  * suitable for `better-sqlite3.prepare(text).all(...values)`. Unlike
  * zqlite's `buildSelectQuery`, this version handles correlated EXISTS /
@@ -2152,6 +2166,10 @@ export class PipelineDriver {
     // #addQueryImpl — their compute is lazy in the yielded generator, so
     // the consumer times it during drain.
     timingMs: number | undefined;
+    // In per-chunk mode, true only on a query's terminal chunk; the
+    // view-syncer gates once-per-query metric recording on it. Always true in
+    // the default (accumulate-to-final) mode and for internal TS queries.
+    final: boolean;
   }> {
     for (const q of queries) {
       this.removeQuery(q.queryID);
@@ -2200,7 +2218,7 @@ export class PipelineDriver {
           if (c !== 'yield') yield c;
         }
       }
-      yield {queryID: q.queryID, changes: dropYields(), timingMs: undefined};
+      yield {queryID: q.queryID, changes: dropYields(), timingMs: undefined, final: true};
     }
 
     if (userQueries.length === 0) {
@@ -2224,7 +2242,7 @@ export class PipelineDriver {
     // previous one is fully consumed. Costs little parallelism: in drive
     // mode the per-CG hydrate is serialized on the snapshotter's single
     // conn anyway.
-    type Entry = {queryID: string; changes: RowChange[]; timingMs: number | undefined};
+    type Entry = {queryID: string; changes: RowChange[]; timingMs: number | undefined; final: boolean};
 
     const byQueryID = new Map<string, (typeof queries)[number]>();
     for (const q of userQueries) byQueryID.set(q.queryID, q);
@@ -2245,15 +2263,20 @@ export class PipelineDriver {
 
       const rpcPromise = this.#goBackend!.hydrateManyStream(
         subBatch.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
-        (r: {queryID: string; changes: unknown[]; timingMs: number | undefined}) => {
+        (r: {queryID: string; changes: unknown[]; timingMs: number | undefined; final?: boolean; chunkIndex?: number}) => {
           buffered.push({
             queryID: r.queryID,
             changes: (r.changes ?? []) as RowChange[],
             timingMs: r.timingMs,
+            // Default (non-chunked) mode fires onResult once per query with
+            // `final` omitted → treat as terminal. Chunked mode carries the
+            // real per-frame flag so the consumer can gate metrics.
+            final: r.final ?? true,
           });
           wake?.();
           wake = null;
         },
+        {chunked: GO_PERCHUNK_HYDRATE},
       )
         .catch((e: unknown) => {
           error = e instanceof Error ? e : new Error(String(e));
@@ -2277,19 +2300,26 @@ export class PipelineDriver {
           const r = buffered.shift()!;
           const q = byQueryID.get(r.queryID);
           if (!q) continue;
-          this.#pipelines.set(q.queryID, {
-            input: {
-              destroy() {},
-              fetch: () => ({} as never),
-              cleanup: () => ({} as never),
-              getSchema: () => ({} as never),
-              setOutput: () => {},
-            } as unknown as Input,
-            hydrationTimeMs: r.timingMs ?? 0,
-            transformedAst: q.ast,
-            transformationHash: q.transformationHash,
-            companions: [],
-          });
+          // Register the Go-owned stub once per query so it exists while the
+          // query's chunks stream, then overwrite with the real engine-compute
+          // time on the terminal chunk (only the final frame carries timingMs).
+          // In the default (non-chunked) path a query has exactly one entry
+          // with final=true, so this collapses to the original single set().
+          if (!this.#pipelines.has(q.queryID) || r.final) {
+            this.#pipelines.set(q.queryID, {
+              input: {
+                destroy() {},
+                fetch: () => ({} as never),
+                cleanup: () => ({} as never),
+                getSchema: () => ({} as never),
+                setOutput: () => {},
+              } as unknown as Input,
+              hydrationTimeMs: r.timingMs ?? 0,
+              transformedAst: q.ast,
+              transformationHash: q.transformationHash,
+              companions: [],
+            });
+          }
           const self = this;
           const changesArr = r.changes;
           // No 'yield' tokens in Go-primary batch hydrate: the view-syncer
@@ -2309,6 +2339,7 @@ export class PipelineDriver {
             queryID: q.queryID,
             changes: this.#trackRowSetSignatures(yieldGoHydration()),
             timingMs: r.timingMs,
+            final: r.final,
           };
         }
         if (done) break;
