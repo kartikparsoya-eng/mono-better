@@ -145,18 +145,20 @@ export type ShadowHydrateResult = {changes: RowChange[]; total: number};
 const GO_HYDRATE_SUB_BATCH = 8;
 
 /**
- * Per-chunk streaming hydrate (env-gated). When GO_IVM_PERCHUNK_HYDRATE=true,
+ * Per-chunk streaming hydrate. When on (production DEFAULT — the Go path
+ * streams by default; GO_IVM_PERCHUNK_HYDRATE=false reverts),
  * goHydrateBatchStream requests chunked delivery from the Go sidecar and
  * yields each chunk to the view-syncer as it arrives — so query#1's poke
  * delivery overlaps the remaining chunks' Go compute (intra-query pipelining),
- * extending the existing inter-query overlap. When false (default) the
+ * extending the existing inter-query overlap. When false the
  * accumulator buffers each query to its terminal frame and yields once,
  * byte-identical to the pre-experiment path. Safe on cold hydrate: every
  * change is an ADD and #trackRowSetSignatures XORs per row (associative), so
  * splitting a query across chunk-boundaried onResult calls produces the
- * identical final signature.
+ * identical final signature. Chunk granularity is the Go side's
+ * GO_IVM_CHUNK_SIZE (default 100; per-row on the NAPI rowMode plane).
  */
-const GO_PERCHUNK_HYDRATE = process.env.GO_IVM_PERCHUNK_HYDRATE === 'true';
+const GO_PERCHUNK_HYDRATE = process.env.GO_IVM_PERCHUNK_HYDRATE !== 'false';
 
 /**
  * Convert an audit AST into a parameterized SQL string + values array

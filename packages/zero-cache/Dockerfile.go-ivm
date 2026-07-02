@@ -130,27 +130,34 @@ ARG ADVANCE_DRIVE=false
 # BOTH sides lowered together (proven by go-ivm engine_streaming_test.go's
 # TestClientFlushSimulation_BothLeversRequired: lowering only one keeps
 # time-to-first-row pinned at full-hydrate time):
-#   - HYDRATE/ADVANCE_CHUNK_SIZE cap each Go->TS streamed partial frame at N
-#     RowChanges (the sidecar EMIT side: GO_IVM_HYDRATE_CHUNK_SIZE /
-#     GO_IVM_ADVANCE_CHUNK_SIZE).
+#   - CHUNK_SIZE caps each Go->TS streamed partial frame at N RowChanges
+#     (the sidecar EMIT side: GO_IVM_CHUNK_SIZE — the ONE production knob,
+#     controlling hydrate + advance together; Go code default 100).
 #   - CURSOR_PAGE_SIZE gates how many deduped rows the view-syncer buffers
 #     before poking the client (the TS CONSUMER side: ZERO_CURSOR_PAGE_SIZE,
 #     view-syncer.ts:2708).
-# Default 10000 on all three matches the sidecar + view-syncer code defaults,
-# so tablesrc/shadow-tablesrc emit one frame per query and poke once at
-# end-of-hydrate. streaming-tablesrc lowers ALL THREE to 100 (via the build
-# matrix) for true fine-grained streaming to the client.
-ARG HYDRATE_CHUNK_SIZE=10000
-ARG ADVANCE_CHUNK_SIZE=10000
-ARG CURSOR_PAGE_SIZE=10000
-# TS-side per-chunk delivery lever (pipeline-driver.ts:158 reads
-# GO_IVM_PERCHUNK_HYDRATE === 'true'). When true, goHydrateBatchStream yields
-# each Go partial frame to the poke pipeline as it arrives instead of buffering
-# the query to its terminal frame, so a query's chunk#1 delivery overlaps the
-# remaining chunks' Go compute (intra-query pipelining). Default false keeps the
-# flag-off path byte-identical for tablesrc/shadow-tablesrc; only
-# streaming-tablesrc arms it (paired with the 100-row chunk/cursor levers above).
-ARG PERCHUNK_HYDRATE=false
+# STREAMING IS THE DEFAULT (2026-07-02 consolidation): empty CHUNK_SIZE
+# defers to the Go code default (100); CURSOR_PAGE_SIZE defaults 100 to
+# match. The legacy per-facet ARGs below remain for the build matrix
+# (tablesrc/shadow-tablesrc pin 10000 to preserve their published one-
+# frame-per-query behavior); empty = defer to GO_IVM_CHUNK_SIZE.
+ARG CHUNK_SIZE=
+ARG HYDRATE_CHUNK_SIZE=
+ARG ADVANCE_CHUNK_SIZE=
+ARG CURSOR_PAGE_SIZE=100
+# ONE parallelism knob (GO_IVM_PARALLELISM, Go code default 4): hydrate
+# lane count P = N, reader-pool floor K = 2×N. Empty = code default.
+# Legacy GO_IVM_HYDRATE_LANES / GO_IVM_HYDRATE_READERS override per facet.
+ARG PARALLELISM=
+# TS-side per-chunk delivery lever (pipeline-driver.ts reads
+# GO_IVM_PERCHUNK_HYDRATE !== 'false'). When true (DEFAULT — matches the
+# streaming-by-default consolidation), goHydrateBatchStream yields each Go
+# partial frame to the poke pipeline as it arrives instead of buffering the
+# query to its terminal frame, so a query's chunk#1 delivery overlaps the
+# remaining chunks' Go compute (intra-query pipelining). tablesrc/
+# shadow-tablesrc pin false via the build matrix to keep their published
+# buffer-to-final behavior.
+ARG PERCHUNK_HYDRATE=true
 
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
@@ -166,9 +173,13 @@ ENV ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=${GO_PRIMARY_TRIGGER}
 ENV ZERO_GO_SIDECAR_LEAN_PRIMARY=${LEAN_PRIMARY}
 ENV GO_IVM_ADVANCE_DRIVE=${ADVANCE_DRIVE}
 ENV ZERO_GO_SIDECAR_ADVANCE_DRIVE=${ADVANCE_DRIVE}
-# Streaming granularity (variant-scoped via the ARGs above; streaming-tablesrc
-# =100, tablesrc/shadow-tablesrc=10000). Chunk sizes cap the Go->TS emit
-# frames; cursor page size gates the view-syncer's client-poke cadence.
+# Streaming granularity (variant-scoped via the ARGs above). GO_IVM_CHUNK_SIZE
+# is the one production knob; the per-facet vars override it when the build
+# matrix pins them (empty env = unset to the Go reader — every GO_IVM_* int
+# env is guarded by `v != ""`). Cursor page size gates the view-syncer's
+# client-poke cadence.
+ENV GO_IVM_CHUNK_SIZE=${CHUNK_SIZE}
+ENV GO_IVM_PARALLELISM=${PARALLELISM}
 ENV GO_IVM_HYDRATE_CHUNK_SIZE=${HYDRATE_CHUNK_SIZE}
 ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
 ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
@@ -184,17 +195,18 @@ ENV GO_IVM_PERCHUNK_HYDRATE=${PERCHUNK_HYDRATE}
 # queueing — raise this if that line appears.
 ENV GO_IVM_MAX_OPEN_CONNS=1024
 ENV GO_IVM_MAX_IDLE_CONNS=128
-# Parallel-hydrate defaults (drive-mode only; both matrix variants set
-# ADVANCE_DRIVE=true). GO_IVM_HYDRATE_READERS=8 builds an 8-conn co-read pool
-# pinned to curr's frame so a CG's cold-hydrate queries fetch in parallel
-# instead of serializing on one connection. GO_IVM_WARM_HYDRATE_POOL=true
-# extends that same parallel pool to WARM hydrates (addQueries on a CG that
-# already has live pipelines) — co-read-only, never converging to head, so it
-# can't desync live pipelines. Validated in sandbox: pin-rate 100%, serial 0.
-# Override per-deployment if a pod is memory-constrained (each reader conn
-# costs ~GO_IVM_CONN_CACHE_KB of SQLite page cache).
-ENV GO_IVM_HYDRATE_READERS=8
-ENV GO_IVM_WARM_HYDRATE_POOL=true
+# Parallel hydrate (drive-mode only; both matrix variants set
+# ADVANCE_DRIVE=true) is ON BY DEFAULT in the sidecar since the 2026-07-02
+# consolidation: GO_IVM_PARALLELISM=4 → 4 lanes + an 8-conn co-read pool
+# pinned to curr's frame (cold-hydrate queries fetch in parallel instead of
+# serializing on one connection), and the warm-hydrate pool extension
+# (addQueries on a CG with live pipelines; co-read-only, never converging to
+# head, so it can't desync live pipelines — validated in sandbox: pin-rate
+# 100%, serial 0). No ENV pins here — pinning GO_IVM_HYDRATE_READERS at
+# image level would mask the GO_IVM_PARALLELISM knob at deploy time. Scale
+# with GO_IVM_PARALLELISM; disable the warm pool with
+# GO_IVM_WARM_HYDRATE_POOL=false if a pod is memory-constrained (each
+# reader conn costs ~GO_IVM_CONN_CACHE_KB of SQLite page cache).
 # Per-conn SQLite page cache in KB. This is C-side malloc — OUTSIDE
 # GOMEMLIMIT's view — and scales as pools × conns × cache: at 1024 conns
 # the SQLite default (~2MB) is up to ~4GB of invisible memory. 1MB/conn
