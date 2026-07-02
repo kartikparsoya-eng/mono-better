@@ -561,10 +561,22 @@ export function createAdvanceStreamAccumulator(opts?: {rowMode?: boolean}): {
  *
  * Returned object is stateful — do not reuse across calls.
  */
-export function createAdvanceToHeadStreamAccumulator(): {
+export function createAdvanceToHeadStreamAccumulator(opts?: {
+  rowMode?: boolean;
+}): {
   onFrame: (value: unknown) => void;
+  onRow: (change: RowChange) => void;
   finish: () => AdvanceToHeadResult;
 } {
+  // Row mode (NAPI transport): same two-plane contract as
+  // createAdvanceStreamAccumulator — rows arrive individually via onRow
+  // (kind-3 records) while FRAMES carry only fallback rows + the terminal
+  // final (which here also carries version/numChanges). Ordering across
+  // both planes is guaranteed by the addon's single delivery queue, but
+  // chunkIndex continuity is NOT observable frame-to-frame (row-bearing
+  // partials produce no frame at all), so the strict monotonicity check
+  // is relaxed to "non-decreasing" in row mode.
+  const rowMode = opts?.rowMode === true;
   const acc: RowChange[] = [];
   let timings: TableTiming[] | undefined;
   let expectedNextIndex = 0;
@@ -575,6 +587,14 @@ export function createAdvanceToHeadStreamAccumulator(): {
   let reset: {reason: string; msg: string} | undefined;
 
   return {
+    onRow: (change: RowChange) => {
+      if (gotFinal) {
+        throw new Error(
+          'advanceToHeadStream received row record after final frame',
+        );
+      }
+      acc.push(change);
+    },
     onFrame: (value: unknown) => {
       const v = value as {
         changes?: RowChange[];
@@ -598,13 +618,15 @@ export function createAdvanceToHeadStreamAccumulator(): {
       // Single sender goroutine on the Go side → strict in-order delivery.
       // A gap is a wire-level bug; fail loud rather than silently committing
       // a partial advance to the CVR.
-      if (chunkIndex !== expectedNextIndex) {
+      // Row mode: index GAPS are expected (row-bearing partials ship as
+      // records, not frames), but going backwards still means reordering.
+      if (rowMode ? chunkIndex < expectedNextIndex : chunkIndex !== expectedNextIndex) {
         throw new Error(
           `advanceToHeadStream chunk order violation: ` +
             `expected chunkIndex=${expectedNextIndex}, got ${chunkIndex}`,
         );
       }
-      expectedNextIndex++;
+      expectedNextIndex = chunkIndex + 1;
 
       // Reject chunks arriving after the terminal frame — a Go-side wire bug
       // that would silently corrupt the accumulated result.
@@ -1218,18 +1240,26 @@ export class GoIVMClient {
     clientGroupID: string,
     initEpoch: number,
     appID: string,
-    opts?: CallOptions,
+    opts?: CallOptions & {rowMode?: boolean},
   ): Promise<AdvanceToHeadResult> {
-    const handler = createAdvanceToHeadStreamAccumulator();
+    // Row mode requires the in-process transport (per-row records ride the
+    // addon's delivery queue); on the socket it silently degrades to the
+    // ordinary frame path — same result, chunked framing.
+    const rowMode = opts?.rowMode === true && this.#napi !== null;
+    const handler = createAdvanceToHeadStreamAccumulator({rowMode});
+    const base = appID
+      ? {clientGroupID, initEpoch, appID}
+      : {clientGroupID, initEpoch};
     await this.#call(
       'advanceToHeadStream',
-      appID ? {clientGroupID, initEpoch, appID} : {clientGroupID, initEpoch},
+      rowMode ? {...base, rowMode: true} : base,
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
         // Forward the group for in-flight fairness (advanceStream omits this;
         // we keep it so a single group can't starve others — CROSS-2).
         clientGroupID: opts?.clientGroupID ?? clientGroupID,
         onPartial: handler.onFrame,
+        ...(rowMode ? {onRow: handler.onRow} : {}),
       },
     );
     return handler.finish();

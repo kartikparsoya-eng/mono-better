@@ -419,6 +419,75 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     // recovery forwards it alongside the re-init (F2/drift contract).
     expect((thrown as DriftError).partialChanges).toEqual([row('a'), row('b')]);
   });
+
+  // --- rowMode (NAPI transport, two-plane delivery) ---
+
+  test('rowMode: rows via onRow + final frame yields full AdvanceToHeadResult', () => {
+    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    // Rows arrive individually as records; row-bearing partials produce NO
+    // frame at all, so the final frame's chunkIndex has a gap.
+    h.onRow(row('a'));
+    h.onRow(row('b'));
+    h.onFrame({
+      chunkIndex: 2,
+      final: true,
+      timings: [{table: 't', type: 0, ms: 3}],
+      version: '0000000011',
+      numChanges: 2,
+    });
+    expect(h.finish()).toEqual({
+      changes: [],
+      version: '0000000011',
+      numChanges: 2,
+      rowChanges: [row('a'), row('b')],
+      timings: [{table: 't', type: 0, ms: 3}],
+      reset: undefined,
+    });
+  });
+
+  test('rowMode: fallback rows in frames interleave with records in queue order', () => {
+    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    h.onRow(row('a'));
+    // A non-encodable change rides a fallback frame between records.
+    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onRow(row('c'));
+    h.onFrame({chunkIndex: 3, final: true, version: '0000000012', numChanges: 3});
+    expect(h.finish().rowChanges).toEqual([row('a'), row('b'), row('c')]);
+  });
+
+  test('rowMode: chunkIndex gaps allowed, backwards still throws', () => {
+    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    h.onFrame({changes: [row('a')], chunkIndex: 3, final: false});
+    expect(() =>
+      h.onFrame({changes: [row('b')], chunkIndex: 2, final: false}),
+    ).toThrow(/advanceToHeadStream chunk order violation/);
+  });
+
+  test('rowMode: row record after final frame throws', () => {
+    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    h.onFrame({chunkIndex: 0, final: true, version: '0000000013'});
+    expect(() => h.onRow(row('x'))).toThrow(
+      /advanceToHeadStream received row record after final frame/,
+    );
+  });
+
+  test('rowMode: drift on final carries records + fallback rows as partialChanges', () => {
+    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    h.onRow(row('a'));
+    h.onFrame({
+      chunkIndex: 1,
+      final: true,
+      drift: {table: 't', op: 'edit', pk: {id: 'a'}, hasCount: 0},
+    });
+    let thrown: unknown;
+    try {
+      h.finish();
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DriftError);
+    expect((thrown as DriftError).partialChanges).toEqual([row('a')]);
+  });
 });
 
 // Cross-language contract: a positional (protocolRev 9) frame — as produced by

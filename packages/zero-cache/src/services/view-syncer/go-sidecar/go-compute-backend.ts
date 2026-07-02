@@ -327,7 +327,10 @@ export class GoComputeBackend {
           this.#clientGroupID,
           this.#sidecarInitEpoch,
           this.#appID,
-          this.#cgOpts(),
+          // rowMode: per-row delivery on the in-process (napi) transport —
+          // the deployed Go-primary trigger path. The client degrades it to
+          // frames when a socket came up instead.
+          {...this.#cgOpts(), rowMode: this.#rowMode},
         ),
       );
     } catch (err) {
