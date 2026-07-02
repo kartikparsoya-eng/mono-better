@@ -67,6 +67,7 @@ import {
   isGoAdvanceDrive,
   isGoPrimaryTrigger,
   isGoLeanPrimary,
+  goNapiRowMode,
   goDriftAuditIntervalMs,
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
@@ -1550,7 +1551,9 @@ export class PipelineDriver {
             // O2: make the shard's appID authoritative on the advanceToHead
             // wire so the sidecar watches the right permissions table even if
             // its GO_IVM_APP_ID env was set inconsistently (externally-managed).
-            {appID: this.#shardID.appID},
+            // rowMode: per-row delivery on the in-process (napi) transport —
+            // the client degrades it to frames when a socket came up instead.
+            {appID: this.#shardID.appID, rowMode: goNapiRowMode(config)},
           )
         : null;
 

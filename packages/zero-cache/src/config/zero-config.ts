@@ -1066,7 +1066,10 @@ export const zeroOptions = {
       type: v.boolean().default(false),
       desc: [
         `In shadow mode, include full row contents in mismatch logs. Default is to`,
-        `redact rows to {type, queryID, rowKey} for PII safety. Only enable in`,
+        // NOTE: parens, not braces — desc lines are chalk templates, and a
+        // brace group here throws "Found extraneous }" at usage-render time,
+        // breaking --help and every validation-error message.
+        `redact rows to (type, queryID, rowKey) for PII safety. Only enable in`,
         `development or with explicit log-PII review.`,
       ],
     },
@@ -1076,6 +1079,49 @@ export const zeroOptions = {
         `Path to the compiled go-ivm-sidecar binary. The default resolves via PATH;`,
         `override with an absolute path when the binary is not on PATH (e.g. when`,
         `running zero-cache from a non-standard install location).`,
+      ],
+    },
+    transport: {
+      type: v.literalUnion('socket', 'napi').default('socket'),
+      desc: [
+        `How the worker talks to the Go IVM engine.`,
+        ``,
+        `{bold socket} (default): spawn (or connect to) a separate sidecar process`,
+        `over a Unix domain socket with length-prefixed msgpack frames.`,
+        ``,
+        `{bold napi}: load the Go engine IN-PROCESS via the goivm_napi N-API addon +`,
+        `libgoivm c-shared library ({bold goSidecar.napiLibPath}). No child process, no`,
+        `socket, no per-frame syscalls; results can be delivered row-by-row`,
+        `({bold goSidecar.napiRowMode}). Requires the out-of-band build artifacts`,
+        `(addon .node + libgoivm); if either is missing, startup fails and the`,
+        `worker falls back to the TS path. Incompatible with`,
+        `{bold goSidecar.externallyManaged} (an in-process engine cannot be shared`,
+        `across workers) — if both are set, externallyManaged wins and transport`,
+        `reverts to socket. NOTE: a Go runtime cannot be unloaded or restarted`,
+        `in-process, so "sidecar restart" recovery does not exist in this mode;`,
+        `a fatal Go error takes down the whole syncer worker (which the`,
+        `supervisor then restarts).`,
+      ],
+    },
+    napiLibPath: {
+      type: v.string().default('libgoivm.so'),
+      desc: [
+        `Path to the libgoivm c-shared library for {bold goSidecar.transport=napi}`,
+        `(ignored otherwise). The default bare name resolves via the platform's`,
+        `dynamic-linker search path (LD_LIBRARY_PATH etc.); use an absolute path`,
+        `in containers (e.g. /usr/local/lib/libgoivm.so). Built in the go-ivm`,
+        `repo with: go build -tags "libsqlite3 napilib" -buildmode=c-shared.`,
+      ],
+    },
+    napiRowMode: {
+      type: v.boolean().default(true),
+      desc: [
+        `When the NAPI transport is active, deliver hydrate/advance results from`,
+        `the Go engine ROW BY ROW (compact binary records over the in-process`,
+        `queue) instead of accumulating them into msgpack chunk frames. This is`,
+        `the point of the NAPI transport — each row is visible to TS as soon as`,
+        `Go produces it. Disable only for A/B measurement (napi-frames vs`,
+        `napi-rows); has no effect on the socket transport.`,
       ],
     },
     externallyManaged: {

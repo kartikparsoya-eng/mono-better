@@ -68,6 +68,14 @@ export class GoComputeBackend {
   readonly #log: GoBackendLogger;
   readonly #loadBatchRows: number;
   readonly #appID: string;
+  /**
+   * Per-row delivery opt-in for streaming RPCs (hydrate + advance). Only
+   * engages when the underlying client is on the in-process (napi)
+   * transport — the client itself degrades rowMode to msgpack frames on a
+   * socket — so this can be armed unconditionally from config without
+   * checking which transport actually came up.
+   */
+  readonly #rowMode: boolean;
   #initialized = false;
   #initEpoch = -1;
   /**
@@ -103,12 +111,14 @@ export class GoComputeBackend {
       logger?: GoBackendLogger;
       loadBatchRows?: number;
       appID?: string;
+      rowMode?: boolean;
     },
   ) {
     this.#manager = manager;
     this.#clientGroupID = clientGroupID;
     this.#getCurrentTables = getCurrentTables;
     this.#getCurrentQueries = getCurrentQueries;
+    this.#rowMode = options?.rowMode ?? false;
     // O2: send the appID on the advanceToHead wire so the sidecar uses the
     // SHARD's appID for its snapshotter's permissions-table watch instead of
     // relying solely on the GO_IVM_APP_ID env (which an externally-managed
@@ -233,7 +243,7 @@ export class GoComputeBackend {
     // can exceed the wire cap, get SKIPPED by the TS reader, and orphan the RPC
     // into a 60s timeout (the cold-hydrate freeze). addQueryStream chunks it.
     return this.#withReinitRetry(() =>
-      this.#client().addQueryStream(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, this.#cgOpts()),
+      this.#client().addQueryStream(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, {...this.#cgOpts(), rowMode: this.#rowMode}),
     );
   }
 
@@ -246,7 +256,9 @@ export class GoComputeBackend {
   ): Promise<void> {
     if (this.#restartGate) await this.#restartGate;
     await this.#withReinitRetry(() =>
-      this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, onResult, {...this.#cgOpts(), chunked: opts?.chunked}),
+      // exactOptionalPropertyTypes: only materialize `chunked` when the
+      // caller actually set it (chunked: undefined ≠ absent).
+      this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, onResult, {...this.#cgOpts(), ...(opts?.chunked !== undefined ? {chunked: opts.chunked} : {}), rowMode: this.#rowMode}),
     );
   }
 
@@ -259,7 +271,7 @@ export class GoComputeBackend {
   // bytes flow as soon as `advanceChunkSize` rows accumulate on Go.
   advanceStream(changes: SnapshotChange[]): Promise<GoAdvanceResult> {
     return this.#advanceWithRecovery(() =>
-      this.#client().advanceStream(this.#clientGroupID, changes, this.#sidecarInitEpoch, this.#cgOpts()),
+      this.#client().advanceStream(this.#clientGroupID, changes, this.#sidecarInitEpoch, {...this.#cgOpts(), rowMode: this.#rowMode}),
     );
   }
 
@@ -896,6 +908,20 @@ export function isGoLeanPrimary(
   return config?.goSidecar?.leanPrimary === true;
 }
 
+// Whether streaming RPCs should opt into per-row delivery. Meaningful only
+// on the in-process (napi) transport — the client degrades rowMode to frames
+// on a socket — so this returns true exactly when the config SELECTS napi and
+// hasn't disabled napiRowMode (its schema default is true; the explicit
+// `!== false` mirrors how goDriftAuditSqlGroundTruth reads its default).
+export function goNapiRowMode(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): boolean {
+  return (
+    config?.goSidecar?.transport === 'napi' &&
+    config?.goSidecar?.napiRowMode !== false
+  );
+}
+
 // Returns 0 when the audit should be off — either Go is disabled, shadow mode
 // already covers it, or the interval is explicitly zeroed in config.
 export function goDriftAuditIntervalMs(
@@ -933,7 +959,7 @@ export function createGoComputeBackend(
   clientGroupID: string,
   getCurrentTables: () => Record<string, TableData>,
   getCurrentQueries: GetCurrentQueries,
-  options?: {logger?: GoBackendLogger; loadBatchRows?: number; appID?: string},
+  options?: {logger?: GoBackendLogger; loadBatchRows?: number; appID?: string; rowMode?: boolean},
 ): GoComputeBackend | null {
   try {
     if (sidecarManager.status !== 'running') return null;

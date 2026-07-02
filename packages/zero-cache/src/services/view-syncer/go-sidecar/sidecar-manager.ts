@@ -10,6 +10,7 @@ import {tmpdir} from 'os';
 import {join} from 'path';
 import {getOrCreateCounter} from '../../../observability/metrics.ts';
 import {GoIVMClient} from './go-ivm-client.ts';
+import {loadGoNapiAddon, type GoNapiAddon} from './napi/index.ts';
 
 /**
  * D5: Protocol-version fallback counter. Pre-fix the catch-and-warn path
@@ -76,8 +77,25 @@ export type SidecarLogger = (
 
 export type SidecarConfig = {
   /** Path to the compiled go-ivm-sidecar binary. Ignored when
-   *  `externallyManaged` is true (the manager does not spawn). */
+   *  `externallyManaged` is true (the manager does not spawn) or when
+   *  `transport` is 'napi' (no process at all). */
   binaryPath: string;
+  /**
+   * Transport to the Go engine (default: 'socket').
+   *
+   * 'socket': spawn/connect to a sidecar process over a Unix socket.
+   * 'napi': load the engine IN-PROCESS via the goivm_napi addon +
+   * libgoivm c-shared library. No child process, no socket, no syscalls
+   * per frame. The Go runtime cannot be unloaded or restarted in-process,
+   * so restart recovery does not exist: any start failure is terminal
+   * ('failed' → callers fall back to TS), and a Go FATAL error (not a
+   * panic — those are recovered at the handler boundary) takes down the
+   * whole worker. Mutually exclusive with `externallyManaged`.
+   */
+  transport?: 'socket' | 'napi';
+  /** Path to libgoivm for transport='napi' (default: 'libgoivm.so',
+   *  resolved by the dynamic linker's search path). */
+  napiLibPath?: string;
   /** Unix socket path (default: /tmp/go-ivm-<pid>.sock) */
   socketPath?: string;
   /** Max restart attempts within restartWindowMs before giving up (default: 5) */
@@ -188,6 +206,13 @@ export class SidecarManager {
   #healthTimer: ReturnType<typeof setInterval> | null = null;
   /** How often the health check runs in externallyManaged mode (ms). */
   static readonly #HEALTH_CHECK_MS = 2000;
+  /**
+   * The loaded goivm_napi addon (transport='napi' only). Set on the first
+   * successful #startNapi; never cleared — the Go host it fronts can only
+   * be started ONCE per process (a Go runtime cannot be re-initialized),
+   * so its presence doubles as the "no second start" guard.
+   */
+  #napiAddon: GoNapiAddon | null = null;
 
   constructor(config: SidecarConfig) {
     // No console fallback: callers without a logger get silence. The syncer
@@ -196,6 +221,8 @@ export class SidecarManager {
     const logger: SidecarLogger = config.logger ?? noop;
     this.#config = {
       binaryPath: config.binaryPath,
+      transport: config.transport ?? 'socket',
+      napiLibPath: config.napiLibPath ?? 'libgoivm.so',
       socketPath: config.socketPath ?? join(tmpdir(), `go-ivm-${process.pid}.sock`),
       maxRestartsInWindow: config.maxRestartsInWindow ?? 5,
       restartWindowMs: config.restartWindowMs ?? 60_000,
@@ -302,10 +329,11 @@ export class SidecarManager {
     }
 
     // In externally-managed mode the binary path is not used by this
-    // manager (some other process owns the sidecar). Skip the existence
-    // check so a typo'd binaryPath doesn't block startup in the shared
-    // deployment.
-    if (!this.#config.externallyManaged) {
+    // manager (some other process owns the sidecar), and in napi mode
+    // there is no process at all (the engine loads in-process from
+    // napiLibPath — dlopen failures surface from #startNapi). Skip the
+    // existence check so an unused binaryPath doesn't block startup.
+    if (!this.#config.externallyManaged && this.#config.transport !== 'napi') {
       if (!existsSync(this.#config.binaryPath)) {
         initFailureCounter.add(1, {reason: 'binary-missing'});
         throw new Error(
@@ -408,7 +436,15 @@ export class SidecarManager {
       this.#proc = null;
     }
 
-    if (!this.#config.externallyManaged) {
+    // In-process transport: deliberately NO addon.shutdown() here. Tearing
+    // down the Go host while handler goroutines may still be flushing rows
+    // races the TSFN release (use-after-free window in deliver_from_go);
+    // and since the host can never be started again in this process, the
+    // only stop() caller that matters is worker shutdown — where process
+    // exit reclaims everything. The idle host holds no client groups after
+    // close() rejected the pendings.
+
+    if (!this.#config.externallyManaged && this.#config.transport !== 'napi') {
       // Clean up socket file (only when we own it)
       try {
         unlinkSync(this.#config.socketPath);
@@ -421,6 +457,125 @@ export class SidecarManager {
   // --- Private ---
 
   async #spawn(): Promise<void> {
+    // In-process transport: no child process, no socket. #startNapi wires
+    // this.#client to the addon; the shared handshake below (ping + version)
+    // then runs identically to the socket path.
+    if (this.#config.transport === 'napi') {
+      this.#startNapi();
+    } else {
+      await this.#spawnSocketTransport();
+    }
+
+    // Verify with ping. #client was just wired by the transport helper;
+    // the local pins non-null for the handshake.
+    const client = this.#client;
+    if (!client) {
+      throw new Error('transport establishment did not produce a client');
+    }
+    const pong = await client.ping();
+    if (pong !== 'pong') {
+      throw new Error(`Sidecar health check failed: expected 'pong', got '${pong}'`);
+    }
+    // Verify wire protocol version (REVIEW-final MED-CROSS-5).
+    try {
+      const v = await client.version();
+      if (v.protocolRev !== EXPECTED_PROTOCOL_REV) {
+        const msg =
+          `Sidecar protocol revision mismatch: client expects ${EXPECTED_PROTOCOL_REV}, ` +
+          `sidecar (v${v.version}) is at ${v.protocolRev}. Refusing to use this sidecar.`;
+        this.#config.logger('error', msg);
+        throw new Error(msg);
+      }
+      this.#sidecarSourceMode = v.sourceMode;
+      this.#config.logger(
+        'info',
+        `Sidecar version ${v.version} (protocol rev ${v.protocolRev}, ` +
+          `source mode ${v.sourceMode ?? 'unreported'})`,
+      );
+    } catch (err) {
+      // Re-throw protocol mismatches — an incompatible sidecar MUST NOT be
+      // accepted. Only swallow "method not found" errors from older sidecars
+      // that don't implement the version RPC at all.
+      if (isProtocolMismatchError(err)) {
+        throw err;
+      }
+      // If the version RPC isn't implemented (older sidecar), warn loudly
+      // but don't refuse — operators can roll out a new client first.
+      // Source mode stays undefined → init ships rows (memory-mode behavior).
+      this.#sidecarSourceMode = undefined;
+      // D5: also bump the fallback counter so dashboards can detect this
+      // (operators kept missing the warn log in busy stdout).
+      protocolFallbackCounter.add(1);
+      this.#config.logger(
+        'warn',
+        'Sidecar does not implement version RPC; assuming compatibility (consider upgrading)',
+        err,
+      );
+    }
+
+    this.#status = 'running';
+    this.#epoch++;
+    // M2: a clean handshake clears the consecutive-retrigger streak so a later
+    // transient restart starts from a full budget again.
+    this.#consecutiveRetriggers = 0;
+    // Explicit startup line: operators grep for this to confirm the Go path
+    // is engaged on a fresh deploy. Pre-fix only the version banner logged
+    // here, leaving "is the manager actually ready?" ambiguous when version
+    // RPC silently failed.
+    this.#config.logger(
+      'info',
+      this.#config.transport === 'napi'
+        ? `Go sidecar manager running in-process via napi (epoch ${this.#epoch})`
+        : `Go sidecar manager running at ${this.#config.socketPath} ` +
+            `(epoch ${this.#epoch}${this.#config.externallyManaged ? ', externally-managed' : ''})`,
+    );
+    this.#runningResolve();
+
+    // In externallyManaged mode there is no proc.on('exit') hook to detect
+    // a sidecar crash. Install a health-check ticker that polls the client's
+    // socket state; on disconnect, route through the same restart pipeline
+    // that the spawned-process path uses.
+    if (this.#config.externallyManaged) {
+      if (this.#healthTimer) clearInterval(this.#healthTimer);
+      this.#healthTimer = setInterval(() => {
+        if (this.#shutdownRequested) return;
+        if (this.#status !== 'running') return;
+        if (this.#client && !this.#client.isConnected()) {
+          this.#config.logger(
+            'error',
+            'External sidecar connection lost — attempting to reconnect',
+          );
+          // Stop polling while restart is in flight; #spawn will reinstall.
+          if (this.#healthTimer) clearInterval(this.#healthTimer);
+          this.#healthTimer = null;
+          this.#handleRestartTrigger();
+        }
+      }, SidecarManager.#HEALTH_CHECK_MS);
+      this.#healthTimer?.unref();
+    }
+
+    if (this.#firstStartComplete) {
+      // This was a restart — notify dependents. Run listeners best-effort;
+      // failures don't roll back the restart.
+      const epoch = this.#epoch;
+      for (const listener of this.#listeners) {
+        Promise.resolve()
+          .then(() => listener(epoch))
+          .catch(err =>
+            this.#config.logger('error', 'restart listener failed', err),
+          );
+      }
+    } else {
+      this.#firstStartComplete = true;
+    }
+  }
+
+  /**
+   * Socket-transport establishment: spawn the sidecar process (unless
+   * externally managed), wait for its socket, and connect this.#client.
+   * Extracted verbatim from the pre-napi #spawn body.
+   */
+  async #spawnSocketTransport(): Promise<void> {
     // Close any prior client BEFORE replacing — without this, restart leaks
     // socket listeners and pending Promises (REVIEW-ts-integration MEDIUM-4).
     if (this.#client) {
@@ -485,7 +640,7 @@ export class SidecarManager {
     // In externallyManaged mode we don't spawn — some other process owns
     // the sidecar. We trust the socket is already there (or appearing
     // shortly). Connection loss is detected by the periodic health check
-    // installed below and routed through the same #handleRestartTrigger
+    // installed by #spawn and routed through the same #handleRestartTrigger
     // path so dependents see a consistent restart-event model.
 
     // Wait for the socket to appear and become connectable
@@ -497,102 +652,49 @@ export class SidecarManager {
         this.#config.logger(level, `client: ${msg}`, err),
     });
     await this.#client.connect();
+  }
 
-    // Verify with ping
-    const pong = await this.#client.ping();
-    if (pong !== 'pong') {
-      throw new Error(`Sidecar health check failed: expected 'pong', got '${pong}'`);
-    }
-    // Verify wire protocol version (REVIEW-final MED-CROSS-5).
-    try {
-      const v = await this.#client.version();
-      if (v.protocolRev !== EXPECTED_PROTOCOL_REV) {
-        const msg =
-          `Sidecar protocol revision mismatch: client expects ${EXPECTED_PROTOCOL_REV}, ` +
-          `sidecar (v${v.version}) is at ${v.protocolRev}. Refusing to use this sidecar.`;
-        this.#config.logger('error', msg);
-        throw new Error(msg);
-      }
-      this.#sidecarSourceMode = v.sourceMode;
-      this.#config.logger(
-        'info',
-        `Sidecar version ${v.version} (protocol rev ${v.protocolRev}, ` +
-          `source mode ${v.sourceMode ?? 'unreported'})`,
-      );
-    } catch (err) {
-      // Re-throw protocol mismatches — an incompatible sidecar MUST NOT be
-      // accepted. Only swallow "method not found" errors from older sidecars
-      // that don't implement the version RPC at all.
-      if (isProtocolMismatchError(err)) {
-        throw err;
-      }
-      // If the version RPC isn't implemented (older sidecar), warn loudly
-      // but don't refuse — operators can roll out a new client first.
-      // Source mode stays undefined → init ships rows (memory-mode behavior).
-      this.#sidecarSourceMode = undefined;
-      // D5: also bump the fallback counter so dashboards can detect this
-      // (operators kept missing the warn log in busy stdout).
-      protocolFallbackCounter.add(1);
-      this.#config.logger(
-        'warn',
-        'Sidecar does not implement version RPC; assuming compatibility (consider upgrading)',
-        err,
+  /**
+   * In-process (napi) transport establishment: load the goivm_napi addon,
+   * dlopen libgoivm, start the Go host with this client's delivery
+   * callback. Synchronous — goivm_start returns only after the host's pump
+   * goroutines are up, so there is no #waitForReady equivalent.
+   *
+   * ONE-SHOT: a Go runtime cannot be re-initialized in-process, so a second
+   * establishment attempt (restart path) throws. The client created here is
+   * never replaced — the TSFN registered with goivm_start closes over it.
+   */
+  #startNapi(): void {
+    if (this.#napiAddon) {
+      throw new Error(
+        'in-process Go host cannot be restarted (Go runtimes cannot ' +
+          're-initialize in a loaded library); worker restart required',
       );
     }
-
-    this.#status = 'running';
-    this.#epoch++;
-    // M2: a clean handshake clears the consecutive-retrigger streak so a later
-    // transient restart starts from a full budget again.
-    this.#consecutiveRetriggers = 0;
-    // Explicit startup line: operators grep for this to confirm the Go path
-    // is engaged on a fresh deploy. Pre-fix only the version banner logged
-    // here, leaving "is the manager actually ready?" ambiguous when version
-    // RPC silently failed.
+    // Env BEFORE dlopen: the Go runtime snapshots environ when the library
+    // loads (rt0 init), so os.Getenv inside newServerFromEnv sees only what
+    // exists at that moment. This mirrors the spawnEnv merge the socket
+    // path applies to the child process — same GO_IVM_* keys, same values
+    // (O1: worker and engine can't silently disagree on mode).
+    for (const [k, val] of Object.entries(this.#config.spawnEnv)) {
+      process.env[k] = val;
+    }
+    const addon = loadGoNapiAddon(); // throws if the .node isn't built
+    const client = new GoIVMClient('napi:in-process', {
+      onLog: (level, msg, err) =>
+        this.#config.logger(level, `client: ${msg}`, err),
+    });
+    // Throws on dlopen failure, missing symbols, ABI mismatch, or
+    // goivm_start rc != 0 — all routed to start()'s catch → 'failed'.
+    addon.start(this.#config.napiLibPath, client.handleNapiDelivery);
+    client.connectNapi(addon);
+    this.#napiAddon = addon;
+    this.#client = client;
     this.#config.logger(
       'info',
-      `Go sidecar manager running at ${this.#config.socketPath} ` +
-        `(epoch ${this.#epoch}${this.#config.externallyManaged ? ', externally-managed' : ''})`,
+      `in-process Go engine loaded (lib ${this.#config.napiLibPath}, ` +
+        `abi v${addon.abiVersion()})`,
     );
-    this.#runningResolve();
-
-    // In externallyManaged mode there is no proc.on('exit') hook to detect
-    // a sidecar crash. Install a health-check ticker that polls the client's
-    // socket state; on disconnect, route through the same restart pipeline
-    // that the spawned-process path uses.
-    if (this.#config.externallyManaged) {
-      if (this.#healthTimer) clearInterval(this.#healthTimer);
-      this.#healthTimer = setInterval(() => {
-        if (this.#shutdownRequested) return;
-        if (this.#status !== 'running') return;
-        if (this.#client && !this.#client.isConnected()) {
-          this.#config.logger(
-            'error',
-            'External sidecar connection lost — attempting to reconnect',
-          );
-          // Stop polling while restart is in flight; #spawn will reinstall.
-          if (this.#healthTimer) clearInterval(this.#healthTimer);
-          this.#healthTimer = null;
-          this.#handleRestartTrigger();
-        }
-      }, SidecarManager.#HEALTH_CHECK_MS);
-      this.#healthTimer?.unref();
-    }
-
-    if (this.#firstStartComplete) {
-      // This was a restart — notify dependents. Run listeners best-effort;
-      // failures don't roll back the restart.
-      const epoch = this.#epoch;
-      for (const listener of this.#listeners) {
-        Promise.resolve()
-          .then(() => listener(epoch))
-          .catch(err =>
-            this.#config.logger('error', 'restart listener failed', err),
-          );
-      }
-    } else {
-      this.#firstStartComplete = true;
-    }
   }
 
   /**
@@ -615,6 +717,22 @@ export class SidecarManager {
   // external triggers (initial start, externally-managed reconnect)
   // count as a new failure.
   #handleRestartTrigger(isRetrigger = false): void {
+    // In-process transport: there is nothing to restart — the Go host
+    // lives (and dies) with this worker and cannot be re-initialized.
+    // Reaching here means the transport failed post-start somehow; go
+    // terminal immediately so dispatch falls back to TS instead of
+    // looping through #spawn → #startNapi-throws → retry.
+    if (this.#config.transport === 'napi') {
+      this.#status = 'failed';
+      initFailureCounter.add(1, {reason: 'napi-no-restart'});
+      this.#runningReject(new Error('Sidecar reached terminal state: failed'));
+      this.#config.logger(
+        'error',
+        'In-process Go engine failed; it cannot be restarted in-process. ' +
+          'Falling back to TS IVM (worker restart restores the Go path).',
+      );
+      return;
+    }
     // Sliding-window restart cap: count failures in the last
     // restartWindowMs and bail if we exceed the cap.
     const now = Date.now();

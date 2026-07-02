@@ -666,6 +666,194 @@ test('zero-cache --help', () => {
                                                                         This configuration is modeled to easily integrate with a knative K_CE_OVERRIDES binding,                                   
                                                                         (i.e. https://github.com/knative/eventing/blob/main/docs/spec/sources.md#sinkbinding).                                     
                                                                                                                                                                                                    
+     --go-sidecar-enabled boolean                                       default: false                                                                                                             
+       ZERO_GO_SIDECAR_ENABLED env                                                                                                                                                                 
+                                                                        Offload IVM compute (advance + hydrate) to the companion Go sidecar process                                                
+                                                                        instead of running the TypeScript operator tree inline. The Go path runs queries                                           
+                                                                        for each client group in parallel and is the production-ready primary path                                                 
+                                                                        (see go-ivm/REVIEW-final.md).                                                                                              
+                                                                                                                                                                                                   
+                                                                        When false, all IVM compute runs in the TS path. When true, requires the                                                   
+                                                                        goSidecar.binaryPath binary to be reachable; if the sidecar fails to start                                                 
+                                                                        or returns an error, the PipelineDriver falls back to the TS path.                                                         
+                                                                                                                                                                                                   
+     --go-sidecar-shadow-mode boolean                                   default: false                                                                                                             
+       ZERO_GO_SIDECAR_SHADOW_MODE env                                                                                                                                                             
+                                                                        Run BOTH the Go and TS IVM paths and compare results. TS remains the source                                                
+                                                                        of truth; Go results are discarded after comparison. Mismatches are logged                                                 
+                                                                        at error level. Used to validate the sidecar before switching to Go-primary.                                               
+                                                                                                                                                                                                   
+                                                                        Requires goSidecar.enabled to also be true.                                                                                
+                                                                                                                                                                                                   
+     --go-sidecar-shadow-verbose boolean                                default: false                                                                                                             
+       ZERO_GO_SIDECAR_SHADOW_VERBOSE env                                                                                                                                                          
+                                                                        In shadow mode, include full row contents in mismatch logs. Default is to                                                  
+                                                                        redact rows to (type, queryID, rowKey) for PII safety. Only enable in                                                      
+                                                                        development or with explicit log-PII review.                                                                               
+                                                                                                                                                                                                   
+     --go-sidecar-binary-path string                                    default: "go-ivm-sidecar"                                                                                                  
+       ZERO_GO_SIDECAR_BINARY_PATH env                                                                                                                                                             
+                                                                        Path to the compiled go-ivm-sidecar binary. The default resolves via PATH;                                                 
+                                                                        override with an absolute path when the binary is not on PATH (e.g. when                                                   
+                                                                        running zero-cache from a non-standard install location).                                                                  
+                                                                                                                                                                                                   
+     --go-sidecar-transport socket,napi                                 default: "socket"                                                                                                          
+       ZERO_GO_SIDECAR_TRANSPORT env                                                                                                                                                               
+                                                                        How the worker talks to the Go IVM engine.                                                                                 
+                                                                                                                                                                                                   
+                                                                        socket (default): spawn (or connect to) a separate sidecar process                                                         
+                                                                        over a Unix domain socket with length-prefixed msgpack frames.                                                             
+                                                                                                                                                                                                   
+                                                                        napi: load the Go engine IN-PROCESS via the goivm_napi N-API addon +                                                       
+                                                                        libgoivm c-shared library (goSidecar.napiLibPath). No child process, no                                                    
+                                                                        socket, no per-frame syscalls; results can be delivered row-by-row                                                         
+                                                                        (goSidecar.napiRowMode). Requires the out-of-band build artifacts                                                          
+                                                                        (addon .node + libgoivm); if either is missing, startup fails and the                                                      
+                                                                        worker falls back to the TS path. Incompatible with                                                                        
+                                                                        goSidecar.externallyManaged (an in-process engine cannot be shared                                                         
+                                                                        across workers) — if both are set, externallyManaged wins and transport                                                    
+                                                                        reverts to socket. NOTE: a Go runtime cannot be unloaded or restarted                                                      
+                                                                        in-process, so "sidecar restart" recovery does not exist in this mode;                                                     
+                                                                        a fatal Go error takes down the whole syncer worker (which the                                                             
+                                                                        supervisor then restarts).                                                                                                 
+                                                                                                                                                                                                   
+     --go-sidecar-napi-lib-path string                                  default: "libgoivm.so"                                                                                                     
+       ZERO_GO_SIDECAR_NAPI_LIB_PATH env                                                                                                                                                           
+                                                                        Path to the libgoivm c-shared library for goSidecar.transport=napi                                                         
+                                                                        (ignored otherwise). The default bare name resolves via the platform's                                                     
+                                                                        dynamic-linker search path (LD_LIBRARY_PATH etc.); use an absolute path                                                    
+                                                                        in containers (e.g. /usr/local/lib/libgoivm.so). Built in the go-ivm                                                       
+                                                                        repo with: go build -tags "libsqlite3 napilib" -buildmode=c-shared.                                                        
+                                                                                                                                                                                                   
+     --go-sidecar-napi-row-mode boolean                                 default: true                                                                                                              
+       ZERO_GO_SIDECAR_NAPI_ROW_MODE env                                                                                                                                                           
+                                                                        When the NAPI transport is active, deliver hydrate/advance results from                                                    
+                                                                        the Go engine ROW BY ROW (compact binary records over the in-process                                                       
+                                                                        queue) instead of accumulating them into msgpack chunk frames. This is                                                     
+                                                                        the point of the NAPI transport — each row is visible to TS as soon as                                                     
+                                                                        Go produces it. Disable only for A/B measurement (napi-frames vs                                                           
+                                                                        napi-rows); has no effect on the socket transport.                                                                         
+                                                                                                                                                                                                   
+     --go-sidecar-externally-managed boolean                            default: false                                                                                                             
+       ZERO_GO_SIDECAR_EXTERNALLY_MANAGED env                                                                                                                                                      
+                                                                        When true, the Go sidecar process is owned by something outside zero-cache                                                 
+                                                                        (e.g., a container entrypoint that spawns one shared sidecar across all                                                    
+                                                                        worker processes). The worker's SidecarManager skips spawning and binary                                                   
+                                                                        discovery — it just connects to the socket at goSidecar.socketPath                                                         
+                                                                        and reconnects via a health-check ticker if the connection drops.                                                          
+                                                                                                                                                                                                   
+                                                                        Use this to consolidate from one-sidecar-per-worker to one-sidecar-per-cache.                                              
+                                                                        With per-worker sidecars, inter-cg parallelism is capped at                                                                
+                                                                        active_cgs / num_sync_workers; with a shared sidecar it scales                                                             
+                                                                        with active_cgs, so increasing worker count doesn't fragment cg                                                            
+                                                                        co-location and shrink per-sidecar batches.                                                                                
+                                                                                                                                                                                                   
+     --go-sidecar-socket-path string                                    optional                                                                                                                   
+       ZERO_GO_SIDECAR_SOCKET_PATH env                                                                                                                                                             
+                                                                        Unix socket path the sidecar listens on. Required when                                                                     
+                                                                        goSidecar.externallyManaged is true (otherwise defaults to a                                                               
+                                                                        per-worker /tmp/go-ivm-<pid>.sock). Both the sidecar owner and the                                                         
+                                                                        connecting workers must agree on this path.                                                                                
+                                                                                                                                                                                                   
+     --go-sidecar-drift-audit-interval-ms number                        default: 60000                                                                                                             
+       ZERO_GO_SIDECAR_DRIFT_AUDIT_INTERVAL_MS env                                                                                                                                                 
+                                                                        In Go-primary mode (enabled=true, shadowMode=false), how often to run a                                                    
+                                                                        sampled-shadow drift audit. Each interval, the PipelineDriver picks one                                                    
+                                                                        random active query and re-hydrates it on BOTH TS and Go from the current                                                  
+                                                                        snapshot, comparing the results to catch silent drift. Mismatches are                                                      
+                                                                        logged at error level and counted via the ivm.drift-audit-mismatch                                                         
+                                                                        metric. Has no effect in shadow mode (which audits every query) or when                                                    
+                                                                        Go is disabled.                                                                                                            
+                                                                                                                                                                                                   
+                                                                        Set to 0 to disable. Default 60000ms (one query per minute per group).                                                     
+                                                                        Lower values give faster drift detection but more sidecar load.                                                            
+                                                                                                                                                                                                   
+     --go-sidecar-drift-audit-sql-ground-truth boolean                  default: true                                                                                                              
+       ZERO_GO_SIDECAR_DRIFT_AUDIT_SQL_GROUND_TRUTH env                                                                                                                                            
+                                                                        When the drift audit fires, also run a raw SQL query on the snapshot's                                                     
+                                                                        SQLite replica as a third opinion and compare Go's output against SQL                                                      
+                                                                        truth (in addition to the TS-audit comparison). Catches Go-vs-SQL set                                                      
+                                                                        and content drift directly — without this, only Go-vs-TS-audit divergence                                                  
+                                                                        is surfaced, which can be noisy (TS-audit has known boundary-drop bugs).                                                   
+                                                                                                                                                                                                   
+                                                                        Disable to skip the per-audit SQL re-query if it shows up in replica                                                       
+                                                                        load. When off, the audit falls back to the legacy TS-vs-Go set                                                            
+                                                                        comparison only.                                                                                                           
+                                                                                                                                                                                                   
+     --go-sidecar-divergence-capture-dir string                         optional                                                                                                                   
+       ZERO_GO_SIDECAR_DIVERGENCE_CAPTURE_DIR env                                                                                                                                                  
+                                                                        When set, the shadow comparator captures a reproducible snapshot of                                                        
+                                                                        each divergence it can't adjudicate (ts-only / oracle-blind /                                                              
+                                                                        go-vs-sql-drift / raw MISMATCH) to this directory: a VACUUM INTO copy                                                      
+                                                                        of the SQLite replica at that stateVersion plus a JSON file with the                                                       
+                                                                        AST, queryID, operation, both sides' changes, and the SQL verdict.                                                         
+                                                                        Captures are rate-capped (one per queryID per minute) and gated off                                                        
+                                                                        by default (empty/unset = no capture) because VACUUM INTO copies the                                                       
+                                                                        whole DB on the divergence hot path. Intended for offline replay via                                                       
+                                                                        the go-ivm testharness RunTestCaseFromSnapshot loader. NEVER point                                                         
+                                                                        this at a directory inside the public go-ivm repo — real prod rows                                                         
+                                                                        have PII; sanitize captures before committing any repro.                                                                   
+                                                                                                                                                                                                   
+     --go-sidecar-advance-drive boolean                                 default: false                                                                                                             
+       ZERO_GO_SIDECAR_ADVANCE_DRIVE env                                                                                                                                                           
+                                                                        Snapshotter-in-Go (P2): DRIVE Go's engine from its own derived diff.                                                       
+                                                                        In shadow mode the Go advance is sourced via the sidecar's advanceToHead                                                   
+                                                                        RPC (frame-coordinated against the Snapshotter's pinned frame — no                                                         
+                                                                        TS-shipped SnapshotChange[]) and the resulting RowChanges are compared                                                     
+                                                                        against TS's. This validates the self-consistent Go-primary advance path                                                   
+                                                                        end-to-end before CVR version authority moves to Go.                                                                       
+                                                                                                                                                                                                   
+                                                                        Requires goSidecar.shadowMode and a sidecar launched with                                                                  
+                                                                        GO_IVM_ADVANCE_DRIVE=true (which implies advanceToHead) +                                                                  
+                                                                        GO_IVM_SOURCE_MODE=table. Implies goSidecar.advanceToHead.                                                                 
+                                                                                                                                                                                                   
+     --go-sidecar-advance-to-head boolean                               default: false                                                                                                             
+       ZERO_GO_SIDECAR_ADVANCE_TO_HEAD env                                                                                                                                                         
+                                                                        Snapshotter-in-Go (P1): on each shadow advance, ALSO call the sidecar's                                                    
+                                                                        advanceToHead RPC so the Go side derives its OWN snapshot diff from the                                                    
+                                                                        replica's changeLog2, then compare it against the diff TS computed for the                                                 
+                                                                        same advance. This validates the ported Go Snapshotter's fidelity before                                                   
+                                                                        Go-derived diffs feed the CVR (P2).                                                                                        
+                                                                                                                                                                                                   
+                                                                        Requires goSidecar.shadowMode (the comparison runs in the shadow                                                           
+                                                                        advance path), a sidecar built with protocolRev>=7 launched with                                                           
+                                                                        GO_IVM_ADVANCE_TO_HEAD=true and GO_IVM_SOURCE_MODE=table.                                                                  
+                                                                        Mismatches are logged at error level under the [go-diff-shadow] tag.                                                       
+                                                                                                                                                                                                   
+     --go-sidecar-go-primary-trigger boolean                            default: false                                                                                                             
+       ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER env                                                                                                                                                      
+                                                                        Snapshotter-in-Go (P2c): in Go-PRIMARY mode (enabled=true,                                                                 
+                                                                        shadowMode=false), source the user-query advance via the sidecar's                                                         
+                                                                        advanceToHead RPC (Go derives its OWN diff + drives its OWN engine,                                                        
+                                                                        frame-coordinated) instead of shipping it the TS-derived diff via                                                          
+                                                                        advanceStream. This makes Go self-consistent (no frame-timing drift) and                                                   
+                                                                        moves user-query CVR version authority to Go: the CVR stateVersion is                                                      
+                                                                        stamped at min(V_ts, V_go) — the completeness floor both the                                                               
+                                                                        TS-internal and Go-user pipelines have crossed (see                                                                        
+                                                                        go-ivm/DESIGN-snapshotter-port.md §10).                                                                                    
+                                                                                                                                                                                                   
+                                                                        Has no effect in shadow mode. Requires a sidecar launched with                                                             
+                                                                        GO_IVM_ADVANCE_TO_HEAD=true + GO_IVM_ADVANCE_DRIVE=true +                                                                  
+                                                                        GO_IVM_SOURCE_MODE=table. When off, Go-primary keeps the push                                                              
+                                                                        (advanceStream) path and the CVR stamps at TS's version.                                                                   
+                                                                                                                                                                                                   
+     --go-sidecar-lean-primary boolean                                  default: false                                                                                                             
+       ZERO_GO_SIDECAR_LEAN_PRIMARY env                                                                                                                                                            
+                                                                        Snapshotter-in-Go (P3): in Go-PRIMARY mode (enabled=true,                                                                  
+                                                                        shadowMode=false), stop TS from walking USER-table changes during                                                          
+                                                                        advance. TS already holds only no-op STUB pipelines for user queries                                                       
+                                                                        (Go owns them) and keeps its user TableSources current via the snapshot                                                    
+                                                                        setDB on every advance — NOT via these pushes — so the walk is pure                                                        
+                                                                        redundant work. With this on, TS's #advance processes only                                                                 
+                                                                        internal/control-plane changes (lmids, mutationResults); user-table                                                        
+                                                                        changes are dropped from TS's replay (and, in trigger mode, never                                                          
+                                                                        materialized at all). The drift audit and cold fallback still                                                              
+                                                                        re-hydrate user queries on demand from the snapshot-backed TableSources,                                                   
+                                                                        so correctness is preserved.                                                                                               
+                                                                                                                                                                                                   
+                                                                        Has no effect in shadow mode (TS is authoritative there and must walk                                                      
+                                                                        the full diff). Safe to combine with goSidecar.goPrimaryTrigger.                                                           
+                                                                                                                                                                                                   
     "
   `);
 });

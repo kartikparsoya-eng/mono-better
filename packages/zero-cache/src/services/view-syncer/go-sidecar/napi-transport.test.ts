@@ -51,7 +51,7 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
   test('frame plane: init + loadRows round-trip', async () => {
     const c = ensureStarted();
     const {initEpoch} = await c.init('cg-napi', {
-      storage: `/tmp/goivm-napi-test-${process.pid}.db`,
+      storagePath: `/tmp/goivm-napi-test-${process.pid}.db`,
       tables: {
         users: {
           columns: {
@@ -60,6 +60,9 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
             age: {type: 'number'},
           },
           primaryKey: ['id'],
+          // Schema-only init (production two-phase pattern): rows ship
+          // via the loadRows RPC below.
+          rows: [],
         },
       },
     });
@@ -130,8 +133,8 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       [
         {
           table: 'users',
+          prevValues: [],
           nextValue: {id: 'u9', name: 'zed', age: 99},
-          rowKey: {id: 'u9'},
         },
       ],
       1,
@@ -157,8 +160,8 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       [
         {
           table: 'users',
+          prevValues: [],
           nextValue: {id: 'u10', name: 'yara', age: 41},
-          rowKey: {id: 'u10'},
         },
       ],
       1,

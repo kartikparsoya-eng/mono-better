@@ -1098,7 +1098,7 @@ export class GoIVMClient {
     queryID: string,
     ast: unknown,
     initEpoch: number,
-    opts?: CallOptions,
+    opts?: CallOptions & {rowMode?: boolean},
   ): Promise<HydrateResult> {
     let result: HydrateResult | undefined;
     await this.addQueriesStream(

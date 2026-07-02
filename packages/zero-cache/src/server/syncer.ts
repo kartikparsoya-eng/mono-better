@@ -131,6 +131,18 @@ export default function runWorker(
     const binaryPath = config.goSidecar.binaryPath;
     const externallyManaged = config.goSidecar.externallyManaged ?? false;
     const socketPath = config.goSidecar.socketPath;
+    // Transport resolution: napi (in-process engine) is per-worker by
+    // construction, so it cannot express the shared-sidecar topology —
+    // externallyManaged wins and the transport reverts to socket.
+    let transport = config.goSidecar.transport ?? 'socket';
+    if (transport === 'napi' && externallyManaged) {
+      lc.warn?.(
+        'goSidecar.transport=napi is incompatible with ' +
+          'goSidecar.externallyManaged (an in-process engine cannot be ' +
+          'shared across workers); using the socket transport.',
+      );
+      transport = 'socket';
+    }
     // M4: the goSidecar flags are independent booleans whose valid combinations
     // are resolved by precedence at dispatch time (shadow wins; primary flags
     // imply others). Warn on contradictory/incomplete combinations that would
@@ -184,6 +196,8 @@ export default function runWorker(
       }
       sidecarManager = new SidecarManager({
         binaryPath,
+        transport,
+        napiLibPath: config.goSidecar.napiLibPath,
         ...(socketPath ? {socketPath} : {}),
         externallyManaged,
         spawnEnv,
@@ -199,9 +213,11 @@ export default function runWorker(
       void sidecarManager.start().then(
         () =>
           lc.info?.(
-            externallyManaged
-              ? `Connected to shared Go IVM sidecar at ${socketPath}`
-              : 'Go IVM sidecar started',
+            transport === 'napi'
+              ? 'Go IVM engine loaded in-process (napi transport)'
+              : externallyManaged
+                ? `Connected to shared Go IVM sidecar at ${socketPath}`
+                : 'Go IVM sidecar started',
           ),
         err => {
           lc.error?.('Failed to start Go IVM sidecar, falling back to TS', err);
