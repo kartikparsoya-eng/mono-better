@@ -1,0 +1,9 @@
+{
+  "name": "goivm-napi-addon",
+  "version": "0.0.0",
+  "private": true,
+  "description": "N-API bridge for the in-process Go IVM engine (libgoivm). Built out-of-band: npm run build",
+  "scripts": {
+    "build": "node-gyp rebuild"
+  }
+}

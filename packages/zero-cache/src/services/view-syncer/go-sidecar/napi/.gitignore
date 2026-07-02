@@ -1,0 +1,2 @@
+# node-gyp output — built out-of-band per platform (npx node-gyp rebuild).
+build/

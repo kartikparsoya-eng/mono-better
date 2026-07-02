@@ -5,6 +5,13 @@
 
 import {createConnection, type Socket} from 'net';
 import {Packr, Unpackr} from 'msgpackr';
+import {
+  DELIVERY_KIND_FRAME,
+  DELIVERY_KIND_GROUP_DEF,
+  DELIVERY_KIND_ROW,
+  RowGroupRegistry,
+} from './napi-records.ts';
+import type {GoNapiAddon} from './napi/index.ts';
 import {trace} from '@opentelemetry/api';
 
 /**
@@ -143,6 +150,14 @@ export type CallOptions = {
    * Used by `addQueriesStream`.
    */
   onPartial?: (value: unknown) => void;
+  /**
+   * Row-plane callback (NAPI transport only). When set, per-row records
+   * (delivery kinds 2/3) for this RPC id are decoded and routed here as
+   * assembled RowChange objects — bypassing msgpack entirely. Partial
+   * FRAMES for the same id (fallback rows + the terminal final frame)
+   * still route through onPartial. See napi-records.ts.
+   */
+  onRow?: (change: RowChange) => void;
 };
 
 /** Per-(table, op) timing reported by Go for an advance call. */
@@ -265,9 +280,10 @@ export function createHydrateStreamAccumulator(
     final?: boolean;
     chunkIndex?: number;
   }) => void,
-  opts?: {chunked?: boolean},
+  opts?: {chunked?: boolean; rowMode?: boolean},
 ): {
   onFrame: (value: unknown) => void;
+  onRow: (change: RowChange) => void;
   finish: () => void;
 } {
   // When true, deliver each partial frame straight to onResult (carrying its
@@ -278,9 +294,15 @@ export function createHydrateStreamAccumulator(
   // all non-streaming callers rely on the exact {queryID,changes,timingMs}
   // shape emitted in that branch).
   const chunked = opts?.chunked === true;
+  // Row mode (NAPI transport): rows arrive individually via onRow (kind-3
+  // records, routed per queryID); FRAMES carry only fallback rows + each
+  // query's terminal final. chunkIndex continuity is relaxed to
+  // non-decreasing (row-bearing partials produce no frame). See the
+  // advance accumulator's rowMode note.
+  const rowMode = opts?.rowMode === true;
   const acc = new Map<
     string,
-    {changes: RowChange[]; expectedNextIndex: number}
+    {changes: RowChange[]; expectedNextIndex: number; rowChunkIndex: number}
   >();
   // Tracks queryIDs that already saw final=true. Without this, a duplicate
   // final frame for the same queryID would resurrect a fresh entry (since
@@ -290,7 +312,38 @@ export function createHydrateStreamAccumulator(
   // mis-dispatch.
   const finalized = new Set<string>();
 
+  const entryFor = (queryID: string) => {
+    let entry = acc.get(queryID);
+    if (!entry) {
+      entry = {changes: [], expectedNextIndex: 0, rowChunkIndex: 0};
+      acc.set(queryID, entry);
+    }
+    return entry;
+  };
+
   return {
+    onRow: (change: RowChange) => {
+      if (finalized.has(change.queryID)) {
+        throw new Error(
+          `addQueriesStream row record after final for queryID=${change.queryID}`,
+        );
+      }
+      const entry = entryFor(change.queryID);
+      if (chunked) {
+        // Per-chunk consumers get each row as its own 1-row non-final
+        // delivery with a synthetic per-query chunk counter (records don't
+        // carry chunkIndex; the addon queue guarantees order).
+        onResult({
+          queryID: change.queryID,
+          changes: [change],
+          timingMs: undefined,
+          final: false,
+          chunkIndex: entry.rowChunkIndex++,
+        });
+        return;
+      }
+      entry.changes.push(change);
+    },
     onFrame: (value: unknown) => {
       const v = value as {
         queryID: string;
@@ -312,7 +365,7 @@ export function createHydrateStreamAccumulator(
 
       let entry = acc.get(v.queryID);
       if (!entry) {
-        entry = {changes: [], expectedNextIndex: 0};
+        entry = {changes: [], expectedNextIndex: 0, rowChunkIndex: 0};
         acc.set(v.queryID, entry);
       }
 
@@ -320,14 +373,15 @@ export function createHydrateStreamAccumulator(
       // goroutine per query calls onResult sequentially) and the RPC
       // transport preserves frame order within an id. A gap or duplicate
       // means a wire-level bug — fail loudly rather than silently
-      // delivering misordered or partial results.
-      if (chunkIndex !== entry.expectedNextIndex) {
+      // delivering misordered or partial results. Row mode: gaps expected
+      // (row-bearing partials ship as records); backwards = reordering.
+      if (rowMode ? chunkIndex < entry.expectedNextIndex : chunkIndex !== entry.expectedNextIndex) {
         throw new Error(
           `addQueriesStream chunk order violation for queryID=${v.queryID}: ` +
             `expected chunkIndex=${entry.expectedNextIndex}, got ${chunkIndex}`,
         );
       }
-      entry.expectedNextIndex++;
+      entry.expectedNextIndex = chunkIndex + 1;
 
       if (chunked) {
         // Per-chunk delivery: hand this frame straight through (no per-queryID
@@ -387,10 +441,18 @@ export function createHydrateStreamAccumulator(
  *
  * Returned object is stateful — do not reuse across calls.
  */
-export function createAdvanceStreamAccumulator(): {
+export function createAdvanceStreamAccumulator(opts?: {rowMode?: boolean}): {
   onFrame: (value: unknown) => void;
+  onRow: (change: RowChange) => void;
   finish: () => AdvanceResult;
 } {
+  // Row mode (NAPI transport): rows arrive individually via onRow (kind-3
+  // records) while FRAMES carry only fallback rows + the terminal final.
+  // Ordering across both planes is guaranteed by the addon's single
+  // delivery queue, but chunkIndex continuity is NOT observable
+  // frame-to-frame (row-bearing partials produce no frame at all), so the
+  // strict monotonicity check is relaxed to "non-decreasing" in row mode.
+  const rowMode = opts?.rowMode === true;
   const acc: RowChange[] = [];
   let timings: TableTiming[] | undefined;
   let expectedNextIndex = 0;
@@ -398,6 +460,12 @@ export function createAdvanceStreamAccumulator(): {
   let drift: DriftError | undefined;
 
   return {
+    onRow: (change: RowChange) => {
+      if (gotFinal) {
+        throw new Error('advanceStream received row record after final frame');
+      }
+      acc.push(change);
+    },
     onFrame: (value: unknown) => {
       const v = value as {
         changes?: RowChange[];
@@ -418,13 +486,15 @@ export function createAdvanceStreamAccumulator(): {
       // Single sender goroutine on the Go side → strict in-order delivery.
       // A gap is a wire-level bug; fail loud rather than silently
       // delivering misordered or partial advance results to the view-syncer.
-      if (chunkIndex !== expectedNextIndex) {
+      // Row mode: index GAPS are expected (row-bearing partials ship as
+      // records, not frames), but going backwards still means reordering.
+      if (rowMode ? chunkIndex < expectedNextIndex : chunkIndex !== expectedNextIndex) {
         throw new Error(
           `advanceStream chunk order violation: ` +
             `expected chunkIndex=${expectedNextIndex}, got ${chunkIndex}`,
         );
       }
-      expectedNextIndex++;
+      expectedNextIndex = chunkIndex + 1;
 
       // Reject chunks arriving after the terminal frame — a Go-side wire bug
       // that would silently corrupt the accumulated result.
@@ -734,6 +804,16 @@ export class GoIVMClient {
     | ((level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void)
     | undefined;
   #socket: Socket | null = null;
+  // In-process (NAPI) transport. Mutually exclusive with #socket: exactly
+  // one of connect() / connectNapi() is used per client instance. When set,
+  // #call sends request payloads through the addon (no length prefix, no
+  // kernel round-trip) and complete response frames arrive via
+  // #handleDelivery — no reassembly, #onData never runs.
+  #napi: GoNapiAddon | null = null;
+  // Row-plane group registry (NAPI row mode): (reqID, groupID) → column/PK
+  // metadata, populated by kind-2 deliveries and cleared when the owning
+  // RPC settles.
+  readonly #rowGroups = new RowGroupRegistry();
   #nextID = 1;
   #pending = new Map<
     number,
@@ -748,6 +828,8 @@ export class GoIVMClient {
        * without `partial`-shape data) resolves the promise normally.
        */
       onPartial?: (value: unknown) => void;
+      /** NAPI row plane: invoked per decoded row record for this id. */
+      onRow?: (change: RowChange) => void;
     }
   >();
 
@@ -828,10 +910,35 @@ export class GoIVMClient {
     });
   }
 
+  /**
+   * Attach the in-process (NAPI) transport instead of a socket. The caller
+   * owns the addon lifecycle (start/shutdown — typically SidecarManager in
+   * 'napi' mode); this just wires deliveries into the client's dispatch.
+   * Call the addon's start() with this client's {@link handleNapiDelivery}
+   * BEFORE issuing RPCs.
+   */
+  connectNapi(addon: GoNapiAddon): void {
+    if (this.#socket) {
+      throw new Error('connectNapi: socket transport already connected');
+    }
+    this.#napi = addon;
+  }
+
+  /**
+   * The delivery callback to register with the addon's start(). Exposed as
+   * a bound method (not wired inside connectNapi) because goivm_start must
+   * be called exactly once per process while GoIVMClient instances may be
+   * recreated — the owner re-points the live callback at the current client.
+   */
+  get handleNapiDelivery(): (kind: number, payload: Buffer) => void {
+    return (kind, payload) => this.#handleDelivery(kind, payload);
+  }
+
   /** Close the connection. */
   close(): void {
     const socket = this.#socket;
     this.#socket = null;
+    this.#napi = null;
     if (socket) {
       socket.destroy();
     }
@@ -855,7 +962,7 @@ export class GoIVMClient {
   }
 
   isConnected(): boolean {
-    return this.#socket !== null;
+    return this.#socket !== null || this.#napi !== null;
   }
 
   /**
@@ -956,15 +1063,24 @@ export class GoIVMClient {
     queries: {queryID: string; ast: unknown}[],
     initEpoch: number,
     onResult: (r: {queryID: string; changes: RowChange[]; timingMs: number | undefined; final?: boolean; chunkIndex?: number}) => void,
-    opts?: CallOptions & {chunked?: boolean},
+    opts?: CallOptions & {chunked?: boolean; rowMode?: boolean},
   ): Promise<void> {
-    const handler = createHydrateStreamAccumulator(onResult, {chunked: opts?.chunked});
+    // Row mode requires the in-process transport; degrades to frames on
+    // the socket (see advanceStream).
+    const rowMode = opts?.rowMode === true && this.#napi !== null;
+    const handler = createHydrateStreamAccumulator(onResult, {
+      chunked: opts?.chunked ?? false,
+      rowMode,
+    });
     await this.#call(
       'addQueriesStream',
-      {clientGroupID, queries, initEpoch},
+      rowMode
+        ? {clientGroupID, queries, initEpoch, rowMode: true}
+        : {clientGroupID, queries, initEpoch},
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
         onPartial: handler.onFrame,
+        ...(rowMode ? {onRow: handler.onRow} : {}),
       },
     );
     handler.finish();
@@ -1026,15 +1142,22 @@ export class GoIVMClient {
     clientGroupID: string,
     changes: SnapshotChange[],
     initEpoch: number,
-    opts?: CallOptions,
+    opts?: CallOptions & {rowMode?: boolean},
   ): Promise<AdvanceResult> {
-    const handler = createAdvanceStreamAccumulator();
+    // Row mode requires the in-process transport (per-row records ride the
+    // addon's delivery queue); on the socket it silently degrades to the
+    // ordinary frame path — same result, chunked framing.
+    const rowMode = opts?.rowMode === true && this.#napi !== null;
+    const handler = createAdvanceStreamAccumulator({rowMode});
     await this.#call(
       'advanceStream',
-      {clientGroupID, changes, initEpoch},
+      rowMode
+        ? {clientGroupID, changes, initEpoch, rowMode: true}
+        : {clientGroupID, changes, initEpoch},
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
         onPartial: handler.onFrame,
+        ...(rowMode ? {onRow: handler.onRow} : {}),
       },
     );
     return handler.finish();
@@ -1271,7 +1394,8 @@ export class GoIVMClient {
     await this.#acquireSlot(cgID);
 
     const socket = this.#socket;
-    if (!socket) {
+    const napi = this.#napi;
+    if (!socket && !napi) {
       this.#releaseSlot(cgID);
       throw new Error('Not connected');
     }
@@ -1284,6 +1408,9 @@ export class GoIVMClient {
         const entry = this.#pending.get(id);
         if (entry?.timer) clearTimeout(entry.timer);
         this.#pending.delete(id);
+        // Row-plane group metadata is per-RPC; free it when the RPC settles
+        // (group ids are only unique within a request).
+        this.#rowGroups.clearRequest(id);
         this.#releaseSlot(cgID);
       };
       const wrappedResolve = (v: unknown) => {
@@ -1313,6 +1440,7 @@ export class GoIVMClient {
         reject: (e: Error) => void;
         timer: NodeJS.Timeout | null;
         onPartial?: (value: unknown) => void;
+        onRow?: (change: RowChange) => void;
       } = {
         method,
         resolve: wrappedResolve,
@@ -1320,6 +1448,7 @@ export class GoIVMClient {
         timer,
       };
       if (opts?.onPartial) entry.onPartial = opts.onPartial;
+      if (opts?.onRow) entry.onRow = opts.onRow;
       this.#pending.set(id, entry);
 
       const req: RPCRequest = {jsonrpc: '2.0', method, params, id};
@@ -1339,6 +1468,24 @@ export class GoIVMClient {
         wrappedReject(
           new Error(`Payload too large for method ${method}: ${payload.length} > ${MAX_FRAME_SIZE}`),
         );
+        return;
+      }
+      // NAPI transport: hand the raw payload to the addon — no length
+      // prefix (goivm_send frames internally), no kernel buffer, no drain
+      // machinery (the Go-side send queue is unbounded like Node's
+      // userspace socket buffering; memory is bounded by the in-flight
+      // slot caps above).
+      if (napi) {
+        const rc = napi.send(payload);
+        if (rc !== 0) {
+          wrappedReject(new Error(`goivm_send failed: rc=${rc} (host closed?)`));
+        }
+        return;
+      }
+      // Socket transport. Re-check under the closure: TS can't narrow the
+      // outer `socket || napi` guard across the Promise executor.
+      if (!socket) {
+        wrappedReject(new Error('Not connected'));
         return;
       }
       const frame = Buffer.allocUnsafe(4 + payload.length);
@@ -1464,13 +1611,29 @@ export class GoIVMClient {
 
       const payload = this.#recvBuf.subarray(this.#recvOffset + 4, this.#recvOffset + 4 + len);
       this.#recvOffset += 4 + len;
+      this.#dispatchResponsePayload(payload);
+    }
 
+    // Compact periodically so the underlying chunk's memory can be released
+    // once we've consumed at least half of it.
+    if (this.#recvOffset > 0 && this.#recvOffset * 2 >= this.#recvBuf.length) {
+      this.#recvBuf = this.#recvBuf.subarray(this.#recvOffset);
+      this.#recvOffset = 0;
+    }
+  }
+
+  // Decode + route ONE complete response frame payload. Shared by both
+  // transports: #onData (socket) calls it per reassembled frame; the NAPI
+  // path calls it per kind-1 delivery (frames arrive whole — no prefix, no
+  // reassembly). Extracted verbatim from the #onData loop body; `return`
+  // here corresponds to the loop's `continue`.
+  #dispatchResponsePayload(payload: Buffer): void {
       let resp: RPCResponse;
       try {
         resp = unpack(payload) as RPCResponse;
       } catch (e) {
         this.#log('warn', `failed to decode response frame: ${(e as Error).message}`);
-        continue;
+        return;
       }
 
       // Coerce id to Number: msgpackr decodes Go's uint64 (9-byte non-compact
@@ -1478,7 +1641,7 @@ export class GoIVMClient {
       // #pending when the request was sent.
       const respId = typeof resp.id === 'bigint' ? Number(resp.id) : resp.id;
       const pending = this.#pending.get(respId);
-      if (!pending) continue;
+      if (!pending) return;
 
       if (resp.error) {
         if (resp.error.code === RPC_CODE_DRIFT) {
@@ -1529,7 +1692,7 @@ export class GoIVMClient {
         } else {
           pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
         }
-        continue;
+        return;
       }
       // Streaming: deliver per-frame value to onPartial unless this is the
       // terminal "done" sentinel. Go emits "done" as a plain string Result;
@@ -1567,7 +1730,7 @@ export class GoIVMClient {
                 `partials must be records, "${STREAM_DONE_SENTINEL}" is reserved as terminal sentinel`,
             ),
           );
-          continue;
+          return;
         }
         try {
           pending.onPartial(resp.result);
@@ -1580,16 +1743,57 @@ export class GoIVMClient {
               : new Error(`onPartial threw: ${String(err)}`),
           );
         }
-        continue;
+        return;
       }
       pending.resolve(resp.result);
-    }
+  }
 
-    // Compact periodically so the underlying chunk's memory can be released
-    // once we've consumed at least half of it.
-    if (this.#recvOffset > 0 && this.#recvOffset * 2 >= this.#recvBuf.length) {
-      this.#recvBuf = this.#recvBuf.subarray(this.#recvOffset);
-      this.#recvOffset = 0;
+  // Route one delivery from the NAPI addon's ordered queue. Kind 1 =
+  // complete msgpack response frame; kinds 2/3 = row-plane records.
+  // The try/catch mirrors #dispatchResponsePayload's onPartial guard: a
+  // record-decode or onRow throw rejects ONLY the owning RPC, never the
+  // process (the addon invokes this from the TSFN callback — an escaped
+  // exception would be an uncaughtException).
+  #handleDelivery(kind: number, payload: Buffer): void {
+    if (kind === DELIVERY_KIND_FRAME) {
+      this.#dispatchResponsePayload(payload);
+      return;
+    }
+    try {
+      if (kind === DELIVERY_KIND_GROUP_DEF) {
+        this.#rowGroups.addGroupDef(payload);
+        return;
+      }
+      if (kind === DELIVERY_KIND_ROW) {
+        const {reqID, change} = this.#rowGroups.decodeRow(payload);
+        const pending = this.#pending.get(reqID);
+        if (!pending) return; // timed-out / settled RPC: drop late rows
+        if (!pending.onRow) {
+          throw new Error(
+            `row record for RPC ${reqID} (${pending.method}) which did not opt into rowMode`,
+          );
+        }
+        pending.onRow(change);
+        return;
+      }
+      this.#log('warn', `unknown NAPI delivery kind ${kind} (${payload.length} bytes)`);
+    } catch (err) {
+      // Attribute to the owning RPC when identifiable (first 8 bytes of
+      // every record are the f64 reqID); otherwise just log.
+      let reqID: number | undefined;
+      if (payload.length >= 8) {
+        reqID = new DataView(payload.buffer, payload.byteOffset, 8).getFloat64(0, true);
+      }
+      const pending = reqID !== undefined ? this.#pending.get(reqID) : undefined;
+      if (pending && reqID !== undefined) {
+        if (pending.timer) clearTimeout(pending.timer);
+        this.#pending.delete(reqID);
+        pending.reject(
+          err instanceof Error ? err : new Error(`row delivery failed: ${String(err)}`),
+        );
+      } else {
+        this.#log('error', `NAPI delivery error (kind=${kind}): ${(err as Error).message}`, err);
+      }
     }
   }
 }
