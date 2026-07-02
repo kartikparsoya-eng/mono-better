@@ -27,7 +27,6 @@
 // 147s while both the Go and JS heaps stayed flat). Adjusting ±len on
 // create/finalize makes V8 collect promptly under load.
 
-#include <assert.h>
 #include <dlfcn.h>
 #include <node_api.h>
 #include <stdint.h>
@@ -35,8 +34,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+// NDEBUG-proof fatal check (REVIEW-napi-transport LOW-1). These guard
+// napi calls that fail only under extreme conditions (V8 heap exhaustion,
+// torn-down env) — but they are LOAD-BEARING: silently continuing after a
+// failed arg construction would invoke the JS callback with garbage, and
+// silently DROPPING a delivery corrupts the stream (a missing row/frame
+// surfaces later as a hung RPC or drift — far harder to diagnose than a
+// crash). assert() is the wrong tool: node-gyp Release configs on some
+// toolchains define NDEBUG, compiling the check out entirely. This macro
+// survives NDEBUG and dies loudly where the failure happened.
+#define GOIVM_FATAL_IF(cond, what)                                        \
+  do {                                                                    \
+    if (cond) {                                                           \
+      fprintf(stderr, "[goivm_napi] FATAL: %s (%s:%d)\n", what, __FILE__, \
+              __LINE__);                                                  \
+      abort();                                                            \
+    }                                                                     \
+  } while (0)
+
 #define EXPECTED_GOIVM_ABI 1
-#define TSFN_MAX_QUEUE 8192
+// Default TSFN queue bound. Tunable via GOIVM_NAPI_QUEUE_MAX (env, read at
+// start): in row mode a single large advance can fill 8192 by itself (one
+// entry per row), stalling the producing Go goroutine in blocking mode —
+// which is the designed backpressure, but operators may want more headroom
+// before it engages. Larger queue = more C-heap payloads pending on the
+// queue (accounted to V8 via napi_adjust_external_memory below).
+#define TSFN_MAX_QUEUE_DEFAULT 8192
 
 typedef void (*goivm_deliver_cb)(void* ctx, int32_t kind, const void* data,
                                  int32_t len);
@@ -89,7 +112,7 @@ static void call_js_deliver(napi_env env, napi_value js_cb, void* ctx,
   }
   napi_value kind_val, buf_val, undefined;
   napi_status status = napi_create_int32(env, item->kind, &kind_val);
-  assert(status == napi_ok);
+  GOIVM_FATAL_IF(status != napi_ok, "napi_create_int32(kind) failed");
   if (item->len > 0) {
     // External buffer: zero-copy handoff of the malloc'd bytes; finalizer
     // frees + un-accounts (hint = len). (If the platform/Node build refuses
@@ -104,18 +127,18 @@ static void call_js_deliver(napi_env env, napi_value js_cb, void* ctx,
       napi_adjust_external_memory(env, (int64_t)item->len, &adjusted);
     } else {
       status = napi_create_buffer_copy(env, item->len, item->data, NULL, &buf_val);
-      assert(status == napi_ok);
+      GOIVM_FATAL_IF(status != napi_ok, "napi_create_buffer_copy failed");
       free(item->data);
     }
   } else {
     status = napi_create_buffer_copy(env, 0, "", NULL, &buf_val);
-    assert(status == napi_ok);
+    GOIVM_FATAL_IF(status != napi_ok, "napi_create_buffer_copy(empty) failed");
     free(item->data);
   }
   free(item);
 
   status = napi_get_undefined(env, &undefined);
-  assert(status == napi_ok);
+  GOIVM_FATAL_IF(status != napi_ok, "napi_get_undefined failed");
   napi_value argv[2] = {kind_val, buf_val};
   // Exceptions from the JS callback propagate as uncaught — the JS wrapper
   // (napi-transport.ts) try/catches internally, mirroring #onData's
@@ -130,18 +153,21 @@ static void deliver_from_go(void* ctx, int32_t kind, const void* data,
   (void)ctx;
   if (g_bridge.tsfn == NULL) return;  // shutdown race: drop
   delivery_item* item = (delivery_item*)malloc(sizeof(delivery_item));
-  if (item == NULL) return;
+  // OOM here must NOT silently drop the delivery: a missing row/frame
+  // corrupts the stream (hung RPC / drift), strictly worse than dying
+  // under memory exhaustion the process wouldn't survive anyway.
+  GOIVM_FATAL_IF(item == NULL, "malloc(delivery_item) failed (OOM)");
   item->kind = kind;
   item->len = (size_t)(len > 0 ? len : 0);
   item->data = malloc(item->len > 0 ? item->len : 1);
-  if (item->data == NULL) {
-    free(item);
-    return;
-  }
+  GOIVM_FATAL_IF(item->data == NULL, "malloc(payload) failed (OOM)");
   if (item->len > 0) memcpy(item->data, data, item->len);
   napi_status status =
       napi_call_threadsafe_function(g_bridge.tsfn, item, napi_tsfn_blocking);
   if (status != napi_ok) {
+    // napi_closing during shutdown teardown — the RPC is dead anyway;
+    // free rather than leak. (Distinct from the OOM cases above: this
+    // path is an expected teardown race, not corruption.)
     free(item->data);
     free(item);
   }
@@ -200,9 +226,19 @@ static napi_value Start(napi_env env, napi_callback_info info) {
   napi_value resource_name;
   status = napi_create_string_utf8(env, "goivm_deliver", NAPI_AUTO_LENGTH,
                                    &resource_name);
-  assert(status == napi_ok);
+  if (status != napi_ok) {
+    dlclose(g_bridge.dl);
+    g_bridge.dl = NULL;
+    return throw_error(env, "napi_create_string_utf8 failed");
+  }
+  size_t queue_max = TSFN_MAX_QUEUE_DEFAULT;
+  const char* queue_env = getenv("GOIVM_NAPI_QUEUE_MAX");
+  if (queue_env != NULL) {
+    long v = atol(queue_env);
+    if (v > 0) queue_max = (size_t)v;
+  }
   status = napi_create_threadsafe_function(
-      env, argv[1], NULL, resource_name, TSFN_MAX_QUEUE, 1, NULL, NULL, NULL,
+      env, argv[1], NULL, resource_name, queue_max, 1, NULL, NULL, NULL,
       call_js_deliver, &g_bridge.tsfn);
   if (status != napi_ok) {
     dlclose(g_bridge.dl);
@@ -243,12 +279,23 @@ static napi_value Send(napi_env env, napi_callback_info info) {
   int32_t rc = g_bridge.send(data, (int32_t)len);
   napi_value out;
   status = napi_create_int32(env, rc, &out);
-  assert(status == napi_ok);
+  if (status != napi_ok) return throw_error(env, "napi_create_int32 failed");
   return out;
 }
 
 // shutdown(): void — tears down the Go host; the library stays loaded (a Go
 // runtime cannot be unloaded/restarted in-process).
+//
+// ORDERING INVARIANT — MUST NOT BE REORDERED (REVIEW-napi-transport LOW):
+// g_bridge.shutdown() runs BEFORE napi_release_threadsafe_function. The Go
+// host's goroutines (pump reader + row-plane handlers) call deliver_from_go
+// until goivm_shutdown returns — it joins the pump and closes every client
+// group first. Releasing the TSFN while those goroutines are still
+// delivering is a use-after-free window (deliver_from_go's NULL check is
+// unsynchronized — TOCTOU). Note production never calls this at all:
+// SidecarManager.stop() deliberately skips addon.shutdown() (a handler
+// mid-row-stream can outlive closeAll — the residual drain race); process
+// exit reclaims everything. This export exists for tests.
 static napi_value Shutdown(napi_env env, napi_callback_info info) {
   (void)info;
   if (g_bridge.started && g_bridge.shutdown != NULL) {
@@ -268,7 +315,7 @@ static napi_value AbiVersion(napi_env env, napi_callback_info info) {
   napi_value out;
   int32_t v = g_bridge.abi_version != NULL ? g_bridge.abi_version() : -1;
   napi_status status = napi_create_int32(env, v, &out);
-  assert(status == napi_ok);
+  if (status != napi_ok) return throw_error(env, "napi_create_int32 failed");
   return out;
 }
 
@@ -281,7 +328,7 @@ static napi_value Init(napi_env env, napi_value exports) {
   };
   napi_status status = napi_define_properties(
       env, exports, sizeof(props) / sizeof(props[0]), props);
-  assert(status == napi_ok);
+  GOIVM_FATAL_IF(status != napi_ok, "napi_define_properties failed");
   return exports;
 }
 

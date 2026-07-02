@@ -96,6 +96,25 @@ export type SidecarConfig = {
   /** Path to libgoivm for transport='napi' (default: 'libgoivm.so',
    *  resolved by the dynamic linker's search path). */
   napiLibPath?: string;
+  /**
+   * Number of syncer workers in this container (transport='napi' only).
+   * Each worker loads its OWN Go runtime, and GO_IVM_GOMEMLIMIT_PERCENT is
+   * a CONTAINER-wide budget share written for the one-shared-sidecar
+   * topology — so the manager divides it across workers before dlopen
+   * (see #startNapi). Default 1 (no division).
+   */
+  numSyncWorkers?: number;
+  /**
+   * Invoked when the in-process (napi) transport fails POST-START — a
+   * terminal state (the Go runtime cannot re-initialize) where "fall back
+   * to TS" is unsound: under leanPrimary the user pipelines are STUBS, so
+   * a worker that keeps running serves nothing for its Go-owned client
+   * groups and nothing ever heals it. Default crashes the worker
+   * (process.exit(1)) so the supervisor restores a working state.
+   * Injectable for tests. Startup failures do NOT route here — they keep
+   * the graceful 'failed' → TS-fallback path (nothing was ever Go-owned).
+   */
+  fatalExit?: () => void;
   /** Unix socket path (default: /tmp/go-ivm-<pid>.sock) */
   socketPath?: string;
   /** Max restart attempts within restartWindowMs before giving up (default: 5) */
@@ -223,6 +242,12 @@ export class SidecarManager {
       binaryPath: config.binaryPath,
       transport: config.transport ?? 'socket',
       napiLibPath: config.napiLibPath ?? 'libgoivm.so',
+      numSyncWorkers: config.numSyncWorkers ?? 1,
+      fatalExit:
+        config.fatalExit ??
+        (() => {
+          process.exit(1);
+        }),
       socketPath: config.socketPath ?? join(tmpdir(), `go-ivm-${process.pid}.sock`),
       maxRestartsInWindow: config.maxRestartsInWindow ?? 5,
       restartWindowMs: config.restartWindowMs ?? 60_000,
@@ -679,6 +704,29 @@ export class SidecarManager {
     for (const [k, val] of Object.entries(this.#config.spawnEnv)) {
       process.env[k] = val;
     }
+    // Go memory budget (REVIEW-napi-transport MED): GO_IVM_GOMEMLIMIT_PERCENT
+    // is a CONTAINER-wide budget share, written for the one-shared-sidecar
+    // topology (image default 40). In napi mode every syncer worker loads
+    // its own Go runtime, so N workers × 40% = 40N% overcommit — the
+    // container OOMs under load with every Go heap individually "under
+    // budget". Divide the container share across workers (floor 3%) unless
+    // the operator pinned an absolute limit (GO_IVM_GOMEMLIMIT / GOMEMLIMIT)
+    // or an explicit per-worker share (GO_IVM_NAPI_GOMEMLIMIT_PERCENT).
+    if (!process.env.GO_IVM_GOMEMLIMIT && !process.env.GOMEMLIMIT) {
+      const workers = Math.max(1, this.#config.numSyncWorkers);
+      const explicit = Number(process.env.GO_IVM_NAPI_GOMEMLIMIT_PERCENT);
+      const base = Number(process.env.GO_IVM_GOMEMLIMIT_PERCENT) || 40;
+      const per =
+        Number.isFinite(explicit) && explicit > 0
+          ? Math.floor(explicit)
+          : Math.max(3, Math.floor(base / workers));
+      process.env.GO_IVM_GOMEMLIMIT_PERCENT = String(per);
+      this.#config.logger(
+        'info',
+        `Go memory budget: ${per}% of cgroup for this worker's runtime ` +
+          `(container share ${base}% ÷ ${workers} workers)`,
+      );
+    }
     const addon = loadGoNapiAddon(); // throws if the .node isn't built
     const client = new GoIVMClient('napi:in-process', {
       onLog: (level, msg, err) =>
@@ -719,18 +767,29 @@ export class SidecarManager {
   #handleRestartTrigger(isRetrigger = false): void {
     // In-process transport: there is nothing to restart — the Go host
     // lives (and dies) with this worker and cannot be re-initialized.
-    // Reaching here means the transport failed post-start somehow; go
-    // terminal immediately so dispatch falls back to TS instead of
-    // looping through #spawn → #startNapi-throws → retry.
     if (this.#config.transport === 'napi') {
       this.#status = 'failed';
       initFailureCounter.add(1, {reason: 'napi-no-restart'});
       this.#runningReject(new Error('Sidecar reached terminal state: failed'));
+      // CRASH, don't degrade (REVIEW-napi-transport B3): "fall back to TS"
+      // does not exist once client groups are Go-owned — under leanPrimary
+      // the user pipelines are STUBS, so a worker that keeps running serves
+      // nothing for those CGs and nothing ever heals it (the Go runtime
+      // cannot restart in-process). Startup failures never reach here (they
+      // route through start()'s catch → graceful 'failed' → TS fallback,
+      // sound because nothing was ever Go-owned); this branch is the
+      // POST-START path — currently defensive (no live trigger wires to it
+      // in napi mode), but if any future failure-detection path lands here
+      // it MUST crash so the supervisor restores a working state (fresh
+      // worker, fresh dlopen).
       this.#config.logger(
         'error',
-        'In-process Go engine failed; it cannot be restarted in-process. ' +
-          'Falling back to TS IVM (worker restart restores the Go path).',
+        'In-process Go engine failed post-start; it cannot be restarted ' +
+          'in-process and TS fallback is unsound for Go-owned client groups ' +
+          '(lean-primary stubs). Crashing the worker so the supervisor ' +
+          'restores a working state.',
       );
+      this.#config.fatalExit();
       return;
     }
     // Sliding-window restart cap: count failures in the last

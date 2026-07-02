@@ -713,9 +713,11 @@ test('zero-cache --help', () => {
                                                                         goSidecar.externallyManaged (an in-process engine cannot be shared                                                         
                                                                         across workers) — if both are set, externallyManaged wins and transport                                                    
                                                                         reverts to socket. NOTE: a Go runtime cannot be unloaded or restarted                                                      
-                                                                        in-process, so "sidecar restart" recovery does not exist in this mode;                                                     
-                                                                        a fatal Go error takes down the whole syncer worker (which the                                                             
-                                                                        supervisor then restarts).                                                                                                 
+                                                                        in-process, so "sidecar restart" recovery does not exist in this mode.                                                     
+                                                                        A fatal Go error takes down the whole syncer worker, and a POST-START                                                      
+                                                                        transport failure deliberately crashes the worker too — once client                                                        
+                                                                        groups are Go-owned, "fall back to TS" is unsound (lean-primary keeps                                                      
+                                                                        only stub pipelines); the supervisor restart restores a working state.                                                     
                                                                                                                                                                                                    
      --go-sidecar-napi-lib-path string                                  default: "libgoivm.so"                                                                                                     
        ZERO_GO_SIDECAR_NAPI_LIB_PATH env                                                                                                                                                           

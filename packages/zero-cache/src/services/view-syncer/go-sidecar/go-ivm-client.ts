@@ -332,7 +332,13 @@ export function createHydrateStreamAccumulator(
       if (chunked) {
         // Per-chunk consumers get each row as its own 1-row non-final
         // delivery with a synthetic per-query chunk counter (records don't
-        // carry chunkIndex; the addon queue guarantees order).
+        // carry chunkIndex; the addon queue guarantees order). NOTE: this
+        // synthetic counter shares a numeric space with the ENGINE's frame
+        // chunkIndex (fallback frames + the terminal final) but counts
+        // different things — (queryID, chunkIndex) is NOT a unique key
+        // across the two planes and must never be used as one. Consumers
+        // key on `final` only (view-syncer gates once-per-query metrics on
+        // it); the wire-order guarantee comes from the addon queue.
         onResult({
           queryID: change.queryID,
           changes: [change],
@@ -1788,6 +1794,23 @@ export class GoIVMClient {
     if (kind === DELIVERY_KIND_FRAME) {
       this.#dispatchResponsePayload(payload);
       return;
+    }
+    // Late-record guard (REVIEW-napi-transport MED): records for an RPC that
+    // already settled (timeout/close cleared #pending AND the group registry)
+    // must drop SILENTLY, BEFORE touching the registry. Two failure modes
+    // otherwise: a late kind-3 decode throws "unknown group" → one error log
+    // per late row on the JS thread — thousands of logs during the exact
+    // overload that caused the timeout; and a late kind-2 def RE-ADDS a
+    // registry entry after clearRequest already ran — a permanent per-request
+    // leak (nothing ever clears it again). Every record's first 8 bytes are
+    // the f64 reqID, so the peek is cheap and decode-free.
+    if (payload.length >= 8) {
+      const reqID = new DataView(
+        payload.buffer,
+        payload.byteOffset,
+        8,
+      ).getFloat64(0, true);
+      if (!this.#pending.has(reqID)) return;
     }
     try {
       if (kind === DELIVERY_KIND_GROUP_DEF) {

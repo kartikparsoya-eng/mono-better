@@ -198,6 +198,9 @@ export default function runWorker(
         binaryPath,
         transport,
         napiLibPath: config.goSidecar.napiLibPath,
+        // napi mode: divides the container-wide Go memory share across the
+        // per-worker runtimes (see SidecarConfig.numSyncWorkers).
+        numSyncWorkers: config.numSyncWorkers,
         ...(socketPath ? {socketPath} : {}),
         externallyManaged,
         spawnEnv,
