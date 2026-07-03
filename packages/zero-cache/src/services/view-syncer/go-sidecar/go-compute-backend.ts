@@ -893,7 +893,9 @@ export function isGoShadowVerbose(
 // Whether to run the advanceToHead Go-derived-diff shadow: each shadow advance
 // also asks Go to derive its OWN snapshot diff and compares it against TS's
 // computed diff (design §7 P1). Only meaningful alongside shadowMode (the
-// comparison runs in #shadowAdvance) and requires a protocolRev>=7 sidecar with
+// comparison runs in #shadowAdvance) and requires a sidecar at protocolRev 9
+// (the connect handshake enforces EXACT equality with EXPECTED_PROTOCOL_REV —
+// see sidecar-manager.ts; ">=" language here was doc rot) launched with
 // GO_IVM_ADVANCE_TO_HEAD=true.
 export function isGoDerivedDiff(
   config: Pick<ZeroConfig, 'goSidecar'> | undefined,

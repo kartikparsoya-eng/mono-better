@@ -47,12 +47,22 @@ on:
       - feat/napi-transport
     paths:
       # Only run on PRs that touch files the docker build cares about,
-      # so unrelated PRs don't pay the multi-minute build cost.
+      # so unrelated PRs don't pay the multi-minute build cost. Must cover
+      # EVERY workspace package in zero-cache's dependency closure (the
+      # Dockerfile COPYs each package.json and pnpm installs the closure) —
+      # napi review M9: zero-events/zero-permissions/zero-types/otel/zqlite
+      # were missing, so PRs touching only those skipped the image build
+      # that would have caught their breakage.
       - 'packages/zero-cache/**'
       - 'packages/zero-protocol/**'
       - 'packages/zero-schema/**'
+      - 'packages/zero-events/**'
+      - 'packages/zero-permissions/**'
+      - 'packages/zero-types/**'
       - 'packages/zql/**'
+      - 'packages/zqlite/**'
       - 'packages/shared/**'
+      - 'packages/otel/**'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'

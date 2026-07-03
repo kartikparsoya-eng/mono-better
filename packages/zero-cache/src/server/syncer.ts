@@ -18,6 +18,7 @@ import {warmupConnections} from '../db/warmup.ts';
 import {initEventSink} from '../observability/events.ts';
 import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
 import {MutagenService} from '../services/mutagen/mutagen.ts';
+import {deriveGoSidecarSpawnEnv} from '../services/view-syncer/go-sidecar/spawn-env.ts';
 import {PusherService} from '../services/mutagen/pusher.ts';
 import type {ReplicaState} from '../services/replicator/replicator.ts';
 import {
@@ -186,19 +187,7 @@ export default async function runWorker(
       // processes are configured independently and a mismatch silently drops
       // every user delta. (Ignored for externallyManaged — the owner sets env on
       // the shared process; a startup mode handshake there is a follow-up.)
-      const sc = config.goSidecar;
-      const wantsAdvanceToHead =
-        (sc.advanceToHead ?? false) ||
-        (sc.advanceDrive ?? false) ||
-        (sc.goPrimaryTrigger ?? false);
-      const spawnEnv: Record<string, string> = {GO_IVM_APP_ID: shard.appID};
-      if (wantsAdvanceToHead) {
-        spawnEnv.GO_IVM_ADVANCE_TO_HEAD = 'true';
-        spawnEnv.GO_IVM_SOURCE_MODE = 'table';
-      }
-      if (sc.advanceDrive ?? false) {
-        spawnEnv.GO_IVM_ADVANCE_DRIVE = 'true';
-      }
+      const spawnEnv = deriveGoSidecarSpawnEnv(config.goSidecar, shard.appID);
       sidecarManager = new SidecarManager({
         binaryPath,
         transport,

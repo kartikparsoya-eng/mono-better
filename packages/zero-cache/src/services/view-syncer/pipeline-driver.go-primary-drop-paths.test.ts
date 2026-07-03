@@ -254,3 +254,30 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
     });
   });
 });
+
+// User's-audit staleness pair: the catch-up path (P2c inverted-edge clamp)
+// now classifies failures exactly like the main advance path instead of
+// swallowing them and committing at min. The two Go-side REFUSALS that make
+// catch-up permanently wedge (a growing diff over GO_IVM_MAX_DIFF_CHANGES,
+// and the GO_IVM_ADVANCE_BUDGET_MS overrun) must land in 'unclassified' —
+// the DROP → ResetPipelinesSignal bucket that re-hydrates immediately —
+// and must never be mistaken for 'data-error' (teardown, never reset) or
+// 'protocol' (re-throw).
+describe('classifier buckets for the Go refusals that wedge catch-up', () => {
+  test('GO_IVM_MAX_DIFF_CHANGES refusal → unclassified (reset bucket)', () => {
+    const e = new Error(
+      'advanceToHeadStream diff: 60000 changes exceeds GO_IVM_MAX_DIFF_CHANGES=50000 — ' +
+        'caller should reset/re-hydrate instead of replaying this diff',
+    );
+    expect(classifyGoPrimaryAdvanceError(e)).toBe('unclassified');
+  });
+
+  test('GO_IVM_ADVANCE_BUDGET_MS overrun → unclassified (reset bucket)', () => {
+    const e = new Error(
+      'advanceToHeadStream: advance exceeded GO_IVM_ADVANCE_BUDGET_MS=60000 during apply ' +
+        '(cg=g1) — caller should reset/re-hydrate; a slow advance pins the WAL frame ' +
+        'the diff was derived against',
+    );
+    expect(classifyGoPrimaryAdvanceError(e)).toBe('unclassified');
+  });
+});

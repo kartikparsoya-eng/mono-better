@@ -1284,7 +1284,9 @@ export class GoIVMClient {
    * TS-shipped SnapshotChange[]. Carries NO changes payload — only the cgID +
    * epoch. Returns Go's derived diff + its new stateVersion. Used (in P1) to
    * shadow-compare Go's diff against TS's own computed one. Requires a
-   * protocolRev>=7 sidecar with GO_IVM_ADVANCE_TO_HEAD=true + table mode.
+   * protocolRev 9 sidecar (exact-match enforced at connect — sidecar-manager
+   * EXPECTED_PROTOCOL_REV; the RPC itself dates to rev 7) with
+   * GO_IVM_ADVANCE_TO_HEAD=true + table mode.
    */
   async advanceToHead(
     clientGroupID: string,
@@ -1324,10 +1326,12 @@ export class GoIVMClient {
    * orphaning the RPC until it times out. Streaming bounds per-frame size the
    * same way push-mode already uses {@link advanceStream}.
    *
-   * Requires a protocolRev>=8 sidecar with GO_IVM_ADVANCE_TO_HEAD=true,
-   * GO_IVM_ADVANCE_DRIVE=true, + table mode. Same defensive invariants as
-   * {@link advanceStream}: chunk-order gaps throw; missing terminal `final:true`
-   * throws; drift on the final frame re-throws as a {@link DriftError}.
+   * Requires a protocolRev 9 sidecar (exact-match enforced at connect —
+   * sidecar-manager EXPECTED_PROTOCOL_REV; this RPC dates to rev 8) with
+   * GO_IVM_ADVANCE_TO_HEAD=true, GO_IVM_ADVANCE_DRIVE=true, + table mode.
+   * Same defensive invariants as {@link advanceStream}: chunk-order gaps
+   * throw; missing terminal `final:true` throws; drift on the final frame
+   * re-throws as a {@link DriftError}.
    */
   async advanceToHeadStream(
     clientGroupID: string,

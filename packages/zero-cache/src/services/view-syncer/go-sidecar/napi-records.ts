@@ -109,12 +109,19 @@ class RecordReader {
   i64(): number | bigint {
     const v = this.#view.getBigInt64(this.off, true);
     this.off += 8;
-    // Downcast to Number when exact — matches msgpackr's int64 handling
-    // (useBigIntExtension:false decodes safe ints as numbers), so row-plane
-    // values are indistinguishable from frame-decoded ones downstream.
-    return v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER)
-      ? Number(v)
-      : v;
+    // Mirror the FRAME plane exactly — NOT "safe integers become numbers"
+    // (user's-audit BigInt decode edge; the old MAX_SAFE_INTEGER split here
+    // was wrong about msgpackr): Go's frame encoder (vmihailenco
+    // UseCompactInts) picks the smallest wire width, so values in
+    // [-2^31, 2^32) ship as ≤32-bit ints that msgpackr decodes as Number,
+    // while anything wider ships as int64/uint64 (0xd3/0xcf) that msgpackr
+    // (mono's options: useBigIntExtension:false, default int64AsType)
+    // decodes as BigInt — INCLUDING values inside the safe-integer range,
+    // e.g. millisecond timestamps. Row-plane values must be
+    // indistinguishable from frame-decoded ones downstream (canonical
+    // JSON, CVR row serialization, shadow compare), so apply the same
+    // width boundary, not Number.MAX_SAFE_INTEGER.
+    return v >= -2147483648n && v <= 4294967295n ? Number(v) : v;
   }
 }
 

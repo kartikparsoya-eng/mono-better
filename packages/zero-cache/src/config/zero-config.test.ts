@@ -844,7 +844,8 @@ test('zero-cache --help', () => {
                                                                         Go-derived diffs feed the CVR (P2).                                                                                        
                                                                                                                                                                                                    
                                                                         Requires goSidecar.shadowMode (the comparison runs in the shadow                                                           
-                                                                        advance path), a sidecar built with protocolRev>=7 launched with                                                           
+                                                                        advance path), a protocolRev-9 sidecar (the connect handshake enforces                                                     
+                                                                        exact protocol equality) launched with                                                                                     
                                                                         GO_IVM_ADVANCE_TO_HEAD=true and GO_IVM_SOURCE_MODE=table.                                                                  
                                                                         Mismatches are logged at error level under the [go-diff-shadow] tag.                                                       
                                                                                                                                                                                                    

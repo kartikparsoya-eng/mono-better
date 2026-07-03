@@ -161,6 +161,54 @@ export type SidecarStatus = 'stopped' | 'starting' | 'running' | 'restarting' | 
 export type RestartListener = (epoch: number) => void | Promise<void>;
 
 /**
+ * Divides the container-wide SQLite connection ceilings across the napi
+ * workers (napi review M8, companion to the GOMEMLIMIT_PERCENT division in
+ * #startNapi): GO_IVM_MAX_OPEN_CONNS / GO_IVM_MAX_IDLE_CONNS are written
+ * for the one-shared-sidecar topology (image defaults 1024/128). In napi
+ * mode every syncer worker opens its OWN replica pools, so N workers ×
+ * 1024 conns × ~GO_IVM_CONN_CACHE_KB of C-side page cache overcommits the
+ * container by N× — memory no Go-side limiter can see. Divide when set
+ * (ceil, with floors so one worker's CGs aren't starved); warn when unset
+ * with W>1 (the Go package default, 256, then applies PER WORKER).
+ * Exported for tests.
+ */
+export function divideGoConnCeilingsForWorkers(
+  env: Record<string, string | undefined>,
+  workers: number,
+  logger: SidecarLogger,
+): void {
+  if (workers <= 1) {
+    return;
+  }
+  const divide = (key: string, floor: number): void => {
+    const raw = env[key];
+    if (raw === undefined || raw === '') {
+      logger(
+        'warn',
+        `${key} is unset with ${workers} napi workers — the Go package ` +
+          `default applies PER WORKER (C-side page cache multiplies by ` +
+          `worker count); set it to the container budget to enable division`,
+      );
+      return;
+    }
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) {
+      logger('warn', `invalid ${key}=${JSON.stringify(raw)} — leaving as-is`);
+      return;
+    }
+    const per = Math.max(floor, Math.ceil(n / workers));
+    env[key] = String(per);
+    logger(
+      'info',
+      `${key}: ${per} conns for this worker's pools (container budget ` +
+        `${n} ÷ ${workers} workers)`,
+    );
+  };
+  divide('GO_IVM_MAX_OPEN_CONNS', 8);
+  divide('GO_IVM_MAX_IDLE_CONNS', 2);
+}
+
+/**
  * Validates the two absolute Go memory-limit env vars before the napi
  * dlopen (scale review). Syntax mirrors the Go runtime's GOMEMLIMIT: an
  * integer byte count with an optional B / KiB / MiB / GiB / TiB suffix
@@ -797,6 +845,14 @@ export class SidecarManager {
           `(container share ${base}% ÷ ${workers} workers)`,
       );
     }
+    // C-side SQLite ceilings are per-ENGINE, and napi runs one engine per
+    // worker — divide the container-wide conn budgets the same way as the
+    // memory share above (napi review M8).
+    divideGoConnCeilingsForWorkers(
+      process.env,
+      Math.max(1, this.#config.numSyncWorkers),
+      this.#config.logger,
+    );
     const addon = loadGoNapiAddon(); // throws if the .node isn't built
     const client = new GoIVMClient('napi:in-process', {
       onLog: (level, msg, err) =>

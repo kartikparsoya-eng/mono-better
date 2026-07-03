@@ -4127,6 +4127,23 @@ export class PipelineDriver {
         try {
           next = await this.#goBackend!.advanceToHeadStream();
         } catch (e) {
+          // User's-audit staleness hole: a failed catch-up is NOT safely
+          // absorbable the way "still behind after MAX_CATCHUP" is. The
+          // documented handling for an advanceToHead error — e.g. the
+          // GO_IVM_MAX_DIFF_CHANGES refusal, or the GO_IVM_ADVANCE_BUDGET_MS
+          // overrun — is reset/re-hydrate; swallowing it here committed at
+          // min with Go's engine stuck a window behind until the drift
+          // audit healed it (~68s of stale serving), and a diff that only
+          // GROWS (the maxDiffChanges case) made the wedge permanent.
+          // Classify exactly like the main advance path: protocol /
+          // stale-epoch / data-error re-throw (via the classifier),
+          // sidecar / unclassified escalate to an immediate pipeline reset.
+          const classified = this.#classifyGoPrimaryAdvanceError(e);
+          if (classified instanceof ResetPipelinesSignal) {
+            return classified;
+          }
+          // Defensive: the RowChange[] bucket is never produced today —
+          // keep the legacy commit-at-min disposition if it ever is.
           this.#lc.warn?.(
             `[go-primary] catch-up advanceToHead failed: ${String(e)}; ` +
               `committing at min`,

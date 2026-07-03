@@ -68,7 +68,7 @@ function makeDef(reqID: number, groupID: number, cols: string[], pk: string[]): 
 }
 
 describe('napi-records decoder (pure)', () => {
-  test('i64 tag: safe values downcast to Number, unsafe stay BigInt', () => {
+  test('i64 tag mirrors the frame plane: [-2^31, 2^32) → Number, wider → BigInt', () => {
     const reg = new RowGroupRegistry();
     reg.addGroupDef(makeDef(7, 0, ['id', 'big'], ['id']));
     const mk = (v: bigint) =>
@@ -84,20 +84,30 @@ describe('napi-records decoder (pure)', () => {
         .i64(v)
         .buf();
 
-    // 2^53-1: exact in f64 → must come out as a plain number, exactly what
-    // the msgpack frame plane would deliver.
-    const safe = reg.decodeRow(mk(9007199254740991n));
-    expect(safe.change.row).toEqual({id: 'a1', big: 9007199254740991});
-    expect(typeof (safe.change.row as {big: unknown}).big).toBe('number');
+    const decode = (v: bigint) =>
+      (reg.decodeRow(mk(v)).change.row as {big: unknown}).big;
 
-    // 2^53+1: NOT exact in f64 → preserved as BigInt (no silent aliasing
-    // to the adjacent even integer).
-    const unsafe = reg.decodeRow(mk(9007199254740993n));
-    expect((unsafe.change.row as {big: unknown}).big).toBe(9007199254740993n);
-
-    expect(reg.decodeRow(mk(-9007199254740993n)).change.row).toMatchObject({
-      big: -9007199254740993n,
-    });
+    // The FRAME plane's boundary is wire WIDTH, not float exactness: Go's
+    // compact encoder emits ≤32-bit ints (msgpackr → Number) for
+    // [-2^31, 2^32) and 0xd3/0xcf (msgpackr default → BigInt) beyond —
+    // including safe integers like ms timestamps. The row plane must be
+    // indistinguishable (user's-audit BigInt decode edge; the previous
+    // MAX_SAFE_INTEGER split here diverged for every int64 in
+    // [2^32, 2^53)).
+    expect(decode(0n)).toBe(0);
+    expect(decode(2147483647n)).toBe(2147483647); // int32 max → Number
+    expect(decode(-2147483648n)).toBe(-2147483648); // int32 min → Number
+    expect(decode(4294967295n)).toBe(4294967295); // uint32 max → Number
+    // One past uint32: frame plane ships 0xcf → BigInt, even though it is
+    // a perfectly safe integer.
+    expect(decode(4294967296n)).toBe(4294967296n);
+    // One below int32 min: frame plane ships 0xd3 → BigInt.
+    expect(decode(-2147483649n)).toBe(-2147483649n);
+    // Millisecond timestamp (the production case that diverged pre-fix).
+    expect(decode(1751500800000n)).toBe(1751500800000n);
+    // Beyond 2^53 stays BigInt on both planes (no aliasing).
+    expect(decode(9007199254740993n)).toBe(9007199254740993n);
+    expect(decode(-9007199254740993n)).toBe(-9007199254740993n);
   });
 
   test('row record with trailing bytes throws (truncation/corruption guard)', () => {
