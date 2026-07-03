@@ -255,11 +255,32 @@ export class GoComputeBackend {
     opts?: {chunked?: boolean},
   ): Promise<void> {
     if (this.#restartGate) await this.#restartGate;
-    await this.#withReinitRetry(() =>
+    // Finding 9 (scale review): once ANY chunk has reached onResult, a
+    // #withReinitRetry re-run would replay the ENTIRE stream into a consumer
+    // that already accumulated attempt 1's chunks — double-XORed row-set
+    // signatures (a per-row XOR twice self-cancels → permanent signature
+    // corruption → spurious drift resets) and duplicate CVR rows. Worse,
+    // the retry hydrates against the restarted sidecar's FRESH snapshot, so
+    // the replayed chunks may not even match attempt 1's. Retry is only
+    // safe when the failure landed before the first chunk; otherwise abort
+    // loudly — the caller's hydrate-failure path re-hydrates from a clean
+    // slate (and purges the partial signatures; see pipeline-driver).
+    let emitted = false;
+    const guardedOnResult: typeof onResult = r => {
+      emitted = true;
+      onResult(r);
+    };
+    await this.#withReinitRetry(() => {
+      if (emitted) {
+        throw new Error(
+          'hydrateManyStream: stream partially delivered before sidecar restart; ' +
+            'not retryable (a replay would double-count the delivered chunks)',
+        );
+      }
       // exactOptionalPropertyTypes: only materialize `chunked` when the
       // caller actually set it (chunked: undefined ≠ absent).
-      this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, onResult, {...this.#cgOpts(), ...(opts?.chunked !== undefined ? {chunked: opts.chunked} : {}), rowMode: this.#rowMode}),
-    );
+      return this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, guardedOnResult, {...this.#cgOpts(), ...(opts?.chunked !== undefined ? {chunked: opts.chunked} : {}), rowMode: this.#rowMode});
+    });
   }
 
   // Push-mode advance (streaming): ship a SnapshotChange diff to Go.

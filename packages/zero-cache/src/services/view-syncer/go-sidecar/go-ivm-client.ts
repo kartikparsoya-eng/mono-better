@@ -8,6 +8,7 @@ import {Packr, Unpackr} from 'msgpackr';
 import {
   DELIVERY_KIND_FRAME,
   DELIVERY_KIND_GROUP_DEF,
+  DELIVERY_KIND_HOST_DEATH,
   DELIVERY_KIND_ROW,
   RowGroupRegistry,
 } from './napi-records.ts';
@@ -815,7 +816,17 @@ export class DriftError extends Error {
     hasCount?: number | undefined;
     message?: string | undefined;
   }) {
-    super(data.message ?? `source drift: table=${data.table} op=${data.op} pk=${JSON.stringify(data.pk)}`);
+    // BigInt-safe stringify (scale review): msgpackr decodes Go's int64/
+    // uint64 PK values as BigInt, and JSON.stringify THROWS on BigInt — a
+    // drift error over a bigint PK would crash the dispatch path instead of
+    // rejecting one RPC.
+    super(
+      data.message ??
+        `source drift: table=${data.table} op=${data.op} pk=${JSON.stringify(
+          data.pk,
+          (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v),
+        )}`,
+    );
     this.name = 'DriftError';
     this.table = data.table ?? '';
     this.op = data.op ?? '';
@@ -893,8 +904,15 @@ export class GoIVMClient {
   #perGroupWaiters = new Map<string, Array<() => void>>();
   // Byte-level backpressure: when socket.write returns false, all subsequent
   // #call invocations await this promise before writing. Set null when the
-  // socket is writable (REVIEW-final MED-TS-1).
+  // socket is writable (REVIEW-final MED-TS-1). #drainResolve is the escape
+  // hatch (A5, scale review): a socket that DIES under backpressure never
+  // emits 'drain', so transport teardown must resolve the promise manually
+  // — otherwise callers already parked on it hang forever, and a stale
+  // non-null #drainPromise after close()+reconnect gated every future call
+  // on a promise nothing could ever resolve (a total client wedge that
+  // SURVIVED sidecar restart).
   #drainPromise: Promise<void> | null = null;
+  #drainResolve: (() => void) | null = null;
   /**
    * IDs that recently timed out. Late responses for them must be dropped,
    * not routed to a freshly-issued same-ID call (REVIEW-final LOW-TS-2).
@@ -948,7 +966,7 @@ export class GoIVMClient {
         this.#perGroupWaiters = new Map();
         for (const waiters of perGroup.values()) for (const w of waiters) w();
         this.#perGroupInFlight.clear();
-        this.#drainPromise = null;
+        this.#releaseDrainWaiters();
       });
     });
   }
@@ -965,6 +983,20 @@ export class GoIVMClient {
       throw new Error('connectNapi: socket transport already connected');
     }
     this.#napi = addon;
+  }
+
+  /**
+   * Release callers parked on the byte-level backpressure gate (A5): the
+   * socket died (or the client closed) before 'drain' fired, so the promise
+   * must be resolved manually — woken callers then fail fast at the
+   * transport checks. Clears the field FIRST so a woken caller re-entering
+   * #acquireSlot doesn't re-await a dead gate.
+   */
+  #releaseDrainWaiters(): void {
+    const resolve = this.#drainResolve;
+    this.#drainPromise = null;
+    this.#drainResolve = null;
+    resolve?.();
   }
 
   /**
@@ -1029,6 +1061,9 @@ export class GoIVMClient {
     this.#perGroupWaiters = new Map();
     for (const ws of perGroup.values()) for (const w of ws) w();
     this.#perGroupInFlight.clear();
+    // A5: without this, a close() during byte-level backpressure left a
+    // stale #drainPromise that gated EVERY call after reconnect — forever.
+    this.#releaseDrainWaiters();
   }
 
   isConnected(): boolean {
@@ -1597,10 +1632,14 @@ export class GoIVMClient {
       if (!ok && !this.#drainPromise) {
         // Byte-level backpressure: gate subsequent writes until the kernel
         // buffer drains. Subsequent #call invocations await this promise
-        // in #acquireSlot (REVIEW-final MED-TS-1).
+        // in #acquireSlot (REVIEW-final MED-TS-1). #drainResolve lets the
+        // teardown paths release parked callers when the socket dies
+        // instead of draining (A5).
         this.#drainPromise = new Promise<void>(resolve => {
+          this.#drainResolve = resolve;
           socket.once('drain', () => {
             this.#drainPromise = null;
+            this.#drainResolve = null;
             resolve();
           });
         });
@@ -1850,14 +1889,42 @@ export class GoIVMClient {
   }
 
   // Route one delivery from the NAPI addon's ordered queue. Kind 1 =
-  // complete msgpack response frame; kinds 2/3 = row-plane records.
+  // complete msgpack response frame; kinds 2/3 = row-plane records; kind 4
+  // = host death (the Go pump died — fail everything, fatal the worker).
   // The try/catch mirrors #dispatchResponsePayload's onPartial guard: a
   // record-decode or onRow throw rejects ONLY the owning RPC, never the
   // process (the addon invokes this from the TSFN callback — an escaped
   // exception would be an uncaughtException).
   #handleDelivery(kind: number, payload: Buffer): void {
     if (kind === DELIVERY_KIND_FRAME) {
-      this.#dispatchResponsePayload(payload);
+      // Containment (scale review): #dispatchResponsePayload guards its
+      // msgpack decode internally, but a post-decode throw (e.g. an error
+      // branch stringifying exotic values) escaped this TSFN callback as an
+      // uncaughtException — a worker crash for one bad frame. There may be
+      // no attributable RPC (the reqID lives INSIDE the body), so log and
+      // drop; the owning RPC, if any, fails via its timeout instead of
+      // taking the worker down.
+      try {
+        this.#dispatchResponsePayload(payload);
+      } catch (err) {
+        this.#log(
+          'error',
+          `NAPI frame dispatch error: ${(err as Error).message}`,
+          err,
+        );
+      }
+      return;
+    }
+    // Host death (A3): the in-process host's pump terminated unexpectedly
+    // — no response can ever arrive again. Sweep pending RPCs and notify
+    // the embedder (→ fatalExit; a dead host cannot be restarted
+    // in-process). MUST be checked BEFORE the late-record reqID guard
+    // below: the payload is a UTF-8 reason string, not a record — its
+    // first 8 bytes are not a reqID, so the guard would silently drop it.
+    if (kind === DELIVERY_KIND_HOST_DEATH) {
+      const reason =
+        payload.length > 0 ? payload.toString('utf8') : 'no reason given';
+      this.#napiFatal(new Error(`go-ivm in-process host died: ${reason}`));
       return;
     }
     // Late-record guard (REVIEW-napi-transport MED): records for an RPC that

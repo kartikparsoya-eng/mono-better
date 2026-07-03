@@ -21,10 +21,11 @@ export type GoNapiAddon = {
   start(libPath: string, onDelivery: (kind: number, payload: Buffer) => void): void;
   /** Forward one request frame (no length prefix). Returns goivm rc (0=ok). */
   send(payload: Buffer): number;
-  /** Tear down the Go host. The Go runtime stays resident (cannot unload). */
-  shutdown(): void;
   /** ABI version of the loaded library; -1 before start. */
   abiVersion(): number;
+  // NOTE: no shutdown() — removed (scale review). Calling goivm_shutdown on
+  // the JS thread deadlocks against TSFN backpressure and racing deliveries
+  // are a use-after-free; the Go host lives until process exit (see addon.c).
 };
 
 const require = createRequire(import.meta.url);

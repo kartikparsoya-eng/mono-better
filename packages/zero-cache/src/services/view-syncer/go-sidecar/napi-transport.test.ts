@@ -42,9 +42,9 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
   }
 
   afterAll(() => {
-    // Deliberately NOT calling addon.shutdown(): the vitest worker exits
-    // after this file; tearing down the Go host mid-flush can race the
-    // TSFN drain. Process exit reclaims everything.
+    // No Go-host teardown: the addon has no shutdown export (tearing down
+    // the Go host mid-flush can race the TSFN drain — see addon.c). The
+    // vitest worker exits after this file; process exit reclaims everything.
     client.close();
   });
 

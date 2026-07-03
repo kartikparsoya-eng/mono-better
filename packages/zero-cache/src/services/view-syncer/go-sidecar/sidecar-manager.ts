@@ -161,6 +161,51 @@ export type SidecarStatus = 'stopped' | 'starting' | 'running' | 'restarting' | 
 export type RestartListener = (epoch: number) => void | Promise<void>;
 
 /**
+ * Validates the two absolute Go memory-limit env vars before the napi
+ * dlopen (scale review). Syntax mirrors the Go runtime's GOMEMLIMIT: an
+ * integer byte count with an optional B / KiB / MiB / GiB / TiB suffix
+ * ("off" is also legal for GOMEMLIMIT). Invalid values are DELETED with a
+ * loud log:
+ *
+ *   - a malformed GO_IVM_GOMEMLIMIT would skip the per-worker percent
+ *     fallback in #startNapi while ALSO failing Go-side parsing — the
+ *     engine then ran with NO memory ceiling at GOGC=200 (container OOM);
+ *   - a malformed GOMEMLIMIT makes the Go RUNTIME fatal during rt0 env
+ *     parsing — with the in-process transport that's an unbootable,
+ *     crash-looping worker.
+ *
+ * Exported for tests.
+ */
+const VALID_GO_MEM_LIMIT = /^\d+((K|M|G|T)i?B|B)?$/;
+
+export function sanitizeGoMemLimitEnv(
+  env: Record<string, string | undefined>,
+  logger: SidecarLogger,
+): void {
+  const gi = env.GO_IVM_GOMEMLIMIT;
+  if (gi !== undefined && !VALID_GO_MEM_LIMIT.test(gi)) {
+    logger(
+      'error',
+      `invalid GO_IVM_GOMEMLIMIT ${JSON.stringify(gi)} — ignoring it ` +
+        `(want bytes or a KiB/MiB/GiB/TiB suffix); the per-worker percent ` +
+        `budget applies instead`,
+    );
+    delete env.GO_IVM_GOMEMLIMIT;
+  }
+  const gml = env.GOMEMLIMIT;
+  if (gml !== undefined && gml !== 'off' && !VALID_GO_MEM_LIMIT.test(gml)) {
+    logger(
+      'error',
+      `invalid GOMEMLIMIT ${JSON.stringify(gml)} — deleting it (the Go ` +
+        `runtime FATALS on a malformed GOMEMLIMIT at load, which would ` +
+        `crash-loop this worker); the per-worker percent budget applies ` +
+        `instead`,
+    );
+    delete env.GOMEMLIMIT;
+  }
+}
+
+/**
  * True iff `err` is the wire-protocol-revision mismatch raised during the
  * version handshake (#start). That handshake's catch intentionally SWALLOWS a
  * "method not found" error so a pre-version-RPC sidecar stays usable, but it
@@ -223,6 +268,12 @@ export class SidecarManager {
    * has no proc.on('exit') hook because it didn't spawn).
    */
   #healthTimer: ReturnType<typeof setInterval> | null = null;
+  // Pending delayed respawn armed by #handleRestartTrigger. Stored so stop()
+  // can cancel it — pre-fix (scale review) the timer was anonymous, so a
+  // stop() landing during 'restarting' let the timer fire afterwards and
+  // #spawn a fresh sidecar NOBODY owned: a zombie process holding the socket
+  // (and a manager resurrected to 'running' after its owner stopped it).
+  #restartTimer: ReturnType<typeof setTimeout> | null = null;
   /** How often the health check runs in externallyManaged mode (ms). */
   static readonly #HEALTH_CHECK_MS = 2000;
   /**
@@ -384,6 +435,11 @@ export class SidecarManager {
       this.#runningResolve = res;
       this.#runningReject = rej;
     });
+    // A rejection with no waitForRunning() caller attached must not become
+    // an unhandledRejection (Node's default crashes the process — e.g. a
+    // stop() rejecting this while nobody awaits it). The derived catch
+    // marks it handled; waitForRunning() still hands out the raw promise.
+    this.#runningPromise.catch(() => {});
 
     try {
       await this.#spawn();
@@ -439,6 +495,12 @@ export class SidecarManager {
       clearInterval(this.#healthTimer);
       this.#healthTimer = null;
     }
+    // Zombie guard (scale review): a restart scheduled before stop() must
+    // never spawn after it.
+    if (this.#restartTimer) {
+      clearTimeout(this.#restartTimer);
+      this.#restartTimer = null;
+    }
 
     if (this.#client) {
       this.#client.close();
@@ -461,13 +523,13 @@ export class SidecarManager {
       this.#proc = null;
     }
 
-    // In-process transport: deliberately NO addon.shutdown() here. Tearing
-    // down the Go host while handler goroutines may still be flushing rows
-    // races the TSFN release (use-after-free window in deliver_from_go);
-    // and since the host can never be started again in this process, the
-    // only stop() caller that matters is worker shutdown — where process
-    // exit reclaims everything. The idle host holds no client groups after
-    // close() rejected the pendings.
+    // In-process transport: nothing to tear down — the addon has NO
+    // shutdown export (removed in the scale review: calling goivm_shutdown
+    // on the JS thread deadlocks against TSFN backpressure and racing
+    // deliveries are a use-after-free). The host can never be restarted
+    // in-process anyway, so the only stop() caller that matters is worker
+    // shutdown — where process exit reclaims everything. The idle host
+    // holds no client groups after close() rejected the pendings.
 
     if (!this.#config.externallyManaged && this.#config.transport !== 'napi') {
       // Clean up socket file (only when we own it)
@@ -712,6 +774,14 @@ export class SidecarManager {
     // budget". Divide the container share across workers (floor 3%) unless
     // the operator pinned an absolute limit (GO_IVM_GOMEMLIMIT / GOMEMLIMIT)
     // or an explicit per-worker share (GO_IVM_NAPI_GOMEMLIMIT_PERCENT).
+    //
+    // Scale review: validate the pinned limits FIRST. A malformed
+    // GO_IVM_GOMEMLIMIT used to skip this fallback while ALSO failing to
+    // parse on the Go side (no limit at all, GOGC=200 → container OOM);
+    // a malformed GOMEMLIMIT FATALS the Go runtime at dlopen (an
+    // unbootable, crash-looping worker). sanitizeGoMemLimitEnv strips
+    // invalid values with a loud log so the percent fallback applies.
+    sanitizeGoMemLimitEnv(process.env, this.#config.logger);
     if (!process.env.GO_IVM_GOMEMLIMIT && !process.env.GOMEMLIMIT) {
       const workers = Math.max(1, this.#config.numSyncWorkers);
       const explicit = Number(process.env.GO_IVM_NAPI_GOMEMLIMIT_PERCENT);
@@ -838,13 +908,25 @@ export class SidecarManager {
         this.#runningResolve = res;
         this.#runningReject = rej;
       });
+      // Same unhandledRejection guard as start(): a stop() during
+      // 'restarting' rejects this promise, and there may be no
+      // waitForRunning() caller left to observe it.
+      this.#runningPromise.catch(() => {});
       this.#config.logger(
         'warn',
         `Restarting (failures in last ${this.#config.restartWindowMs}ms: ` +
           `${this.#restartTimestamps.length}/${this.#config.maxRestartsInWindow})`,
       );
-      setTimeout(
-        () =>
+      this.#restartTimer = setTimeout(
+        () => {
+          this.#restartTimer = null;
+          // Zombie guard (scale review): stop() clears this timer, but
+          // re-check at fire time anyway — a stop() immediately followed by
+          // a fresh start() resets #shutdownRequested, so the only state a
+          // scheduled respawn may legally fire in is a live 'restarting'.
+          if (this.#shutdownRequested || this.#status !== 'restarting') {
+            return;
+          }
           this.#spawn().catch(err => {
             this.#config.logger('error', 'spawn failed', err);
             if (this.#shutdownRequested) return;
@@ -889,7 +971,8 @@ export class SidecarManager {
               // Spawned mode, process already dead — proc.on('exit') will
               // have queued #handleRestartTrigger; nothing to do here.
             }
-          }),
+          });
+        },
         this.#config.restartDelayMs,
       );
     } else {

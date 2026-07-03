@@ -52,7 +52,10 @@
     }                                                                     \
   } while (0)
 
-#define EXPECTED_GOIVM_ABI 1
+// ABI v2: delivery kind 4 (host death) added — the client fatals the worker
+// on receipt, so a v1 library that never emits it must not pair with this
+// addon (the A3 guarantee would silently vanish).
+#define EXPECTED_GOIVM_ABI 2
 // Default TSFN queue bound. Tunable via GOIVM_NAPI_QUEUE_MAX (env, read at
 // start): in row mode a single large advance can fill 8192 by itself (one
 // entry per row), stalling the producing Go goroutine in blocking mode —
@@ -152,6 +155,24 @@ static void deliver_from_go(void* ctx, int32_t kind, const void* data,
                             int32_t len) {
   (void)ctx;
   if (g_bridge.tsfn == NULL) return;  // shutdown race: drop
+  // Containment (scale review): no legitimate delivery exceeds 64MB — the
+  // Go side caps frames (maxFrameSize, both directions) and row records
+  // (rowrecord.go R1) at 64MB. A larger (or negative) len here can only be
+  // ABI mismatch or memory corruption; the old path would malloc up to 2GB
+  // and abort() the whole worker on OOM. Convert it into a synthetic
+  // host-death record (kind 4, same as go-ivm abi.go's death watcher): the
+  // JS client sweeps pending RPCs and fatals the worker CLEANLY.
+  static const int32_t kMaxDelivery = 64 * 1024 * 1024;
+  char death_msg[160];
+  if (len > kMaxDelivery || len < 0) {
+    snprintf(death_msg, sizeof(death_msg),
+             "goivm_napi: oversized delivery (kind=%d len=%d) — ABI mismatch "
+             "or memory corruption",
+             (int)kind, (int)len);
+    kind = 4; /* DELIVERY_KIND_HOST_DEATH */
+    data = death_msg;
+    len = (int32_t)strlen(death_msg);
+  }
   delivery_item* item = (delivery_item*)malloc(sizeof(delivery_item));
   // OOM here must NOT silently drop the delivery: a missing row/frame
   // corrupts the stream (hung RPC / drift), strictly worse than dying
@@ -283,33 +304,18 @@ static napi_value Send(napi_env env, napi_callback_info info) {
   return out;
 }
 
-// shutdown(): void — tears down the Go host; the library stays loaded (a Go
-// runtime cannot be unloaded/restarted in-process).
-//
-// ORDERING INVARIANT — MUST NOT BE REORDERED (REVIEW-napi-transport LOW):
-// g_bridge.shutdown() runs BEFORE napi_release_threadsafe_function. The Go
-// host's goroutines (pump reader + row-plane handlers) call deliver_from_go
-// until goivm_shutdown returns — it joins the pump and closes every client
-// group first. Releasing the TSFN while those goroutines are still
-// delivering is a use-after-free window (deliver_from_go's NULL check is
-// unsynchronized — TOCTOU). Note production never calls this at all:
-// SidecarManager.stop() deliberately skips addon.shutdown() (a handler
-// mid-row-stream can outlive closeAll — the residual drain race); process
-// exit reclaims everything. This export exists for tests.
-static napi_value Shutdown(napi_env env, napi_callback_info info) {
-  (void)info;
-  if (g_bridge.started && g_bridge.shutdown != NULL) {
-    g_bridge.shutdown();
-  }
-  if (g_bridge.tsfn != NULL) {
-    napi_release_threadsafe_function(g_bridge.tsfn, napi_tsfn_abort);
-    g_bridge.tsfn = NULL;
-  }
-  (void)env;
-  return NULL;
-}
-
 // abiVersion(): number — of the LOADED library (-1 before start).
+//
+// NOTE: there is deliberately NO shutdown export (scale review). The old
+// Shutdown called goivm_shutdown ON THE JS THREAD: it joins the Go pumps and
+// drains every client group, while a handler blocked pushing into the TSFN
+// queue needs the JS thread to drain it — a deadlock; and releasing the TSFN
+// while Go goroutines may still call deliver_from_go was a TOCTOU
+// use-after-free. Production never called it (SidecarManager.stop()
+// deliberately skips teardown; process exit reclaims everything), so the
+// export's only reachable behaviors were the pathological ones. The Go
+// library still exports goivm_shutdown (resolved above for ABI-surface
+// validation); nothing in-process may safely call it.
 static napi_value AbiVersion(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value out;
@@ -323,7 +329,6 @@ static napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor props[] = {
       {"start", NULL, Start, NULL, NULL, NULL, napi_default, NULL},
       {"send", NULL, Send, NULL, NULL, NULL, napi_default, NULL},
-      {"shutdown", NULL, Shutdown, NULL, NULL, NULL, napi_default, NULL},
       {"abiVersion", NULL, AbiVersion, NULL, NULL, NULL, napi_default, NULL},
   };
   napi_status status = napi_define_properties(

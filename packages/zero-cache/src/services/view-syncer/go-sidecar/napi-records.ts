@@ -29,6 +29,13 @@ import {unpack} from './go-ivm-client.ts';
 export const DELIVERY_KIND_FRAME = 1;
 export const DELIVERY_KIND_GROUP_DEF = 2;
 export const DELIVERY_KIND_ROW = 3;
+/**
+ * Host death (A3): the in-process Go host's pump died unexpectedly — no
+ * response will ever arrive again. Payload is a UTF-8 reason string, NOT a
+ * record (no reqID header). Emitted by go-ivm abi.go's death watcher;
+ * never emitted on deliberate shutdown. ABI v2.
+ */
+export const DELIVERY_KIND_HOST_DEATH = 4;
 
 const VAL_NULL = 0;
 const VAL_FALSE = 1;

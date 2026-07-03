@@ -2300,7 +2300,23 @@ export class PipelineDriver {
             wake = resolve;
           });
         }
-        if (error) throw error;
+        if (error) {
+          // Finding 9 (scale review): a stream that died mid-query leaves
+          // that query's XOR row-set signature PARTIALLY accumulated (the
+          // yielded chunks already passed through #trackRowSetSignatures).
+          // Any later re-hydrate XORs its full row set ON TOP of the
+          // residue — the duplicated rows self-cancel and the signature is
+          // permanently wrong → spurious drift resets on the next audit.
+          // Purge the residue for every query that hadn't reached its
+          // final chunk; whatever re-hydrates them starts from 0n. (The
+          // backend refuses to replay a partially-delivered stream — see
+          // GoComputeBackend.hydrateManyStream — so this error path is the
+          // only way out of a torn stream.)
+          for (const queryID of byQueryID.keys()) {
+            this.#rowSetSignatures.delete(queryID);
+          }
+          throw error;
+        }
         while (buffered.length > 0) {
           const r = buffered.shift()!;
           const q = byQueryID.get(r.queryID);
