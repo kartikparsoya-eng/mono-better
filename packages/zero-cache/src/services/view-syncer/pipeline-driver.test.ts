@@ -1195,7 +1195,7 @@ describe('view-syncer/pipeline-driver', () => {
     pipelines.init(clientSchema);
 
     expect(() => [
-      ...pipelines.addQuery(
+      ...addQuery(
         'hash1',
         'queryID1',
         {table: 'doesNotExist'},
