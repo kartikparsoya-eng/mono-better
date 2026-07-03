@@ -21,7 +21,10 @@ import type {Change} from '../../../../zql/src/ivm/change.ts';
 import type {Node} from '../../../../zql/src/ivm/data.ts';
 import {
   skipYields,
+  throwOutput,
+  type FetchRequest,
   type Input,
+  type Output,
   type Storage,
 } from '../../../../zql/src/ivm/operator.ts';
 import type {SourceSchema} from '../../../../zql/src/ivm/schema.ts';
@@ -1017,12 +1020,20 @@ type Pipeline = {
   readonly hydrationTimeMs: number;
   readonly transformedAst: AST;
   readonly transformationHash: string;
+  readonly queryName?: string | undefined;
   readonly companions: readonly CompanionPipeline[];
 };
 
 type QueryInfo = {
   readonly transformedAst: AST;
   readonly transformationHash: string;
+  readonly queryName?: string | undefined;
+};
+
+type QueryLogInfo = {
+  readonly queryHash: string;
+  readonly transformationHash: string;
+  readonly queryName?: string | undefined;
 };
 
 type AdvanceContext = {
@@ -2029,11 +2040,18 @@ export class PipelineDriver {
     queryID: string,
     query: AST,
     timer: Timer,
+    queryName?: string,
   ): Iterable<RowChange | 'yield'> | Promise<Iterable<RowChange | 'yield'>> {
     // If Go backend init is pending, await it first
     if (this.#goInitPromise && this.#goBackend && !this.#goBackend.initialized) {
       return this.#goInitPromise.then(() =>
-        this.#addQueryDispatch(transformationHash, queryID, query, timer),
+        this.#addQueryDispatch(
+          transformationHash,
+          queryID,
+          query,
+          timer,
+          queryName,
+        ),
       );
     }
     // If a per-CG recovery is in flight (drift, sidecar-restart, etc.),
@@ -2048,10 +2066,22 @@ export class PipelineDriver {
       return this.#goBackend
         .whenRecovered()
         .then(() =>
-          this.#addQueryDispatch(transformationHash, queryID, query, timer),
+          this.#addQueryDispatch(
+            transformationHash,
+            queryID,
+            query,
+            timer,
+            queryName,
+          ),
         );
     }
-    return this.#addQueryDispatch(transformationHash, queryID, query, timer);
+    return this.#addQueryDispatch(
+      transformationHash,
+      queryID,
+      query,
+      timer,
+      queryName,
+    );
   }
 
   #addQueryDispatch(
@@ -2059,6 +2089,7 @@ export class PipelineDriver {
     queryID: string,
     query: AST,
     timer: Timer,
+    queryName?: string,
   ): Iterable<RowChange | 'yield'> | Promise<Iterable<RowChange | 'yield'>> {
     // Internal queries (lmids, mutationResults, queries rooted at the
     // <appID>.permissions or <appID>_<shard>.clients tables) always
@@ -2071,19 +2102,25 @@ export class PipelineDriver {
       this.#isInternalTable(query.table)
     ) {
       return this.#trackRowSetSignatures(
-        this.#addQueryImpl(transformationHash, queryID, query, timer),
+        this.#addQueryImpl(transformationHash, queryID, query, timer, queryName),
       );
     }
     // Shadow mode: run BOTH paths, compare, return TS results
     if (this.#shadowMode && this.#goBackend?.initialized) {
-      return this.#shadowAddQuery(transformationHash, queryID, query, timer);
+      return this.#shadowAddQuery(
+        transformationHash,
+        queryID,
+        query,
+        timer,
+        queryName,
+      );
     }
     // When Go backend is active (non-shadow), hydrate via sidecar (Go-owned
     // stub pipeline). F1: record the build mode so a later Go-availability flip
     // triggers a rebuild instead of a silent freeze / double-emit.
     if (this.#goBackend?.initialized) {
       this.#goUserPipelineMode = 'go';
-      return this.#goHydrate(transformationHash, queryID, query);
+      return this.#goHydrate(transformationHash, queryID, query, queryName);
     }
     // Real TS pipeline. In a Go-primary deployment this is the DEGRADED path
     // (Go unavailable at build time); mark it so advance() serves TS-native and
@@ -2092,7 +2129,7 @@ export class PipelineDriver {
       this.#goUserPipelineMode = 'ts';
     }
     return this.#trackRowSetSignatures(
-      this.#addQueryImpl(transformationHash, queryID, query, timer),
+      this.#addQueryImpl(transformationHash, queryID, query, timer, queryName),
     );
   }
 
@@ -2100,6 +2137,7 @@ export class PipelineDriver {
     transformationHash: string,
     queryID: string,
     query: AST,
+    queryName?: string,
   ): Promise<Iterable<RowChange | 'yield'>> {
     this.removeQuery(queryID);
     // Plan the AST the same way the batch path does so Go's pipeline
@@ -2128,6 +2166,7 @@ export class PipelineDriver {
       transformedAst: planned,
       transformationHash,
       companions: [],
+      ...(queryName !== undefined && {queryName}),
     });
 
     // Convert Go RowChanges and track signatures
@@ -2729,6 +2768,7 @@ export class PipelineDriver {
           auditID,
           ast,
           noopTimer,
+          undefined, // queryName — audit pipelines are synthetic
           true, // auditMode — no-op setOutput; see #addQueryImpl
         )) {
           if (c !== 'yield') tsChanges.push(c);
@@ -3494,6 +3534,7 @@ export class PipelineDriver {
     queryID: string,
     query: AST,
     timer: Timer,
+    queryName?: string,
     /**
      * When true, the pipeline's setOutput is a no-op — source pushes still
      * flow through the operator chain (correctness preserved), but nothing
@@ -3545,7 +3586,13 @@ export class PipelineDriver {
           createStorage: () => this.#createStorage(),
           decorateSourceInput: (input: SourceInput, _queryID: string): Input =>
             new MeasurePushOperator(
-              input,
+              new QueryFailureLoggingOperator(
+                this.#lc,
+                input,
+                queryID,
+                transformationHash,
+                queryName,
+              ),
               queryID,
               this.#inspectorDelegate,
               'query-update-server',
@@ -3670,8 +3717,17 @@ export class PipelineDriver {
         hydrationTimeMs,
         transformedAst: resolvedQuery,
         transformationHash,
+        ...(queryName !== undefined && {queryName}),
         companions: liveCompanions,
       });
+    } catch (e) {
+      logQueryFailure(
+        this.#lc,
+        {queryHash: queryID, transformationHash, queryName},
+        'query hydration failed',
+        e,
+      );
+      throw e;
     } finally {
       this.#hydrateContext = null;
     }
@@ -4427,11 +4483,12 @@ export class PipelineDriver {
     queryID: string,
     query: AST,
     timer: Timer,
+    queryName?: string,
   ): Iterable<RowChange | 'yield'> {
     const tsHydStart = performance.now();
     const tsResults = [
       ...this.#trackRowSetSignatures(
-        this.#addQueryImpl(transformationHash, queryID, query, timer),
+        this.#addQueryImpl(transformationHash, queryID, query, timer, queryName),
       ),
     ];
     const tsHydMs = performance.now() - tsHydStart;
@@ -5947,7 +6004,12 @@ export class PipelineDriver {
 
   #startAccumulating() {
     assert(this.#streamer === null, 'Streamer already started');
-    this.#streamer = new Streamer(must(this.#primaryKeys), this.#tableSpecs);
+    this.#streamer = new Streamer(
+      must(this.#primaryKeys),
+      this.#tableSpecs,
+      (queryID, error) =>
+        this.#logQueryFailure(queryID, 'query pipeline failed', error),
+    );
   }
 
   #stopAccumulating(): Streamer {
@@ -5956,18 +6018,35 @@ export class PipelineDriver {
     this.#streamer = null;
     return streamer;
   }
+
+  #logQueryFailure(queryID: string, message: string, error: unknown): void {
+    const pipeline = this.#pipelines.get(queryID);
+    const queryInfo = pipeline
+      ? {
+          queryHash: queryID,
+          transformationHash: pipeline.transformationHash,
+          queryName: pipeline.queryName,
+        }
+      : undefined;
+    logQueryFailure(this.#lc, queryInfo, message, error);
+  }
 }
 
 class Streamer {
   readonly #primaryKeys: Map<string, PrimaryKey>;
   readonly #tableSpecs: Map<string, LiteAndZqlSpec>;
+  readonly #logQueryFailure:
+    | ((queryID: string, error: unknown) => void)
+    | undefined;
 
   constructor(
     primaryKeys: Map<string, PrimaryKey>,
     tableSpecs: Map<string, LiteAndZqlSpec>,
+    logQueryFailure?: (queryID: string, error: unknown) => void,
   ) {
     this.#primaryKeys = primaryKeys;
     this.#tableSpecs = tableSpecs;
+    this.#logQueryFailure = logQueryFailure;
   }
 
   readonly #changes: [
@@ -5987,7 +6066,12 @@ class Streamer {
 
   *stream(): Iterable<RowChange | 'yield'> {
     for (const [queryID, schema, changes] of this.#changes) {
-      yield* this.#streamChanges(queryID, schema, changes);
+      try {
+        yield* this.#streamChanges(queryID, schema, changes);
+      } catch (e) {
+        this.#logQueryFailure?.(queryID, e);
+        throw e;
+      }
     }
   }
 
@@ -6086,6 +6170,85 @@ class Streamer {
       }
     }
   }
+}
+
+class QueryFailureLoggingOperator implements Input, Output {
+  readonly #lc: LogContext;
+  readonly #input: Input;
+  readonly #queryHash: string;
+  readonly #transformationHash: string;
+  readonly #queryName: string | undefined;
+  #output: Output = throwOutput;
+
+  constructor(
+    lc: LogContext,
+    input: Input,
+    queryHash: string,
+    transformationHash: string,
+    queryName?: string,
+  ) {
+    this.#lc = lc;
+    this.#input = input;
+    this.#queryHash = queryHash;
+    this.#transformationHash = transformationHash;
+    this.#queryName = queryName;
+    input.setOutput(this);
+  }
+
+  setOutput(output: Output): void {
+    this.#output = output;
+  }
+
+  getSchema(): SourceSchema {
+    return this.#input.getSchema();
+  }
+
+  destroy(): void {
+    this.#input.destroy();
+  }
+
+  fetch(req: FetchRequest): Iterable<Node | 'yield'> {
+    return this.#input.fetch(req);
+  }
+
+  *push(change: Change): Iterable<'yield'> {
+    try {
+      yield* this.#output.push(change, this);
+    } catch (e) {
+      logQueryFailure(
+        this.#lc,
+        {
+          queryHash: this.#queryHash,
+          transformationHash: this.#transformationHash,
+          queryName: this.#queryName,
+        },
+        'query pipeline failed',
+        e,
+      );
+      throw e;
+    }
+  }
+}
+
+function logQueryFailure(
+  lc: LogContext,
+  queryInfo: QueryLogInfo | undefined,
+  message: string,
+  error: unknown,
+): void {
+  if (error instanceof ResetPipelinesSignal) {
+    return;
+  }
+  let queryLC = lc;
+  if (queryInfo) {
+    queryLC = queryLC
+      .withContext('queryHash', queryInfo.queryHash)
+      .withContext('transformationHash', queryInfo.transformationHash);
+    if (queryInfo.queryName !== undefined) {
+      queryLC = queryLC.withContext('queryName', queryInfo.queryName);
+    }
+  }
+  queryLC.error?.(message, error);
 }
 
 function* toAdds(nodes: Iterable<Node | 'yield'>): Iterable<Change | 'yield'> {

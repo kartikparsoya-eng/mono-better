@@ -1,7 +1,7 @@
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
-import {createSilentLogContext, TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
+import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import {createSchema} from '../../../../zero-schema/src/builder/schema-builder.ts';
 import {
@@ -69,11 +69,13 @@ describe('view-syncer/pipeline-driver', () => {
   let dbFile: DbFile;
   let db: DB;
   let lc: LogContext;
+  let logSink: TestLogSink;
   let pipelines: PipelineDriver;
   let replicator: FakeReplicator;
 
   beforeEach(() => {
-    lc = createSilentLogContext();
+    logSink = new TestLogSink();
+    lc = new LogContext('error', undefined, logSink);
     dbFile = new DbFile('pipelines_test');
     dbFile.connect(lc).pragma('journal_mode = wal2');
 
@@ -105,7 +107,7 @@ describe('view-syncer/pipeline-driver', () => {
       CREATE TABLE issues (
         id TEXT PRIMARY KEY,
         closed BOOL,
-        ignored INET,
+        ignored BYTEA,
         _0_version TEXT NOT NULL
       );
       CREATE TABLE comments (
@@ -1187,6 +1189,32 @@ describe('view-syncer/pipeline-driver', () => {
         },
       ]
     `);
+  });
+
+  test('logs query identity when query hydration fails', () => {
+    pipelines.init(clientSchema);
+
+    expect(() => [
+      ...pipelines.addQuery(
+        'hash1',
+        'queryID1',
+        {table: 'doesNotExist'},
+        startTimer(),
+        'myQuery',
+      ),
+    ]).toThrowError(/doesNotExist/);
+
+    const failureLog = logSink.messages.find(
+      ([level, context, args]) =>
+        level === 'error' &&
+        context?.queryHash === 'queryID1' &&
+        args[0] === 'query hydration failed',
+    );
+    expect(failureLog?.[1]).toMatchObject({
+      queryHash: 'queryID1',
+      queryName: 'myQuery',
+      transformationHash: 'hash1',
+    });
   });
 
   test('insert', () => {

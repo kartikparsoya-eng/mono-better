@@ -105,6 +105,7 @@ bun.lock
 packages/zql-integration-tests/Chinook_Sqlite.sqlite
 
 *.ignore.*
+package-lock-commit-deps-report.html
 
 # Local debug / probe scripts (not part of the source tree)
 zero-probe.mjs
