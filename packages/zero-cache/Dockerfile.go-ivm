@@ -37,29 +37,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy package files first for better layer caching
-COPY package.json package-lock.json ./
+# Copy package manifests first for better layer caching. pnpm (the repo's
+# package manager since the upstream 1.7.0 npm->pnpm migration, #5997)
+# resolves workspace:* deps, so every workspace package in zero-cache's
+# dependency closure needs its REAL package.json present at install time
+# (dirs without a package.json are simply not workspace members — no
+# stub manifests needed, unlike the old npm flow).
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/zero-cache/package.json packages/zero-cache/
 COPY packages/zero-protocol/package.json packages/zero-protocol/
 COPY packages/zero-schema/package.json packages/zero-schema/
+COPY packages/zero-events/package.json packages/zero-events/
+COPY packages/zero-permissions/package.json packages/zero-permissions/
+COPY packages/zero-types/package.json packages/zero-types/
 COPY packages/shared/package.json packages/shared/
+COPY packages/otel/package.json packages/otel/
 COPY packages/zql/package.json packages/zql/
+COPY packages/zqlite/package.json packages/zqlite/
 
-# Stub package.json for workspace packages that might be referenced
-RUN find packages -maxdepth 1 -mindepth 1 -type d | while read dir; do \
-    if [ ! -f "$dir/package.json" ]; then \
-      echo '{"name":"'$(basename $dir)'","version":"0.0.0"}' > "$dir/package.json"; \
-    fi; done
+# pnpm via corepack (bundled with node 22), pinned to the repo's
+# packageManager version — same recipe as packages/zero/Dockerfile.
+RUN corepack enable && corepack prepare pnpm@11.5.3 --activate
 
-# Install all deps (including native binaries like esbuild)
-RUN npm install --prefer-offline 2>&1 | tail -5
+# Install deps for zero-cache + its workspace dependency closure only
+# (the `...` filter suffix includes workspace dependencies). Native
+# builds (esbuild, msgpackr-extract, @rocicorp/zero-sqlite3, …) run per
+# the allowBuilds list in pnpm-workspace.yaml. devDependencies are
+# included deliberately — the entrypoint runs `npx tsx`, and tsx is a
+# zero-cache devDependency.
+RUN pnpm install --filter zero-cache... 2>&1 | tail -5
 
 # OpenTelemetry auto-instrumentation. Packages are installed at the
 # workspace root so they're resolvable from zero-cache at runtime.
 # Always installed; SDK is wired via NODE_OPTIONS below but no-ops
 # at runtime when OTEL_EXPORTER_OTLP_ENDPOINT is unset (no perf cost
-# for operators who don't enable tracing).
-RUN npm install --no-save \
+# for operators who don't enable tracing). pnpm has no --no-save;
+# `add -w` mutates the root manifest+lockfile inside the image only.
+RUN pnpm add -w \
     @opentelemetry/auto-instrumentations-node \
     @opentelemetry/sdk-node \
     2>&1 | tail -5
