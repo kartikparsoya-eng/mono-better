@@ -731,6 +731,23 @@ export class SidecarManager {
     const client = new GoIVMClient('napi:in-process', {
       onLog: (level, msg, err) =>
         this.#config.logger(level, `client: ${msg}`, err),
+      // A2 (scale review): the client detects in-process host death
+      // (goivm_send rc != 0) and latches its transport dead. Route that to
+      // the restart trigger, whose napi branch is the crash-don't-degrade
+      // path (status 'failed' → fatalExit). Without this wiring the branch
+      // was dead code: the manager stayed 'running' with a dead engine and
+      // every Go-owned CG spun in per-CG reset loops the supervisor never
+      // saw. Skip when already terminal — a send racing a deliberate stop()
+      // (status 'stopped') must not crash a cleanly-shutting-down worker.
+      onFatal: err => {
+        if (this.#status === 'stopped' || this.#status === 'failed') return;
+        this.#config.logger(
+          'error',
+          `in-process Go engine fatal: ${err.message}`,
+          err,
+        );
+        this.#handleRestartTrigger();
+      },
     });
     // Throws on dlopen failure, missing symbols, ABI mismatch, or
     // goivm_start rc != 0 — all routed to start()'s catch → 'failed'.
@@ -778,9 +795,9 @@ export class SidecarManager {
       // cannot restart in-process). Startup failures never reach here (they
       // route through start()'s catch → graceful 'failed' → TS fallback,
       // sound because nothing was ever Go-owned); this branch is the
-      // POST-START path — currently defensive (no live trigger wires to it
-      // in napi mode), but if any future failure-detection path lands here
-      // it MUST crash so the supervisor restores a working state (fresh
+      // POST-START path — wired live (A2) from GoIVMClient's onFatal, which
+      // fires when goivm_send returns rc != 0 (host receive loop gone). It
+      // MUST crash so the supervisor restores a working state (fresh
       // worker, fresh dlopen).
       this.#config.logger(
         'error',

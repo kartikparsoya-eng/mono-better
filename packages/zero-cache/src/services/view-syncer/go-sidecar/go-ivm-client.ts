@@ -831,6 +831,17 @@ export class GoIVMClient {
   readonly #onLog:
     | ((level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void)
     | undefined;
+  /**
+   * A2 (scale review): invoked ONCE when the in-process (NAPI) transport is
+   * detected dead (goivm_send rc != 0 — the pump/host has exited). The
+   * embedder (SidecarManager) routes this to its fatal-exit path: a dead
+   * in-process engine cannot be restarted (dlopen is once-per-process) and
+   * TS fallback is unsound for Go-owned client groups, so the worker must
+   * crash for the supervisor to restore a working state. Without this hook
+   * the send failure only rejected the ONE RPC — the manager stayed
+   * 'running' and every CG spun in per-CG reset loops forever.
+   */
+  readonly #onFatal: ((err: Error) => void) | undefined;
   #socket: Socket | null = null;
   // In-process (NAPI) transport. Mutually exclusive with #socket: exactly
   // one of connect() / connectNapi() is used per client instance. When set,
@@ -893,10 +904,14 @@ export class GoIVMClient {
 
   constructor(
     socketPath = '/tmp/go-ivm.sock',
-    options?: {onLog?: (level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void},
+    options?: {
+      onLog?: (level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void;
+      onFatal?: (err: Error) => void;
+    },
   ) {
     this.#socketPath = socketPath;
     this.#onLog = options?.onLog;
+    this.#onFatal = options?.onFatal;
   }
 
   /** Connect to the Go sidecar. Resolves when connected. */
@@ -953,6 +968,33 @@ export class GoIVMClient {
   }
 
   /**
+   * Terminal in-process transport failure (A2). Mirrors the socket 'close'
+   * cleanup: mark the transport dead FIRST so concurrent #call invocations
+   * fail fast, reject every pending RPC (their responses can never arrive —
+   * without this they'd each burn a full timeout during the fatal-exit
+   * window), release all backpressure waiters, then notify the embedder
+   * exactly once via onFatal.
+   */
+  #napiFatal(err: Error): void {
+    if (!this.#napi) return; // already dead (latch) or never connected
+    this.#napi = null;
+    for (const [, p] of this.#pending) {
+      if (p.timer) clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.#pending.clear();
+    const globalWaiters = this.#slotWaiters;
+    this.#slotWaiters = [];
+    for (const w of globalWaiters) w();
+    const perGroup = this.#perGroupWaiters;
+    this.#perGroupWaiters = new Map();
+    for (const waiters of perGroup.values()) for (const w of waiters) w();
+    this.#perGroupInFlight.clear();
+    this.#log('error', `napi transport fatal: ${err.message}`, err);
+    this.#onFatal?.(err);
+  }
+
+  /**
    * The delivery callback to register with the addon's start(). Exposed as
    * a bound method (not wired inside connectNapi) because goivm_start must
    * be called exactly once per process while GoIVMClient instances may be
@@ -1004,7 +1046,12 @@ export class GoIVMClient {
     const result = (await this.#call(
       'init',
       {clientGroupID, ...params},
-      {timeoutMs: opts?.timeoutMs ?? 120_000},
+      // A1: forward the group so heavyweight RPCs take PER-GROUP fairness
+      // slots. Pre-fix every wrapper except advanceToHeadStream bucketed
+      // under GLOBAL_KEY — ONE shared 16-slot cap for all CGs' init/
+      // hydrate/advance traffic, so 16 slow CGs head-blocked every other
+      // CG on the worker (the per-group cap existed but was dead code).
+      {timeoutMs: opts?.timeoutMs ?? 120_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
     )) as {status?: string; initEpoch?: number} | 'ok';
     if (typeof result !== 'object' || typeof result.initEpoch !== 'number') {
       throw new Error('init: sidecar did not return initEpoch — protocol mismatch');
@@ -1027,7 +1074,7 @@ export class GoIVMClient {
     await this.#call(
       'loadRows',
       {clientGroupID, table, rows, initEpoch},
-      {timeoutMs: opts?.timeoutMs ?? 120_000},
+      {timeoutMs: opts?.timeoutMs ?? 120_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
     );
   }
 
@@ -1043,7 +1090,7 @@ export class GoIVMClient {
     const result = (await this.#call(
       'addQuery',
       {clientGroupID, queryID, ast, initEpoch},
-      {timeoutMs: opts?.timeoutMs ?? 60_000},
+      {timeoutMs: opts?.timeoutMs ?? 60_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
     )) as {changes: RowChange[]; timingMs?: number};
     return {changes: result.changes ?? [], timingMs: result.timingMs};
   }
@@ -1059,7 +1106,7 @@ export class GoIVMClient {
     const result = (await this.#call(
       'addQueries',
       {clientGroupID, queries, initEpoch},
-      {timeoutMs: opts?.timeoutMs ?? 120_000},
+      {timeoutMs: opts?.timeoutMs ?? 120_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
     )) as {results: {changes: RowChange[]; timingMs?: number}[]};
     return (result.results ?? []).map(r => ({
       changes: r.changes ?? [],
@@ -1107,6 +1154,7 @@ export class GoIVMClient {
         : {clientGroupID, queries, initEpoch},
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
+        clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
         onPartial: handler.onFrame,
         ...(rowMode ? {onRow: handler.onRow} : {}),
       },
@@ -1148,7 +1196,10 @@ export class GoIVMClient {
 
   /** Remove a query pipeline from a client group's engine. */
   async removeQuery(clientGroupID: string, queryID: string, initEpoch: number, opts?: CallOptions): Promise<void> {
-    await this.#call('removeQuery', {clientGroupID, queryID, initEpoch}, opts);
+    await this.#call('removeQuery', {clientGroupID, queryID, initEpoch}, {
+      ...opts,
+      clientGroupID: opts?.clientGroupID ?? clientGroupID,
+    });
   }
 
   // Push mode: ship a SnapshotChange diff to Go, which applies it and
@@ -1184,6 +1235,7 @@ export class GoIVMClient {
         : {clientGroupID, changes, initEpoch},
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
+        clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
         onPartial: handler.onFrame,
         ...(rowMode ? {onRow: handler.onRow} : {}),
       },
@@ -1211,7 +1263,7 @@ export class GoIVMClient {
     const result = (await this.#call(
       'advanceToHead',
       appID ? {clientGroupID, initEpoch, appID} : {clientGroupID, initEpoch},
-      opts,
+      {...opts, clientGroupID: opts?.clientGroupID ?? clientGroupID},
     )) as Partial<AdvanceToHeadResult>;
     return {
       changes: result.changes ?? [],
@@ -1261,8 +1313,8 @@ export class GoIVMClient {
       rowMode ? {...base, rowMode: true} : base,
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
-        // Forward the group for in-flight fairness (advanceStream omits this;
-        // we keep it so a single group can't starve others — CROSS-2).
+        // Forward the group for in-flight fairness (every CG-scoped wrapper
+        // does this since A1 — one group can't starve others — CROSS-2).
         clientGroupID: opts?.clientGroupID ?? clientGroupID,
         onPartial: handler.onFrame,
         ...(rowMode ? {onRow: handler.onRow} : {}),
@@ -1286,7 +1338,10 @@ export class GoIVMClient {
     initEpoch: number,
     opts?: CallOptions,
   ): Promise<void> {
-    await this.#call('destroy', {clientGroupID, initEpoch}, opts);
+    await this.#call('destroy', {clientGroupID, initEpoch}, {
+      ...opts,
+      clientGroupID: opts?.clientGroupID ?? clientGroupID,
+    });
   }
 
   /**
@@ -1305,7 +1360,7 @@ export class GoIVMClient {
     await this.#call(
       'refreshSnapshot',
       {clientGroupID, initEpoch},
-      opts,
+      {...opts, clientGroupID: opts?.clientGroupID ?? clientGroupID},
     );
   }
 
@@ -1322,7 +1377,10 @@ export class GoIVMClient {
     clientGroupID: string,
     opts?: CallOptions,
   ): Promise<number> {
-    const r = await this.#call('pipelineCount', {clientGroupID}, opts);
+    const r = await this.#call('pipelineCount', {clientGroupID}, {
+      ...opts,
+      clientGroupID: opts?.clientGroupID ?? clientGroupID,
+    });
     return typeof r === 'number' ? r : 0;
   }
 
@@ -1514,7 +1572,14 @@ export class GoIVMClient {
       if (napi) {
         const rc = napi.send(payload);
         if (rc !== 0) {
-          wrappedReject(new Error(`goivm_send failed: rc=${rc} (host closed?)`));
+          // rc != 0 means the Go host's receive loop is gone (markClosed) —
+          // the engine is dead for EVERY pending and future RPC, not just
+          // this one. Reject this call with the specific error, then latch
+          // the whole transport dead and notify the embedder (→ fatalExit;
+          // see #napiFatal / A2).
+          const err = new Error(`goivm_send failed: rc=${rc} (host closed?)`);
+          wrappedReject(err);
+          this.#napiFatal(err);
         }
         return;
       }
