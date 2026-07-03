@@ -31,6 +31,12 @@ FROM litestream/litestream:0.5.11 AS litestream-v5
 # Stage 4: zero-cache runtime
 FROM node:22-slim
 
+# Every RUN below that pipes through `tail` must fail when the LEFT side
+# fails: Debian's /bin/sh (dash) has no pipefail, so a failed
+# `pnpm install | tail -5` exited 0 and produced a broken image that only
+# died at runtime (napi-review H2). bash is present in node:22-slim.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget ca-certificates python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -64,8 +70,10 @@ RUN corepack enable && corepack prepare pnpm@11.5.3 --activate
 # builds (esbuild, msgpackr-extract, @rocicorp/zero-sqlite3, …) run per
 # the allowBuilds list in pnpm-workspace.yaml. devDependencies are
 # included deliberately — the entrypoint runs `npx tsx`, and tsx is a
-# zero-cache devDependency.
-RUN pnpm install --filter zero-cache... 2>&1 | tail -5
+# zero-cache devDependency. --frozen-lockfile: the image must install
+# EXACTLY what pnpm-lock.yaml pins — a stale lockfile fails the build
+# loudly instead of silently resolving fresh versions (H2).
+RUN pnpm install --filter zero-cache... --frozen-lockfile 2>&1 | tail -5
 
 # OpenTelemetry auto-instrumentation. Packages are installed at the
 # workspace root so they're resolvable from zero-cache at runtime.
@@ -210,8 +218,10 @@ ARG PERCHUNK_HYDRATE=true
 #                      go-ivm base image that carries libgoivm.so.
 # EXTERNALLY_MANAGED must be false for napi (an in-process engine cannot
 # be shared across workers — syncer.ts resolves the conflict in socket's
-# favor). The entrypoint's shared sidecar process still spawns and sits
-# idle in napi mode (nobody connects) — harmless, keeps one entrypoint.
+# favor). The entrypoint branches on ZERO_GO_SIDECAR_TRANSPORT: napi mode
+# execs zero-cache directly and never spawns the shared sidecar (H3 —
+# previously an idle sidecar booted anyway, coupling container startup to
+# a process nobody connects to while it claimed GOMEMLIMIT/conn budgets).
 ARG TRANSPORT=socket
 ARG EXTERNALLY_MANAGED=true
 

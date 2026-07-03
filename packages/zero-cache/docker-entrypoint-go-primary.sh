@@ -1,16 +1,27 @@
 #!/bin/sh
 # Container entrypoint for the Go-primary zero-cache image.
 #
-# Topology: one shared go-ivm-sidecar per container, spawned here
-# before zero-cache starts. Every zero-cache syncer worker connects
-# to it via SidecarManager's externallyManaged=true path. This is
-# the recommended Go-primary deployment per
-# go-ivm/REVIEW-final.md and feedback_shared_sidecar_tuning.md
-# (workers=1 + shared sidecar — see Dockerfile.go-ivm).
+# Two transports (ZERO_GO_SIDECAR_TRANSPORT, baked by the TRANSPORT build
+# arg):
+#   napi   — each syncer worker dlopens libgoivm.so IN-PROCESS; no shared
+#            sidecar process exists, so exec zero-cache directly. (H3:
+#            previously the socket sidecar was spawned anyway and sat
+#            idle — nobody connects in napi mode — while container boot
+#            lived or died with it and it claimed GOMEMLIMIT/conn
+#            budgets alongside the real in-process engines.)
+#   socket — one shared go-ivm-sidecar per container, spawned here before
+#            zero-cache starts. Every zero-cache syncer worker connects
+#            to it via SidecarManager's externallyManaged=true path, per
+#            go-ivm/REVIEW-final.md and feedback_shared_sidecar_tuning.md.
 #
 # `set -e` is intentionally NOT used: the socket-poll loop below
 # uses explicit checks so a transient missing socket doesn't kill
 # the container before we've waited long enough.
+
+if [ "${ZERO_GO_SIDECAR_TRANSPORT:-socket}" = "napi" ]; then
+  echo "[entrypoint] transport=napi — in-process engine (libgoivm.so); not spawning shared sidecar"
+  exec npx tsx ./src/server/runner/main.ts
+fi
 
 SOCKET_PATH="${ZERO_GO_SIDECAR_SOCKET_PATH:-/tmp/go-ivm-shared.sock}"
 SIDECAR_BIN="${ZERO_GO_SIDECAR_BINARY_PATH:-/opt/go-ivm/go-ivm-sidecar}"
