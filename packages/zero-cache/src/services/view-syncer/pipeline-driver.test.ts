@@ -560,11 +560,14 @@ describe('view-syncer/pipeline-driver', () => {
     try {
       goPrimary.init(clientSchema);
 
-      // 20 user queries → windows of [8, 8, 4].
+      // 20 user queries → windows of [8, 8, 4]. q0 carries a custom-query
+      // name: the batch path must thread it into the pipeline stub like
+      // the per-query #goHydrate path does (review M1 — it was dropped).
       const queries = Array.from({length: 20}, (_, i) => ({
         transformationHash: `hash${i}`,
         queryID: `q${i}`,
         ast: UNIQUES_QUERY,
+        queryName: i === 0 ? 'myCustomQuery' : undefined,
       }));
 
       for await (const entry of goPrimary.goHydrateBatchStream(queries)) {
@@ -585,6 +588,12 @@ describe('view-syncer/pipeline-driver', () => {
       expect(seen.length).toBe(20);
       expect(new Set(seen)).toEqual(new Set(queries.map(q => q.queryID)));
       expect(drainedChanges).toBe(0);
+
+      // M1: the custom-query name must land on the registered Go-owned
+      // pipeline stub (inspector + queryName log context read it there);
+      // unnamed queries stay undefined.
+      expect(goPrimary.queries().get('q0')?.queryName).toBe('myCustomQuery');
+      expect(goPrimary.queries().get('q1')?.queryName).toBeUndefined();
 
       // Sub-batched into windows of 8: [8, 8, 4]. No RPC ever carries more
       // than GO_HYDRATE_SUB_BATCH queries.

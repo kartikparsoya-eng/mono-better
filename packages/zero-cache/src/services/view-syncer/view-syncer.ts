@@ -2151,6 +2151,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               transformationHash: q.transformationHash,
               queryID: q.id,
               ast: q.ast,
+              // Custom-query name for the pipeline stub (inspector +
+              // queryName log context) — the non-batch path passes it to
+              // addQuery; dropping it here lost it in Go-primary (M1).
+              queryName: q.name,
             })),
           )) {
             const q = byID.get(queryID);

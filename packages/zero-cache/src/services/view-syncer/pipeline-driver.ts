@@ -2197,7 +2197,15 @@ export class PipelineDriver {
    * `queries`.
    */
   async *goHydrateBatchStream(
-    queries: {transformationHash: string; queryID: string; ast: AST}[],
+    queries: {
+      transformationHash: string;
+      queryID: string;
+      ast: AST;
+      // Custom-query name, threaded to the pipeline stub exactly like the
+      // per-query #goHydrate path (:2169) — observability only (inspector
+      // + queryName log context). Review M1: the batch path dropped it.
+      queryName?: string | undefined;
+    }[],
   ): AsyncIterable<{
     queryID: string;
     changes: Iterable<RowChange | 'yield'>;
@@ -2255,7 +2263,7 @@ export class PipelineDriver {
     } as unknown as Timer;
     for (const q of internalQueries) {
       const raw = this.#trackRowSetSignatures(
-        this.#addQueryImpl(q.transformationHash, q.queryID, q.ast, noopTimer),
+        this.#addQueryImpl(q.transformationHash, q.queryID, q.ast, noopTimer, q.queryName),
       );
       function* dropYields(): Iterable<RowChange | 'yield'> {
         for (const c of raw) {
@@ -2378,6 +2386,7 @@ export class PipelineDriver {
               transformedAst: q.ast,
               transformationHash: q.transformationHash,
               companions: [],
+              ...(q.queryName !== undefined && {queryName: q.queryName}),
             });
           }
           const self = this;
