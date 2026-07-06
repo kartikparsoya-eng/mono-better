@@ -74,21 +74,19 @@ async function flush(): Promise<void> {
 }
 
 describe('computeBoundTimeoutMs', () => {
-  test('in-process → 0 (no timeout); socket keeps the wall-clock default', () => {
-    expect(computeBoundTimeoutMs(true, 120_000)).toBe(0);
-    expect(computeBoundTimeoutMs(false, 120_000)).toBe(120_000);
+  test('in-process → 0 (no timeout)', () => {
+    expect(computeBoundTimeoutMs()).toBe(0);
   });
 
-  test('explicit override wins on both transports — including an explicit 0', () => {
-    expect(computeBoundTimeoutMs(true, 120_000, 5_000)).toBe(5_000);
-    expect(computeBoundTimeoutMs(false, 120_000, 5_000)).toBe(5_000);
-    expect(computeBoundTimeoutMs(false, 120_000, 0)).toBe(0);
+  test('explicit override wins — including an explicit 0', () => {
+    expect(computeBoundTimeoutMs(5_000)).toBe(5_000);
+    expect(computeBoundTimeoutMs(0)).toBe(0);
   });
 });
 
 describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
   test('abortBudget rides the request as additive params', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 
@@ -108,7 +106,7 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
   });
 
   test('no abortBudget → no budget fields (old-server pairs see the rev-9 shape)', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 
@@ -122,7 +120,7 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
   });
 
   test('RPC_CODE_ADVANCE_ABORTED (-32103) rejects as AdvanceAbortedError with the TS message verbatim', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 
@@ -140,7 +138,7 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
   });
 
   test('RPC_CODE_ADVANCE_CLEAN_RETRYABLE (-32104) rejects as RetryableAdvanceError', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 
@@ -155,7 +153,7 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
 
   test('NO wall-clock timeout in-process: still pending far past the old 120s default', async () => {
     vi.useFakeTimers();
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 

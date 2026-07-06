@@ -6,18 +6,16 @@
 // Restart safety: the sidecar client is resolved through SidecarManager on
 // every call, and a restart subscription invalidates #initialized so the
 // next advance/hydrate re-inits via getCurrentTables before proceeding.
-// Init chunking: schema-only `init`, then `loadRows` in batches so no frame
-// approaches the 64MB cap.
+// Init is schema-only: the table-mode sidecar reads rows from SQLite
+// directly.
 //
 // Feature flag: ZERO_GO_SIDECAR_ENABLED=true.
 
 import type {ZeroConfig} from '../../../config/zero-config.ts';
-import {DriftError, RetryableAdvanceError} from './go-ivm-client.ts';
+import {RetryableAdvanceError} from './go-ivm-client.ts';
 import type {
-  AdvanceResult as GoAdvanceResult,
   AdvanceToHeadResult,
   HydrateResult as GoHydrateResult,
-  SnapshotChange,
   TableData,
 } from './go-ivm-client.ts';
 import type {SidecarManager} from './sidecar-manager.ts';
@@ -28,28 +26,6 @@ export interface TableSchemaSpec {
   columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean | undefined}>;
   primaryKey: string[];
 }
-
-/** Max rows per loadRows RPC. Picked so each batch stays well under 64MB. */
-const DEFAULT_LOAD_BATCH_ROWS = 5_000;
-
-/**
- * Drift-loop circuit breaker. Without this, a pathological steady-state where
- * every advance trips a Go DriftError → full reinit (loadRows + readdQueries
- * for the whole CG state) → next advance trips again would peg the sidecar's
- * IO/CPU indefinitely. Each reinit is seconds-long for large CGs so even a
- * modest rate is destructive.
- *
- * Breaker semantics: count drift-driven reinit events in a sliding
- * `DRIFT_BREAKER_WINDOW_MS` window. If the count crosses the threshold, mark
- * the backend uninitialized for `DRIFT_BREAKER_COOLDOWN_MS` so the
- * PipelineDriver's dispatch falls through to the TS-native path entirely.
- * Cooldown auto-clears; legitimate Go path is restored without manual
- * intervention. A second drift loop after cooldown trips the breaker again,
- * giving operators a clean metric to alert on (sidecar_drift_breaker_open).
- */
-const DRIFT_BREAKER_WINDOW_MS = 60_000;
-const DRIFT_BREAKER_THRESHOLD = 5;
-const DRIFT_BREAKER_COOLDOWN_MS = 300_000;
 
 export type GoBackendLogger = (
   level: 'info' | 'warn' | 'error',
@@ -66,24 +42,7 @@ export class GoComputeBackend {
   readonly #getCurrentTables: () => Record<string, TableData>;
   readonly #getCurrentQueries: GetCurrentQueries;
   readonly #log: GoBackendLogger;
-  readonly #loadBatchRows: number;
   readonly #appID: string;
-  /**
-   * Per-row delivery opt-in for streaming RPCs (hydrate + advance). Only
-   * engages when the underlying client is on the in-process (napi)
-   * transport — the client itself degrades rowMode to msgpack frames on a
-   * socket — so this can be armed unconditionally from config without
-   * checking which transport actually came up.
-   */
-  readonly #rowMode: boolean;
-  /**
-   * Pull-based hydration (ABI v3): batch hydrates go through
-   * {@link hydrateManyStreamPull} — Go produces rows only as the returned
-   * iterator is consumed. Requires #rowMode + the napi transport; the
-   * client throws if armed without them, so config gating
-   * (goPullHydrate) must imply both.
-   */
-  readonly #pullHydrate: boolean;
   /** Pull lookahead window W (see zero-config goSidecar.pullWindow). */
   readonly #pullWindow: number;
   #initialized = false;
@@ -107,10 +66,6 @@ export class GoComputeBackend {
   #restartGate: Promise<void> | null = null;
   #unsubscribe: (() => void) | null = null;
   #destroyed = false;
-  /** Sliding-window timestamps of drift-driven reinits. See breaker constants. */
-  #driftReinitTimestamps: number[] = [];
-  /** When non-zero, breaker is open until Date.now() >= this value. */
-  #driftBreakerOpenUntil = 0;
 
   constructor(
     manager: SidecarManager,
@@ -119,10 +74,7 @@ export class GoComputeBackend {
     getCurrentQueries: GetCurrentQueries,
     options?: {
       logger?: GoBackendLogger;
-      loadBatchRows?: number;
       appID?: string;
-      rowMode?: boolean;
-      pullHydrate?: boolean;
       pullWindow?: number;
     },
   ) {
@@ -130,8 +82,6 @@ export class GoComputeBackend {
     this.#clientGroupID = clientGroupID;
     this.#getCurrentTables = getCurrentTables;
     this.#getCurrentQueries = getCurrentQueries;
-    this.#rowMode = options?.rowMode ?? false;
-    this.#pullHydrate = (options?.pullHydrate ?? false) && this.#rowMode;
     this.#pullWindow = Math.max(1, Math.floor(options?.pullWindow ?? 64));
     // O2: send the appID on the advanceToHead wire so the sidecar uses the
     // SHARD's appID for its snapshotter's permissions-table watch instead of
@@ -148,38 +98,18 @@ export class GoComputeBackend {
     // bodies where authors happened to include it; many lines didn't.
     const cgTag = `[cg=${clientGroupID}]`;
     this.#log = (level, msg, err) => raw(level, `${cgTag} ${msg}`, err);
-    this.#loadBatchRows = options?.loadBatchRows ?? DEFAULT_LOAD_BATCH_ROWS;
 
     this.#unsubscribe = manager.onRestart(epoch => this.#onSidecarRestart(epoch));
   }
 
   get initialized(): boolean {
-    // Drift-loop breaker overrides ready-state: while open, callers see Go as
-    // not-initialized and the PipelineDriver dispatch falls through to TS
-    // until cooldown clears. Reading Date.now() per dispatch is cheap; the
-    // alternative (timer that flips a flag) adds setTimeout pressure.
-    if (this.#driftBreakerOpenUntil !== 0) {
-      if (Date.now() < this.#driftBreakerOpenUntil) return false;
-      this.#driftBreakerOpenUntil = 0;
-      this.#driftReinitTimestamps.length = 0;
-      this.#log('info', 'drift-loop breaker cooldown elapsed; Go path re-engaged');
-    }
     return this.#initialized && this.#initEpoch === this.#manager.epoch;
   }
 
   // Manager epoch; increments on every sidecar restart. Surfaced for callers
-  // (e.g. the drift audit) that need to detect a restart that happened mid-
-  // operation even when their Snapshotter-version check would otherwise pass.
+  // that need to detect a restart that happened mid-operation.
   get epoch(): number {
     return this.#manager.epoch;
-  }
-
-  // Source mode the sidecar reported at handshake ('memory' | 'table';
-  // undefined = older sidecar, treat as memory). In table mode the init
-  // path must NOT materialize + ship row contents — the sidecar reads
-  // SQLite directly and discards them (loadRows is a no-op).
-  get sidecarSourceMode(): string | undefined {
-    return this.#manager.sidecarSourceMode;
   }
 
   /**
@@ -257,62 +187,20 @@ export class GoComputeBackend {
     // can exceed the wire cap, get SKIPPED by the TS reader, and orphan the RPC
     // into a 60s timeout (the cold-hydrate freeze). addQueryStream chunks it.
     return this.#withReinitRetry(() =>
-      this.#client().addQueryStream(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, {...this.#cgOpts(), rowMode: this.#rowMode}),
+      this.#client().addQueryStream(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, this.#cgOpts()),
     );
-  }
-
-  // Batch-hydrate `queries`; `onResult` fires per query as each Go
-  // goroutine finishes. Resolves on the terminal "done" frame.
-  async hydrateManyStream(
-    queries: {queryID: string; ast: QueryAST}[],
-    onResult: (r: {queryID: string; changes: unknown[]; timingMs: number | undefined; final?: boolean; chunkIndex?: number}) => void,
-    opts?: {chunked?: boolean},
-  ): Promise<void> {
-    if (this.#restartGate) await this.#restartGate;
-    // Finding 9 (scale review): once ANY chunk has reached onResult, a
-    // #withReinitRetry re-run would replay the ENTIRE stream into a consumer
-    // that already accumulated attempt 1's chunks — double-XORed row-set
-    // signatures (a per-row XOR twice self-cancels → permanent signature
-    // corruption → spurious drift resets) and duplicate CVR rows. Worse,
-    // the retry hydrates against the restarted sidecar's FRESH snapshot, so
-    // the replayed chunks may not even match attempt 1's. Retry is only
-    // safe when the failure landed before the first chunk; otherwise abort
-    // loudly — the caller's hydrate-failure path re-hydrates from a clean
-    // slate (and purges the partial signatures; see pipeline-driver).
-    let emitted = false;
-    const guardedOnResult: typeof onResult = r => {
-      emitted = true;
-      onResult(r);
-    };
-    await this.#withReinitRetry(() => {
-      if (emitted) {
-        throw new Error(
-          'hydrateManyStream: stream partially delivered before sidecar restart; ' +
-            'not retryable (a replay would double-count the delivered chunks)',
-        );
-      }
-      // exactOptionalPropertyTypes: only materialize `chunked` when the
-      // caller actually set it (chunked: undefined ≠ absent).
-      return this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, guardedOnResult, {...this.#cgOpts(), ...(opts?.chunked !== undefined ? {chunked: opts.chunked} : {}), rowMode: this.#rowMode});
-    });
-  }
-
-  /** Whether batch hydrates should use the pull path (config + transport). */
-  get pullHydrateEnabled(): boolean {
-    return this.#pullHydrate;
   }
 
   /**
    * Pull-mode batch hydrate (ABI v3): Go produces rows only as the returned
    * iterator is consumed; return()/throw() cancels the Go producer.
    *
-   * NO #withReinitRetry here — deliberately. The same Finding-9 logic that
-   * forbids replaying a partially-delivered hydrateManyStream applies from
-   * the FIRST entry: the consumer processes entries as they arrive, so a
-   * mid-stream sidecar restart is never replay-safe. A restart rejects the
+   * NO #withReinitRetry here — deliberately. The consumer processes entries
+   * as they arrive, so a mid-stream sidecar restart is never replay-safe
+   * (a replay would double-count the delivered entries: double-XORed
+   * row-set signatures and duplicate CVR rows). A restart rejects the
    * in-flight RPC → the iterator throws → the caller's hydrate-failure
-   * path re-hydrates from a clean slate (exactly the partially-delivered
-   * abort path today).
+   * path re-hydrates from a clean slate.
    */
   hydrateManyStreamPull(
     queries: {queryID: string; ast: QueryAST}[],
@@ -323,9 +211,6 @@ export class GoComputeBackend {
     final: boolean;
     chunkIndex?: number | undefined;
   }> {
-    if (!this.#pullHydrate) {
-      throw new Error('hydrateManyStreamPull: pull hydration is not enabled');
-    }
     return this.#client().addQueriesStreamPull(
       this.#clientGroupID,
       queries,
@@ -334,64 +219,11 @@ export class GoComputeBackend {
     );
   }
 
-  // Push-mode advance (streaming): ship a SnapshotChange diff to Go.
-  // Go ships partial frames during the call; the underlying client
-  // reassembles into the same {@link GoAdvanceResult} shape so callers
-  // (PipelineDriver#goAdvance) see no behavioral difference.
-  //
-  // Wins: Go-side memory pressure relieved on large diffs; first wire
-  // bytes flow as soon as `advanceChunkSize` rows accumulate on Go.
-  advanceStream(changes: SnapshotChange[]): Promise<GoAdvanceResult> {
-    return this.#advanceWithRecovery(() =>
-      this.#client().advanceStream(this.#clientGroupID, changes, this.#sidecarInitEpoch, {...this.#cgOpts(), rowMode: this.#rowMode}),
-    );
-  }
-
-  // advanceToHead: ask Go to derive its OWN snapshot diff (no changes payload).
-  // Read-only on the Go side (it only leapfrogs the Snapshotter; it does NOT
-  // drive the engine), so it does NOT go through #advanceWithRecovery's
-  // drop-the-advance drift handling — a failure just surfaces to the caller,
-  // which (in the P1 shadow compare) logs it and skips the comparison.
-  async advanceToHead(): Promise<AdvanceToHeadResult> {
-    try {
-      return await this.#withReinitRetry(() =>
-        this.#client().advanceToHead(
-          this.#clientGroupID,
-          this.#sidecarInitEpoch,
-          this.#appID,
-          this.#cgOpts(),
-        ),
-      );
-    } catch (err) {
-      // F4: drive-mode (advanceToHead) drift must feed the SAME drift-loop
-      // circuit breaker as push-mode advance. #advanceWithRecovery records +
-      // trips the breaker on DriftError, but advanceToHead routes through
-      // #withReinitRetry — which only handles sidecar-restart / not-initialized
-      // and re-throws everything else — so a drive-mode DriftError escaped
-      // unaccounted and the breaker was DEAD in the deployed trigger mode (a
-      // pathological drift loop would reset-loop forever with nothing
-      // tripping). Record the drift + trip the breaker if the rate is
-      // pathological, then re-throw so the caller's classify path escalates to
-      // a full pipeline reset (F2) — which both reinits Go AND re-hydrates the
-      // client view (a bare Go reinit would leave the F2 gap). No separate
-      // reinit here: the reset path owns the rebuild, avoiding a double reinit.
-      // When the breaker trips, `initialized` flips false and the next advance
-      // degrades to TS via the F1 path.
-      if (err instanceof DriftError) {
-        this.#recordDriftReinit();
-        this.#maybeTripDriftBreaker();
-      }
-      throw err;
-    }
-  }
-
-  // advanceToHeadStream: streaming variant of {@link advanceToHead} for DRIVE
-  // mode (finding F5). Identical contract — same #withReinitRetry wrapper and
-  // the SAME F4 drift-breaker accounting on DriftError — but the client chunks
-  // the engine RowChanges over the wire so a bulk backfill / mass UPDATE can't
-  // blow the 64MB single-frame cap (which the TS receive loop SKIPS, orphaning
-  // the RPC into a timeout). Reassembles into the same AdvanceToHeadResult, so
-  // PipelineDriver#goPrimaryAdvance consumes it identically.
+  // advanceToHeadStream: streaming push-based advance (the production
+  // advance path). Go independently leapfrogs its Snapshotter, derives its
+  // own diff, drives its engine, and streams the RowChanges per row over
+  // the in-process boundary; the client reassembles them into one
+  // AdvanceToHeadResult.
   //
   // abortBudget (optional) arms Go's port of TS's economic advancement-abort
   // — the caller (PipelineDriver's drive path) passes the CG's measured
@@ -404,149 +236,22 @@ export class GoComputeBackend {
   // jittered backoff instead of surfacing: TS-native has no transient
   // advance-failure class, so absorbing these keeps the failure model
   // TS-identical (a reset here would be Go-only churn; the storm class).
-  async advanceToHeadStream(abortBudget?: {
+  advanceToHeadStream(abortBudget?: {
     totalHydrationTimeMs: number;
   }): Promise<AdvanceToHeadResult> {
-    try {
-      return await this.#withCleanRetry('advanceToHeadStream', () =>
-        this.#withReinitRetry(() =>
-          this.#client().advanceToHeadStream(
-            this.#clientGroupID,
-            this.#sidecarInitEpoch,
-            this.#appID,
-            // rowMode: per-row delivery on the in-process (napi) transport —
-            // the deployed Go-primary trigger path. The client degrades it to
-            // frames when a socket came up instead.
-            {
-              ...this.#cgOpts(),
-              rowMode: this.#rowMode,
-              ...(abortBudget ? {abortBudget} : {}),
-            },
-          ),
+    return this.#withCleanRetry('advanceToHeadStream', () =>
+      this.#withReinitRetry(() =>
+        this.#client().advanceToHeadStream(
+          this.#clientGroupID,
+          this.#sidecarInitEpoch,
+          this.#appID,
+          {
+            ...this.#cgOpts(),
+            ...(abortBudget ? {abortBudget} : {}),
+          },
         ),
-      );
-    } catch (err) {
-      // F4: drive-mode drift must feed the SAME drift-loop circuit breaker as
-      // push-mode advance (see advanceToHead for the full rationale). Record +
-      // maybe-trip, then re-throw so the caller's classify path escalates to a
-      // full pipeline reset (F2).
-      if (err instanceof DriftError) {
-        this.#recordDriftReinit();
-        this.#maybeTripDriftBreaker();
-      }
-      throw err;
-    }
-  }
-
-  // Recovery path for advanceStream (push mode). Two error
-  // classes:
-  //   1. Sidecar died/disconnected mid-call. Wait for re-init via the
-  //      onRestart listener, then DROP this advance — Go's new state
-  //      after init+loadRows already reflects the post-advance snapshot.
-  //      Retrying the diff against the freshly-initialized engine would
-  //      double-apply and panic with "Row not found" (sidecar-kill drill
-  //      finding). Clients miss this delta from the IVM stream, but Go's
-  //      state is consistent and the next advance produces correct
-  //      deltas.
-  //   2. "engine not initialized" — same race as #withReinitRetry but
-  //      with the same "don't replay" rule.
-  async #advanceWithRecovery(
-    call: () => Promise<GoAdvanceResult>,
-  ): Promise<GoAdvanceResult> {
-    if (this.#restartGate) await this.#restartGate;
-    try {
-      return await call();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-
-      // Drift recovery (option 3 / self-heal on miss): Go detected a
-      // missing row on Edit/Remove (or duplicate Add) and bailed out of
-      // this advance BEFORE mutating any state. We treat it like a
-      // sidecar restart — force a fresh init from current SQLite truth
-      // and DROP this advance. Clients miss exactly one delta and
-      // resync against the post-init state. No retry: replaying the
-      // diff against the freshly-loaded Go state would either
-      // double-apply (the missing row is now present from SQLite) or
-      // re-trip the same drift.
-      if (err instanceof DriftError) {
-        const partialCount = err.partialChanges?.length ?? 0;
-        this.#log(
-          'warn',
-          `Go drift detected (${err.op} on ${err.table} pk=${JSON.stringify(
-            err.pk,
-            // HIGH-9: msgpackr decodes int64 PKs > 2^32 as BigInt, which
-            // plain JSON.stringify throws on — crashing drift RECOVERY itself
-            // with a misleading error instead of recovering. Stringify BigInt.
-            (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
-          )} has=${err.hasCount}); ` +
-            `re-initing engine from current snapshot, forwarding ${partialCount} partial RowChanges`,
-        );
-        // Record this drift in the sliding window BEFORE the reinit so
-        // breaker arithmetic reflects the true rate even if reinit hangs.
-        // Trip is checked after a successful reinit so the current advance
-        // gets its full recovery — clients are no worse off than before;
-        // the trip just suppresses Go for SUBSEQUENT advances.
-        this.#recordDriftReinit();
-        const ok = await this.#reinitPerCGAndRegisterQueries(
-          'advance-drift',
-          this.#getCurrentTables(),
-        );
-        if (!ok) {
-          throw err; // surface original drift so caller's fallback engages
-        }
-        this.#maybeTripDriftBreaker();
-        // Forward partial output produced by Pushes that completed before
-        // the drift panic. Matches TS view-syncer's assert-and-throw path
-        // where the pre-throw RowChanges already streamed to pokers; the
-        // CVR is then rebuilt against the re-initialized state. Without
-        // this, Go silently swallowed RowChanges that TS would have
-        // emitted, producing the observable TS/Go output divergence seen
-        // in 20-user 30-min shadow soaks.
-        return {
-          changes: err.partialChanges ?? [],
-          timings: err.partialTimings ?? [],
-        };
-      }
-
-      const sidecarUnavailable =
-        this.#manager.status !== 'running' ||
-        msg.includes('Sidecar is not running') ||
-        msg.includes('Connection closed') ||
-        msg.includes('Not connected');
-      if (sidecarUnavailable) {
-        try {
-          await this.#manager.waitForRunning();
-        } catch {
-          throw err;
-        }
-        await this.whenInitialized();
-        if (!this.initialized) {
-          const ok = await this.#reinitPerCGAndRegisterQueries(
-            'advance-sidecar-restart',
-            this.#getCurrentTables(),
-          );
-          if (!ok) {
-            throw err;
-          }
-        }
-        this.#log(
-          'warn',
-          'advance dropped after sidecar restart; Go state re-init from current snapshot',
-        );
-        return {changes: [], timings: []};
-      }
-      if (msg.includes('engine not initialized')) {
-        const ok = await this.#reinitPerCGAndRegisterQueries(
-          'advance-engine-not-initialized',
-          this.#getCurrentTables(),
-        );
-        if (!ok) {
-          throw err;
-        }
-        return {changes: [], timings: []};
-      }
-      throw err;
-    }
+      ),
+    );
   }
 
   // Pinned cgID for the client's per-group fairness semaphore.
@@ -661,28 +366,6 @@ export class GoComputeBackend {
     await this.#client().removeQuery(this.#clientGroupID, queryID, this.#sidecarInitEpoch, this.#cgOpts());
   }
 
-  // Roll the leaf source's pinned read tx so subsequent Fetches see the
-  // current WAL frame instead of the snapshot pinned since the last
-  // Push. Called by the drift audit before its comparison reads. No-op
-  // on MemorySource (sidecar handles the type switch).
-  //
-  // Long timeout because this RPC currently routes through the per-CG
-  // worker FIFO on the sidecar, so it can queue behind in-flight
-  // advance/hydrate work under heavy load. The handler itself is a
-  // cheap mutex bump; the wait is the queue. 120s budget covers a
-  // worst-case hydrate of a fat query before refresh gets its turn.
-  // If we observe persistent timeouts, the next step is to bypass the
-  // CG FIFO on the sidecar side (refreshSnapshot only touches per-source
-  // mutexes — no engine-state mutation that the FIFO is protecting).
-  // Health probe used by the drift audit. Returns the number of queries
-  // currently registered on this CG's Go engine. If the value disagrees
-  // with TS's #pipelines.size, per-CG recovery has dropped pipeline state
-  // and the client view is silently frozen — audit treats that as a
-  // freeze signal and self-heals via resetEngine.
-  pipelineCount(): Promise<number> {
-    return this.#client().pipelineCount(this.#clientGroupID);
-  }
-
   // Resolves when no per-CG recovery is in flight. Callers that dispatch
   // a new query/advance can await this BEFORE deciding TS vs Go, so a
   // brief recovery window doesn't cause a fall-through to TS that
@@ -692,14 +375,6 @@ export class GoComputeBackend {
     if (this.#restartGate) {
       await this.#restartGate;
     }
-  }
-
-  async refreshSnapshot(): Promise<void> {
-    await this.#client().refreshSnapshot(
-      this.#clientGroupID,
-      this.#sidecarInitEpoch,
-      {...this.#cgOpts(), timeoutMs: 120_000},
-    );
   }
 
   async destroy(): Promise<void> {
@@ -761,8 +436,9 @@ export class GoComputeBackend {
     // with init (the post-restart init will re-run with a fresh epoch).
     const epoch = this.#manager.epoch;
 
-    // Step 1: send schema only — rows go through loadRows so we never blow
-    // past the 64MB frame cap on large tables (REVIEW-ts-integration CRITICAL-2).
+    // Schema-only init: the table-mode sidecar reads rows from SQLite
+    // directly, so no row contents ever ship (strip defensively — the
+    // tables callback already produces empty row arrays).
     const tablesNoRows: Record<string, TableData> = {};
     for (const [name, t] of Object.entries(tables)) {
       tablesNoRows[name] = {
@@ -778,77 +454,15 @@ export class GoComputeBackend {
       {tables: tablesNoRows},
       this.#cgOpts(),
     );
-    // Stash the sidecar's per-cgID epoch BEFORE any loadRows so all
-    // subsequent mutating RPCs from THIS instance carry the matching
-    // epoch. A torn-down predecessor instance for the same cgID still
-    // holds an older epoch; its in-flight RPCs land on the sidecar
-    // AFTER this init and get rejected with rpcCodeStaleInitEpoch
-    // instead of corrupting state.
+    // Stash the sidecar's per-cgID epoch so all subsequent mutating RPCs
+    // from THIS instance carry the matching epoch. A torn-down predecessor
+    // instance for the same cgID still holds an older epoch; its in-flight
+    // RPCs land on the sidecar AFTER this init and get rejected with
+    // rpcCodeStaleInitEpoch instead of corrupting state.
     this.#sidecarInitEpoch = initResult.initEpoch;
-
-    // Step 2: stream rows for each table in bounded batches. If any batch
-    // fails (timeout, decode error, process didn't die but the RPC tripped),
-    // the Go side is left with a half-loaded engine. Destroy it so the next
-    // init attempt starts clean instead of stacking onto inconsistent state
-    // (REVIEW-final MED-TS-3).
-    try {
-      for (const [name, t] of Object.entries(tables)) {
-        if (t.rows.length === 0) continue;
-        for (let i = 0; i < t.rows.length; i += this.#loadBatchRows) {
-          const batch = t.rows.slice(i, i + this.#loadBatchRows);
-          await client.loadRows(
-            this.#clientGroupID,
-            name,
-            batch,
-            this.#sidecarInitEpoch,
-            this.#cgOpts(),
-          );
-        }
-      }
-    } catch (err) {
-      this.#log('warn', 'loadRows failed mid-init; destroying partial engine to clear state', err);
-      try {
-        await client.destroy(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts());
-      } catch (destroyErr) {
-        // Best-effort — surface the original error regardless.
-        this.#log('warn', 'destroy after partial init also failed', destroyErr);
-      }
-      throw err;
-    }
 
     this.#initialized = true;
     this.#initEpoch = epoch;
-  }
-
-  /** Prune timestamps older than the window then append now. */
-  #recordDriftReinit(): void {
-    const now = Date.now();
-    const cutoff = now - DRIFT_BREAKER_WINDOW_MS;
-    // Most recent timestamps cluster at the tail, so scan from head and
-    // slice once. Array is tiny (bounded by threshold), so O(n) is fine.
-    let dropTo = 0;
-    while (
-      dropTo < this.#driftReinitTimestamps.length &&
-      this.#driftReinitTimestamps[dropTo] < cutoff
-    ) {
-      dropTo++;
-    }
-    if (dropTo > 0) {
-      this.#driftReinitTimestamps.splice(0, dropTo);
-    }
-    this.#driftReinitTimestamps.push(now);
-  }
-
-  /** Open the breaker if recent drift count crossed the threshold. */
-  #maybeTripDriftBreaker(): void {
-    if (this.#driftReinitTimestamps.length >= DRIFT_BREAKER_THRESHOLD) {
-      this.#driftBreakerOpenUntil = Date.now() + DRIFT_BREAKER_COOLDOWN_MS;
-      this.#log(
-        'error',
-        `drift-loop breaker OPEN: ${this.#driftReinitTimestamps.length} drift-driven reinits ` +
-          `within ${DRIFT_BREAKER_WINDOW_MS}ms; suppressing Go path for ${DRIFT_BREAKER_COOLDOWN_MS}ms`,
-      );
-    }
   }
 
   async #onSidecarRestart(epoch: number): Promise<void> {
@@ -869,9 +483,7 @@ export class GoComputeBackend {
   // Shared per-CG reinit path. Used by:
   //   1. #onSidecarRestart  (manager-level restart)
   //   2. resetEngine        (intentional reset from PipelineDriver)
-  //   3. #advanceWithRecovery's three error branches (drift,
-  //      sidecar-unavailable, engine-not-initialized)
-  //   4. #withReinitRetry's two error branches (sidecar-unavailable,
+  //   3. #withReinitRetry's two error branches (sidecar-unavailable,
   //      engine-not-initialized)
   //
   // All these paths used to call only #doInit, which loads sources but
@@ -981,86 +593,6 @@ export function isGoSidecarEnabled(
   return config?.goSidecar?.enabled === true;
 }
 
-export function isGoShadowMode(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.shadowMode === true;
-}
-
-export function isGoShadowVerbose(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.shadowVerbose === true;
-}
-
-// Whether to run the advanceToHead Go-derived-diff shadow: each shadow advance
-// also asks Go to derive its OWN snapshot diff and compares it against TS's
-// computed diff (design §7 P1). Only meaningful alongside shadowMode (the
-// comparison runs in #shadowAdvance) and requires a sidecar at protocolRev 9
-// (the connect handshake enforces EXACT equality with EXPECTED_PROTOCOL_REV —
-// see sidecar-manager.ts; ">=" language here was doc rot) launched with
-// GO_IVM_ADVANCE_TO_HEAD=true.
-export function isGoDerivedDiff(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.advanceToHead === true;
-}
-
-// Whether to DRIVE Go's engine from its own derived diff (P2): in shadow mode
-// the Go advance is sourced via advanceToHead (frame-coordinated, no TS-shipped
-// SnapshotChange[]) and its RowChanges are compared to TS's. Implies a sidecar
-// launched with GO_IVM_ADVANCE_DRIVE=true.
-export function isGoAdvanceDrive(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.advanceDrive === true;
-}
-
-// Whether Go-PRIMARY serving should source the user-query advance via
-// advanceToHead (P2c trigger) instead of advanceStream (push). Only meaningful
-// in Go-primary mode (enabled && !shadowMode); makes Go self-consistent and
-// moves the user-query CVR watermark to min(V_ts, V_go). Implies a sidecar
-// launched with GO_IVM_ADVANCE_TO_HEAD=true + GO_IVM_ADVANCE_DRIVE=true.
-export function isGoPrimaryTrigger(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.goPrimaryTrigger === true;
-}
-
-// P3 lean primary: whether TS should skip walking USER-table changes during a
-// Go-primary advance (TS holds only stub user pipelines and keeps user
-// TableSources current via snapshot setDB, so the walk is redundant). Only
-// meaningful in Go-primary mode (enabled && !shadowMode).
-export function isGoLeanPrimary(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.leanPrimary === true;
-}
-
-// Whether streaming RPCs should opt into per-row delivery. Meaningful only
-// on the in-process (napi) transport — the client degrades rowMode to frames
-// on a socket — so this returns true exactly when the config SELECTS napi and
-// hasn't disabled napiRowMode (its schema default is true; the explicit
-// `!== false` mirrors how goDriftAuditSqlGroundTruth reads its default).
-export function goNapiRowMode(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return (
-    config?.goSidecar?.transport === 'napi' &&
-    config?.goSidecar?.napiRowMode !== false
-  );
-}
-
-// Whether batch hydrates should use PULL delivery (ABI v3): explicit opt-in
-// (schema default false — rollout flag) AND the row plane must be able to
-// engage (napi + rowMode), since credits can only flow over the in-process
-// boundary. Everywhere this is false the behavior is exactly today's push.
-export function goPullHydrate(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.pullHydrate === true && goNapiRowMode(config);
-}
-
 // Pull lookahead window W (see zero-config goSidecar.pullWindow). Clamped
 // to ≥ 1: W=0 would strand the stream (zero opening credit and no consumer
 // deliveries to trigger top-ups).
@@ -1071,35 +603,6 @@ export function goPullWindow(
   return Math.max(1, Math.floor(w));
 }
 
-// Returns 0 when the audit should be off — either Go is disabled, shadow mode
-// already covers it, or the interval is explicitly zeroed in config.
-export function goDriftAuditIntervalMs(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): number {
-  if (!isGoSidecarEnabled(config) || isGoShadowMode(config)) return 0;
-  const ms = config?.goSidecar?.driftAuditIntervalMs ?? 0;
-  return ms > 0 ? ms : 0;
-}
-
-// Whether the drift audit should run a raw SQL query on the replica as a
-// third opinion. Defaults to true (matches the schema default); pass false
-// to skip the SQL re-query and fall back to TS-vs-Go set comparison only.
-export function goDriftAuditSqlGroundTruth(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): boolean {
-  return config?.goSidecar?.driftAuditSqlGroundTruth !== false;
-}
-
-// Directory to write divergence capture repro bundles to (VACUUM INTO snapshot
-// .db + .json metadata). Empty string / undefined = capture OFF (the default —
-// VACUUM INTO copies the whole replica on the divergence hot path, so capture
-// is opt-in and rate-capped). See goSidecar.divergenceCaptureDir in zero-config.
-export function goDivergenceCaptureDir(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
-): string {
-  return config?.goSidecar?.divergenceCaptureDir ?? '';
-}
-
 // Returns null when the manager isn't `running` so the caller falls back
 // to the TS path; `getCurrentTables` is invoked both on initial init and
 // after each sidecar restart.
@@ -1108,7 +611,7 @@ export function createGoComputeBackend(
   clientGroupID: string,
   getCurrentTables: () => Record<string, TableData>,
   getCurrentQueries: GetCurrentQueries,
-  options?: {logger?: GoBackendLogger; loadBatchRows?: number; appID?: string; rowMode?: boolean; pullHydrate?: boolean; pullWindow?: number},
+  options?: {logger?: GoBackendLogger; appID?: string; pullWindow?: number},
 ): GoComputeBackend | null {
   try {
     if (sidecarManager.status !== 'running') return null;

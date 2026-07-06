@@ -128,100 +128,36 @@ export default async function runWorker(
 
   const shard = getShardID(config);
 
-  // Go IVM sidecar: one process per client group set. When
-  // goSidecar.externallyManaged is true the sidecar is shared across all
-  // workers in this zero-cache (typically spawned by the container
-  // entrypoint), and this manager just connects.
+  // Go IVM engine: loaded in-process (napi) per syncer worker.
   let sidecarManager: SidecarManager | undefined;
   if (isGoSidecarEnabled(config)) {
-    const binaryPath = config.goSidecar.binaryPath;
-    const externallyManaged = config.goSidecar.externallyManaged ?? false;
-    const socketPath = config.goSidecar.socketPath;
-    // Transport resolution: napi (in-process engine) is per-worker by
-    // construction, so it cannot express the shared-sidecar topology —
-    // externallyManaged wins and the transport reverts to socket.
-    let transport = config.goSidecar.transport ?? 'socket';
-    if (transport === 'napi' && externallyManaged) {
-      lc.warn?.(
-        'goSidecar.transport=napi is incompatible with ' +
-          'goSidecar.externallyManaged (an in-process engine cannot be ' +
-          'shared across workers); using the socket transport.',
-      );
-      transport = 'socket';
-    }
-    // M4: the goSidecar flags are independent booleans whose valid combinations
-    // are resolved by precedence at dispatch time (shadow wins; primary flags
-    // imply others). Warn on contradictory/incomplete combinations that would
-    // otherwise silently degrade, so an operator isn't left wondering why a mode
-    // they configured isn't running.
-    {
-      const sc = config.goSidecar;
-      const anyPrimary =
-        (sc.advanceToHead ?? false) ||
-        (sc.advanceDrive ?? false) ||
-        (sc.goPrimaryTrigger ?? false) ||
-        (sc.leanPrimary ?? false);
-      if ((sc.shadowMode ?? false) && anyPrimary) {
-        lc.warn?.(
-          'goSidecar: shadowMode and a go-primary flag are both set; shadow ' +
-            'mode wins and the primary flags are ignored this run.',
-        );
-      }
-      if ((sc.leanPrimary ?? false) && !(sc.goPrimaryTrigger ?? false)) {
-        lc.warn?.(
-          'goSidecar.leanPrimary=true without goSidecar.goPrimaryTrigger=true ' +
-            'has no effect (lean only applies to the trigger-primary path).',
-        );
-      }
-    }
-    if (externallyManaged && !socketPath) {
-      lc.error?.(
-        'goSidecar.externallyManaged=true requires goSidecar.socketPath to be set; falling back to TS',
-      );
-    } else {
-      const sidecarLc = lc.withContext('component', 'go-ivm');
-      // O1: derive the sidecar's GO_IVM_* mode env from the SAME goSidecar
-      // config that drives the TS dispatch, so a spawned sidecar is armed
-      // exactly as the worker expects (advanceToHead / advanceDrive both require
-      // the sidecar's snapshotter + table source mode). Without this the two
-      // processes are configured independently and a mismatch silently drops
-      // every user delta. (Ignored for externallyManaged — the owner sets env on
-      // the shared process; a startup mode handshake there is a follow-up.)
-      const spawnEnv = deriveGoSidecarSpawnEnv(config.goSidecar, shard.appID);
-      sidecarManager = new SidecarManager({
-        binaryPath,
-        transport,
-        napiLibPath: config.goSidecar.napiLibPath,
-        // napi mode: divides the container-wide Go memory share across the
-        // per-worker runtimes (see SidecarConfig.numSyncWorkers).
-        numSyncWorkers: config.numSyncWorkers,
-        ...(socketPath ? {socketPath} : {}),
-        externallyManaged,
-        spawnEnv,
-        logger: (level, msg, err) => {
-          // Route sidecar stdout/stderr + manager events through LogContext
-          // instead of raw process.std{out,err}.write so structured logging
-          // stays structured. REVIEW-ts-integration LOW-2.
-          if (level === 'error') sidecarLc.error?.(msg, err ?? '');
-          else if (level === 'warn') sidecarLc.warn?.(msg, err ?? '');
-          else sidecarLc.info?.(msg);
-        },
-      });
-      void sidecarManager.start().then(
-        () =>
-          lc.info?.(
-            transport === 'napi'
-              ? 'Go IVM engine loaded in-process (napi transport)'
-              : externallyManaged
-                ? `Connected to shared Go IVM sidecar at ${socketPath}`
-                : 'Go IVM sidecar started',
-          ),
-        err => {
-          lc.error?.('Failed to start Go IVM sidecar, falling back to TS', err);
-          sidecarManager = undefined;
-        },
-      );
-    }
+    const sidecarLc = lc.withContext('component', 'go-ivm');
+    // O1: derive the engine's GO_IVM_* env from the SAME goSidecar config
+    // that drives the TS dispatch, so the engine is armed exactly as the
+    // worker expects.
+    const spawnEnv = deriveGoSidecarSpawnEnv(shard.appID);
+    sidecarManager = new SidecarManager({
+      napiLibPath: config.goSidecar.napiLibPath,
+      // Divides the container-wide Go memory share across the per-worker
+      // runtimes (see SidecarConfig.numSyncWorkers).
+      numSyncWorkers: config.numSyncWorkers,
+      spawnEnv,
+      logger: (level, msg, err) => {
+        // Route manager events through LogContext instead of raw
+        // process.std{out,err}.write so structured logging stays
+        // structured. REVIEW-ts-integration LOW-2.
+        if (level === 'error') sidecarLc.error?.(msg, err ?? '');
+        else if (level === 'warn') sidecarLc.warn?.(msg, err ?? '');
+        else sidecarLc.info?.(msg);
+      },
+    });
+    void sidecarManager.start().then(
+      () => lc.info?.('Go IVM engine loaded in-process (napi transport)'),
+      err => {
+        lc.error?.('Failed to start Go IVM sidecar, falling back to TS', err);
+        sidecarManager = undefined;
+      },
+    );
   }
 
   const customQueryConfig = getCustomQueryConfig(config);

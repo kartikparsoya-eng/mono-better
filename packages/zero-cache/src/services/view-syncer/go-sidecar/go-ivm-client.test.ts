@@ -13,10 +13,8 @@
 
 import {describe, expect, test, vi} from 'vitest';
 import {
-  createAdvanceStreamAccumulator,
   createAdvanceToHeadStreamAccumulator,
   createHydrateStreamAccumulator,
-  DriftError,
   GoIVMClient,
   type RowChange,
   unpack,
@@ -183,101 +181,6 @@ describe('createHydrateStreamAccumulator', () => {
   });
 });
 
-describe('createAdvanceStreamAccumulator', () => {
-  test('single-chunk fast path: one final frame returns full AdvanceResult', () => {
-    const h = createAdvanceStreamAccumulator();
-    h.onFrame({
-      ...posFrame(['a', 'b']),
-      chunkIndex: 0,
-      final: true,
-      timings: [{table: 't', type: 0, ms: 5}],
-    });
-    const result = h.finish();
-    expect(result).toEqual({
-      changes: [row('a'), row('b')],
-      timings: [{table: 't', type: 0, ms: 5}],
-    });
-  });
-
-  test('multi-chunk: accumulates, returns reassembled result', () => {
-    const h = createAdvanceStreamAccumulator();
-    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
-    h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
-    h.onFrame({
-      ...posFrame(['c']),
-      chunkIndex: 2,
-      final: true,
-      timings: [{table: 't', type: 1, ms: 2}],
-    });
-
-    const result = h.finish();
-    expect(result.changes).toEqual([row('a'), row('b'), row('c')]);
-    expect(result.timings).toEqual([{table: 't', type: 1, ms: 2}]);
-  });
-
-  test('empty advance: one frame with empty changes + final=true', () => {
-    const h = createAdvanceStreamAccumulator();
-    h.onFrame({chunkIndex: 0, final: true});
-    const result = h.finish();
-    expect(result.changes).toEqual([]);
-    expect(result.timings).toBeUndefined();
-  });
-
-  test('chunk-order gap throws immediately', () => {
-    const h = createAdvanceStreamAccumulator();
-    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
-    expect(() =>
-      h.onFrame({...posFrame(['b']), chunkIndex: 2, final: true}),
-    ).toThrow(
-      /advanceStream chunk order violation: expected chunkIndex=1, got 2/,
-    );
-  });
-
-  test('missing final: finish() throws if no frame had final=true', () => {
-    const h = createAdvanceStreamAccumulator();
-    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
-    h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
-    expect(() => h.finish()).toThrow(
-      /advanceStream finished without a final chunk/,
-    );
-  });
-
-  test('post-final frame throws (audit fix #18)', () => {
-    // A chunk arriving AFTER the terminal frame is a Go-side wire bug
-    // that would silently corrupt accumulated results. Pre-fix, the
-    // accumulator kept pushing rows unconditionally.
-    const h = createAdvanceStreamAccumulator();
-    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: true});
-    expect(() =>
-      h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false}),
-    ).toThrow(
-      /advanceStream received chunk \(index=1\) after final frame/,
-    );
-  });
-
-  test('timings only attached on final: earlier-frame timings are ignored', () => {
-    // The Go side only emits timings on the final frame, but if a buggy
-    // sidecar sent timings on a non-final frame, we'd want them ignored
-    // rather than mixed into the final result (which could mislead
-    // downstream histograms).
-    const h = createAdvanceStreamAccumulator();
-    h.onFrame({
-      ...posFrame(['a']),
-      chunkIndex: 0,
-      final: false,
-      timings: [{table: 'wrong', type: 0, ms: 999}],
-    });
-    h.onFrame({
-      ...posFrame(['b']),
-      chunkIndex: 1,
-      final: true,
-      timings: [{table: 'right', type: 0, ms: 5}],
-    });
-    const result = h.finish();
-    expect(result.timings).toEqual([{table: 'right', type: 0, ms: 5}]);
-  });
-});
-
 describe('createAdvanceToHeadStreamAccumulator', () => {
   test('single-chunk: one final frame yields full AdvanceToHeadResult', () => {
     const h = createAdvanceToHeadStreamAccumulator();
@@ -408,27 +311,6 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     );
   });
 
-  test('drift on final: finish() throws DriftError carrying accumulated partial rowChanges', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
-    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
-    h.onFrame({
-      ...posFrame(['b']),
-      chunkIndex: 1,
-      final: true,
-      drift: {table: 't', op: 'edit', pk: {id: 'b'}, hasCount: 0},
-    });
-    let thrown: unknown;
-    try {
-      h.finish();
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(DriftError);
-    // The pre-drift partial output rides the DriftError so GoComputeBackend's
-    // recovery forwards it alongside the re-init (F2/drift contract).
-    expect((thrown as DriftError).partialChanges).toEqual([row('a'), row('b')]);
-  });
-
   // --- rowMode (NAPI transport, two-plane delivery) ---
 
   test('rowMode: rows via onRow + final frame yields full AdvanceToHeadResult', () => {
@@ -478,24 +360,6 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     expect(() => h.onRow(row('x'))).toThrow(
       /advanceToHeadStream received row record after final frame/,
     );
-  });
-
-  test('rowMode: drift on final carries records + fallback rows as partialChanges', () => {
-    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
-    h.onRow(row('a'));
-    h.onFrame({
-      chunkIndex: 1,
-      final: true,
-      drift: {table: 't', op: 'edit', pk: {id: 'a'}, hasCount: 0},
-    });
-    let thrown: unknown;
-    try {
-      h.finish();
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown).toBeInstanceOf(DriftError);
-    expect((thrown as DriftError).partialChanges).toEqual([row('a')]);
   });
 });
 
@@ -567,9 +431,9 @@ describe('positional (rev 9) frame decoding', () => {
   });
 
   test('empty positional frame (no r) yields no changes', () => {
-    const acc = createAdvanceStreamAccumulator();
+    const acc = createAdvanceToHeadStreamAccumulator();
     acc.onFrame({chunkIndex: 0, final: true}); // neither `changes` nor `r`
-    expect(acc.finish().changes).toEqual([]);
+    expect(acc.finish().rowChanges).toEqual([]);
   });
 
   test('positional frame with r: null (msgpack-null) yields no changes', () => {
@@ -578,9 +442,9 @@ describe('positional (rev 9) frame decoding', () => {
     // r === null rather than r omitted. Before extractChanges guarded null
     // (not just undefined) this reached decodePositionalChanges(…, null) ->
     // null.length -> TypeError, orphaning the advance RPC. Must be inert.
-    const acc = createAdvanceStreamAccumulator();
+    const acc = createAdvanceToHeadStreamAccumulator();
     acc.onFrame({chunkIndex: 0, final: true, r: null});
-    expect(acc.finish().changes).toEqual([]);
+    expect(acc.finish().rowChanges).toEqual([]);
   });
 
   // Wire-level contract: the bytes below are EXACTLY what the Go sidecar's
@@ -647,7 +511,7 @@ describe('positional (rev 9) frame decoding', () => {
 
 describe('addQueryStream (single-query streaming hydrate)', () => {
   test('routes one query through addQueriesStream and returns its result', async () => {
-    const client = new GoIVMClient('/tmp/unused-addquerystream-test.sock');
+    const client = new GoIVMClient();
     const changes = [row('r1')];
     const spy = vi
       .spyOn(client, 'addQueriesStream')
@@ -665,7 +529,7 @@ describe('addQueryStream (single-query streaming hydrate)', () => {
   });
 
   test('throws if the stream completes without a result frame', async () => {
-    const client = new GoIVMClient('/tmp/unused-addquerystream-test.sock');
+    const client = new GoIVMClient();
     // onResult never fires — defensive guard must reject.
     vi.spyOn(client, 'addQueriesStream').mockImplementation(() =>
       Promise.resolve(),

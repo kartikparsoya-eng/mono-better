@@ -5,7 +5,6 @@ export type {
   TableSchema,
   TableTiming as GoTableTiming,
   HydrateResult as GoHydrateResult,
-  AdvanceResult as GoAdvanceResult,
 } from './go-ivm-client.ts';
 export {SidecarManager} from './sidecar-manager.ts';
 export type {SidecarConfig, SidecarStatus} from './sidecar-manager.ts';

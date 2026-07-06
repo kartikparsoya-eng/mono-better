@@ -141,7 +141,7 @@ function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: nu
 
 describe('GoIVMClient.addQueriesStreamPull', () => {
   test('delivers all rows in order; host never produces past the granted window', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeFakeHost(client, 10);
     client.connectNapi(host.addon);
 
@@ -165,7 +165,7 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
   });
 
   test('W=1 is strict lockstep: produced never exceeds consumed + 1', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeFakeHost(client, 5);
     client.connectNapi(host.addon);
 
@@ -182,7 +182,7 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
   });
 
   test('return() cancels the Go producer and settles quietly', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeFakeHost(client, 100);
     client.connectNapi(host.addon);
 
@@ -203,7 +203,7 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
   });
 
   test('mid-stream Go error surfaces as a throw from next()', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeFakeHost(client, 10, {errorAfter: 2});
     client.connectNapi(host.addon);
 
@@ -218,7 +218,7 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
   });
 
   test('done without a final chunk trips the orphan guard', async () => {
-    const client = new GoIVMClient('napi:test');
+    const client = new GoIVMClient();
     const host = makeFakeHost(client, 2, {omitFinal: true});
     client.connectNapi(host.addon);
 
@@ -230,7 +230,7 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
   });
 
   test('requires the NAPI transport', () => {
-    const client = new GoIVMClient('/tmp/nonexistent.sock');
+    const client = new GoIVMClient();
     expect(() => client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1)).toThrow(
       /requires the NAPI transport/,
     );

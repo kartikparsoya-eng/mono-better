@@ -1,9 +1,9 @@
-// MessagePack-RPC client for the Go IVM sidecar over a Unix socket.
-// Wire format: 4-byte big-endian length prefix, then a MessagePack payload.
-// Each clientGroupID maps to its own Engine in the sidecar; groups run in
-// parallel and the client multiplexes a single socket across them.
+// MessagePack-RPC client for the Go IVM engine over the in-process (NAPI)
+// transport. Request payloads go through the addon (goivm_send); complete
+// response frames and row-plane records arrive via the addon's ordered
+// delivery queue. Each clientGroupID maps to its own Engine; groups run in
+// parallel and the client multiplexes the single in-process channel.
 
-import {createConnection, type Socket} from 'net';
 import {Packr, Unpackr} from 'msgpackr';
 import {
   DELIVERY_KIND_FRAME,
@@ -183,12 +183,6 @@ export type HydrateResult = {
   timingMs: number | undefined;
 };
 
-/** Advance result, with optional per-(table, op) wall-times. */
-export type AdvanceResult = {
-  changes: RowChange[];
-  timings: TableTiming[] | undefined;
-};
-
 // --- Positional (protocolRev 9) RowChange decoding ---
 //
 // Streamed RowChange chunks arrive in the positional wire form (see the Go
@@ -261,11 +255,9 @@ function extractChanges(value: unknown): RowChange[] {
 
 // --- Streaming accumulators ---
 //
-// Both `addQueriesStream` and `advanceStream` receive partial frames from
-// Go that need to be reassembled into the same result shape their
-// non-streaming counterparts return. These factory functions own the
-// reassembly logic so it can be unit-tested in isolation — without
-// having to spin up a real Unix socket and fake sidecar.
+// `addQueriesStream` and `advanceToHeadStream` receive partial frames from
+// Go that need to be reassembled into one result. These factory functions
+// own the reassembly logic so it can be unit-tested in isolation.
 //
 // Defensive invariants enforced here (all throw on violation):
 //   - ChunkIndex arrives strictly in monotonic order (0, 1, 2, ...) — a
@@ -451,130 +443,11 @@ export function createHydrateStreamAccumulator(
 }
 
 /**
- * Accumulator for `advanceStream` partial frames. Reassembles into one
- * `AdvanceResult`. After the streaming RPC resolves, call `finish()` to
- * collect the reassembled result; it throws if no frame carried
- * `final=true` before "done".
- *
- * Returned object is stateful — do not reuse across calls.
- */
-export function createAdvanceStreamAccumulator(opts?: {rowMode?: boolean}): {
-  onFrame: (value: unknown) => void;
-  onRow: (change: RowChange) => void;
-  finish: () => AdvanceResult;
-} {
-  // Row mode (NAPI transport): rows arrive individually via onRow (kind-3
-  // records) while FRAMES carry only fallback rows + the terminal final.
-  // Ordering across both planes is guaranteed by the addon's single
-  // delivery queue, but chunkIndex continuity is NOT observable
-  // frame-to-frame (row-bearing partials produce no frame at all), so the
-  // strict monotonicity check is relaxed to "non-decreasing" in row mode.
-  const rowMode = opts?.rowMode === true;
-  const acc: RowChange[] = [];
-  let timings: TableTiming[] | undefined;
-  let expectedNextIndex = 0;
-  let gotFinal = false;
-  let drift: DriftError | undefined;
-
-  return {
-    onRow: (change: RowChange) => {
-      if (gotFinal) {
-        throw new Error('advanceStream received row record after final frame');
-      }
-      acc.push(change);
-    },
-    onFrame: (value: unknown) => {
-      const v = value as {
-        changes?: RowChange[];
-        chunkIndex?: number;
-        final?: boolean;
-        timings?: TableTiming[];
-        drift?: {
-          table?: string;
-          op?: string;
-          pk?: Record<string, unknown>;
-          hasCount?: number;
-        };
-      };
-      const chunkIndex = v.chunkIndex ?? 0;
-      const final = v.final ?? true; // belt-and-braces for older sidecars
-      const chunk = extractChanges(value);
-
-      // Single sender goroutine on the Go side → strict in-order delivery.
-      // A gap is a wire-level bug; fail loud rather than silently
-      // delivering misordered or partial advance results to the view-syncer.
-      // Row mode: index GAPS are expected (row-bearing partials ship as
-      // records, not frames), but going backwards still means reordering.
-      if (rowMode ? chunkIndex < expectedNextIndex : chunkIndex !== expectedNextIndex) {
-        throw new Error(
-          `advanceStream chunk order violation: ` +
-            `expected chunkIndex=${expectedNextIndex}, got ${chunkIndex}`,
-        );
-      }
-      expectedNextIndex = chunkIndex + 1;
-
-      // Reject chunks arriving after the terminal frame — a Go-side wire bug
-      // that would silently corrupt the accumulated result.
-      if (gotFinal) {
-        throw new Error(
-          `advanceStream received chunk (index=${chunkIndex}) after final frame`,
-        );
-      }
-
-      for (const rc of chunk) acc.push(rc);
-
-      // Timings + drift only travel on the final frame (Go-side invariant).
-      if (final) {
-        timings = v.timings;
-        gotFinal = true;
-        if (v.drift) {
-          drift = new DriftError({
-            table: v.drift.table,
-            op: v.drift.op,
-            pk: v.drift.pk,
-            hasCount: v.drift.hasCount,
-          });
-        }
-      }
-    },
-
-    finish: (): AdvanceResult => {
-      if (!gotFinal) {
-        // `done` arrived without any frame carrying final=true. Indicates
-        // a Go-side bug (AdvanceStream MUST always emit a terminal frame,
-        // even for empty advances). Surface so we don't silently return a
-        // partial AdvanceResult that would corrupt the CVR.
-        throw new Error('advanceStream finished without a final chunk');
-      }
-      if (drift) {
-        // Drift on Final — attach the partial-output the Go sidecar
-        // produced from Pushes that succeeded BEFORE the panic to the
-        // DriftError. GoComputeBackend's recovery path forwards them
-        // alongside the re-init so the view-syncer + clients see the
-        // same partial-emit-then-rehydrate sequence TS's assert-and-
-        // throw path produces. Without this, Go silently dropped
-        // RowChanges that TS would have emitted — the divergence
-        // observed in shadow soaks.
-        drift.partialChanges = acc;
-        drift.partialTimings = timings;
-        throw drift;
-      }
-      return {changes: acc, timings};
-    },
-  };
-}
-
-/**
- * Accumulator for `advanceToHeadStream` partial frames (the DRIVE-mode
- * streaming variant of advanceToHead). Reassembles into one
- * {@link AdvanceToHeadResult}. Mirrors {@link createAdvanceStreamAccumulator}
- * for the chunked RowChanges (→ `rowChanges`) but additionally captures the
+ * Accumulator for `advanceToHeadStream` partial frames (the streaming
+ * push-based advance). Reassembles into one {@link AdvanceToHeadResult},
+ * capturing the chunked RowChanges (→ `rowChanges`) plus the
  * advanceToHead-specific `version` + `numChanges` + `reset`, which ride the
  * final frame only.
- *
- * The derive-only `changes` field is always `[]` here — the streaming variant
- * only carries the engine's RowChanges (drive mode); the P1 derive-only diff
- * uses the non-streaming `advanceToHead`.
  *
  * Returned object is stateful — do not reuse across calls.
  */
@@ -598,7 +471,6 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
   let timings: TableTiming[] | undefined;
   let expectedNextIndex = 0;
   let gotFinal = false;
-  let drift: DriftError | undefined;
   let version = '';
   let numChanges = 0;
   let reset: {reason: string; msg: string} | undefined;
@@ -618,12 +490,6 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
         chunkIndex?: number;
         final?: boolean;
         timings?: TableTiming[];
-        drift?: {
-          table?: string;
-          op?: string;
-          pk?: Record<string, unknown>;
-          hasCount?: number;
-        };
         version?: string;
         numChanges?: number;
         reset?: {reason: string; msg: string};
@@ -655,7 +521,7 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
 
       for (const rc of chunk) acc.push(rc);
 
-      // version + numChanges + timings + reset + drift travel on the final
+      // version + numChanges + timings + reset travel on the final
       // frame only (Go-side invariant).
       if (final) {
         timings = v.timings;
@@ -663,34 +529,18 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
         numChanges = v.numChanges ?? 0;
         reset = v.reset;
         gotFinal = true;
-        if (v.drift) {
-          drift = new DriftError({
-            table: v.drift.table,
-            op: v.drift.op,
-            pk: v.drift.pk,
-            hasCount: v.drift.hasCount,
-          });
-        }
       }
     },
 
     finish: (): AdvanceToHeadResult => {
       if (!gotFinal) {
         // `done` arrived without any frame carrying final=true — a Go-side bug
-        // (AdvanceStream MUST always emit a terminal frame). Surface so we
+        // (the advance MUST always emit a terminal frame). Surface so we
         // don't silently return a partial result that would corrupt the CVR.
         throw new Error('advanceToHeadStream finished without a final chunk');
       }
-      if (drift) {
-        // Same contract as createAdvanceStreamAccumulator: attach the
-        // partial-output the sidecar produced before the drift panic so
-        // GoComputeBackend's recovery forwards it alongside the re-init.
-        drift.partialChanges = acc;
-        drift.partialTimings = timings;
-        throw drift;
-      }
       return {
-        // Derive-only diff is never streamed (drive mode carries RowChanges).
+        // Derive-only diff is never streamed (the stream carries RowChanges).
         changes: [],
         version,
         numChanges,
@@ -728,35 +578,26 @@ const MAX_FRAME_SIZE = 64 * 1024 * 1024; // 64MB — must match Go side
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
- * Default timeout for COMPUTE-BOUND RPCs (hydrate / advance families),
- * decided by transport. Exported pure for unit tests.
+ * Default timeout for COMPUTE-BOUND RPCs (hydrate / advance families).
+ * Exported pure for unit tests.
  *
  * In-process (napi): 0 — NO timeout. The Go engine lives in this process;
  * "the RPC got lost" is impossible (worker death takes both sides down), so
  * a wall-clock timeout can only misfire — and it misfires exactly under
  * load, where TS's own compute has no deadline either (TS hydration is
  * unbounded; the TS advance is bounded by the ECONOMIC abort, whose Go twin
- * now runs inside the Go advance — see RPC_CODE_ADVANCE_ABORTED). The old
+ * runs inside the Go advance — see RPC_CODE_ADVANCE_ABORTED). The old
  * fixed timeouts were the reset-storm fuel: slow advance → timeout →
  * 'unclassified' → full re-hydrate under the same load, across every CG.
  *
- * Socket (legacy): keep the wall-clock default — a separate process CAN die
- * or wedge independently, and the sidecar-manager's restart heuristics feed
- * on these timeouts.
- *
- * Control-plane RPCs (init/destroy/removeQuery/refreshSnapshot/ping/version)
- * keep their fixed timeouts on both transports: they are small,
- * constant-time calls whose timeout indicates a genuine wedge, and their
- * failure dispositions (fallback-to-TS, best-effort-ignore) are not
- * load-coupled.
+ * Control-plane RPCs (init/destroy/removeQuery/ping/version) keep their
+ * fixed timeouts: they are small, constant-time calls whose timeout
+ * indicates a genuine wedge, and their failure dispositions
+ * (fallback-to-TS, best-effort-ignore) are not load-coupled.
  */
-export function computeBoundTimeoutMs(
-  inProcess: boolean,
-  socketDefaultMs: number,
-  override?: number,
-): number {
+export function computeBoundTimeoutMs(override?: number): number {
   if (override !== undefined) return override;
-  return inProcess ? 0 : socketDefaultMs;
+  return 0;
 }
 const MAX_IN_FLIGHT = 1024; // global semaphore: caps concurrent pending RPCs
 const MAX_IN_FLIGHT_PER_GROUP = 16; // per-clientGroupID fairness cap
@@ -774,25 +615,17 @@ export class TimeoutError extends Error {
 }
 
 /**
- * RPC error code Go uses to signal source drift — MemorySource detected
- * an Edit/Remove against a missing row, or a duplicate Add. Surface for
- * GoComputeBackend so it can branch on the drift recovery path instead
- * of escalating to a generic RPC failure.
- */
-export const RPC_CODE_DRIFT = -32100;
-
-/**
- * Terminal sentinel for streaming RPCs (addQueriesStream / advanceStream).
- * Go emits this as a plain-string Result on the final frame; everything
- * else is a partial. Reserved — handlers MUST NOT emit a string-valued
- * partial that collides with this constant. See D6 collision defense
- * in #onData below.
+ * Terminal sentinel for streaming RPCs (addQueriesStream /
+ * advanceToHeadStream). Go emits this as a plain-string Result on the final
+ * frame; everything else is a partial. Reserved — handlers MUST NOT emit a
+ * string-valued partial that collides with this constant. See D6 collision
+ * defense in #dispatchResponsePayload below.
  */
 const STREAM_DONE_SENTINEL = 'done';
 
 /**
- * RPC error code Go uses when a mutating call (loadRows / addQuery* /
- * advance*) carries an initEpoch that doesn't match the cgID's current
+ * RPC error code Go uses when a mutating call (addQuery* / advance*)
+ * carries an initEpoch that doesn't match the cgID's current
  * epoch on the sidecar. The caller is a torn-down view-syncer instance
  * whose RPC raced past the next instance's init for the same cgID; without
  * this guard, Go would silently mutate the new engine's state with stale
@@ -866,59 +699,9 @@ export class RetryableAdvanceError extends Error {
   }
 }
 
-/**
- * Source-drift signal from the Go sidecar. Carries the offending table +
- * op + PK so the caller can log specifics before re-init. Thrown by
- * {@link GoIVMClient.advance} and surfaced via accumulator on
- * {@link GoIVMClient.advanceStream} when the Final frame has drift set.
- *
- * partialChanges + partialTimings carry the output produced by Push calls
- * that successfully completed BEFORE the panic-and-drift fired in this
- * advance batch. Matches TS view-syncer behavior: assert-and-throw streams
- * whatever was already pushed to the output before snapshot revert +
- * re-hydrate. Previously Go's drift recovery discarded these (the comment
- * at the discard site cited "Replaying them now would risk double-
- * application" — but partial emission + re-hydrate is precisely TS's path,
- * so dropping the partial only widened the TS/Go output divergence
- * observed in shadow soaks).
- */
-export class DriftError extends Error {
-  readonly table: string;
-  readonly op: string;
-  readonly pk: Record<string, unknown>;
-  readonly hasCount: number;
-  partialChanges: RowChange[] = [];
-  partialTimings: TableTiming[] | undefined = undefined;
-  constructor(data: {
-    table?: string | undefined;
-    op?: string | undefined;
-    pk?: Record<string, unknown> | undefined;
-    hasCount?: number | undefined;
-    message?: string | undefined;
-  }) {
-    // BigInt-safe stringify (scale review): msgpackr decodes Go's int64/
-    // uint64 PK values as BigInt, and JSON.stringify THROWS on BigInt — a
-    // drift error over a bigint PK would crash the dispatch path instead of
-    // rejecting one RPC.
-    super(
-      data.message ??
-        `source drift: table=${data.table} op=${data.op} pk=${JSON.stringify(
-          data.pk,
-          (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v),
-        )}`,
-    );
-    this.name = 'DriftError';
-    this.table = data.table ?? '';
-    this.op = data.op ?? '';
-    this.pk = data.pk ?? {};
-    this.hasCount = data.hasCount ?? 0;
-  }
-}
-
 // --- Client ---
 
 export class GoIVMClient {
-  readonly #socketPath: string;
   readonly #onLog:
     | ((level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void)
     | undefined;
@@ -933,12 +716,9 @@ export class GoIVMClient {
    * 'running' and every CG spun in per-CG reset loops forever.
    */
   readonly #onFatal: ((err: Error) => void) | undefined;
-  #socket: Socket | null = null;
-  // In-process (NAPI) transport. Mutually exclusive with #socket: exactly
-  // one of connect() / connectNapi() is used per client instance. When set,
-  // #call sends request payloads through the addon (no length prefix, no
-  // kernel round-trip) and complete response frames arrive via
-  // #handleDelivery — no reassembly, #onData never runs.
+  // In-process (NAPI) transport. When set, #call sends request payloads
+  // through the addon (no length prefix, no kernel round-trip) and complete
+  // response frames arrive via #handleDelivery.
   #napi: GoNapiAddon | null = null;
   // Row-plane group registry (NAPI row mode): (reqID, groupID) → column/PK
   // metadata, populated by kind-2 deliveries and cleared when the owning
@@ -963,18 +743,6 @@ export class GoIVMClient {
     }
   >();
 
-  // Frame parser state: buffer + read offset. Avoids quadratic Buffer.concat
-  // by retaining a single underlying buffer until at least half is consumed,
-  // then compacting once.
-  #recvBuf: Buffer = Buffer.alloc(0);
-  #recvOffset = 0;
-  // Bytes remaining to discard as part of skipping past an oversized frame.
-  // When > 0, #onData consumes incoming bytes without parsing instead of
-  // closing the entire connection (audit H8). The orphaned RPC for the
-  // bad frame times out naturally; healthy CGs on the same connection
-  // keep flowing.
-  #skipRemaining = 0;
-
   // Backpressure (global cap): awaiters waiting for any in-flight slot.
   #slotWaiters: Array<() => void> = [];
   // Per-clientGroupID in-flight counters and waiter queues. Prevents one
@@ -982,17 +750,6 @@ export class GoIVMClient {
   // starving every other ViewSyncer (REVIEW-final CRITICAL-CROSS-2).
   #perGroupInFlight = new Map<string, number>();
   #perGroupWaiters = new Map<string, Array<() => void>>();
-  // Byte-level backpressure: when socket.write returns false, all subsequent
-  // #call invocations await this promise before writing. Set null when the
-  // socket is writable (REVIEW-final MED-TS-1). #drainResolve is the escape
-  // hatch (A5, scale review): a socket that DIES under backpressure never
-  // emits 'drain', so transport teardown must resolve the promise manually
-  // — otherwise callers already parked on it hang forever, and a stale
-  // non-null #drainPromise after close()+reconnect gated every future call
-  // on a promise nothing could ever resolve (a total client wedge that
-  // SURVIVED sidecar restart).
-  #drainPromise: Promise<void> | null = null;
-  #drainResolve: (() => void) | null = null;
   /**
    * IDs that recently timed out. Late responses for them must be dropped,
    * not routed to a freshly-issued same-ID call (REVIEW-final LOW-TS-2).
@@ -1001,82 +758,23 @@ export class GoIVMClient {
   #recentlyTimedOut = new Set<number>();
 
   constructor(
-    socketPath = '/tmp/go-ivm.sock',
     options?: {
       onLog?: (level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void;
       onFatal?: (err: Error) => void;
     },
   ) {
-    this.#socketPath = socketPath;
     this.#onLog = options?.onLog;
     this.#onFatal = options?.onFatal;
   }
 
-  /** Connect to the Go sidecar. Resolves when connected. */
-  connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const socket = createConnection(this.#socketPath, () => {
-        this.#socket = socket;
-        socket.on('data', chunk => this.#onData(chunk));
-        resolve();
-      });
-      socket.on('error', err => {
-        if (!this.#socket) {
-          reject(err);
-          return;
-        }
-        this.#log('error', `socket error: ${(err as Error).message}`, err);
-        // Treat as terminal — the 'close' handler will run next and clean up.
-      });
-      socket.on('close', () => {
-        // Mark socket dead BEFORE rejecting so concurrent #call invocations
-        // fail fast instead of writing into a destroyed Socket.
-        this.#socket = null;
-        const err = new Error('Connection closed');
-        for (const [, p] of this.#pending) {
-          if (p.timer) clearTimeout(p.timer);
-          p.reject(err);
-        }
-        this.#pending.clear();
-        // Release any backpressure waiters (global + per-group + drain) so they can fail fast.
-        const globalWaiters = this.#slotWaiters;
-        this.#slotWaiters = [];
-        for (const w of globalWaiters) w();
-        const perGroup = this.#perGroupWaiters;
-        this.#perGroupWaiters = new Map();
-        for (const waiters of perGroup.values()) for (const w of waiters) w();
-        this.#perGroupInFlight.clear();
-        this.#releaseDrainWaiters();
-      });
-    });
-  }
-
   /**
-   * Attach the in-process (NAPI) transport instead of a socket. The caller
-   * owns the addon lifecycle (start/shutdown — typically SidecarManager in
-   * 'napi' mode); this just wires deliveries into the client's dispatch.
-   * Call the addon's start() with this client's {@link handleNapiDelivery}
-   * BEFORE issuing RPCs.
+   * Attach the in-process (NAPI) transport. The caller owns the addon
+   * lifecycle (start/shutdown — typically SidecarManager); this just wires
+   * deliveries into the client's dispatch. Call the addon's start() with
+   * this client's {@link handleNapiDelivery} BEFORE issuing RPCs.
    */
   connectNapi(addon: GoNapiAddon): void {
-    if (this.#socket) {
-      throw new Error('connectNapi: socket transport already connected');
-    }
     this.#napi = addon;
-  }
-
-  /**
-   * Release callers parked on the byte-level backpressure gate (A5): the
-   * socket died (or the client closed) before 'drain' fired, so the promise
-   * must be resolved manually — woken callers then fail fast at the
-   * transport checks. Clears the field FIRST so a woken caller re-entering
-   * #acquireSlot doesn't re-await a dead gate.
-   */
-  #releaseDrainWaiters(): void {
-    const resolve = this.#drainResolve;
-    this.#drainPromise = null;
-    this.#drainResolve = null;
-    resolve?.();
   }
 
   /**
@@ -1118,15 +816,7 @@ export class GoIVMClient {
 
   /** Close the connection. */
   close(): void {
-    const socket = this.#socket;
-    this.#socket = null;
     this.#napi = null;
-    if (socket) {
-      socket.destroy();
-    }
-    this.#recvBuf = Buffer.alloc(0);
-    this.#recvOffset = 0;
-    this.#skipRemaining = 0;
     // Reject anything still pending so callers don't hang.
     const err = new Error('Client closed');
     for (const [, p] of this.#pending) {
@@ -1141,18 +831,15 @@ export class GoIVMClient {
     this.#perGroupWaiters = new Map();
     for (const ws of perGroup.values()) for (const w of ws) w();
     this.#perGroupInFlight.clear();
-    // A5: without this, a close() during byte-level backpressure left a
-    // stale #drainPromise that gated EVERY call after reconnect — forever.
-    this.#releaseDrainWaiters();
   }
 
   isConnected(): boolean {
-    return this.#socket !== null || this.#napi !== null;
+    return this.#napi !== null;
   }
 
   /**
    * Initialize an engine for a client group. Returns the new initEpoch
-   * which subsequent mutating calls (loadRows / addQuery* / advance*) MUST
+   * which subsequent mutating calls (addQuery* / advance*) MUST
    * pass back so the sidecar can reject calls from a torn-down caller
    * whose RPC raced past a fresh init for the same cgID.
    */
@@ -1172,25 +859,6 @@ export class GoIVMClient {
       throw new Error('init: sidecar did not return initEpoch — protocol mismatch');
     }
     return {initEpoch: result.initEpoch};
-  }
-
-  /**
-   * Append a batch of rows to a previously-init'd table.
-   * Chunking is the caller's responsibility — pick batch sizes that fit
-   * comfortably under the 64MB frame cap (typical: 1–10MB encoded).
-   */
-  async loadRows(
-    clientGroupID: string,
-    table: string,
-    rows: Record<string, unknown>[],
-    initEpoch: number,
-    opts?: CallOptions,
-  ): Promise<void> {
-    await this.#call(
-      'loadRows',
-      {clientGroupID, table, rows, initEpoch},
-      {timeoutMs: opts?.timeoutMs ?? 120_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
-    );
   }
 
   // Batch hydrate over the streaming RPC: Go builds all pipelines and
@@ -1218,26 +886,22 @@ export class GoIVMClient {
     queries: {queryID: string; ast: unknown}[],
     initEpoch: number,
     onResult: (r: {queryID: string; changes: RowChange[]; timingMs: number | undefined; final?: boolean; chunkIndex?: number}) => void,
-    opts?: CallOptions & {chunked?: boolean; rowMode?: boolean},
+    opts?: CallOptions & {chunked?: boolean},
   ): Promise<void> {
-    // Row mode requires the in-process transport; degrades to frames on
-    // the socket (see advanceStream).
-    const rowMode = opts?.rowMode === true && this.#napi !== null;
+    // Per-row delivery rides the in-process transport's row plane.
     const handler = createHydrateStreamAccumulator(onResult, {
       chunked: opts?.chunked ?? false,
-      rowMode,
+      rowMode: true,
     });
     await this.#call(
       'addQueriesStream',
-      rowMode
-        ? {clientGroupID, queries, initEpoch, rowMode: true}
-        : {clientGroupID, queries, initEpoch},
+      {clientGroupID, queries, initEpoch, rowMode: true},
       {
         // Compute-bound: no timeout in-process (TS hydration has none either).
-        timeoutMs: computeBoundTimeoutMs(this.#napi !== null, 120_000, opts?.timeoutMs),
+        timeoutMs: computeBoundTimeoutMs(opts?.timeoutMs),
         clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
         onPartial: handler.onFrame,
-        ...(rowMode ? {onRow: handler.onRow} : {}),
+        onRow: handler.onRow,
       },
     );
     handler.finish();
@@ -1253,8 +917,7 @@ export class GoIVMClient {
    * served, and `return()`/`throw()` cancels the Go producer mid-stream
    * (cursor close, pool-reader release) via goivm_stream_cancel.
    *
-   * Requires the NAPI transport (throws otherwise — callers gate on
-   * goPullHydrate(config), which implies transport=napi + rowMode).
+   * Requires the NAPI transport (throws otherwise).
    *
    * Timeout: pull duration is CONSUMER-driven, so the blanket RPC timeout
    * defaults OFF (a legit slow consumer must not fire it). Liveness is
@@ -1446,7 +1109,7 @@ export class GoIVMClient {
     queryID: string,
     ast: unknown,
     initEpoch: number,
-    opts?: CallOptions & {rowMode?: boolean},
+    opts?: CallOptions,
   ): Promise<HydrateResult> {
     let result: HydrateResult | undefined;
     await this.addQueriesStream(
@@ -1474,116 +1137,21 @@ export class GoIVMClient {
     });
   }
 
-  // Push mode: ship a SnapshotChange diff to Go, which applies it and
-  // streams the resulting RowChanges back as one or more partial frames
-  // (chunked at advanceChunkSize on the Go side). This method accumulates
-  // them and returns an {@link AdvanceResult}, including per-(table, op)
-  // wall-times so TS's `ivm.advance-time` histogram keeps native-path
-  // granularity.
-  //
-  // Streaming wins: Go-side memory pressure relieved on large diffs (each
-  // chunk is encoded + flushed + freed before the next accumulates instead
-  // of being buffered into a single msgpack frame); first chunk hits the
-  // socket as soon as advanceChunkSize rows accumulate, so TTFB on big
-  // advances drops.
-  //
-  // Same defensive invariants as {@link addQueriesStream}: chunk-order
-  // gaps throw; missing terminal `final: true` throws.
-  async advanceStream(
-    clientGroupID: string,
-    changes: SnapshotChange[],
-    initEpoch: number,
-    opts?: CallOptions & {rowMode?: boolean},
-  ): Promise<AdvanceResult> {
-    // Row mode requires the in-process transport (per-row records ride the
-    // addon's delivery queue); on the socket it silently degrades to the
-    // ordinary frame path — same result, chunked framing.
-    const rowMode = opts?.rowMode === true && this.#napi !== null;
-    const handler = createAdvanceStreamAccumulator({rowMode});
-    await this.#call(
-      'advanceStream',
-      rowMode
-        ? {clientGroupID, changes, initEpoch, rowMode: true}
-        : {clientGroupID, changes, initEpoch},
-      {
-        // Compute-bound: no timeout in-process (see computeBoundTimeoutMs —
-        // the fixed 120s here was the reset-storm trigger under load).
-        timeoutMs: computeBoundTimeoutMs(this.#napi !== null, 120_000, opts?.timeoutMs),
-        clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
-        onPartial: handler.onFrame,
-        ...(rowMode ? {onRow: handler.onRow} : {}),
-      },
-    );
-    return handler.finish();
-  }
-
   /**
-   * advanceToHead: the Go sidecar derives its OWN snapshot diff from the
-   * replica's changeLog2 (via internal/snapshotter) instead of consuming a
-   * TS-shipped SnapshotChange[]. Carries NO changes payload — only the cgID +
-   * epoch. Returns Go's derived diff + its new stateVersion. Used (in P1) to
-   * shadow-compare Go's diff against TS's own computed one. Requires a
-   * protocolRev 9 sidecar (exact-match enforced at connect — sidecar-manager
-   * EXPECTED_PROTOCOL_REV; the RPC itself dates to rev 7) with
-   * GO_IVM_ADVANCE_TO_HEAD=true + table mode.
-   */
-  async advanceToHead(
-    clientGroupID: string,
-    initEpoch: number,
-    appID: string,
-    opts?: CallOptions,
-  ): Promise<AdvanceToHeadResult> {
-    // O2: forward the shard's appID so the sidecar's snapshotter watches the
-    // correct `<appID>.permissions` table. Omitted when empty so the Go side
-    // keeps its GO_IVM_APP_ID env fallback (p.AppID is `omitempty`).
-    const result = (await this.#call(
-      'advanceToHead',
-      appID ? {clientGroupID, initEpoch, appID} : {clientGroupID, initEpoch},
-      {
-        ...opts,
-        // Compute-bound (shadow-only unary variant): same no-timeout-in-process
-        // rule as the streaming advance.
-        timeoutMs: computeBoundTimeoutMs(this.#napi !== null, DEFAULT_TIMEOUT_MS, opts?.timeoutMs),
-        clientGroupID: opts?.clientGroupID ?? clientGroupID,
-      },
-    )) as Partial<AdvanceToHeadResult>;
-    return {
-      changes: result.changes ?? [],
-      version: result.version ?? '',
-      numChanges: result.numChanges ?? 0,
-      rowChanges: result.rowChanges ?? [],
-      timings: result.timings,
-      reset: result.reset,
-    };
-  }
-
-  /**
-   * Streaming variant of {@link advanceToHead} for DRIVE mode (P2 / Go-primary
-   * trigger). Go derives its own diff, drives its engine, and emits the
-   * resulting RowChanges as chunked partial frames (at `advanceChunkSize` on
-   * the Go side) instead of one msgpack frame. This method reassembles them
-   * into the same {@link AdvanceToHeadResult} shape `advanceToHead` returns, so
-   * the caller is unaware of chunking.
+   * Streaming push-based advance (the production advance path). Go derives
+   * its own diff, drives its engine, and emits the resulting RowChanges as
+   * per-row records over the in-process row plane (plus chunked fallback
+   * frames). This method reassembles them into one
+   * {@link AdvanceToHeadResult}.
    *
-   * Why this exists (finding F5): the non-streaming `advanceToHead` carries all
-   * drive-mode RowChanges in a single frame under the 64MB cap. A bulk backfill
-   * or mass UPDATE blows the cap; the TS receive loop SKIPS the oversized frame,
-   * orphaning the RPC until it times out. Streaming bounds per-frame size the
-   * same way push-mode already uses {@link advanceStream}.
-   *
-   * Requires a protocolRev 9 sidecar (exact-match enforced at connect —
-   * sidecar-manager EXPECTED_PROTOCOL_REV; this RPC dates to rev 8) with
-   * GO_IVM_ADVANCE_TO_HEAD=true, GO_IVM_ADVANCE_DRIVE=true, + table mode.
-   * Same defensive invariants as {@link advanceStream}: chunk-order gaps
-   * throw; missing terminal `final:true` throws; drift on the final frame
-   * re-throws as a {@link DriftError}.
+   * Same defensive invariants as {@link addQueriesStream}: chunk-order gaps
+   * throw; missing terminal `final:true` throws.
    */
   async advanceToHeadStream(
     clientGroupID: string,
     initEpoch: number,
     appID: string,
     opts?: CallOptions & {
-      rowMode?: boolean;
       /**
        * Arms Go's port of TS's economic advancement-abort
        * (#shouldAdvanceYieldMaybeAbortAdvance): totalHydrationTimeMs is the
@@ -1595,15 +1163,11 @@ export class GoIVMClient {
       abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
     },
   ): Promise<AdvanceToHeadResult> {
-    // Row mode requires the in-process transport (per-row records ride the
-    // addon's delivery queue); on the socket it silently degrades to the
-    // ordinary frame path — same result, chunked framing.
-    const rowMode = opts?.rowMode === true && this.#napi !== null;
-    const handler = createAdvanceToHeadStreamAccumulator({rowMode});
+    const handler = createAdvanceToHeadStreamAccumulator({rowMode: true});
     const base: Record<string, unknown> = appID
       ? {clientGroupID, initEpoch, appID}
       : {clientGroupID, initEpoch};
-    if (rowMode) base.rowMode = true;
+    base.rowMode = true;
     if (opts?.abortBudget) {
       base.totalHydrationTimeMs = opts.abortBudget.totalHydrationTimeMs;
       if (opts.abortBudget.suppressAbort) base.suppressAbort = true;
@@ -1612,12 +1176,12 @@ export class GoIVMClient {
       // Compute-bound: no timeout in-process. The advance's bound is the
       // ECONOMIC abort riding this request (abortBudget), not wall-clock —
       // exactly TS's own advance discipline.
-      timeoutMs: computeBoundTimeoutMs(this.#napi !== null, 120_000, opts?.timeoutMs),
+      timeoutMs: computeBoundTimeoutMs(opts?.timeoutMs),
       // Forward the group for in-flight fairness (every CG-scoped wrapper
       // does this since A1 — one group can't starve others — CROSS-2).
       clientGroupID: opts?.clientGroupID ?? clientGroupID,
       onPartial: handler.onFrame,
-      ...(rowMode ? {onRow: handler.onRow} : {}),
+      onRow: handler.onRow,
     });
     return handler.finish();
   }
@@ -1643,46 +1207,6 @@ export class GoIVMClient {
     });
   }
 
-  /**
-   * Roll the engine's leaf sources to a fresh snapshot of underlying
-   * storage. No-op for MemorySource (it has no pinned snapshot); for
-   * tablesource.Source it commits the current read tx and opens a new
-   * one at the current WAL frame. Used by the drift audit so its
-   * comparison reads on Go see the same point-in-time as the SQL
-   * ground-truth read (avoids transient snapshot skew). protocolRev 6+.
-   */
-  async refreshSnapshot(
-    clientGroupID: string,
-    initEpoch: number,
-    opts?: CallOptions,
-  ): Promise<void> {
-    await this.#call(
-      'refreshSnapshot',
-      {clientGroupID, initEpoch},
-      {...opts, clientGroupID: opts?.clientGroupID ?? clientGroupID},
-    );
-  }
-
-  /**
-   * Returns the number of queries currently registered on the given CG's
-   * engine. Drift audit uses this as a cross-validation health probe: if
-   * TS thinks N queries are active but Go reports 0, per-CG recovery has
-   * silently dropped pipeline state (the C2 freeze). Returns 0 cleanly
-   * when the engine isn't initialized — the absence-of-engine is the
-   * answer. No initEpoch param: we want this probe to succeed even
-   * after a stale view-syncer instance was torn down.
-   */
-  async pipelineCount(
-    clientGroupID: string,
-    opts?: CallOptions,
-  ): Promise<number> {
-    const r = await this.#call('pipelineCount', {clientGroupID}, {
-      ...opts,
-      clientGroupID: opts?.clientGroupID ?? clientGroupID,
-    });
-    return typeof r === 'number' ? r : 0;
-  }
-
   /** Ping the sidecar. */
   async ping(opts?: CallOptions): Promise<string> {
     return (await this.#call('ping', undefined, {timeoutMs: opts?.timeoutMs ?? 5_000})) as string;
@@ -1692,18 +1216,13 @@ export class GoIVMClient {
    * Query sidecar version and protocol revision. Used by `SidecarManager`
    * to refuse to talk to an incompatible build during rolling deploys
    * (REVIEW-final MED-CROSS-5).
-   *
-   * `sourceMode` ('memory' | 'table') is reported by newer sidecars so the
-   * init path can skip shipping row contents when the sidecar reads SQLite
-   * directly (loadRows is a no-op in table mode). Absent on older builds —
-   * callers must treat undefined as memory mode (ship rows).
    */
   async version(
     opts?: CallOptions,
-  ): Promise<{version: string; protocolRev: number; sourceMode?: string}> {
+  ): Promise<{version: string; protocolRev: number}> {
     return (await this.#call('version', undefined, {
       timeoutMs: opts?.timeoutMs ?? 5_000,
-    })) as {version: string; protocolRev: number; sourceMode?: string};
+    })) as {version: string; protocolRev: number};
   }
 
   // --- Private ---
@@ -1715,11 +1234,6 @@ export class GoIVMClient {
   }
 
   async #acquireSlot(cgID: string): Promise<void> {
-    // Byte-level backpressure — wait for socket drain before issuing more
-    // writes (REVIEW-final MED-TS-1).
-    if (this.#drainPromise) {
-      await this.#drainPromise;
-    }
     // Global cap first — a hard safety bound on aggregate in-flight RPCs.
     if (this.#pending.size >= MAX_IN_FLIGHT) {
       await new Promise<void>(resolve => this.#slotWaiters.push(resolve));
@@ -1786,9 +1300,8 @@ export class GoIVMClient {
     // Backpressure: cap in-flight RPCs globally and per-group.
     await this.#acquireSlot(cgID);
 
-    const socket = this.#socket;
     const napi = this.#napi;
-    if (!socket && !napi) {
+    if (!napi) {
       this.#releaseSlot(cgID);
       throw new Error('Not connected');
     }
@@ -1869,173 +1382,26 @@ export class GoIVMClient {
         return;
       }
       // NAPI transport: hand the raw payload to the addon — no length
-      // prefix (goivm_send frames internally), no kernel buffer, no drain
-      // machinery (the Go-side send queue is unbounded like Node's
-      // userspace socket buffering; memory is bounded by the in-flight
-      // slot caps above).
-      if (napi) {
-        const rc = napi.send(payload);
-        if (rc !== 0) {
-          // rc != 0 means the Go host's receive loop is gone (markClosed) —
-          // the engine is dead for EVERY pending and future RPC, not just
-          // this one. Reject this call with the specific error, then latch
-          // the whole transport dead and notify the embedder (→ fatalExit;
-          // see #napiFatal / A2).
-          const err = new Error(`goivm_send failed: rc=${rc} (host closed?)`);
-          wrappedReject(err);
-          this.#napiFatal(err);
-        }
-        return;
-      }
-      // Socket transport. Re-check under the closure: TS can't narrow the
-      // outer `socket || napi` guard across the Promise executor.
-      if (!socket) {
-        wrappedReject(new Error('Not connected'));
-        return;
-      }
-      const frame = Buffer.allocUnsafe(4 + payload.length);
-      frame.writeUInt32BE(payload.length, 0);
-      payload.copy(frame, 4);
-
-      const ok = socket.write(frame);
-      if (!ok && !this.#drainPromise) {
-        // Byte-level backpressure: gate subsequent writes until the kernel
-        // buffer drains. Subsequent #call invocations await this promise
-        // in #acquireSlot (REVIEW-final MED-TS-1). #drainResolve lets the
-        // teardown paths release parked callers when the socket dies
-        // instead of draining (A5).
-        this.#drainPromise = new Promise<void>(resolve => {
-          this.#drainResolve = resolve;
-          socket.once('drain', () => {
-            this.#drainPromise = null;
-            this.#drainResolve = null;
-            resolve();
-          });
-        });
+      // prefix (goivm_send frames internally), no kernel buffer (the
+      // Go-side send queue is unbounded like Node's userspace socket
+      // buffering; memory is bounded by the in-flight slot caps above).
+      const rc = napi.send(payload);
+      if (rc !== 0) {
+        // rc != 0 means the Go host's receive loop is gone (markClosed) —
+        // the engine is dead for EVERY pending and future RPC, not just
+        // this one. Reject this call with the specific error, then latch
+        // the whole transport dead and notify the embedder (→ fatalExit;
+        // see #napiFatal / A2).
+        const err = new Error(`goivm_send failed: rc=${rc} (host closed?)`);
+        wrappedReject(err);
+        this.#napiFatal(err);
       }
     });
   }
 
-  #onData(chunk: Buffer): void {
-    // Skip-mode (H8): when a previous frame was rejected as too large
-    // we discard its remaining bytes from the stream instead of closing
-    // the entire connection. Other CGs' RPCs continue normally; the
-    // orphaned RPC times out via its own timer.
-    if (this.#skipRemaining > 0) {
-      const discard = Math.min(chunk.length, this.#skipRemaining);
-      this.#skipRemaining -= discard;
-      if (discard === chunk.length) return;
-      chunk = chunk.subarray(discard);
-    }
-    // Append: if we have unconsumed data, splice it together with the new
-    // chunk. Optimisation for the case where we already know the next
-    // frame's length and it's larger than the new chunk: pre-allocate a
-    // buffer sized for the full frame so subsequent chunks copy into it
-    // in O(chunkSize) instead of O(everything-so-far). Avoids the O(N²)
-    // accumulation that hit very large frames split across many chunks
-    // (REVIEW-final LOW-TS-1).
-    if (this.#recvOffset === this.#recvBuf.length) {
-      this.#recvBuf = chunk;
-      this.#recvOffset = 0;
-    } else {
-      const remaining = this.#recvBuf.length - this.#recvOffset;
-      // If we have a length-prefix and know the target frame is bigger
-      // than what we currently hold, grow once to the full frame size.
-      let cap = remaining + chunk.length;
-      if (remaining >= 4) {
-        const announcedLen = this.#recvBuf.readUInt32BE(this.#recvOffset);
-        if (announcedLen <= MAX_FRAME_SIZE && 4 + announcedLen > cap) {
-          cap = 4 + announcedLen;
-        }
-      }
-      const combined = Buffer.allocUnsafe(cap);
-      this.#recvBuf.copy(combined, 0, this.#recvOffset);
-      chunk.copy(combined, remaining);
-      // Track logical filled length separately from buffer capacity. The
-      // existing length checks below use `this.#recvBuf.length`; keep that
-      // semantic by trimming if we over-allocated.
-      this.#recvBuf =
-        remaining + chunk.length === cap
-          ? combined
-          : combined.subarray(0, remaining + chunk.length);
-      this.#recvOffset = 0;
-    }
-
-    while (this.#recvBuf.length - this.#recvOffset >= 4) {
-      const len = this.#recvBuf.readUInt32BE(this.#recvOffset);
-      // D7: minimum frame size. Wire never legitimately carries len=0
-      // (no valid msgpack response is 0 bytes). Pre-fix this would slide
-      // past the 4-byte prefix, hand an empty payload to unpack(), warn,
-      // and continue — turning a corrupted stream of `\x00\x00\x00\x00`
-      // into a fast log-flood loop. Now we close the connection (returning
-      // here breaks out; subsequent #onData calls re-enter against a
-      // buffer that still starts with the same len-0 prefix, but the
-      // outer caller closes on persistent decode failure).
-      if (len < 1) {
-        this.#log(
-          'error',
-          `Frame too small: ${len} bytes (protocol violation) — closing connection`,
-        );
-        // Force the connection closed so the SidecarManager's restart
-        // machinery takes over; the stream is desynchronized.
-        try {
-          this.#socket?.destroy(new Error(`protocol violation: zero-length frame`));
-        } catch {
-          // best-effort
-        }
-        return;
-      }
-      if (len > MAX_FRAME_SIZE) {
-        // H8 fix: don't close the connection — that kills every CG on
-        // this socket for one bad query. The frame's body is too long
-        // to parse (we can't know the RPC id without decoding), so we
-        // can't selectively reject the offending pending entry. Skip-
-        // read its bytes instead; the orphaned RPC times out via its
-        // own timer while other CGs' traffic flows uninterrupted.
-        this.#log(
-          'error',
-          `Frame too large: ${len} bytes — skipping past it (orphan RPC will time out)`,
-        );
-        // Step past the 4-byte length prefix. Any frame body bytes
-        // already buffered get discarded inline; remaining bytes are
-        // discarded on subsequent #onData chunks via #skipRemaining.
-        this.#recvOffset += 4;
-        const bufferedBody = this.#recvBuf.length - this.#recvOffset;
-        if (bufferedBody >= len) {
-          // Whole body already in buffer — advance past it.
-          this.#recvOffset += len;
-        } else {
-          // Discard the buffered portion now; consume the rest from
-          // upcoming chunks.
-          this.#skipRemaining = len - bufferedBody;
-          this.#recvBuf = Buffer.alloc(0);
-          this.#recvOffset = 0;
-        }
-        continue;
-      }
-      if (this.#recvBuf.length - this.#recvOffset < 4 + len) {
-        // Wait for more bytes; preserve the partial frame.
-        return;
-      }
-
-      const payload = this.#recvBuf.subarray(this.#recvOffset + 4, this.#recvOffset + 4 + len);
-      this.#recvOffset += 4 + len;
-      this.#dispatchResponsePayload(payload);
-    }
-
-    // Compact periodically so the underlying chunk's memory can be released
-    // once we've consumed at least half of it.
-    if (this.#recvOffset > 0 && this.#recvOffset * 2 >= this.#recvBuf.length) {
-      this.#recvBuf = this.#recvBuf.subarray(this.#recvOffset);
-      this.#recvOffset = 0;
-    }
-  }
-
-  // Decode + route ONE complete response frame payload. Shared by both
-  // transports: #onData (socket) calls it per reassembled frame; the NAPI
+  // Decode + route ONE complete response frame payload. The NAPI
   // path calls it per kind-1 delivery (frames arrive whole — no prefix, no
-  // reassembly). Extracted verbatim from the #onData loop body; `return`
-  // here corresponds to the loop's `continue`.
+  // reassembly).
   #dispatchResponsePayload(payload: Buffer): void {
       let resp: RPCResponse;
       try {
@@ -2053,34 +1419,7 @@ export class GoIVMClient {
       if (!pending) return;
 
       if (resp.error) {
-        if (resp.error.code === RPC_CODE_DRIFT) {
-          // Drift signal: parse the structured payload Go ships in
-          // error.data (table/op/pk/hasCount) so callers don't have to
-          // string-match the message. Caller is GoComputeBackend, which
-          // catches DriftError and triggers re-init.
-          // partialChanges + partialTimings carry the RowChanges produced
-          // by Pushes that completed BEFORE the panic; the recovery path
-          // emits them to clients matching TS's "stream-pre-throw-output-
-          // then-revert" behavior.
-          const d = (resp.error as {data?: unknown}).data as {
-            table?: string;
-            op?: string;
-            pk?: Record<string, unknown>;
-            hasCount?: number;
-            partialChanges?: RowChange[];
-            partialTimings?: TableTiming[];
-          } | undefined;
-          const drift = new DriftError({
-            table: d?.table,
-            op: d?.op,
-            pk: d?.pk,
-            hasCount: d?.hasCount,
-            message: resp.error.message,
-          });
-          drift.partialChanges = d?.partialChanges ?? [];
-          drift.partialTimings = d?.partialTimings;
-          pending.reject(drift);
-        } else if (resp.error.code === RPC_CODE_STALE_INIT_EPOCH) {
+        if (resp.error.code === RPC_CODE_STALE_INIT_EPOCH) {
           // Stale-epoch signal: the sidecar is rejecting our call because
           // this view-syncer instance's initEpoch is behind a successor's.
           // Surface as StaleInitEpochError so callers (GoComputeBackend,
@@ -2128,15 +1467,11 @@ export class GoIVMClient {
       // useful error.
       //
       // try/catch around onPartial is load-bearing: accumulators (e.g.
-      // createAdvanceStreamAccumulator) throw on chunk-order violations
+      // createAdvanceToHeadStreamAccumulator) throw on chunk-order violations
       // or missing-final invariants. A synchronous throw from this
-      // socket data handler propagates to Node's EventEmitter, which
-      // emits 'error' on the socket — without an explicit listener
-      // that triggers uncaughtException and crashes the worker.
-      // Pre-fix this took down the entire view-syncer process on any
-      // protocol bug. Now we reject the offending RPC with the throw
-      // and continue draining other pending entries; the connection
-      // stays up and other CGs' RPCs flow normally.
+      // handler must reject only the offending RPC — we reject the
+      // offending RPC with the throw and continue draining other pending
+      // entries; other CGs' RPCs flow normally.
       const isStreamTerminal = resp.result === STREAM_DONE_SENTINEL;
       if (pending.onPartial && !isStreamTerminal) {
         if (typeof resp.result !== 'object' || resp.result === null) {
