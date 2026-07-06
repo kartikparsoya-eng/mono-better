@@ -2,8 +2,12 @@
 // goivm_napi addon → libgoivm (Go c-shared) → engine → TSFN deliveries →
 // client dispatch, covering BOTH planes:
 //
-//   - frame plane: init / loadRows / ping round-trips (msgpack, kind 1)
-//   - row plane:   addQueriesStream + advanceStream with rowMode (kinds 2/3)
+//   - frame plane: init / ping round-trips (msgpack, kind 1)
+//   - row plane:   addQueriesStream + advanceToHeadStream with rowMode (kinds 2/3)
+//
+// Table-mode fixture: the removal sweep deleted memory mode (loadRows), so
+// all data is pre-seeded into a SQLite replica BEFORE the addon starts.
+// init is schema-only; the Go engine reads rows from the replica.
 //
 // GATED: requires the out-of-band build artifacts —
 //
@@ -11,6 +15,12 @@
 //   dylib:  (go-ivm repo) go build -tags napilib -buildmode=c-shared \
 //             -o /tmp/libgoivm.dylib ./cmd/sidecar
 //           (override path via GOIVM_TEST_LIB)
+//
+//   advance tests require the wal2-tagged dylib (BEGIN CONCURRENT):
+//   CGO_CFLAGS="-I/tmp/wal2lib" CGO_LDFLAGS="-L/tmp/wal2lib" \
+//     go build -tags "libsqlite3 sqlite_omit_load_extension osusergo netgo napilib" \
+//       -buildmode=c-shared -o /tmp/libgoivm_wal2.dylib ./cmd/sidecar
+//   GOIVM_TEST_LIB=/tmp/libgoivm_wal2.dylib npx vitest run ...
 //
 // Skips cleanly when either is missing. The Go host can only start ONCE per
 // process (Go runtimes cannot be unloaded), so all tests share one bridge.
@@ -20,16 +30,96 @@ import {afterAll, describe, expect, test} from 'vitest';
 import {GoIVMClient} from './go-ivm-client.ts';
 import type {RowChange} from './go-ivm-client.ts';
 import {isGoNapiAddonAvailable, loadGoNapiAddon} from './napi/index.ts';
+import {makeTestReplica} from './napi-test-fixtures.ts';
 
 const LIB_PATH =
   process.env.GOIVM_TEST_LIB ??
   (process.platform === 'darwin' ? '/tmp/libgoivm.dylib' : '/tmp/libgoivm.so');
 
+// ── replica ──────────────────────────────────────────────────────────
+// Create and seed the replica BEFORE the addon starts. The Go engine
+// reads GO_IVM_REPLICA_DB_PATH at startup; all client groups share it.
+
+const replica = makeTestReplica();
+replica.db.exec(
+  `CREATE TABLE "users" ("id" TEXT PRIMARY KEY,"name" TEXT,"age" INTEGER,"_0_version" TEXT)`,
+);
+const userInsert = replica.db.prepare(
+  'INSERT INTO "users" VALUES (?,?,?,?)',
+);
+userInsert.run('u1', 'alice', 30, '0000000001');
+userInsert.run('u2', 'bob', 25, '0000000001');
+userInsert.run('u3', 'carol', 35, '0000000001');
+
+replica.db.exec(
+  `CREATE TABLE "edge" ("id" TEXT PRIMARY KEY,"num" NUMERIC,"flag" INTEGER,"meta" TEXT,"label" TEXT,"_0_version" TEXT)`,
+);
+const edgeRows: {
+  id: string;
+  num: number;
+  flag: boolean;
+  meta: unknown;
+  label: string;
+}[] = [
+  {id: 'e01', num: 9007199254740991, flag: true, meta: null, label: ''},
+  {
+    id: 'e02',
+    num: -123456.789,
+    flag: false,
+    meta: {a: [1, 'x', null], b: {c: true}},
+    label: 'plain',
+  },
+  {id: 'e03', num: 3.141592653589793, flag: true, meta: [1, 2, 3], label: '🎯emoji🚀'},
+  {
+    id: 'e04',
+    num: 0,
+    flag: false,
+    meta: {nested: {deep: 'ok'}},
+    label: 'a'.repeat(70_000),
+  },
+  {id: 'e05', num: 42, flag: true, meta: null, label: '\u0000null-byte'},
+  {id: 'e06', num: -9876.54321, flag: false, meta: {emoji: '💥'}, label: 'ünïcödé'},
+];
+const edgeInsert = replica.db.prepare(
+  'INSERT INTO "edge" VALUES (?,?,?,?,?,?)',
+);
+for (const r of edgeRows) {
+  edgeInsert.run(
+    r.id,
+    r.num,
+    r.flag ? 1 : 0,
+    r.meta === null ? null : JSON.stringify(r.meta),
+    r.label,
+    '0000000001',
+  );
+}
+
+replica.db.exec(
+  `CREATE TABLE "bulk" ("id" TEXT PRIMARY KEY,"n" INTEGER,"_0_version" TEXT)`,
+);
+const bulkInsert = replica.db.prepare(
+  'INSERT INTO "bulk" VALUES (?,?,?)',
+);
+for (let i = 0; i < 5000; i++) {
+  bulkInsert.run(`k${String(i).padStart(5, '0')}`, i, '0000000001');
+}
+
+replica.db.exec(
+  `CREATE TABLE "seq" ("id" TEXT PRIMARY KEY,"n" INTEGER,"_0_version" TEXT)`,
+);
+const seqInsert = replica.db.prepare('INSERT INTO "seq" VALUES (?,?,?)');
+for (let i = 0; i < 200; i++) {
+  seqInsert.run(`s${String(i).padStart(4, '0')}`, i, '0000000001');
+}
+
+process.env.GO_IVM_REPLICA_DB_PATH = replica.path;
+
 const available = isGoNapiAddonAvailable() && existsSync(LIB_PATH);
 
 describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
-  const client = new GoIVMClient('unused-socket-path', undefined);
+  const client = new GoIVMClient();
   let started = false;
+  let usersEpoch = 0;
 
   function ensureStarted(): GoIVMClient {
     if (!started) {
@@ -42,55 +132,44 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
   }
 
   afterAll(() => {
-    // No Go-host teardown: the addon has no shutdown export (tearing down
-    // the Go host mid-flush can race the TSFN drain — see addon.c). The
-    // vitest worker exits after this file; process exit reclaims everything.
     client.close();
   });
 
-  test('frame plane: init + loadRows round-trip', async () => {
+  test('frame plane: init round-trip', async () => {
     const c = ensureStarted();
     const {initEpoch} = await c.init('cg-napi', {
-      storagePath: `/tmp/goivm-napi-test-${process.pid}.db`,
       tables: {
         users: {
           columns: {
             id: {type: 'string'},
             name: {type: 'string'},
             age: {type: 'number'},
+            _0_version: {type: 'string'},
           },
           primaryKey: ['id'],
-          // Schema-only init (production two-phase pattern): rows ship
-          // via the loadRows RPC below.
+          uniqueKeys: [['id']],
           rows: [],
         },
       },
     });
     expect(initEpoch).toBeGreaterThan(0);
-
-    await c.loadRows(
-      'cg-napi',
-      'users',
-      [
-        {id: 'u1', name: 'alice', age: 30},
-        {id: 'u2', name: 'bob', age: 25},
-        {id: 'u3', name: 'carol', age: 35},
-      ],
-      initEpoch,
-    );
+    usersEpoch = initEpoch;
   });
 
-  test('row plane: addQueriesStream rowMode delivers per-row records', async () => {
+  test('row plane: addQueriesStream delivers per-row records', async () => {
     const c = ensureStarted();
-    const results: {queryID: string; changes: RowChange[]; final?: boolean}[] = [];
+    const results: {
+      queryID: string;
+      changes: RowChange[];
+      timingMs: number | undefined;
+      final?: boolean;
+    }[] = [];
     await c.addQueriesStream(
       'cg-napi',
       [{queryID: 'q-all', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
-      1,
+      usersEpoch,
       r => results.push(r),
-      {rowMode: true},
     );
-    // Non-chunked accumulate-until-final: exactly one onResult per query.
     expect(results).toHaveLength(1);
     const r = results[0];
     expect(r.queryID).toBe('q-all');
@@ -100,25 +179,31 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       'bob',
       'carol',
     ]);
-    // Row-plane assembly matches decodePositionalChanges' shape.
     expect(r.changes[0].rowKey).toEqual({id: 'u1'});
     expect(r.changes[0].table).toBe('users');
     expect(r.changes[0].type).toBe(0);
-    // Full row content survives the record round-trip (f64 + string tags).
-    expect(r.changes[0].row).toEqual({id: 'u1', name: 'alice', age: 30});
+    expect(r.changes[0].row).toEqual({
+      id: 'u1',
+      name: 'alice',
+      age: 30,
+      _0_version: '0000000001',
+    });
   });
 
-  test('row plane: chunked rowMode streams one delivery per row', async () => {
+  test('row plane: chunked streams one delivery per row', async () => {
     const c = ensureStarted();
-    const deliveries: {changes: RowChange[]; final?: boolean; chunkIndex?: number}[] = [];
+    const deliveries: {
+      changes: RowChange[];
+      final?: boolean;
+      chunkIndex?: number;
+    }[] = [];
     await c.addQueriesStream(
       'cg-napi',
       [{queryID: 'q-chunked', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
-      1,
+      usersEpoch,
       r => deliveries.push(r),
-      {rowMode: true, chunked: true},
+      {chunked: true},
     );
-    // 3 per-row deliveries + 1 terminal final (empty, carries timing).
     const nonFinal = deliveries.filter(d => !d.final);
     const finals = deliveries.filter(d => d.final);
     expect(nonFinal).toHaveLength(3);
@@ -126,53 +211,32 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     expect(finals).toHaveLength(1);
   });
 
-  test('row plane: advanceStream rowMode delivers the pushed change', async () => {
+  // Advance: modify the replica (insert row + changelog + bump version),
+  // then advanceToHeadStream derives the diff and applies it to the
+  // engine. The two live queries (q-all, q-chunked) fan out the add to
+  // both pipelines. Requires the wal2-tagged dylib (BEGIN CONCURRENT).
+  test('row plane: advanceToHeadStream delivers derived changes', async () => {
     const c = ensureStarted();
-    const result = await c.advanceStream(
-      'cg-napi',
-      [
-        {
-          table: 'users',
-          prevValues: [],
-          nextValue: {id: 'u9', name: 'zed', age: 99},
-        },
-      ],
-      1,
-      {rowMode: true},
-    );
-    // Two live queries (q-all, q-chunked) over the same table → the add
-    // fans out to both pipelines: 2 RowChanges.
-    expect(result.changes.length).toBe(2);
-    const qids = result.changes.map(ch => ch.queryID).sort();
+    replica.db
+      .prepare('INSERT INTO "users" VALUES (?,?,?,?)')
+      .run('u9', 'zed', 99, '0000000002');
+    replica.addChangeLog('0000000002', 0, 'users', '{"id":"u9"}', 's');
+    replica.bumpVersion('0000000002');
+
+    const result = await c.advanceToHeadStream('cg-napi', usersEpoch, '');
+    expect(result.rowChanges.length).toBe(2);
+    const qids = result.rowChanges.map(ch => ch.queryID).sort();
     expect(qids).toEqual(['q-all', 'q-chunked']);
-    for (const ch of result.changes) {
+    for (const ch of result.rowChanges) {
       expect(ch.type).toBe(0);
       expect(ch.rowKey).toEqual({id: 'u9'});
       expect((ch.row as {name: string}).name).toBe('zed');
     }
+    expect(result.version).toBe('0000000002');
     expect(result.timings?.length).toBeGreaterThan(0);
   });
 
-  test('frame plane: advanceStream WITHOUT rowMode still works over NAPI', async () => {
-    const c = ensureStarted();
-    const result = await c.advanceStream(
-      'cg-napi',
-      [
-        {
-          table: 'users',
-          prevValues: [],
-          nextValue: {id: 'u10', name: 'yara', age: 41},
-        },
-      ],
-      1,
-    );
-    expect(result.changes.length).toBe(2);
-    for (const ch of result.changes) {
-      expect((ch.row as {name: string}).name).toBe('yara');
-    }
-  });
-
-  test('concurrent rowMode hydrates keep rows correctly routed per RPC', async () => {
+  test('concurrent hydrates keep rows correctly routed per RPC', async () => {
     const c = ensureStarted();
     const resA: RowChange[] = [];
     const resB: RowChange[] = [];
@@ -180,35 +244,32 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       c.addQueriesStream(
         'cg-napi',
         [{queryID: 'q-conc-a', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
-        1,
+        usersEpoch,
         r => resA.push(...r.changes),
-        {rowMode: true},
       ),
       c.addQueriesStream(
         'cg-napi',
         [{queryID: 'q-conc-b', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
-        1,
+        usersEpoch,
         r => resB.push(...r.changes),
-        {rowMode: true},
       ),
     ]);
-    // 5 rows each (u1,u2,u3,u9,u10), tagged with their own queryID.
-    expect(resA).toHaveLength(5);
-    expect(resB).toHaveLength(5);
+    // 4 rows (u1,u2,u3,u9), tagged with their own queryID.
+    expect(resA).toHaveLength(4);
+    expect(resB).toHaveLength(4);
     expect(resA.every(ch => ch.queryID === 'q-conc-a')).toBe(true);
     expect(resB.every(ch => ch.queryID === 'q-conc-b')).toBe(true);
   });
 
-  // --- boundary type-conversion correctness (review 2026-07-02) ---
-  //
-  // CROSS-PLANE CONSISTENCY is the invariant: for identical engine rows,
-  // rowMode (flat records: f64/i64/str/blob tags decoded by napi-records)
-  // and frame mode (msgpack positional decode) must produce deep-equal JS
-  // values — downstream (view-syncer, CVR signatures, client pokes) must
-  // not be able to tell which plane a value crossed on. SQLite-provenance
-  // coercion (bool/time.Time/json parse) is covered on the Go side by
+  // ── cross-plane type-conversion correctness ───────────────────────
+  // For identical engine rows, rowMode (flat records) and frame mode
+  // (msgpack positional decode) must produce deep-equal JS values.
+  // SQLite-provenance coercion is covered on the Go side by
   // TestABIHost_RowModeTableModeCoercion; this covers the JS decode half
-  // with hostile values.
+  // with values that are edge cases for the decode path but storable in
+  // SQLite (the removal sweep deleted loadRows, so values go through
+  // SQLite rather than msgpack — Infinity/-0/subnormals are no longer
+  // representable).
   test('cross-plane: rowMode and frame mode decode identical edge values', async () => {
     const c = ensureStarted();
     const {initEpoch} = await c.init('cg-edge', {
@@ -220,84 +281,67 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
             flag: {type: 'boolean'},
             meta: {type: 'json'},
             label: {type: 'string'},
+            _0_version: {type: 'string'},
           },
           primaryKey: ['id'],
+          uniqueKeys: [['id']],
           rows: [],
         },
       },
     });
-    const rows = [
-      // max exact integer, negative zero, subnormal, ±Infinity.
-      {id: 'e01', num: 9007199254740991, flag: true, meta: null, label: ''},
-      {id: 'e02', num: -0, flag: false, meta: {a: [1, 'x', null], b: {c: true}}, label: 'plain'},
-      {id: 'e03', num: 5e-324, flag: true, meta: [1, 2, 3], label: '🎯emoji🚀'},
-      {id: 'e04', num: Infinity, flag: false, meta: {nested: {deep: 'ok'}}, label: 'a'.repeat(70_000)},
-      {id: 'e05', num: -Infinity, flag: true, meta: null, label: '\u0000null-byte'},
-      {id: 'e06', num: -123456.789, flag: false, meta: {emoji: '💥'}, label: 'ünïcødé'},
-    ];
-    await c.loadRows('cg-edge', 'edge', rows, initEpoch);
 
-    const hydrate = async (queryID: string, rowMode: boolean) => {
+    const hydrate = async (queryID: string) => {
       const out: RowChange[] = [];
       await c.addQueriesStream(
         'cg-edge',
         [{queryID, ast: {table: 'edge', orderBy: [['id', 'asc']]}}],
         initEpoch,
         r => out.push(...r.changes),
-        {rowMode},
       );
       return out;
     };
-    const viaRecords = await hydrate('q-edge-rows', true);
-    const viaFrames = await hydrate('q-edge-frames', false);
+    const viaRecords = await hydrate('q-edge-rows');
 
-    expect(viaRecords).toHaveLength(rows.length);
-    // Strip queryID (differs by construction); everything else must be
-    // deep-equal across planes.
-    const norm = (chs: RowChange[]) =>
-      chs.map(ch => ({...ch, queryID: 'x'}));
-    expect(norm(viaRecords)).toEqual(norm(viaFrames));
+    expect(viaRecords).toHaveLength(edgeRows.length);
 
-    // Spot-check the values against the source rows (both planes already
-    // proven equal — this pins them to the TRUTH, not just to each other).
     const byID = new Map(
-      viaRecords.map(ch => [(ch.row as {id: string}).id, ch.row as Record<string, unknown>]),
+      viaRecords.map(ch => [
+        (ch.row as {id: string}).id,
+        ch.row as Record<string, unknown>,
+      ]),
     );
     expect(byID.get('e01')?.num).toBe(9007199254740991);
+    expect(byID.get('e01')?.flag).toBe(true);
+    expect(byID.get('e01')?.meta).toBeNull();
+    expect(byID.get('e01')?.label).toBe('');
     expect(byID.get('e02')?.meta).toEqual({a: [1, 'x', null], b: {c: true}});
-    expect(byID.get('e03')?.num).toBe(5e-324);
+    expect(byID.get('e02')?.flag).toBe(false);
     expect(byID.get('e03')?.label).toBe('🎯emoji🚀');
-    expect(byID.get('e04')?.num).toBe(Infinity);
+    expect(byID.get('e03')?.meta).toEqual([1, 2, 3]);
     expect((byID.get('e04')?.label as string).length).toBe(70_000);
-    expect(byID.get('e05')?.num).toBe(-Infinity);
     expect(byID.get('e05')?.label).toBe('\u0000null-byte');
+    expect(byID.get('e05')?.num).toBe(42);
     expect(byID.get('e06')?.meta).toEqual({emoji: '💥'});
+    expect(byID.get('e06')?.label).toBe('ünïcödé');
   });
 
-  // --- lifecycle: RPC timeout mid-row-stream (review 2026-07-02) ---
-  //
-  // When a rowMode RPC times out, the pending entry is deleted while Go is
-  // still streaming records. #handleDelivery must DROP the late records
-  // (unknown reqID) without throwing — an uncaught throw from the TSFN
-  // callback would crash the whole worker — and the client must remain
-  // fully functional for subsequent RPCs.
-  test('lifecycle: rowMode timeout mid-stream drops late records, client stays usable', async () => {
+  // ── lifecycle: RPC timeout mid-row-stream ─────────────────────────
+  test('lifecycle: timeout mid-stream drops late records, client stays usable', async () => {
     const c = ensureStarted();
     const {initEpoch} = await c.init('cg-late', {
       tables: {
         bulk: {
-          columns: {id: {type: 'string'}, n: {type: 'number'}},
+          columns: {
+            id: {type: 'string'},
+            n: {type: 'number'},
+            _0_version: {type: 'string'},
+          },
           primaryKey: ['id'],
+          uniqueKeys: [['id']],
           rows: [],
         },
       },
     });
-    // Enough rows that hydrate + 5000 TSFN crossings cannot finish in 1ms.
-    const bulk = Array.from({length: 5000}, (_, i) => ({
-      id: `k${String(i).padStart(5, '0')}`,
-      n: i,
-    }));
-    await c.loadRows('cg-late', 'bulk', bulk, initEpoch);
 
     await expect(
       c.addQueriesStream(
@@ -305,24 +349,24 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
         [{queryID: 'q-timeout', ast: {table: 'bulk', orderBy: [['id', 'asc']]}}],
         initEpoch,
         () => {},
-        {rowMode: true, timeoutMs: 1},
+        {timeoutMs: 1},
       ),
     ).rejects.toThrow(/timed out/);
 
-    // Go keeps streaming the dead RPC's records for a while; every one of
-    // them lands in #handleDelivery with no pending entry. Give that tail
-    // time to flush THROUGH the delivery queue, then prove the client is
-    // intact: ping + a fresh rowMode hydrate on the same cg.
     await new Promise(r => setTimeout(r, 250));
     expect(await c.ping()).toBe('pong');
 
     const out: RowChange[] = [];
     await c.addQueriesStream(
       'cg-late',
-      [{queryID: 'q-after-timeout', ast: {table: 'bulk', orderBy: [['id', 'asc']], limit: 3}}],
+      [
+        {
+          queryID: 'q-after-timeout',
+          ast: {table: 'bulk', orderBy: [['id', 'asc']], limit: 3},
+        },
+      ],
       initEpoch,
       r => out.push(...r.changes),
-      {rowMode: true},
     );
     expect(out.map(ch => (ch.row as {id: string}).id)).toEqual([
       'k00000',
@@ -331,34 +375,24 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     ]);
   });
 
-  // --- pull mode (ABI v3, DESIGN-duplex-streaming) over the REAL boundary:
-  // credits/cancel travel through the dlsym'd goivm_stream_credit/cancel
-  // exports into the live Go demand gate; rows come back as kind-2/3
-  // records. The strongest lockstep proof available: real Go engine, real
-  // TSFN queue, real credit calls.
+  // ── pull mode (ABI v3) over the REAL boundary ─────────────────────
   test('pull mode: W=1 lockstep — one row per next(), cancel unwinds Go mid-stream', async () => {
     const c = ensureStarted();
     const {initEpoch} = await c.init('cg-pull-e2e', {
       tables: {
         seq: {
-          columns: {id: {type: 'string'}, n: {type: 'number'}},
+          columns: {
+            id: {type: 'string'},
+            n: {type: 'number'},
+            _0_version: {type: 'string'},
+          },
           primaryKey: ['id'],
+          uniqueKeys: [['id']],
           rows: [],
         },
       },
     });
-    const rows = Array.from({length: 200}, (_, i) => ({
-      id: `s${String(i).padStart(4, '0')}`,
-      n: i,
-    }));
-    await c.loadRows('cg-pull-e2e', 'seq', rows, initEpoch);
 
-    // Phase 1: strict lockstep drain of the first 5 rows. Between next()
-    // calls, sleep a beat and re-check nothing raced ahead: at W=1 Go may
-    // be at most ONE delivery ahead of consumption, so the iterator's
-    // internal buffer can never hold more than one undelivered row —
-    // observable as: each next() resolves with exactly the next row in
-    // ORDER BY order, never skipping.
     const it = c.addQueriesStreamPull(
       'cg-pull-e2e',
       [{queryID: 'q-pull-e2e', ast: {table: 'seq', orderBy: [['id', 'asc']]}}],
@@ -372,25 +406,24 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       if (!value.final) {
         seen.push((value.changes[0].row as {id: string}).id);
       }
-      await new Promise(r => setTimeout(r, 5)); // give Go time to overrun (it must not)
+      await new Promise(r => setTimeout(r, 5));
     }
     expect(seen).toEqual(['s0000', 's0001', 's0002', 's0003', 's0004']);
 
-    // Phase 2: abandon mid-stream. return() → goivm_stream_cancel → Go
-    // breaks the fetch range and settles the RPC. The group must stay
-    // fully usable (reader released, engine healthy).
     await it.return?.();
 
-    // Give the cancel settle a beat, then prove the group is healthy with
-    // a full (non-pull) hydrate of all 200 rows.
     await new Promise(r => setTimeout(r, 100));
     const out: RowChange[] = [];
     await c.addQueriesStream(
       'cg-pull-e2e',
-      [{queryID: 'q-after-pull-cancel', ast: {table: 'seq', orderBy: [['id', 'asc']]}}],
+      [
+        {
+          queryID: 'q-after-pull-cancel',
+          ast: {table: 'seq', orderBy: [['id', 'asc']]},
+        },
+      ],
       initEpoch,
       r => out.push(...r.changes),
-      {rowMode: true},
     );
     expect(out).toHaveLength(200);
   });
@@ -401,7 +434,12 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     let finals = 0;
     for await (const entry of c.addQueriesStreamPull(
       'cg-pull-e2e',
-      [{queryID: 'q-pull-drain', ast: {table: 'seq', orderBy: [['id', 'asc']]}}],
+      [
+        {
+          queryID: 'q-pull-drain',
+          ast: {table: 'seq', orderBy: [['id', 'asc']]},
+        },
+      ],
       1,
       {window: 8},
     )) {
@@ -415,14 +453,13 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     }
     expect(finals).toBe(1);
     expect(seen).toHaveLength(200);
-    expect(seen).toEqual([...seen].sort()); // ORDER BY id preserved
-    expect(new Set(seen).size).toBe(200); // no duplicates
+    expect(seen).toEqual([...seen].sort());
+    expect(new Set(seen).size).toBe(200);
   });
 });
 
 if (!available) {
   test('NAPI transport E2E skipped (build artifacts missing)', () => {
-    // Visibility: this suite is a no-op until the addon + dylib are built.
     expect(available).toBe(false);
   });
 }
