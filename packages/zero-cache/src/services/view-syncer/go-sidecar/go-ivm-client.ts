@@ -91,7 +91,6 @@ export type TableData = {
 };
 
 export type InitParams = {
-  dbPath?: string;
   storagePath?: string;
   tables: Record<string, TableData>;
 };
@@ -1122,43 +1121,8 @@ export class GoIVMClient {
     );
   }
 
-  // Hydrates a new query — initial state encoded as ADDs. `timingMs` feeds
-  // TS's adaptive advance circuit-breaker.
-  async addQuery(
-    clientGroupID: string,
-    queryID: string,
-    ast: unknown,
-    initEpoch: number,
-    opts?: CallOptions,
-  ): Promise<HydrateResult> {
-    const result = (await this.#call(
-      'addQuery',
-      {clientGroupID, queryID, ast, initEpoch},
-      {timeoutMs: opts?.timeoutMs ?? 60_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
-    )) as {changes: RowChange[]; timingMs?: number};
-    return {changes: result.changes ?? [], timingMs: result.timingMs};
-  }
-
-  // Builds all pipelines, hydrates them in parallel goroutines, returns
-  // results in input order with per-query `timingMs`.
-  async addQueries(
-    clientGroupID: string,
-    queries: {queryID: string; ast: unknown}[],
-    initEpoch: number,
-    opts?: CallOptions,
-  ): Promise<HydrateResult[]> {
-    const result = (await this.#call(
-      'addQueries',
-      {clientGroupID, queries, initEpoch},
-      {timeoutMs: opts?.timeoutMs ?? 120_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
-    )) as {results: {changes: RowChange[]; timingMs?: number}[]};
-    return (result.results ?? []).map(r => ({
-      changes: r.changes ?? [],
-      timingMs: r.timingMs,
-    }));
-  }
-
-  // Like {@link addQueries} but `onResult` fires per query as each
+  // Batch hydrate over the streaming RPC: Go builds all pipelines and
+  // hydrates them in parallel goroutines; `onResult` fires per query as each
   // Go goroutine finishes (in completion order, not input order).
   // Resolves on the terminal "done" frame. Cuts tail latency on batches
   // with uneven hydration costs.
