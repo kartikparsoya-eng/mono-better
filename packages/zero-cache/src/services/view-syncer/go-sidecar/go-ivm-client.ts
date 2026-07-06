@@ -159,6 +159,15 @@ export type CallOptions = {
    * still route through onPartial. See napi-records.ts.
    */
   onRow?: (change: RowChange) => void;
+  /**
+   * Invoked synchronously with the allocated RPC id just before the
+   * request is sent. Pull-mode streams (ABI v3) use it to learn the reqID
+   * for goivm_stream_credit/goivm_stream_cancel top-up and cancel calls.
+   * (The OPENING window never uses this — it rides the request params as
+   * pullWindow, because a credit call racing ahead of Go-side gate
+   * registration is a silent no-op and would strand the stream.)
+   */
+  onStreamOpen?: (reqID: number) => void;
 };
 
 /** Per-(table, op) timing reported by Go for an advance call. */
@@ -1197,6 +1206,197 @@ export class GoIVMClient {
     handler.finish();
   }
 
+  /**
+   * Pull-mode batch hydrate (ABI v3, DESIGN-duplex-streaming): returns an
+   * AsyncIterableIterator over per-delivery entries — one row-bearing entry
+   * per Go-side gated delivery (chunkSize=1 ⇒ one row), plus each query's
+   * ungated terminal `final` entry. Go produces ONLY as this iterator is
+   * consumed: the opening window W rides the request (`pullWindow`), the
+   * iterator grants top-ups at the low-water mark (W/2) as entries are
+   * served, and `return()`/`throw()` cancels the Go producer mid-stream
+   * (cursor close, pool-reader release) via goivm_stream_cancel.
+   *
+   * Requires the NAPI transport (throws otherwise — callers gate on
+   * goPullHydrate(config), which implies transport=napi + rowMode).
+   *
+   * Timeout: pull duration is CONSUMER-driven, so the blanket RPC timeout
+   * defaults OFF (a legit slow consumer must not fire it). Liveness is
+   * bounded on the Go side instead: no grants for
+   * GO_IVM_PULL_IDLE_TIMEOUT_SEC (60s default) auto-cancels the stream
+   * (terminal error frame → this iterator throws), and a host death
+   * sweeps every pending RPC (#napiFatal).
+   *
+   * Error semantics (I3 all-or-nothing): any RPC rejection — including the
+   * Go-side idle-timeout cancel — surfaces as a throw from next(); the
+   * caller abandons the whole hydrate exactly like an addQueriesStream
+   * rejection today. After the CONSUMER cancels via return()/throw(), the
+   * RPC's own bookkeeping rejection ("cancelled by consumer") is swallowed:
+   * the consumer already knows.
+   */
+  addQueriesStreamPull(
+    clientGroupID: string,
+    queries: {queryID: string; ast: unknown}[],
+    initEpoch: number,
+    opts?: CallOptions & {window?: number},
+  ): AsyncIterableIterator<{
+    queryID: string;
+    changes: RowChange[];
+    timingMs: number | undefined;
+    final: boolean;
+    chunkIndex?: number | undefined;
+  }> {
+    const napi = this.#napi;
+    if (!napi) {
+      throw new Error('addQueriesStreamPull requires the NAPI transport');
+    }
+    const window = Math.max(1, Math.floor(opts?.window ?? 64));
+    const lowWater = Math.max(1, Math.floor(window / 2));
+
+    type Entry = {
+      queryID: string;
+      changes: RowChange[];
+      timingMs: number | undefined;
+      final: boolean;
+      chunkIndex?: number | undefined;
+    };
+    const buffered: Entry[] = [];
+    let wake: (() => void) | null = null;
+    let done = false;
+    let error: Error | null = null;
+    let reqID: number | null = null;
+    // Credit accounting in DELIVERY units (one row-bearing delivery == one
+    // Go-side gate acquire — a fallback frame carrying rows costs one, just
+    // like a row record; final/empty frames are free on both sides).
+    let granted = window; // the opening window rides the request params
+    let consumed = 0;
+    let closed = false; // consumer called return()/throw()
+
+    const notify = () => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+
+    // Reuse the accumulator in chunked+rowMode: every record and every
+    // frame becomes exactly one onResult entry, preserving wire order and
+    // the chunk-order/duplicate-final guards.
+    const handler = createHydrateStreamAccumulator(
+      r => {
+        buffered.push({
+          queryID: r.queryID,
+          changes: r.changes,
+          timingMs: r.timingMs,
+          final: r.final ?? true,
+          chunkIndex: r.chunkIndex,
+        });
+        notify();
+      },
+      {chunked: true, rowMode: true},
+    );
+
+    void this.#call(
+      'addQueriesStream',
+      {clientGroupID, queries, initEpoch, rowMode: true, pullMode: true, pullWindow: window},
+      {
+        timeoutMs: opts?.timeoutMs ?? 0,
+        clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
+        onPartial: handler.onFrame,
+        onRow: handler.onRow,
+        onStreamOpen: id => {
+          reqID = id;
+        },
+      },
+    ).then(
+      () => {
+        // Preserve the accumulator's orphan guard: "done" with a query
+        // that never saw its final chunk is a wire bug, same as the
+        // non-pull path (handler.finish() throws → iterator throws).
+        try {
+          handler.finish();
+          done = true;
+        } catch (e) {
+          if (!closed) {
+            error = e instanceof Error ? e : new Error(String(e));
+          } else {
+            done = true;
+          }
+        }
+        notify();
+      },
+      (e: unknown) => {
+        if (closed) {
+          // Consumer already cancelled; the rejection is Go's bookkeeping
+          // error frame for OUR cancel — not news. Settle quietly.
+          done = true;
+        } else {
+          error = e instanceof Error ? e : new Error(String(e));
+        }
+        notify();
+      },
+    );
+
+    const cancel = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      buffered.length = 0;
+      if (reqID !== null) {
+        // Unparks the Go producer → fetch-range break → operator unwind.
+        // Idempotent; unknown reqID (RPC already settled) is a no-op.
+        napi.streamCancel(reqID);
+      }
+    };
+
+    const iterator: AsyncIterableIterator<Entry> = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next: async (): Promise<IteratorResult<Entry>> => {
+        for (;;) {
+          if (closed) {
+            return {value: undefined, done: true};
+          }
+          const entry = buffered.shift();
+          if (entry !== undefined) {
+            if (entry.changes.length > 0) {
+              consumed += 1;
+              const outstanding = granted - consumed;
+              if (outstanding <= lowWater && reqID !== null && !done && error === null) {
+                const topUp = window - outstanding;
+                granted += topUp;
+                napi.streamCredit(reqID, topUp);
+              }
+            }
+            return {value: entry, done: false};
+          }
+          if (error !== null) {
+            const e = error;
+            error = null;
+            closed = true;
+            throw e;
+          }
+          if (done) {
+            closed = true;
+            return {value: undefined, done: true};
+          }
+          await new Promise<void>(resolve => {
+            wake = resolve;
+          });
+        }
+      },
+      return: (): Promise<IteratorResult<Entry>> => {
+        cancel();
+        return Promise.resolve({value: undefined, done: true});
+      },
+      throw: (e?: unknown): Promise<IteratorResult<Entry>> => {
+        cancel();
+        return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    };
+    return iterator;
+  }
+
   // Single-query hydrate over the STREAMING path. Identical return contract to
   // {@link addQuery}, but routes through addQueriesStream so the result is
   // chunked on the Go side (byte-aware, softChunkBytes ~8MB) instead of shipped
@@ -1583,6 +1783,11 @@ export class GoIVMClient {
       if (opts?.onPartial) entry.onPartial = opts.onPartial;
       if (opts?.onRow) entry.onRow = opts.onRow;
       this.#pending.set(id, entry);
+      // Pull streams learn their reqID here (top-up credits + cancel).
+      // After #pending.set so a synchronous throw inside the callback
+      // cannot orphan the entry; before send so the consumer can never
+      // observe a delivery for an id it doesn't know yet.
+      opts?.onStreamOpen?.(id);
 
       const req: RPCRequest = {jsonrpc: '2.0', method, params, id};
       // Attach the active W3C traceparent if available — Go-side can log

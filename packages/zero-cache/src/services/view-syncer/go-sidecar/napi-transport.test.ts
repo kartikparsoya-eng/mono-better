@@ -330,6 +330,94 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       'k00002',
     ]);
   });
+
+  // --- pull mode (ABI v3, DESIGN-duplex-streaming) over the REAL boundary:
+  // credits/cancel travel through the dlsym'd goivm_stream_credit/cancel
+  // exports into the live Go demand gate; rows come back as kind-2/3
+  // records. The strongest lockstep proof available: real Go engine, real
+  // TSFN queue, real credit calls.
+  test('pull mode: W=1 lockstep — one row per next(), cancel unwinds Go mid-stream', async () => {
+    const c = ensureStarted();
+    const {initEpoch} = await c.init('cg-pull-e2e', {
+      tables: {
+        seq: {
+          columns: {id: {type: 'string'}, n: {type: 'number'}},
+          primaryKey: ['id'],
+          rows: [],
+        },
+      },
+    });
+    const rows = Array.from({length: 200}, (_, i) => ({
+      id: `s${String(i).padStart(4, '0')}`,
+      n: i,
+    }));
+    await c.loadRows('cg-pull-e2e', 'seq', rows, initEpoch);
+
+    // Phase 1: strict lockstep drain of the first 5 rows. Between next()
+    // calls, sleep a beat and re-check nothing raced ahead: at W=1 Go may
+    // be at most ONE delivery ahead of consumption, so the iterator's
+    // internal buffer can never hold more than one undelivered row —
+    // observable as: each next() resolves with exactly the next row in
+    // ORDER BY order, never skipping.
+    const it = c.addQueriesStreamPull(
+      'cg-pull-e2e',
+      [{queryID: 'q-pull-e2e', ast: {table: 'seq', orderBy: [['id', 'asc']]}}],
+      initEpoch,
+      {window: 1},
+    );
+    const seen: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const {value, done} = await it.next();
+      expect(done).toBe(false);
+      if (!value.final) {
+        seen.push((value.changes[0].row as {id: string}).id);
+      }
+      await new Promise(r => setTimeout(r, 5)); // give Go time to overrun (it must not)
+    }
+    expect(seen).toEqual(['s0000', 's0001', 's0002', 's0003', 's0004']);
+
+    // Phase 2: abandon mid-stream. return() → goivm_stream_cancel → Go
+    // breaks the fetch range and settles the RPC. The group must stay
+    // fully usable (reader released, engine healthy).
+    await it.return?.();
+
+    // Give the cancel settle a beat, then prove the group is healthy with
+    // a full (non-pull) hydrate of all 200 rows.
+    await new Promise(r => setTimeout(r, 100));
+    const out: RowChange[] = [];
+    await c.addQueriesStream(
+      'cg-pull-e2e',
+      [{queryID: 'q-after-pull-cancel', ast: {table: 'seq', orderBy: [['id', 'asc']]}}],
+      initEpoch,
+      r => out.push(...r.changes),
+      {rowMode: true},
+    );
+    expect(out).toHaveLength(200);
+  });
+
+  test('pull mode: full drain delivers every row exactly once with W=8', async () => {
+    const c = ensureStarted();
+    const seen: string[] = [];
+    let finals = 0;
+    for await (const entry of c.addQueriesStreamPull(
+      'cg-pull-e2e',
+      [{queryID: 'q-pull-drain', ast: {table: 'seq', orderBy: [['id', 'asc']]}}],
+      1,
+      {window: 8},
+    )) {
+      if (entry.final) {
+        finals++;
+        expect(entry.timingMs).toBeGreaterThan(0);
+        continue;
+      }
+      expect(entry.changes).toHaveLength(1);
+      seen.push((entry.changes[0].row as {id: string}).id);
+    }
+    expect(finals).toBe(1);
+    expect(seen).toHaveLength(200);
+    expect(seen).toEqual([...seen].sort()); // ORDER BY id preserved
+    expect(new Set(seen).size).toBe(200); // no duplicates
+  });
 });
 
 if (!available) {

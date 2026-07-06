@@ -1158,6 +1158,32 @@ export const zeroOptions = {
         `napi-rows); has no effect on the socket transport.`,
       ],
     },
+    pullHydrate: {
+      type: v.boolean().default(false),
+      desc: [
+        `PULL-based hydration over the NAPI transport (ABI v3): Go produces`,
+        `hydrate rows only as the view-syncer consumes them — consumer demand`,
+        `crosses the boundary as credit grants, and abandoning a hydrate`,
+        `mid-stream cancels the Go producer (cursor close, reader release).`,
+        `This is the TS-faithful demand discipline: one next() ⇒ one row,`,
+        `bounded lookahead of {bold goSidecar.pullWindow}.`,
+        ``,
+        `Requires {bold goSidecar.transport=napi} + {bold goSidecar.napiRowMode}`,
+        `and a v3 libgoivm; silently degrades to push delivery otherwise.`,
+        `Off by default (rollout flag — flip per deployment).`,
+      ],
+    },
+    pullWindow: {
+      type: v.number().default(64),
+      desc: [
+        `Pull-hydration lookahead window W ({bold goSidecar.pullHydrate}): Go may`,
+        `run at most W row deliveries ahead of what the view-syncer consumed;`,
+        `credits top back up to W at the W/2 low-water mark. 1 = strict lockstep`,
+        `(literal TS generator semantics, one next() per row — the parity-test`,
+        `pin); 64 (default) keeps identical semantics with 32x fewer park/wake`,
+        `cycles and boundary calls on the hot path.`,
+      ],
+    },
     externallyManaged: {
       type: v.boolean().default(false),
       desc: [

@@ -55,7 +55,12 @@
 // ABI v2: delivery kind 4 (host death) added — the client fatals the worker
 // on receipt, so a v1 library that never emits it must not pair with this
 // addon (the A3 guarantee would silently vanish).
-#define EXPECTED_GOIVM_ABI 2
+// ABI v3: goivm_stream_credit / goivm_stream_cancel added (pull-hydration
+// demand gate — DESIGN-duplex-streaming). Both are DIRECT JS-thread calls
+// into the Go library (leaf-mutex registry lookup; O(1), never blocks,
+// never touches N-API on the Go side) — deliberately NOT routed through
+// the TSFN: credit grants are upstream control flow, not deliveries.
+#define EXPECTED_GOIVM_ABI 3
 // Default TSFN queue bound. Tunable via GOIVM_NAPI_QUEUE_MAX (env, read at
 // start): in row mode a single large advance can fill 8192 by itself (one
 // entry per row), stalling the producing Go goroutine in blocking mode —
@@ -70,6 +75,8 @@ typedef int32_t (*goivm_start_fn)(goivm_deliver_cb cb, void* ctx);
 typedef int32_t (*goivm_send_fn)(const void* data, int32_t len);
 typedef void (*goivm_shutdown_fn)(void);
 typedef int32_t (*goivm_abi_version_fn)(void);
+typedef void (*goivm_stream_credit_fn)(double req_id, int32_t n);
+typedef void (*goivm_stream_cancel_fn)(double req_id);
 
 typedef struct {
   void* dl;
@@ -77,6 +84,8 @@ typedef struct {
   goivm_send_fn send;
   goivm_shutdown_fn shutdown;
   goivm_abi_version_fn abi_version;
+  goivm_stream_credit_fn stream_credit;
+  goivm_stream_cancel_fn stream_cancel;
   napi_threadsafe_function tsfn;
   int started;
 } bridge_state;
@@ -228,8 +237,13 @@ static napi_value Start(napi_env env, napi_callback_info info) {
   g_bridge.shutdown = (goivm_shutdown_fn)dlsym(g_bridge.dl, "goivm_shutdown");
   g_bridge.abi_version =
       (goivm_abi_version_fn)dlsym(g_bridge.dl, "goivm_abi_version");
+  g_bridge.stream_credit =
+      (goivm_stream_credit_fn)dlsym(g_bridge.dl, "goivm_stream_credit");
+  g_bridge.stream_cancel =
+      (goivm_stream_cancel_fn)dlsym(g_bridge.dl, "goivm_stream_cancel");
   if (!g_bridge.start || !g_bridge.send || !g_bridge.shutdown ||
-      !g_bridge.abi_version) {
+      !g_bridge.abi_version || !g_bridge.stream_credit ||
+      !g_bridge.stream_cancel) {
     dlclose(g_bridge.dl);
     g_bridge.dl = NULL;
     return throw_error(env, "libgoivm missing goivm_* symbols (wrong library?)");
@@ -325,11 +339,57 @@ static napi_value AbiVersion(napi_env env, napi_callback_info info) {
   return out;
 }
 
+// streamCredit(reqID: number, n: number) — grant n pull credits to the
+// in-flight pullMode RPC identified by reqID (ABI v3). Direct call into
+// the Go library on the JS thread: goivm_stream_credit is a leaf-mutex
+// registry lookup + cond broadcast — O(1), allocation-free, never blocks,
+// never re-enters N-API — so no TSFN round-trip is needed or wanted
+// (credits are upstream control flow; queueing them behind deliveries
+// would deadlock the very backpressure they implement). Unknown reqIDs
+// are a silent no-op on the Go side (RPC already settled).
+static napi_value StreamCredit(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_status status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  if (status != napi_ok || argc < 2) {
+    return throw_error(env, "streamCredit(reqID, n) requires 2 arguments");
+  }
+  if (!g_bridge.started) return throw_error(env, "bridge not started");
+  double req_id = 0;
+  status = napi_get_value_double(env, argv[0], &req_id);
+  if (status != napi_ok) return throw_error(env, "reqID must be a number");
+  int32_t n = 0;
+  status = napi_get_value_int32(env, argv[1], &n);
+  if (status != napi_ok) return throw_error(env, "n must be a number");
+  g_bridge.stream_credit(req_id, n);
+  return NULL;
+}
+
+// streamCancel(reqID: number) — cancel the pull gate for reqID (the JS
+// iterator's .return()/.throw() crossing the boundary, ABI v3). Same
+// direct-call rationale and no-op semantics as streamCredit; idempotent.
+static napi_value StreamCancel(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_status status = napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  if (status != napi_ok || argc < 1) {
+    return throw_error(env, "streamCancel(reqID) requires 1 argument");
+  }
+  if (!g_bridge.started) return throw_error(env, "bridge not started");
+  double req_id = 0;
+  status = napi_get_value_double(env, argv[0], &req_id);
+  if (status != napi_ok) return throw_error(env, "reqID must be a number");
+  g_bridge.stream_cancel(req_id);
+  return NULL;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor props[] = {
       {"start", NULL, Start, NULL, NULL, NULL, napi_default, NULL},
       {"send", NULL, Send, NULL, NULL, NULL, napi_default, NULL},
       {"abiVersion", NULL, AbiVersion, NULL, NULL, NULL, napi_default, NULL},
+      {"streamCredit", NULL, StreamCredit, NULL, NULL, NULL, napi_default, NULL},
+      {"streamCancel", NULL, StreamCancel, NULL, NULL, NULL, napi_default, NULL},
   };
   napi_status status = napi_define_properties(
       env, exports, sizeof(props) / sizeof(props[0]), props);

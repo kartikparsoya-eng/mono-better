@@ -15,7 +15,9 @@ function fakeAddon(send: (payload: Buffer) => number): GoNapiAddon {
   return {
     start: () => {},
     send,
-    abiVersion: () => 2,
+    abiVersion: () => 3,
+    streamCredit: () => {},
+    streamCancel: () => {},
   };
 }
 

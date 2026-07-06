@@ -71,6 +71,8 @@ import {
   isGoPrimaryTrigger,
   isGoLeanPrimary,
   goNapiRowMode,
+  goPullHydrate,
+  goPullWindow,
   goDriftAuditIntervalMs,
   goDriftAuditSqlGroundTruth,
 } from './go-sidecar/go-compute-backend.ts';
@@ -1566,7 +1568,15 @@ export class PipelineDriver {
             // its GO_IVM_APP_ID env was set inconsistently (externally-managed).
             // rowMode: per-row delivery on the in-process (napi) transport —
             // the client degrades it to frames when a socket came up instead.
-            {appID: this.#shardID.appID, rowMode: goNapiRowMode(config)},
+            // pullHydrate/pullWindow: ABI v3 credit-gated hydration (see
+            // goHydrateBatchStream's pull branch); goPullHydrate() is false
+            // unless explicitly enabled AND the row plane can engage.
+            {
+              appID: this.#shardID.appID,
+              rowMode: goNapiRowMode(config),
+              pullHydrate: goPullHydrate(config),
+              pullWindow: goPullWindow(config),
+            },
           )
         : null;
 
@@ -2298,6 +2308,72 @@ export class PipelineDriver {
 
     const byQueryID = new Map<string, (typeof queries)[number]>();
     for (const q of userQueries) byQueryID.set(q.queryID, q);
+
+    // PULL path (ABI v3, DESIGN-duplex-streaming): Go produces each row only
+    // as this generator's consumer demands it — the for-await below IS the
+    // demand clock (view-syncer pulls one entry, forwards to the pokers,
+    // awaits downstream, pulls the next; Go stays ≤ pullWindow deliveries
+    // ahead). Abandoning this generator mid-stream (consumer return())
+    // closes the inner iterator, which cancels the Go producer (cursor
+    // close, pool-reader release) via goivm_stream_cancel. Sub-batching is
+    // unnecessary here: heap is bounded by the credit window, not by
+    // buffering whole query results, and one RPC per batch keeps Go's
+    // per-query goroutines (no lane pool in pull mode) maximally parallel
+    // while the single ordered queue interleaves their rows.
+    if (this.#goBackend!.pullHydrateEnabled) {
+      const stream = this.#goBackend!.hydrateManyStreamPull(
+        userQueries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
+      );
+      try {
+        for await (const r of stream) {
+          const q = byQueryID.get(r.queryID);
+          if (!q) continue;
+          // Same per-entry processing as the push path below: stub
+          // registration once per query (real timingMs lands on the
+          // terminal entry), signature tracking, final-gated pruning.
+          if (!this.#pipelines.has(q.queryID) || r.final) {
+            this.#pipelines.set(q.queryID, {
+              input: {
+                destroy() {},
+                fetch: () => ({} as never),
+                cleanup: () => ({} as never),
+                getSchema: () => ({} as never),
+                setOutput: () => {},
+              } as unknown as Input,
+              hydrationTimeMs: r.timingMs ?? 0,
+              transformedAst: q.ast,
+              transformationHash: q.transformationHash,
+              companions: [],
+              ...(q.queryName !== undefined && {queryName: q.queryName}),
+            });
+          }
+          const self = this;
+          const changesArr = r.changes as RowChange[];
+          function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
+            for (const rc of changesArr) {
+              yield self.#goRowChangeToRowChange(rc);
+            }
+          }
+          yield {
+            queryID: q.queryID,
+            changes: this.#trackRowSetSignatures(yieldGoHydration()),
+            timingMs: r.timingMs,
+            final: r.final,
+          };
+          if (r.final) byQueryID.delete(q.queryID);
+        }
+      } catch (e) {
+        // Finding 9: purge partially-accumulated XOR signatures for every
+        // query that never reached its final entry (see the push path's
+        // error branch below for the full rationale). Applies to iterator
+        // throws too: idle-timeout cancel, sidecar restart, wire errors.
+        for (const queryID of byQueryID.keys()) {
+          this.#rowSetSignatures.delete(queryID);
+        }
+        throw e;
+      }
+      return;
+    }
 
     for (
       let batchStart = 0;

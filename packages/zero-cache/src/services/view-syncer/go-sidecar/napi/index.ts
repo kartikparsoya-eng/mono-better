@@ -23,6 +23,20 @@ export type GoNapiAddon = {
   send(payload: Buffer): number;
   /** ABI version of the loaded library; -1 before start. */
   abiVersion(): number;
+  /**
+   * Grant `n` pull credits to the in-flight pullMode RPC `reqID` (ABI v3,
+   * DESIGN-duplex-streaming). Direct synchronous call into the Go library
+   * — O(1) leaf-mutex registry op, never blocks the JS thread. Unknown
+   * reqID is a silent no-op (RPC already settled).
+   */
+  streamCredit(reqID: number, n: number): void;
+  /**
+   * Cancel the pull gate for `reqID` — the AsyncIterator's
+   * .return()/.throw() crossing the boundary. Go unwinds the producer
+   * (cursor close, pool-reader release) and settles the RPC with a
+   * terminal error frame. Idempotent; unknown reqID is a no-op.
+   */
+  streamCancel(reqID: number): void;
   // NOTE: no shutdown() — removed (scale review). Calling goivm_shutdown on
   // the JS thread deadlocks against TSFN backpressure and racing deliveries
   // are a use-after-free; the Go host lives until process exit (see addon.c).

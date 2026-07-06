@@ -76,6 +76,16 @@ export class GoComputeBackend {
    * checking which transport actually came up.
    */
   readonly #rowMode: boolean;
+  /**
+   * Pull-based hydration (ABI v3): batch hydrates go through
+   * {@link hydrateManyStreamPull} — Go produces rows only as the returned
+   * iterator is consumed. Requires #rowMode + the napi transport; the
+   * client throws if armed without them, so config gating
+   * (goPullHydrate) must imply both.
+   */
+  readonly #pullHydrate: boolean;
+  /** Pull lookahead window W (see zero-config goSidecar.pullWindow). */
+  readonly #pullWindow: number;
   #initialized = false;
   #initEpoch = -1;
   /**
@@ -112,6 +122,8 @@ export class GoComputeBackend {
       loadBatchRows?: number;
       appID?: string;
       rowMode?: boolean;
+      pullHydrate?: boolean;
+      pullWindow?: number;
     },
   ) {
     this.#manager = manager;
@@ -119,6 +131,8 @@ export class GoComputeBackend {
     this.#getCurrentTables = getCurrentTables;
     this.#getCurrentQueries = getCurrentQueries;
     this.#rowMode = options?.rowMode ?? false;
+    this.#pullHydrate = (options?.pullHydrate ?? false) && this.#rowMode;
+    this.#pullWindow = Math.max(1, Math.floor(options?.pullWindow ?? 64));
     // O2: send the appID on the advanceToHead wire so the sidecar uses the
     // SHARD's appID for its snapshotter's permissions-table watch instead of
     // relying solely on the GO_IVM_APP_ID env (which an externally-managed
@@ -281,6 +295,43 @@ export class GoComputeBackend {
       // caller actually set it (chunked: undefined ≠ absent).
       return this.#client().addQueriesStream(this.#clientGroupID, queries, this.#sidecarInitEpoch, guardedOnResult, {...this.#cgOpts(), ...(opts?.chunked !== undefined ? {chunked: opts.chunked} : {}), rowMode: this.#rowMode});
     });
+  }
+
+  /** Whether batch hydrates should use the pull path (config + transport). */
+  get pullHydrateEnabled(): boolean {
+    return this.#pullHydrate;
+  }
+
+  /**
+   * Pull-mode batch hydrate (ABI v3): Go produces rows only as the returned
+   * iterator is consumed; return()/throw() cancels the Go producer.
+   *
+   * NO #withReinitRetry here — deliberately. The same Finding-9 logic that
+   * forbids replaying a partially-delivered hydrateManyStream applies from
+   * the FIRST entry: the consumer processes entries as they arrive, so a
+   * mid-stream sidecar restart is never replay-safe. A restart rejects the
+   * in-flight RPC → the iterator throws → the caller's hydrate-failure
+   * path re-hydrates from a clean slate (exactly the partially-delivered
+   * abort path today).
+   */
+  hydrateManyStreamPull(
+    queries: {queryID: string; ast: QueryAST}[],
+  ): AsyncIterableIterator<{
+    queryID: string;
+    changes: unknown[];
+    timingMs: number | undefined;
+    final: boolean;
+    chunkIndex?: number | undefined;
+  }> {
+    if (!this.#pullHydrate) {
+      throw new Error('hydrateManyStreamPull: pull hydration is not enabled');
+    }
+    return this.#client().addQueriesStreamPull(
+      this.#clientGroupID,
+      queries,
+      this.#sidecarInitEpoch,
+      {...this.#cgOpts(), window: this.#pullWindow},
+    );
   }
 
   // Push-mode advance (streaming): ship a SnapshotChange diff to Go.
@@ -948,6 +999,26 @@ export function goNapiRowMode(
   );
 }
 
+// Whether batch hydrates should use PULL delivery (ABI v3): explicit opt-in
+// (schema default false — rollout flag) AND the row plane must be able to
+// engage (napi + rowMode), since credits can only flow over the in-process
+// boundary. Everywhere this is false the behavior is exactly today's push.
+export function goPullHydrate(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): boolean {
+  return config?.goSidecar?.pullHydrate === true && goNapiRowMode(config);
+}
+
+// Pull lookahead window W (see zero-config goSidecar.pullWindow). Clamped
+// to ≥ 1: W=0 would strand the stream (zero opening credit and no consumer
+// deliveries to trigger top-ups).
+export function goPullWindow(
+  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+): number {
+  const w = config?.goSidecar?.pullWindow ?? 64;
+  return Math.max(1, Math.floor(w));
+}
+
 // Returns 0 when the audit should be off — either Go is disabled, shadow mode
 // already covers it, or the interval is explicitly zeroed in config.
 export function goDriftAuditIntervalMs(
@@ -985,7 +1056,7 @@ export function createGoComputeBackend(
   clientGroupID: string,
   getCurrentTables: () => Record<string, TableData>,
   getCurrentQueries: GetCurrentQueries,
-  options?: {logger?: GoBackendLogger; loadBatchRows?: number; appID?: string; rowMode?: boolean},
+  options?: {logger?: GoBackendLogger; loadBatchRows?: number; appID?: string; rowMode?: boolean; pullHydrate?: boolean; pullWindow?: number},
 ): GoComputeBackend | null {
   try {
     if (sidecarManager.status !== 'running') return null;
