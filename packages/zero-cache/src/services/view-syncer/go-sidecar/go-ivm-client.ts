@@ -233,13 +233,15 @@ function decodePositionalChanges(
 }
 
 /**
- * Extract a stream frame's RowChanges. Tolerant of both encodings: positional
- * (`{d, r}`, protocolRev 9) when present, else the legacy `changes` array.
- * Empty frames (no `r` and no `changes`) yield `[]`.
+ * Extract a stream frame's RowChanges from the positional encoding
+ * (`{d, r}`, protocolRev 9 — the only encoding a rev-9 Go emits on streaming
+ * partials; the exact-match protocolRev handshake makes any other producer
+ * unreachable). Empty frames (no `r`) yield `[]`. The pre-rev-9 map-keyed
+ * `changes` fallback was deleted with the RPC-surface cleanup: dead on the
+ * wire, it only masked fakes/tests that bypassed the real decode.
  */
 function extractChanges(value: unknown): RowChange[] {
   const v = value as {
-    changes?: RowChange[];
     d?: PositionalDictEntry[];
     r?: unknown[][];
   };
@@ -254,7 +256,7 @@ function extractChanges(value: unknown): RowChange[] {
   if (v.r !== undefined && v.r !== null) {
     return decodePositionalChanges(v.d ?? [], v.r);
   }
-  return v.changes ?? [];
+  return [];
 }
 
 // --- Streaming accumulators ---

@@ -22,12 +22,22 @@ import {
   unpack,
 } from './go-ivm-client.ts';
 
-const row = (id: string): RowChange => ({
+const row = (id: string, queryID = 'q1'): RowChange => ({
   type: 0,
-  queryID: 'q1',
+  queryID,
   table: 't',
   rowKey: {id},
-  row: null,
+  row: {id},
+});
+
+// Positional (rev-9) INPUT frame carrying ADDs for `ids` — the wire twin of
+// `ids.map(id => row(id, queryID))`; extractChanges decodes it back to exactly
+// that. The legacy map-keyed `changes` INPUT shape is gone from both the wire
+// (rev-9 Go emits positional only) and the client (fallback deleted in the
+// RPC-surface cleanup) — these fixtures now exercise the real decode.
+const posFrame = (ids: string[], queryID = 'q1') => ({
+  d: [{q: queryID, t: 't', c: ['id'], k: ['id']}],
+  r: ids.map(id => [0, 0, id] as unknown[]),
 });
 
 describe('createHydrateStreamAccumulator', () => {
@@ -37,7 +47,7 @@ describe('createHydrateStreamAccumulator', () => {
 
     h.onFrame({
       queryID: 'q1',
-      changes: [row('a'), row('b')],
+      ...posFrame(['a', 'b']),
       chunkIndex: 0,
       final: true,
       timingMs: 5,
@@ -56,15 +66,15 @@ describe('createHydrateStreamAccumulator', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
-    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
-    h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
+    h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 1, final: false});
 
     // Should not have fired yet — final hasn't arrived
     expect(onResult).not.toHaveBeenCalled();
 
     h.onFrame({
       queryID: 'q1',
-      changes: [row('c')],
+      ...posFrame(['c']),
       chunkIndex: 2,
       final: true,
       timingMs: 12,
@@ -84,16 +94,16 @@ describe('createHydrateStreamAccumulator', () => {
     const h = createHydrateStreamAccumulator(onResult);
 
     // Interleave q1 and q2 frames — completion order may differ from input order
-    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
-    h.onFrame({queryID: 'q2', changes: [row('x')], chunkIndex: 0, final: true, timingMs: 3});
-    h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 1, final: true, timingMs: 7});
+    h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
+    h.onFrame({queryID: 'q2', ...posFrame(['x'], 'q2'), chunkIndex: 0, final: true, timingMs: 3});
+    h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 1, final: true, timingMs: 7});
     h.finish();
 
     expect(onResult).toHaveBeenCalledTimes(2);
     // q2 finalized first
     expect(onResult).toHaveBeenNthCalledWith(1, {
       queryID: 'q2',
-      changes: [row('x')],
+      changes: [row('x', 'q2')],
       timingMs: 3,
     });
     expect(onResult).toHaveBeenNthCalledWith(2, {
@@ -107,10 +117,10 @@ describe('createHydrateStreamAccumulator', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
-    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
     // Skip chunkIndex=1, jump to 2 — should throw
     expect(() =>
-      h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 2, final: true}),
+      h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 2, final: true}),
     ).toThrow(
       /addQueriesStream chunk order violation for queryID=q1: expected chunkIndex=1, got 2/,
     );
@@ -121,9 +131,9 @@ describe('createHydrateStreamAccumulator', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
-    h.onFrame({queryID: 'q1', changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
     expect(() =>
-      h.onFrame({queryID: 'q1', changes: [row('b')], chunkIndex: 0, final: false}),
+      h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 0, final: false}),
     ).toThrow(/expected chunkIndex=1, got 0/);
   });
 
@@ -132,8 +142,8 @@ describe('createHydrateStreamAccumulator', () => {
     const h = createHydrateStreamAccumulator(onResult);
 
     // q1 finalizes, q2 doesn't
-    h.onFrame({queryID: 'q1', changes: [], chunkIndex: 0, final: true, timingMs: 1});
-    h.onFrame({queryID: 'q2', changes: [row('x')], chunkIndex: 0, final: false});
+    h.onFrame({queryID: 'q1', chunkIndex: 0, final: true, timingMs: 1});
+    h.onFrame({queryID: 'q2', ...posFrame(['x'], 'q2'), chunkIndex: 0, final: false});
 
     expect(() => h.finish()).toThrow(
       /addQueriesStream finished but 1 queries never received a final chunk: q2/,
@@ -146,7 +156,7 @@ describe('createHydrateStreamAccumulator', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
-    h.onFrame({queryID: 'q1', changes: [], chunkIndex: 0, final: true, timingMs: 0});
+    h.onFrame({queryID: 'q1', chunkIndex: 0, final: true, timingMs: 0});
     h.finish();
 
     expect(onResult).toHaveBeenCalledWith({
@@ -162,7 +172,7 @@ describe('createHydrateStreamAccumulator', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
-    h.onFrame({queryID: 'q1', changes: [row('a')], timingMs: 4}); // no chunkIndex, no final
+    h.onFrame({queryID: 'q1', ...posFrame(['a']), timingMs: 4}); // no chunkIndex, no final
     h.finish();
 
     expect(onResult).toHaveBeenCalledWith({
@@ -177,7 +187,7 @@ describe('createAdvanceStreamAccumulator', () => {
   test('single-chunk fast path: one final frame returns full AdvanceResult', () => {
     const h = createAdvanceStreamAccumulator();
     h.onFrame({
-      changes: [row('a'), row('b')],
+      ...posFrame(['a', 'b']),
       chunkIndex: 0,
       final: true,
       timings: [{table: 't', type: 0, ms: 5}],
@@ -191,10 +201,10 @@ describe('createAdvanceStreamAccumulator', () => {
 
   test('multi-chunk: accumulates, returns reassembled result', () => {
     const h = createAdvanceStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
-    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
     h.onFrame({
-      changes: [row('c')],
+      ...posFrame(['c']),
       chunkIndex: 2,
       final: true,
       timings: [{table: 't', type: 1, ms: 2}],
@@ -207,7 +217,7 @@ describe('createAdvanceStreamAccumulator', () => {
 
   test('empty advance: one frame with empty changes + final=true', () => {
     const h = createAdvanceStreamAccumulator();
-    h.onFrame({changes: [], chunkIndex: 0, final: true});
+    h.onFrame({chunkIndex: 0, final: true});
     const result = h.finish();
     expect(result.changes).toEqual([]);
     expect(result.timings).toBeUndefined();
@@ -215,9 +225,9 @@ describe('createAdvanceStreamAccumulator', () => {
 
   test('chunk-order gap throws immediately', () => {
     const h = createAdvanceStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
     expect(() =>
-      h.onFrame({changes: [row('b')], chunkIndex: 2, final: true}),
+      h.onFrame({...posFrame(['b']), chunkIndex: 2, final: true}),
     ).toThrow(
       /advanceStream chunk order violation: expected chunkIndex=1, got 2/,
     );
@@ -225,8 +235,8 @@ describe('createAdvanceStreamAccumulator', () => {
 
   test('missing final: finish() throws if no frame had final=true', () => {
     const h = createAdvanceStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
-    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
     expect(() => h.finish()).toThrow(
       /advanceStream finished without a final chunk/,
     );
@@ -237,9 +247,9 @@ describe('createAdvanceStreamAccumulator', () => {
     // that would silently corrupt accumulated results. Pre-fix, the
     // accumulator kept pushing rows unconditionally.
     const h = createAdvanceStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: true});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: true});
     expect(() =>
-      h.onFrame({changes: [row('b')], chunkIndex: 1, final: false}),
+      h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false}),
     ).toThrow(
       /advanceStream received chunk \(index=1\) after final frame/,
     );
@@ -252,13 +262,13 @@ describe('createAdvanceStreamAccumulator', () => {
     // downstream histograms).
     const h = createAdvanceStreamAccumulator();
     h.onFrame({
-      changes: [row('a')],
+      ...posFrame(['a']),
       chunkIndex: 0,
       final: false,
       timings: [{table: 'wrong', type: 0, ms: 999}],
     });
     h.onFrame({
-      changes: [row('b')],
+      ...posFrame(['b']),
       chunkIndex: 1,
       final: true,
       timings: [{table: 'right', type: 0, ms: 5}],
@@ -272,7 +282,7 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
   test('single-chunk: one final frame yields full AdvanceToHeadResult', () => {
     const h = createAdvanceToHeadStreamAccumulator();
     h.onFrame({
-      changes: [row('a'), row('b')],
+      ...posFrame(['a', 'b']),
       chunkIndex: 0,
       final: true,
       timings: [{table: 't', type: 0, ms: 5}],
@@ -293,10 +303,10 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   test('multi-chunk: rowChanges accumulate; version+numChanges ride the final frame', () => {
     const h = createAdvanceToHeadStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
-    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
     h.onFrame({
-      changes: [row('c')],
+      ...posFrame(['c']),
       chunkIndex: 2,
       final: true,
       timings: [{table: 't', type: 1, ms: 2}],
@@ -317,14 +327,14 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     // corrupt the watermark: the final frame is authoritative.
     const h = createAdvanceToHeadStreamAccumulator();
     h.onFrame({
-      changes: [row('a')],
+      ...posFrame(['a']),
       chunkIndex: 0,
       final: false,
       version: 'WRONG',
       numChanges: 999,
     });
     h.onFrame({
-      changes: [row('b')],
+      ...posFrame(['b']),
       chunkIndex: 1,
       final: true,
       version: '0000000011',
@@ -339,7 +349,6 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
   test('reset frame: single final frame with reset + version, no rowChanges', () => {
     const h = createAdvanceToHeadStreamAccumulator();
     h.onFrame({
-      changes: [],
       chunkIndex: 0,
       final: true,
       version: '0000000012',
@@ -356,7 +365,7 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   test('empty advance: one final frame with no changes', () => {
     const h = createAdvanceToHeadStreamAccumulator();
-    h.onFrame({changes: [], chunkIndex: 0, final: true, version: '0000000013'});
+    h.onFrame({chunkIndex: 0, final: true, version: '0000000013'});
     const result = h.finish();
     expect(result.rowChanges).toEqual([]);
     expect(result.version).toBe('0000000013');
@@ -366,9 +375,9 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   test('chunk-order gap throws immediately', () => {
     const h = createAdvanceToHeadStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
     expect(() =>
-      h.onFrame({changes: [row('b')], chunkIndex: 2, final: true}),
+      h.onFrame({...posFrame(['b']), chunkIndex: 2, final: true}),
     ).toThrow(
       /advanceToHeadStream chunk order violation: expected chunkIndex=1, got 2/,
     );
@@ -376,8 +385,8 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   test('missing final: finish() throws if no frame had final=true', () => {
     const h = createAdvanceToHeadStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
-    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
     expect(() => h.finish()).toThrow(
       /advanceToHeadStream finished without a final chunk/,
     );
@@ -387,13 +396,13 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     // Same as advanceStream: a chunk after the terminal frame must throw.
     const h = createAdvanceToHeadStreamAccumulator();
     h.onFrame({
-      changes: [row('a')],
+      ...posFrame(['a']),
       chunkIndex: 0,
       final: true,
       version: '0000000005',
     });
     expect(() =>
-      h.onFrame({changes: [row('b')], chunkIndex: 1, final: false}),
+      h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false}),
     ).toThrow(
       /advanceToHeadStream received chunk \(index=1\) after final frame/,
     );
@@ -401,9 +410,9 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   test('drift on final: finish() throws DriftError carrying accumulated partial rowChanges', () => {
     const h = createAdvanceToHeadStreamAccumulator();
-    h.onFrame({changes: [row('a')], chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
     h.onFrame({
-      changes: [row('b')],
+      ...posFrame(['b']),
       chunkIndex: 1,
       final: true,
       drift: {table: 't', op: 'edit', pk: {id: 'b'}, hasCount: 0},
@@ -449,7 +458,7 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
     h.onRow(row('a'));
     // A non-encodable change rides a fallback frame between records.
-    h.onFrame({changes: [row('b')], chunkIndex: 1, final: false});
+    h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
     h.onRow(row('c'));
     h.onFrame({chunkIndex: 3, final: true, version: '0000000012', numChanges: 3});
     expect(h.finish().rowChanges).toEqual([row('a'), row('b'), row('c')]);
@@ -457,9 +466,9 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   test('rowMode: chunkIndex gaps allowed, backwards still throws', () => {
     const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
-    h.onFrame({changes: [row('a')], chunkIndex: 3, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 3, final: false});
     expect(() =>
-      h.onFrame({changes: [row('b')], chunkIndex: 2, final: false}),
+      h.onFrame({...posFrame(['b']), chunkIndex: 2, final: false}),
     ).toThrow(/advanceToHeadStream chunk order violation/);
   });
 

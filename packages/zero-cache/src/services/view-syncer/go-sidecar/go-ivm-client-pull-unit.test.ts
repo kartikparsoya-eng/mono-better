@@ -89,9 +89,10 @@ function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: nu
         }
         deliver({
           queryID: 'q1',
-          changes: [
-            {type: 0, queryID: 'q1', table: 't', rowKey: {id: `r${i}`}, row: {id: `r${i}`}},
-          ],
+          // Positional rev-9 wire shape ({d, r}) — the ONLY encoding a rev-9
+          // Go emits on streaming partials; exercises the real decode.
+          d: [{q: 'q1', t: 't', c: ['id'], k: ['id']}],
+          r: [[0, 0, `r${i}`]],
           chunkIndex: i,
           final: false,
         });

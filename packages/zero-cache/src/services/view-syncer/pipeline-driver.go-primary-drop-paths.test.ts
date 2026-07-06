@@ -282,28 +282,33 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
 });
 
 // User's-audit staleness pair: the catch-up path (P2c inverted-edge clamp)
-// now classifies failures exactly like the main advance path instead of
+// classifies failures exactly like the main advance path instead of
 // swallowing them and committing at min. The two Go-side REFUSALS that make
-// catch-up permanently wedge (a growing diff over GO_IVM_MAX_DIFF_CHANGES,
-// and the GO_IVM_ADVANCE_BUDGET_MS overrun) must land in 'unclassified' —
-// the DROP → ResetPipelinesSignal bucket that re-hydrates immediately —
-// and must never be mistaken for 'data-error' (teardown, never reset) or
-// 'protocol' (re-throw).
+// catch-up permanently wedge — a growing diff over GO_IVM_MAX_DIFF_CHANGES,
+// and the GO_IVM_ADVANCE_BUDGET_MS overrun — arrive on the wire as
+// RPC_CODE_ADVANCE_ABORTED (typed AdvanceAbortedError since the follow-TS
+// failure model): the 'advance-aborted' bucket → ResetPipelinesSignal
+// ('advancement-timeout'), the reset-and-re-hydrate disposition both
+// refusals document. They must never be 'data-error' (teardown, never
+// reset), 'protocol' (re-throw), or 'unclassified' — which now RETHROWS
+// into a CG teardown (plain-Error forms of these messages would land there,
+// but that requires a version-skewed dylib/TS pair, which the single-image
+// napi packaging rules out).
 describe('classifier buckets for the Go refusals that wedge catch-up', () => {
-  test('GO_IVM_MAX_DIFF_CHANGES refusal → unclassified (reset bucket)', () => {
-    const e = new Error(
-      'advanceToHeadStream diff: 60000 changes exceeds GO_IVM_MAX_DIFF_CHANGES=50000 — ' +
+  test('GO_IVM_MAX_DIFF_CHANGES refusal → advance-aborted (reset via advancement-timeout)', () => {
+    const e = new AdvanceAbortedError(
+      'advanceToHead diff: 60000 changes exceeds GO_IVM_MAX_DIFF_CHANGES=50000 — ' +
         'caller should reset/re-hydrate instead of replaying this diff',
     );
-    expect(classifyGoPrimaryAdvanceError(e)).toBe('unclassified');
+    expect(classifyGoPrimaryAdvanceError(e)).toBe('advance-aborted');
   });
 
-  test('GO_IVM_ADVANCE_BUDGET_MS overrun → unclassified (reset bucket)', () => {
-    const e = new Error(
+  test('GO_IVM_ADVANCE_BUDGET_MS overrun → advance-aborted (reset via advancement-timeout)', () => {
+    const e = new AdvanceAbortedError(
       'advanceToHeadStream: advance exceeded GO_IVM_ADVANCE_BUDGET_MS=60000 during apply ' +
         '(cg=g1) — caller should reset/re-hydrate; a slow advance pins the WAL frame ' +
         'the diff was derived against',
     );
-    expect(classifyGoPrimaryAdvanceError(e)).toBe('unclassified');
+    expect(classifyGoPrimaryAdvanceError(e)).toBe('advance-aborted');
   });
 });
