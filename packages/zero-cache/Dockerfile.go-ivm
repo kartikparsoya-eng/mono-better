@@ -1,11 +1,17 @@
-# Dockerfile for zero-cache with the Go IVM sidecar bundled.
-# The Go binary is pulled from the published go-ivm image (built by
-# the go-ivm- repo's GitHub Actions workflow on every push to main).
-# Override GO_IVM_IMAGE to pin a specific tag (default: latest).
+# Dockerfile for zero-cache with the in-process Go IVM engine (NAPI).
+# libgoivm.so is pulled from the published go-ivm image (built by the
+# go-ivm repo's GitHub Actions workflow on every push). Override
+# GO_IVM_IMAGE to pin a specific tag (default: latest).
+#
+# NAPI-ONLY (removal sweep, protocolRev 10): the socket transport and its
+# shared-sidecar binary are gone — each zero-cache syncer worker dlopens
+# /opt/go-ivm/libgoivm.so IN-PROCESS via the goivm_napi addon: no socket,
+# no per-frame syscalls, per-row Go→JS delivery, pull-based streaming
+# hydrate + push-based streaming advance (advanceToHeadStream).
 
 ARG GO_IVM_IMAGE=ghcr.io/kartikparsoya-eng/go-ivm:latest
 
-# Stage 1: grab the prebuilt Go IVM binary
+# Stage 1: grab the prebuilt Go IVM c-shared library
 FROM ${GO_IVM_IMAGE} AS go-ivm
 
 # Stage 2: build litestream from rocicorp's fork (replicator role needs it
@@ -69,7 +75,7 @@ RUN corepack enable && corepack prepare pnpm@11.5.3 --activate
 # (the `...` filter suffix includes workspace dependencies). Native
 # builds (esbuild, msgpackr-extract, @rocicorp/zero-sqlite3, …) run per
 # the allowBuilds list in pnpm-workspace.yaml. devDependencies are
-# included deliberately — the entrypoint runs `npx tsx`, and tsx is a
+# included deliberately — the container runs `npx tsx`, and tsx is a
 # zero-cache devDependency. --frozen-lockfile: the image must install
 # EXACTLY what pnpm-lock.yaml pins — a stale lockfile fails the build
 # loudly instead of silently resolving fresh versions (H2).
@@ -89,33 +95,19 @@ RUN pnpm add -w \
 # Now copy all source
 COPY . .
 
-# Bundle the Go IVM binary into the image (replaces the bind-mount
-# pattern the earlier revision used).
-COPY --from=go-ivm /usr/local/bin/go-ivm-sidecar /opt/go-ivm/go-ivm-sidecar
+# libgoivm.so — the c-shared Go engine every syncer worker dlopens.
+# Unconditional COPY: napi is the ONLY transport, so a go-ivm image
+# without the .so must fail THIS build loudly instead of producing an
+# image whose every worker dies at dlopen time.
+COPY --from=go-ivm /usr/local/lib/libgoivm.so /opt/go-ivm/libgoivm.so
 
-# libgoivm.so (in-process NAPI transport, feat/napi-transport lineage).
-# Bind-mount + shell copy instead of a plain COPY: older go-ivm image tags
-# (feat-snapshotter-in-go, feat-streaming-hydrate) don't carry the .so,
-# and an unconditional COPY would fail THEIR variants' builds. Copies
-# when present, no-ops otherwise — socket-only images simply don't get
-# the file (they don't reference it either).
-RUN --mount=type=bind,from=go-ivm,source=/,target=/goivm-img \
-    if [ -f /goivm-img/usr/local/lib/libgoivm.so ]; then \
-      cp /goivm-img/usr/local/lib/libgoivm.so /opt/go-ivm/libgoivm.so; \
-      echo "bundled libgoivm.so ($(stat -c%s /opt/go-ivm/libgoivm.so) bytes)"; \
-    else \
-      echo "go-ivm image has no libgoivm.so — socket-only variant"; \
-    fi
-
-# Compile the goivm_napi N-API addon (dlopen bridge for the in-process
-# transport). Built unconditionally — in-tree C source + binding.gyp,
-# toolchain (python3/make/g++) already installed above, and node-gyp
-# resolves headers from this exact node build — so EVERY variant carries
-# the addon and flipping to the napi transport at deploy time is pure env
-# (needs a go-ivm image that carries libgoivm.so). Fails the build loudly
-# rather than producing an image whose napi mode dies confusingly at
-# runtime. `rebuild` also discards any stale build/ dir that leaked into
-# the docker context from a host checkout (wrong-arch .node).
+# Compile the goivm_napi N-API addon (the dlopen bridge). In-tree C
+# source + binding.gyp, toolchain (python3/make/g++) installed above, and
+# node-gyp resolves headers from this exact node build. Fails the build
+# loudly rather than producing an image whose engine load dies
+# confusingly at runtime. `rebuild` also discards any stale build/ dir
+# that leaked into the docker context from a host checkout (wrong-arch
+# .node).
 RUN cd packages/zero-cache/src/services/view-syncer/go-sidecar/napi \
     && npx --yes node-gyp rebuild 2>&1 | tail -3 \
     && test -f build/Release/goivm_napi.node
@@ -129,67 +121,18 @@ COPY --from=litestream-v5      /usr/local/bin/litestream /usr/local/bin/litestre
 # zero-cache reads from via ZERO_LITESTREAM_CONFIG_PATH.
 RUN cp /app/packages/zero-cache/src/services/litestream/config.yml /etc/litestream.yml
 
-# Build-time mode selector:
-#   SHADOW_MODE=false (default) → Go-primary image (Go serves clients)
-#   SHADOW_MODE=true            → Shadow image (TS source of truth,
-#                                  Go runs in parallel for drift audit)
-# CI publishes both variants to different tags off the same Dockerfile.
-ARG SHADOW_MODE=false
-
-# Leaf-source selector for the Go sidecar (see
-# go-ivm/DESIGN-tablesource-port.md). Default is "memory" so the existing
-# primary/shadow images keep their current loadRows-populated
-# MemorySource behavior unchanged. "table" switches to the read-from-
-# replica TableSource — only the tablesrc image variant sets this.
-# When SOURCE_MODE=table, the deployer must also set
-# GO_IVM_REPLICA_DB_PATH at runtime (no sensible default — the path is
-# environment-specific).
-ARG SOURCE_MODE=memory
-
-# Go-primary serving selectors (snapshotter-in-go port). Both default
-# false so the existing memory primary/shadow images are unchanged; only
-# the table-mode Go-primary variant sets them true:
-#   GO_PRIMARY_TRIGGER=true → Go derives its OWN diff via advanceToHead
-#                             (self-consistent V_go), not push-applies TS's.
-#   LEAN_PRIMARY=true       → TS walks INTERNAL/control-plane tables only;
-#                             Go owns all user-table changes.
-# Shadow variants keep both false (TS stays source of truth).
-ARG GO_PRIMARY_TRIGGER=false
-ARG LEAN_PRIMARY=false
-
-# Frame-coordinated advance (snapshotter-in-go P2). ONE arg arms both sides:
-#   sidecar: GO_IVM_ADVANCE_DRIVE=true (implies GO_IVM_ADVANCE_TO_HEAD — the
-#            sidecar builds per-CG Snapshotters and binds tablesource leaves
-#            to the pinned frame; without it, advanceToHead RPCs fail and a
-#            trigger-baked image can never serve Go-primary).
-#   mono:    ZERO_GO_SIDECAR_ADVANCE_DRIVE=true — shadow-only gate: in shadow
-#            mode the Go advance is sourced via advanceToHead and compared to
-#            TS (validated 2026-06-10: same-seed soak, push-mode drift=140
-#            FAIL vs drive-mode drift=0 PASS — push-applying TS's diff to an
-#            independently-pinned snapshot frame-skews during mutation
-#            bursts). In primary mode (shadowMode=false) it is a no-op; the
-#            trigger path is selected by GO_PRIMARY_TRIGGER instead.
-# true for tablesrc (Go-primary needs the sidecar armed) and shadow-tablesrc
-# (pre-prod soak validates the same frame-coordinated path that deploys).
-# Requires SOURCE_MODE=table — the sidecar ignores it (with a warning) in
-# memory mode, so the memory primary/shadow images keep it false.
-ARG ADVANCE_DRIVE=false
-
-# Streaming granularity levers. A client-VISIBLE progressive-render win needs
-# BOTH sides lowered together (proven by go-ivm engine_streaming_test.go's
-# TestClientFlushSimulation_BothLeversRequired: lowering only one keeps
-# time-to-first-row pinned at full-hydrate time):
+# Streaming granularity levers. A client-VISIBLE progressive-render win
+# needs BOTH sides lowered together (proven by go-ivm
+# engine_streaming_test.go's TestClientFlushSimulation_BothLeversRequired:
+# lowering only one keeps time-to-first-row pinned at full-hydrate time):
 #   - CHUNK_SIZE caps each Go->TS streamed partial frame at N RowChanges
 #     (the sidecar EMIT side: GO_IVM_CHUNK_SIZE — the ONE production knob,
 #     controlling hydrate + advance together; Go code default 100).
 #   - CURSOR_PAGE_SIZE gates how many deduped rows the view-syncer buffers
-#     before poking the client (the TS CONSUMER side: ZERO_CURSOR_PAGE_SIZE,
-#     view-syncer.ts:2708).
-# STREAMING IS THE DEFAULT (2026-07-02 consolidation): empty CHUNK_SIZE
-# defers to the Go code default (100); CURSOR_PAGE_SIZE defaults 100 to
-# match. The legacy per-facet ARGs below remain for the build matrix
-# (tablesrc/shadow-tablesrc pin 10000 to preserve their published one-
-# frame-per-query behavior); empty = defer to GO_IVM_CHUNK_SIZE.
+#     before poking the client (the TS CONSUMER side: ZERO_CURSOR_PAGE_SIZE).
+# STREAMING IS THE DEFAULT: empty CHUNK_SIZE defers to the Go code default
+# (100); CURSOR_PAGE_SIZE defaults 100 to match. The per-facet ARGs remain
+# for build-matrix pins; empty = defer to GO_IVM_CHUNK_SIZE.
 ARG CHUNK_SIZE=
 ARG HYDRATE_CHUNK_SIZE=
 ARG ADVANCE_CHUNK_SIZE=
@@ -198,49 +141,12 @@ ARG CURSOR_PAGE_SIZE=100
 # lane count P = N, reader-pool floor K = 2×N. Empty = code default.
 # Legacy GO_IVM_HYDRATE_LANES / GO_IVM_HYDRATE_READERS override per facet.
 ARG PARALLELISM=
-# TS-side per-chunk delivery lever (pipeline-driver.ts reads
-# GO_IVM_PERCHUNK_HYDRATE !== 'false'). When true (DEFAULT — matches the
-# streaming-by-default consolidation), goHydrateBatchStream yields each Go
-# partial frame to the poke pipeline as it arrives instead of buffering the
-# query to its terminal frame, so a query's chunk#1 delivery overlaps the
-# remaining chunks' Go compute (intra-query pipelining). tablesrc/
-# shadow-tablesrc pin false via the build matrix to keep their published
-# buffer-to-final behavior.
-ARG PERCHUNK_HYDRATE=true
-
-# Transport selector (feat/napi-transport lineage):
-#   socket (default) — spawn/connect to the bundled sidecar binary over a
-#                      Unix socket. Existing variants unchanged.
-#   napi             — each syncer worker dlopens /opt/go-ivm/libgoivm.so
-#                      IN-PROCESS via the goivm_napi addon: no socket, no
-#                      per-frame syscalls, per-row Go→JS delivery
-#                      (goSidecar.napiRowMode defaults true). Requires a
-#                      go-ivm base image that carries libgoivm.so.
-# EXTERNALLY_MANAGED must be false for napi (an in-process engine cannot
-# be shared across workers — syncer.ts resolves the conflict in socket's
-# favor). The entrypoint branches on ZERO_GO_SIDECAR_TRANSPORT: napi mode
-# execs zero-cache directly and never spawns the shared sidecar (H3 —
-# previously an idle sidecar booted anyway, coupling container startup to
-# a process nobody connects to while it claimed GOMEMLIMIT/conn budgets).
-ARG TRANSPORT=socket
-ARG EXTERNALLY_MANAGED=true
 
 # All ENV defaults are overridable at `docker run -e` / compose env-block
-# time. See go-ivm/REVIEW-final.md for the recommended rollout sequence
-# (shadow on 1 prod node → ~1 week observation → flip to primary).
+# time.
 ENV NODE_ENV=production
-ENV ZERO_GO_SIDECAR_BINARY_PATH=/opt/go-ivm/go-ivm-sidecar
 ENV ZERO_GO_SIDECAR_ENABLED=true
-ENV ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=${EXTERNALLY_MANAGED}
-ENV ZERO_GO_SIDECAR_SOCKET_PATH=/tmp/go-ivm-shared.sock
-ENV ZERO_GO_SIDECAR_TRANSPORT=${TRANSPORT}
 ENV ZERO_GO_SIDECAR_NAPI_LIB_PATH=/opt/go-ivm/libgoivm.so
-ENV ZERO_GO_SIDECAR_SHADOW_MODE=${SHADOW_MODE}
-ENV GO_IVM_SOURCE_MODE=${SOURCE_MODE}
-ENV ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=${GO_PRIMARY_TRIGGER}
-ENV ZERO_GO_SIDECAR_LEAN_PRIMARY=${LEAN_PRIMARY}
-ENV GO_IVM_ADVANCE_DRIVE=${ADVANCE_DRIVE}
-ENV ZERO_GO_SIDECAR_ADVANCE_DRIVE=${ADVANCE_DRIVE}
 # Streaming granularity (variant-scoped via the ARGs above). GO_IVM_CHUNK_SIZE
 # is the one production knob; the per-facet vars override it when the build
 # matrix pins them (empty env = unset to the Go reader — every GO_IVM_* int
@@ -251,61 +157,41 @@ ENV GO_IVM_PARALLELISM=${PARALLELISM}
 ENV GO_IVM_HYDRATE_CHUNK_SIZE=${HYDRATE_CHUNK_SIZE}
 ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
 ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
-ENV GO_IVM_PERCHUNK_HYDRATE=${PERCHUNK_HYDRATE}
 # --- Production-scale memory/connection guards (2026-06-11 audit) ---
-# Replica read+writable pool ceilings. The sidecar's package default (256)
-# is sized for ~36 push-mode CGs / ~128 drive-mode CGs (2 pinned snapshotter
-# conns per CG); production runs hundreds of CGs per shared sidecar, and
-# pool exhaustion surfaces as silent Conn() blocking → TS-side RPC timeouts
-# → CG reset storms. 1024 supports ~400 drive-mode CGs with headroom; each
-# SQLite conn costs ~2MB page cache (~2GB worst case at full utilization).
-# The sidecar logs "replica pool pressure" every 10s when conns start
-# queueing — raise this if that line appears.
+# Replica read+writable pool ceilings. The engine's package default (256)
+# is sized for ~128 drive-mode CGs (2 pinned snapshotter conns per CG);
+# production runs hundreds of CGs, and pool exhaustion surfaces as silent
+# Conn() blocking → TS-side RPC timeouts → CG reset storms. 1024 supports
+# ~400 CGs with headroom; each SQLite conn costs GO_IVM_CONN_CACHE_KB of
+# page cache. The engine logs "replica pool pressure" every 10s when conns
+# start queueing — raise this if that line appears. SidecarManager divides
+# these ceilings across the ZERO_NUM_SYNC_WORKERS in-process engines.
 ENV GO_IVM_MAX_OPEN_CONNS=1024
 ENV GO_IVM_MAX_IDLE_CONNS=128
-# Parallel hydrate (drive-mode only; both matrix variants set
-# ADVANCE_DRIVE=true) is ON BY DEFAULT in the sidecar since the 2026-07-02
-# consolidation: GO_IVM_PARALLELISM=4 → 4 lanes + an 8-conn co-read pool
-# pinned to curr's frame (cold-hydrate queries fetch in parallel instead of
-# serializing on one connection), and the warm-hydrate pool extension
-# (addQueries on a CG with live pipelines; co-read-only, never converging to
-# head, so it can't desync live pipelines — validated in sandbox: pin-rate
-# 100%, serial 0). No ENV pins here — pinning GO_IVM_HYDRATE_READERS at
-# image level would mask the GO_IVM_PARALLELISM knob at deploy time. Scale
-# with GO_IVM_PARALLELISM; disable the warm pool with
-# GO_IVM_WARM_HYDRATE_POOL=false if a pod is memory-constrained (each
-# reader conn costs ~GO_IVM_CONN_CACHE_KB of SQLite page cache).
 # Per-conn SQLite page cache in KB. This is C-side malloc — OUTSIDE
 # GOMEMLIMIT's view — and scales as pools × conns × cache: at 1024 conns
 # the SQLite default (~2MB) is up to ~4GB of invisible memory. 1MB/conn
 # halves that; hot pages stay in the shared, evictable OS page cache.
 ENV GO_IVM_CONN_CACHE_KB=1024
 # Soft Go heap ceiling as a percentage of the container's cgroup memory
-# limit (GOMEMLIMIT). The sidecar shares the container with the node
-# syncer workers, so it must not claim the whole budget. Soft limit: GC
-# works harder near the cap instead of the kernel OOM-killing the whole
-# container (which takes down every CG plus the node workers). Explicit
-# GO_IVM_GOMEMLIMIT / GOMEMLIMIT override the percentage.
+# limit (GOMEMLIMIT). The in-process engines share the container with the
+# node syncer workers, so they must not claim the whole budget. Soft
+# limit: GC works harder near the cap instead of the kernel OOM-killing
+# the whole container (which takes down every CG plus the node workers).
+# Explicit GO_IVM_GOMEMLIMIT / GOMEMLIMIT override the percentage.
 ENV GO_IVM_GOMEMLIMIT_PERCENT=40
-# Cap on change-log entries advanceToHead[Stream] will materialize for a
-# single catch-up diff (entries carry full row values). Above this the RPC
-# errors and TS resets/re-hydrates with bounded memory — replaying a diff
-# that big is slower than a re-hydrate anyway.
-ENV GO_IVM_MAX_DIFF_CHANGES=50000
 # Estimated-bytes budget per streamed partial frame. Row-count chunk caps
 # alone let 10k fat rows (>6.4KB avg: message bodies, canvas JSON) encode
 # past the 64MB wire frame cap — a deterministic hydrate failure loop.
 # 8MB leaves ample margin for msgpack overhead under the 64MB cap.
 ENV GO_IVM_CHUNK_SOFT_BYTES=8388608
-# workers=8: the shared externally-managed sidecar handles all CGs
-# regardless of worker count (goroutine-per-CG, shared socket), so
-# multiple relay workers add V8 event-loop parallelism for poke/cvr/
-# websocket work that stays TS-side — essential to avoid funneling
-# ~7.7 core-equiv of TS work onto a single loop. Prod Grafana shows
-# ELU headroom supports ~24 workers; 8 is the correctness-gated
-# minimum (sandbox soak: 0 drift mismatches, bounded memory, no
-# socket contention across workers 0-7). Code defaults for
-# upstream.maxConns (20) and cvr.maxConns (30) are both >= 8.
+# workers=8: V8 event-loop parallelism for poke/cvr/websocket work that
+# stays TS-side. Each worker hosts its own in-process Go engine; the Go
+# side's compute parallelism comes from GO_IVM_PARALLELISM lanes within
+# each engine. Prod Grafana shows ELU headroom supports ~24 workers; 8 is
+# the correctness-gated minimum (sandbox soak: bounded memory, no
+# cross-worker contention). Code defaults for upstream.maxConns (20) and
+# cvr.maxConns (30) are both >= 8.
 ENV ZERO_NUM_SYNC_WORKERS=8
 # Litestream paths for the replicator role's continuous backup. When
 # ZERO_LITESTREAM_BACKUP_URL is set at deploy time (e.g. an S3/GCS URL),
@@ -325,9 +211,6 @@ EXPOSE 4848
 
 WORKDIR /app/packages/zero-cache
 
-# Custom entrypoint spawns the shared sidecar before zero-cache,
-# waits for the socket, then execs the normal zero-cache main.
-COPY packages/zero-cache/docker-entrypoint-go-primary.sh /usr/local/bin/zero-cache-entrypoint.sh
-RUN chmod +x /usr/local/bin/zero-cache-entrypoint.sh
-
-CMD ["/usr/local/bin/zero-cache-entrypoint.sh"]
+# No entrypoint script: with the socket transport gone there is no shared
+# sidecar to spawn/await — each syncer worker dlopens libgoivm.so itself.
+CMD ["npx", "tsx", "./src/server/runner/main.ts"]

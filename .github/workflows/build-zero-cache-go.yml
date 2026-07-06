@@ -1,49 +1,35 @@
 name: Build & publish zero-cache+go image
 
-# Builds packages/zero-cache/Dockerfile.go-ivm, which pulls the Go IVM
-# binary from ghcr.io/kartikparsoya-eng/go-ivm and bundles it with
-# zero-cache. Publishes to ghcr.io/kartikparsoya-eng/zero-cache-go.
+# Builds packages/zero-cache/Dockerfile.go-ivm, which pulls libgoivm.so
+# (the in-process Go IVM engine) from ghcr.io/kartikparsoya-eng/go-ivm
+# and bundles it with zero-cache. Publishes to
+# ghcr.io/kartikparsoya-eng/zero-cache-go.
 #
-# Four variants are published from the same Dockerfile + same mono
-# source, differing in build args (SHADOW_MODE / GO_PRIMARY_TRIGGER /
-# LEAN_PRIMARY / TRANSPORT / ...) and the bundled go-ivm sidecar
-# (GO_IVM_IMAGE):
-#   - tablesrc:           Go-primary, table source, full parallel hydrate.
-#                         Bundles go-ivm:feat-snapshotter-in-go.
-#                         tags: tablesrc-...
-#   - shadow-tablesrc:    TS source of truth, Go in parallel for drift
-#                         audit. Bundles go-ivm:feat-snapshotter-in-go.
-#                         tags: shadow-tablesrc-...
-#   - streaming-tablesrc: Same Go-primary + full parallelization config as
-#                         tablesrc, but bundles the streaming-hydrate
-#                         sidecar (go-ivm:feat-streaming-hydrate — true
-#                         streaming hydrate, K=P×Cmax parallel reader pool).
-#                         tags: streaming-tablesrc-...
-#   - napi-tablesrc:      Go-primary over the IN-PROCESS (NAPI) transport:
-#                         each syncer worker dlopens libgoivm.so — no
-#                         socket, no per-frame syscalls, per-row Go→JS
-#                         delivery, streaming+parallel engine defaults
-#                         (chunk 100 / parallelism 4 / warm pool / lazy +
-#                         parallel advance). Bundles
-#                         go-ivm:feat-napi-transport (which carries
-#                         libgoivm.so alongside the binary).
-#                         tags: napi-tablesrc-...
+# ONE variant (removal sweep, protocolRev 10 — napi is the only
+# transport; the socket sidecar binary and the shadow/drift-audit modes
+# are gone):
+#   - napi-tablesrc: Go-primary over the IN-PROCESS (NAPI) transport —
+#                    each syncer worker dlopens libgoivm.so: no socket,
+#                    no per-frame syscalls, per-row Go→JS delivery,
+#                    pull-based streaming hydrate + push-based streaming
+#                    advance (advanceToHeadStream), streaming+parallel
+#                    engine defaults (chunk 100 / parallelism 4 / warm
+#                    pool / lazy + parallel advance). Bundles
+#                    go-ivm:feat-napi-transport (artifact-carrier image
+#                    whose only payload is libgoivm.so).
+#                    tags: napi-tablesrc-...
 #
 # `pull: true` forces the build to re-fetch the go-ivm image so the
 # chain "push to go-ivm → push to mono" reliably bundles the latest
-# sidecar binary in every variant.
+# libgoivm.so.
 
 on:
   push:
     branches:
-      - feat/go-ivm-sidecar-async-advance
-      - feat/snapshotter-in-go
       - feat/napi-transport
     tags: ['v*']
   pull_request:
     branches:
-      - feat/go-ivm-sidecar-async-advance
-      - feat/snapshotter-in-go
       - feat/napi-transport
     paths:
       # Only run on PRs that touch files the docker build cares about,
@@ -69,10 +55,10 @@ on:
       - '.github/workflows/build-zero-cache-go.yml'
   workflow_dispatch:
   # Fired by the go-ivm "Build & publish sidecar image" workflow after a
-  # new sidecar image is pushed to GHCR. This eliminates the race where a
+  # new go-ivm image is pushed to GHCR. This eliminates the race where a
   # marker commit to this repo could trigger a rebuild BEFORE go-ivm
-  # finishes publishing, causing the bundled binary to be one version
-  # stale. See go-ivm/.github/workflows/build-image.yml's
+  # finishes publishing, causing the bundled libgoivm.so to be one
+  # version stale. See go-ivm/.github/workflows/build-image.yml's
   # `notify-downstream` job for the dispatcher.
   repository_dispatch:
     types: [go-ivm-published]
@@ -92,100 +78,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # TableSource Go-primary — Go reads SQLite directly, derives
-          # its own diff (trigger), TS walks internal tables only (lean).
-          # Run-and-go image for production Go-primary deployment.
-          - mode: tablesrc
-            shadow_mode_arg: "false"
-            source_mode_arg: "table"
-            go_primary_trigger_arg: "true"
-            lean_primary_arg: "true"
-            advance_drive_arg: "true"
-            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
-            tag_prefix: "tablesrc-"
-            hydrate_chunk_size_arg: "10000"
-            advance_chunk_size_arg: "10000"
-            cursor_page_size_arg: "10000"
-            # Per-chunk TS delivery off -> flag-off path stays byte-identical.
-            perchunk_hydrate_arg: "false"
-            transport_arg: "socket"
-            externally_managed_arg: "true"
-          # Shadow + TableSource — TS serves (zero risk), Go runs in
-          # parallel for high-coverage drift validation. Use for pre-prod
-          # soaks before flipping to tablesrc-primary.
-          - mode: shadow-tablesrc
-            shadow_mode_arg: "true"
-            source_mode_arg: "table"
-            go_primary_trigger_arg: "false"
-            lean_primary_arg: "false"
-            advance_drive_arg: "true"
-            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-snapshotter-in-go"
-            tag_prefix: "shadow-tablesrc-"
-            hydrate_chunk_size_arg: "10000"
-            advance_chunk_size_arg: "10000"
-            cursor_page_size_arg: "10000"
-            # Per-chunk TS delivery off -> flag-off path stays byte-identical.
-            perchunk_hydrate_arg: "false"
-            transport_arg: "socket"
-            externally_managed_arg: "true"
-          # Streaming-hydrate Go-primary — identical Go-primary serving +
-          # full parallelization config as `tablesrc`, but bundles the
-          # sidecar binary built from the go-ivm feat/streaming-hydrate
-          # branch (true streaming hydrate with a K=P×Cmax parallel reader
-          # pool). Requires the go-ivm build workflow to publish the
-          # feat-streaming-hydrate tag (its push-branch list must include
-          # feat/streaming-hydrate), else this variant's FROM pull fails.
-          - mode: streaming-tablesrc
-            shadow_mode_arg: "false"
-            source_mode_arg: "table"
-            go_primary_trigger_arg: "true"
-            lean_primary_arg: "true"
-            advance_drive_arg: "true"
-            go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-streaming-hydrate"
-            tag_prefix: "streaming-tablesrc-"
-            # Fine-grained streaming: 100-row frames (vs 10000 baseline) so
-            # large hydrates emit progressive partial frames on the Go->TS RPC,
-            # AND a matching 100-row view-syncer cursor page so the client is
-            # poked early (both levers required for a client-visible win).
-            hydrate_chunk_size_arg: "100"
-            advance_chunk_size_arg: "100"
-            cursor_page_size_arg: "100"
-            # Arm the TS-side per-chunk delivery flag (pipeline-driver.ts:158)
-            # so goHydrateBatchStream yields each 100-row Go frame to the poke
-            # pipeline as it arrives -- the third lever required for a
-            # client-visible progressive-render win alongside the 100-row
-            # chunk/cursor sizes above.
-            perchunk_hydrate_arg: "true"
-            transport_arg: "socket"
-            externally_managed_arg: "true"
           # In-process (NAPI) Go-primary — the feat/napi-transport lineage.
-          # Same trigger/lean/drive serving shape as tablesrc, but each
-          # syncer worker loads the Go engine IN-PROCESS (dlopen
-          # libgoivm.so via the goivm_napi addon): no socket, no per-frame
-          # syscalls, per-row Go→JS delivery (napiRowMode default true).
-          # EXTERNALLY_MANAGED=false — an in-process engine is per-worker
-          # by construction. Chunk/parallelism args left EMPTY so the
-          # streaming+parallel code defaults apply (GO_IVM_CHUNK_SIZE=100,
-          # GO_IVM_PARALLELISM=4, warm pool + lazy/parallel advance ON —
-          # the 2026-07-02 consolidation); CURSOR_PAGE_SIZE=100 pairs the
-          # TS consumer side with the 100-row emit default. Requires the
+          # Each syncer worker loads the Go engine IN-PROCESS (dlopen
+          # libgoivm.so via the goivm_napi addon). Chunk/parallelism args
+          # left EMPTY so the streaming+parallel code defaults apply
+          # (GO_IVM_CHUNK_SIZE=100, GO_IVM_PARALLELISM=4, warm pool +
+          # lazy/parallel advance ON); CURSOR_PAGE_SIZE=100 pairs the TS
+          # consumer side with the 100-row emit default. Requires the
           # go-ivm build workflow to publish feat-napi-transport (its
-          # Dockerfile ships libgoivm.so alongside the binary), else the
-          # bundled lib is missing and napi startup fails → TS fallback.
+          # Dockerfile ships libgoivm.so), else the unconditional COPY in
+          # Dockerfile.go-ivm fails this build loudly.
           - mode: napi-tablesrc
-            shadow_mode_arg: "false"
-            source_mode_arg: "table"
-            go_primary_trigger_arg: "true"
-            lean_primary_arg: "true"
-            advance_drive_arg: "true"
             go_ivm_image: "ghcr.io/kartikparsoya-eng/go-ivm:feat-napi-transport"
             tag_prefix: "napi-tablesrc-"
             hydrate_chunk_size_arg: ""
             advance_chunk_size_arg: ""
             cursor_page_size_arg: "100"
-            perchunk_hydrate_arg: "true"
-            transport_arg: "napi"
-            externally_managed_arg: "false"
 
     name: build (${{ matrix.mode }})
 
@@ -219,17 +127,15 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=tag
-            # Variant-prefixed sha tag. Without the explicit prefix, both
-            # tablesrc and shadow-tablesrc emit the SAME unprefixed
-            # `sha-<commit>` tag and clobber each other (last build wins) —
-            # so it could not be used to pin a specific variant.
+            # Variant-prefixed sha tag (kept explicit so the prefix survives
+            # type=sha's own default prefix).
             type=sha,format=short,prefix=${{ matrix.tag_prefix }}sha-
             # Guaranteed-unique-per-build handle. The same mono commit is
-            # rebuilt by the downstream go-ivm dispatch with a fresh sidecar
-            # binary, so a commit sha alone is NOT unique per build; the run
-            # id is. Pin deploys to `<prefix>run-<id>` for an immutable image.
+            # rebuilt by the downstream go-ivm dispatch with a fresh
+            # libgoivm.so, so a commit sha alone is NOT unique per build; the
+            # run id is. Pin deploys to `<prefix>run-<id>` for an immutable
+            # image.
             type=raw,value=run-${{ github.run_id }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/feat/go-ivm-sidecar-async-advance' }}
 
       - name: Build & push image (${{ matrix.mode }})
         uses: docker/build-push-action@v5
@@ -237,29 +143,20 @@ jobs:
           context: .
           file: packages/zero-cache/Dockerfile.go-ivm
           # Force-pull the go-ivm base image so we always bundle the
-          # latest sidecar binary — without this, a cached older
-          # version would silently get baked in.
+          # latest libgoivm.so — without this, a cached older version
+          # would silently get baked in.
           pull: true
           # PRs build (verifies the Dockerfile still compiles) but
           # don't push (no image churn from forks).
           push: ${{ github.event_name != 'pull_request' }}
           build-args: |
-            SHADOW_MODE=${{ matrix.shadow_mode_arg }}
-            SOURCE_MODE=${{ matrix.source_mode_arg }}
-            GO_PRIMARY_TRIGGER=${{ matrix.go_primary_trigger_arg }}
-            LEAN_PRIMARY=${{ matrix.lean_primary_arg }}
-            ADVANCE_DRIVE=${{ matrix.advance_drive_arg }}
             GO_IVM_IMAGE=${{ matrix.go_ivm_image }}
             HYDRATE_CHUNK_SIZE=${{ matrix.hydrate_chunk_size_arg }}
             ADVANCE_CHUNK_SIZE=${{ matrix.advance_chunk_size_arg }}
             CURSOR_PAGE_SIZE=${{ matrix.cursor_page_size_arg }}
-            PERCHUNK_HYDRATE=${{ matrix.perchunk_hydrate_arg }}
-            TRANSPORT=${{ matrix.transport_arg }}
-            EXTERNALLY_MANAGED=${{ matrix.externally_managed_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Cache scoped per-matrix-variant so primary and shadow don't
-          # invalidate each other (they share most layers but the final
-          # ENV layer differs).
+          # Cache scoped per-matrix-variant (single variant today; keeps
+          # the scope stable if more are ever added).
           cache-from: type=gha,scope=${{ matrix.mode }}
           cache-to: type=gha,mode=max,scope=${{ matrix.mode }}
