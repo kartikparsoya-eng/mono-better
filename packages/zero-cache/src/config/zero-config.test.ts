@@ -692,7 +692,7 @@ test('zero-cache --help', () => {
                                                                         This configuration is modeled to easily integrate with a knative K_CE_OVERRIDES binding,                                   
                                                                         (i.e. https://github.com/knative/eventing/blob/main/docs/spec/sources.md#sinkbinding).                                     
                                                                                                                                                                                                    
-     --go-sidecar-enabled boolean                                       default: false                                                                                                             
+     --go-sidecar-enabled boolean                                       default: true                                                                                                              
        ZERO_GO_SIDECAR_ENABLED env                                                                                                                                                                 
                                                                         Offload IVM compute (advance + hydrate) to the companion Go sidecar process                                                
                                                                         instead of running the TypeScript operator tree inline. The Go path runs queries                                           
@@ -723,14 +723,14 @@ test('zero-cache --help', () => {
                                                                         override with an absolute path when the binary is not on PATH (e.g. when                                                   
                                                                         running zero-cache from a non-standard install location).                                                                  
                                                                                                                                                                                                    
-     --go-sidecar-transport socket,napi                                 default: "socket"                                                                                                          
+     --go-sidecar-transport socket,napi                                 default: "napi"                                                                                                            
        ZERO_GO_SIDECAR_TRANSPORT env                                                                                                                                                               
                                                                         How the worker talks to the Go IVM engine.                                                                                 
                                                                                                                                                                                                    
-                                                                        socket (default): spawn (or connect to) a separate sidecar process                                                         
+                                                                        socket: spawn (or connect to) a separate sidecar process                                                                   
                                                                         over a Unix domain socket with length-prefixed msgpack frames.                                                             
                                                                                                                                                                                                    
-                                                                        napi: load the Go engine IN-PROCESS via the goivm_napi N-API addon +                                                       
+                                                                        napi (default — the production path): load the Go engine IN-PROCESS via the goivm_napi N-API addon +                       
                                                                         libgoivm c-shared library (goSidecar.napiLibPath). No child process, no                                                    
                                                                         socket, no per-frame syscalls; results can be delivered row-by-row                                                         
                                                                         (goSidecar.napiRowMode). Requires the out-of-band build artifacts                                                          
@@ -762,7 +762,7 @@ test('zero-cache --help', () => {
                                                                         Go produces it. Disable only for A/B measurement (napi-frames vs                                                           
                                                                         napi-rows); has no effect on the socket transport.                                                                         
                                                                                                                                                                                                    
-     --go-sidecar-pull-hydrate boolean                                  default: false                                                                                                             
+     --go-sidecar-pull-hydrate boolean                                  default: true                                                                                                              
        ZERO_GO_SIDECAR_PULL_HYDRATE env                                                                                                                                                            
                                                                         PULL-based hydration over the NAPI transport (ABI v3): Go produces                                                         
                                                                         hydrate rows only as the view-syncer consumes them — consumer demand                                                       
@@ -773,7 +773,8 @@ test('zero-cache --help', () => {
                                                                                                                                                                                                    
                                                                         Requires goSidecar.transport=napi + goSidecar.napiRowMode                                                                  
                                                                         and a v3 libgoivm; silently degrades to push delivery otherwise.                                                           
-                                                                        Off by default (rollout flag — flip per deployment).                                                                       
+                                                                        On by default (the production path); disable per deployment to fall                                                        
+                                                                        back to push delivery.                                                                                                     
                                                                                                                                                                                                    
      --go-sidecar-pull-window number                                    default: 64                                                                                                                
        ZERO_GO_SIDECAR_PULL_WINDOW env                                                                                                                                                             
@@ -844,7 +845,7 @@ test('zero-cache --help', () => {
                                                                         this at a directory inside the public go-ivm repo — real prod rows                                                         
                                                                         have PII; sanitize captures before committing any repro.                                                                   
                                                                                                                                                                                                    
-     --go-sidecar-advance-drive boolean                                 default: false                                                                                                             
+     --go-sidecar-advance-drive boolean                                 default: true                                                                                                              
        ZERO_GO_SIDECAR_ADVANCE_DRIVE env                                                                                                                                                           
                                                                         Snapshotter-in-Go (P2): DRIVE Go's engine from its own derived diff.                                                       
                                                                         In shadow mode the Go advance is sourced via the sidecar's advanceToHead                                                   
@@ -871,7 +872,7 @@ test('zero-cache --help', () => {
                                                                         GO_IVM_ADVANCE_TO_HEAD=true and GO_IVM_SOURCE_MODE=table.                                                                  
                                                                         Mismatches are logged at error level under the [go-diff-shadow] tag.                                                       
                                                                                                                                                                                                    
-     --go-sidecar-go-primary-trigger boolean                            default: false                                                                                                             
+     --go-sidecar-go-primary-trigger boolean                            default: true                                                                                                              
        ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER env                                                                                                                                                      
                                                                         Snapshotter-in-Go (P2c): in Go-PRIMARY mode (enabled=true,                                                                 
                                                                         shadowMode=false), source the user-query advance via the sidecar's                                                         
@@ -888,7 +889,7 @@ test('zero-cache --help', () => {
                                                                         GO_IVM_SOURCE_MODE=table. When off, Go-primary keeps the push                                                              
                                                                         (advanceStream) path and the CVR stamps at TS's version.                                                                   
                                                                                                                                                                                                    
-     --go-sidecar-lean-primary boolean                                  default: false                                                                                                             
+     --go-sidecar-lean-primary boolean                                  default: true                                                                                                              
        ZERO_GO_SIDECAR_LEAN_PRIMARY env                                                                                                                                                            
                                                                         Snapshotter-in-Go (P3): in Go-PRIMARY mode (enabled=true,                                                                  
                                                                         shadowMode=false), stop TS from walking USER-table changes during                                                          

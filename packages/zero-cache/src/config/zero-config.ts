@@ -1072,7 +1072,7 @@ export const zeroOptions = {
 
   goSidecar: {
     enabled: {
-      type: v.boolean().default(false),
+      type: v.boolean().default(true),
       desc: [
         `Offload IVM compute (advance + hydrate) to the companion Go sidecar process`,
         `instead of running the TypeScript operator tree inline. The Go path runs queries`,
@@ -1114,14 +1114,14 @@ export const zeroOptions = {
       ],
     },
     transport: {
-      type: v.literalUnion('socket', 'napi').default('socket'),
+      type: v.literalUnion('socket', 'napi').default('napi'),
       desc: [
         `How the worker talks to the Go IVM engine.`,
         ``,
-        `{bold socket} (default): spawn (or connect to) a separate sidecar process`,
+        `{bold socket}: spawn (or connect to) a separate sidecar process`,
         `over a Unix domain socket with length-prefixed msgpack frames.`,
         ``,
-        `{bold napi}: load the Go engine IN-PROCESS via the goivm_napi N-API addon +`,
+        `{bold napi} (default — the production path): load the Go engine IN-PROCESS via the goivm_napi N-API addon +`,
         `libgoivm c-shared library ({bold goSidecar.napiLibPath}). No child process, no`,
         `socket, no per-frame syscalls; results can be delivered row-by-row`,
         `({bold goSidecar.napiRowMode}). Requires the out-of-band build artifacts`,
@@ -1159,7 +1159,7 @@ export const zeroOptions = {
       ],
     },
     pullHydrate: {
-      type: v.boolean().default(false),
+      type: v.boolean().default(true),
       desc: [
         `PULL-based hydration over the NAPI transport (ABI v3): Go produces`,
         `hydrate rows only as the view-syncer consumes them — consumer demand`,
@@ -1170,7 +1170,8 @@ export const zeroOptions = {
         ``,
         `Requires {bold goSidecar.transport=napi} + {bold goSidecar.napiRowMode}`,
         `and a v3 libgoivm; silently degrades to push delivery otherwise.`,
-        `Off by default (rollout flag — flip per deployment).`,
+        `On by default (the production path); disable per deployment to fall`,
+        `back to push delivery.`,
       ],
     },
     pullWindow: {
@@ -1255,7 +1256,7 @@ export const zeroOptions = {
       ],
     },
     advanceDrive: {
-      type: v.boolean().default(false),
+      type: v.boolean().default(true),
       desc: [
         `Snapshotter-in-Go (P2): DRIVE Go's engine from its own derived diff.`,
         `In shadow mode the Go advance is sourced via the sidecar's advanceToHead`,
@@ -1286,7 +1287,7 @@ export const zeroOptions = {
       ],
     },
     goPrimaryTrigger: {
-      type: v.boolean().default(false),
+      type: v.boolean().default(true),
       desc: [
         `Snapshotter-in-Go (P2c): in Go-PRIMARY mode (enabled=true,`,
         `shadowMode=false), source the user-query advance via the sidecar's`,
@@ -1305,7 +1306,7 @@ export const zeroOptions = {
       ],
     },
     leanPrimary: {
-      type: v.boolean().default(false),
+      type: v.boolean().default(true),
       desc: [
         `Snapshotter-in-Go (P3): in Go-PRIMARY mode (enabled=true,`,
         `shadowMode=false), stop TS from walking USER-table changes during`,
