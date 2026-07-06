@@ -1,5 +1,6 @@
 import {describe, expect, test} from 'vitest';
 import {
+  AdvanceAbortedError,
   PermanentDataError,
   StaleInitEpochError,
 } from './go-sidecar/go-ivm-client.ts';
@@ -86,14 +87,21 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
   });
 
   // F2 — dropped user deltas leave permanent gaps. The classifier buckets an
-  // advance RPC failure; protocol/stale-epoch ESCALATE (re-throw → teardown +
-  // reconnect), sidecar/unclassified DROP → reset (the caller turns these into a
-  // ResetPipelinesSignal so the view-syncer re-hydrates the gap as an idempotent
-  // superset rather than committing the watermark past a never-delivered delta).
+  // advance RPC failure; protocol/stale-epoch/data-error/unclassified ESCALATE
+  // (re-throw → teardown + reconnect — unclassified moved from DROP to
+  // RETHROW when the follow-TS failure model landed: with no in-process
+  // wall-clock timeouts, the economic abort owning the load-coupled case, and
+  // clean failures retried in place, an unclassified error is a genuine bug
+  // and TS's answer to bugs is teardown). advance-aborted/sidecar DROP → a
+  // ResetPipelinesSignal so the view-syncer re-hydrates the gap as an
+  // idempotent superset rather than committing the watermark past a
+  // never-delivered delta.
   describe('F2: classifyGoPrimaryAdvanceError', () => {
     const RETHROW: ReadonlySet<GoAdvanceErrorClass> = new Set([
       'protocol',
       'stale-epoch',
+      'data-error',
+      'unclassified',
     ]);
 
     test('protocol violations → protocol (escalate, a reset cannot fix a wire bug)', () => {
@@ -153,13 +161,25 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       }
     });
 
-    test('RPC timeout under load → unclassified (drop → reset, NOT silently swallowed)', () => {
-      // The exact class that the soaks never produced and that — pre-F2 —
-      // returned [] and floored the watermark at prev, permanently skipping the
-      // (prev→head] delta. Now it escalates to a reset.
+    test('RPC timeout message → unclassified (now RETHROW → teardown; in-process transports arm no such timers)', () => {
+      // Pre-follow-TS this was the storm class: a 30s/120s wall-clock timeout
+      // under load → 'unclassified' → full re-hydrate UNDER THE SAME LOAD,
+      // across every CG. Two things changed: (1) compute-bound RPCs on the
+      // napi transport arm NO timer (computeBoundTimeoutMs → 0), so the
+      // message can only arise on the legacy socket transport; (2) whatever
+      // does land here is treated as a genuine bug — rethrow → CG teardown
+      // (TS's unexpected-error semantics), never an immediate reset.
       expect(
         classifyGoPrimaryAdvanceError(new Error('RPC timed out after 30000ms')),
       ).toBe('unclassified');
+    });
+
+    test('AdvanceAbortedError → advance-aborted (economic abort → advancement-timeout reset)', () => {
+      const e = new AdvanceAbortedError(
+        'Advancement exceeded timeout at 1499 of 30000 changes after 234.5 ms. ' +
+          'Advancement time limited based on total hydration time of 120.5 ms.',
+      );
+      expect(classifyGoPrimaryAdvanceError(e)).toBe('advance-aborted');
     });
 
     test('non-Error values are classified by their string form', () => {
@@ -178,18 +198,24 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       expect(classifyGoPrimaryAdvanceError(e)).toBe('protocol');
     });
 
-    test('escalate-vs-drop contract: only protocol/stale-epoch re-throw', () => {
+    test('escalate-vs-drop contract: only advance-aborted/sidecar resolve to a reset', () => {
       const classes: GoAdvanceErrorClass[] = [
         'protocol',
         'stale-epoch',
+        'data-error',
+        'advance-aborted',
         'sidecar',
         'unclassified',
       ];
-      // sidecar + unclassified are the DROP buckets that must escalate to a
-      // ResetPipelinesSignal rather than re-throw — the heart of the F2 fix.
+      // advance-aborted (TS's own advancement-timeout economics) and sidecar
+      // (availability flip, F1 machinery) are the ONLY buckets that resolve
+      // to a ResetPipelinesSignal; everything else re-throws — teardown +
+      // client-reconnect backoff, TS's disposition for both wire bugs and
+      // unexpected errors. 'unclassified' moving to RETHROW is the heart of
+      // the reset-storm fix.
       expect(classes.filter(c => !RETHROW.has(c))).toEqual([
+        'advance-aborted',
         'sidecar',
-        'unclassified',
       ]);
     });
   });

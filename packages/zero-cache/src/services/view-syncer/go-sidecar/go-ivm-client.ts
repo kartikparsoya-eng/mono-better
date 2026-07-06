@@ -724,6 +724,38 @@ type RPCResponse = {
 
 const MAX_FRAME_SIZE = 64 * 1024 * 1024; // 64MB — must match Go side
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Default timeout for COMPUTE-BOUND RPCs (hydrate / advance families),
+ * decided by transport. Exported pure for unit tests.
+ *
+ * In-process (napi): 0 — NO timeout. The Go engine lives in this process;
+ * "the RPC got lost" is impossible (worker death takes both sides down), so
+ * a wall-clock timeout can only misfire — and it misfires exactly under
+ * load, where TS's own compute has no deadline either (TS hydration is
+ * unbounded; the TS advance is bounded by the ECONOMIC abort, whose Go twin
+ * now runs inside the Go advance — see RPC_CODE_ADVANCE_ABORTED). The old
+ * fixed timeouts were the reset-storm fuel: slow advance → timeout →
+ * 'unclassified' → full re-hydrate under the same load, across every CG.
+ *
+ * Socket (legacy): keep the wall-clock default — a separate process CAN die
+ * or wedge independently, and the sidecar-manager's restart heuristics feed
+ * on these timeouts.
+ *
+ * Control-plane RPCs (init/destroy/removeQuery/refreshSnapshot/ping/version)
+ * keep their fixed timeouts on both transports: they are small,
+ * constant-time calls whose timeout indicates a genuine wedge, and their
+ * failure dispositions (fallback-to-TS, best-effort-ignore) are not
+ * load-coupled.
+ */
+export function computeBoundTimeoutMs(
+  inProcess: boolean,
+  socketDefaultMs: number,
+  override?: number,
+): number {
+  if (override !== undefined) return override;
+  return inProcess ? 0 : socketDefaultMs;
+}
 const MAX_IN_FLIGHT = 1024; // global semaphore: caps concurrent pending RPCs
 const MAX_IN_FLIGHT_PER_GROUP = 16; // per-clientGroupID fairness cap
 const GLOBAL_KEY = '__global__'; // bucket for ping / unscoped calls
@@ -791,6 +823,44 @@ export class PermanentDataError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'PermanentDataError';
+  }
+}
+
+/**
+ * RPC error code Go uses when the advance hit the ECONOMIC abort — the
+ * line-faithful port of TS's #shouldAdvanceYieldMaybeAbortAdvance running
+ * INSIDE the Go advance (go-ivm advance_abort.go). The message is
+ * byte-identical to TS's advancement-timeout message; the classifier maps
+ * this to ResetPipelinesSignal('advancement-timeout') — the SAME signal,
+ * reason, and recovery TS's own abort produces. This replaces the fixed
+ * RPC timeout as the only load-coupled abort on the in-process advance path
+ * (a wall-clock timeout under load classified 'unclassified' → reset →
+ * re-hydrate UNDER THE SAME LOAD → the reset storm).
+ */
+export const RPC_CODE_ADVANCE_ABORTED = -32103;
+
+export class AdvanceAbortedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdvanceAbortedError';
+  }
+}
+
+/**
+ * RPC error code Go uses when an advance failed BEFORE any state moved:
+ * the snapshotter's Advance is failure-atomic (its prev/curr swap commits
+ * only after the diff exists) and the engine applied nothing, so the call
+ * is idempotent to retry in place. GoComputeBackend retries with bounded
+ * backoff instead of resetting — TS-native has no transient-advance-failure
+ * class at all, so retrying (invisible to clients) is the
+ * minimal-divergence disposition; a reset here would be pure Go-only churn.
+ */
+export const RPC_CODE_ADVANCE_CLEAN_RETRYABLE = -32104;
+
+export class RetryableAdvanceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryableAdvanceError';
   }
 }
 
@@ -1161,7 +1231,8 @@ export class GoIVMClient {
         ? {clientGroupID, queries, initEpoch, rowMode: true}
         : {clientGroupID, queries, initEpoch},
       {
-        timeoutMs: opts?.timeoutMs ?? 120_000,
+        // Compute-bound: no timeout in-process (TS hydration has none either).
+        timeoutMs: computeBoundTimeoutMs(this.#napi !== null, 120_000, opts?.timeoutMs),
         clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
         onPartial: handler.onFrame,
         ...(rowMode ? {onRow: handler.onRow} : {}),
@@ -1433,7 +1504,9 @@ export class GoIVMClient {
         ? {clientGroupID, changes, initEpoch, rowMode: true}
         : {clientGroupID, changes, initEpoch},
       {
-        timeoutMs: opts?.timeoutMs ?? 120_000,
+        // Compute-bound: no timeout in-process (see computeBoundTimeoutMs —
+        // the fixed 120s here was the reset-storm trigger under load).
+        timeoutMs: computeBoundTimeoutMs(this.#napi !== null, 120_000, opts?.timeoutMs),
         clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
         onPartial: handler.onFrame,
         ...(rowMode ? {onRow: handler.onRow} : {}),
@@ -1464,7 +1537,13 @@ export class GoIVMClient {
     const result = (await this.#call(
       'advanceToHead',
       appID ? {clientGroupID, initEpoch, appID} : {clientGroupID, initEpoch},
-      {...opts, clientGroupID: opts?.clientGroupID ?? clientGroupID},
+      {
+        ...opts,
+        // Compute-bound (shadow-only unary variant): same no-timeout-in-process
+        // rule as the streaming advance.
+        timeoutMs: computeBoundTimeoutMs(this.#napi !== null, DEFAULT_TIMEOUT_MS, opts?.timeoutMs),
+        clientGroupID: opts?.clientGroupID ?? clientGroupID,
+      },
     )) as Partial<AdvanceToHeadResult>;
     return {
       changes: result.changes ?? [],
@@ -1501,28 +1580,43 @@ export class GoIVMClient {
     clientGroupID: string,
     initEpoch: number,
     appID: string,
-    opts?: CallOptions & {rowMode?: boolean},
+    opts?: CallOptions & {
+      rowMode?: boolean;
+      /**
+       * Arms Go's port of TS's economic advancement-abort
+       * (#shouldAdvanceYieldMaybeAbortAdvance): totalHydrationTimeMs is the
+       * CG's measured re-hydrate cost — the price of the reset an abort
+       * triggers — computed by PipelineDriver.totalHydrationTimeMs() so the
+       * decision inputs are identical to TS's own. Omitted → abort disarmed
+       * (old-server pairs ignore the extra fields — additive msgpack).
+       */
+      abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
+    },
   ): Promise<AdvanceToHeadResult> {
     // Row mode requires the in-process transport (per-row records ride the
     // addon's delivery queue); on the socket it silently degrades to the
     // ordinary frame path — same result, chunked framing.
     const rowMode = opts?.rowMode === true && this.#napi !== null;
     const handler = createAdvanceToHeadStreamAccumulator({rowMode});
-    const base = appID
+    const base: Record<string, unknown> = appID
       ? {clientGroupID, initEpoch, appID}
       : {clientGroupID, initEpoch};
-    await this.#call(
-      'advanceToHeadStream',
-      rowMode ? {...base, rowMode: true} : base,
-      {
-        timeoutMs: opts?.timeoutMs ?? 120_000,
-        // Forward the group for in-flight fairness (every CG-scoped wrapper
-        // does this since A1 — one group can't starve others — CROSS-2).
-        clientGroupID: opts?.clientGroupID ?? clientGroupID,
-        onPartial: handler.onFrame,
-        ...(rowMode ? {onRow: handler.onRow} : {}),
-      },
-    );
+    if (rowMode) base.rowMode = true;
+    if (opts?.abortBudget) {
+      base.totalHydrationTimeMs = opts.abortBudget.totalHydrationTimeMs;
+      if (opts.abortBudget.suppressAbort) base.suppressAbort = true;
+    }
+    await this.#call('advanceToHeadStream', base, {
+      // Compute-bound: no timeout in-process. The advance's bound is the
+      // ECONOMIC abort riding this request (abortBudget), not wall-clock —
+      // exactly TS's own advance discipline.
+      timeoutMs: computeBoundTimeoutMs(this.#napi !== null, 120_000, opts?.timeoutMs),
+      // Forward the group for in-flight fairness (every CG-scoped wrapper
+      // does this since A1 — one group can't starve others — CROSS-2).
+      clientGroupID: opts?.clientGroupID ?? clientGroupID,
+      onPartial: handler.onFrame,
+      ...(rowMode ? {onRow: handler.onRow} : {}),
+    });
     return handler.finish();
   }
 
@@ -2002,6 +2096,16 @@ export class GoIVMClient {
           // escalating to a pipeline reset — a reset re-reads the same bad
           // row and re-panics forever (reset storm).
           pending.reject(new PermanentDataError(resp.error.message));
+        } else if (resp.error.code === RPC_CODE_ADVANCE_ABORTED) {
+          // Go's economic advancement-abort (TS's own formula running inside
+          // the Go advance). The message is TS's advancement-timeout message
+          // byte-for-byte; the classifier maps it to
+          // ResetPipelinesSignal('advancement-timeout').
+          pending.reject(new AdvanceAbortedError(resp.error.message));
+        } else if (resp.error.code === RPC_CODE_ADVANCE_CLEAN_RETRYABLE) {
+          // State-untouched advance failure — GoComputeBackend retries the
+          // idempotent call in place instead of resetting.
+          pending.reject(new RetryableAdvanceError(resp.error.message));
         } else {
           pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
         }

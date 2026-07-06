@@ -12,7 +12,7 @@
 // Feature flag: ZERO_GO_SIDECAR_ENABLED=true.
 
 import type {ZeroConfig} from '../../../config/zero-config.ts';
-import {DriftError} from './go-ivm-client.ts';
+import {DriftError, RetryableAdvanceError} from './go-ivm-client.ts';
 import type {
   AdvanceResult as GoAdvanceResult,
   AdvanceToHeadResult,
@@ -392,17 +392,37 @@ export class GoComputeBackend {
   // blow the 64MB single-frame cap (which the TS receive loop SKIPS, orphaning
   // the RPC into a timeout). Reassembles into the same AdvanceToHeadResult, so
   // PipelineDriver#goPrimaryAdvance consumes it identically.
-  async advanceToHeadStream(): Promise<AdvanceToHeadResult> {
+  //
+  // abortBudget (optional) arms Go's port of TS's economic advancement-abort
+  // — the caller (PipelineDriver's drive path) passes the CG's measured
+  // totalHydrationTimeMs so Go aborts on TS's own formula and the RPC
+  // rejects with AdvanceAbortedError → ResetPipelinesSignal
+  // ('advancement-timeout').
+  //
+  // Clean-retryable failures (RetryableAdvanceError — Go failed BEFORE any
+  // state moved; the call is idempotent) are retried IN PLACE with bounded
+  // jittered backoff instead of surfacing: TS-native has no transient
+  // advance-failure class, so absorbing these keeps the failure model
+  // TS-identical (a reset here would be Go-only churn; the storm class).
+  async advanceToHeadStream(abortBudget?: {
+    totalHydrationTimeMs: number;
+  }): Promise<AdvanceToHeadResult> {
     try {
-      return await this.#withReinitRetry(() =>
-        this.#client().advanceToHeadStream(
-          this.#clientGroupID,
-          this.#sidecarInitEpoch,
-          this.#appID,
-          // rowMode: per-row delivery on the in-process (napi) transport —
-          // the deployed Go-primary trigger path. The client degrades it to
-          // frames when a socket came up instead.
-          {...this.#cgOpts(), rowMode: this.#rowMode},
+      return await this.#withCleanRetry('advanceToHeadStream', () =>
+        this.#withReinitRetry(() =>
+          this.#client().advanceToHeadStream(
+            this.#clientGroupID,
+            this.#sidecarInitEpoch,
+            this.#appID,
+            // rowMode: per-row delivery on the in-process (napi) transport —
+            // the deployed Go-primary trigger path. The client degrades it to
+            // frames when a socket came up instead.
+            {
+              ...this.#cgOpts(),
+              rowMode: this.#rowMode,
+              ...(abortBudget ? {abortBudget} : {}),
+            },
+          ),
         ),
       );
     } catch (err) {
@@ -532,6 +552,38 @@ export class GoComputeBackend {
   // Pinned cgID for the client's per-group fairness semaphore.
   #cgOpts(): {clientGroupID: string} {
     return {clientGroupID: this.#clientGroupID};
+  }
+
+  /**
+   * Bounded in-place retry for CLEAN advance failures
+   * (RetryableAdvanceError, RPC_CODE_ADVANCE_CLEAN_RETRYABLE): Go's
+   * failure-atomic snapshotter left nothing moved, so re-running the SAME
+   * call re-derives from the unchanged position — idempotent by
+   * construction. Anything else (including exhausted retries) propagates
+   * unchanged: persistent failure means something is genuinely wedged, and
+   * the TS-shaped disposition for that is the classifier's rethrow → CG
+   * teardown → client reconnect, not a reset loop.
+   */
+  async #withCleanRetry<T>(what: string, fn: () => Promise<T>): Promise<T> {
+    const delaysMs = [100, 500, 2000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (!(err instanceof RetryableAdvanceError) || attempt >= delaysMs.length) {
+          throw err;
+        }
+        // Full jitter (0.5x–1.5x) so simultaneous clean failures across CGs
+        // don't re-converge on the same instant.
+        const delay = Math.round(delaysMs[attempt] * (0.5 + Math.random()));
+        this.#log(
+          'warn',
+          `${what} failed clean (state untouched); retrying in place ` +
+            `(attempt ${attempt + 1}/${delaysMs.length}, ${delay}ms): ${err.message}`,
+        );
+        await new Promise<void>(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
 
   // Two retry-worthy error classes:

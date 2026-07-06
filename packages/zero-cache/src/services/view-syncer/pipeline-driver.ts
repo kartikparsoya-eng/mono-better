@@ -86,6 +86,7 @@ import type {
   TableTiming,
 } from './go-sidecar/go-ivm-client.ts';
 import {
+  AdvanceAbortedError,
   DriftError,
   PermanentDataError,
   StaleInitEpochError,
@@ -928,10 +929,24 @@ export function decideGoPrimaryDispatch(
  *   'data-error'   permanent, non-retryable bad replica data (ivm.DataError /
  *                  RPC_CODE_DATA_ERROR) — RE-THROW (teardown), NEVER reset: a
  *                  reset re-reads the same bad row and loops forever.
+ *   'advance-aborted'  Go's ECONOMIC advancement-abort fired (TS's own
+ *                  #shouldAdvanceYieldMaybeAbortAdvance formula running inside
+ *                  the Go advance) — DROP → ResetPipelinesSignal with TS's own
+ *                  'advancement-timeout' reason: byte-identical recovery to a
+ *                  TS-native abort.
  *   'sidecar'      sidecar unavailable / restart in flight — DROP → reset.
- *   'unclassified' anything else (incl. RPC timeouts under load) — DROP → reset.
+ *   'unclassified' anything else — RE-THROW (CG teardown + client reconnect,
+ *                  exactly TS's disposition for an unexpected error). This
+ *                  bucket used to DROP → reset, which was the reset-storm
+ *                  engine: with no fixed RPC timeout on the in-process
+ *                  transport (computeBoundTimeoutMs), the economic abort
+ *                  owning the load-coupled case, and clean failures retried in
+ *                  place (RetryableAdvanceError), whatever still lands here is
+ *                  a genuine bug — and TS's answer to bugs is teardown, whose
+ *                  client-reconnect backoff is natural admission control the
+ *                  immediate-reset path never had.
  *
- * The two DROP buckets escalate to a ResetPipelinesSignal (full re-hydrate)
+ * The DROP buckets escalate to a ResetPipelinesSignal (full re-hydrate)
  * instead of the legacy "return [] + #scheduleGoReset", which left a permanent
  * (prev→head] gap: the async reset rebuilt Go at head and DISCARDED its hydrate
  * output, so the dropped user delta was never delivered. The order matters —
@@ -944,6 +959,7 @@ export type GoAdvanceErrorClass =
   | 'protocol'
   | 'stale-epoch'
   | 'data-error'
+  | 'advance-aborted'
   | 'sidecar'
   | 'unclassified';
 
@@ -959,6 +975,12 @@ export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   }
   if (e instanceof StaleInitEpochError) {
     return 'stale-epoch';
+  }
+  // Go's economic advancement-abort (RPC_CODE_ADVANCE_ABORTED). Checked via
+  // instanceof after the protocol patterns (an abort message can never match
+  // them, but the pinned precedence stays untouched).
+  if (e instanceof AdvanceAbortedError) {
+    return 'advance-aborted';
   }
   // Permanent data error (RPC_CODE_DATA_ERROR → PermanentDataError): bad
   // replica data the sidecar can't represent. Checked before the 'sidecar' /
@@ -1340,7 +1362,18 @@ export class PipelineDriver {
   readonly #advanceDroppedOther = getOrCreateCounter(
     'sync',
     'ivm.advance-dropped-other',
-    'Go-primary advance dropped due to unclassified Go-side error',
+    'Go-primary advance failed unclassified (escalated to CG teardown — TS semantics for unexpected errors)',
+  );
+  /**
+   * Go's economic advancement-abort fired (TS's own formula running inside
+   * the Go advance) — resolves as ResetPipelinesSignal('advancement-timeout'),
+   * the same reason TS-native aborts carry; counted separately so dashboards
+   * can tell economically-justified resets from failure-driven ones.
+   */
+  readonly #advanceAbortedEconomic = getOrCreateCounter(
+    'sync',
+    'ivm.advance-aborted-economic',
+    "Go advance hit the economic advancement-abort (reset via TS's advancement-timeout path)",
   );
   /**
    * D11: per-reason counter for #scheduleGoReset. Pre-fix every reset
@@ -4092,7 +4125,16 @@ export class PipelineDriver {
       | {changes: RowChange[]; goVersion: string | undefined}
       | {reset: ResetPipelinesSignal}
     > = this.#goPrimaryTrigger
-      ? this.#goBackend!.advanceToHeadStream()
+      ? this.#goBackend!.advanceToHeadStream({
+          // Arm Go's economic advancement-abort with TS's own inputs: the
+          // CG's measured re-hydrate cost (for Go-owned pipelines these
+          // entries ARE Go's hydrate timingMs, stored back at registration).
+          // Go aborts on TS's formula → AdvanceAbortedError →
+          // 'advancement-timeout' reset — the identical recovery a TS-native
+          // abort takes. This replaces the wall-clock RPC timeout as the only
+          // load-coupled bound on the advance.
+          totalHydrationTimeMs: this.totalHydrationTimeMs(),
+        })
           .then(goDerived => {
           if (goDerived.reset) {
             // F2: a Go-reported reset (truncate / permissions change / engine
@@ -4201,7 +4243,11 @@ export class PipelineDriver {
       for (let i = 0; i < MAX_CATCHUP && goVersionFinal < version; i++) {
         let next: AdvanceToHeadResult;
         try {
-          next = await this.#goBackend!.advanceToHeadStream();
+          next = await this.#goBackend!.advanceToHeadStream({
+            // Same economic bound as the main drive advance: a slow catch-up
+            // is exactly the "cheaper to reset" case.
+            totalHydrationTimeMs: this.totalHydrationTimeMs(),
+          });
         } catch (e) {
           // User's-audit staleness hole: a failed catch-up is NOT safely
           // absorbable the way "still behind after MAX_CATCHUP" is. The
@@ -4378,6 +4424,15 @@ export class PipelineDriver {
             `NOT resetting — bad replica data, retry cannot fix): ${msg}`,
         );
         throw e;
+      case 'advance-aborted':
+        // Go's economic abort — TS's own advancement-timeout, computed inside
+        // the Go advance with the same inputs (elapsed vs the CG's measured
+        // totalHydrationTimeMs, progress vs numChanges). Resolve to the SAME
+        // signal + reason a TS-native abort produces; the message is Go's
+        // byte-identical rendering of TS's template.
+        this.#advanceAbortedEconomic.add(1);
+        this.#lc.info?.(`[go-primary] ${msg}`);
+        return new ResetPipelinesSignal(msg, 'advancement-timeout');
       case 'sidecar':
         this.#advanceDroppedSidecar.add(1);
         this.#lc.warn?.(
@@ -4389,15 +4444,22 @@ export class PipelineDriver {
           'go-primary-drop',
         );
       case 'unclassified':
+        // TS semantics for an unexpected error: RE-THROW → run()'s outer
+        // catch → CG teardown → clients reconnect (with their own backoff —
+        // natural admission control). This bucket used to DROP → reset,
+        // which under load (RPC timeouts) became the reset storm: every
+        // timeout re-paid every CG's hydrate on an already-saturated worker.
+        // The load-coupled causes now have owners — no in-process wall-clock
+        // timeouts (computeBoundTimeoutMs), the economic abort
+        // ('advance-aborted' above), clean-failure in-place retries
+        // (RetryableAdvanceError in GoComputeBackend) — so whatever lands
+        // here is a genuine bug, and resets don't fix bugs.
         this.#advanceDroppedOther.add(1);
         this.#lc.error?.(
-          `[go-primary] Go advance failed (unclassified); escalating to pipeline ` +
-            `reset: ${msg}`,
+          `[go-primary] Go advance failed (unclassified); escalating to CG ` +
+            `teardown (TS unexpected-error semantics): ${msg}`,
         );
-        return new ResetPipelinesSignal(
-          `Go advance failed (unclassified): ${msg}`,
-          'go-primary-drop',
-        );
+        throw e;
     }
   }
 
