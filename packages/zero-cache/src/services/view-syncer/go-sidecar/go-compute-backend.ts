@@ -55,6 +55,15 @@ export class GoComputeBackend {
    * `-1` = not yet init'd (any call would fail validation anyway).
    */
   #sidecarInitEpoch = -1;
+  /**
+   * The stateVersion Go's per-CG snapshotter pinned at on the LAST
+   * successful init — the frame the first hydrate reads (gen-6). The
+   * PipelineDriver maxes this into the CVR hydrate-updater stateVersion so
+   * rows Go hydrates from a frame ahead of TS's own snapshot pin are never
+   * received under an unbumped CVR version (cvr.ts:778 teardown).
+   * Undefined until init succeeds or against a pre-gen-6 sidecar.
+   */
+  #pinnedVersion: string | undefined = undefined;
   /** Promise resolving when the *current* epoch's init finishes (resolve OR reject). */
   #currentInitPromise: Promise<void> | null = null;
   /**
@@ -104,6 +113,15 @@ export class GoComputeBackend {
 
   get initialized(): boolean {
     return this.#initialized && this.#initEpoch === this.#manager.epoch;
+  }
+
+  /**
+   * Go's snapshotter pin from the last successful init (gen-6). Only
+   * meaningful while {@link initialized}; monotone across re-inits (a
+   * re-init pins at the then-current head, which only grows).
+   */
+  get pinnedVersion(): string | undefined {
+    return this.#pinnedVersion;
   }
 
   // Manager epoch; increments on every sidecar restart. Surfaced for callers
@@ -460,6 +478,17 @@ export class GoComputeBackend {
     // RPCs land on the sidecar AFTER this init and get rejected with
     // rpcCodeStaleInitEpoch instead of corrupting state.
     this.#sidecarInitEpoch = initResult.initEpoch;
+    if (initResult.version !== undefined) {
+      this.#pinnedVersion = initResult.version;
+    } else {
+      // Pre-gen-6 sidecar: the CVR hydrate stamp falls back to TS's own
+      // version and the version-skew window stays open. Loud, once per init.
+      this.#log(
+        'warn',
+        'init returned no snapshotter pin version (old sidecar?); ' +
+          'CVR hydrate stamps fall back to the TS snapshot version',
+      );
+    }
 
     this.#initialized = true;
     this.#initEpoch = epoch;

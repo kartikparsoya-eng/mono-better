@@ -165,7 +165,7 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
 
   test('frame plane: init round-trip', async () => {
     const c = ensureStarted();
-    const {initEpoch} = await c.init('cg-napi', {
+    const {initEpoch, version} = await c.init('cg-napi', {
       tables: {
         users: {
           columns: {
@@ -181,6 +181,12 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       },
     });
     expect(initEpoch).toBeGreaterThan(0);
+    // Gen-6: init must report the snapshotter's pinned stateVersion — the
+    // frame the first hydrate reads. The CVR hydrate updater is stamped at
+    // max(tsVersion, THIS); without it, rows Go hydrates from a frame ahead
+    // of TS's own pin arrive under an unbumped CVR version (cvr.ts:778
+    // teardown).
+    expect(version).toBe('0000000001');
     usersEpoch = initEpoch;
   });
 

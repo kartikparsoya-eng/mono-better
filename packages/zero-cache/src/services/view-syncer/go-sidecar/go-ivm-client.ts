@@ -861,9 +861,15 @@ export class GoIVMClient {
    * Initialize an engine for a client group. Returns the new initEpoch
    * which subsequent mutating calls (addQuery* / advance*) MUST
    * pass back so the sidecar can reject calls from a torn-down caller
-   * whose RPC raced past a fresh init for the same cgID.
+   * whose RPC raced past a fresh init for the same cgID, plus the
+   * stateVersion Go's per-CG snapshotter pinned at — the frame the first
+   * hydrate reads. The caller stamps its CVR hydrate updater at
+   * max(tsVersion, version) so rows written after TS's own (earlier)
+   * snapshot pin are never received under an unbumped CVR version
+   * (cvr.ts "Expected CVR version to have been bumped" — gen-6).
+   * `version` is undefined only against a pre-gen-6 sidecar.
    */
-  async init(clientGroupID: string, params: InitParams, opts?: CallOptions): Promise<{initEpoch: number}> {
+  async init(clientGroupID: string, params: InitParams, opts?: CallOptions): Promise<{initEpoch: number; version: string | undefined}> {
     // init can be slow on first start; allow longer default.
     const result = (await this.#call(
       'init',
@@ -874,11 +880,17 @@ export class GoIVMClient {
       // hydrate/advance traffic, so 16 slow CGs head-blocked every other
       // CG on the worker (the per-group cap existed but was dead code).
       {timeoutMs: opts?.timeoutMs ?? 120_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
-    )) as {status?: string; initEpoch?: number} | 'ok';
+    )) as {status?: string; initEpoch?: number; version?: string} | 'ok';
     if (typeof result !== 'object' || typeof result.initEpoch !== 'number') {
       throw new Error('init: sidecar did not return initEpoch — protocol mismatch');
     }
-    return {initEpoch: result.initEpoch};
+    return {
+      initEpoch: result.initEpoch,
+      version:
+        typeof result.version === 'string' && result.version !== ''
+          ? result.version
+          : undefined,
+    };
   }
 
   // Batch hydrate over the streaming RPC: Go builds all pipelines and

@@ -1435,7 +1435,17 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   ): Promise<Set<string>> {
     assert(this.#pipelines.initialized(), 'pipelines must be initialized');
 
-    const dbVersion = this.#pipelines.currentVersion();
+    // Gen-6: gate on the version the hydrate DATA will be read at, not just
+    // TS's snapshot. In Go-primary mode user rows hydrate from Go's own
+    // (later-pinned) snapshot; this no-CVR-updater fast path is only sound
+    // when the pipeline row set provably equals the CVR row set, i.e. when
+    // the DATA version matches the CVR version exactly. Gating on TS's
+    // version alone let Go deliver gap rows into pipelines the CVR never
+    // learned about (silent skew), and pushed the mismatch into the
+    // #addAndRemoveQueries updater at an unbumped version (cvr.ts:778
+    // teardown). awaitGoInit first so Go's pin is populated.
+    await this.#pipelines.awaitGoInit();
+    const dbVersion = this.#pipelines.hydrateVersion();
     const cvrVersion = cvr.version;
 
     if (cvrVersion.stateVersion !== dbVersion) {
@@ -2027,7 +2037,21 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       );
       const start = performance.now();
 
-      const stateVersion = this.#pipelines.currentVersion();
+      // Gen-6: stamp the updater at the version the hydrate DATA is read at.
+      // In Go-primary mode Go pins its snapshot AFTER TS pins its own, so
+      // rows can carry _0_versions above TS's currentVersion(). Stamping at
+      // TS's version alone can equal the committed CVR version exactly
+      // (reconnects re-execute queries with UNCHANGED transformation hashes,
+      // which bump nothing), and the first Go-delivered gap row then fires
+      // cvr.ts's "Expected CVR version to have been bumped above original"
+      // assertion — a full client-group teardown. hydrateVersion() is
+      // max(TS version, Go's init pin, Go's last advance version); the
+      // constructor bumps whenever it exceeds the CVR version, making the
+      // gap rows legally stampable. Await Go init BEFORE reading it — the
+      // pin is only known once init completes (generateRowChanges' own
+      // awaitGoInit below happens after the updater exists, too late).
+      await this.#pipelines.awaitGoInit();
+      const stateVersion = this.#pipelines.hydrateVersion();
       lc = lc.withContext('stateVersion', stateVersion);
       lc.info?.(`hydrating ${addQueries.length} queries`);
 
@@ -2529,6 +2553,26 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         this.#pipelines.replicaVersion,
         queryID => this.#pipelines.rowSetSignature(queryID),
       );
+      // Gen-6 (advance-path equality): when the reconciled watermark lands
+      // exactly ON the committed CVR stateVersion (Go pinned at the CVR
+      // version while TS's head stalled, or vice versa), the constructor
+      // above bumps nothing — and the first row update would trip cvr.ts's
+      // "Expected CVR version to have been bumped above original" assertion
+      // (CG teardown). Force a minor-version bump so row patches have a
+      // legal patchVersion. Sound: a minor bump does not claim replication
+      // progress (stateVersion is unchanged — still ≤ both authorities),
+      // it is monotone, and the drift-re-execution path already uses the
+      // same escape hatch (updater.ensureNewVersion() in
+      // #addAndRemoveQueries). Stock TS never hits this branch: with a
+      // single snapshot the advance version strictly exceeds the CVR
+      // version whenever there are changes.
+      if (cmpVersions(updater.updatedVersion(), cvr.version) === 0) {
+        lc.info?.(
+          `[go-primary] advance watermark ${version} equals committed CVR ` +
+            `version; forcing minor bump for row patches`,
+        );
+        updater.ensureNewVersion();
+      }
       // Only poke clients that are at the cvr.version. New clients that
       // are behind need to first be caught up when their initConnection
       // message is processed (and #syncQueryPipelines is called).

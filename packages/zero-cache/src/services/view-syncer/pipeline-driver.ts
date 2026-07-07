@@ -63,7 +63,7 @@ import {
   isGoSidecarEnabled,
   goPullWindow,
 } from './go-sidecar/go-compute-backend.ts';
-import {min as minLexiVersion} from '../../types/lexi-version.ts';
+import {max as maxLexiVersion, min as minLexiVersion} from '../../types/lexi-version.ts';
 import {isEnum as isLiteEnum, isArray} from '../../types/lite.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {
@@ -145,6 +145,41 @@ export function reconcileGoPrimaryWatermark(
     return {version: tsVersion, tsVersion, goVersion: undefined};
   }
   return {version: minLexiVersion(tsVersion, goVersion), tsVersion, goVersion};
+}
+
+/**
+ * Gen-6: the stateVersion CVR **hydrate** updaters must be stamped at when
+ * the Go backend owns user-query hydrates — an upper bound on the
+ * `_0_version` of every row the hydrate can deliver.
+ *
+ * Go pins its snapshot AFTER TS pins its own (init runs after TS's pin;
+ * each advance re-pins Go after TS), so hydrated rows can carry versions
+ * above `tsVersion`. Stamping at `tsVersion` alone can leave the updater
+ * EQUAL to the committed CVR version (reconnects re-execute queries with
+ * unchanged transformation hashes, which bump nothing) and the first
+ * Go-delivered gap row then trips cvr.ts's "Expected CVR version to have
+ * been bumped above original" assertion — a full client-group teardown.
+ *
+ * max() is safe in each argument: the CVR constructor requires
+ * stateVersion ≥ cvr.stateVersion (all three inputs are ≥ it — each
+ * authority and the CVR only advance), and stamping AT the data's version
+ * is exactly stock semantics (stock's single snapshot makes data version ≡
+ * stamp). Empty/undefined/null Go components are ignored (pre-gen-6
+ * sidecar, no advance yet).
+ */
+export function goHydrateStampVersion(
+  tsVersion: string,
+  goPinnedVersion: string | undefined,
+  goDataVersion: string | null,
+): string {
+  const versions: [string, ...string[]] = [tsVersion];
+  if (goPinnedVersion !== undefined && goPinnedVersion !== '') {
+    versions.push(goPinnedVersion);
+  }
+  if (goDataVersion !== null && goDataVersion !== '') {
+    versions.push(goDataVersion);
+  }
+  return maxLexiVersion(...versions);
 }
 
 /**
@@ -606,6 +641,17 @@ export class PipelineDriver {
   readonly #goBackend: GoComputeBackend | null = null;
   #goInitPromise: Promise<void> | null = null;
   /**
+   * Gen-6: the latest KNOWN stateVersion of Go's data plane — the max of
+   * Go's advance-reported versions observed by this driver. Combined with
+   * the backend's init-time snapshotter pin (see {@link hydrateVersion})
+   * it bounds the version of every row Go can deliver to a hydrate, so the
+   * CVR hydrate updater is stamped at (at least) the data's version and
+   * new rows never arrive under an unbumped CVR version (cvr.ts:778).
+   * Monotone; never regresses (Go's snapshotter only advances, and a
+   * re-init re-pins at the then-current head ≥ any prior value).
+   */
+  #goDataVersion: string | null = null;
+  /**
    * F1: how the CURRENT user-query pipelines were built, so the advance
    * dispatch can detect a Go-availability flip and rebuild in the right mode.
    *   'go'      — Go-owned stubs (TS emits nothing for user queries).
@@ -952,6 +998,53 @@ export class PipelineDriver {
   currentVersion(): string {
     assert(this.initialized(), 'Not yet initialized');
     return this.#snapshotter.current().version;
+  }
+
+  /**
+   * Gen-6: the stateVersion to stamp CVR **hydrate** updaters at — an upper
+   * bound on the version of every row the hydrate can deliver.
+   *
+   * Stock TS hydrates from its own snapshot, so the data version IS
+   * {@link currentVersion} and the two never diverge. In Go-primary mode the
+   * user-query rows come from GO's independently pinned snapshot, which is
+   * taken LATER than TS's (init runs after TS's pin; each advance re-pins Go
+   * after TS): rows written in that gap carry `_0_version`s above TS's
+   * version. Stamping the hydrate updater at TS's version alone can leave it
+   * EQUAL to the committed CVR version (reconnects with unchanged
+   * transformation hashes bump nothing), and receiving a gap row under an
+   * unbumped CVR version trips cvr.ts's "Expected CVR version to have been
+   * bumped above original" assertion — a full client-group teardown.
+   *
+   * Returns max(TS snapshot version, Go's init-time snapshotter pin, the
+   * latest Go advance-reported version). The Go components only apply while
+   * the Go backend owns hydrates (`initialized`); degraded/TS-native mode
+   * returns {@link currentVersion} — stock behavior. Callers must
+   * {@link awaitGoInit} first so the init-time pin is populated.
+   */
+  hydrateVersion(): string {
+    const ts = this.currentVersion();
+    if (!this.#goBackend?.initialized) {
+      return ts;
+    }
+    return goHydrateStampVersion(
+      ts,
+      this.#goBackend.pinnedVersion,
+      this.#goDataVersion,
+    );
+  }
+
+  /**
+   * Gen-6: record a Go-reported data version (advanceToHeadStream results).
+   * Monotone — ignores empty/undefined and never regresses, so a late or
+   * out-of-order report cannot shrink the hydrate stamp.
+   */
+  #noteGoDataVersion(version: string | undefined): void {
+    if (version === undefined || version === '') {
+      return;
+    }
+    if (this.#goDataVersion === null || version > this.#goDataVersion) {
+      this.#goDataVersion = version;
+    }
   }
 
   /**
@@ -2079,6 +2172,10 @@ export class PipelineDriver {
     // committed patchVersion), over-claiming risks a client missing a change in
     // the gap. In push mode `goVersion` is undefined and the watermark is V_ts.
     const reconciled = reconcileGoPrimaryWatermark(version, goVersionFinal);
+    // Gen-6: remember Go's data-plane version — warm hydrates on this CG read
+    // Go's post-advance frame, so the CVR hydrate stamp (hydrateVersion) must
+    // cover it or gap rows arrive under an unbumped CVR version (cvr.ts:778).
+    this.#noteGoDataVersion(goVersionFinal);
 
     // Merge: TS internal-query events + Go user-query events. The two
     // sets are table-disjoint by construction (internal tables filtered
