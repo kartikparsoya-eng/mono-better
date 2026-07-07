@@ -12,20 +12,27 @@
 // GATED: requires the out-of-band build artifacts —
 //
 //   addon:  cd .../go-sidecar/napi && npx node-gyp rebuild
-//   dylib:  (go-ivm repo) go build -tags napilib -buildmode=c-shared \
-//             -o /tmp/libgoivm.dylib ./cmd/sidecar
-//           (override path via GOIVM_TEST_LIB)
 //
-//   advance tests require the wal2-tagged dylib (BEGIN CONCURRENT):
-//   CGO_CFLAGS="-I/tmp/wal2lib" CGO_LDFLAGS="-L/tmp/wal2lib" \
-//     go build -tags "libsqlite3 sqlite_omit_load_extension osusergo netgo napilib" \
-//       -buildmode=c-shared -o /tmp/libgoivm_wal2.dylib ./cmd/sidecar
-//   GOIVM_TEST_LIB=/tmp/libgoivm_wal2.dylib npx vitest run ...
+//   dylib — FULL SUITE (wal2-linked). The advance test needs BEGIN
+//   CONCURRENT (wal2 fork) so the Source's prev-tx can take writes while
+//   the fixture's better-sqlite3 writer moves the WAL; on a plain (mattn)
+//   build the prev-tx falls back to BEGIN, the external write moves the WAL
+//   past the pinned read point, and writeChange's read→write upgrade hits
+//   SQLITE_BUSY_SNAPSHOT ("database is locked") — an artifact limitation,
+//   not a prod bug (production always links wal2):
+//     CGO_CFLAGS="-I/tmp/wal2lib" CGO_LDFLAGS="-L/tmp/wal2lib -lsqlite3" \
+//       go build -tags "libsqlite3 sqlite_omit_load_extension osusergo netgo napilib" \
+//         -buildmode=c-shared -o /tmp/libgoivm_wal2.dylib ./cmd/sidecar
+//     GOIVM_TEST_LIB=/tmp/libgoivm_wal2.dylib npx vitest run ...
+//
+//   dylib — plain mattn (8/9 tests; the advance test SKIPS itself with a
+//   pointer here instead of failing with the phantom "database is locked"):
+//     go build -tags napilib -buildmode=c-shared -o /tmp/libgoivm.dylib ./cmd/sidecar
 //
 // Skips cleanly when either is missing. The Go host can only start ONCE per
 // process (Go runtimes cannot be unloaded), so all tests share one bridge.
 
-import {existsSync} from 'node:fs';
+import {existsSync, statSync} from 'node:fs';
 import {afterAll, describe, expect, test} from 'vitest';
 import {GoIVMClient} from './go-ivm-client.ts';
 import type {RowChange} from './go-ivm-client.ts';
@@ -35,6 +42,27 @@ import {makeTestReplica} from './napi-test-fixtures.ts';
 const LIB_PATH =
   process.env.GOIVM_TEST_LIB ??
   (process.platform === 'darwin' ? '/tmp/libgoivm.dylib' : '/tmp/libgoivm.so');
+
+// Filename convention for the runtime skip-guard below: a lib named *wal2*
+// is held to the FULL contract (a "database is locked" there is a real
+// failure); any other name is presumed plain-mattn and the advance test
+// converts that specific error into a skip with the build recipe.
+const LIB_LOOKS_WAL2 = /wal2/i.test(LIB_PATH);
+
+// Stale-artifact tripwire: these tests dlopen whatever sits at LIB_PATH — an
+// old dylib silently tests old Go code (cost a real debugging session on
+// 2026-07-07: a pre-fix dylib "reproduced" an already-fixed bug). Warn only;
+// CI builds fresh.
+if (existsSync(LIB_PATH)) {
+  const ageH = (Date.now() - statSync(LIB_PATH).mtimeMs) / 3_600_000;
+  if (ageH > 24) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[napi-transport.test] ${LIB_PATH} is ${ageH.toFixed(0)}h old — ` +
+        `rebuild the dylib if you have changed Go code (see header recipe)`,
+    );
+  }
+}
 
 // ── replica ──────────────────────────────────────────────────────────
 // Create and seed the replica BEFORE the addon starts. The Go engine
@@ -214,8 +242,10 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
   // Advance: modify the replica (insert row + changelog + bump version),
   // then advanceToHeadStream derives the diff and applies it to the
   // engine. The two live queries (q-all, q-chunked) fan out the add to
-  // both pipelines. Requires the wal2-tagged dylib (BEGIN CONCURRENT).
-  test('row plane: advanceToHeadStream delivers derived changes', async () => {
+  // both pipelines. Requires the wal2-tagged dylib (BEGIN CONCURRENT) —
+  // on a plain build it self-skips (see header) instead of failing with
+  // the phantom "database is locked".
+  test('row plane: advanceToHeadStream delivers derived changes', async ctx => {
     const c = ensureStarted();
     replica.db
       .prepare('INSERT INTO "users" VALUES (?,?,?,?)')
@@ -223,7 +253,19 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     replica.addChangeLog('0000000002', 0, 'users', '{"id":"u9"}', 's');
     replica.bumpVersion('0000000002');
 
-    const result = await c.advanceToHeadStream('cg-napi', usersEpoch, '');
+    let result: Awaited<ReturnType<typeof c.advanceToHeadStream>>;
+    try {
+      result = await c.advanceToHeadStream('cg-napi', usersEpoch, '');
+    } catch (e) {
+      if (!LIB_LOOKS_WAL2 && String(e).includes('database is locked')) {
+        ctx.skip(
+          `advance requires the wal2-linked dylib (BEGIN CONCURRENT); ` +
+            `${LIB_PATH} appears to be a plain (mattn) build — see the ` +
+            `header recipe, then rerun with GOIVM_TEST_LIB=/tmp/libgoivm_wal2.dylib`,
+        );
+      }
+      throw e;
+    }
     expect(result.rowChanges.length).toBe(2);
     const qids = result.rowChanges.map(ch => ch.queryID).sort();
     expect(qids).toEqual(['q-all', 'q-chunked']);
