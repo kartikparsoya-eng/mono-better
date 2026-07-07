@@ -167,7 +167,15 @@ ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
 # start queueing — raise this if that line appears. SidecarManager divides
 # these ceilings across the ZERO_NUM_SYNC_WORKERS in-process engines.
 ENV GO_IVM_MAX_OPEN_CONNS=1024
-ENV GO_IVM_MAX_IDLE_CONNS=128
+# Idle cap = open cap (2026-07-07 latency forensics): the old 128 (÷8
+# workers = 16 idle vs 128 open per worker) made every hydrate burst churn
+# fresh SQLite opens against a multi-hundred-MB replica — pod telemetry
+# showed 70s of cumulative read-pool wait per 10s window at sampled in-use
+# as low as 0-25/128, a uniform ~36× steady-latency tax on warm hydrates.
+# Idle conns are cheap (fd + CONN_CACHE_KB page cache, already inside
+# the MAX_OPEN memory budget below); the engine's 90s ConnMaxIdle reaper
+# still trims truly idle ones. The engine also self-clamps idle ≤ open.
+ENV GO_IVM_MAX_IDLE_CONNS=1024
 # Per-conn SQLite page cache in KB. This is C-side malloc — OUTSIDE
 # GOMEMLIMIT's view — and scales as pools × conns × cache: at 1024 conns
 # the SQLite default (~2MB) is up to ~4GB of invisible memory. 1MB/conn
