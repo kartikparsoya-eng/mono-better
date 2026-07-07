@@ -241,6 +241,108 @@ export type GoAdvanceErrorClass =
   | 'sidecar'
   | 'unclassified';
 
+/**
+ * Gen-5 (2026-07-07 abort-loop forensics): the two pure inputs that keep
+ * Go's economic advancement-abort CONVERGENT under sustained writes.
+ *
+ * Background: Go runs TS's own abort formula (advance_abort.go) with a
+ * budget TS computes — totalHydrationTimeMs, the priced cost of the reset
+ * the abort would trigger. TS-native prices it with the WALL of each
+ * pipeline's hydrate (see the note above the #addQueryImpl pipelines.set:
+ * "a wall-clock measurement taken across the time-sliced hydrate"), which
+ * under load is seconds — so TS-native effectively never aborts at this
+ * catalog, and when the system slows, re-hydrates slow too, growing the
+ * next budget: self-healing economics.
+ *
+ * The Go-primary integration originally stored Go's ENGINE-internal hydrate
+ * time (goResult.timingMs, 4–54ms at this catalog) — ~100× below the true
+ * reset cost (query re-transform REST round-trips, CVR rewrite, poke
+ * re-delivery, re-registration). The budget floor-pinned at 50ms while a
+ * ~150-change backlog costs >50ms CPU, and unlike TS the budget never grew:
+ * abort → reset → same backlog re-accumulates during the seconds-long reset
+ * → abort at the SAME position — observed as 11–14× consecutive aborts at
+ * identical positions, breaker trips, and cascading CVR-version errors
+ * (16/50 clients lost at ~14 writes/s, where stock TS at the identical
+ * load had zero aborts and zero client losses).
+ */
+
+/**
+ * The hydration cost to record for a Go-owned pipeline entry: the maximum
+ * of Go's engine-internal hydrate time and the TS-observed wall of the
+ * hydrate. Unit-parity with TS-native entries (wall), with the engine time
+ * kept as a floor. Wall ≥ engine always in practice (the engine runs inside
+ * the awaited call), so this is effectively the TS wall — the max() guards
+ * the degenerate clock-skew/instant-await cases.
+ */
+export function goHydrationCostMs(
+  engineTimingMs: number | undefined,
+  tsWallMs: number,
+): number {
+  return Math.max(engineTimingMs ?? 0, tsWallMs);
+}
+
+/**
+ * Escalation backstop: double the abort budget per CONSECUTIVE economic
+ * abort (capped at 8×), cleared by the first completed advance. TS-native
+ * needs no explicit escalation because its budget input self-heals (slow
+ * system → slow re-hydrate → bigger next budget); Go's re-hydrates stay
+ * fast even under storm, so a budget that underprices once would underprice
+ * identically forever — the loop pathology above. Doubling converges by
+ * construction; the cap keeps the abort meaningful as a big-transaction
+ * circuit breaker, and the GO_IVM_ADVANCE_BUDGET_MS wall backstop (60s)
+ * still bounds runaway advances (and with them the WAL pin) regardless.
+ */
+export function escalatedAbortBudgetMs(
+  baseMs: number,
+  consecutiveAborts: number,
+): number {
+  const exp = Math.min(Math.max(consecutiveAborts, 0), 3);
+  return baseMs * 2 ** exp;
+}
+
+/**
+ * The minimum abort budget ever sent to Go — the price floor of a Go reset.
+ *
+ * Why a floor exists at all (2026-07-07 rerun forensics): 50/77 residual
+ * aborts carried a budget of literally 0ms. Budget≈0 arises STRUCTURALLY,
+ * not as a bug: internal-only CGs (lmids/mutationResults entries register
+ * through the batch path's noopTimer → hydrationTimeMs 0), CGs whose user
+ * queries are TTL-expired at reconnect (empty map), and stub entries
+ * mid-registration. Go still does real work on every advance for such CGs
+ * — handleInit created a Source per schema table, and each advance replays
+ * every change through prev-tx source maintenance regardless of query
+ * count (~50ms CPU per ~150-change burst) — so a 0 budget aborted every
+ * burst forever. Two reasons that can never be economical: (1) a Go reset
+ * is never remotely free — resetEngine is destroy + re-init (per-table
+ * presence probes + Sources) + full re-hydrate + TS re-registration and
+ * query re-transform round-trips, hundreds of ms at minimum; (2) the
+ * source-maintenance CPU the abort "saves" is re-paid by the reset's own
+ * leapfrog + re-hydrate anyway. TS-native never manifests this only
+ * because its no-pipeline advances cost ~0 lap-ms — its formula never
+ * trips. The floor also covers what the measured hydrate wall structurally
+ * omits (re-transform REST round-trips, CVR rewrite, poke re-delivery).
+ *
+ * Genuine economics are preserved: huge-transaction advances cost seconds
+ * of CPU and still abort; GO_IVM_MAX_DIFF_CHANGES and the
+ * GO_IVM_ADVANCE_BUDGET_MS wall backstop still guard runaways.
+ */
+export const GO_ADVANCE_ABORT_BUDGET_FLOOR_MS = 250;
+
+/**
+ * The budget actually sent on advanceToHeadStream: honest base pricing
+ * (goHydrationCostMs entries), streak escalation (escalatedAbortBudgetMs),
+ * and the reset-cost floor — in that order.
+ */
+export function goAdvanceAbortBudgetMs(
+  baseMs: number,
+  consecutiveAborts: number,
+): number {
+  return Math.max(
+    escalatedAbortBudgetMs(baseMs, consecutiveAborts),
+    GO_ADVANCE_ABORT_BUDGET_FLOOR_MS,
+  );
+}
+
 export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   const msg = e instanceof Error ? e.message : String(e);
   if (
@@ -468,6 +570,17 @@ export class PipelineDriver {
     'ivm.advance-aborted-economic',
     "Go advance hit the economic advancement-abort (reset via TS's advancement-timeout path)",
   );
+
+  /**
+   * Consecutive economic advancement-aborts (advance-aborted class) with no
+   * completed advance in between — the input to escalatedAbortBudgetMs.
+   * Incremented in #classifyGoPrimaryAdvanceError's 'advance-aborted' case,
+   * cleared when a drive advance completes. Instance state: survives
+   * pipeline RESETS (the loop this breaks is abort→reset→abort on one
+   * driver), dies with the view-syncer on teardown — a fresh instance
+   * starting at 1× is correct.
+   */
+  #consecutiveAdvanceAborts = 0;
   /**
    * A resolved scalar subquery's value changed mid-advance in Go — resolves
    * as ResetPipelinesSignal('scalar-subquery'), identical to TS-native's
@@ -1123,12 +1236,17 @@ export class PipelineDriver {
     // shapes, and post-reconnect getRow() panicked because the
     // TableSource was never created. (Audit fix F.)
     const planned = this.#planAstForGo(query);
+    const hydrateStartMs = performance.now();
     const goResult = await this.#goBackend!.hydrate(queryID, planned);
+    const hydrateWallMs = performance.now() - hydrateStartMs;
 
-    // Store a minimal pipeline entry for queries() map and hydration time tracking
-    // (no TS pipeline needed — Go handles push processing). The real
-    // hydrationTimeMs from Go restores the adaptive circuit breaker math
-    // in #shouldAdvanceYieldMaybeAbortAdvance.
+    // Store a minimal pipeline entry for queries() map and hydration time
+    // tracking (no TS pipeline needed — Go handles push processing).
+    // hydrationTimeMs feeds totalHydrationTimeMs() — the abort budget — so
+    // it must price the RESET an abort triggers, in TS-native's units
+    // (wall; see the note above #addQueryImpl's pipelines.set). Go's
+    // engine-internal timingMs alone underpriced it ~100× → floor-pinned
+    // budget → the abort loop (see goHydrationCostMs).
     this.#pipelines.set(queryID, {
       input: {
         destroy() {},
@@ -1137,7 +1255,7 @@ export class PipelineDriver {
         getSchema: () => ({} as never),
         setOutput: () => {},
       } as unknown as Input,
-      hydrationTimeMs: goResult.timingMs ?? 0,
+      hydrationTimeMs: goHydrationCostMs(goResult.timingMs, hydrateWallMs),
       transformedAst: planned,
       transformationHash,
       companions: [],
@@ -1267,6 +1385,7 @@ export class PipelineDriver {
     // by the credit window, and one RPC per batch keeps Go's per-query
     // goroutines maximally parallel while the single ordered queue
     // interleaves their rows.
+    const batchHydrateStartMs = performance.now();
     const stream = this.#goBackend!.hydrateManyStreamPull(
       userQueries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
     );
@@ -1277,6 +1396,14 @@ export class PipelineDriver {
         // Stub registration once per query (real timingMs lands on the
         // terminal entry), signature tracking, final-gated pruning.
         if (!this.#pipelines.has(q.queryID) || r.final) {
+          // Abort-budget pricing on the terminal entry (stub registrations
+          // keep the engine time until then): the batch hydrates its queries
+          // in PARALLEL on one pull stream, so attributing each query its
+          // full first→final wall would sum to ~N× the batch wall.
+          // Amortize instead — wall-so-far ÷ batch size — so
+          // SUM(entries) ≈ the batch's true parallel re-hydrate wall
+          // (conservative vs TS-native's serial sum), with Go's engine time
+          // as the per-query floor via goHydrationCostMs.
           this.#pipelines.set(q.queryID, {
             input: {
               destroy() {},
@@ -1285,7 +1412,13 @@ export class PipelineDriver {
               getSchema: () => ({} as never),
               setOutput: () => {},
             } as unknown as Input,
-            hydrationTimeMs: r.timingMs ?? 0,
+            hydrationTimeMs: r.final
+              ? goHydrationCostMs(
+                  r.timingMs,
+                  (performance.now() - batchHydrateStartMs) /
+                    userQueries.length,
+                )
+              : (r.timingMs ?? 0),
             transformedAst: q.ast,
             transformationHash: q.transformationHash,
             companions: [],
@@ -1765,13 +1898,21 @@ export class PipelineDriver {
       | {reset: ResetPipelinesSignal}
     > = this.#goBackend!.advanceToHeadStream({
           // Arm Go's economic advancement-abort with TS's own inputs: the
-          // CG's measured re-hydrate cost (for Go-owned pipelines these
-          // entries ARE Go's hydrate timingMs, stored back at registration).
-          // Go aborts on TS's formula → AdvanceAbortedError →
-          // 'advancement-timeout' reset — the identical recovery a TS-native
-          // abort takes. This replaces the wall-clock RPC timeout as the only
-          // load-coupled bound on the advance.
-          totalHydrationTimeMs: this.totalHydrationTimeMs(),
+          // CG's priced re-hydrate cost (Go-owned entries record the
+          // TS-observed hydrate WALL — goHydrationCostMs — the same units
+          // TS-native entries carry), escalated 2× per consecutive abort
+          // and floored at the minimum true cost of a Go reset
+          // (goAdvanceAbortBudgetMs) so a structurally-tiny budget
+          // (internal-only / TTL-expired CGs price at ~0) cannot loop
+          // abort→reset→abort. Go aborts on TS's formula →
+          // AdvanceAbortedError → 'advancement-timeout' reset — the
+          // identical recovery a TS-native abort takes. This replaces the
+          // wall-clock RPC timeout as the only load-coupled bound on the
+          // advance.
+          totalHydrationTimeMs: goAdvanceAbortBudgetMs(
+            this.totalHydrationTimeMs(),
+            this.#consecutiveAdvanceAborts,
+          ),
         })
           .then(goDerived => {
           if (goDerived.reset) {
@@ -1842,6 +1983,9 @@ export class PipelineDriver {
       return goOutcome.reset;
     }
     const {changes: goResults, goVersion} = goOutcome;
+    // A completed drive advance ends the abort streak — the next budget
+    // returns to 1× (see escalatedAbortBudgetMs).
+    this.#consecutiveAdvanceAborts = 0;
     let goVersionFinal = goVersion;
     let goResultsFinal = goResults;
 
@@ -1864,9 +2008,14 @@ export class PipelineDriver {
         let next: AdvanceToHeadResult;
         try {
           next = await this.#goBackend!.advanceToHeadStream({
-            // Same economic bound as the main drive advance: a slow catch-up
-            // is exactly the "cheaper to reset" case.
-            totalHydrationTimeMs: this.totalHydrationTimeMs(),
+            // Same economic bound as the main drive advance (escalation +
+            // reset-cost floor included — a catch-up abort feeds the same
+            // streak): a slow catch-up is exactly the "cheaper to reset"
+            // case.
+            totalHydrationTimeMs: goAdvanceAbortBudgetMs(
+              this.totalHydrationTimeMs(),
+              this.#consecutiveAdvanceAborts,
+            ),
           });
         } catch (e) {
           // User's-audit staleness hole: a failed catch-up is NOT safely
@@ -2036,10 +2185,13 @@ export class PipelineDriver {
         throw e;
       case 'advance-aborted':
         // Go's economic abort — TS's own advancement-timeout, computed inside
-        // the Go advance with the same inputs (elapsed vs the CG's measured
+        // the Go advance with the same inputs (elapsed vs the CG's priced
         // totalHydrationTimeMs, progress vs numChanges). Resolve to the SAME
         // signal + reason a TS-native abort produces; the message is Go's
-        // byte-identical rendering of TS's template.
+        // byte-identical rendering of TS's template. The streak feeds
+        // escalatedAbortBudgetMs so consecutive aborts cannot loop at the
+        // same backlog position.
+        this.#consecutiveAdvanceAborts++;
         this.#advanceAbortedEconomic.add(1);
         this.#lc.info?.(`[go-primary] ${msg}`);
         return new ResetPipelinesSignal(msg, 'advancement-timeout');
