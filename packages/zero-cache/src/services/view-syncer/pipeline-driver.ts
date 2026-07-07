@@ -74,6 +74,7 @@ import type {
 import {
   AdvanceAbortedError,
   PermanentDataError,
+  ScalarResetError,
   StaleInitEpochError,
 } from './go-sidecar/go-ivm-client.ts';
 import {type ShardID} from '../../types/shards.ts';
@@ -204,6 +205,12 @@ export function decideGoPrimaryDispatch(
  *                  the Go advance) — DROP → ResetPipelinesSignal with TS's own
  *                  'advancement-timeout' reason: byte-identical recovery to a
  *                  TS-native abort.
+ *   'scalar-reset' a resolved scalar subquery's value changed mid-advance
+ *                  (RPC_CODE_SCALAR_RESET → ScalarResetError) — DROP →
+ *                  ResetPipelinesSignal('scalar-subquery'), the identical
+ *                  signal TS-native's companion push throws for the same
+ *                  event (:1468). NOT unclassified/teardown: this is a
+ *                  designed-for transparent reset.
  *   'sidecar'      sidecar unavailable / restart in flight — DROP → reset.
  *   'unclassified' anything else — RE-THROW (CG teardown + client reconnect,
  *                  exactly TS's disposition for an unexpected error). This
@@ -230,6 +237,7 @@ export type GoAdvanceErrorClass =
   | 'stale-epoch'
   | 'data-error'
   | 'advance-aborted'
+  | 'scalar-reset'
   | 'sidecar'
   | 'unclassified';
 
@@ -251,6 +259,12 @@ export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   // them, but the pinned precedence stays untouched).
   if (e instanceof AdvanceAbortedError) {
     return 'advance-aborted';
+  }
+  // Scalar-subquery reset (RPC_CODE_SCALAR_RESET): Go's companion pipeline
+  // detected a resolved scalar value change mid-advance. Same disposition as
+  // TS-native's own throw at :1468 — reset with reason 'scalar-subquery'.
+  if (e instanceof ScalarResetError) {
+    return 'scalar-reset';
   }
   // Permanent data error (RPC_CODE_DATA_ERROR → PermanentDataError): bad
   // replica data the sidecar can't represent. Checked before the 'sidecar' /
@@ -453,6 +467,16 @@ export class PipelineDriver {
     'sync',
     'ivm.advance-aborted-economic',
     "Go advance hit the economic advancement-abort (reset via TS's advancement-timeout path)",
+  );
+  /**
+   * A resolved scalar subquery's value changed mid-advance in Go — resolves
+   * as ResetPipelinesSignal('scalar-subquery'), identical to TS-native's
+   * companion-push throw. Counted separately from failure-driven resets.
+   */
+  readonly #advanceScalarReset = getOrCreateCounter(
+    'sync',
+    'ivm.advance-scalar-reset',
+    "Go advance hit a scalar-subquery value change (reset via TS's scalar-subquery path)",
   );
   /**
    * D11: per-reason counter for #scheduleGoReset. Pre-fix every reset
@@ -2019,6 +2043,17 @@ export class PipelineDriver {
         this.#advanceAbortedEconomic.add(1);
         this.#lc.info?.(`[go-primary] ${msg}`);
         return new ResetPipelinesSignal(msg, 'advancement-timeout');
+      case 'scalar-reset':
+        // A resolved scalar subquery's value changed mid-advance (Go's
+        // companion detection, engine.ScalarResetError → -32105). TS-native
+        // throws ResetPipelinesSignal('scalar-subquery') from its own
+        // companion push for the identical event — same signal, same reason,
+        // same transparent reset + re-hydrate. Before this branch the error
+        // landed in 'unclassified' → re-throw → CG teardown: a "manual
+        // reload"-class client symptom on a designed-for seamless path.
+        this.#advanceScalarReset.add(1);
+        this.#lc.info?.(`[go-primary] scalar-subquery reset: ${msg}`);
+        return new ResetPipelinesSignal(msg, 'scalar-subquery');
       case 'sidecar':
         this.#advanceDroppedSidecar.add(1);
         this.#lc.warn?.(

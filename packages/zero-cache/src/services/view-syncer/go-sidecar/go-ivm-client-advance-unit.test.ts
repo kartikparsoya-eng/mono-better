@@ -6,9 +6,10 @@
 //      reset-storm fuel; TS's own compute has no deadline either).
 //   2. advanceToHeadStream ships the economic-abort budget
 //      (totalHydrationTimeMs / suppressAbort) as additive request params.
-//   3. RPC_CODE_ADVANCE_ABORTED / RPC_CODE_ADVANCE_CLEAN_RETRYABLE map to
-//      typed errors (AdvanceAbortedError → 'advancement-timeout' reset;
-//      RetryableAdvanceError → in-place retry in GoComputeBackend).
+//   3. RPC_CODE_ADVANCE_ABORTED / RPC_CODE_ADVANCE_CLEAN_RETRYABLE /
+//      RPC_CODE_SCALAR_RESET map to typed errors (AdvanceAbortedError →
+//      'advancement-timeout' reset; RetryableAdvanceError → in-place retry
+//      in GoComputeBackend; ScalarResetError → 'scalar-subquery' reset).
 
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import {Packr} from 'msgpackr';
@@ -17,6 +18,7 @@ import {
   computeBoundTimeoutMs,
   GoIVMClient,
   RetryableAdvanceError,
+  ScalarResetError,
 } from './go-ivm-client.ts';
 import type {GoNapiAddon} from './napi/index.ts';
 
@@ -149,6 +151,24 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
       message: 'advanceToHeadStream advance: snapshotter: acquire conn (30s timeout): busy',
     });
     await expect(p).rejects.toBeInstanceOf(RetryableAdvanceError);
+  });
+
+  test('RPC_CODE_SCALAR_RESET (-32105) rejects as ScalarResetError with the TS message verbatim', async () => {
+    // Pre-fix, -32105 fell through the ladder to the generic Error branch
+    // (`RPC error -32105: ...`) → classifier 'unclassified' → CG teardown.
+    // The Go message mirrors TS's ResetPipelinesSignal('scalar-subquery')
+    // text; the typed error is what routes it to the same transparent reset.
+    const client = new GoIVMClient();
+    const host = makeAdvanceFakeHost(client);
+    client.connectNapi(host.addon);
+
+    const msg = 'Scalar subquery value changed for users: alice -> bob';
+    const p = client.advanceToHeadStream('cg', 1, 'app');
+    await flush();
+    host.deliver(host.reqs[0].id, undefined, {code: -32105, message: msg});
+    await expect(p).rejects.toSatisfy(
+      (e: unknown) => e instanceof ScalarResetError && e.message === msg,
+    );
   });
 
   test('NO wall-clock timeout in-process: still pending far past the old 120s default', async () => {

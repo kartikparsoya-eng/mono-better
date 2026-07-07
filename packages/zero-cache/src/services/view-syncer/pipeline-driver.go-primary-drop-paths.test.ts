@@ -2,6 +2,7 @@ import {describe, expect, test} from 'vitest';
 import {
   AdvanceAbortedError,
   PermanentDataError,
+  ScalarResetError,
   StaleInitEpochError,
 } from './go-sidecar/go-ivm-client.ts';
 import {
@@ -182,6 +183,32 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       expect(classifyGoPrimaryAdvanceError(e)).toBe('advance-aborted');
     });
 
+    test('ScalarResetError → scalar-reset (transparent reset, reason scalar-subquery — NOT teardown)', () => {
+      // Go's -32105: a resolved scalar subquery's value changed mid-advance.
+      // TS-native throws ResetPipelinesSignal('scalar-subquery') for the same
+      // event (pipeline-driver.ts:1468). Pre-fix this typed error did not
+      // exist and the RPC error fell into 'unclassified' → re-throw → CG
+      // teardown — every affected client forced through a reconnect on a
+      // designed-for seamless path.
+      const e = new ScalarResetError(
+        'Scalar subquery value changed for users: alice -> bob',
+      );
+      expect(classifyGoPrimaryAdvanceError(e)).toBe('scalar-reset');
+    });
+
+    test('scalar-reset plain-Error message form → unclassified (instanceof is the contract)', () => {
+      // The wire mapping (RPC_CODE_SCALAR_RESET → ScalarResetError) is what
+      // routes this to a reset; a bare message must NOT be string-sniffed
+      // into a reset bucket (unlike data-error there is no defense-in-depth
+      // fallback here — a plain-Error form implies a version-skewed pair,
+      // which the single-image napi packaging rules out).
+      expect(
+        classifyGoPrimaryAdvanceError(
+          new Error('Scalar subquery value changed for users: alice -> bob'),
+        ),
+      ).toBe('unclassified');
+    });
+
     test('non-Error values are classified by their string form', () => {
       expect(classifyGoPrimaryAdvanceError('engine not initialized')).toBe(
         'sidecar',
@@ -198,16 +225,18 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       expect(classifyGoPrimaryAdvanceError(e)).toBe('protocol');
     });
 
-    test('escalate-vs-drop contract: only advance-aborted/sidecar resolve to a reset', () => {
+    test('escalate-vs-drop contract: only advance-aborted/scalar-reset/sidecar resolve to a reset', () => {
       const classes: GoAdvanceErrorClass[] = [
         'protocol',
         'stale-epoch',
         'data-error',
         'advance-aborted',
+        'scalar-reset',
         'sidecar',
         'unclassified',
       ];
-      // advance-aborted (TS's own advancement-timeout economics) and sidecar
+      // advance-aborted (TS's own advancement-timeout economics),
+      // scalar-reset (TS's own scalar-subquery reset), and sidecar
       // (availability flip, F1 machinery) are the ONLY buckets that resolve
       // to a ResetPipelinesSignal; everything else re-throws — teardown +
       // client-reconnect backoff, TS's disposition for both wire bugs and
@@ -215,6 +244,7 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       // the reset-storm fix.
       expect(classes.filter(c => !RETHROW.has(c))).toEqual([
         'advance-aborted',
+        'scalar-reset',
         'sidecar',
       ]);
     });

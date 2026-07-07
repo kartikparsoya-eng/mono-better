@@ -699,6 +699,26 @@ export class RetryableAdvanceError extends Error {
   }
 }
 
+/**
+ * RPC error code Go uses when a resolved scalar subquery's value changed
+ * mid-advance (engine.ScalarResetError): the main query's baked-in literal
+ * is stale, so the pipelines must reset + re-hydrate. TS-native's own
+ * companion push throws ResetPipelinesSignal('scalar-subquery') for the
+ * identical event (pipeline-driver.ts:1468) — a TRANSPARENT reset, not a
+ * teardown. The classifier maps this typed error to that same signal +
+ * reason. Before this mapping existed the code fell through to the generic
+ * Error branch → 'unclassified' → re-throw → CG teardown: a designed-for
+ * seamless event became a client disconnect/reconnect.
+ */
+export const RPC_CODE_SCALAR_RESET = -32105;
+
+export class ScalarResetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScalarResetError';
+  }
+}
+
 // --- Client ---
 
 export class GoIVMClient {
@@ -1447,6 +1467,12 @@ export class GoIVMClient {
           // State-untouched advance failure — GoComputeBackend retries the
           // idempotent call in place instead of resetting.
           pending.reject(new RetryableAdvanceError(resp.error.message));
+        } else if (resp.error.code === RPC_CODE_SCALAR_RESET) {
+          // A resolved scalar subquery's value changed mid-advance. The
+          // message mirrors TS's ResetPipelinesSignal('scalar-subquery')
+          // text byte-for-byte; the classifier maps it to that same signal
+          // + reason (transparent reset, NOT teardown).
+          pending.reject(new ScalarResetError(resp.error.message));
         } else {
           pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
         }
