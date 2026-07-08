@@ -19,6 +19,13 @@
 //      socket"): a JS loop starved for minutes parked the producing Go
 //      goroutine in an uninterruptible call while it held the row plane's
 //      mutex — the G13 permanent CG wedge.
+//   5. Drain signal (ABI v5): the addon tracks queue occupancy and, after
+//      any FULL rejection, calls goivm_queue_drained() (a direct dlsym'd
+//      Go export, streamCredit-class: O(1), never blocks) once the queue
+//      drains below the low-water mark — the EVENT-DRIVEN wakeup for Go
+//      producers parked on a full queue. Replaces the v4 Go-side
+//      sleep-poll, whose up-to-5ms dead air per park was the measured
+//      latency tax (19,242 parks in one 20-min soak).
 //
 // Memory: the deliver callback malloc+memcpy's the payload (Go's buffer is
 // only valid during the call — cgo pointer rules); the JS-side callback
@@ -35,6 +42,7 @@
 
 #include <dlfcn.h>
 #include <node_api.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,7 +80,15 @@
 // callback would consume garbage (a phantom "queue full" retries an
 // enqueue that SUCCEEDED — duplicate delivery → stream corruption), and a
 // v3 library's blocking callback on this addon would reintroduce the wedge.
-#define EXPECTED_GOIVM_ABI 4
+// ABI v5: adds the goivm_queue_drained export (dlsym'd + REQUIRED below —
+// the event-driven wakeup for Go producers parked on a full queue; called
+// from call_js_deliver's drain accounting) and delivery kind 5 (record
+// batch — framed sub-records staged Go-side under congestion; decoded by
+// napi-records.ts iterateBatch). The version gates BOTH: a v5 library on a
+// v4 addon would never receive drain signals (producers degrade to
+// tick-polling) and — worse — its kind-5 batches would hit a JS side with
+// no batch decoder: dropped deliveries → stream corruption.
+#define EXPECTED_GOIVM_ABI 5
 // Deliver statuses returned to the Go library (must mirror rowplane.go).
 #define GOIVM_DELIVER_OK 0
 #define GOIVM_DELIVER_FULL 1
@@ -93,6 +109,7 @@ typedef void (*goivm_shutdown_fn)(void);
 typedef int32_t (*goivm_abi_version_fn)(void);
 typedef void (*goivm_stream_credit_fn)(double req_id, int32_t n);
 typedef void (*goivm_stream_cancel_fn)(double req_id);
+typedef void (*goivm_queue_drained_fn)(void);
 
 typedef struct {
   void* dl;
@@ -102,11 +119,26 @@ typedef struct {
   goivm_abi_version_fn abi_version;
   goivm_stream_credit_fn stream_credit;
   goivm_stream_cancel_fn stream_cancel;
+  goivm_queue_drained_fn queue_drained;
   napi_threadsafe_function tsfn;
+  // low_water = queue_max/2: the drain-signal threshold (ABI v5). After
+  // any FULL rejection, the first dequeue that brings occupancy to or
+  // below this fires ONE goivm_queue_drained() (latched by
+  // g_queue_was_full — one signal per full episode).
+  size_t low_water;
   int started;
 } bridge_state;
 
 static bridge_state g_bridge = {0};
+
+// Queue-occupancy accounting for the ABI v5 drain signal. g_queue_len is
+// an UPPER bound on queued items (incremented BEFORE the enqueue attempt,
+// decremented on failure or dequeue — never transiently under-counts, so a
+// drain signal is never fired while the queue might still be full).
+// Touched from Go threads (deliver_from_go) and the JS thread
+// (call_js_deliver); C11 atomics.
+static atomic_long g_queue_len;
+static atomic_bool g_queue_was_full;
 
 typedef struct {
   int32_t kind;
@@ -130,6 +162,21 @@ static void free_delivery_buffer(napi_env env, void* data, void* hint) {
 static void call_js_deliver(napi_env env, napi_value js_cb, void* ctx,
                             void* data) {
   delivery_item* item = (delivery_item*)data;
+  // Drain accounting (ABI v5): every dequeued item decrements — including
+  // the teardown path below. After a FULL episode (latch set), the first
+  // dequeue at or below the low-water mark fires ONE drain signal to wake
+  // the Go producers parked on the full queue. atomic_exchange makes
+  // exactly one dequeue win the latch; env==NULL (TSFN teardown) skips the
+  // call into a dying bridge — parked producers unwind via deliverClosed
+  // on their next attempt.
+  long remaining = atomic_fetch_sub(&g_queue_len, 1) - 1;
+  if (remaining <= (long)g_bridge.low_water &&
+      atomic_load(&g_queue_was_full)) {
+    if (atomic_exchange(&g_queue_was_full, false) && env != NULL &&
+        g_bridge.queue_drained != NULL) {
+      g_bridge.queue_drained();
+    }
+  }
   if (env == NULL || js_cb == NULL) {
     // TSFN torn down with items still queued — just free.
     if (item != NULL) {
@@ -212,13 +259,23 @@ static int32_t deliver_from_go(void* ctx, int32_t kind, const void* data,
   item->data = malloc(item->len > 0 ? item->len : 1);
   GOIVM_FATAL_IF(item->data == NULL, "malloc(payload) failed (OOM)");
   if (item->len > 0) memcpy(item->data, data, item->len);
+  // Count BEFORE the enqueue attempt (upper bound — see g_queue_len) and
+  // undo on failure: the drain signal must never fire while the queue
+  // might still be full.
+  atomic_fetch_add(&g_queue_len, 1);
   napi_status status = napi_call_threadsafe_function(g_bridge.tsfn, item,
                                                      napi_tsfn_nonblocking);
   if (status == napi_ok) return GOIVM_DELIVER_OK;
-  // Nothing was enqueued — free the copy either way.
+  // Nothing was enqueued — undo the count and free the copy either way.
+  atomic_fetch_sub(&g_queue_len, 1);
   free(item->data);
   free(item);
-  if (status == napi_queue_full) return GOIVM_DELIVER_FULL;
+  if (status == napi_queue_full) {
+    // Latch the full episode: the next drain below low-water fires ONE
+    // goivm_queue_drained() (ABI v5) to wake the parked producers.
+    atomic_store(&g_queue_was_full, true);
+    return GOIVM_DELIVER_FULL;
+  }
   // napi_closing (shutdown teardown) or any other terminal condition:
   // the transport is dead; the Go side unwinds the stream.
   return GOIVM_DELIVER_CLOSED;
@@ -262,9 +319,11 @@ static napi_value Start(napi_env env, napi_callback_info info) {
       (goivm_stream_credit_fn)dlsym(g_bridge.dl, "goivm_stream_credit");
   g_bridge.stream_cancel =
       (goivm_stream_cancel_fn)dlsym(g_bridge.dl, "goivm_stream_cancel");
+  g_bridge.queue_drained =
+      (goivm_queue_drained_fn)dlsym(g_bridge.dl, "goivm_queue_drained");
   if (!g_bridge.start || !g_bridge.send || !g_bridge.shutdown ||
       !g_bridge.abi_version || !g_bridge.stream_credit ||
-      !g_bridge.stream_cancel) {
+      !g_bridge.stream_cancel || !g_bridge.queue_drained) {
     dlclose(g_bridge.dl);
     g_bridge.dl = NULL;
     return throw_error(env, "libgoivm missing goivm_* symbols (wrong library?)");
@@ -293,6 +352,7 @@ static napi_value Start(napi_env env, napi_callback_info info) {
     long v = atol(queue_env);
     if (v > 0) queue_max = (size_t)v;
   }
+  g_bridge.low_water = queue_max / 2;
   status = napi_create_threadsafe_function(
       env, argv[1], NULL, resource_name, queue_max, 1, NULL, NULL, NULL,
       call_js_deliver, &g_bridge.tsfn);

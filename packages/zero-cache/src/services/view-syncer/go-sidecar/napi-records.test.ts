@@ -7,7 +7,14 @@
 // lifecycle (clearRequest).
 
 import {describe, expect, test} from 'vitest';
-import {RowGroupRegistry, decodeGroupDef, decodeRowRecord} from './napi-records.ts';
+import {
+  DELIVERY_KIND_GROUP_DEF,
+  DELIVERY_KIND_ROW,
+  RowGroupRegistry,
+  decodeGroupDef,
+  decodeRowRecord,
+  iterateBatch,
+} from './napi-records.ts';
 
 class Writer {
   #chunks: number[] = [];
@@ -182,5 +189,64 @@ describe('napi-records decoder (pure)', () => {
         : undefined,
     );
     expect((change.row as {label: string}).label).toBe(label);
+  });
+});
+
+// Kind-5 record batches (ABI v5): the Go row plane stages records while the
+// TSFN queue is full and ships them as ONE item — a concatenation of framed
+// sub-records ([u8 kind][u32le len][bytes]). Layout locked by go-ivm
+// cmd/sidecar/rowplane.go stageAppendLocked; order within a batch is the Go
+// emit order (nothing may overtake the stage).
+describe('iterateBatch', () => {
+  function batchOf(...subs: Array<{kind: number; payload: Uint8Array}>): Buffer {
+    const parts: number[] = [];
+    for (const {kind, payload} of subs) {
+      const hdr = Buffer.alloc(5);
+      hdr[0] = kind;
+      hdr.writeUInt32LE(payload.length, 1);
+      parts.push(...hdr, ...payload);
+    }
+    return Buffer.from(parts);
+  }
+
+  test('splits framed sub-records in order, zero-copy', () => {
+    const a = new Uint8Array([1, 2, 3]);
+    const b = new Uint8Array([9]);
+    const c = new Uint8Array([]); // zero-length body is legal framing
+    const batch = batchOf(
+      {kind: DELIVERY_KIND_GROUP_DEF, payload: a},
+      {kind: DELIVERY_KIND_ROW, payload: b},
+      {kind: DELIVERY_KIND_ROW, payload: c},
+    );
+    const got = [...iterateBatch(batch)];
+    expect(got.map(s => s.kind)).toEqual([
+      DELIVERY_KIND_GROUP_DEF,
+      DELIVERY_KIND_ROW,
+      DELIVERY_KIND_ROW,
+    ]);
+    expect([...got[0].payload]).toEqual([1, 2, 3]);
+    expect([...got[1].payload]).toEqual([9]);
+    expect(got[2].payload.length).toBe(0);
+    // Zero-copy contract: sub-payloads are views into the parent buffer.
+    expect(got[0].payload.buffer).toBe(batch.buffer);
+  });
+
+  test('empty batch yields nothing', () => {
+    expect([...iterateBatch(Buffer.alloc(0))]).toEqual([]);
+  });
+
+  test('truncated header throws (ABI-mismatch class)', () => {
+    const batch = batchOf({kind: DELIVERY_KIND_ROW, payload: new Uint8Array([1])});
+    // Chop mid-header of a phantom second record.
+    const bad = Buffer.concat([batch, Buffer.from([3, 0, 0])]);
+    expect(() => [...iterateBatch(bad)]).toThrow(/header truncated/);
+  });
+
+  test('truncated body throws (ABI-mismatch class)', () => {
+    const hdr = Buffer.alloc(5);
+    hdr[0] = DELIVERY_KIND_ROW;
+    hdr.writeUInt32LE(10, 1); // claims 10 bytes, provides 2
+    const bad = Buffer.concat([hdr, Buffer.from([1, 2])]);
+    expect(() => [...iterateBatch(bad)]).toThrow(/body truncated/);
   });
 });

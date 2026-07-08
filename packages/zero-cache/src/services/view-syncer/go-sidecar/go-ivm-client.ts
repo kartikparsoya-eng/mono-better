@@ -6,11 +6,13 @@
 
 import {Packr, Unpackr} from 'msgpackr';
 import {
+  DELIVERY_KIND_BATCH,
   DELIVERY_KIND_FRAME,
   DELIVERY_KIND_GROUP_DEF,
   DELIVERY_KIND_HOST_DEATH,
   DELIVERY_KIND_ROW,
   RowGroupRegistry,
+  iterateBatch,
 } from './napi-records.ts';
 import type {GoNapiAddon} from './napi/index.ts';
 import {trace} from '@opentelemetry/api';
@@ -1577,6 +1579,31 @@ export class GoIVMClient {
       const reason =
         payload.length > 0 ? payload.toString('utf8') : 'no reason given';
       this.#napiFatal(new Error(`go-ivm in-process host died: ${reason}`));
+      return;
+    }
+    // Record batch (ABI v5): framed sub-records staged Go-side while the
+    // TSFN queue was full (rowplane.go's congestion stage) — iterate and
+    // dispatch each through this very handler, so every sub-record gets
+    // the same late-record guard and error containment as a direct
+    // delivery (sub-kinds are 2/3 only; recursion depth is 1). MUST run
+    // BEFORE the late-record guard below: the batch payload begins with a
+    // sub-record frame header, not a reqID — the guard would misread it
+    // and could silently drop the whole batch.
+    if (kind === DELIVERY_KIND_BATCH) {
+      try {
+        for (const sub of iterateBatch(payload)) {
+          this.#handleDelivery(sub.kind, sub.payload);
+        }
+      } catch (err) {
+        // Malformed batch FRAMING (truncated header/body) — ABI-mismatch
+        // class. Per-sub-record dispatch errors never reach here: each is
+        // contained by the recursive call's own try/catch.
+        this.#log(
+          'error',
+          `NAPI batch framing error: ${(err as Error).message}`,
+          err,
+        );
+      }
       return;
     }
     // Late-record guard (REVIEW-napi-transport MED): records for an RPC that

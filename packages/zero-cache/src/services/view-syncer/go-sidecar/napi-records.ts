@@ -36,6 +36,46 @@ export const DELIVERY_KIND_ROW = 3;
  * never emitted on deliberate shutdown. ABI v2.
  */
 export const DELIVERY_KIND_HOST_DEATH = 4;
+/**
+ * Record batch (ABI v5): the payload is a concatenation of framed
+ * sub-records — each [u8 kind][u32le len][len bytes] with kind ∈ {2,3} —
+ * staged by the Go row plane while the TSFN queue was full (go-ivm
+ * rowplane.go's congestion stage) and shipped as ONE queue item, so queue
+ * occupancy tracks batches instead of rows under pressure. Iterate with
+ * iterateBatch and dispatch each sub-record exactly as if it had been
+ * delivered individually; order within the batch is the Go emit order.
+ */
+export const DELIVERY_KIND_BATCH = 5;
+
+/**
+ * Iterate a kind-5 batch payload's framed sub-records. Yields zero-copy
+ * subarray views into the parent Buffer — valid for the synchronous
+ * dispatch loop this feeds (the decoders copy values out by construction).
+ * Throws on malformed framing (truncated header/body): that is an ABI
+ * mismatch class, not a data error — the caller logs and drops the batch.
+ */
+export function* iterateBatch(
+  payload: Buffer,
+): IterableIterator<{kind: number; payload: Buffer}> {
+  let off = 0;
+  while (off < payload.length) {
+    if (off + 5 > payload.length) {
+      throw new Error(
+        `batch sub-record header truncated at offset ${off} (payload ${payload.length} bytes)`,
+      );
+    }
+    const kind = payload[off];
+    const len = payload.readUInt32LE(off + 1);
+    off += 5;
+    if (off + len > payload.length) {
+      throw new Error(
+        `batch sub-record body truncated at offset ${off} (want ${len} bytes, have ${payload.length - off})`,
+      );
+    }
+    yield {kind, payload: payload.subarray(off, off + len)};
+    off += len;
+  }
+}
 
 const VAL_NULL = 0;
 const VAL_FALSE = 1;
