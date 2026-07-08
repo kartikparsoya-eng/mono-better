@@ -10,9 +10,15 @@
 //      frames (kind 1) and row records (kinds 2/3).
 //   3. send(buffer): forwards a request frame to goivm_send (which copies
 //      and returns immediately — never blocks the JS thread).
-//   4. Backpressure: the TSFN queue is bounded; the deliver callback uses
-//      napi_tsfn_blocking, so a slow JS consumer blocks the calling Go
-//      goroutine — propagating into the engine exactly like a slow socket.
+//   4. Backpressure: the TSFN queue is bounded; the deliver callback
+//      enqueues with napi_tsfn_nonblocking and returns a status (ABI v4:
+//      0=queued, 1=queue full, 2=closing). The GO side owns the retry —
+//      which is what makes a delivery stalled on a starved JS event loop
+//      CANCELLABLE (pull-gate cancel / group teardown / deliver timeout).
+//      Pre-v4 this used napi_tsfn_blocking ("backpressure like a slow
+//      socket"): a JS loop starved for minutes parked the producing Go
+//      goroutine in an uninterruptible call while it held the row plane's
+//      mutex — the G13 permanent CG wedge.
 //
 // Memory: the deliver callback malloc+memcpy's the payload (Go's buffer is
 // only valid during the call — cgo pointer rules); the JS-side callback
@@ -60,17 +66,27 @@
 // into the Go library (leaf-mutex registry lookup; O(1), never blocks,
 // never touches N-API on the Go side) — deliberately NOT routed through
 // the TSFN: credit grants are upstream control flow, not deliveries.
-#define EXPECTED_GOIVM_ABI 3
+// ABI v4: the deliver callback returns int32_t status and enqueues with
+// napi_tsfn_nonblocking (see deliver_from_go). The version gates the
+// SIGNATURE: a v4 library reading a return value from a v3 addon's void
+// callback would consume garbage (a phantom "queue full" retries an
+// enqueue that SUCCEEDED — duplicate delivery → stream corruption), and a
+// v3 library's blocking callback on this addon would reintroduce the wedge.
+#define EXPECTED_GOIVM_ABI 4
+// Deliver statuses returned to the Go library (must mirror rowplane.go).
+#define GOIVM_DELIVER_OK 0
+#define GOIVM_DELIVER_FULL 1
+#define GOIVM_DELIVER_CLOSED 2
 // Default TSFN queue bound. Tunable via GOIVM_NAPI_QUEUE_MAX (env, read at
 // start): in row mode a single large advance can fill 8192 by itself (one
-// entry per row), stalling the producing Go goroutine in blocking mode —
+// entry per row), putting the producing Go goroutine into its retry loop —
 // which is the designed backpressure, but operators may want more headroom
 // before it engages. Larger queue = more C-heap payloads pending on the
 // queue (accounted to V8 via napi_adjust_external_memory below).
 #define TSFN_MAX_QUEUE_DEFAULT 8192
 
-typedef void (*goivm_deliver_cb)(void* ctx, int32_t kind, const void* data,
-                                 int32_t len);
+typedef int32_t (*goivm_deliver_cb)(void* ctx, int32_t kind, const void* data,
+                                    int32_t len);
 typedef int32_t (*goivm_start_fn)(goivm_deliver_cb cb, void* ctx);
 typedef int32_t (*goivm_send_fn)(const void* data, int32_t len);
 typedef void (*goivm_shutdown_fn)(void);
@@ -159,11 +175,15 @@ static void call_js_deliver(napi_env env, napi_value js_cb, void* ctx,
 }
 
 // The C deliver callback Go invokes from its goroutines. Copies the payload
-// and enqueues; blocking mode = backpressure into Go when JS lags.
-static void deliver_from_go(void* ctx, int32_t kind, const void* data,
-                            int32_t len) {
+// and enqueues NONBLOCKING (ABI v4); the returned status tells the Go side
+// whether the entry was queued (payload copied — caller may reuse its
+// buffer), the queue was full (nothing enqueued — Go owns the retry, which
+// keeps a stalled delivery cancellable), or the TSFN is closing (transport
+// dead).
+static int32_t deliver_from_go(void* ctx, int32_t kind, const void* data,
+                               int32_t len) {
   (void)ctx;
-  if (g_bridge.tsfn == NULL) return;  // shutdown race: drop
+  if (g_bridge.tsfn == NULL) return GOIVM_DELIVER_CLOSED;  // shutdown race
   // Containment (scale review): no legitimate delivery exceeds 64MB — the
   // Go side caps frames (maxFrameSize, both directions) and row records
   // (rowrecord.go R1) at 64MB. A larger (or negative) len here can only be
@@ -192,15 +212,16 @@ static void deliver_from_go(void* ctx, int32_t kind, const void* data,
   item->data = malloc(item->len > 0 ? item->len : 1);
   GOIVM_FATAL_IF(item->data == NULL, "malloc(payload) failed (OOM)");
   if (item->len > 0) memcpy(item->data, data, item->len);
-  napi_status status =
-      napi_call_threadsafe_function(g_bridge.tsfn, item, napi_tsfn_blocking);
-  if (status != napi_ok) {
-    // napi_closing during shutdown teardown — the RPC is dead anyway;
-    // free rather than leak. (Distinct from the OOM cases above: this
-    // path is an expected teardown race, not corruption.)
-    free(item->data);
-    free(item);
-  }
+  napi_status status = napi_call_threadsafe_function(g_bridge.tsfn, item,
+                                                     napi_tsfn_nonblocking);
+  if (status == napi_ok) return GOIVM_DELIVER_OK;
+  // Nothing was enqueued — free the copy either way.
+  free(item->data);
+  free(item);
+  if (status == napi_queue_full) return GOIVM_DELIVER_FULL;
+  // napi_closing (shutdown teardown) or any other terminal condition:
+  // the transport is dead; the Go side unwinds the stream.
+  return GOIVM_DELIVER_CLOSED;
 }
 
 static napi_value throw_error(napi_env env, const char* msg) {
