@@ -38,7 +38,7 @@ const initFailureCounter = getOrCreateCounter(
  * `sidecarProtocolRev` in `go-ivm/cmd/sidecar/main.go`. A mismatch refuses
  * to start the manager (REVIEW-final MED-CROSS-5).
  */
-const EXPECTED_PROTOCOL_REV = 10;
+const EXPECTED_PROTOCOL_REV = 11;
 
 /**
  * Cold-start init concurrency cap. When N ViewSyncers start simultaneously,
@@ -210,13 +210,14 @@ export function sanitizeGoMemLimitEnv(
  */
 export function isProtocolMismatchError(err: unknown): boolean {
   return (
-    err instanceof Error &&
-    err.message.includes('protocol revision mismatch')
+    err instanceof Error && err.message.includes('protocol revision mismatch')
   );
 }
 
 export class SidecarManager {
-  readonly #config: Required<Omit<SidecarConfig, 'logger'>> & {logger: SidecarLogger};
+  readonly #config: Required<Omit<SidecarConfig, 'logger'>> & {
+    logger: SidecarLogger;
+  };
   #client: GoIVMClient | null = null;
   #status: SidecarStatus = 'stopped';
   #epoch = 0;
@@ -411,7 +412,9 @@ export class SidecarManager {
     }
     const pong = await client.ping();
     if (pong !== 'pong') {
-      throw new Error(`Sidecar health check failed: expected 'pong', got '${pong}'`);
+      throw new Error(
+        `Sidecar health check failed: expected 'pong', got '${pong}'`,
+      );
     }
     // Verify wire protocol version (REVIEW-final MED-CROSS-5).
     try {

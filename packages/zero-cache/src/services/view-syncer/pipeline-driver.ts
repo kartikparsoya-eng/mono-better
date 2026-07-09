@@ -7,8 +7,6 @@ import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts'
 import type {Row} from '../../../../zero-protocol/src/data.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
 import {buildPipeline} from '../../../../zql/src/builder/builder.ts';
-import {planQuery} from '../../../../zql/src/planner/planner-builder.ts';
-import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
 import {
   Debug,
   runtimeDebugFlags,
@@ -34,7 +32,9 @@ import {
   makeSourceChangeEdit,
   makeSourceChangeRemove,
 } from '../../../../zql/src/ivm/source.ts';
+import {planQuery} from '../../../../zql/src/planner/planner-builder.ts';
 import type {ConnectionCostModel} from '../../../../zql/src/planner/planner-connection.ts';
+import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
 import {MeasurePushOperator} from '../../../../zql/src/query/measure-push-operator.ts';
 import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
 import type {Database} from '../../../../zqlite/src/db.ts';
@@ -56,18 +56,25 @@ import {
   getOrCreateLatencyHistogram,
 } from '../../observability/metrics.ts';
 import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
+import {
+  max as maxLexiVersion,
+  min as minLexiVersion,
+} from '../../types/lexi-version.ts';
+import {isEnum as isLiteEnum, isArray} from '../../types/lite.ts';
 import {type RowKey} from '../../types/row-key.ts';
+import {type ShardID} from '../../types/shards.ts';
+import {
+  getSubscriptionState,
+  ZERO_VERSION_COLUMN_NAME,
+} from '../replicator/schema/replication-state.ts';
+import {checkClientSchema} from './client-schema.ts';
 import {
   type GoComputeBackend,
   createGoComputeBackend,
   isGoSidecarEnabled,
   goPullWindow,
 } from './go-sidecar/go-compute-backend.ts';
-import {max as maxLexiVersion, min as minLexiVersion} from '../../types/lexi-version.ts';
-import {isEnum as isLiteEnum, isArray} from '../../types/lite.ts';
-import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import type {
-  RowChange as GoRowChange,
   AdvanceToHeadResult,
   TableTiming,
 } from './go-sidecar/go-ivm-client.ts';
@@ -77,13 +84,12 @@ import {
   ScalarResetError,
   StaleInitEpochError,
 } from './go-sidecar/go-ivm-client.ts';
-import {type ShardID} from '../../types/shards.ts';
+import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import {
-  getSubscriptionState,
-  ZERO_VERSION_COLUMN_NAME,
-} from '../replicator/schema/replication-state.ts';
-import {checkClientSchema} from './client-schema.ts';
-import {rowIDSignatureUnit} from './row-set-signature.ts';
+  formatSignature,
+  parseSignature,
+  rowIDSignatureUnit,
+} from './row-set-signature.ts';
 import type {Snapshotter} from './snapshotter.ts';
 import {ResetPipelinesSignal, type SnapshotDiff} from './snapshotter.ts';
 
@@ -102,6 +108,57 @@ export type RowRemove = RowOp<ChangeType.REMOVE>;
 export type RowEdit = RowOp<ChangeType.EDIT>;
 
 export type RowChange = RowAdd | RowRemove | RowEdit;
+
+type MergedGoSigDeltas = {
+  readonly deltas: ReadonlyMap<string, bigint>;
+  readonly fallbackQueryIDs: ReadonlySet<string>;
+};
+
+function mergeGoSigDeltas(
+  acc: MergedGoSigDeltas | undefined,
+  batch: Record<string, string> | undefined,
+  batchChanges: readonly RowChange[],
+): MergedGoSigDeltas | undefined {
+  const out = new Map(acc?.deltas);
+  const fallbackQueryIDs = new Set(acc?.fallbackQueryIDs);
+  const touched = new Set<string>();
+  for (const c of batchChanges) {
+    if (c.type !== ChangeType.EDIT) {
+      touched.add(c.queryID);
+    }
+  }
+  for (const queryID of touched) {
+    if (fallbackQueryIDs.has(queryID)) {
+      continue;
+    }
+    const delta = batch?.[queryID];
+    if (delta === undefined) {
+      fallbackQueryIDs.add(queryID);
+      out.delete(queryID);
+      continue;
+    }
+    const cur = out.get(queryID) ?? 0n;
+    out.set(queryID, cur ^ parseSignature(delta));
+  }
+  if (out.size === 0 && fallbackQueryIDs.size === 0) {
+    return undefined;
+  }
+  return {deltas: out, fallbackQueryIDs};
+}
+
+function goSigDeltaRecord(
+  merged: MergedGoSigDeltas | undefined,
+): Record<string, string> | undefined {
+  if (!merged || merged.deltas.size === 0) {
+    return undefined;
+  }
+  return Object.fromEntries(
+    [...merged.deltas].map(([queryID, delta]) => [
+      queryID,
+      formatSignature(delta),
+    ]),
+  );
+}
 
 export type AdvanceResult = {
   version: string;
@@ -757,8 +814,7 @@ export class PipelineDriver {
   #isInternalTable(name: string): boolean {
     const {appID, shardNum} = this.#shardID;
     return (
-      name.startsWith(`${appID}.`) ||
-      name.startsWith(`${appID}_${shardNum}.`)
+      name.startsWith(`${appID}.`) || name.startsWith(`${appID}_${shardNum}.`)
     );
   }
 
@@ -774,7 +830,13 @@ export class PipelineDriver {
   #currentTablesForGo(): Record<
     string,
     {
-      columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean}>;
+      columns: Record<
+        string,
+        {
+          type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+          optional?: boolean;
+        }
+      >;
       primaryKey: string[];
       uniqueKeys?: string[][] | undefined;
       minRowVersion?: string | null | undefined;
@@ -797,7 +859,9 @@ export class PipelineDriver {
     // "database connection is not open" once per table. One typed throw lets the
     // caller (resetEngine / #scheduleGoReset) abandon the reset cleanly.
     if (this.#snapshotter.destroyed) {
-      throw new Error('snapshotter destroyed — CG torn down; aborting Go (re-)init');
+      throw new Error(
+        'snapshotter destroyed — CG torn down; aborting Go (re-)init',
+      );
     }
     // The sidecar's leaves read SQLite directly (table mode), so shipping
     // row contents is pure waste — and materializing every user table via
@@ -806,15 +870,20 @@ export class PipelineDriver {
     const tables: Record<
       string,
       {
-        columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean}>;
+        columns: Record<
+          string,
+          {
+            type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+            optional?: boolean;
+          }
+        >;
         primaryKey: string[];
         uniqueKeys?: string[][] | undefined;
         minRowVersion?: string | null | undefined;
         rows: Record<string, unknown>[];
       }
     > = {};
-    const warn = (msg: string) =>
-      this.#lc.warn?.(`[go-ivm pgType] ${msg}`);
+    const warn = (msg: string) => this.#lc.warn?.(`[go-ivm pgType] ${msg}`);
     for (const [name, spec] of this.#tableSpecs.entries()) {
       // Skip Zero-internal plumbing tables (<appID>.permissions,
       // <appID>_<shard>.clients, etc). These are written by zero-cache
@@ -830,7 +899,10 @@ export class PipelineDriver {
       }
       const columns: Record<
         string,
-        {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean}
+        {
+          type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+          optional?: boolean;
+        }
       > = {};
       for (const [col, colSpec] of Object.entries(spec.tableSpec.columns)) {
         // HIGH-1: forward nullability so Go's nullable-aware SQL (IS NULL /
@@ -857,7 +929,9 @@ export class PipelineDriver {
           : [[...spec.tableSpec.primaryKey]];
       tables[name] = {
         columns,
-        primaryKey: [...(this.#primaryKeys?.get(name) ?? spec.tableSpec.primaryKey)],
+        primaryKey: [
+          ...(this.#primaryKeys?.get(name) ?? spec.tableSpec.primaryKey),
+        ],
         uniqueKeys,
         // Forward minRowVersion so the Go streamer can bump emitted rows'
         // _0_version when below it (audit item K).
@@ -1101,8 +1175,9 @@ export class PipelineDriver {
   // Join + applyOr path attaches the inner-CSQ relationship and the streamer
   // over-emits it (H18-cont).
   #planAstForGo(ast: AST): AST {
-    const planned = completeOrdering(ast, tableName =>
-      must(this.#getSource(tableName)).tableSchema.primaryKey,
+    const planned = completeOrdering(
+      ast,
+      tableName => must(this.#getSource(tableName)).tableSchema.primaryKey,
     );
     if (!this.#costModels) {
       return planned;
@@ -1234,7 +1309,11 @@ export class PipelineDriver {
     queryName?: string,
   ): Iterable<RowChange | 'yield'> | Promise<Iterable<RowChange | 'yield'>> {
     // If Go backend init is pending, await it first
-    if (this.#goInitPromise && this.#goBackend && !this.#goBackend.initialized) {
+    if (
+      this.#goInitPromise &&
+      this.#goBackend &&
+      !this.#goBackend.initialized
+    ) {
       return this.#goInitPromise.then(() =>
         this.#addQueryDispatch(
           transformationHash,
@@ -1293,7 +1372,13 @@ export class PipelineDriver {
       this.#isInternalTable(query.table)
     ) {
       return this.#trackRowSetSignatures(
-        this.#addQueryImpl(transformationHash, queryID, query, timer, queryName),
+        this.#addQueryImpl(
+          transformationHash,
+          queryID,
+          query,
+          timer,
+          queryName,
+        ),
       );
     }
     // When Go backend is active, hydrate via sidecar (Go-owned
@@ -1343,9 +1428,9 @@ export class PipelineDriver {
     this.#pipelines.set(queryID, {
       input: {
         destroy() {},
-        fetch: () => ({} as never),
-        cleanup: () => ({} as never),
-        getSchema: () => ({} as never),
+        fetch: () => ({}) as never,
+        cleanup: () => ({}) as never,
+        getSchema: () => ({}) as never,
         setOutput: () => {},
       } as unknown as Input,
       hydrationTimeMs: goHydrationCostMs(goResult.timingMs, hydrateWallMs),
@@ -1355,20 +1440,27 @@ export class PipelineDriver {
       ...(queryName !== undefined && {queryName}),
     });
 
-    // Convert Go RowChanges and track signatures
-    const self = this;
+    // The decoded RowChanges are already the final pipeline shape — both
+    // decoders (decodeRowRecord / decodePositionalChanges) emit type 0/1/2
+    // (identical to ChangeType.ADD/REMOVE/EDIT), build `row` for every
+    // non-remove, and omit it for remove. No per-row wrapper allocation.
     function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
       let i = 0;
       for (const rc of goResult.changes) {
         if (i > 0 && i % 100 === 0) {
           yield 'yield';
         }
-        yield self.#goRowChangeToRowChange(rc);
+        yield rc as unknown as RowChange;
         i++;
       }
     }
 
-    return this.#trackRowSetSignatures(yieldGoHydration());
+    return this.#trackRowSetSignatures(
+      yieldGoHydration(),
+      goResult.sigDelta !== undefined
+        ? {[queryID]: goResult.sigDelta}
+        : undefined,
+    );
   }
 
   /**
@@ -1423,7 +1515,10 @@ export class PipelineDriver {
     const internalQueries: typeof queries = [];
     const userQueries: typeof queries = [];
     for (const q of queries) {
-      if (this.#isInternalQueryID(q.queryID) || this.#isInternalTable(q.ast.table)) {
+      if (
+        this.#isInternalQueryID(q.queryID) ||
+        this.#isInternalTable(q.ast.table)
+      ) {
         internalQueries.push(q);
       } else {
         userQueries.push(q);
@@ -1449,14 +1544,25 @@ export class PipelineDriver {
     } as unknown as Timer;
     for (const q of internalQueries) {
       const raw = this.#trackRowSetSignatures(
-        this.#addQueryImpl(q.transformationHash, q.queryID, q.ast, noopTimer, q.queryName),
+        this.#addQueryImpl(
+          q.transformationHash,
+          q.queryID,
+          q.ast,
+          noopTimer,
+          q.queryName,
+        ),
       );
       function* dropYields(): Iterable<RowChange | 'yield'> {
         for (const c of raw) {
           if (c !== 'yield') yield c;
         }
       }
-      yield {queryID: q.queryID, changes: dropYields(), timingMs: undefined, final: true};
+      yield {
+        queryID: q.queryID,
+        changes: dropYields(),
+        timingMs: undefined,
+        final: true,
+      };
     }
 
     if (userQueries.length === 0) {
@@ -1480,7 +1586,10 @@ export class PipelineDriver {
     // interleaves their rows.
     const batchHydrateStartMs = performance.now();
     const stream = this.#goBackend!.hydrateManyStreamPull(
-      userQueries.map(q => ({queryID: q.queryID, ast: this.#planAstForGo(q.ast)})),
+      userQueries.map(q => ({
+        queryID: q.queryID,
+        ast: this.#planAstForGo(q.ast),
+      })),
     );
     try {
       for await (const r of stream) {
@@ -1500,9 +1609,9 @@ export class PipelineDriver {
           this.#pipelines.set(q.queryID, {
             input: {
               destroy() {},
-              fetch: () => ({} as never),
-              cleanup: () => ({} as never),
-              getSchema: () => ({} as never),
+              fetch: () => ({}) as never,
+              cleanup: () => ({}) as never,
+              getSchema: () => ({}) as never,
               setOutput: () => {},
             } as unknown as Input,
             hydrationTimeMs: r.final
@@ -1518,11 +1627,10 @@ export class PipelineDriver {
             ...(q.queryName !== undefined && {queryName: q.queryName}),
           });
         }
-        const self = this;
         const changesArr = r.changes as RowChange[];
         function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
           for (const rc of changesArr) {
-            yield self.#goRowChangeToRowChange(rc);
+            yield rc;
           }
         }
         yield {
@@ -1794,16 +1902,30 @@ export class PipelineDriver {
    */
   *#trackRowSetSignatures(
     changes: Iterable<RowChange | 'yield'>,
+    sigDeltas?: Readonly<Record<string, string>>,
   ): Iterable<RowChange | 'yield'> {
+    const appliedDeltas = new Set<string>();
     for (const change of changes) {
       if (change !== 'yield' && change.type !== ChangeType.EDIT) {
-        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
-        const unit = rowIDSignatureUnit({
-          schema: '',
-          table: change.table,
-          rowKey: change.rowKey as RowKey,
-        });
-        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+        const sigDelta = sigDeltas?.[change.queryID];
+        if (sigDelta !== undefined) {
+          if (!appliedDeltas.has(change.queryID)) {
+            const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+            this.#rowSetSignatures.set(
+              change.queryID,
+              cur ^ parseSignature(sigDelta),
+            );
+            appliedDeltas.add(change.queryID);
+          }
+        } else {
+          const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+          const unit = rowIDSignatureUnit({
+            schema: '',
+            table: change.table,
+            rowKey: change.rowKey as RowKey,
+          });
+          this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+        }
       }
       yield change;
     }
@@ -1851,7 +1973,11 @@ export class PipelineDriver {
       'Pipeline driver must be initialized before advancing',
     );
     // If Go backend init is pending, await it first
-    if (this.#goInitPromise && this.#goBackend && !this.#goBackend.initialized) {
+    if (
+      this.#goInitPromise &&
+      this.#goBackend &&
+      !this.#goBackend.initialized
+    ) {
       return this.#goInitPromise.then(() => this.#advanceDispatch(timer));
     }
     return this.#advanceDispatch(timer);
@@ -1987,71 +2113,75 @@ export class PipelineDriver {
     // (re-throw), restart/unclassified drop the delta + schedule a reset (the
     // "miss exactly one delta" contract; recovery rebuilds Go's state).
     const goPromise: Promise<
-      | {changes: RowChange[]; goVersion: string | undefined}
+      | {
+          changes: RowChange[];
+          goVersion: string | undefined;
+          sigDeltas?: Record<string, string> | undefined;
+        }
       | {reset: ResetPipelinesSignal}
-    > = this.#goBackend!.advanceToHeadStream({
-          // Arm Go's economic advancement-abort with TS's own inputs: the
-          // CG's priced re-hydrate cost (Go-owned entries record the
-          // TS-observed hydrate WALL — goHydrationCostMs — the same units
-          // TS-native entries carry), escalated 2× per consecutive abort
-          // and floored at the minimum true cost of a Go reset
-          // (goAdvanceAbortBudgetMs) so a structurally-tiny budget
-          // (internal-only / TTL-expired CGs price at ~0) cannot loop
-          // abort→reset→abort. Go aborts on TS's formula →
-          // AdvanceAbortedError → 'advancement-timeout' reset — the
-          // identical recovery a TS-native abort takes. This replaces the
-          // wall-clock RPC timeout as the only load-coupled bound on the
-          // advance.
-          totalHydrationTimeMs: goAdvanceAbortBudgetMs(
-            this.totalHydrationTimeMs(),
-            this.#consecutiveAdvanceAborts,
-          ),
-        })
-          .then(goDerived => {
-          if (goDerived.reset) {
-            // F2: a Go-reported reset (truncate / permissions change / engine
-              // reset) means Go's user pipelines must full-re-hydrate. The
-              // legacy path (#scheduleGoReset + stamp prev) floored THIS cycle's
-              // watermark safely, but the async Go reset rebuilds at head and
-              // DISCARDS its hydrate output — so the (prev→head] user delta is
-              // never delivered. For a TRUNCATE that means the deleted rows stay
-              // on every client's screen indefinitely (TS-native does a full
-              // re-hydrate for the same signal). Escalate to a full pipeline
-              // reset so the view-syncer re-hydrates at head, re-delivering the
-              // current state as an idempotent superset.
-              this.#lc.info?.(
-                `[go-primary] Go reported reset ${goDerived.reset.reason} ` +
-                  `(${goDerived.reset.msg}); escalating to pipeline reset`,
-              );
-              return {
-                reset: new ResetPipelinesSignal(
-                  `Go reported reset ${goDerived.reset.reason} ` +
-                    `(${goDerived.reset.msg})`,
-                  'go-primary-drop',
-                ),
-              };
-            }
-            this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
-            return {
-              changes: goDerived.rowChanges.map(rc =>
-                this.#goRowChangeToRowChange(rc),
-              ),
-              goVersion: goDerived.version,
-            };
-          })
-          .catch(e => {
-            // F2: a dropped advance (sidecar restart / engine not initialized /
-            // RPC timeout / unclassified) escalates to a full pipeline reset
-            // rather than committing an empty delta floored at prev — the
-            // latter permanently skips the (prev→head] user changes because the
-            // scheduled Go reset rebuilds at head and discards its hydrate
-            // output (see #classifyGoPrimaryAdvanceError). Protocol/stale errors
-            // still reject goPromise (re-thrown) and never reach here.
-            const classified = this.#classifyGoPrimaryAdvanceError(e);
-            return classified instanceof ResetPipelinesSignal
-              ? {reset: classified}
-              : {changes: classified, goVersion: diff.prev.version};
-          });
+    > = this.#goBackend!
+      .advanceToHeadStream({
+        // Arm Go's economic advancement-abort with TS's own inputs: the
+        // CG's priced re-hydrate cost (Go-owned entries record the
+        // TS-observed hydrate WALL — goHydrationCostMs — the same units
+        // TS-native entries carry), escalated 2× per consecutive abort
+        // and floored at the minimum true cost of a Go reset
+        // (goAdvanceAbortBudgetMs) so a structurally-tiny budget
+        // (internal-only / TTL-expired CGs price at ~0) cannot loop
+        // abort→reset→abort. Go aborts on TS's formula →
+        // AdvanceAbortedError → 'advancement-timeout' reset — the
+        // identical recovery a TS-native abort takes. This replaces the
+        // wall-clock RPC timeout as the only load-coupled bound on the
+        // advance.
+        totalHydrationTimeMs: goAdvanceAbortBudgetMs(
+          this.totalHydrationTimeMs(),
+          this.#consecutiveAdvanceAborts,
+        ),
+      })
+      .then(goDerived => {
+        if (goDerived.reset) {
+          // F2: a Go-reported reset (truncate / permissions change / engine
+          // reset) means Go's user pipelines must full-re-hydrate. The
+          // legacy path (#scheduleGoReset + stamp prev) floored THIS cycle's
+          // watermark safely, but the async Go reset rebuilds at head and
+          // DISCARDS its hydrate output — so the (prev→head] user delta is
+          // never delivered. For a TRUNCATE that means the deleted rows stay
+          // on every client's screen indefinitely (TS-native does a full
+          // re-hydrate for the same signal). Escalate to a full pipeline
+          // reset so the view-syncer re-hydrates at head, re-delivering the
+          // current state as an idempotent superset.
+          this.#lc.info?.(
+            `[go-primary] Go reported reset ${goDerived.reset.reason} ` +
+              `(${goDerived.reset.msg}); escalating to pipeline reset`,
+          );
+          return {
+            reset: new ResetPipelinesSignal(
+              `Go reported reset ${goDerived.reset.reason} ` +
+                `(${goDerived.reset.msg})`,
+              'go-primary-drop',
+            ),
+          };
+        }
+        this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
+        return {
+          changes: goDerived.rowChanges as unknown as RowChange[],
+          goVersion: goDerived.version,
+          sigDeltas: goDerived.sigDeltas,
+        };
+      })
+      .catch(e => {
+        // F2: a dropped advance (sidecar restart / engine not initialized /
+        // RPC timeout / unclassified) escalates to a full pipeline reset
+        // rather than committing an empty delta floored at prev — the
+        // latter permanently skips the (prev→head] user changes because the
+        // scheduled Go reset rebuilds at head and discards its hydrate
+        // output (see #classifyGoPrimaryAdvanceError). Protocol/stale errors
+        // still reject goPromise (re-thrown) and never reach here.
+        const classified = this.#classifyGoPrimaryAdvanceError(e);
+        return classified instanceof ResetPipelinesSignal
+          ? {reset: classified}
+          : {changes: classified, goVersion: diff.prev.version};
+      });
 
     // Run TS's #advance over the replay buffer. Only internal-query pipelines
     // are connected, so user-table pushes are no-ops on TS — the iterator
@@ -2059,7 +2189,12 @@ export class PipelineDriver {
     // the buffer already excludes user changes, so pass its actual length for
     // the advance-time heuristic instead of the full diff's numChanges.
     const tsChanges: RowChange[] = [];
-    for (const change of this.#advance(replayDiff, timer, buffered.length, true)) {
+    for (const change of this.#advance(
+      replayDiff,
+      timer,
+      buffered.length,
+      true,
+    )) {
       if (change === 'yield') {
         await new Promise<void>(resolve => setImmediate(resolve));
       } else {
@@ -2081,6 +2216,11 @@ export class PipelineDriver {
     this.#consecutiveAdvanceAborts = 0;
     let goVersionFinal = goVersion;
     let goResultsFinal = goResults;
+    let goSigDeltasFinal = mergeGoSigDeltas(
+      undefined,
+      goOutcome.sigDeltas,
+      goResults,
+    );
 
     // P2c clamp (inverted-edge guard): if Go came back BEHIND TS
     // (V_go < V_ts — rare; Go re-init/lag left its snapshotter pinned behind),
@@ -2149,10 +2289,13 @@ export class PipelineDriver {
           );
         }
         this.#recordGoPrimaryAdvanceTimings(next.timings);
-        goResultsFinal = [
-          ...goResultsFinal,
-          ...next.rowChanges.map(rc => this.#goRowChangeToRowChange(rc)),
-        ];
+        const nextRows = next.rowChanges as unknown as RowChange[];
+        goSigDeltasFinal = mergeGoSigDeltas(
+          goSigDeltasFinal,
+          next.sigDeltas,
+          nextRows,
+        );
+        goResultsFinal = [...goResultsFinal, ...nextRows];
         goVersionFinal = next.version;
       }
       if (goVersionFinal < version) {
@@ -2180,15 +2323,20 @@ export class PipelineDriver {
     // Merge: TS internal-query events + Go user-query events. The two
     // sets are table-disjoint by construction (internal tables filtered
     // out of Go; user tables have stub pipelines in TS that don't emit).
+    const trackedTsChanges = this.#trackRowSetSignatures(tsChanges);
+    const trackedGoResults = this.#trackRowSetSignatures(
+      goResultsFinal,
+      goSigDeltaRecord(goSigDeltasFinal),
+    );
     function* yieldMerged(): Iterable<RowChange | 'yield'> {
-      for (const c of tsChanges) yield c;
-      for (const c of goResultsFinal) yield c;
+      yield* trackedTsChanges;
+      yield* trackedGoResults;
     }
 
     return {
       version: reconciled.version,
       numChanges,
-      changes: this.#trackRowSetSignatures(yieldMerged()),
+      changes: yieldMerged(),
       tsVersion: reconciled.tsVersion,
       goVersion: reconciled.goVersion,
     };
@@ -2251,7 +2399,9 @@ export class PipelineDriver {
    * #goPrimaryAdvance → graceful re-hydrate); throws for the escalation cases
    * (protocol/stale → caller surfaces it → teardown + reconnect).
    */
-  #classifyGoPrimaryAdvanceError(e: unknown): RowChange[] | ResetPipelinesSignal {
+  #classifyGoPrimaryAdvanceError(
+    e: unknown,
+  ): RowChange[] | ResetPipelinesSignal {
     const msg = e instanceof Error ? e.message : String(e);
 
     switch (classifyGoPrimaryAdvanceError(e)) {
@@ -2333,47 +2483,6 @@ export class PipelineDriver {
     }
   }
 
-  #goRowChangeToRowChange(rc: GoRowChange): RowChange {
-    const type =
-      rc.type === 0
-        ? ChangeType.ADD
-        : rc.type === 1
-          ? ChangeType.REMOVE
-          : ChangeType.EDIT;
-    // Mirror the TS-native Streamer at pipeline-driver.ts:1598 which emits
-    // `row: undefined` for REMOVE. The RowChange type declares row as Row
-    // but in practice REMOVE rows carry undefined on both paths — this is
-    // an intentional shape match, not a bug. Setting `row = rc.rowKey` here
-    // would diverge from TS's REMOVE shape.
-    let row: Row | undefined;
-    if (type === ChangeType.REMOVE) {
-      row = undefined;
-    } else if (rc.row === null || rc.row === undefined) {
-      // ADD/EDIT MUST carry a full row — Go's streamNodes sets rc.Row =
-      // node.Row for every non-REMOVE change. A missing row here is a
-      // Go-side wire/serialization bug. Previously we silently substituted
-      // rc.rowKey, shipping a PK-only row that corrupts the client view
-      // invisibly. Surface it at error level (the rowKey fallback is kept
-      // only so one wire glitch doesn't crash the merge), so the bug is
-      // diagnosable instead of hidden.
-      this.#lc.error?.(
-        `[go-primary] ${type === ChangeType.ADD ? 'ADD' : 'EDIT'} RowChange ` +
-          `missing row for ${rc.table} ${JSON.stringify(rc.rowKey)} — Go wire ` +
-          `bug; falling back to rowKey (PK-only row)`,
-      );
-      row = rc.rowKey as Row;
-    } else {
-      row = rc.row as Row;
-    }
-    return {
-      type,
-      queryID: rc.queryID,
-      table: rc.table,
-      rowKey: rc.rowKey as Row,
-      row,
-    } as RowChange;
-  }
-
   /**
    * Schedule a best-effort reset of the Go engine from the current snapshot.
    * Used after a Go failure that leaves engine state suspect — reinitializing
@@ -2391,7 +2500,9 @@ export class PipelineDriver {
     // gone; skip cleanly. (More likely under the P2c trigger path, whose longer
     // advanceToHead window widens the reset-vs-teardown overlap.)
     if (this.#snapshotter.destroyed) {
-      this.#lc.debug?.(`[go-reset] snapshotter torn down; skipping reset (${reason})`);
+      this.#lc.debug?.(
+        `[go-reset] snapshotter torn down; skipping reset (${reason})`,
+      );
       return;
     }
     // Record EVERY caller (even ones we coalesce with #goResetDirty) so the
@@ -3094,30 +3205,53 @@ export function pgTypeToGoType(
   if (
     // Integer + serial families (PG rewrites SERIAL → INTEGER, but the
     // declared type may still surface as serial in a lite type string).
-    t === 'SMALLINT' || t === 'INTEGER' || t === 'INT' ||
-    t === 'INT2' || t === 'INT4' || t === 'INT8' || t === 'BIGINT' ||
-    t === 'SMALLSERIAL' || t === 'SERIAL' ||
-    t === 'SERIAL2' || t === 'SERIAL4' || t === 'SERIAL8' ||
+    t === 'SMALLINT' ||
+    t === 'INTEGER' ||
+    t === 'INT' ||
+    t === 'INT2' ||
+    t === 'INT4' ||
+    t === 'INT8' ||
+    t === 'BIGINT' ||
+    t === 'SMALLSERIAL' ||
+    t === 'SERIAL' ||
+    t === 'SERIAL2' ||
+    t === 'SERIAL4' ||
+    t === 'SERIAL8' ||
     t === 'BIGSERIAL' ||
     // Real / floating / fixed-point.
-    t === 'REAL' || t === 'DOUBLE PRECISION' ||
-    t === 'FLOAT' || t === 'FLOAT4' || t === 'FLOAT8' ||
-    t === 'NUMERIC' || t === 'DECIMAL' ||
+    t === 'REAL' ||
+    t === 'DOUBLE PRECISION' ||
+    t === 'FLOAT' ||
+    t === 'FLOAT4' ||
+    t === 'FLOAT8' ||
+    t === 'NUMERIC' ||
+    t === 'DECIMAL' ||
     // Date / time — all mapped to number (epoch-ish) like the canonical map.
     t === 'DATE' ||
-    t === 'TIME' || t === 'TIMETZ' ||
-    t === 'TIME WITH TIME ZONE' || t === 'TIME WITHOUT TIME ZONE' ||
-    t === 'TIMESTAMP' || t === 'TIMESTAMPTZ' ||
+    t === 'TIME' ||
+    t === 'TIMETZ' ||
+    t === 'TIME WITH TIME ZONE' ||
+    t === 'TIME WITHOUT TIME ZONE' ||
+    t === 'TIMESTAMP' ||
+    t === 'TIMESTAMPTZ' ||
     t === 'TIMESTAMP WITH TIME ZONE' ||
     t === 'TIMESTAMP WITHOUT TIME ZONE'
-  ) return 'number';
+  )
+    return 'number';
   if (t === 'JSON' || t === 'JSONB') return 'json';
   // Explicitly recognised string-shaped types — keep this list growing.
   if (
-    t === 'TEXT' || t === 'VARCHAR' || t === 'CHARACTER VARYING' ||
-    t === 'CHAR' || t === 'CHARACTER' || t === 'BPCHAR' ||
-    t === 'UUID' || t === 'CITEXT' || t === 'NAME'
-  ) return 'string';
+    t === 'TEXT' ||
+    t === 'VARCHAR' ||
+    t === 'CHARACTER VARYING' ||
+    t === 'CHAR' ||
+    t === 'CHARACTER' ||
+    t === 'BPCHAR' ||
+    t === 'UUID' ||
+    t === 'CITEXT' ||
+    t === 'NAME'
+  )
+    return 'string';
   // Postgres array types (e.g. INT4[], TEXT[]) are handled by the early
   // `isArray` check above (which also catches enum-arrays and the legacy
   // |TEXT_ARRAY[] form). The previous `t.endsWith('[]')` here was redundant
@@ -3127,7 +3261,9 @@ export function pgTypeToGoType(
   if (t === 'BYTEA') {
     if (warn && !pgTypeWarningsSeen.has(t)) {
       pgTypeWarningsSeen.add(t);
-      warn(`BYTEA treated as text-encoded string — binary content opaque to Go IVM`);
+      warn(
+        `BYTEA treated as text-encoded string — binary content opaque to Go IVM`,
+      );
     }
     return 'string';
   }
@@ -3135,7 +3271,9 @@ export function pgTypeToGoType(
   // visible. Operators can add explicit mappings as they appear.
   if (warn && !pgTypeWarningsSeen.has(t)) {
     pgTypeWarningsSeen.add(t);
-    warn(`unrecognised PostgreSQL type "${t}" mapped to 'string' — Go IVM may produce wrong results`);
+    warn(
+      `unrecognised PostgreSQL type "${t}" mapped to 'string' — Go IVM may produce wrong results`,
+    );
   }
   return 'string';
 }

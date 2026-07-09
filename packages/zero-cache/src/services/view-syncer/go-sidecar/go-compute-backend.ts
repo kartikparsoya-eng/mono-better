@@ -23,7 +23,13 @@ import type {SidecarManager} from './sidecar-manager.ts';
 export type QueryAST = unknown;
 
 export interface TableSchemaSpec {
-  columns: Record<string, {type: 'boolean' | 'number' | 'string' | 'null' | 'json'; optional?: boolean | undefined}>;
+  columns: Record<
+    string,
+    {
+      type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+      optional?: boolean | undefined;
+    }
+  >;
   primaryKey: string[];
 }
 
@@ -108,7 +114,9 @@ export class GoComputeBackend {
     const cgTag = `[cg=${clientGroupID}]`;
     this.#log = (level, msg, err) => raw(level, `${cgTag} ${msg}`, err);
 
-    this.#unsubscribe = manager.onRestart(epoch => this.#onSidecarRestart(epoch));
+    this.#unsubscribe = manager.onRestart(epoch =>
+      this.#onSidecarRestart(epoch),
+    );
   }
 
   get initialized(): boolean {
@@ -173,7 +181,11 @@ export class GoComputeBackend {
   async resetEngine(): Promise<void> {
     if (this.#initialized) {
       try {
-        await this.#client().destroy(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts());
+        await this.#client().destroy(
+          this.#clientGroupID,
+          this.#sidecarInitEpoch,
+          this.#cgOpts(),
+        );
       } catch (err) {
         this.#log('warn', 'destroy before reset failed (continuing)', err);
       }
@@ -205,7 +217,13 @@ export class GoComputeBackend {
     // can exceed the wire cap, get SKIPPED by the TS reader, and orphan the RPC
     // into a 60s timeout (the cold-hydrate freeze). addQueryStream chunks it.
     return this.#withReinitRetry(() =>
-      this.#client().addQueryStream(this.#clientGroupID, queryID, ast, this.#sidecarInitEpoch, this.#cgOpts()),
+      this.#client().addQueryStream(
+        this.#clientGroupID,
+        queryID,
+        ast,
+        this.#sidecarInitEpoch,
+        this.#cgOpts(),
+      ),
     );
   }
 
@@ -226,6 +244,7 @@ export class GoComputeBackend {
     queryID: string;
     changes: unknown[];
     timingMs: number | undefined;
+    sigDelta?: string | undefined;
     final: boolean;
     chunkIndex?: number | undefined;
   }> {
@@ -293,7 +312,10 @@ export class GoComputeBackend {
       try {
         return await fn();
       } catch (err) {
-        if (!(err instanceof RetryableAdvanceError) || attempt >= delaysMs.length) {
+        if (
+          !(err instanceof RetryableAdvanceError) ||
+          attempt >= delaysMs.length
+        ) {
           throw err;
         }
         // Full jitter (0.5x–1.5x) so simultaneous clean failures across CGs
@@ -381,7 +403,12 @@ export class GoComputeBackend {
 
   // Rejects on failure — callers either ignore or surface depending on context.
   async removeQuery(queryID: string): Promise<void> {
-    await this.#client().removeQuery(this.#clientGroupID, queryID, this.#sidecarInitEpoch, this.#cgOpts());
+    await this.#client().removeQuery(
+      this.#clientGroupID,
+      queryID,
+      this.#sidecarInitEpoch,
+      this.#cgOpts(),
+    );
   }
 
   // Resolves when no per-CG recovery is in flight. Callers that dispatch
@@ -404,7 +431,11 @@ export class GoComputeBackend {
     if (this.#initialized) {
       this.#initialized = false;
       try {
-        await this.#client().destroy(this.#clientGroupID, this.#sidecarInitEpoch, this.#cgOpts());
+        await this.#client().destroy(
+          this.#clientGroupID,
+          this.#sidecarInitEpoch,
+          this.#cgOpts(),
+        );
       } catch (err) {
         // Best-effort: the sidecar may already be gone.
         this.#log('warn', 'destroy failed (ignoring)', err);
@@ -585,11 +616,7 @@ export class GoComputeBackend {
           );
         } catch (qerr) {
           this.#initialized = false;
-          this.#log(
-            'error',
-            `[${reason}] re-register queries failed`,
-            qerr,
-          );
+          this.#log('error', `[${reason}] re-register queries failed`, qerr);
           return false;
         }
       } else {

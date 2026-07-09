@@ -4,6 +4,7 @@
 // delivery queue. Each clientGroupID maps to its own Engine; groups run in
 // parallel and the client multiplexes the single in-process channel.
 
+import {trace} from '@opentelemetry/api';
 import {Packr, Unpackr} from 'msgpackr';
 import {
   DELIVERY_KIND_BATCH,
@@ -15,7 +16,6 @@ import {
   iterateBatch,
 } from './napi-records.ts';
 import type {GoNapiAddon} from './napi/index.ts';
-import {trace} from '@opentelemetry/api';
 
 /**
  * Build a W3C traceparent string from the currently-active OTel span, or
@@ -125,6 +125,7 @@ export type AdvanceToHeadResult = {
   // P2 (drive): the engine RowChanges produced by applying Go's OWN derived
   // diff to Go's engine (frame-coordinated). Empty in derive-only mode.
   rowChanges: RowChange[];
+  sigDeltas?: Record<string, string> | undefined;
   timings?: TableTiming[] | undefined;
   reset?: {reason: string; msg: string} | undefined;
 };
@@ -183,6 +184,7 @@ export type TableTiming = {
 export type HydrateResult = {
   changes: RowChange[];
   timingMs: number | undefined;
+  sigDelta?: string | undefined;
 };
 
 // --- Positional (protocolRev 9) RowChange decoding ---
@@ -282,6 +284,7 @@ export function createHydrateStreamAccumulator(
     queryID: string;
     changes: RowChange[];
     timingMs: number | undefined;
+    sigDelta?: string | undefined;
     final?: boolean;
     chunkIndex?: number;
   }) => void,
@@ -362,6 +365,7 @@ export function createHydrateStreamAccumulator(
         chunkIndex?: number;
         final?: boolean;
         timingMs?: number;
+        sigDelta?: string;
       };
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // older sidecars sent unchunked frames
@@ -386,7 +390,11 @@ export function createHydrateStreamAccumulator(
       // means a wire-level bug — fail loudly rather than silently
       // delivering misordered or partial results. Row mode: gaps expected
       // (row-bearing partials ship as records); backwards = reordering.
-      if (rowMode ? chunkIndex < entry.expectedNextIndex : chunkIndex !== entry.expectedNextIndex) {
+      if (
+        rowMode
+          ? chunkIndex < entry.expectedNextIndex
+          : chunkIndex !== entry.expectedNextIndex
+      ) {
         throw new Error(
           `addQueriesStream chunk order violation for queryID=${v.queryID}: ` +
             `expected chunkIndex=${entry.expectedNextIndex}, got ${chunkIndex}`,
@@ -403,13 +411,24 @@ export function createHydrateStreamAccumulator(
           acc.delete(v.queryID);
           finalized.add(v.queryID);
         }
-        onResult({
+        const result: {
+          queryID: string;
+          changes: RowChange[];
+          timingMs: number | undefined;
+          sigDelta?: string | undefined;
+          final: boolean;
+          chunkIndex: number;
+        } = {
           queryID: v.queryID,
           changes: chunk,
           timingMs: final ? v.timingMs : undefined,
           final,
           chunkIndex,
-        });
+        };
+        if (final && v.sigDelta !== undefined) {
+          result.sigDelta = v.sigDelta;
+        }
+        onResult(result);
         return;
       }
 
@@ -422,11 +441,20 @@ export function createHydrateStreamAccumulator(
       if (final) {
         acc.delete(v.queryID);
         finalized.add(v.queryID);
-        onResult({
+        const result: {
+          queryID: string;
+          changes: RowChange[];
+          timingMs: number | undefined;
+          sigDelta?: string | undefined;
+        } = {
           queryID: v.queryID,
           changes: entry.changes,
           timingMs: v.timingMs,
-        });
+        };
+        if (v.sigDelta !== undefined) {
+          result.sigDelta = v.sigDelta;
+        }
+        onResult(result);
       }
     },
 
@@ -476,6 +504,7 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
   let version = '';
   let numChanges = 0;
   let reset: {reason: string; msg: string} | undefined;
+  let sigDeltas: Record<string, string> | undefined;
 
   return {
     onRow: (change: RowChange) => {
@@ -495,6 +524,7 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
         version?: string;
         numChanges?: number;
         reset?: {reason: string; msg: string};
+        sigDeltas?: Record<string, string>;
       };
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // belt-and-braces for older sidecars
@@ -505,7 +535,11 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
       // a partial advance to the CVR.
       // Row mode: index GAPS are expected (row-bearing partials ship as
       // records, not frames), but going backwards still means reordering.
-      if (rowMode ? chunkIndex < expectedNextIndex : chunkIndex !== expectedNextIndex) {
+      if (
+        rowMode
+          ? chunkIndex < expectedNextIndex
+          : chunkIndex !== expectedNextIndex
+      ) {
         throw new Error(
           `advanceToHeadStream chunk order violation: ` +
             `expected chunkIndex=${expectedNextIndex}, got ${chunkIndex}`,
@@ -530,6 +564,7 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
         version = v.version ?? '';
         numChanges = v.numChanges ?? 0;
         reset = v.reset;
+        sigDeltas = v.sigDeltas;
         gotFinal = true;
       }
     },
@@ -541,7 +576,7 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
         // don't silently return a partial result that would corrupt the CVR.
         throw new Error('advanceToHeadStream finished without a final chunk');
       }
-      return {
+      const result: AdvanceToHeadResult = {
         // Derive-only diff is never streamed (the stream carries RowChanges).
         changes: [],
         version,
@@ -550,6 +585,10 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
         timings,
         reset,
       };
+      if (sigDeltas !== undefined) {
+        result.sigDeltas = sigDeltas;
+      }
+      return result;
     },
   };
 }
@@ -779,12 +818,14 @@ export class GoIVMClient {
    */
   #recentlyTimedOut = new Set<number>();
 
-  constructor(
-    options?: {
-      onLog?: (level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void;
-      onFatal?: (err: Error) => void;
-    },
-  ) {
+  constructor(options?: {
+    onLog?: (
+      level: 'info' | 'warn' | 'error',
+      msg: string,
+      err?: unknown,
+    ) => void;
+    onFatal?: (err: Error) => void;
+  }) {
     this.#onLog = options?.onLog;
     this.#onFatal = options?.onFatal;
   }
@@ -871,7 +912,11 @@ export class GoIVMClient {
    * (cvr.ts "Expected CVR version to have been bumped" — gen-6).
    * `version` is undefined only against a pre-gen-6 sidecar.
    */
-  async init(clientGroupID: string, params: InitParams, opts?: CallOptions): Promise<{initEpoch: number; version: string | undefined}> {
+  async init(
+    clientGroupID: string,
+    params: InitParams,
+    opts?: CallOptions,
+  ): Promise<{initEpoch: number; version: string | undefined}> {
     // init can be slow on first start; allow longer default.
     const result = (await this.#call(
       'init',
@@ -881,10 +926,15 @@ export class GoIVMClient {
       // under GLOBAL_KEY — ONE shared 16-slot cap for all CGs' init/
       // hydrate/advance traffic, so 16 slow CGs head-blocked every other
       // CG on the worker (the per-group cap existed but was dead code).
-      {timeoutMs: opts?.timeoutMs ?? 120_000, clientGroupID: opts?.clientGroupID ?? clientGroupID},
+      {
+        timeoutMs: opts?.timeoutMs ?? 120_000,
+        clientGroupID: opts?.clientGroupID ?? clientGroupID,
+      },
     )) as {status?: string; initEpoch?: number; version?: string} | 'ok';
     if (typeof result !== 'object' || typeof result.initEpoch !== 'number') {
-      throw new Error('init: sidecar did not return initEpoch — protocol mismatch');
+      throw new Error(
+        'init: sidecar did not return initEpoch — protocol mismatch',
+      );
     }
     return {
       initEpoch: result.initEpoch,
@@ -919,7 +969,14 @@ export class GoIVMClient {
     clientGroupID: string,
     queries: {queryID: string; ast: unknown}[],
     initEpoch: number,
-    onResult: (r: {queryID: string; changes: RowChange[]; timingMs: number | undefined; final?: boolean; chunkIndex?: number}) => void,
+    onResult: (r: {
+      queryID: string;
+      changes: RowChange[];
+      timingMs: number | undefined;
+      sigDelta?: string | undefined;
+      final?: boolean;
+      chunkIndex?: number;
+    }) => void,
     opts?: CallOptions & {chunked?: boolean},
   ): Promise<void> {
     // Per-row delivery rides the in-process transport's row plane.
@@ -1030,7 +1087,14 @@ export class GoIVMClient {
 
     void this.#call(
       'addQueriesStream',
-      {clientGroupID, queries, initEpoch, rowMode: true, pullMode: true, pullWindow: window},
+      {
+        clientGroupID,
+        queries,
+        initEpoch,
+        rowMode: true,
+        pullMode: true,
+        pullWindow: window,
+      },
       {
         timeoutMs: opts?.timeoutMs ?? 0,
         clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
@@ -1096,7 +1160,12 @@ export class GoIVMClient {
             if (entry.changes.length > 0) {
               consumed += 1;
               const outstanding = granted - consumed;
-              if (outstanding <= lowWater && reqID !== null && !done && error === null) {
+              if (
+                outstanding <= lowWater &&
+                reqID !== null &&
+                !done &&
+                error === null
+              ) {
                 const topUp = window - outstanding;
                 granted += topUp;
                 napi.streamCredit(reqID, topUp);
@@ -1152,6 +1221,9 @@ export class GoIVMClient {
       initEpoch,
       r => {
         result = {changes: r.changes, timingMs: r.timingMs};
+        if (r.sigDelta !== undefined) {
+          result.sigDelta = r.sigDelta;
+        }
       },
       opts,
     );
@@ -1164,11 +1236,20 @@ export class GoIVMClient {
   }
 
   /** Remove a query pipeline from a client group's engine. */
-  async removeQuery(clientGroupID: string, queryID: string, initEpoch: number, opts?: CallOptions): Promise<void> {
-    await this.#call('removeQuery', {clientGroupID, queryID, initEpoch}, {
-      ...opts,
-      clientGroupID: opts?.clientGroupID ?? clientGroupID,
-    });
+  async removeQuery(
+    clientGroupID: string,
+    queryID: string,
+    initEpoch: number,
+    opts?: CallOptions,
+  ): Promise<void> {
+    await this.#call(
+      'removeQuery',
+      {clientGroupID, queryID, initEpoch},
+      {
+        ...opts,
+        clientGroupID: opts?.clientGroupID ?? clientGroupID,
+      },
+    );
   }
 
   /**
@@ -1235,15 +1316,21 @@ export class GoIVMClient {
     initEpoch: number,
     opts?: CallOptions,
   ): Promise<void> {
-    await this.#call('destroy', {clientGroupID, initEpoch}, {
-      ...opts,
-      clientGroupID: opts?.clientGroupID ?? clientGroupID,
-    });
+    await this.#call(
+      'destroy',
+      {clientGroupID, initEpoch},
+      {
+        ...opts,
+        clientGroupID: opts?.clientGroupID ?? clientGroupID,
+      },
+    );
   }
 
   /** Ping the sidecar. */
   async ping(opts?: CallOptions): Promise<string> {
-    return (await this.#call('ping', undefined, {timeoutMs: opts?.timeoutMs ?? 5_000})) as string;
+    return (await this.#call('ping', undefined, {
+      timeoutMs: opts?.timeoutMs ?? 5_000,
+    })) as string;
   }
 
   /**
@@ -1282,7 +1369,10 @@ export class GoIVMClient {
       }
       await new Promise<void>(resolve => waiters!.push(resolve));
     }
-    this.#perGroupInFlight.set(cgID, (this.#perGroupInFlight.get(cgID) ?? 0) + 1);
+    this.#perGroupInFlight.set(
+      cgID,
+      (this.#perGroupInFlight.get(cgID) ?? 0) + 1,
+    );
   }
 
   #releaseSlot(cgID: string): void {
@@ -1329,7 +1419,11 @@ export class GoIVMClient {
     throw new Error('Could not allocate unused RPC id');
   }
 
-  async #call(method: string, params: unknown, opts?: CallOptions): Promise<unknown> {
+  async #call(
+    method: string,
+    params: unknown,
+    opts?: CallOptions,
+  ): Promise<unknown> {
     const cgID = opts?.clientGroupID ?? GLOBAL_KEY;
     // Backpressure: cap in-flight RPCs globally and per-group.
     await this.#acquireSlot(cgID);
@@ -1411,7 +1505,9 @@ export class GoIVMClient {
       }
       if (payload.length > MAX_FRAME_SIZE) {
         wrappedReject(
-          new Error(`Payload too large for method ${method}: ${payload.length} > ${MAX_FRAME_SIZE}`),
+          new Error(
+            `Payload too large for method ${method}: ${payload.length} > ${MAX_FRAME_SIZE}`,
+          ),
         );
         return;
       }
@@ -1437,109 +1533,114 @@ export class GoIVMClient {
   // path calls it per kind-1 delivery (frames arrive whole — no prefix, no
   // reassembly).
   #dispatchResponsePayload(payload: Buffer): void {
-      let resp: RPCResponse;
+    let resp: RPCResponse;
+    try {
+      resp = unpack(payload) as RPCResponse;
+    } catch (e) {
+      this.#log(
+        'warn',
+        `failed to decode response frame: ${(e as Error).message}`,
+      );
+      return;
+    }
+
+    // Coerce id to Number: msgpackr decodes Go's uint64 (9-byte non-compact
+    // encoding) as BigInt, which won't match the Number key stored in
+    // #pending when the request was sent.
+    const respId = typeof resp.id === 'bigint' ? Number(resp.id) : resp.id;
+    const pending = this.#pending.get(respId);
+    if (!pending) return;
+
+    if (resp.error) {
+      if (resp.error.code === RPC_CODE_STALE_INIT_EPOCH) {
+        // Stale-epoch signal: the sidecar is rejecting our call because
+        // this view-syncer instance's initEpoch is behind a successor's.
+        // Surface as StaleInitEpochError so callers (GoComputeBackend,
+        // PipelineDriver's #goPrimaryAdvance catch) can branch on
+        // instanceof instead of string-matching. Pre-fix this fell
+        // through to the generic Error path and the type existed but
+        // was never instantiated.
+        pending.reject(new StaleInitEpochError(resp.error.message));
+      } else if (resp.error.code === RPC_CODE_DATA_ERROR) {
+        // Permanent data error: the sidecar hit bad replica data it cannot
+        // represent (non-JSON in a json/array column, int beyond
+        // MAX_SAFE_INTEGER, cross-type compare). Surface as
+        // PermanentDataError so #classifyGoPrimaryAdvanceError TEARS DOWN
+        // the CG (like TS-native's UnsupportedValueError throw) instead of
+        // escalating to a pipeline reset — a reset re-reads the same bad
+        // row and re-panics forever (reset storm).
+        pending.reject(new PermanentDataError(resp.error.message));
+      } else if (resp.error.code === RPC_CODE_ADVANCE_ABORTED) {
+        // Go's economic advancement-abort (TS's own formula running inside
+        // the Go advance). The message is TS's advancement-timeout message
+        // byte-for-byte; the classifier maps it to
+        // ResetPipelinesSignal('advancement-timeout').
+        pending.reject(new AdvanceAbortedError(resp.error.message));
+      } else if (resp.error.code === RPC_CODE_ADVANCE_CLEAN_RETRYABLE) {
+        // State-untouched advance failure — GoComputeBackend retries the
+        // idempotent call in place instead of resetting.
+        pending.reject(new RetryableAdvanceError(resp.error.message));
+      } else if (resp.error.code === RPC_CODE_SCALAR_RESET) {
+        // A resolved scalar subquery's value changed mid-advance. The
+        // message mirrors TS's ResetPipelinesSignal('scalar-subquery')
+        // text byte-for-byte; the classifier maps it to that same signal
+        // + reason (transparent reset, NOT teardown).
+        pending.reject(new ScalarResetError(resp.error.message));
+      } else {
+        pending.reject(
+          new Error(`RPC error ${resp.error.code}: ${resp.error.message}`),
+        );
+      }
+      return;
+    }
+    // Streaming: deliver per-frame value to onPartial unless this is the
+    // terminal "done" sentinel. Go emits "done" as a plain string Result;
+    // any other Result shape is a partial.
+    //
+    // Sentinel collision defense (D6): partial values are ALWAYS objects
+    // (chunk-metadata records); the literal string "done" is reserved as
+    // the terminal sentinel. If a partial were ever emitted as the string
+    // "done" (Go-side bug or replay), the equality check below would
+    // silently terminate the stream — caller's onResult never fires for
+    // the missing query, and the accumulator's `finish()` then throws
+    // "queries never received a final chunk", obscuring the real cause.
+    // We assert partial shape here so the failure surfaces with the
+    // useful error.
+    //
+    // try/catch around onPartial is load-bearing: accumulators (e.g.
+    // createAdvanceToHeadStreamAccumulator) throw on chunk-order violations
+    // or missing-final invariants. A synchronous throw from this
+    // handler must reject only the offending RPC — we reject the
+    // offending RPC with the throw and continue draining other pending
+    // entries; other CGs' RPCs flow normally.
+    const isStreamTerminal = resp.result === STREAM_DONE_SENTINEL;
+    if (pending.onPartial && !isStreamTerminal) {
+      if (typeof resp.result !== 'object' || resp.result === null) {
+        if (pending.timer) clearTimeout(pending.timer);
+        this.#pending.delete(respId);
+        pending.reject(
+          new Error(
+            `Streaming RPC received non-object partial: ` +
+              `typeof=${typeof resp.result} value=${JSON.stringify(resp.result)}; ` +
+              `partials must be records, "${STREAM_DONE_SENTINEL}" is reserved as terminal sentinel`,
+          ),
+        );
+        return;
+      }
       try {
-        resp = unpack(payload) as RPCResponse;
-      } catch (e) {
-        this.#log('warn', `failed to decode response frame: ${(e as Error).message}`);
-        return;
+        pending.onPartial(resp.result);
+      } catch (err) {
+        if (pending.timer) clearTimeout(pending.timer);
+        this.#pending.delete(respId);
+        pending.reject(
+          err instanceof Error
+            ? err
+            : new Error(`onPartial threw: ${String(err)}`),
+        );
       }
-
-      // Coerce id to Number: msgpackr decodes Go's uint64 (9-byte non-compact
-      // encoding) as BigInt, which won't match the Number key stored in
-      // #pending when the request was sent.
-      const respId = typeof resp.id === 'bigint' ? Number(resp.id) : resp.id;
-      const pending = this.#pending.get(respId);
-      if (!pending) return;
-
-      if (resp.error) {
-        if (resp.error.code === RPC_CODE_STALE_INIT_EPOCH) {
-          // Stale-epoch signal: the sidecar is rejecting our call because
-          // this view-syncer instance's initEpoch is behind a successor's.
-          // Surface as StaleInitEpochError so callers (GoComputeBackend,
-          // PipelineDriver's #goPrimaryAdvance catch) can branch on
-          // instanceof instead of string-matching. Pre-fix this fell
-          // through to the generic Error path and the type existed but
-          // was never instantiated.
-          pending.reject(new StaleInitEpochError(resp.error.message));
-        } else if (resp.error.code === RPC_CODE_DATA_ERROR) {
-          // Permanent data error: the sidecar hit bad replica data it cannot
-          // represent (non-JSON in a json/array column, int beyond
-          // MAX_SAFE_INTEGER, cross-type compare). Surface as
-          // PermanentDataError so #classifyGoPrimaryAdvanceError TEARS DOWN
-          // the CG (like TS-native's UnsupportedValueError throw) instead of
-          // escalating to a pipeline reset — a reset re-reads the same bad
-          // row and re-panics forever (reset storm).
-          pending.reject(new PermanentDataError(resp.error.message));
-        } else if (resp.error.code === RPC_CODE_ADVANCE_ABORTED) {
-          // Go's economic advancement-abort (TS's own formula running inside
-          // the Go advance). The message is TS's advancement-timeout message
-          // byte-for-byte; the classifier maps it to
-          // ResetPipelinesSignal('advancement-timeout').
-          pending.reject(new AdvanceAbortedError(resp.error.message));
-        } else if (resp.error.code === RPC_CODE_ADVANCE_CLEAN_RETRYABLE) {
-          // State-untouched advance failure — GoComputeBackend retries the
-          // idempotent call in place instead of resetting.
-          pending.reject(new RetryableAdvanceError(resp.error.message));
-        } else if (resp.error.code === RPC_CODE_SCALAR_RESET) {
-          // A resolved scalar subquery's value changed mid-advance. The
-          // message mirrors TS's ResetPipelinesSignal('scalar-subquery')
-          // text byte-for-byte; the classifier maps it to that same signal
-          // + reason (transparent reset, NOT teardown).
-          pending.reject(new ScalarResetError(resp.error.message));
-        } else {
-          pending.reject(new Error(`RPC error ${resp.error.code}: ${resp.error.message}`));
-        }
-        return;
-      }
-      // Streaming: deliver per-frame value to onPartial unless this is the
-      // terminal "done" sentinel. Go emits "done" as a plain string Result;
-      // any other Result shape is a partial.
-      //
-      // Sentinel collision defense (D6): partial values are ALWAYS objects
-      // (chunk-metadata records); the literal string "done" is reserved as
-      // the terminal sentinel. If a partial were ever emitted as the string
-      // "done" (Go-side bug or replay), the equality check below would
-      // silently terminate the stream — caller's onResult never fires for
-      // the missing query, and the accumulator's `finish()` then throws
-      // "queries never received a final chunk", obscuring the real cause.
-      // We assert partial shape here so the failure surfaces with the
-      // useful error.
-      //
-      // try/catch around onPartial is load-bearing: accumulators (e.g.
-      // createAdvanceToHeadStreamAccumulator) throw on chunk-order violations
-      // or missing-final invariants. A synchronous throw from this
-      // handler must reject only the offending RPC — we reject the
-      // offending RPC with the throw and continue draining other pending
-      // entries; other CGs' RPCs flow normally.
-      const isStreamTerminal = resp.result === STREAM_DONE_SENTINEL;
-      if (pending.onPartial && !isStreamTerminal) {
-        if (typeof resp.result !== 'object' || resp.result === null) {
-          if (pending.timer) clearTimeout(pending.timer);
-          this.#pending.delete(respId);
-          pending.reject(
-            new Error(
-              `Streaming RPC received non-object partial: ` +
-                `typeof=${typeof resp.result} value=${JSON.stringify(resp.result)}; ` +
-                `partials must be records, "${STREAM_DONE_SENTINEL}" is reserved as terminal sentinel`,
-            ),
-          );
-          return;
-        }
-        try {
-          pending.onPartial(resp.result);
-        } catch (err) {
-          if (pending.timer) clearTimeout(pending.timer);
-          this.#pending.delete(respId);
-          pending.reject(
-            err instanceof Error
-              ? err
-              : new Error(`onPartial threw: ${String(err)}`),
-          );
-        }
-        return;
-      }
-      pending.resolve(resp.result);
+      return;
+    }
+    pending.resolve(resp.result);
   }
 
   // Route one delivery from the NAPI addon's ordered queue. Kind 1 =
@@ -1637,7 +1738,10 @@ export class GoIVMClient {
         pending.onRow(change);
         return;
       }
-      this.#log('warn', `unknown NAPI delivery kind ${kind} (${payload.length} bytes)`);
+      this.#log(
+        'warn',
+        `unknown NAPI delivery kind ${kind} (${payload.length} bytes)`,
+      );
     } catch (err) {
       // Attribute to the owning RPC when identifiable (first 8 bytes of
       // every record are the f64 reqID); otherwise just log.
@@ -1645,15 +1749,22 @@ export class GoIVMClient {
       if (payload.length >= 8) {
         reqID = payload.readDoubleLE(0);
       }
-      const pending = reqID !== undefined ? this.#pending.get(reqID) : undefined;
+      const pending =
+        reqID !== undefined ? this.#pending.get(reqID) : undefined;
       if (pending && reqID !== undefined) {
         if (pending.timer) clearTimeout(pending.timer);
         this.#pending.delete(reqID);
         pending.reject(
-          err instanceof Error ? err : new Error(`row delivery failed: ${String(err)}`),
+          err instanceof Error
+            ? err
+            : new Error(`row delivery failed: ${String(err)}`),
         );
       } else {
-        this.#log('error', `NAPI delivery error (kind=${kind}): ${(err as Error).message}`, err);
+        this.#log(
+          'error',
+          `NAPI delivery error (kind=${kind}): ${(err as Error).message}`,
+          err,
+        );
       }
     }
   }

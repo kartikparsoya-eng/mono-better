@@ -60,6 +60,28 @@ describe('createHydrateStreamAccumulator', () => {
     });
   });
 
+  test('final frame carries Go row-set signature delta', () => {
+    const onResult = vi.fn();
+    const h = createHydrateStreamAccumulator(onResult);
+
+    h.onFrame({
+      queryID: 'q1',
+      ...posFrame(['a']),
+      chunkIndex: 0,
+      final: true,
+      timingMs: 5,
+      sigDelta: '1577071b99a74425',
+    });
+    h.finish();
+
+    expect(onResult).toHaveBeenCalledWith({
+      queryID: 'q1',
+      changes: [row('a')],
+      timingMs: 5,
+      sigDelta: '1577071b99a74425',
+    });
+  });
+
   test('multi-chunk: accumulates rows in order, fires onResult only on final', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
@@ -93,8 +115,20 @@ describe('createHydrateStreamAccumulator', () => {
 
     // Interleave q1 and q2 frames — completion order may differ from input order
     h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
-    h.onFrame({queryID: 'q2', ...posFrame(['x'], 'q2'), chunkIndex: 0, final: true, timingMs: 3});
-    h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 1, final: true, timingMs: 7});
+    h.onFrame({
+      queryID: 'q2',
+      ...posFrame(['x'], 'q2'),
+      chunkIndex: 0,
+      final: true,
+      timingMs: 3,
+    });
+    h.onFrame({
+      queryID: 'q1',
+      ...posFrame(['b']),
+      chunkIndex: 1,
+      final: true,
+      timingMs: 7,
+    });
     h.finish();
 
     expect(onResult).toHaveBeenCalledTimes(2);
@@ -118,7 +152,12 @@ describe('createHydrateStreamAccumulator', () => {
     h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
     // Skip chunkIndex=1, jump to 2 — should throw
     expect(() =>
-      h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 2, final: true}),
+      h.onFrame({
+        queryID: 'q1',
+        ...posFrame(['b']),
+        chunkIndex: 2,
+        final: true,
+      }),
     ).toThrow(
       /addQueriesStream chunk order violation for queryID=q1: expected chunkIndex=1, got 2/,
     );
@@ -131,7 +170,12 @@ describe('createHydrateStreamAccumulator', () => {
 
     h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
     expect(() =>
-      h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 0, final: false}),
+      h.onFrame({
+        queryID: 'q1',
+        ...posFrame(['b']),
+        chunkIndex: 0,
+        final: false,
+      }),
     ).toThrow(/expected chunkIndex=1, got 0/);
   });
 
@@ -141,13 +185,20 @@ describe('createHydrateStreamAccumulator', () => {
 
     // q1 finalizes, q2 doesn't
     h.onFrame({queryID: 'q1', chunkIndex: 0, final: true, timingMs: 1});
-    h.onFrame({queryID: 'q2', ...posFrame(['x'], 'q2'), chunkIndex: 0, final: false});
+    h.onFrame({
+      queryID: 'q2',
+      ...posFrame(['x'], 'q2'),
+      chunkIndex: 0,
+      final: false,
+    });
 
     expect(() => h.finish()).toThrow(
       /addQueriesStream finished but 1 queries never received a final chunk: q2/,
     );
     expect(onResult).toHaveBeenCalledTimes(1);
-    expect(onResult).toHaveBeenCalledWith(expect.objectContaining({queryID: 'q1'}));
+    expect(onResult).toHaveBeenCalledWith(
+      expect.objectContaining({queryID: 'q1'}),
+    );
   });
 
   test('empty query: zero rows + final=true still delivers empty changes', () => {
@@ -201,6 +252,23 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
       rowChanges: [row('a'), row('b')],
       timings: [{table: 't', type: 0, ms: 5}],
       reset: undefined,
+    });
+  });
+
+  test('final frame carries Go row-set signature deltas', () => {
+    const h = createAdvanceToHeadStreamAccumulator();
+    h.onFrame({
+      ...posFrame(['a']),
+      chunkIndex: 0,
+      final: true,
+      version: '0000000009',
+      numChanges: 1,
+      sigDeltas: {q1: '1577071b99a74425'},
+    });
+
+    expect(h.finish()).toMatchObject({
+      rowChanges: [row('a')],
+      sigDeltas: {q1: '1577071b99a74425'},
     });
   });
 
@@ -342,7 +410,12 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
     // A non-encodable change rides a fallback frame between records.
     h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
     h.onRow(row('c'));
-    h.onFrame({chunkIndex: 3, final: true, version: '0000000012', numChanges: 3});
+    h.onFrame({
+      chunkIndex: 3,
+      final: true,
+      version: '0000000012',
+      numChanges: 3,
+    });
     expect(h.finish().rowChanges).toEqual([row('a'), row('b'), row('c')]);
   });
 
