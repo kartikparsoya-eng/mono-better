@@ -75,7 +75,6 @@ import {
   goPullWindow,
 } from './go-sidecar/go-compute-backend.ts';
 import type {
-  AdvanceToHeadResult,
   AdvanceToHeadStreamChunk,
   TableTiming,
 } from './go-sidecar/go-ivm-client.ts';
@@ -87,7 +86,6 @@ import {
 } from './go-sidecar/go-ivm-client.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
 import {
-  formatSignature,
   parseSignature,
   rowIDSignatureUnit,
 } from './row-set-signature.ts';
@@ -109,57 +107,6 @@ export type RowRemove = RowOp<ChangeType.REMOVE>;
 export type RowEdit = RowOp<ChangeType.EDIT>;
 
 export type RowChange = RowAdd | RowRemove | RowEdit;
-
-type MergedGoSigDeltas = {
-  readonly deltas: ReadonlyMap<string, bigint>;
-  readonly fallbackQueryIDs: ReadonlySet<string>;
-};
-
-function mergeGoSigDeltas(
-  acc: MergedGoSigDeltas | undefined,
-  batch: Record<string, string> | undefined,
-  batchChanges: readonly RowChange[],
-): MergedGoSigDeltas | undefined {
-  const out = new Map(acc?.deltas);
-  const fallbackQueryIDs = new Set(acc?.fallbackQueryIDs);
-  const touched = new Set<string>();
-  for (const c of batchChanges) {
-    if (c.type !== ChangeType.EDIT) {
-      touched.add(c.queryID);
-    }
-  }
-  for (const queryID of touched) {
-    if (fallbackQueryIDs.has(queryID)) {
-      continue;
-    }
-    const delta = batch?.[queryID];
-    if (delta === undefined) {
-      fallbackQueryIDs.add(queryID);
-      out.delete(queryID);
-      continue;
-    }
-    const cur = out.get(queryID) ?? 0n;
-    out.set(queryID, cur ^ parseSignature(delta));
-  }
-  if (out.size === 0 && fallbackQueryIDs.size === 0) {
-    return undefined;
-  }
-  return {deltas: out, fallbackQueryIDs};
-}
-
-function goSigDeltaRecord(
-  merged: MergedGoSigDeltas | undefined,
-): Record<string, string> | undefined {
-  if (!merged || merged.deltas.size === 0) {
-    return undefined;
-  }
-  return Object.fromEntries(
-    Array.from(merged.deltas, ([queryID, delta]) => [
-      queryID,
-      formatSignature(delta),
-    ]),
-  );
-}
 
 export type AdvanceResult = {
   version: string;
@@ -2191,153 +2138,25 @@ export class PipelineDriver {
       );
     };
 
-    const collectGoChunks = async (
-      firstChunk: AdvanceToHeadStreamChunk,
-    ): Promise<AdvanceToHeadResult> => {
-      const rowChanges: RowChange[] = [];
-      let finalChunk: AdvanceToHeadStreamChunk | undefined;
-      const consume = (chunk: AdvanceToHeadStreamChunk) => {
-        for (const rc of chunk.changes) {
-          rowChanges.push(rc as unknown as RowChange);
-        }
-        if (chunk.final) {
-          finalChunk = chunk;
-        }
-      };
-      consume(firstChunk);
-      for (;;) {
-        const next = await goIterator.next();
-        if (next.done) break;
-        consume(next.value);
-      }
-      return {
-        changes: [],
-        version: finalChunk?.version ?? firstChunk.version ?? '',
-        numChanges: finalChunk?.numChanges ?? firstChunk.numChanges ?? 0,
-        rowChanges,
-        timings: finalChunk?.timings,
-        reset: finalChunk?.reset,
-        sigDeltas: finalChunk?.sigDeltas,
-      };
-    };
-
-    const headerGoVersion =
-      firstGoChunk.header === true && firstGoChunk.version
-        ? firstGoChunk.version
-        : undefined;
-
-    if (firstGoChunk.reset) {
-      return resetFromGo(firstGoChunk.reset);
+    if (firstGoChunk.header !== true || firstGoChunk.final) {
+      await goIterator.return?.();
+      throw new Error(
+        'advanceToHeadStream expected non-final header as first frame',
+      );
     }
 
-    if (firstGoChunk.header === true && headerGoVersion === undefined) {
+    const headerGoVersion = firstGoChunk.version;
+    if (headerGoVersion === undefined) {
       await goIterator.return?.();
       throw new Error('advanceToHeadStream header missing version');
     }
 
-    if (
-      firstGoChunk.header !== true ||
-      firstGoChunk.final ||
-      (headerGoVersion !== undefined && headerGoVersion < version)
-    ) {
-      let goDerived: AdvanceToHeadResult;
-      try {
-        goDerived = await collectGoChunks(firstGoChunk);
-      } catch (e) {
-        const classified = this.#classifyGoPrimaryAdvanceError(e);
-        return classified instanceof ResetPipelinesSignal
-          ? classified
-          : {
-              version: diff.prev.version,
-              numChanges,
-              changes: classified,
-            };
-      }
-      if (goDerived.reset) {
-        return resetFromGo(goDerived.reset);
-      }
-      this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
-      let goVersionFinal = goDerived.version;
-      let goResultsFinal = goDerived.rowChanges as unknown as RowChange[];
-      let goSigDeltasFinal = mergeGoSigDeltas(
-        undefined,
-        goDerived.sigDeltas,
-        goResultsFinal,
+    if (headerGoVersion < version) {
+      await goIterator.return?.();
+      return new ResetPipelinesSignal(
+        `Go header version ${headerGoVersion} fell behind TS version ${version}`,
+        'go-primary-drop',
       );
-
-      if (goVersionFinal !== undefined && goVersionFinal < version) {
-        const MAX_CATCHUP = 3;
-        for (let i = 0; i < MAX_CATCHUP && goVersionFinal < version; i++) {
-          let next: AdvanceToHeadResult;
-          try {
-            next = await this.#goBackend!.advanceToHeadStream({
-              totalHydrationTimeMs: goAdvanceAbortBudgetMs(
-                this.totalHydrationTimeMs(),
-                this.#consecutiveAdvanceAborts,
-              ),
-            });
-          } catch (e) {
-            const classified = this.#classifyGoPrimaryAdvanceError(e);
-            if (classified instanceof ResetPipelinesSignal) {
-              return classified;
-            }
-            this.#lc.warn?.(
-              `[go-primary] catch-up advanceToHead failed: ${String(e)}; ` +
-                `committing at min`,
-            );
-            break;
-          }
-          if (next.reset) {
-            this.#lc.info?.(
-              `[go-primary] Go reported reset during catch-up ` +
-                `(${next.reset.reason}); escalating to pipeline reset`,
-            );
-            return new ResetPipelinesSignal(
-              `Go reported reset during catch-up ${next.reset.reason} ` +
-                `(${next.reset.msg})`,
-              'go-primary-drop',
-            );
-          }
-          this.#recordGoPrimaryAdvanceTimings(next.timings);
-          const nextRows = next.rowChanges as unknown as RowChange[];
-          goSigDeltasFinal = mergeGoSigDeltas(
-            goSigDeltasFinal,
-            next.sigDeltas,
-            nextRows,
-          );
-          goResultsFinal = [...goResultsFinal, ...nextRows];
-          goVersionFinal = next.version;
-        }
-        if (goVersionFinal < version) {
-          this.#lc.warn?.(
-            `[go-primary] Go still behind TS after catch-up ` +
-              `(V_ts=${version}, V_go=${goVersionFinal}); committing at min — ` +
-              `rare transient, control-plane ack may lead data by one cycle`,
-          );
-        }
-      }
-
-      this.#consecutiveAdvanceAborts = 0;
-      const reconciled = reconcileGoPrimaryWatermark(version, goVersionFinal);
-      this.#noteGoDataVersion(goVersionFinal);
-
-      const trackedTsChanges = this.#trackRowSetSignatures(tsChanges);
-      const trackedGoResults = this.#trackRowSetSignatures(
-        goResultsFinal,
-        goSigDeltaRecord(goSigDeltasFinal),
-      );
-      function* yieldMerged(): Iterable<RowChange | 'yield'> {
-        yield* trackedTsChanges;
-        yield* trackedGoResults;
-      }
-
-      return {
-        version: reconciled.version,
-        numChanges,
-        changes: yieldMerged(),
-        tsVersion: reconciled.tsVersion,
-        goVersion: reconciled.goVersion,
-      };
     }
 
     const reconciled = reconcileGoPrimaryWatermark(version, headerGoVersion);
@@ -2348,11 +2167,17 @@ export class PipelineDriver {
       const fallbackDeltas = new Map<string, bigint>();
       let finalSigDeltas: Record<string, string> | undefined;
       let finalGoVersion = headerGoVersion;
+      let sawFinal = false;
       try {
         for (;;) {
           const next = await goIterator.next();
           if (next.done) break;
           const chunk = next.value;
+          if (sawFinal) {
+            throw new Error(
+              'advanceToHeadStream yielded a frame after the final frame',
+            );
+          }
           if (chunk.reset) {
             throw resetFromGo(chunk.reset);
           }
@@ -2374,6 +2199,7 @@ export class PipelineDriver {
             self.#recordGoPrimaryAdvanceTimings(chunk.timings);
             finalSigDeltas = chunk.sigDeltas;
             finalGoVersion = chunk.version || finalGoVersion;
+            sawFinal = true;
           }
         }
       } catch (e) {
@@ -2389,6 +2215,9 @@ export class PipelineDriver {
         await goIterator.return?.();
       }
 
+      if (!sawFinal) {
+        throw new Error('advanceToHeadStream ended without a final frame');
+      }
       if (finalGoVersion !== undefined && finalGoVersion < version) {
         throw new ResetPipelinesSignal(
           `Go final version ${finalGoVersion} fell behind TS version ${version}`,
@@ -2410,8 +2239,8 @@ export class PipelineDriver {
   }
 
   /**
-   * Record Go-side per-(table,op) advance timings into the same #advanceTime
-   * histogram the TS-native path populates, so Go-primary has table/op timing
+   * Record Go-side per-table advance timings into the same #advanceTime
+   * histogram the TS-native path populates, so Go-primary has timing
    * attribution parity instead of dropping `timings` on the floor. Also feeds
    * the per-query `query-update-server` inspector metric (the TS-native path
    * populates it via MeasurePushOperator, which can't exist across the RPC

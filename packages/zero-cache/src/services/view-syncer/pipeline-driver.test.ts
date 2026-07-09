@@ -1077,7 +1077,7 @@ describe('view-syncer/pipeline-driver', () => {
     );
   });
 
-  test('Go-primary advance falls back to per-row signatures after any delta-less batch', async () => {
+  test('Go-primary streamed advance resets instead of buffered catch-up when Go header is behind TS', async () => {
     const goPipelines = (fakeBackend: unknown) => {
       goBackendMock.backend = fakeBackend;
       const storage = new Database(lc, ':memory:');
@@ -1103,16 +1103,8 @@ describe('view-syncer/pipeline-driver', () => {
       rowKey: {id},
       row: {id, closed: false, _0_version: version},
     });
-    const sigUnit = (c: RowChange) =>
-      rowIDSignatureUnit({
-        schema: '',
-        table: c.table,
-        rowKey: c.rowKey as RowKey,
-      });
 
     const firstAdvanceRow = goRow('go-a', '134');
-    const catchUpRow = goRow('go-b', '134');
-    const catchUpDelta = sigUnit(catchUpRow).toString(16);
     const fakeBackend = {
       initialized: true,
       pinnedVersion: undefined,
@@ -1139,13 +1131,7 @@ describe('view-syncer/pipeline-driver', () => {
           numChanges: 1,
         };
       }),
-      advanceToHeadStream: vi.fn().mockResolvedValueOnce({
-        changes: [],
-        version: '134',
-        numChanges: 1,
-        rowChanges: [catchUpRow],
-        sigDeltas: {queryID1: catchUpDelta},
-      }),
+      advanceToHeadStream: vi.fn(),
       destroy: vi.fn().mockResolvedValue(undefined),
     };
     const p = goPipelines(fakeBackend);
@@ -1163,20 +1149,15 @@ describe('view-syncer/pipeline-driver', () => {
       messages.insert('issues', {id: '4', closed: 0}),
     );
     const advanced = await p.advance(NO_TIME_ADVANCEMENT_TIMER);
-    if (advanced instanceof ResetPipelinesSignal) {
-      throw new Error(`unexpected reset: ${advanced.message}`);
-    }
-    const advancedRows: RowChange[] = [];
-    for await (const change of advanced.changes) {
-      if (change !== 'yield') advancedRows.push(change);
-    }
-    expect(advancedRows).toEqual([firstAdvanceRow, catchUpRow]);
+    expect(advanced).toBeInstanceOf(ResetPipelinesSignal);
+    expect((advanced as ResetPipelinesSignal).reason).toBe('go-primary-drop');
+    expect((advanced as ResetPipelinesSignal).message).toContain(
+      'Go header version 133 fell behind TS version 134',
+    );
 
     expect(fakeBackend.advanceToHeadStreamChunks).toHaveBeenCalledTimes(1);
-    expect(fakeBackend.advanceToHeadStream).toHaveBeenCalledTimes(1);
-    expect(p.rowSetSignature('queryID1')).toEqual(
-      sigUnit(firstAdvanceRow) ^ sigUnit(catchUpRow),
-    );
+    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
+    expect(p.rowSetSignature('queryID1')).toBeUndefined();
   });
 
   test('Go-primary batch hydrate stores the planned AST for reset re-register', async () => {
@@ -1473,6 +1454,75 @@ describe('view-syncer/pipeline-driver', () => {
         }
       })(),
     ).rejects.toThrow(/advanceToHeadStream finished without a final chunk/);
+    expect(rows).toEqual([goRow]);
+    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
+  });
+
+  test('Go-primary streamed advance rejects clean stream end without final frame', async () => {
+    const goRow: RowChange = {
+      type: ChangeType.ADD,
+      queryID: 'queryID1',
+      table: 'issues',
+      rowKey: {id: 'go-streamed-no-final'},
+      row: {id: 'go-streamed-no-final', closed: false, _0_version: '134'},
+    };
+    const fakeBackend = {
+      initialized: true,
+      pinnedVersion: undefined,
+      initEngine: vi.fn().mockResolvedValue(undefined),
+      whenRecovered: vi.fn().mockResolvedValue(undefined),
+      hydrate: vi.fn().mockResolvedValue({
+        changes: [],
+        timingMs: 0,
+        sigDelta: '0',
+      }),
+      removeQuery: vi.fn().mockResolvedValue(undefined),
+      advanceToHeadStream: vi.fn(),
+      advanceToHeadStreamChunks: vi.fn(async function* () {
+        yield {
+          changes: [],
+          final: false,
+          header: true,
+          version: '134',
+          numChanges: 1,
+        };
+        yield {
+          changes: [goRow],
+          final: false,
+          version: '134',
+          numChanges: 1,
+        };
+      }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const p = goPrimaryPipelines(fakeBackend, 'go-stream-missing-final');
+    p.init(clientSchema);
+    expect([
+      ...(await p.addQuery(
+        'hash-go-stream-missing-final',
+        'queryID1',
+        {table: 'issues', orderBy: [['id', 'desc']]},
+        startTimer(),
+      )),
+    ]).toEqual([]);
+
+    replicator.processTransaction(
+      '134',
+      messages.insert('issues', {id: '4', closed: 0}),
+    );
+    const advanced = await p.advance(NO_TIME_ADVANCEMENT_TIMER);
+    if (advanced instanceof ResetPipelinesSignal) {
+      throw new Error(`unexpected reset: ${advanced.message}`);
+    }
+
+    const rows: RowChange[] = [];
+    await expect(
+      (async () => {
+        for await (const change of advanced.changes) {
+          if (change !== 'yield') rows.push(change);
+        }
+      })(),
+    ).rejects.toThrow(/advanceToHeadStream ended without a final frame/);
     expect(rows).toEqual([goRow]);
     expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
   });
