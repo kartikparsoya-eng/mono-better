@@ -271,3 +271,134 @@ test('controlled rehome moves a hot assigned client group after sustained imbala
     rmSync(dir, {recursive: true, force: true});
   }
 });
+
+test('controlled rehome does not move into an already-hot target', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zero-syncer-router-'));
+  try {
+    const assignmentsFile = join(dir, 'assignments.json');
+    writeFileSync(assignmentsFile, JSON.stringify({'hot-cg': 0}));
+    const moves: unknown[] = [];
+    const router = new SyncerAssignmentRouter({
+      taskID: 'task-a',
+      syncerCount: 3,
+      assignmentsFile,
+      lc: createSilentLogContext(),
+      controlledRehome: {
+        enabled: true,
+        sustainedReports: 1,
+        minScoreDelta: 1000,
+        minDurationMs: 0,
+        cooldownMs: 0,
+        onRehome: move => moves.push(move),
+      },
+    });
+
+    router.updateLoad(0, {
+      workerIndex: 0,
+      activeClientGroups: 100,
+      activeConnections: 100,
+      queries: 0,
+      rows: 0,
+      clientGroups: [
+        {
+          clientGroupID: 'hot-cg',
+          activeConnections: 1,
+          queries: 10,
+          rows: 10_000,
+        },
+      ],
+      timestamp: 1,
+    });
+    router.updateLoad(1, {
+      workerIndex: 1,
+      activeClientGroups: 95,
+      activeConnections: 95,
+      queries: 0,
+      rows: 0,
+      clientGroups: [],
+      timestamp: 1,
+    });
+    router.updateLoad(2, {
+      workerIndex: 2,
+      activeClientGroups: 96,
+      activeConnections: 96,
+      queries: 0,
+      rows: 0,
+      clientGroups: [],
+      timestamp: 1,
+    });
+
+    expect(moves).toHaveLength(0);
+    expect(router.assign('hot-cg')).toBe(0);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('controlled rehome caps rehomes in a rolling window even when cooldown is low', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zero-syncer-router-'));
+  try {
+    const assignmentsFile = join(dir, 'assignments.json');
+    writeFileSync(assignmentsFile, JSON.stringify({'hot-a': 0, 'hot-b': 0}));
+    const moves: unknown[] = [];
+    const router = new SyncerAssignmentRouter({
+      taskID: 'task-a',
+      syncerCount: 2,
+      assignmentsFile,
+      lc: createSilentLogContext(),
+      controlledRehome: {
+        enabled: true,
+        sustainedReports: 1,
+        minScoreDelta: 1000,
+        minDurationMs: 0,
+        cooldownMs: 0,
+        maxRehomesPerWindow: 1,
+        rehomeWindowMs: 60_000,
+        onRehome: move => moves.push(move),
+      },
+    });
+
+    const hotClientGroups = [
+      {
+        clientGroupID: 'hot-a',
+        activeConnections: 1,
+        queries: 100,
+        rows: 100_000,
+      },
+      {
+        clientGroupID: 'hot-b',
+        activeConnections: 1,
+        queries: 100,
+        rows: 100_000,
+      },
+    ];
+    const hotReport = {
+      workerIndex: 0,
+      activeClientGroups: 4,
+      activeConnections: 4,
+      queries: 100,
+      rows: 100_000,
+      clientGroups: hotClientGroups,
+      timestamp: 1,
+    };
+    const coldReport = {
+      workerIndex: 1,
+      activeClientGroups: 0,
+      activeConnections: 0,
+      queries: 0,
+      rows: 0,
+      clientGroups: [],
+      timestamp: 1,
+    };
+
+    router.updateLoad(0, hotReport);
+    router.updateLoad(1, coldReport);
+    expect(moves).toHaveLength(1);
+
+    router.updateLoad(0, {...hotReport, timestamp: 2});
+    router.updateLoad(1, {...coldReport, timestamp: 2});
+    expect(moves).toHaveLength(1);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});

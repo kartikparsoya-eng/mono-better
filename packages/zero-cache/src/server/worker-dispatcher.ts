@@ -52,6 +52,9 @@ type ControlledRehomeOptions = {
   minScoreDelta?: number | undefined;
   minDurationMs?: number | undefined;
   cooldownMs?: number | undefined;
+  maxTargetScore?: number | undefined;
+  maxRehomesPerWindow?: number | undefined;
+  rehomeWindowMs?: number | undefined;
   onRehome: (request: SyncerRehomeRequest) => void;
 };
 
@@ -61,6 +64,9 @@ type NormalizedControlledRehomeOptions = {
   minScoreDelta: number;
   minDurationMs: number;
   cooldownMs: number;
+  maxTargetScore: number;
+  maxRehomesPerWindow: number;
+  rehomeWindowMs: number;
   onRehome: (request: SyncerRehomeRequest) => void;
 };
 
@@ -76,6 +82,9 @@ const DEFAULT_REHOME_SUSTAINED_REPORTS = 3;
 const DEFAULT_REHOME_MIN_SCORE_DELTA = 2_000;
 const DEFAULT_REHOME_MIN_DURATION_MS = 30_000;
 const DEFAULT_REHOME_COOLDOWN_MS = 60_000;
+const DEFAULT_REHOME_MAX_TARGET_SCORE = 25_000;
+const DEFAULT_REHOME_MAX_PER_WINDOW = 3;
+const DEFAULT_REHOME_WINDOW_MS = 10 * 60_000;
 
 export class SyncerAssignmentRouter {
   readonly #taskID: string;
@@ -87,6 +96,7 @@ export class SyncerAssignmentRouter {
   readonly #assignmentCounts: number[];
   readonly #loadReports = new Map<number, SyncerLoadReport>();
   readonly #rehomeCooldownUntilByCG = new Map<string, number>();
+  #recentRehomeTimestamps: number[] = [];
   #imbalancePair: string | undefined;
   #imbalanceSince = 0;
   #imbalanceStreak = 0;
@@ -117,6 +127,14 @@ export class SyncerAssignmentRouter {
               controlledRehome.minDurationMs ?? DEFAULT_REHOME_MIN_DURATION_MS,
             cooldownMs:
               controlledRehome.cooldownMs ?? DEFAULT_REHOME_COOLDOWN_MS,
+            maxTargetScore:
+              controlledRehome.maxTargetScore ??
+              DEFAULT_REHOME_MAX_TARGET_SCORE,
+            maxRehomesPerWindow:
+              controlledRehome.maxRehomesPerWindow ??
+              DEFAULT_REHOME_MAX_PER_WINDOW,
+            rehomeWindowMs:
+              controlledRehome.rehomeWindowMs ?? DEFAULT_REHOME_WINDOW_MS,
           }
         : undefined;
     this.#assignmentCounts = new Array<number>(syncerCount).fill(0);
@@ -213,12 +231,14 @@ export class SyncerAssignmentRouter {
       return;
     }
 
+    let totalScore = 0;
     let hotIdx = -1;
     let hotScore = Number.NEGATIVE_INFINITY;
     let coldIdx = -1;
     let coldScore = Number.POSITIVE_INFINITY;
     for (let i = 0; i < this.#syncerCount; i++) {
       const score = this.#score(i);
+      totalScore += score;
       if (score > hotScore) {
         hotIdx = i;
         hotScore = score;
@@ -241,6 +261,14 @@ export class SyncerAssignmentRouter {
       this.#imbalanceStreak = 0;
       return;
     }
+    const averageScore = totalScore / this.#syncerCount;
+    if (
+      coldScore > controlledRehome.maxTargetScore ||
+      coldScore + controlledRehome.minScoreDelta > averageScore
+    ) {
+      this.#resetImbalance();
+      return;
+    }
 
     if (this.#imbalancePair === pair) {
       this.#imbalanceStreak++;
@@ -259,8 +287,21 @@ export class SyncerAssignmentRouter {
     if (now < this.#nextRehomeAt) {
       return;
     }
+    this.#pruneRecentRehomes(now, controlledRehome.rehomeWindowMs);
+    if (
+      this.#recentRehomeTimestamps.length >=
+      controlledRehome.maxRehomesPerWindow
+    ) {
+      return;
+    }
 
-    const candidate = this.#pickRehomeCandidate(hotIdx, now);
+    const candidate = this.#pickRehomeCandidate(
+      hotIdx,
+      hotScore,
+      coldScore,
+      averageScore,
+      now,
+    );
     if (!candidate) {
       return;
     }
@@ -285,15 +326,14 @@ export class SyncerAssignmentRouter {
       candidate.clientGroupID,
       now + controlledRehome.cooldownMs,
     );
-    this.#imbalancePair = undefined;
-    this.#imbalanceSince = 0;
-    this.#imbalanceStreak = 0;
+    this.#recentRehomeTimestamps.push(now);
+    this.#resetImbalance();
 
     const request = {
       clientGroupID: candidate.clientGroupID,
       fromWorkerIndex: hotIdx,
       toWorkerIndex: coldIdx,
-      reason: `syncer load score ${hotScore} exceeds ${coldScore} by ${scoreDelta}`,
+      reason: `syncer load score ${hotScore} exceeds ${coldScore} by ${scoreDelta}; moving estimated score ${clientGroupScore(candidate)}`,
       timestamp: now,
     };
     this.#lc.info?.(
@@ -305,8 +345,15 @@ export class SyncerAssignmentRouter {
 
   #pickRehomeCandidate(
     sourceIdx: number,
+    sourceScore: number,
+    targetScore: number,
+    averageScore: number,
     now: number,
   ): SyncerClientGroupLoad | undefined {
+    const controlledRehome = this.#controlledRehome;
+    if (!controlledRehome) {
+      return undefined;
+    }
     const report = this.#loadReports.get(sourceIdx);
     if (!report) {
       return undefined;
@@ -329,6 +376,15 @@ export class SyncerAssignmentRouter {
       }
 
       const score = clientGroupScore(clientGroup);
+      const sourceAfter = sourceScore - score;
+      const targetAfter = targetScore + score;
+      if (
+        targetAfter > controlledRehome.maxTargetScore ||
+        targetAfter > averageScore ||
+        Math.max(sourceAfter, targetAfter) >= sourceScore
+      ) {
+        continue;
+      }
       const tie = h32(clientGroup.clientGroupID);
       if (score > bestScore || (score === bestScore && tie > bestTie)) {
         best = clientGroup;
@@ -337,6 +393,18 @@ export class SyncerAssignmentRouter {
       }
     }
     return best;
+  }
+
+  #resetImbalance() {
+    this.#imbalancePair = undefined;
+    this.#imbalanceSince = 0;
+    this.#imbalanceStreak = 0;
+  }
+
+  #pruneRecentRehomes(now: number, windowMs: number) {
+    this.#recentRehomeTimestamps = this.#recentRehomeTimestamps.filter(
+      timestamp => now - timestamp < windowMs,
+    );
   }
 
   #persistAssignments() {
