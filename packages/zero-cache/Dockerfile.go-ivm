@@ -36,6 +36,7 @@ FROM litestream/litestream:0.5.11 AS litestream-v5
 
 # Stage 4: zero-cache runtime
 FROM node:22-slim
+ARG GO_IVM_IMAGE
 
 # Every RUN below that pipes through `tail` must fail when the LEFT side
 # fails: Debian's /bin/sh (dash) has no pipefail, so a failed
@@ -144,6 +145,11 @@ ARG CURSOR_PAGE_SIZE=100
 ARG PARALLELISM=
 ARG HYDRATE_PARALLELISM=
 ARG ADVANCE_PARALLELISM=
+# Syncer worker routing. Load-aware sticky assignment is safe as a prod
+# default; controlled rehome is an active drain/reconnect action and stays
+# opt-in unless explicitly pinned by the image build or deploy env.
+ARG SYNCER_LOAD_AWARE_ROUTING=1
+ARG SYNCER_CONTROLLED_REHOME=
 
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time.
@@ -162,6 +168,8 @@ ENV GO_IVM_ADVANCE_PARALLELISM=${ADVANCE_PARALLELISM}
 ENV GO_IVM_HYDRATE_CHUNK_SIZE=${HYDRATE_CHUNK_SIZE}
 ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
 ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
+ENV ZERO_SYNCER_LOAD_AWARE_ROUTING=${SYNCER_LOAD_AWARE_ROUTING}
+ENV ZERO_SYNCER_CONTROLLED_REHOME=${SYNCER_CONTROLLED_REHOME}
 # --- Production-scale memory/connection guards (2026-06-11 audit) ---
 # Replica read+writable pool ceilings. The engine's package default (256)
 # is sized for ~128 drive-mode CGs (2 pinned snapshotter conns per CG);
@@ -227,4 +235,6 @@ WORKDIR /app/packages/zero-cache
 
 # No entrypoint script: with the socket transport gone there is no shared
 # sidecar to spawn/await — each syncer worker dlopens libgoivm.so itself.
+LABEL org.opencontainers.image.go-ivm-image="${GO_IVM_IMAGE}"
+
 CMD ["npx", "tsx", "./src/server/runner/main.ts"]

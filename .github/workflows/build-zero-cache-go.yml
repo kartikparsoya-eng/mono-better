@@ -80,11 +80,14 @@ jobs:
         include:
           # In-process (NAPI) Go-primary — the feat/napi-transport lineage.
           # Each syncer worker loads the Go engine IN-PROCESS (dlopen
-          # libgoivm.so via the goivm_napi addon). Chunk/parallelism args
-          # left EMPTY so the streaming+parallel code defaults apply
-          # (GO_IVM_CHUNK_SIZE=100, GO_IVM_PARALLELISM=4, warm pool +
-          # lazy/parallel advance ON); CURSOR_PAGE_SIZE=100 pairs the TS
-          # consumer side with the 100-row emit default. Requires the
+          # libgoivm.so via the goivm_napi addon). Chunk/hydrate/advance
+          # args left EMPTY so Go code defaults apply (chunk=100,
+          # hydrate parallelism=4, advance parallelism=4, warm pool +
+          # lazy/parallel advance ON). CURSOR_PAGE_SIZE=100 pairs the TS
+          # consumer side with the 100-row emit default. Sticky
+          # load-aware syncer routing is ON in the prod image; controlled
+          # rehome stays empty/off because it actively drains live CGs.
+          # Requires the
           # go-ivm build workflow to publish feat-napi-transport (its
           # Dockerfile ships libgoivm.so), else the unconditional COPY in
           # Dockerfile.go-ivm fails this build loudly.
@@ -93,7 +96,11 @@ jobs:
             tag_prefix: "napi-tablesrc-"
             hydrate_chunk_size_arg: ""
             advance_chunk_size_arg: ""
+            hydrate_parallelism_arg: ""
+            advance_parallelism_arg: ""
             cursor_page_size_arg: "100"
+            syncer_load_aware_routing_arg: "1"
+            syncer_controlled_rehome_arg: ""
 
     name: build (${{ matrix.mode }})
 
@@ -142,6 +149,7 @@ jobs:
         with:
           context: .
           file: packages/zero-cache/Dockerfile.go-ivm
+          platforms: linux/amd64
           # Force-pull the go-ivm base image so we always bundle the
           # latest libgoivm.so — without this, a cached older version
           # would silently get baked in.
@@ -153,7 +161,11 @@ jobs:
             GO_IVM_IMAGE=${{ matrix.go_ivm_image }}
             HYDRATE_CHUNK_SIZE=${{ matrix.hydrate_chunk_size_arg }}
             ADVANCE_CHUNK_SIZE=${{ matrix.advance_chunk_size_arg }}
+            HYDRATE_PARALLELISM=${{ matrix.hydrate_parallelism_arg }}
+            ADVANCE_PARALLELISM=${{ matrix.advance_parallelism_arg }}
             CURSOR_PAGE_SIZE=${{ matrix.cursor_page_size_arg }}
+            SYNCER_LOAD_AWARE_ROUTING=${{ matrix.syncer_load_aware_routing_arg }}
+            SYNCER_CONTROLLED_REHOME=${{ matrix.syncer_controlled_rehome_arg }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache scoped per-matrix-variant (single variant today; keeps
