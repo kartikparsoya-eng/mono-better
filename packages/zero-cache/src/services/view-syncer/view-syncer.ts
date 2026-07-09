@@ -1574,6 +1574,142 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     // the caller bumps configVersion for these.
     const driftedQueryIDs = new Set<string>();
 
+    const checkRowSetSignatureDrift = (queryID: string, count: number) => {
+      // Drift detection: compare the just-computed candidate signature against
+      // the signature stored in the CVR. They should match for a deterministic
+      // query at the same db state. A mismatch indicates a query containing
+      // the Cap operator picked a different N-row subset on re-execution.
+      // Remove the query from pipelines so #syncQueryPipelineSet 'missing'
+      // re-executes it via the CVRQueryDrivenUpdater path, where the row diff
+      // will be properly emitted to the client.
+      //
+      // Skip when the stored signature is absent — legacy queries from before
+      // this feature was deployed have no signature to compare against, and a
+      // forced re-execution would needlessly resend rows to the client. Such
+      // queries get their signature initialized whenever they next re-execute
+      // via the normal path (transformation hash change, etc.), at which
+      // point drift detection becomes effective for subsequent cycles.
+      const storedSigHex = cvr.queries[queryID]?.rowSetSignature;
+      if (storedSigHex !== undefined && storedSigHex !== null) {
+        const priorSig = parseSignature(storedSigHex);
+        const candidateSig = this.#pipelines.rowSetSignature(queryID) ?? 0n;
+        if (priorSig !== candidateSig) {
+          lc.warn?.(
+            `rowSetSignature drift for query ${queryID}: ` +
+              `prior=${priorSig.toString(16)} new=${candidateSig.toString(16)} ` +
+              `(${count} rows). Removing from pipelines for full re-execution.`,
+          );
+          this.#rowSetSignatureDrifts.add(1);
+          this.#pipelines.removeQuery(queryID);
+          driftedQueryIDs.add(queryID);
+        }
+      }
+    };
+
+    const recordHydrated = (
+      queryID: string,
+      transformationHash: string,
+      transformedAst: AST,
+      elapsed: number,
+      count: number,
+    ) => {
+      this.#hydrations.add(1);
+      this.#hydrationTime.recordMs(elapsed);
+      this.#addQueryMaterializationServerMetric(transformationHash, elapsed);
+      this.#inspectorDelegate.addQuery(transformationHash, transformedAst);
+      lc.debug?.(`hydrated ${count} rows for ${queryID} (${elapsed} ms)`);
+      manualSpan(tracer, 'vs.hydrateUnchangedQuery', elapsed, {
+        hash: queryID,
+        transformationHash,
+      });
+    };
+
+    const hydrateQueries = transformedQueries.map(q => {
+      const queryID = q.id;
+      const query = cvr.queries[queryID];
+      const queryName = query.type === 'custom' ? query.name : undefined;
+      return {
+        id: queryID,
+        transformationHash: q.transformationHash,
+        transformedAst: q.transformedAst,
+        ...(queryName !== undefined && {name: queryName}),
+      };
+    });
+
+    if (hydrateQueries.length > 0) {
+      await this.#pipelines.awaitGoInit();
+    }
+
+    if (this.#pipelines.canBatchHydrate && hydrateQueries.length > 0) {
+      const batchStart = performance.now();
+      const byID = new Map(hydrateQueries.map(q => [q.id, q]));
+      const counts = new Map<string, number>();
+      let completed = 0;
+      let totalComputeMs = 0;
+
+      await startAsyncSpan(
+        tracer,
+        'vs.#hydrateUnchangedQueries.batch',
+        async span => {
+          span.setAttribute('queries', hydrateQueries.length);
+          const stream = this.#pipelines.goHydrateBatchStream(
+            hydrateQueries.map(q => ({
+              transformationHash: q.transformationHash,
+              queryID: q.id,
+              ast: q.transformedAst,
+              ...(q.name !== undefined && {queryName: q.name}),
+            })),
+          );
+          for await (const {queryID, changes, timingMs, final} of stream) {
+            const q = byID.get(queryID);
+            if (!q) continue;
+
+            let count = counts.get(queryID) ?? 0;
+            const consumeStart = performance.now();
+            for (const change of changes) {
+              if (change === 'yield') {
+                await yieldProcess(lc);
+              } else {
+                count++;
+              }
+            }
+            const consumeElapsed = performance.now() - consumeStart;
+            counts.set(queryID, count);
+
+            if (!final) {
+              continue;
+            }
+
+            const elapsed = timingMs ?? consumeElapsed;
+            totalComputeMs += elapsed;
+            recordHydrated(
+              q.id,
+              q.transformationHash,
+              q.transformedAst,
+              elapsed,
+              count,
+            );
+            checkRowSetSignatureDrift(q.id, count);
+            byID.delete(queryID);
+            completed++;
+          }
+          if (byID.size > 0) {
+            throw new Error(
+              `hydrateUnchangedQueries batch ended before final for ` +
+                `${[...byID.keys()].join(', ')}`,
+            );
+          }
+        },
+      );
+
+      lc.info?.(
+        `hydrateUnchangedQueries batch hydrated ${completed} queries ` +
+          `in ${(performance.now() - batchStart).toFixed(2)}ms ` +
+          `(compute ${totalComputeMs.toFixed(2)}ms)`,
+      );
+      return driftedQueryIDs;
+    }
+
     for (const {
       id: queryID,
       transformationHash,
@@ -1610,41 +1746,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       );
 
       const elapsed = timer.totalElapsed();
-      this.#hydrations.add(1);
-      this.#hydrationTime.recordMs(elapsed);
-      this.#addQueryMaterializationServerMetric(transformationHash, elapsed);
-      this.#inspectorDelegate.addQuery(transformationHash, transformedAst);
-      lc.debug?.(`hydrated ${count} rows for ${queryID} (${elapsed} ms)`);
-
-      // Drift detection: compare the just-computed candidate signature against
-      // the signature stored in the CVR. They should match for a deterministic
-      // query at the same db state. A mismatch indicates a query containing
-      // the Cap operator picked a different N-row subset on re-execution.
-      // Remove the query from pipelines so #syncQueryPipelineSet 'missing'
-      // re-executes it via the CVRQueryDrivenUpdater path, where the row diff
-      // will be properly emitted to the client.
-      //
-      // Skip when the stored signature is absent — legacy queries from before
-      // this feature was deployed have no signature to compare against, and a
-      // forced re-execution would needlessly resend rows to the client. Such
-      // queries get their signature initialized whenever they next re-execute
-      // via the normal path (transformation hash change, etc.), at which
-      // point drift detection becomes effective for subsequent cycles.
-      const storedSigHex = cvr.queries[queryID]?.rowSetSignature;
-      if (storedSigHex !== undefined && storedSigHex !== null) {
-        const priorSig = parseSignature(storedSigHex);
-        const candidateSig = this.#pipelines.rowSetSignature(queryID) ?? 0n;
-        if (priorSig !== candidateSig) {
-          lc.warn?.(
-            `rowSetSignature drift for query ${queryID}: ` +
-              `prior=${priorSig.toString(16)} new=${candidateSig.toString(16)} ` +
-              `(${count} rows). Removing from pipelines for full re-execution.`,
-          );
-          this.#rowSetSignatureDrifts.add(1);
-          this.#pipelines.removeQuery(queryID);
-          driftedQueryIDs.add(queryID);
-        }
-      }
+      recordHydrated(
+        queryID,
+        transformationHash,
+        transformedAst,
+        elapsed,
+        count,
+      );
+      checkRowSetSignatureDrift(queryID, count);
     }
 
     return driftedQueryIDs;
