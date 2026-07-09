@@ -2,6 +2,7 @@ import {describe, expect, test} from 'vitest';
 import {
   divideGoConnCeilingsForWorkers,
   isProtocolMismatchError,
+  isVersionMethodNotFoundError,
 } from './sidecar-manager.ts';
 
 // The version handshake (SidecarManager #start) wraps the version RPC in a
@@ -23,16 +24,24 @@ describe('view-syncer/go-sidecar/sidecar-manager: protocol-mismatch gate', () =>
 
   test('"method not found" from an older sidecar → swallow (false)', () => {
     // The ONLY case the catch is allowed to absorb: a pre-version-RPC sidecar.
-    expect(isProtocolMismatchError(new Error('method not found: version'))).toBe(
-      false,
-    );
+    expect(
+      isProtocolMismatchError(new Error('method not found: version')),
+    ).toBe(false);
+    expect(
+      isVersionMethodNotFoundError(new Error('method not found: version')),
+    ).toBe(true);
   });
 
-  test('an unrelated transport error → swallow (false), not mis-escalated', () => {
-    // A dropped socket mid-handshake is not a protocol incompatibility; it must
-    // fall through to the warn-and-continue path, not the re-throw.
+  test('an unrelated transport error → not a compatibility fallback', () => {
+    // A dropped transport during version() means the wire rev is unverified;
+    // startup must fail instead of marking the manager running.
     expect(
       isProtocolMismatchError(new Error('Connection closed before response')),
+    ).toBe(false);
+    expect(
+      isVersionMethodNotFoundError(
+        new Error('Connection closed before response'),
+      ),
     ).toBe(false);
   });
 

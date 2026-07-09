@@ -1135,6 +1135,7 @@ export class GoIVMClient {
     // the chunk-order/duplicate-final guards.
     const handler = createHydrateStreamAccumulator(
       r => {
+        if (closed) return;
         buffered.push({
           queryID: r.queryID,
           changes: r.changes,
@@ -1164,6 +1165,11 @@ export class GoIVMClient {
         onRow: handler.onRow,
         onStreamOpen: id => {
           reqID = id;
+          if (closed) {
+            throw new Error(
+              'addQueriesStreamPull cancelled before request send',
+            );
+          }
         },
       },
     ).then(
@@ -1381,10 +1387,15 @@ export class GoIVMClient {
       abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
     },
   ): AsyncIterableIterator<AdvanceToHeadStreamChunk> {
+    const napi = this.#napi;
+    if (!napi) {
+      throw new Error('advanceToHeadStreamChunks requires the NAPI transport');
+    }
     const buffered: AdvanceToHeadStreamChunk[] = [];
     let wake: (() => void) | null = null;
     let done = false;
     let error: Error | null = null;
+    let reqID: number | null = null;
     let closed = false;
 
     const notify = () => {
@@ -1420,6 +1431,14 @@ export class GoIVMClient {
       clientGroupID: opts?.clientGroupID ?? clientGroupID,
       onPartial: handler.onFrame,
       onRow: handler.onRow,
+      onStreamOpen: id => {
+        reqID = id;
+        if (closed) {
+          throw new Error(
+            'advanceToHeadStreamChunks cancelled before request send',
+          );
+        }
+      },
     }).then(
       () => {
         try {
@@ -1443,6 +1462,18 @@ export class GoIVMClient {
         notify();
       },
     );
+
+    const cancel = () => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      buffered.length = 0;
+      if (reqID !== null) {
+        napi.streamCancel(reqID);
+      }
+      notify();
+    };
 
     const iterator: AsyncIterableIterator<AdvanceToHeadStreamChunk> = {
       [Symbol.asyncIterator]() {
@@ -1473,13 +1504,13 @@ export class GoIVMClient {
         }
       },
       return: (): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
-        closed = true;
-        buffered.length = 0;
+        cancel();
         return Promise.resolve({value: undefined, done: true});
       },
-      throw: (e?: unknown): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
-        closed = true;
-        buffered.length = 0;
+      throw: (
+        e?: unknown,
+      ): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
+        cancel();
         return Promise.reject(e instanceof Error ? e : new Error(String(e)));
       },
     };
@@ -1673,7 +1704,12 @@ export class GoIVMClient {
       // After #pending.set so a synchronous throw inside the callback
       // cannot orphan the entry; before send so the consumer can never
       // observe a delivery for an id it doesn't know yet.
-      opts?.onStreamOpen?.(id);
+      try {
+        opts?.onStreamOpen?.(id);
+      } catch (err) {
+        wrappedReject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
 
       const req: RPCRequest = {jsonrpc: '2.0', method, params, id};
       // Attach the active W3C traceparent if available — Go-side can log

@@ -6,8 +6,8 @@
 // contract pinned by go-ivm's cmd/sidecar/pullmode_test.go. No real .node /
 // libgoivm needed, so these run everywhere.
 
-import {describe, expect, test} from 'vitest';
 import {Packr} from 'msgpackr';
+import {describe, expect, test} from 'vitest';
 import {GoIVMClient, type RowChange} from './go-ivm-client.ts';
 import type {GoNapiAddon} from './napi/index.ts';
 
@@ -29,6 +29,7 @@ type FakeHost = {
   overProduction: number;
   /** Total credits received (opening window + top-ups). */
   granted: number;
+  sent: number;
   produced: number;
   cancelled: boolean;
   /** When true, deliver an error frame after `errorAfter` rows. */
@@ -39,12 +40,17 @@ type FakeHost = {
 
 // makeFakeHost wires a GoIVMClient to an in-memory pull-aware host. The
 // client must be created first so deliveries route to it.
-function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: number; omitFinal?: boolean}): FakeHost {
+function makeFakeHost(
+  client: GoIVMClient,
+  rows: number,
+  opts?: {errorAfter?: number; omitFinal?: boolean},
+): FakeHost {
   const host: FakeHost = {
     addon: undefined as unknown as GoNapiAddon,
     rows,
     overProduction: 0,
     granted: 0,
+    sent: 0,
     produced: 0,
     cancelled: false,
     ...(opts?.errorAfter !== undefined ? {errorAfter: opts.errorAfter} : {}),
@@ -54,7 +60,10 @@ function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: nu
   let reqID = 0;
   let settled = false;
 
-  const deliver = (result: unknown, error?: {code: number; message: string}) => {
+  const deliver = (
+    result: unknown,
+    error?: {code: number; message: string},
+  ) => {
     const frame = error
       ? {jsonrpc: '2.0', error, id: reqID}
       : {jsonrpc: '2.0', result, id: reqID};
@@ -68,7 +77,12 @@ function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: nu
       deliver(undefined, error);
     } else {
       if (!host.omitFinal) {
-        deliver({queryID: 'q1', chunkIndex: host.produced, final: true, timingMs: 1.5});
+        deliver({
+          queryID: 'q1',
+          chunkIndex: host.produced,
+          final: true,
+          timingMs: 1.5,
+        });
       }
       deliver('done');
     }
@@ -85,7 +99,10 @@ function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: nu
         }
         const i = host.produced++;
         if (host.produced - host.granted > 0) {
-          host.overProduction = Math.max(host.overProduction, host.produced - host.granted);
+          host.overProduction = Math.max(
+            host.overProduction,
+            host.produced - host.granted,
+          );
         }
         deliver({
           queryID: 'q1',
@@ -111,6 +128,7 @@ function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: nu
     start: () => {},
     abiVersion: () => 3,
     send: (payload: Buffer) => {
+      host.sent++;
       const req = packr.unpack(payload) as {
         id: number;
         method: string;
@@ -133,7 +151,10 @@ function makeFakeHost(client: GoIVMClient, rows: number, opts?: {errorAfter?: nu
       expect(id).toBe(reqID);
       host.cancelled = true;
       // Go settles the RPC with the bookkeeping error frame (I9: -32000).
-      settle({code: -32000, message: 'addQueriesStream: hydrate stream cancelled by consumer'});
+      settle({
+        code: -32000,
+        message: 'addQueriesStream: hydrate stream cancelled by consumer',
+      });
     },
   };
   return host;
@@ -147,7 +168,12 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
 
     const seen: string[] = [];
     let finals = 0;
-    for await (const entry of client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1, {window: 4})) {
+    for await (const entry of client.addQueriesStreamPull(
+      'cg',
+      [{queryID: 'q1', ast: {}}],
+      1,
+      {window: 4},
+    )) {
       if (entry.final) {
         finals++;
         expect(entry.timingMs).toBe(1.5);
@@ -170,7 +196,12 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
     client.connectNapi(host.addon);
 
     let consumed = 0;
-    for await (const entry of client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1, {window: 1})) {
+    for await (const entry of client.addQueriesStreamPull(
+      'cg',
+      [{queryID: 'q1', ast: {}}],
+      1,
+      {window: 1},
+    )) {
       if (!entry.final) {
         consumed++;
         // I6 at W=1: at the moment a row is served, the host can be at
@@ -186,7 +217,12 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
     const host = makeFakeHost(client, 100);
     client.connectNapi(host.addon);
 
-    const it = client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1, {window: 2});
+    const it = client.addQueriesStreamPull(
+      'cg',
+      [{queryID: 'q1', ast: {}}],
+      1,
+      {window: 2},
+    );
     let rows = 0;
     for await (const entry of it) {
       if (!entry.final) rows++;
@@ -202,6 +238,25 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
     await new Promise(r => setTimeout(r, 10));
   });
 
+  test('return() before reqID assignment aborts before send', async () => {
+    const client = new GoIVMClient();
+    const host = makeFakeHost(client, 100);
+    client.connectNapi(host.addon);
+
+    const it = client.addQueriesStreamPull(
+      'cg',
+      [{queryID: 'q1', ast: {}}],
+      1,
+      {window: 2},
+    );
+    await it.return!();
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(host.sent).toBe(0);
+    expect(host.cancelled).toBe(false);
+    expect(host.produced).toBe(0);
+  });
+
   test('mid-stream Go error surfaces as a throw from next()', async () => {
     const client = new GoIVMClient();
     const host = makeFakeHost(client, 10, {errorAfter: 2});
@@ -209,8 +264,14 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
 
     const seen: string[] = [];
     await expect(async () => {
-      for await (const entry of client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1, {window: 8})) {
-        if (!entry.final) seen.push((entry.changes[0] as RowChange).rowKey.id as string);
+      for await (const entry of client.addQueriesStreamPull(
+        'cg',
+        [{queryID: 'q1', ast: {}}],
+        1,
+        {window: 8},
+      )) {
+        if (!entry.final)
+          seen.push((entry.changes[0] as RowChange).rowKey.id as string);
       }
     }).rejects.toThrow(/synthetic mid-stream failure/);
     expect(seen).toEqual(['r0', 'r1']);
@@ -223,7 +284,12 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
     client.connectNapi(host.addon);
 
     await expect(async () => {
-      for await (const _ of client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1, {window: 4})) {
+      for await (const _ of client.addQueriesStreamPull(
+        'cg',
+        [{queryID: 'q1', ast: {}}],
+        1,
+        {window: 4},
+      )) {
         // drain
       }
     }).rejects.toThrow(/never received a final chunk/);
@@ -231,8 +297,8 @@ describe('GoIVMClient.addQueriesStreamPull', () => {
 
   test('requires the NAPI transport', () => {
     const client = new GoIVMClient();
-    expect(() => client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1)).toThrow(
-      /requires the NAPI transport/,
-    );
+    expect(() =>
+      client.addQueriesStreamPull('cg', [{queryID: 'q1', ast: {}}], 1),
+    ).toThrow(/requires the NAPI transport/);
   });
 });

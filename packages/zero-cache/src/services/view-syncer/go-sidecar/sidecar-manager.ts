@@ -214,6 +214,14 @@ export function isProtocolMismatchError(err: unknown): boolean {
   );
 }
 
+export function isVersionMethodNotFoundError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    /method not found/i.test(err.message) &&
+    /\bversion\b/i.test(err.message)
+  );
+}
+
 export class SidecarManager {
   readonly #config: Required<Omit<SidecarConfig, 'logger'>> & {
     logger: SidecarLogger;
@@ -431,10 +439,9 @@ export class SidecarManager {
         `Sidecar version ${v.version} (protocol rev ${v.protocolRev})`,
       );
     } catch (err) {
-      // Re-throw protocol mismatches — an incompatible sidecar MUST NOT be
-      // accepted. Only swallow "method not found" errors from older sidecars
-      // that don't implement the version RPC at all.
-      if (isProtocolMismatchError(err)) {
+      // Re-throw every verified-handshake failure except the one backward-
+      // compatibility case: older sidecars that do not implement version().
+      if (!isVersionMethodNotFoundError(err)) {
         throw err;
       }
       // If the version RPC isn't implemented (older sidecar), warn loudly

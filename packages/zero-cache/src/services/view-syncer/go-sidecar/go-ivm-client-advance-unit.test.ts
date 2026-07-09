@@ -11,8 +11,8 @@
 //      'advancement-timeout' reset; RetryableAdvanceError → in-place retry
 //      in GoComputeBackend; ScalarResetError → 'scalar-subquery' reset).
 
-import {afterEach, describe, expect, test, vi} from 'vitest';
 import {Packr} from 'msgpackr';
+import {afterEach, describe, expect, test, vi} from 'vitest';
 import {
   AdvanceAbortedError,
   computeBoundTimeoutMs,
@@ -45,6 +45,7 @@ const posFrame = (ids: string[], queryID = 'q1') => ({
 // deliver back (no autonomous pump — advance frames are test-driven).
 function makeAdvanceFakeHost(client: GoIVMClient) {
   const reqs: CapturedReq[] = [];
+  const cancelled: number[] = [];
   const addon: GoNapiAddon = {
     start: () => {},
     abiVersion: () => 3,
@@ -53,19 +54,30 @@ function makeAdvanceFakeHost(client: GoIVMClient) {
       return 0;
     },
     streamCredit: () => {},
-    streamCancel: () => {},
+    streamCancel: (id: number) => {
+      cancelled.push(id);
+    },
   };
-  const deliver = (id: number, result: unknown, error?: {code: number; message: string}) => {
+  const deliver = (
+    id: number,
+    result: unknown,
+    error?: {code: number; message: string},
+  ) => {
     const frame = error
       ? {jsonrpc: '2.0', error, id}
       : {jsonrpc: '2.0', result, id};
     client.handleNapiDelivery(1, packr.pack(frame) as Buffer);
   };
   const deliverSuccess = (id: number) => {
-    deliver(id, {chunkIndex: 0, final: true, version: '0000000002', numChanges: 0});
+    deliver(id, {
+      chunkIndex: 0,
+      final: true,
+      version: '0000000002',
+      numChanges: 0,
+    });
     deliver(id, 'done');
   };
-  return {reqs, addon, deliver, deliverSuccess};
+  return {reqs, cancelled, addon, deliver, deliverSuccess};
 }
 
 afterEach(() => {
@@ -154,7 +166,8 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     await flush();
     host.deliver(host.reqs[0].id, undefined, {
       code: -32104,
-      message: 'advanceToHeadStream advance: snapshotter: acquire conn (30s timeout): busy',
+      message:
+        'advanceToHeadStream advance: snapshotter: acquire conn (30s timeout): busy',
     });
     await expect(p).rejects.toBeInstanceOf(RetryableAdvanceError);
   });
@@ -185,7 +198,9 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
 
     let settled: 'resolved' | 'rejected' | undefined;
     const p = client
-      .advanceToHeadStream('cg', 1, 'app', {abortBudget: {totalHydrationTimeMs: 1}})
+      .advanceToHeadStream('cg', 1, 'app', {
+        abortBudget: {totalHydrationTimeMs: 1},
+      })
       .then(
         () => (settled = 'resolved'),
         () => (settled = 'rejected'),
@@ -257,6 +272,25 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
       value: undefined,
       done: true,
     });
+  });
+
+  test('chunk iterator return() cancels the Go stream', async () => {
+    const client = new GoIVMClient();
+    const host = makeAdvanceFakeHost(client);
+    client.connectNapi(host.addon);
+
+    const it = client.advanceToHeadStreamChunks('cg', 1, 'app');
+    await flush();
+    const req = host.reqs[0];
+
+    await it.return!();
+    expect(host.cancelled).toEqual([req.id]);
+
+    host.deliver(req.id, undefined, {
+      code: -32000,
+      message: 'advanceToHeadStream: stream cancelled by consumer',
+    });
+    await flush();
   });
 
   test('chunk iterator throws if done arrives without final frame', async () => {
