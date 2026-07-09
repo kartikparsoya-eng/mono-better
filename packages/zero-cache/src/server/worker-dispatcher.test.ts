@@ -1,5 +1,9 @@
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {expect, test} from 'vitest';
-import {parsePath} from './worker-dispatcher.ts';
+import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
+import {parsePath, SyncerAssignmentRouter} from './worker-dispatcher.ts';
 
 test.each([
   ['/sync/v1/connect', {version: '1', worker: 'sync', action: 'connect'}],
@@ -87,4 +91,94 @@ test.each([
   ['', undefined],
 ])('parseSyncPath %s', (path, result) => {
   expect(parsePath(new URL(path, 'http://foo/'))).toEqual(result);
+});
+
+test('load-aware syncer routing chooses the lowest live score and keeps sticky assignments', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zero-syncer-router-'));
+  try {
+    const assignmentsFile = join(dir, 'assignments.json');
+    const router = new SyncerAssignmentRouter({
+      taskID: 'task-a',
+      syncerCount: 3,
+      assignmentsFile,
+      lc: createSilentLogContext(),
+    });
+
+    router.updateLoad(0, {
+      workerIndex: 0,
+      activeClientGroups: 5,
+      activeConnections: 5,
+      queries: 0,
+      rows: 0,
+      timestamp: 1,
+    });
+    router.updateLoad(1, {
+      workerIndex: 1,
+      activeClientGroups: 1,
+      activeConnections: 1,
+      queries: 0,
+      rows: 0,
+      timestamp: 1,
+    });
+    router.updateLoad(2, {
+      workerIndex: 2,
+      activeClientGroups: 3,
+      activeConnections: 3,
+      queries: 0,
+      rows: 0,
+      timestamp: 1,
+    });
+
+    expect(router.assign('cg-new')).toBe(1);
+
+    router.updateLoad(1, {
+      workerIndex: 1,
+      activeClientGroups: 99,
+      activeConnections: 99,
+      queries: 0,
+      rows: 0,
+      timestamp: 2,
+    });
+    expect(router.assign('cg-new')).toBe(1);
+    expect(JSON.parse(readFileSync(assignmentsFile, 'utf-8'))).toEqual({
+      'cg-new': 1,
+    });
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('load-aware syncer routing scores from live reports instead of stale persisted assignment counts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zero-syncer-router-'));
+  try {
+    const assignmentsFile = join(dir, 'assignments.json');
+    writeFileSync(assignmentsFile, JSON.stringify({'old-cg': 0}));
+    const router = new SyncerAssignmentRouter({
+      taskID: 'task-a',
+      syncerCount: 2,
+      assignmentsFile,
+      lc: createSilentLogContext(),
+    });
+
+    router.updateLoad(0, {
+      workerIndex: 0,
+      activeClientGroups: 0,
+      activeConnections: 0,
+      queries: 0,
+      rows: 0,
+      timestamp: 1,
+    });
+    router.updateLoad(1, {
+      workerIndex: 1,
+      activeClientGroups: 10,
+      activeConnections: 10,
+      queries: 0,
+      rows: 0,
+      timestamp: 1,
+    });
+
+    expect(router.assign('new-cg')).toBe(0);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
 });

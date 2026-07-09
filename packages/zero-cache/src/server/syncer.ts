@@ -302,6 +302,7 @@ export default async function runWorker(
     viewSyncerFactory,
     mutagenFactory,
     pusherFactory,
+    workerIndex,
     parent,
     validateLegacyJWT,
   );

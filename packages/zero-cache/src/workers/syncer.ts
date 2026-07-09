@@ -19,6 +19,7 @@ import {
   recordConnectionSuccess,
   setActiveClientGroupsGetter,
 } from '../server/anonymous-otel-start.ts';
+import type {SyncerLoadMessage} from '../server/worker-dispatcher.ts';
 import type {Mutagen} from '../services/mutagen/mutagen.ts';
 import type {Pusher} from '../services/mutagen/pusher.ts';
 import type {ReplicaState} from '../services/replicator/replicator.ts';
@@ -85,10 +86,12 @@ export class Syncer implements SingletonService {
   readonly #connections = new Map<string, Connection>();
   readonly #drainCoordinator = new DrainCoordinator();
   readonly #parent: Worker;
+  readonly #workerIndex: number;
   readonly #wss: WebSocketServer;
   readonly #stopped = resolver();
   readonly #config: ZeroConfig;
   readonly #validateLegacyJWT: ValidateLegacyJWT | undefined;
+  readonly #loadHeartbeat: ReturnType<typeof setInterval>;
 
   constructor(
     lc: LogContext,
@@ -105,11 +108,13 @@ export class Syncer implements SingletonService {
           connContextManager: ConnectionContextManager,
         ) => Pusher & Service)
       | undefined,
+    workerIndex: number,
     parent: Worker,
     validateLegacyJWT: ValidateLegacyJWT | undefined,
   ) {
     this.#config = config;
     this.#validateLegacyJWT = validateLegacyJWT;
+    this.#workerIndex = workerIndex;
     // Relays notifications from the parent thread subscription
     // to ViewSyncers within this thread.
     const notifier = createNotifierFrom(lc, parent);
@@ -137,6 +142,7 @@ export class Syncer implements SingletonService {
     }
     this.#parent = parent;
     this.#wss = new WebSocketServer(getWebSocketServerOptions(config));
+    this.#loadHeartbeat = setInterval(() => this.#publishLoad(), 5_000);
 
     installWebSocketReceiver(
       lc,
@@ -176,6 +182,27 @@ export class Syncer implements SingletonService {
       }
       result.observe(total);
     });
+    this.#publishLoad();
+  }
+
+  #publishLoad() {
+    let queries = 0;
+    let rows = 0;
+    for (const vs of this.#viewSyncers.getServices()) {
+      queries += vs.queryCount;
+      rows += vs.rowCount;
+    }
+    this.#parent.send([
+      'syncerLoad',
+      {
+        workerIndex: this.#workerIndex,
+        activeClientGroups: this.#viewSyncers.size,
+        activeConnections: this.#connections.size,
+        queries,
+        rows,
+        timestamp: Date.now(),
+      },
+    ] satisfies SyncerLoadMessage);
   }
 
   readonly #createConnection = async (ws: WebSocket, params: ConnectParams) => {
@@ -247,6 +274,7 @@ export class Syncer implements SingletonService {
     }
 
     const viewSyncer = this.#viewSyncers.getService(clientGroupID);
+    this.#publishLoad();
     const connContextManager = viewSyncer.connContextManager;
     const group = connContextManager.getGroupState();
 
@@ -318,6 +346,7 @@ export class Syncer implements SingletonService {
           // If their ref counts are zero, they will stop themselves and set themselves invalid.
           mutagen?.unref();
           pusher?.unref();
+          this.#publishLoad();
         },
       );
     } catch (e) {
@@ -328,6 +357,7 @@ export class Syncer implements SingletonService {
     }
 
     this.#connections.set(clientID, connection);
+    this.#publishLoad();
 
     connection.init() && recordConnectionSuccess();
 
@@ -375,6 +405,7 @@ export class Syncer implements SingletonService {
   }
 
   stop() {
+    clearInterval(this.#loadHeartbeat);
     this.#wss.close();
     this.#stopped.resolve();
     return promiseVoid;

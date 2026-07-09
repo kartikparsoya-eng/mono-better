@@ -186,6 +186,7 @@ function setupSyncer(lc: LogContext, config: ZeroConfig) {
     viewSyncerFactory,
     mutagenFactory,
     pusherFactory,
+    0,
     TEST_PARENT,
     validateLegacyJWT,
   );

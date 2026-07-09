@@ -137,10 +137,13 @@ ARG CHUNK_SIZE=
 ARG HYDRATE_CHUNK_SIZE=
 ARG ADVANCE_CHUNK_SIZE=
 ARG CURSOR_PAGE_SIZE=100
-# ONE parallelism knob (GO_IVM_PARALLELISM, Go code default 4): hydrate
-# lane count P = N, reader-pool floor K = 2×N. Empty = code default.
-# Legacy GO_IVM_HYDRATE_LANES / GO_IVM_HYDRATE_READERS override per facet.
+# Split parallelism knobs (Go code defaults 4/4). Hydrate lane count P = N,
+# reader-pool floor K = 2×N. Empty = code default. PARALLELISM remains a
+# legacy fallback for both hydrate and advance when the split knobs are unset.
+# GO_IVM_HYDRATE_LANES / GO_IVM_HYDRATE_READERS override hydrate facets.
 ARG PARALLELISM=
+ARG HYDRATE_PARALLELISM=
+ARG ADVANCE_PARALLELISM=
 
 # All ENV defaults are overridable at `docker run -e` / compose env-block
 # time.
@@ -154,6 +157,8 @@ ENV ZERO_GO_SIDECAR_NAPI_LIB_PATH=/opt/go-ivm/libgoivm.so
 # client-poke cadence.
 ENV GO_IVM_CHUNK_SIZE=${CHUNK_SIZE}
 ENV GO_IVM_PARALLELISM=${PARALLELISM}
+ENV GO_IVM_HYDRATE_PARALLELISM=${HYDRATE_PARALLELISM}
+ENV GO_IVM_ADVANCE_PARALLELISM=${ADVANCE_PARALLELISM}
 ENV GO_IVM_HYDRATE_CHUNK_SIZE=${HYDRATE_CHUNK_SIZE}
 ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
 ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
@@ -195,8 +200,9 @@ ENV GO_IVM_GOMEMLIMIT_PERCENT=40
 ENV GO_IVM_CHUNK_SOFT_BYTES=8388608
 # workers=8: V8 event-loop parallelism for poke/cvr/websocket work that
 # stays TS-side. Each worker hosts its own in-process Go engine; the Go
-# side's compute parallelism comes from GO_IVM_PARALLELISM lanes within
-# each engine. Prod Grafana shows ELU headroom supports ~24 workers; 8 is
+# side's compute parallelism comes from GO_IVM_HYDRATE_PARALLELISM and
+# GO_IVM_ADVANCE_PARALLELISM within each engine. Prod Grafana shows ELU
+# headroom supports ~24 workers; 8 is
 # the correctness-gated minimum (sandbox soak: bounded memory, no
 # cross-worker contention). Code defaults for upstream.maxConns (20) and
 # cvr.maxConns (30) are both >= 8.

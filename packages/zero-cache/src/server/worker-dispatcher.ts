@@ -1,5 +1,5 @@
-import type {LogContext} from '@rocicorp/logger';
 import {existsSync, readFileSync, writeFileSync} from 'node:fs';
+import type {LogContext} from '@rocicorp/logger';
 import UrlPattern from 'url-pattern';
 import {assert} from '../../../shared/src/asserts.ts';
 import {h32} from '../../../shared/src/hash.ts';
@@ -7,9 +7,146 @@ import {getOrCreateGauge} from '../observability/metrics.ts';
 import {RunningState} from '../services/running-state.ts';
 import type {Service} from '../services/service.ts';
 import type {IncomingMessageSubset} from '../types/http.ts';
-import type {Worker} from '../types/processes.ts';
+import {MESSAGE_TYPES, type Worker} from '../types/processes.ts';
 import {installWebSocketHandoff} from '../types/websocket-handoff.ts';
 import {getConnectParams} from '../workers/connect-params.ts';
+
+export type SyncerLoadReport = {
+  workerIndex: number;
+  activeClientGroups: number;
+  activeConnections: number;
+  queries: number;
+  rows: number;
+  timestamp: number;
+};
+
+export type SyncerLoadMessage = [
+  typeof MESSAGE_TYPES.syncerLoad,
+  SyncerLoadReport,
+];
+
+type SyncerAssignmentRouterOptions = {
+  taskID: string;
+  syncerCount: number;
+  assignmentsFile: string | undefined;
+  lc: LogContext;
+};
+
+export class SyncerAssignmentRouter {
+  readonly #taskID: string;
+  readonly #syncerCount: number;
+  readonly #assignmentsFile: string | undefined;
+  readonly #lc: LogContext;
+  readonly #assignments = new Map<string, number>();
+  readonly #assignmentCounts: number[];
+  readonly #loadReports = new Map<number, SyncerLoadReport>();
+
+  constructor({
+    taskID,
+    syncerCount,
+    assignmentsFile,
+    lc,
+  }: SyncerAssignmentRouterOptions) {
+    this.#taskID = taskID;
+    this.#syncerCount = syncerCount;
+    this.#assignmentsFile = assignmentsFile;
+    this.#lc = lc;
+    this.#assignmentCounts = new Array<number>(syncerCount).fill(0);
+
+    if (assignmentsFile && existsSync(assignmentsFile)) {
+      try {
+        const data = JSON.parse(readFileSync(assignmentsFile, 'utf-8'));
+        for (const [cg, idx] of Object.entries(data)) {
+          if (
+            typeof idx === 'number' &&
+            Number.isInteger(idx) &&
+            idx >= 0 &&
+            idx < syncerCount
+          ) {
+            this.#assignments.set(cg, idx);
+            this.#assignmentCounts[idx]++;
+          }
+        }
+        lc.info?.(
+          `loaded ${this.#assignments.size} syncer assignments from ${assignmentsFile}`,
+        );
+      } catch (e) {
+        lc.warn?.(`failed to load syncer assignments, starting fresh`, e);
+      }
+    }
+  }
+
+  updateLoad(listenerIndex: number, report: SyncerLoadReport) {
+    if (listenerIndex < 0 || listenerIndex >= this.#syncerCount) {
+      return;
+    }
+    this.#loadReports.set(listenerIndex, report);
+  }
+
+  assign(clientGroupID: string): number {
+    const existing = this.#assignments.get(clientGroupID);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const syncerIdx = this.#assignmentsFile
+      ? this.#leastLoadedSyncer(clientGroupID)
+      : this.#hashedSyncer(clientGroupID);
+    this.#assignments.set(clientGroupID, syncerIdx);
+    this.#assignmentCounts[syncerIdx]++;
+    this.#persistAssignments();
+    return syncerIdx;
+  }
+
+  #hashedSyncer(clientGroupID: string): number {
+    return h32(this.#taskID + '/' + clientGroupID) % this.#syncerCount;
+  }
+
+  #leastLoadedSyncer(clientGroupID: string): number {
+    let bestIdx = 0;
+    let bestScore = Number.POSITIVE_INFINITY;
+    let bestTie = Number.NEGATIVE_INFINITY;
+
+    for (let i = 0; i < this.#syncerCount; i++) {
+      const score = this.#score(i);
+      // Rendezvous tie-break keeps equal-score assignment stable without
+      // first-worker bias.
+      const tie = h32(`${clientGroupID}/${i}`);
+      if (score < bestScore || (score === bestScore && tie > bestTie)) {
+        bestIdx = i;
+        bestScore = score;
+        bestTie = tie;
+      }
+    }
+
+    return bestIdx;
+  }
+
+  #score(index: number): number {
+    const report = this.#loadReports.get(index);
+    if (!report) {
+      return this.#assignmentCounts[index] * 1000;
+    }
+    return (
+      report.activeClientGroups * 1000 +
+      report.activeConnections * 25 +
+      report.queries +
+      Math.ceil(report.rows / 1000)
+    );
+  }
+
+  #persistAssignments() {
+    if (!this.#assignmentsFile) return;
+    try {
+      writeFileSync(
+        this.#assignmentsFile,
+        JSON.stringify(Object.fromEntries(this.#assignments)),
+      );
+    } catch (e) {
+      this.#lc.warn?.(`failed to persist syncer assignments`, e);
+    }
+  }
+}
 
 export class WorkerDispatcher implements Service {
   readonly id = 'worker-dispatcher';
@@ -24,76 +161,25 @@ export class WorkerDispatcher implements Service {
     syncers: Worker[],
     mutator: Worker | undefined,
     changeStreamer: Worker | undefined,
-    // When defined, switch from hash-based to least-loaded routing and
+    // When defined, switch from hash-based to load-aware routing and
     // persist the cg→syncer mapping to this path so assignments survive
-    // restart. Wired via ZERO_LEAST_LOADED_ROUTING=1 in main.ts.
+    // restart. Wired via ZERO_SYNCER_LOAD_AWARE_ROUTING=1 in main.ts.
     assignmentsFile?: string | undefined,
   ) {
     this.#lc = lc;
 
-    // Least-loaded syncer assignment with persistence. Tracks how many
-    // client groups each syncer has and persists the mapping to disk
-    // so assignments survive restart.
-    //
-    // KNOWN LIMITATION: syncerLoad[] is never decremented when a cg
-    // is reaped — the dispatcher has no signal from the syncer about
-    // cg lifecycle. Over time the picker degrades toward the
-    // first-assigned syncer for new cgs. Acceptable for warm-start
-    // distribution; for long-running processes, restart periodically
-    // to refresh the picture (the persisted file preserves existing
-    // sticky assignments across the restart).
-    const assignments = new Map<string, number>();
-    const syncerLoad = new Array<number>(syncers.length).fill(0);
-
-    if (assignmentsFile && existsSync(assignmentsFile)) {
-      try {
-        const data = JSON.parse(readFileSync(assignmentsFile, 'utf-8'));
-        for (const [cg, idx] of Object.entries(data)) {
-          const syncerIdx = idx as number;
-          if (syncerIdx >= 0 && syncerIdx < syncers.length) {
-            assignments.set(cg, syncerIdx);
-            syncerLoad[syncerIdx]++;
-          }
-        }
-        lc.info?.(
-          `loaded ${assignments.size} syncer assignments from ${assignmentsFile}`,
-        );
-      } catch (e) {
-        lc.warn?.(`failed to load syncer assignments, starting fresh`, e);
-      }
-    }
-
-    function persistAssignments() {
-      if (!assignmentsFile) return;
-      try {
-        writeFileSync(assignmentsFile, JSON.stringify(Object.fromEntries(assignments)));
-      } catch (e) {
-        lc.warn?.(`failed to persist syncer assignments`, e);
-      }
-    }
-
-    function assignSyncer(clientGroupID: string): number {
-      if (!assignmentsFile) {
-        // Original hash-based routing — diversifies by taskID so a task
-        // shedding connections redistributes evenly across receivers.
-        return h32(taskID + '/' + clientGroupID) % syncers.length;
-      }
-      const existing = assignments.get(clientGroupID);
-      if (existing !== undefined) return existing;
-      // Pick the least-loaded syncer (first wins on tie).
-      let minLoad = syncerLoad[0];
-      let minIdx = 0;
-      for (let i = 1; i < syncerLoad.length; i++) {
-        if (syncerLoad[i] < minLoad) {
-          minLoad = syncerLoad[i];
-          minIdx = i;
-        }
-      }
-      assignments.set(clientGroupID, minIdx);
-      syncerLoad[minIdx]++;
-      persistAssignments();
-      return minIdx;
-    }
+    const syncerRouter = new SyncerAssignmentRouter({
+      taskID,
+      syncerCount: syncers.length,
+      assignmentsFile,
+      lc,
+    });
+    syncers.forEach((syncer, index) => {
+      syncer.onMessageType<SyncerLoadMessage>(
+        MESSAGE_TYPES.syncerLoad,
+        report => syncerRouter.updateLoad(index, report),
+      );
+    });
 
     function connectParams(req: IncomingMessageSubset) {
       const {headers, url: u} = req;
@@ -138,9 +224,9 @@ export class WorkerDispatcher implements Service {
       const {clientGroupID, protocolVersion} = params;
       maxProtocolVersion = Math.max(maxProtocolVersion, protocolVersion);
 
-      // Routing strategy is selected by assignSyncer(): hash-based by
-      // default, least-loaded + persistent when assignmentsFile is set.
-      const syncer = assignSyncer(clientGroupID);
+      // Routing strategy is selected by SyncerAssignmentRouter: hash-based by
+      // default, sticky load-aware + persistent when assignmentsFile is set.
+      const syncer = syncerRouter.assign(clientGroupID);
 
       lc.debug?.(`connecting ${clientGroupID} to syncer ${syncer}`);
       return {payload: params, sender: syncers[syncer]};
