@@ -110,6 +110,7 @@ test('load-aware syncer routing chooses the lowest live score and keeps sticky a
       activeConnections: 5,
       queries: 0,
       rows: 0,
+      clientGroups: [],
       timestamp: 1,
     });
     router.updateLoad(1, {
@@ -118,6 +119,7 @@ test('load-aware syncer routing chooses the lowest live score and keeps sticky a
       activeConnections: 1,
       queries: 0,
       rows: 0,
+      clientGroups: [],
       timestamp: 1,
     });
     router.updateLoad(2, {
@@ -126,6 +128,7 @@ test('load-aware syncer routing chooses the lowest live score and keeps sticky a
       activeConnections: 3,
       queries: 0,
       rows: 0,
+      clientGroups: [],
       timestamp: 1,
     });
 
@@ -137,6 +140,7 @@ test('load-aware syncer routing chooses the lowest live score and keeps sticky a
       activeConnections: 99,
       queries: 0,
       rows: 0,
+      clientGroups: [],
       timestamp: 2,
     });
     expect(router.assign('cg-new')).toBe(1);
@@ -166,6 +170,7 @@ test('load-aware syncer routing scores from live reports instead of stale persis
       activeConnections: 0,
       queries: 0,
       rows: 0,
+      clientGroups: [],
       timestamp: 1,
     });
     router.updateLoad(1, {
@@ -174,10 +179,94 @@ test('load-aware syncer routing scores from live reports instead of stale persis
       activeConnections: 10,
       queries: 0,
       rows: 0,
+      clientGroups: [],
       timestamp: 1,
     });
 
     expect(router.assign('new-cg')).toBe(0);
+  } finally {
+    rmSync(dir, {recursive: true, force: true});
+  }
+});
+
+test('controlled rehome moves a hot assigned client group after sustained imbalance', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zero-syncer-router-'));
+  try {
+    const assignmentsFile = join(dir, 'assignments.json');
+    writeFileSync(assignmentsFile, JSON.stringify({'hot-cg': 0}));
+    const moves: unknown[] = [];
+    const router = new SyncerAssignmentRouter({
+      taskID: 'task-a',
+      syncerCount: 2,
+      assignmentsFile,
+      lc: createSilentLogContext(),
+      controlledRehome: {
+        enabled: true,
+        sustainedReports: 2,
+        minScoreDelta: 1000,
+        minDurationMs: 0,
+        cooldownMs: 60_000,
+        onRehome: move => moves.push(move),
+      },
+    });
+
+    router.updateLoad(0, {
+      workerIndex: 0,
+      activeClientGroups: 4,
+      activeConnections: 4,
+      queries: 100,
+      rows: 100_000,
+      clientGroups: [
+        {
+          clientGroupID: 'hot-cg',
+          activeConnections: 1,
+          queries: 100,
+          rows: 100_000,
+        },
+      ],
+      timestamp: 1,
+    });
+    expect(moves).toHaveLength(0);
+
+    router.updateLoad(1, {
+      workerIndex: 1,
+      activeClientGroups: 0,
+      activeConnections: 0,
+      queries: 0,
+      rows: 0,
+      clientGroups: [],
+      timestamp: 1,
+    });
+    expect(moves).toHaveLength(0);
+
+    router.updateLoad(0, {
+      workerIndex: 0,
+      activeClientGroups: 4,
+      activeConnections: 4,
+      queries: 100,
+      rows: 100_000,
+      clientGroups: [
+        {
+          clientGroupID: 'hot-cg',
+          activeConnections: 1,
+          queries: 100,
+          rows: 100_000,
+        },
+      ],
+      timestamp: 2,
+    });
+
+    expect(moves).toEqual([
+      expect.objectContaining({
+        clientGroupID: 'hot-cg',
+        fromWorkerIndex: 0,
+        toWorkerIndex: 1,
+      }),
+    ]);
+    expect(router.assign('hot-cg')).toBe(1);
+    expect(JSON.parse(readFileSync(assignmentsFile, 'utf-8'))).toEqual({
+      'hot-cg': 1,
+    });
   } finally {
     rmSync(dir, {recursive: true, force: true});
   }

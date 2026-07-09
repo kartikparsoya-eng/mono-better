@@ -11,12 +11,20 @@ import {MESSAGE_TYPES, type Worker} from '../types/processes.ts';
 import {installWebSocketHandoff} from '../types/websocket-handoff.ts';
 import {getConnectParams} from '../workers/connect-params.ts';
 
+export type SyncerClientGroupLoad = {
+  clientGroupID: string;
+  activeConnections: number;
+  queries: number;
+  rows: number;
+};
+
 export type SyncerLoadReport = {
   workerIndex: number;
   activeClientGroups: number;
   activeConnections: number;
   queries: number;
   rows: number;
+  clientGroups: SyncerClientGroupLoad[];
   timestamp: number;
 };
 
@@ -25,32 +33,92 @@ export type SyncerLoadMessage = [
   SyncerLoadReport,
 ];
 
+export type SyncerRehomeRequest = {
+  clientGroupID: string;
+  fromWorkerIndex: number;
+  toWorkerIndex: number;
+  reason: string;
+  timestamp: number;
+};
+
+export type SyncerRehomeMessage = [
+  typeof MESSAGE_TYPES.syncerRehome,
+  SyncerRehomeRequest,
+];
+
+type ControlledRehomeOptions = {
+  enabled: boolean;
+  sustainedReports?: number | undefined;
+  minScoreDelta?: number | undefined;
+  minDurationMs?: number | undefined;
+  cooldownMs?: number | undefined;
+  onRehome: (request: SyncerRehomeRequest) => void;
+};
+
+type NormalizedControlledRehomeOptions = {
+  enabled: true;
+  sustainedReports: number;
+  minScoreDelta: number;
+  minDurationMs: number;
+  cooldownMs: number;
+  onRehome: (request: SyncerRehomeRequest) => void;
+};
+
 type SyncerAssignmentRouterOptions = {
   taskID: string;
   syncerCount: number;
   assignmentsFile: string | undefined;
   lc: LogContext;
+  controlledRehome?: ControlledRehomeOptions | undefined;
 };
+
+const DEFAULT_REHOME_SUSTAINED_REPORTS = 3;
+const DEFAULT_REHOME_MIN_SCORE_DELTA = 2_000;
+const DEFAULT_REHOME_MIN_DURATION_MS = 30_000;
+const DEFAULT_REHOME_COOLDOWN_MS = 60_000;
 
 export class SyncerAssignmentRouter {
   readonly #taskID: string;
   readonly #syncerCount: number;
   readonly #assignmentsFile: string | undefined;
   readonly #lc: LogContext;
+  readonly #controlledRehome: NormalizedControlledRehomeOptions | undefined;
   readonly #assignments = new Map<string, number>();
   readonly #assignmentCounts: number[];
   readonly #loadReports = new Map<number, SyncerLoadReport>();
+  readonly #rehomeCooldownUntilByCG = new Map<string, number>();
+  #imbalancePair: string | undefined;
+  #imbalanceSince = 0;
+  #imbalanceStreak = 0;
+  #nextRehomeAt = 0;
 
   constructor({
     taskID,
     syncerCount,
     assignmentsFile,
     lc,
+    controlledRehome,
   }: SyncerAssignmentRouterOptions) {
     this.#taskID = taskID;
     this.#syncerCount = syncerCount;
     this.#assignmentsFile = assignmentsFile;
     this.#lc = lc;
+    this.#controlledRehome =
+      controlledRehome?.enabled === true
+        ? {
+            ...controlledRehome,
+            enabled: true,
+            sustainedReports:
+              controlledRehome.sustainedReports ??
+              DEFAULT_REHOME_SUSTAINED_REPORTS,
+            minScoreDelta:
+              controlledRehome.minScoreDelta ?? DEFAULT_REHOME_MIN_SCORE_DELTA,
+            minDurationMs:
+              controlledRehome.minDurationMs ?? DEFAULT_REHOME_MIN_DURATION_MS,
+            cooldownMs:
+              controlledRehome.cooldownMs ?? DEFAULT_REHOME_COOLDOWN_MS,
+          }
+        : undefined;
     this.#assignmentCounts = new Array<number>(syncerCount).fill(0);
 
     if (assignmentsFile && existsSync(assignmentsFile)) {
@@ -81,6 +149,7 @@ export class SyncerAssignmentRouter {
       return;
     }
     this.#loadReports.set(listenerIndex, report);
+    this.#maybeRehome();
   }
 
   assign(clientGroupID: string): number {
@@ -135,6 +204,141 @@ export class SyncerAssignmentRouter {
     );
   }
 
+  #maybeRehome() {
+    const controlledRehome = this.#controlledRehome;
+    if (!controlledRehome || this.#syncerCount < 2) {
+      return;
+    }
+    if (this.#loadReports.size < this.#syncerCount) {
+      return;
+    }
+
+    let hotIdx = -1;
+    let hotScore = Number.NEGATIVE_INFINITY;
+    let coldIdx = -1;
+    let coldScore = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < this.#syncerCount; i++) {
+      const score = this.#score(i);
+      if (score > hotScore) {
+        hotIdx = i;
+        hotScore = score;
+      }
+      if (score < coldScore) {
+        coldIdx = i;
+        coldScore = score;
+      }
+    }
+    if (hotIdx === -1 || coldIdx === -1 || hotIdx === coldIdx) {
+      return;
+    }
+
+    const scoreDelta = hotScore - coldScore;
+    const pair = `${hotIdx}->${coldIdx}`;
+    const now = Date.now();
+    if (scoreDelta < controlledRehome.minScoreDelta) {
+      this.#imbalancePair = undefined;
+      this.#imbalanceSince = 0;
+      this.#imbalanceStreak = 0;
+      return;
+    }
+
+    if (this.#imbalancePair === pair) {
+      this.#imbalanceStreak++;
+    } else {
+      this.#imbalancePair = pair;
+      this.#imbalanceSince = now;
+      this.#imbalanceStreak = 1;
+    }
+    if (
+      this.#imbalanceStreak < controlledRehome.sustainedReports ||
+      now - this.#imbalanceSince < controlledRehome.minDurationMs
+    ) {
+      return;
+    }
+
+    if (now < this.#nextRehomeAt) {
+      return;
+    }
+
+    const candidate = this.#pickRehomeCandidate(hotIdx, now);
+    if (!candidate) {
+      return;
+    }
+
+    const existing = this.#assignments.get(candidate.clientGroupID);
+    if (existing !== undefined && existing !== hotIdx) {
+      return;
+    }
+
+    this.#assignments.set(candidate.clientGroupID, coldIdx);
+    if (existing === hotIdx) {
+      this.#assignmentCounts[hotIdx] = Math.max(
+        0,
+        this.#assignmentCounts[hotIdx] - 1,
+      );
+    }
+    this.#assignmentCounts[coldIdx]++;
+    this.#persistAssignments();
+
+    this.#nextRehomeAt = now + controlledRehome.cooldownMs;
+    this.#rehomeCooldownUntilByCG.set(
+      candidate.clientGroupID,
+      now + controlledRehome.cooldownMs,
+    );
+    this.#imbalancePair = undefined;
+    this.#imbalanceSince = 0;
+    this.#imbalanceStreak = 0;
+
+    const request = {
+      clientGroupID: candidate.clientGroupID,
+      fromWorkerIndex: hotIdx,
+      toWorkerIndex: coldIdx,
+      reason: `syncer load score ${hotScore} exceeds ${coldScore} by ${scoreDelta}`,
+      timestamp: now,
+    };
+    this.#lc.info?.(
+      `rehome client group ${candidate.clientGroupID} from syncer ${hotIdx} to ${coldIdx}`,
+      request,
+    );
+    controlledRehome.onRehome(request);
+  }
+
+  #pickRehomeCandidate(
+    sourceIdx: number,
+    now: number,
+  ): SyncerClientGroupLoad | undefined {
+    const report = this.#loadReports.get(sourceIdx);
+    if (!report) {
+      return undefined;
+    }
+
+    let best: SyncerClientGroupLoad | undefined;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    let bestTie = Number.NEGATIVE_INFINITY;
+    for (const clientGroup of report.clientGroups) {
+      if (clientGroup.activeConnections <= 0) {
+        continue;
+      }
+      if (this.#assignments.get(clientGroup.clientGroupID) !== sourceIdx) {
+        continue;
+      }
+      const cooldownUntil =
+        this.#rehomeCooldownUntilByCG.get(clientGroup.clientGroupID) ?? 0;
+      if (now < cooldownUntil) {
+        continue;
+      }
+
+      const score = clientGroupScore(clientGroup);
+      const tie = h32(clientGroup.clientGroupID);
+      if (score > bestScore || (score === bestScore && tie > bestTie)) {
+        best = clientGroup;
+        bestScore = score;
+        bestTie = tie;
+      }
+    }
+    return best;
+  }
+
   #persistAssignments() {
     if (!this.#assignmentsFile) return;
     try {
@@ -146,6 +350,15 @@ export class SyncerAssignmentRouter {
       this.#lc.warn?.(`failed to persist syncer assignments`, e);
     }
   }
+}
+
+function clientGroupScore(clientGroup: SyncerClientGroupLoad): number {
+  return (
+    1000 +
+    clientGroup.activeConnections * 25 +
+    clientGroup.queries +
+    Math.ceil(clientGroup.rows / 1000)
+  );
 }
 
 export class WorkerDispatcher implements Service {
@@ -165,6 +378,7 @@ export class WorkerDispatcher implements Service {
     // persist the cg→syncer mapping to this path so assignments survive
     // restart. Wired via ZERO_SYNCER_LOAD_AWARE_ROUTING=1 in main.ts.
     assignmentsFile?: string | undefined,
+    controlledRehome = false,
   ) {
     this.#lc = lc;
 
@@ -173,6 +387,26 @@ export class WorkerDispatcher implements Service {
       syncerCount: syncers.length,
       assignmentsFile,
       lc,
+      controlledRehome:
+        controlledRehome && assignmentsFile
+          ? {
+              enabled: true,
+              onRehome: request => {
+                const source = syncers[request.fromWorkerIndex];
+                if (!source) {
+                  lc.warn?.(
+                    `rehome source syncer ${request.fromWorkerIndex} missing`,
+                    request,
+                  );
+                  return;
+                }
+                source.send([
+                  MESSAGE_TYPES.syncerRehome,
+                  request,
+                ] satisfies SyncerRehomeMessage);
+              },
+            }
+          : undefined,
     });
     syncers.forEach((syncer, index) => {
       syncer.onMessageType<SyncerLoadMessage>(

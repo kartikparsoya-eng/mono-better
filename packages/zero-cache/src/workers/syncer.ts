@@ -19,7 +19,11 @@ import {
   recordConnectionSuccess,
   setActiveClientGroupsGetter,
 } from '../server/anonymous-otel-start.ts';
-import type {SyncerLoadMessage} from '../server/worker-dispatcher.ts';
+import type {
+  SyncerClientGroupLoad,
+  SyncerLoadMessage,
+  SyncerRehomeMessage,
+} from '../server/worker-dispatcher.ts';
 import type {Mutagen} from '../services/mutagen/mutagen.ts';
 import type {Pusher} from '../services/mutagen/pusher.ts';
 import type {ReplicaState} from '../services/replicator/replicator.ts';
@@ -32,7 +36,7 @@ import type {
 import type {ConnectionContextManager} from '../services/view-syncer/connection-context-manager.ts';
 import {DrainCoordinator} from '../services/view-syncer/drain-coordinator.ts';
 import type {ViewSyncer} from '../services/view-syncer/view-syncer.ts';
-import type {Worker} from '../types/processes.ts';
+import {MESSAGE_TYPES, type Worker} from '../types/processes.ts';
 import type {Subscription} from '../types/subscription.ts';
 import {installWebSocketReceiver} from '../types/websocket-handoff.ts';
 import type {ConnectParams} from './connect-params.ts';
@@ -92,6 +96,7 @@ export class Syncer implements SingletonService {
   readonly #config: ZeroConfig;
   readonly #validateLegacyJWT: ValidateLegacyJWT | undefined;
   readonly #loadHeartbeat: ReturnType<typeof setInterval>;
+  readonly #connectionClientGroups = new Map<string, string>();
 
   constructor(
     lc: LogContext,
@@ -143,6 +148,10 @@ export class Syncer implements SingletonService {
     this.#parent = parent;
     this.#wss = new WebSocketServer(getWebSocketServerOptions(config));
     this.#loadHeartbeat = setInterval(() => this.#publishLoad(), 5_000);
+    this.#parent.onMessageType<SyncerRehomeMessage>(
+      MESSAGE_TYPES.syncerRehome,
+      this.#handleRehome,
+    );
 
     installWebSocketReceiver(
       lc,
@@ -188,10 +197,27 @@ export class Syncer implements SingletonService {
   #publishLoad() {
     let queries = 0;
     let rows = 0;
+    const clientGroups: SyncerClientGroupLoad[] = [];
+    const clientGroupsByID = new Map<string, SyncerClientGroupLoad>();
     for (const vs of this.#viewSyncers.getServices()) {
       queries += vs.queryCount;
       rows += vs.rowCount;
+      const clientGroup = {
+        clientGroupID: vs.id,
+        activeConnections: 0,
+        queries: vs.queryCount,
+        rows: vs.rowCount,
+      };
+      clientGroups.push(clientGroup);
+      clientGroupsByID.set(vs.id, clientGroup);
     }
+    for (const clientGroupID of this.#connectionClientGroups.values()) {
+      const clientGroup = clientGroupsByID.get(clientGroupID);
+      if (clientGroup) {
+        clientGroup.activeConnections++;
+      }
+    }
+    clientGroups.sort((a, b) => a.clientGroupID.localeCompare(b.clientGroupID));
     this.#parent.send([
       'syncerLoad',
       {
@@ -200,10 +226,35 @@ export class Syncer implements SingletonService {
         activeConnections: this.#connections.size,
         queries,
         rows,
+        clientGroups,
         timestamp: Date.now(),
       },
     ] satisfies SyncerLoadMessage);
   }
+
+  readonly #handleRehome = (request: SyncerRehomeMessage[1]) => {
+    if (request.fromWorkerIndex !== this.#workerIndex) {
+      return;
+    }
+    const connectionsToClose: Connection[] = [];
+    for (const [clientID, connection] of this.#connections) {
+      if (
+        this.#connectionClientGroups.get(clientID) === request.clientGroupID
+      ) {
+        connectionsToClose.push(connection);
+      }
+    }
+    this.#lc.info?.(
+      `controlled rehome closing ${connectionsToClose.length} connection(s) for ${request.clientGroupID}`,
+      request,
+    );
+    for (const connection of connectionsToClose) {
+      connection.close(
+        `controlled rehome to syncer ${request.toWorkerIndex}: ${request.reason}`,
+      );
+    }
+    this.#publishLoad();
+  };
 
   readonly #createConnection = async (ws: WebSocket, params: ConnectParams) => {
     this.#lc.debug?.(
@@ -341,6 +392,7 @@ export class Syncer implements SingletonService {
           });
           if (this.#connections.get(clientID) === connection) {
             this.#connections.delete(clientID);
+            this.#connectionClientGroups.delete(clientID);
           }
           // Connection is closed. We can unref the mutagen and pusher.
           // If their ref counts are zero, they will stop themselves and set themselves invalid.
@@ -357,6 +409,7 @@ export class Syncer implements SingletonService {
     }
 
     this.#connections.set(clientID, connection);
+    this.#connectionClientGroups.set(clientID, clientGroupID);
     this.#publishLoad();
 
     connection.init() && recordConnectionSuccess();

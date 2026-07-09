@@ -24,6 +24,7 @@ export const MESSAGE_TYPES = {
   notify: 'notify',
   ready: 'ready',
   syncerLoad: 'syncerLoad',
+  syncerRehome: 'syncerRehome',
 } as const;
 
 export type Message<Payload> = [keyof typeof MESSAGE_TYPES, Payload];

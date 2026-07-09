@@ -201,6 +201,9 @@ export default async function runWorker(
 
   parent.send(['ready', {ready: true}]);
 
+  const loadAwareSyncerRouting =
+    env.ZERO_SYNCER_LOAD_AWARE_ROUTING === '1' ||
+    env.ZERO_LEAST_LOADED_ROUTING === '1';
   try {
     await runUntilKilled(
       lc,
@@ -215,13 +218,13 @@ export default async function runWorker(
         // Opt into load-aware sticky routing + persistent cg→syncer mapping.
         // File lives next to the replica so it's on the same volume as
         // CVR data — moving them together preserves locality.
-        env.ZERO_SYNCER_LOAD_AWARE_ROUTING === '1' ||
-          env.ZERO_LEAST_LOADED_ROUTING === '1'
+        loadAwareSyncerRouting
           ? path.join(
               path.dirname(config.replica.file),
               'syncer-assignments.json',
             )
           : undefined,
+        loadAwareSyncerRouting && env.ZERO_SYNCER_CONTROLLED_REHOME === '1',
       ),
     );
   } catch (err) {

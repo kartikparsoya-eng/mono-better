@@ -48,6 +48,7 @@ import {
   recordConnectionAttempted,
   recordConnectionSuccess,
 } from '../server/anonymous-otel-start.ts';
+import type {SyncerRehomeMessage} from '../server/worker-dispatcher.ts';
 import {MutagenService} from '../services/mutagen/mutagen.ts';
 import {PusherService} from '../services/mutagen/pusher.ts';
 import {CREATE_TABLE_METADATA_TABLE} from '../services/replicator/schema/table-metadata.ts';
@@ -55,6 +56,7 @@ import type {ActivityBasedService} from '../services/service.ts';
 import type {ConnectionContextManager} from '../services/view-syncer/connection-context-manager.ts';
 import {ConnectionContextManagerImpl} from '../services/view-syncer/connection-context-manager.ts';
 import type {ViewSyncer} from '../services/view-syncer/view-syncer.ts';
+import {MESSAGE_TYPES} from '../types/processes.ts';
 import type {WebSocketReceiver} from '../types/websocket-handoff.ts';
 import {Syncer} from './syncer.ts';
 
@@ -79,6 +81,24 @@ const TEST_PARENT: any = {
   onMessageType: () => {},
   send: () => {},
 };
+
+function makeParent() {
+  const handlers = new Map<string, ((msg: unknown) => void)[]>();
+  return {
+    onMessageType(type: string, handler: (msg: unknown) => void) {
+      const existing = handlers.get(type) ?? [];
+      existing.push(handler);
+      handlers.set(type, existing);
+      return this;
+    },
+    send: vi.fn(),
+    emitMessage(type: string, msg: unknown) {
+      for (const handler of handlers.get(type) ?? []) {
+        handler(msg);
+      }
+    },
+  };
+}
 
 function makeFactories(
   lc: LogContext,
@@ -155,7 +175,7 @@ function makeFactories(
   } as const;
 }
 
-function setupSyncer(lc: LogContext, config: ZeroConfig) {
+function setupSyncer(lc: LogContext, config: ZeroConfig, parent = TEST_PARENT) {
   const mutagens: MutagenService[] = [];
   const pushers: PusherService[] = [];
   const contextManagers = new Map<string, ConnectionContextManagerImpl>();
@@ -187,7 +207,7 @@ function setupSyncer(lc: LogContext, config: ZeroConfig) {
     mutagenFactory,
     pusherFactory,
     0,
-    TEST_PARENT,
+    parent as any,
     validateLegacyJWT,
   );
   return {syncer, mutagens, pushers, contextManagers};
@@ -294,6 +314,45 @@ describe('cleanup', () => {
       await newConnection(1);
       check(i);
     }
+  });
+});
+
+describe('controlled rehome', () => {
+  let syncer: Syncer;
+  let parent: ReturnType<typeof makeParent>;
+
+  beforeEach(() => {
+    parent = makeParent();
+    const env = setupSyncer(
+      lc,
+      {
+        auth: {
+          secret: 'test-secret',
+        },
+      } as ZeroConfig,
+      parent,
+    );
+    syncer = env.syncer;
+  });
+
+  afterEach(async () => {
+    await syncer.stop();
+  });
+
+  test('closes only connections from the rehomed client group', async () => {
+    const rehomed = await openConnection(1, {clientGroupID: 'cg-a'});
+    const retained = await openConnection(2, {clientGroupID: 'cg-b'});
+
+    parent.emitMessage(MESSAGE_TYPES.syncerRehome, {
+      clientGroupID: 'cg-a',
+      fromWorkerIndex: 0,
+      toWorkerIndex: 1,
+      reason: 'test move',
+      timestamp: Date.now(),
+    } satisfies SyncerRehomeMessage[1]);
+
+    expect((rehomed as any).readyState).toBe(MockWebSocket.CLOSED);
+    expect((retained as any).readyState).toBe(MockWebSocket.OPEN);
   });
 });
 
