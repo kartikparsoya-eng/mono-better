@@ -2072,221 +2072,228 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         updater.ensureNewVersion();
       }
 
-      // Note: This kicks off background PG queries for CVR data associated with the
-      // executed and removed queries.
-      const {queryPatches, newVersion} = updater.trackQueries(
-        lc,
-        addQueries,
-        removeQueries,
-      );
+      let pokers: PokeHandler | undefined;
+      try {
+        // Note: This kicks off background PG queries for CVR data associated with the
+        // executed and removed queries.
+        const {queryPatches, newVersion} = updater.trackQueries(
+          lc,
+          addQueries,
+          removeQueries,
+        );
 
-      const clients = this.#getClients();
-      const pokers = startPoke(clients, newVersion);
-      for (const patch of queryPatches) {
-        // Bump patches' toVersion to the post-drift-bump version so that
-        // pokers don't see them as belonging to a stale cookie.
-        await pokers.addPatch(patch);
-      }
-
-      // Removing queries is easy. The pipelines are dropped, and the CVR
-      // updater handles the updates and pokes.
-      for (const q of removeQueries) {
-        this.#pipelines.removeQuery(q.id);
-        // Remove per-query server metrics when query is deleted
-        this.#inspectorDelegate.removeQuery(q.id);
-        // Clean up thrashing detection for removed queries
-        this.#queryReplacements.delete(q.id);
-      }
-
-      let totalProcessTime = 0;
-      const timer = new TimeSliceTimer(lc);
-      const pipelines = this.#pipelines;
-      const hydrations = this.#hydrations;
-      const hydrationTime = this.#hydrationTime;
-      // oxlint-disable-next-line @typescript-eslint/no-this-alias
-      const self = this;
-
-      // yield at the very beginning so that the first time slice
-      // is properly processed by the time-slice queue.
-      await yieldProcess(lc);
-
-      async function* generateRowChanges(slowHydrateThreshold: number) {
-        // Await Go init so the first batch of queries uses the Go path
-        if (addQueries.length > 0) {
-          await pipelines.awaitGoInit();
+        const clients = this.#getClients();
+        const activePokers = (pokers = startPoke(clients, newVersion));
+        for (const patch of queryPatches) {
+          // Bump patches' toVersion to the post-drift-bump version so that
+          // pokers don't see them as belonging to a stale cookie.
+          await activePokers.addPatch(patch);
         }
-        // Streaming batch hydration: send all queries to Go in one RPC,
-        // yield each query's RowChanges to the WebSocket pokers AS SOON as
-        // Go finishes that query — instead of waiting for the slowest one
-        // in the batch. Tail-latency win for batches with uneven hydrate
-        // cost (REVIEW-final perf-opt streaming).
-        if (pipelines.canBatchHydrate && addQueries.length > 0) {
-          const batchStart = performance.now();
-          const byID = new Map<string, (typeof addQueries)[number]>();
-          for (const q of addQueries) byID.set(q.id, q);
-          let count = 0;
-          let goComputeMs = 0;
-          for await (const {
-            queryID,
-            changes,
-            timingMs,
-            final,
-          } of pipelines.goHydrateBatchStream(
-            addQueries.map(q => ({
-              transformationHash: q.transformationHash,
-              queryID: q.id,
-              ast: q.ast,
-              // Custom-query name for the pipeline stub (inspector +
-              // queryName log context) — the non-batch path passes it to
-              // addQuery; dropping it here lost it in Go-primary (M1).
-              queryName: q.name,
-            })),
-          )) {
-            const q = byID.get(queryID);
-            if (!q) continue;
-            const consumeStart = performance.now();
-            yield* changes as Iterable<RowChange | 'yield'>;
-            const consumeElapsed = performance.now() - consumeStart;
-            // Per-chunk streaming: this loop body runs once per CHUNK, so the
-            // yield* above delivers each chunk's rows to the pokers as soon as
-            // Go produces them. Per-QUERY bookkeeping (hydration_time, span,
-            // count) must fire exactly once — gate it on the terminal chunk.
-            // In the default (accumulate-to-final) mode every entry is
-            // terminal, so this is a no-op guard and behavior is unchanged.
-            if (!final) {
-              continue;
+
+        // Removing queries is easy. The pipelines are dropped, and the CVR
+        // updater handles the updates and pokes.
+        for (const q of removeQueries) {
+          this.#pipelines.removeQuery(q.id);
+          // Remove per-query server metrics when query is deleted
+          this.#inspectorDelegate.removeQuery(q.id);
+          // Clean up thrashing detection for removed queries
+          this.#queryReplacements.delete(q.id);
+        }
+
+        let totalProcessTime = 0;
+        const timer = new TimeSliceTimer(lc);
+        const pipelines = this.#pipelines;
+        const hydrations = this.#hydrations;
+        const hydrationTime = this.#hydrationTime;
+        // oxlint-disable-next-line @typescript-eslint/no-this-alias
+        const self = this;
+
+        // yield at the very beginning so that the first time slice
+        // is properly processed by the time-slice queue.
+        await yieldProcess(lc);
+
+        async function* generateRowChanges(slowHydrateThreshold: number) {
+          // Await Go init so the first batch of queries uses the Go path
+          if (addQueries.length > 0) {
+            await pipelines.awaitGoInit();
+          }
+          // Streaming batch hydration: send all queries to Go in one RPC,
+          // yield each query's RowChanges to the WebSocket pokers AS SOON as
+          // Go finishes that query — instead of waiting for the slowest one
+          // in the batch. Tail-latency win for batches with uneven hydrate
+          // cost (REVIEW-final perf-opt streaming).
+          if (pipelines.canBatchHydrate && addQueries.length > 0) {
+            const batchStart = performance.now();
+            const byID = new Map<string, (typeof addQueries)[number]>();
+            for (const q of addQueries) byID.set(q.id, q);
+            let count = 0;
+            let goComputeMs = 0;
+            for await (const {
+              queryID,
+              changes,
+              timingMs,
+              final,
+            } of pipelines.goHydrateBatchStream(
+              addQueries.map(q => ({
+                transformationHash: q.transformationHash,
+                queryID: q.id,
+                ast: q.ast,
+                // Custom-query name for the pipeline stub (inspector +
+                // queryName log context) — the non-batch path passes it to
+                // addQuery; dropping it here lost it in Go-primary (M1).
+                queryName: q.name,
+              })),
+            )) {
+              const q = byID.get(queryID);
+              if (!q) continue;
+              const consumeStart = performance.now();
+              yield* changes as Iterable<RowChange | 'yield'>;
+              const consumeElapsed = performance.now() - consumeStart;
+              // Per-chunk streaming: this loop body runs once per CHUNK, so the
+              // yield* above delivers each chunk's rows to the pokers as soon as
+              // Go produces them. Per-QUERY bookkeeping (hydration_time, span,
+              // count) must fire exactly once — gate it on the terminal chunk.
+              // In the default (accumulate-to-final) mode every entry is
+              // terminal, so this is a no-op guard and behavior is unchanged.
+              if (!final) {
+                continue;
+              }
+              // `timingMs` is Go's per-query engine COMPUTE (engine.go
+              // hydrateEntry, `time.Since(start)` — excludes RPC/serialize).
+              // It is undefined for internal queries (lmids/clients/...)
+              // that ran through TS's #addQueryImpl, whose compute happens
+              // lazily during the yield* above — so consumeElapsed IS their
+              // compute. Either way `computeMs` is this query's hydrate
+              // compute, which is the span #hydrationTime measures on the TS
+              // path. Recording this (not the TS-side consumption of
+              // already-computed Go rows) keeps hydration_time apples-to-apples
+              // across engines; the old code recorded consumeElapsed
+              // for Go user queries, which excluded Go's own compute and
+              // understated Go.
+              const computeMs = timingMs ?? consumeElapsed;
+              totalProcessTime += computeMs;
+              goComputeMs += computeMs;
+              self.#addQueryMaterializationServerMetric(q.id, computeMs);
+              if (computeMs > slowHydrateThreshold) {
+                lc.warn?.('Slow query materialization', computeMs, q.ast);
+              }
+              manualSpan(tracer, 'vs.addAndConsumeQuery', computeMs, {
+                hash: q.id,
+                transformationHash: q.transformationHash,
+                ...(q.name !== undefined && {name: q.name}),
+              });
+              count++;
             }
-            // `timingMs` is Go's per-query engine COMPUTE (engine.go
-            // hydrateEntry, `time.Since(start)` — excludes RPC/serialize).
-            // It is undefined for internal queries (lmids/clients/...)
-            // that ran through TS's #addQueryImpl, whose compute happens
-            // lazily during the yield* above — so consumeElapsed IS their
-            // compute. Either way `computeMs` is this query's hydrate
-            // compute, which is the span #hydrationTime measures on the TS
-            // path. Recording this (not the TS-side consumption of
-            // already-computed Go rows) keeps hydration_time apples-to-apples
-            // across engines; the old code recorded consumeElapsed
-            // for Go user queries, which excluded Go's own compute and
-            // understated Go.
-            const computeMs = timingMs ?? consumeElapsed;
-            totalProcessTime += computeMs;
-            goComputeMs += computeMs;
-            self.#addQueryMaterializationServerMetric(q.id, computeMs);
-            if (computeMs > slowHydrateThreshold) {
-              lc.warn?.('Slow query materialization', computeMs, q.ast);
+            const batchElapsed = performance.now() - batchStart;
+            lc.info?.(
+              `[batch-hydrate-stream] ${count} queries in ${batchElapsed.toFixed(2)}ms (go compute ${goComputeMs.toFixed(2)}ms)`,
+            );
+            hydrations.add(1);
+            // hydration_time = engine COMPUTE (Go timingMs / TS lazy consume),
+            // the apples-to-apples match to TS's hydration_time (full TS
+            // materialization compute, no sidecar RPC).
+            hydrationTime.recordMs(totalProcessTime);
+            // hydration_e2e_time = whole-batch wall-clock: Go compute + RPC +
+            // TS-side consumption. The fair END-TO-END headline — Go-
+            // pessimistic, since this span includes the sidecar RPC tax that
+            // TS's hydration_time (recorded above as the same compute span)
+            // does not pay. The gap between the two on Go is the serialization
+            // cost (see positional wire-format work).
+            self.#hydrationE2ETime.recordMs(batchElapsed);
+            return;
+          }
+
+          for (const q of addQueries) {
+            let queryLC = lc
+              .withContext('hash', q.id)
+              .withContext('queryHash', q.id)
+              .withContext('transformationHash', q.transformationHash);
+            if (q.name !== undefined) {
+              queryLC = queryLC.withContext('queryName', q.name);
             }
-            manualSpan(tracer, 'vs.addAndConsumeQuery', computeMs, {
+            queryLC.debug?.(`adding pipeline for query`, q.ast);
+
+            const result = pipelines.addQuery(
+              q.transformationHash,
+              q.id,
+              q.ast,
+              timer.startWithoutYielding(),
+              q.name,
+            );
+            const iterable = result instanceof Promise ? await result : result;
+            let queryTotal = 0;
+            for (const c of iterable) {
+              if (c !== 'yield') {
+                queryTotal++;
+              }
+              yield c;
+            }
+            const elapsed = timer.stop();
+            totalProcessTime += elapsed;
+
+            self.#addQueryMaterializationServerMetric(q.id, elapsed);
+            self.#inspectorDelegate.addQuery(q.id, q.ast);
+
+            if (elapsed > slowHydrateThreshold) {
+              queryLC.warn?.('Slow query materialization', elapsed, q.ast);
+            }
+            manualSpan(tracer, 'vs.addAndConsumeQuery', elapsed, {
               hash: q.id,
               transformationHash: q.transformationHash,
               ...(q.name !== undefined && {name: q.name}),
             });
-            count++;
           }
-          const batchElapsed = performance.now() - batchStart;
-          lc.info?.(
-            `[batch-hydrate-stream] ${count} queries in ${batchElapsed.toFixed(2)}ms (go compute ${goComputeMs.toFixed(2)}ms)`,
-          );
           hydrations.add(1);
-          // hydration_time = engine COMPUTE (Go timingMs / TS lazy consume),
-          // the apples-to-apples match to TS's hydration_time (full TS
-          // materialization compute, no sidecar RPC).
           hydrationTime.recordMs(totalProcessTime);
-          // hydration_e2e_time = whole-batch wall-clock: Go compute + RPC +
-          // TS-side consumption. The fair END-TO-END headline — Go-
-          // pessimistic, since this span includes the sidecar RPC tax that
-          // TS's hydration_time (recorded above as the same compute span)
-          // does not pay. The gap between the two on Go is the serialization
-          // cost (see positional wire-format work).
-          self.#hydrationE2ETime.recordMs(batchElapsed);
-          return;
         }
+        // #processChanges does batched de-duping of rows. Wrap all pipelines in
+        // a single generator in order to maximize de-duping.
+        await this.#processChanges(
+          lc,
+          timer,
+          generateRowChanges(this.#slowHydrateThreshold),
+          updater,
+          activePokers,
+        );
 
-        for (const q of addQueries) {
-          let queryLC = lc
-            .withContext('hash', q.id)
-            .withContext('queryHash', q.id)
-            .withContext('transformationHash', q.transformationHash);
-          if (q.name !== undefined) {
-            queryLC = queryLC.withContext('queryName', q.name);
-          }
-          queryLC.debug?.(`adding pipeline for query`, q.ast);
-
-          const result = pipelines.addQuery(
-            q.transformationHash,
-            q.id,
-            q.ast,
-            timer.startWithoutYielding(),
-            q.name,
-          );
-          const iterable = result instanceof Promise ? await result : result;
-          let queryTotal = 0;
-          for (const c of iterable) {
-            if (c !== 'yield') {
-              queryTotal++;
+        await startAsyncSpan(
+          tracer,
+          'vs.#syncQueryPipelineSet.deleteUnreferencedRows',
+          async () => {
+            for (const patch of await updater.deleteUnreferencedRows(lc)) {
+              await activePokers.addPatch(patch);
             }
-            yield c;
-          }
-          const elapsed = timer.stop();
-          totalProcessTime += elapsed;
+          },
+        );
 
-          self.#addQueryMaterializationServerMetric(q.id, elapsed);
-          self.#inspectorDelegate.addQuery(q.id, q.ast);
+        // Commit the changes and update the CVR snapshot.
+        this.#cvr = await this.#flushUpdater(lc, updater);
 
-          if (elapsed > slowHydrateThreshold) {
-            queryLC.warn?.('Slow query materialization', elapsed, q.ast);
-          }
-          manualSpan(tracer, 'vs.addAndConsumeQuery', elapsed, {
-            hash: q.id,
-            transformationHash: q.transformationHash,
-            ...(q.name !== undefined && {name: q.name}),
-          });
-        }
-        hydrations.add(1);
-        hydrationTime.recordMs(totalProcessTime);
+        const finalVersion = this.#cvr.version;
+
+        // Before ending the poke, catch up clients that were behind the old CVR.
+        await this.#catchupClients(
+          lc,
+          cvr,
+          finalVersion,
+          addQueries.map(q => q.id),
+          activePokers,
+        );
+
+        // Signal clients to commit.
+        await startAsyncSpan(tracer, 'vs.#syncQueryPipelineSet.pokeEnd', () =>
+          activePokers.end(finalVersion),
+        );
+
+        const wallTime = performance.now() - start;
+        lc.info?.(
+          `finished processing queries (process: ${totalProcessTime} ms, wall: ${wallTime} ms)`,
+        );
+      } catch (e) {
+        await pokers?.cancel();
+        this.#cvrStore.discardPendingWrites();
+        throw e;
       }
-      // #processChanges does batched de-duping of rows. Wrap all pipelines in
-      // a single generator in order to maximize de-duping.
-      await this.#processChanges(
-        lc,
-        timer,
-        generateRowChanges(this.#slowHydrateThreshold),
-        updater,
-        pokers,
-      );
-
-      await startAsyncSpan(
-        tracer,
-        'vs.#syncQueryPipelineSet.deleteUnreferencedRows',
-        async () => {
-          for (const patch of await updater.deleteUnreferencedRows(lc)) {
-            await pokers.addPatch(patch);
-          }
-        },
-      );
-
-      // Commit the changes and update the CVR snapshot.
-      this.#cvr = await this.#flushUpdater(lc, updater);
-
-      const finalVersion = this.#cvr.version;
-
-      // Before ending the poke, catch up clients that were behind the old CVR.
-      await this.#catchupClients(
-        lc,
-        cvr,
-        finalVersion,
-        addQueries.map(q => q.id),
-        pokers,
-      );
-
-      // Signal clients to commit.
-      await startAsyncSpan(tracer, 'vs.#syncQueryPipelineSet.pokeEnd', () =>
-        pokers.end(finalVersion),
-      );
-
-      const wallTime = performance.now() - start;
-      lc.info?.(
-        `finished processing queries (process: ${totalProcessTime} ms, wall: ${wallTime} ms)`,
-      );
     });
   }
 

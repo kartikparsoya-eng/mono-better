@@ -201,6 +201,24 @@ describe('view-syncer/service', () => {
     return owner;
   }
 
+  async function nextPokeWithin(
+    client: Queue<Downstream>,
+    timeoutMs = 1000,
+  ): Promise<Downstream[]> {
+    const timedOut = ['timeout'] as unknown as Downstream;
+    const received: Downstream[] = [];
+    for (;;) {
+      const msg = await client.dequeue(timedOut, timeoutMs);
+      if (msg === timedOut) {
+        throw new Error('timed out waiting for pokeEnd');
+      }
+      received.push(msg);
+      if (msg[0] === 'pokeEnd') {
+        return received;
+      }
+    }
+  }
+
   test('adds desired queries from initConnectionMessage', async () => {
     const client = connect(SYNC_CONTEXT, [
       {op: 'put', hash: 'query-hash1', ast: ISSUES_QUERY},
@@ -373,6 +391,27 @@ describe('view-syncer/service', () => {
       },
       version: {stateVersion: '00', configVersion: 2},
     });
+  });
+
+  test('cancels hydrate poke and discards CVR writes when hydrate flush fails', async () => {
+    const client = connect(SYNC_CONTEXT, [
+      {op: 'put', hash: 'query-hash1', ast: ISSUES_QUERY},
+    ]);
+    await nextPoke(client);
+
+    const discardSpy = vi.spyOn(CVRStore.prototype, 'discardPendingWrites');
+    vi.spyOn(
+      CVRQueryDrivenUpdater.prototype,
+      'deleteUnreferencedRows',
+    ).mockRejectedValueOnce(new Error('forced hydrate prune failure'));
+
+    stateChanges.push({state: 'version-ready'});
+    const hydratePoke = await nextPokeWithin(client);
+    const end = hydratePoke.at(-1);
+
+    expect(end?.[0]).toBe('pokeEnd');
+    expect((end as ['pokeEnd', PokeEndBody])[1]).toMatchObject({cancel: true});
+    await vi.waitFor(() => expect(discardSpy).toHaveBeenCalledTimes(1));
   });
 
   test('initial hydration', async () => {
