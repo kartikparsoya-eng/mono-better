@@ -62,7 +62,7 @@ import {
   ISSUES_QUERY_WITH_NOT_EXISTS_AND_RELATED,
   ISSUES_QUERY_WITH_RELATED,
   messages,
-  nextPoke,
+  nextPoke as nextPokeWithTimestamp,
   nextPokeParts,
   ON_FAILURE,
   permissionsAll,
@@ -77,6 +77,17 @@ import {
 } from './view-syncer-test-util.ts';
 import type {ViewSyncerService} from './view-syncer.ts';
 import {type SyncContext} from './view-syncer.ts';
+
+function stripPokeStartTimestamp(msg: Downstream): Downstream {
+  if (msg[0] === 'pokeStart') {
+    delete (msg[1] as {timestamp?: number}).timestamp;
+  }
+  return msg;
+}
+
+async function nextPoke(client: Queue<Downstream>): Promise<Downstream[]> {
+  return (await nextPokeWithTimestamp(client)).map(stripPokeStartTimestamp);
+}
 
 describe('view-syncer/service', () => {
   const clientFallback: ConnectionValidation = {kind: 'client-fallback'};
@@ -212,7 +223,7 @@ describe('view-syncer/service', () => {
       if (msg === timedOut) {
         throw new Error('timed out waiting for pokeEnd');
       }
-      received.push(msg);
+      received.push(stripPokeStartTimestamp(msg));
       if (msg[0] === 'pokeEnd') {
         return received;
       }
