@@ -18,7 +18,6 @@ import {warmupConnections} from '../db/warmup.ts';
 import {initEventSink} from '../observability/events.ts';
 import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
 import {MutagenService} from '../services/mutagen/mutagen.ts';
-import {deriveGoSidecarSpawnEnv} from '../services/view-syncer/go-sidecar/spawn-env.ts';
 import {PusherService} from '../services/mutagen/pusher.ts';
 import type {ReplicaState} from '../services/replicator/replicator.ts';
 import {
@@ -26,11 +25,12 @@ import {
   ConnectionContextManagerImpl,
 } from '../services/view-syncer/connection-context-manager.ts';
 import type {DrainCoordinator} from '../services/view-syncer/drain-coordinator.ts';
-import {PipelineDriver} from '../services/view-syncer/pipeline-driver.ts';
 import {
   isGoSidecarEnabled,
   SidecarManager,
 } from '../services/view-syncer/go-sidecar/index.ts';
+import {deriveGoSidecarSpawnEnv} from '../services/view-syncer/go-sidecar/spawn-env.ts';
+import {PipelineDriver} from '../services/view-syncer/pipeline-driver.ts';
 import {Snapshotter} from '../services/view-syncer/snapshotter.ts';
 import {ViewSyncerService} from '../services/view-syncer/view-syncer.ts';
 import {ProtocolErrorWithLevel} from '../types/error-with-level.ts';
@@ -135,7 +135,7 @@ export default async function runWorker(
     // O1: derive the engine's GO_IVM_* env from the SAME goSidecar config
     // that drives the TS dispatch, so the engine is armed exactly as the
     // worker expects.
-    const spawnEnv = deriveGoSidecarSpawnEnv(shard.appID);
+    const spawnEnv = deriveGoSidecarSpawnEnv(shard.appID, replicaFile);
     sidecarManager = new SidecarManager({
       napiLibPath: config.goSidecar.napiLibPath,
       // Divides the container-wide Go memory share across the per-worker

@@ -8,6 +8,12 @@
  * is the shard's appID (used as the permissions-table-watch fallback when
  * the wire didn't carry one).
  */
-export function deriveGoSidecarSpawnEnv(appID: string): Record<string, string> {
-  return {GO_IVM_APP_ID: appID};
+export function deriveGoSidecarSpawnEnv(
+  appID: string,
+  replicaFile: string,
+): Record<string, string> {
+  return {
+    GO_IVM_APP_ID: appID,
+    GO_IVM_REPLICA_DB_PATH: replicaFile,
+  };
 }
