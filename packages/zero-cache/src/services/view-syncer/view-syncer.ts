@@ -1593,7 +1593,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           if (queryName !== undefined) {
             span.setAttribute('queryName', queryName);
           }
-          for (const change of await this.#pipelines.addQuery(
+          for await (const change of await this.#pipelines.addQuery(
             transformationHash,
             queryID,
             transformedAst,
@@ -2222,7 +2222,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             );
             const iterable = result instanceof Promise ? await result : result;
             let queryTotal = 0;
-            for (const c of iterable) {
+            for await (const c of iterable) {
               if (c !== 'yield') {
                 queryTotal++;
               }

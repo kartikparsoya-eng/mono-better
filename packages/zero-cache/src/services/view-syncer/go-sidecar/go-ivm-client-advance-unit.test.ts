@@ -46,6 +46,7 @@ const posFrame = (ids: string[], queryID = 'q1') => ({
 function makeAdvanceFakeHost(client: GoIVMClient) {
   const reqs: CapturedReq[] = [];
   const cancelled: number[] = [];
+  const credits: {id: number; n: number}[] = [];
   const addon: GoNapiAddon = {
     start: () => {},
     abiVersion: () => 3,
@@ -53,7 +54,9 @@ function makeAdvanceFakeHost(client: GoIVMClient) {
       reqs.push(packr.unpack(payload) as CapturedReq);
       return 0;
     },
-    streamCredit: () => {},
+    streamCredit: (id: number, n: number) => {
+      credits.push({id, n});
+    },
     streamCancel: (id: number) => {
       cancelled.push(id);
     },
@@ -77,7 +80,7 @@ function makeAdvanceFakeHost(client: GoIVMClient) {
     });
     deliver(id, 'done');
   };
-  return {reqs, cancelled, addon, deliver, deliverSuccess};
+  return {reqs, cancelled, credits, addon, deliver, deliverSuccess};
 }
 
 afterEach(() => {
@@ -117,6 +120,8 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     expect(host.reqs).toHaveLength(1);
     const req = host.reqs[0];
     expect(req.method).toBe('advanceToHeadStream');
+    expect(req.params.pullMode).toBe(true);
+    expect(req.params.pullWindow).toBe(64);
     expect(req.params.totalHydrationTimeMs).toBe(123.5);
     // suppressAbort omitted (additive; Go treats absent as false).
     expect('suppressAbort' in req.params).toBe(false);
@@ -133,6 +138,8 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     const p = client.advanceToHeadStream('cg', 1, 'app');
     await flush();
     const req = host.reqs[0];
+    expect(req.params.pullMode).toBe(true);
+    expect(req.params.pullWindow).toBe(64);
     expect('totalHydrationTimeMs' in req.params).toBe(false);
     expect('suppressAbort' in req.params).toBe(false);
     host.deliverSuccess(req.id);
@@ -267,6 +274,56 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
       final: true,
       version: '0000000002',
       numChanges: 1,
+    });
+    await expect(it.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  test('chunk iterator uses pull credits and tops up as row chunks are consumed', async () => {
+    const client = new GoIVMClient();
+    const host = makeAdvanceFakeHost(client);
+    client.connectNapi(host.addon);
+
+    const it = client.advanceToHeadStreamChunks('cg', 1, 'app', {window: 1});
+    await flush();
+    const req = host.reqs[0];
+    expect(req.params.pullMode).toBe(true);
+    expect(req.params.pullWindow).toBe(1);
+
+    host.deliver(req.id, {
+      chunkIndex: 0,
+      final: false,
+      version: '0000000002',
+      numChanges: 1,
+      header: true,
+    });
+    host.deliver(req.id, {
+      ...posFrame(['early']),
+      chunkIndex: 0,
+      final: false,
+    });
+
+    await expect(it.next()).resolves.toMatchObject({
+      done: false,
+      value: {header: true},
+    });
+    const first = await it.next();
+    expect(first.done).toBe(false);
+    expect((first.value.changes[0] as RowChange).rowKey.id).toBe('early');
+    expect(host.credits).toEqual([{id: req.id, n: 1}]);
+
+    host.deliver(req.id, {
+      chunkIndex: 1,
+      final: true,
+      version: '0000000002',
+      numChanges: 1,
+    });
+    host.deliver(req.id, 'done');
+    await expect(it.next()).resolves.toMatchObject({
+      done: false,
+      value: {final: true},
     });
     await expect(it.next()).resolves.toEqual({
       value: undefined,

@@ -1095,6 +1095,7 @@ export class GoIVMClient {
     queryID: string;
     changes: RowChange[];
     timingMs: number | undefined;
+    sigDelta?: string | undefined;
     final: boolean;
     chunkIndex?: number | undefined;
   }> {
@@ -1109,6 +1110,7 @@ export class GoIVMClient {
       queryID: string;
       changes: RowChange[];
       timingMs: number | undefined;
+      sigDelta?: string | undefined;
       final: boolean;
       chunkIndex?: number | undefined;
     };
@@ -1140,6 +1142,7 @@ export class GoIVMClient {
           queryID: r.queryID,
           changes: r.changes,
           timingMs: r.timingMs,
+          ...(r.sigDelta !== undefined ? {sigDelta: r.sigDelta} : {}),
           final: r.final ?? true,
           chunkIndex: r.chunkIndex,
         });
@@ -1344,6 +1347,7 @@ export class GoIVMClient {
        * (old-server pairs ignore the extra fields — additive msgpack).
        */
       abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
+      window?: number;
     },
   ): Promise<AdvanceToHeadResult> {
     const rowChanges: RowChange[] = [];
@@ -1385,18 +1389,23 @@ export class GoIVMClient {
        * (old-server pairs ignore the extra fields — additive msgpack).
        */
       abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
+      window?: number;
     },
   ): AsyncIterableIterator<AdvanceToHeadStreamChunk> {
     const napi = this.#napi;
     if (!napi) {
       throw new Error('advanceToHeadStreamChunks requires the NAPI transport');
     }
+    const window = Math.max(1, Math.floor(opts?.window ?? 64));
+    const lowWater = Math.max(1, Math.floor(window / 2));
     const buffered: AdvanceToHeadStreamChunk[] = [];
     let wake: (() => void) | null = null;
     let done = false;
     let error: Error | null = null;
     let reqID: number | null = null;
     let closed = false;
+    let granted = window;
+    let consumed = 0;
 
     const notify = () => {
       const w = wake;
@@ -1416,6 +1425,8 @@ export class GoIVMClient {
       ? {clientGroupID, initEpoch, appID}
       : {clientGroupID, initEpoch};
     base.rowMode = true;
+    base.pullMode = true;
+    base.pullWindow = window;
     if (opts?.abortBudget) {
       base.totalHydrationTimeMs = opts.abortBudget.totalHydrationTimeMs;
       if (opts.abortBudget.suppressAbort) base.suppressAbort = true;
@@ -1486,6 +1497,20 @@ export class GoIVMClient {
           }
           const entry = buffered.shift();
           if (entry !== undefined) {
+            if (entry.changes.length > 0) {
+              consumed += 1;
+              const outstanding = granted - consumed;
+              if (
+                outstanding <= lowWater &&
+                reqID !== null &&
+                !done &&
+                error === null
+              ) {
+                const topUp = window - outstanding;
+                granted += topUp;
+                napi.streamCredit(reqID, topUp);
+              }
+            }
             return {value: entry, done: false};
           }
           if (error !== null) {

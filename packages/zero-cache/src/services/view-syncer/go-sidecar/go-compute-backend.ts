@@ -228,6 +228,20 @@ export class GoComputeBackend {
     );
   }
 
+  hydrateStreamPull(
+    queryID: string,
+    ast: QueryAST,
+  ): AsyncIterableIterator<{
+    queryID: string;
+    changes: unknown[];
+    timingMs: number | undefined;
+    sigDelta?: string | undefined;
+    final: boolean;
+    chunkIndex?: number | undefined;
+  }> {
+    return this.hydrateManyStreamPull([{queryID, ast}]);
+  }
+
   /**
    * Pull-mode batch hydrate (ABI v3): Go produces rows only as the returned
    * iterator is consumed; return()/throw() cancels the Go producer.
@@ -285,6 +299,7 @@ export class GoComputeBackend {
           this.#appID,
           {
             ...this.#cgOpts(),
+            window: this.#pullWindow,
             ...(abortBudget ? {abortBudget} : {}),
           },
         ),
@@ -306,6 +321,7 @@ export class GoComputeBackend {
           this.#appID,
           {
             ...this.#cgOpts(),
+            window: this.#pullWindow,
             ...(abortBudget ? {abortBudget} : {}),
           },
         );

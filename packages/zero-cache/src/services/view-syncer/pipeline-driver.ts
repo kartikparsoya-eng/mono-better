@@ -85,10 +85,7 @@ import {
   StaleInitEpochError,
 } from './go-sidecar/go-ivm-client.ts';
 import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
-import {
-  parseSignature,
-  rowIDSignatureUnit,
-} from './row-set-signature.ts';
+import {parseSignature, rowIDSignatureUnit} from './row-set-signature.ts';
 import type {Snapshotter} from './snapshotter.ts';
 import {ResetPipelinesSignal, type SnapshotDiff} from './snapshotter.ts';
 
@@ -1256,7 +1253,12 @@ export class PipelineDriver {
     query: AST,
     timer: Timer,
     queryName?: string,
-  ): Iterable<RowChange | 'yield'> | Promise<Iterable<RowChange | 'yield'>> {
+  ):
+    | Iterable<RowChange | 'yield'>
+    | AsyncIterable<RowChange | 'yield'>
+    | Promise<
+        Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>
+      > {
     // If Go backend init is pending, await it first
     if (
       this.#goInitPromise &&
@@ -1309,7 +1311,12 @@ export class PipelineDriver {
     query: AST,
     timer: Timer,
     queryName?: string,
-  ): Iterable<RowChange | 'yield'> | Promise<Iterable<RowChange | 'yield'>> {
+  ):
+    | Iterable<RowChange | 'yield'>
+    | AsyncIterable<RowChange | 'yield'>
+    | Promise<
+        Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>
+      > {
     // Internal queries (lmids, mutationResults, queries rooted at the
     // <appID>.permissions or <appID>_<shard>.clients tables) always
     // run via TS — their source tables are excluded from Go's data
@@ -1353,7 +1360,7 @@ export class PipelineDriver {
     queryID: string,
     query: AST,
     queryName?: string,
-  ): Promise<Iterable<RowChange | 'yield'>> {
+  ): Promise<AsyncIterable<RowChange | 'yield'>> {
     this.removeQuery(queryID);
     // Plan the AST the same way the batch path does so Go's pipeline
     // gets the planner's flip:true annotation and the side-effect of
@@ -1364,8 +1371,7 @@ export class PipelineDriver {
     // TableSource was never created. (Audit fix F.)
     const planned = this.#planAstForGo(query);
     const hydrateStartMs = performance.now();
-    const goResult = await this.#goBackend!.hydrate(queryID, planned);
-    const hydrateWallMs = performance.now() - hydrateStartMs;
+    const stream = this.#goBackend!.hydrateStreamPull(queryID, planned);
 
     // Store a minimal pipeline entry for queries() map and hydration time
     // tracking (no TS pipeline needed — Go handles push processing).
@@ -1382,34 +1388,67 @@ export class PipelineDriver {
         getSchema: () => ({}) as never,
         setOutput: () => {},
       } as unknown as Input,
-      hydrationTimeMs: goHydrationCostMs(goResult.timingMs, hydrateWallMs),
+      hydrationTimeMs: 0,
       transformedAst: planned,
       transformationHash,
       companions: [],
       ...(queryName !== undefined && {queryName}),
     });
 
-    // The decoded RowChanges are already the final pipeline shape — both
-    // decoders (decodeRowRecord / decodePositionalChanges) emit type 0/1/2
-    // (identical to ChangeType.ADD/REMOVE/EDIT), build `row` for every
-    // non-remove, and omit it for remove. No per-row wrapper allocation.
-    function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
+    const self = this;
+    async function* yieldGoHydration(): AsyncIterable<RowChange | 'yield'> {
       let i = 0;
-      for (const rc of goResult.changes) {
-        if (i > 0 && i % 100 === 0) {
-          yield 'yield';
+      let sawFinal = false;
+      let fallbackDelta = 0n;
+      let finalSigDelta: string | undefined;
+      try {
+        for await (const r of stream) {
+          for (const rc of r.changes as RowChange[]) {
+            if (i > 0 && i % 100 === 0) {
+              yield 'yield';
+            }
+            if (rc.type !== ChangeType.EDIT) {
+              fallbackDelta ^= rowIDSignatureUnit({
+                schema: '',
+                table: rc.table,
+                rowKey: rc.rowKey as RowKey,
+              });
+            }
+            yield rc;
+            i++;
+          }
+          if (r.final) {
+            sawFinal = true;
+            finalSigDelta = r.sigDelta;
+            const pipeline = self.#pipelines.get(queryID);
+            if (pipeline) {
+              self.#pipelines.set(queryID, {
+                ...pipeline,
+                hydrationTimeMs: goHydrationCostMs(
+                  r.timingMs,
+                  performance.now() - hydrateStartMs,
+                ),
+              });
+            }
+          }
         }
-        yield rc as unknown as RowChange;
-        i++;
+      } catch (e) {
+        self.#rowSetSignatures.delete(queryID);
+        throw e;
       }
+      if (!sawFinal) {
+        self.#rowSetSignatures.delete(queryID);
+        throw new Error(`go hydrate stream ended without final for ${queryID}`);
+      }
+      self.#xorRowSetSignature(
+        queryID,
+        finalSigDelta !== undefined
+          ? parseSignature(finalSigDelta)
+          : fallbackDelta,
+      );
     }
 
-    return this.#trackRowSetSignatures(
-      yieldGoHydration(),
-      goResult.sigDelta !== undefined
-        ? {[queryID]: goResult.sigDelta}
-        : undefined,
-    );
+    return yieldGoHydration();
   }
 
   /**
@@ -2090,25 +2129,6 @@ export class PipelineDriver {
       [Symbol.asyncIterator]();
     const firstGoChunkPromise = goIterator.next();
 
-    // Run TS's #advance over the replay buffer. Only internal-query pipelines
-    // are connected, so user-table pushes are no-ops on TS — the iterator
-    // emits nothing for those, only events for internal queries. When lean,
-    // the buffer already excludes user changes, so pass its actual length for
-    // the advance-time heuristic instead of the full diff's numChanges.
-    const tsChanges: RowChange[] = [];
-    for (const change of this.#advance(
-      replayDiff,
-      timer,
-      buffered.length,
-      true,
-    )) {
-      if (change === 'yield') {
-        await new Promise<void>(resolve => setImmediate(resolve));
-      } else {
-        tsChanges.push(change);
-      }
-    }
-
     let firstGoChunk: AdvanceToHeadStreamChunk;
     try {
       const first = await firstGoChunkPromise;
@@ -2162,55 +2182,63 @@ export class PipelineDriver {
     const reconciled = reconcileGoPrimaryWatermark(version, headerGoVersion);
     const self = this;
     async function* yieldMerged(): AsyncIterable<RowChange | 'yield'> {
-      yield* self.#trackRowSetSignatures(tsChanges);
-
       const fallbackDeltas = new Map<string, bigint>();
       let finalSigDeltas: Record<string, string> | undefined;
       let finalGoVersion = headerGoVersion;
       let sawFinal = false;
       try {
-        for (;;) {
-          const next = await goIterator.next();
-          if (next.done) break;
-          const chunk = next.value;
-          if (sawFinal) {
-            throw new Error(
-              'advanceToHeadStream yielded a frame after the final frame',
-            );
-          }
-          if (chunk.reset) {
-            throw resetFromGo(chunk.reset);
-          }
-          for (const change of chunk.changes as unknown as RowChange[]) {
-            if (change.type !== ChangeType.EDIT) {
-              const unit = rowIDSignatureUnit({
-                schema: '',
-                table: change.table,
-                rowKey: change.rowKey as RowKey,
-              });
-              fallbackDeltas.set(
-                change.queryID,
-                (fallbackDeltas.get(change.queryID) ?? 0n) ^ unit,
+        // Run TS's #advance over the replay buffer on the consumer's pull clock.
+        // Only internal-query pipelines are connected, so user-table pushes are
+        // no-ops on TS. The buffer already excludes user changes, so pass its
+        // actual length for the advance-time heuristic.
+        yield* self.#trackRowSetSignatures(
+          self.#advance(replayDiff, timer, buffered.length, true),
+        );
+
+        try {
+          for (;;) {
+            const next = await goIterator.next();
+            if (next.done) break;
+            const chunk = next.value;
+            if (sawFinal) {
+              throw new Error(
+                'advanceToHeadStream yielded a frame after the final frame',
               );
             }
-            yield change;
+            if (chunk.reset) {
+              throw resetFromGo(chunk.reset);
+            }
+            for (const change of chunk.changes as unknown as RowChange[]) {
+              if (change.type !== ChangeType.EDIT) {
+                const unit = rowIDSignatureUnit({
+                  schema: '',
+                  table: change.table,
+                  rowKey: change.rowKey as RowKey,
+                });
+                fallbackDeltas.set(
+                  change.queryID,
+                  (fallbackDeltas.get(change.queryID) ?? 0n) ^ unit,
+                );
+              }
+              yield change;
+            }
+            if (chunk.final) {
+              self.#recordGoPrimaryAdvanceTimings(chunk.timings);
+              finalSigDeltas = chunk.sigDeltas;
+              finalGoVersion = chunk.version || finalGoVersion;
+              sawFinal = true;
+            }
           }
-          if (chunk.final) {
-            self.#recordGoPrimaryAdvanceTimings(chunk.timings);
-            finalSigDeltas = chunk.sigDeltas;
-            finalGoVersion = chunk.version || finalGoVersion;
-            sawFinal = true;
+        } catch (e) {
+          if (e instanceof ResetPipelinesSignal) {
+            throw e;
           }
-        }
-      } catch (e) {
-        if (e instanceof ResetPipelinesSignal) {
+          const classified = self.#classifyGoPrimaryAdvanceError(e);
+          if (classified instanceof ResetPipelinesSignal) {
+            throw classified;
+          }
           throw e;
         }
-        const classified = self.#classifyGoPrimaryAdvanceError(e);
-        if (classified instanceof ResetPipelinesSignal) {
-          throw classified;
-        }
-        throw e;
       } finally {
         await goIterator.return?.();
       }

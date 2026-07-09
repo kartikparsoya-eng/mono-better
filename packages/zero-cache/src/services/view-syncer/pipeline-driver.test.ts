@@ -501,6 +501,26 @@ describe('view-syncer/pipeline-driver', () => {
     );
   }
 
+  async function collectRows(
+    xs: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
+  ): Promise<(RowChange | 'yield')[]> {
+    const out: (RowChange | 'yield')[] = [];
+    for await (const x of xs) out.push(x);
+    return out;
+  }
+
+  function emptyHydrateStreamPull() {
+    return vi.fn(async function* (queryID: string) {
+      yield {
+        queryID,
+        changes: [],
+        timingMs: 0,
+        sigDelta: '0',
+        final: true,
+      };
+    });
+  }
+
   test('replica version', () => {
     pipelines.init(clientSchema);
     expect(pipelines.replicaVersion).toBe('123');
@@ -1115,6 +1135,7 @@ describe('view-syncer/pipeline-driver', () => {
         timingMs: 0,
         sigDelta: '0',
       }),
+      hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
       advanceToHeadStreamChunks: vi.fn(async function* () {
         yield {
@@ -1142,7 +1163,7 @@ describe('view-syncer/pipeline-driver', () => {
       {table: 'issues', orderBy: [['id', 'desc']]},
       startTimer(),
     );
-    expect([...hydrated]).toEqual([]);
+    expect(await collectRows(hydrated)).toEqual([]);
 
     replicator.processTransaction(
       '134',
@@ -1157,7 +1178,7 @@ describe('view-syncer/pipeline-driver', () => {
 
     expect(fakeBackend.advanceToHeadStreamChunks).toHaveBeenCalledTimes(1);
     expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
-    expect(p.rowSetSignature('queryID1')).toBeUndefined();
+    expect(p.rowSetSignature('queryID1')).toBe(0n);
   });
 
   test('Go-primary batch hydrate stores the planned AST for reset re-register', async () => {
@@ -1251,6 +1272,7 @@ describe('view-syncer/pipeline-driver', () => {
         timingMs: 0,
         sigDelta: '0',
       }),
+      hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
       advanceToHeadStream: vi.fn(async () => {
         await finalGate;
@@ -1289,7 +1311,7 @@ describe('view-syncer/pipeline-driver', () => {
       {table: 'issues', orderBy: [['id', 'desc']]},
       startTimer(),
     );
-    expect([...hydrated]).toEqual([]);
+    expect(await collectRows(hydrated)).toEqual([]);
 
     replicator.processTransaction(
       '134',
@@ -1321,6 +1343,105 @@ describe('view-syncer/pipeline-driver', () => {
     expect(p.rowSetSignature('queryID1')).toEqual(BigInt(`0x${sigDelta}`));
   });
 
+  test('Go-primary streamed advance cancels Go iterator when consumer stops during TS replay', async () => {
+    const returnSpy = vi.fn(async () => ({
+      done: true as const,
+      value: undefined,
+    }));
+    const fakeBackend = {
+      initialized: true,
+      pinnedVersion: undefined,
+      initEngine: vi.fn().mockResolvedValue(undefined),
+      whenRecovered: vi.fn().mockResolvedValue(undefined),
+      hydrate: vi.fn().mockResolvedValue({
+        changes: [],
+        timingMs: 0,
+        sigDelta: '0',
+      }),
+      hydrateStreamPull: emptyHydrateStreamPull(),
+      removeQuery: vi.fn().mockResolvedValue(undefined),
+      advanceToHeadStream: vi.fn(),
+      advanceToHeadStreamChunks: vi.fn(() => ({
+        [Symbol.asyncIterator]() {
+          let sentHeader = false;
+          return {
+            next() {
+              if (!sentHeader) {
+                sentHeader = true;
+                return Promise.resolve({
+                  done: false as const,
+                  value: {
+                    changes: [],
+                    final: false,
+                    header: true,
+                    version: '134',
+                    numChanges: 2,
+                  },
+                });
+              }
+              return new Promise<IteratorResult<unknown>>(() => {});
+            },
+            return: returnSpy,
+          };
+        },
+      })),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const p = goPrimaryPipelines(fakeBackend, 'go-stream-cancel-ts-replay');
+    p.init(clientSchema);
+
+    expect(
+      await collectRows(
+        await p.addQuery(
+          'hash-go-stream-cancel',
+          'queryID1',
+          {table: 'issues', orderBy: [['id', 'desc']]},
+          startTimer(),
+        ),
+      ),
+    ).toEqual([]);
+    const mutationResultsQuery = getMutationResultsQuery(
+      upstreamSchema(shardID),
+      'cg1',
+    );
+    expect(
+      await collectRows(
+        await p.addQuery(
+          mutationResultsQuery.id,
+          mutationResultsQuery.id,
+          mutationResultsQuery.ast,
+          startTimer(),
+        ),
+      ),
+    ).toEqual([]);
+
+    replicator.processTransaction(
+      '134',
+      messages.insert('issues', {id: '4', closed: 0}),
+      messages.insert(mutationsTableName, {
+        clientGroupID: 'cg1',
+        clientID: 'c1',
+        mutationID: 1,
+        result: {},
+      }),
+    );
+    const advanced = await p.advance(NO_TIME_ADVANCEMENT_TIMER);
+    if (advanced instanceof ResetPipelinesSignal) {
+      throw new Error(`unexpected reset: ${advanced.message}`);
+    }
+
+    let seen = 0;
+    for await (const change of advanced.changes) {
+      if (change !== 'yield') {
+        seen++;
+        break;
+      }
+    }
+    expect(seen).toBe(1);
+    expect(returnSpy).toHaveBeenCalledTimes(1);
+    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
+  });
+
   test('Go-primary streamed advance rejects a header without version', async () => {
     const returnSpy = vi.fn(() => ({
       done: true as const,
@@ -1336,6 +1457,7 @@ describe('view-syncer/pipeline-driver', () => {
         timingMs: 0,
         sigDelta: '0',
       }),
+      hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
       advanceToHeadStream: vi.fn(),
       advanceToHeadStreamChunks: vi.fn(() => ({
@@ -1365,14 +1487,16 @@ describe('view-syncer/pipeline-driver', () => {
     };
     const p = goPrimaryPipelines(fakeBackend, 'go-stream-missing-version');
     p.init(clientSchema);
-    expect([
-      ...(await p.addQuery(
-        'hash-go-stream-missing-version',
-        'queryID1',
-        {table: 'issues', orderBy: [['id', 'desc']]},
-        startTimer(),
-      )),
-    ]).toEqual([]);
+    expect(
+      await collectRows(
+        await p.addQuery(
+          'hash-go-stream-missing-version',
+          'queryID1',
+          {table: 'issues', orderBy: [['id', 'desc']]},
+          startTimer(),
+        ),
+      ),
+    ).toEqual([]);
 
     replicator.processTransaction(
       '134',
@@ -1406,6 +1530,7 @@ describe('view-syncer/pipeline-driver', () => {
         timingMs: 0,
         sigDelta: '0',
       }),
+      hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
       advanceToHeadStream: vi.fn(),
       advanceToHeadStreamChunks: vi.fn(async function* () {
@@ -1428,14 +1553,16 @@ describe('view-syncer/pipeline-driver', () => {
     };
     const p = goPrimaryPipelines(fakeBackend, 'go-stream-late-protocol');
     p.init(clientSchema);
-    expect([
-      ...(await p.addQuery(
-        'hash-go-stream-late-protocol',
-        'queryID1',
-        {table: 'issues', orderBy: [['id', 'desc']]},
-        startTimer(),
-      )),
-    ]).toEqual([]);
+    expect(
+      await collectRows(
+        await p.addQuery(
+          'hash-go-stream-late-protocol',
+          'queryID1',
+          {table: 'issues', orderBy: [['id', 'desc']]},
+          startTimer(),
+        ),
+      ),
+    ).toEqual([]);
 
     replicator.processTransaction(
       '134',
@@ -1476,6 +1603,7 @@ describe('view-syncer/pipeline-driver', () => {
         timingMs: 0,
         sigDelta: '0',
       }),
+      hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
       advanceToHeadStream: vi.fn(),
       advanceToHeadStreamChunks: vi.fn(async function* () {
@@ -1497,14 +1625,16 @@ describe('view-syncer/pipeline-driver', () => {
     };
     const p = goPrimaryPipelines(fakeBackend, 'go-stream-missing-final');
     p.init(clientSchema);
-    expect([
-      ...(await p.addQuery(
-        'hash-go-stream-missing-final',
-        'queryID1',
-        {table: 'issues', orderBy: [['id', 'desc']]},
-        startTimer(),
-      )),
-    ]).toEqual([]);
+    expect(
+      await collectRows(
+        await p.addQuery(
+          'hash-go-stream-missing-final',
+          'queryID1',
+          {table: 'issues', orderBy: [['id', 'desc']]},
+          startTimer(),
+        ),
+      ),
+    ).toEqual([]);
 
     replicator.processTransaction(
       '134',
