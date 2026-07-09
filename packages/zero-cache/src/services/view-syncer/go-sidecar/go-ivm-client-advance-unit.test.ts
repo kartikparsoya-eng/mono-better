@@ -18,6 +18,7 @@ import {
   computeBoundTimeoutMs,
   GoIVMClient,
   RetryableAdvanceError,
+  type RowChange,
   ScalarResetError,
 } from './go-ivm-client.ts';
 import type {GoNapiAddon} from './napi/index.ts';
@@ -34,6 +35,11 @@ type CapturedReq = {
   method: string;
   params: Record<string, unknown>;
 };
+
+const posFrame = (ids: string[], queryID = 'q1') => ({
+  d: [{q: queryID, t: 't', c: ['id'], k: ['id']}],
+  r: ids.map(id => [0, 0, id] as unknown[]),
+});
 
 // Minimal fake host: captures every request; the TEST decides when/what to
 // deliver back (no autonomous pump — advance frames are test-driven).
@@ -194,5 +200,89 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     host.deliverSuccess(host.reqs[0].id);
     await p;
     expect(settled).toBe('resolved');
+  });
+
+  test('chunk iterator yields row chunks before the final frame arrives', async () => {
+    const client = new GoIVMClient();
+    const host = makeAdvanceFakeHost(client);
+    client.connectNapi(host.addon);
+
+    const it = client.advanceToHeadStreamChunks('cg', 1, 'app');
+    await flush();
+    const req = host.reqs[0];
+
+    host.deliver(req.id, {
+      chunkIndex: 0,
+      final: false,
+      version: '0000000002',
+      numChanges: 1,
+      header: true,
+    });
+    host.deliver(req.id, {
+      ...posFrame(['early']),
+      chunkIndex: 0,
+      final: false,
+    });
+
+    const header = await it.next();
+    expect(header.done).toBe(false);
+    expect(header.value).toMatchObject({
+      changes: [],
+      final: false,
+      header: true,
+      version: '0000000002',
+      numChanges: 1,
+    });
+
+    const first = await it.next();
+    expect(first.done).toBe(false);
+    expect((first.value.changes[0] as RowChange).rowKey.id).toBe('early');
+
+    host.deliver(req.id, {
+      chunkIndex: 1,
+      final: true,
+      version: '0000000002',
+      numChanges: 1,
+    });
+    host.deliver(req.id, 'done');
+    const final = await it.next();
+    expect(final.done).toBe(false);
+    expect(final.value).toMatchObject({
+      changes: [],
+      final: true,
+      version: '0000000002',
+      numChanges: 1,
+    });
+    await expect(it.next()).resolves.toEqual({
+      value: undefined,
+      done: true,
+    });
+  });
+
+  test('chunk iterator throws if done arrives without final frame', async () => {
+    const client = new GoIVMClient();
+    const host = makeAdvanceFakeHost(client);
+    client.connectNapi(host.addon);
+
+    const it = client.advanceToHeadStreamChunks('cg', 1, 'app');
+    await flush();
+    const req = host.reqs[0];
+
+    host.deliver(req.id, {
+      chunkIndex: 0,
+      final: false,
+      version: '0000000002',
+      numChanges: 1,
+      header: true,
+    });
+    await expect(it.next()).resolves.toMatchObject({
+      done: false,
+      value: {header: true},
+    });
+
+    host.deliver(req.id, 'done');
+    await expect(it.next()).rejects.toThrow(
+      /advanceToHeadStream finished without a final chunk/,
+    );
   });
 });

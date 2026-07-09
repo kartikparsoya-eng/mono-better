@@ -475,7 +475,11 @@ describe('view-syncer/pipeline-driver', () => {
   }
 
   function changes(timer: Timer = NO_TIME_ADVANCEMENT_TIMER) {
-    return [...(pipelines.advance(timer) as AdvanceResult).changes];
+    return [
+      ...((pipelines.advance(timer) as AdvanceResult).changes as Iterable<
+        RowChange | 'yield'
+      >),
+    ];
   }
 
   test('replica version', () => {
@@ -1101,14 +1105,23 @@ describe('view-syncer/pipeline-driver', () => {
         sigDelta: '0',
       }),
       removeQuery: vi.fn().mockResolvedValue(undefined),
-      advanceToHeadStream: vi
-        .fn()
-        .mockResolvedValueOnce({
+      advanceToHeadStreamChunks: vi.fn(async function* () {
+        yield {
           changes: [],
+          final: false,
+          header: true,
           version: '133',
           numChanges: 1,
-          rowChanges: [firstAdvanceRow],
-        })
+        };
+        yield {
+          changes: [firstAdvanceRow],
+          final: true,
+          version: '133',
+          numChanges: 1,
+        };
+      }),
+      advanceToHeadStream: vi
+        .fn()
         .mockResolvedValueOnce({
           changes: [],
           version: '134',
@@ -1136,14 +1149,132 @@ describe('view-syncer/pipeline-driver', () => {
     if (advanced instanceof ResetPipelinesSignal) {
       throw new Error(`unexpected reset: ${advanced.message}`);
     }
-    expect(
-      [...advanced.changes].filter((c): c is RowChange => c !== 'yield'),
-    ).toEqual([firstAdvanceRow, catchUpRow]);
+    const advancedRows: RowChange[] = [];
+    for await (const change of advanced.changes) {
+      if (change !== 'yield') advancedRows.push(change);
+    }
+    expect(advancedRows).toEqual([firstAdvanceRow, catchUpRow]);
 
-    expect(fakeBackend.advanceToHeadStream).toHaveBeenCalledTimes(2);
+    expect(fakeBackend.advanceToHeadStreamChunks).toHaveBeenCalledTimes(1);
+    expect(fakeBackend.advanceToHeadStream).toHaveBeenCalledTimes(1);
     expect(p.rowSetSignature('queryID1')).toEqual(
       sigUnit(firstAdvanceRow) ^ sigUnit(catchUpRow),
     );
+  });
+
+  test('Go-primary advance returns after Go header before final rows finish', async () => {
+    const goPipelines = (fakeBackend: unknown) => {
+      goBackendMock.backend = fakeBackend;
+      const storage = new Database(lc, ':memory:');
+      storage.prepare(CREATE_STORAGE_TABLE).run();
+      return new PipelineDriver(
+        lc,
+        testLogConfig,
+        new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
+        shardID,
+        new DatabaseStorage(storage).createClientGroupStorage(
+          'go-stream-test',
+        ),
+        'pipeline-driver.test.ts',
+        new InspectorDelegate(undefined),
+        () => 200,
+        undefined,
+        {goSidecar: {enabled: true}} as never,
+        {} as never,
+      );
+    };
+    const goRow: RowChange = {
+      type: ChangeType.ADD,
+      queryID: 'queryID1',
+      table: 'issues',
+      rowKey: {id: 'go-streamed'},
+      row: {id: 'go-streamed', closed: false, _0_version: '134'},
+    };
+    const sigDelta = rowIDSignatureUnit({
+      schema: '',
+      table: goRow.table,
+      rowKey: goRow.rowKey as RowKey,
+    }).toString(16);
+    let releaseFinal!: () => void;
+    const finalGate = new Promise<void>(resolve => {
+      releaseFinal = resolve;
+    });
+    const fakeBackend = {
+      initialized: true,
+      pinnedVersion: undefined,
+      initEngine: vi.fn().mockResolvedValue(undefined),
+      whenRecovered: vi.fn().mockResolvedValue(undefined),
+      hydrate: vi.fn().mockResolvedValue({
+        changes: [],
+        timingMs: 0,
+        sigDelta: '0',
+      }),
+      removeQuery: vi.fn().mockResolvedValue(undefined),
+      advanceToHeadStream: vi.fn(async () => {
+        await finalGate;
+        return {
+          changes: [],
+          version: '134',
+          numChanges: 1,
+          rowChanges: [goRow],
+          sigDeltas: {queryID1: sigDelta},
+        };
+      }),
+      advanceToHeadStreamChunks: vi.fn(async function* () {
+        yield {
+          changes: [],
+          final: false,
+          header: true,
+          version: '134',
+          numChanges: 1,
+        };
+        await finalGate;
+        yield {
+          changes: [goRow],
+          final: true,
+          version: '134',
+          numChanges: 1,
+          sigDeltas: {queryID1: sigDelta},
+        };
+      }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const p = goPipelines(fakeBackend);
+    p.init(clientSchema);
+    const hydrated = await p.addQuery(
+      'hash-go-stream',
+      'queryID1',
+      {table: 'issues', orderBy: [['id', 'desc']]},
+      startTimer(),
+    );
+    expect([...hydrated]).toEqual([]);
+
+    replicator.processTransaction(
+      '134',
+      messages.insert('issues', {id: '4', closed: 0}),
+    );
+    const advancePromise = Promise.resolve(p.advance(NO_TIME_ADVANCEMENT_TIMER));
+    try {
+      const early = await Promise.race([
+        advancePromise.then(() => 'resolved' as const),
+        new Promise<'blocked'>(resolve => setTimeout(resolve, 20, 'blocked')),
+      ]);
+      expect(early).toBe('resolved');
+    } finally {
+      releaseFinal();
+    }
+    const advanced = await advancePromise;
+    if (advanced instanceof ResetPipelinesSignal) {
+      throw new Error(`unexpected reset: ${advanced.message}`);
+    }
+    const rows: RowChange[] = [];
+    for await (const change of advanced.changes) {
+      if (change !== 'yield') rows.push(change);
+    }
+    expect(rows).toEqual([goRow]);
+    expect(fakeBackend.advanceToHeadStreamChunks).toHaveBeenCalledTimes(1);
+    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
+    expect(p.rowSetSignature('queryID1')).toEqual(BigInt(`0x${sigDelta}`));
   });
 
   test('timeout on slow advancement', () => {
@@ -1165,7 +1296,9 @@ describe('view-syncer/pipeline-driver', () => {
       elapsedLap: () => 60,
       running: () => true,
     }) as AdvanceResult;
-    expect(() => [...advResult1.changes]).toThrowErrorMatchingInlineSnapshot(
+    expect(() => [
+      ...(advResult1.changes as Iterable<RowChange | 'yield'>),
+    ]).toThrowErrorMatchingInlineSnapshot(
       `[ResetPipelinesSignal: Advancement exceeded timeout at 0 of 1 changes after 60 ms. Advancement time limited based on total hydration time of 100 ms.]`,
     );
 
@@ -1190,7 +1323,9 @@ describe('view-syncer/pipeline-driver', () => {
       elapsedLap: () => 20,
       running: () => true,
     }) as AdvanceResult;
-    expect(() => [...advResult2.changes]).not.toThrow();
+    expect(() => [
+      ...(advResult2.changes as Iterable<RowChange | 'yield'>),
+    ]).not.toThrow();
   });
 
   test('advancement timeout has a minimum limit', () => {
@@ -1213,7 +1348,9 @@ describe('view-syncer/pipeline-driver', () => {
       elapsedLap: () => 29,
       running: () => true,
     }) as AdvanceResult;
-    expect(() => [...advResult3.changes]).not.toThrow();
+    expect(() => [
+      ...(advResult3.changes as Iterable<RowChange | 'yield'>),
+    ]).not.toThrow();
   });
 
   test('reset', () => {

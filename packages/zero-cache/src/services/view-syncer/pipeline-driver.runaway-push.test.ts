@@ -197,7 +197,7 @@ describe('view-syncer/pipeline-driver', () => {
     let elapsed = 0;
     const advResult1 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++, running: () => true}) as AdvanceResult;
     expect(() => [
-      ...advResult1.changes,
+      ...(advResult1.changes as Iterable<RowChange | 'yield'>),
     ]).toThrowErrorMatchingInlineSnapshot(
       `[ResetPipelinesSignal: Advancement exceeded timeout at 0 of 1 changes after 501 ms. Advancement time limited based on total hydration time of 1000 ms.]`,
     );
@@ -228,7 +228,7 @@ describe('view-syncer/pipeline-driver', () => {
     let elapsed = 0;
     const advResult2 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++, running: () => true}) as AdvanceResult;
     expect(() => [
-      ...advResult2.changes,
+      ...(advResult2.changes as Iterable<RowChange | 'yield'>),
     ]).toThrowErrorMatchingInlineSnapshot(
       `[ResetPipelinesSignal: Advancement exceeded timeout at 0 of 1 changes after 501 ms. Advancement time limited based on total hydration time of 1000 ms.]`,
     );
@@ -260,7 +260,7 @@ describe('view-syncer/pipeline-driver', () => {
       running: () => true,
     }) as AdvanceResult;
     expect(() => {
-      for (const _ of advResult3.changes) {
+      for (const _ of advResult3.changes as Iterable<RowChange | 'yield'>) {
         changeCount++;
       }
     }).toThrowErrorMatchingInlineSnapshot(

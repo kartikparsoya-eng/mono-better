@@ -130,6 +130,18 @@ export type AdvanceToHeadResult = {
   reset?: {reason: string; msg: string} | undefined;
 };
 
+export type AdvanceToHeadStreamChunk = {
+  changes: RowChange[];
+  final: boolean;
+  header?: boolean | undefined;
+  chunkIndex?: number | undefined;
+  version?: string | undefined;
+  numChanges?: number | undefined;
+  sigDeltas?: Record<string, string> | undefined;
+  timings?: TableTiming[] | undefined;
+  reset?: {reason: string; msg: string} | undefined;
+};
+
 export type RowChange = {
   type: 0 | 1 | 2; // add, remove, edit
   queryID: string;
@@ -488,6 +500,44 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
   onRow: (change: RowChange) => void;
   finish: () => AdvanceToHeadResult;
 } {
+  const acc: RowChange[] = [];
+  let finalResult: AdvanceToHeadStreamChunk | undefined;
+  const handler = createAdvanceToHeadStreamChunkAccumulator(chunk => {
+    for (const rc of chunk.changes) acc.push(rc);
+    if (chunk.final) {
+      finalResult = chunk;
+    }
+  }, opts);
+
+  return {
+    onRow: handler.onRow,
+    onFrame: handler.onFrame,
+    finish: (): AdvanceToHeadResult => {
+      handler.finish();
+      const result: AdvanceToHeadResult = {
+        changes: [],
+        version: finalResult?.version ?? '',
+        numChanges: finalResult?.numChanges ?? 0,
+        rowChanges: acc,
+        timings: finalResult?.timings,
+        reset: finalResult?.reset,
+      };
+      if (finalResult?.sigDeltas !== undefined) {
+        result.sigDeltas = finalResult.sigDeltas;
+      }
+      return result;
+    },
+  };
+}
+
+export function createAdvanceToHeadStreamChunkAccumulator(
+  onResult: (chunk: AdvanceToHeadStreamChunk) => void,
+  opts?: {rowMode?: boolean},
+): {
+  onFrame: (value: unknown) => void;
+  onRow: (change: RowChange) => void;
+  finish: () => void;
+} {
   // Row mode (NAPI transport): same two-plane contract as
   // createAdvanceStreamAccumulator — rows arrive individually via onRow
   // (kind-3 records) while FRAMES carry only fallback rows + the terminal
@@ -497,14 +547,9 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
   // partials produce no frame at all), so the strict monotonicity check
   // is relaxed to "non-decreasing" in row mode.
   const rowMode = opts?.rowMode === true;
-  const acc: RowChange[] = [];
-  let timings: TableTiming[] | undefined;
   let expectedNextIndex = 0;
   let gotFinal = false;
-  let version = '';
-  let numChanges = 0;
-  let reset: {reason: string; msg: string} | undefined;
-  let sigDeltas: Record<string, string> | undefined;
+  let gotHeader = false;
 
   return {
     onRow: (change: RowChange) => {
@@ -513,13 +558,14 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
           'advanceToHeadStream received row record after final frame',
         );
       }
-      acc.push(change);
+      onResult({changes: [change], final: false});
     },
     onFrame: (value: unknown) => {
       const v = value as {
         changes?: RowChange[];
         chunkIndex?: number;
         final?: boolean;
+        header?: boolean;
         timings?: TableTiming[];
         version?: string;
         numChanges?: number;
@@ -528,7 +574,34 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
       };
       const chunkIndex = v.chunkIndex ?? 0;
       const final = v.final ?? true; // belt-and-braces for older sidecars
+      const header = v.header === true;
       const chunk = extractChanges(value);
+
+      if (header) {
+        if (gotFinal) {
+          throw new Error(
+            'advanceToHeadStream received header after final frame',
+          );
+        }
+        if (gotHeader) {
+          throw new Error('advanceToHeadStream received duplicate header');
+        }
+        if (chunk.length > 0 || final) {
+          throw new Error(
+            'advanceToHeadStream header must be non-final and rowless',
+          );
+        }
+        gotHeader = true;
+        onResult({
+          changes: [],
+          final: false,
+          header: true,
+          chunkIndex,
+          version: v.version,
+          numChanges: v.numChanges,
+        });
+        return;
+      }
 
       // Single sender goroutine on the Go side → strict in-order delivery.
       // A gap is a wire-level bug; fail loud rather than silently committing
@@ -555,40 +628,29 @@ export function createAdvanceToHeadStreamAccumulator(opts?: {
         );
       }
 
-      for (const rc of chunk) acc.push(rc);
-
-      // version + numChanges + timings + reset travel on the final
-      // frame only (Go-side invariant).
+      const result: AdvanceToHeadStreamChunk = {
+        changes: chunk,
+        final,
+        chunkIndex,
+      };
       if (final) {
-        timings = v.timings;
-        version = v.version ?? '';
-        numChanges = v.numChanges ?? 0;
-        reset = v.reset;
-        sigDeltas = v.sigDeltas;
+        result.timings = v.timings;
+        result.version = v.version ?? '';
+        result.numChanges = v.numChanges ?? 0;
+        result.reset = v.reset;
+        result.sigDeltas = v.sigDeltas;
         gotFinal = true;
       }
+      onResult(result);
     },
 
-    finish: (): AdvanceToHeadResult => {
+    finish: () => {
       if (!gotFinal) {
         // `done` arrived without any frame carrying final=true — a Go-side bug
         // (the advance MUST always emit a terminal frame). Surface so we
         // don't silently return a partial result that would corrupt the CVR.
         throw new Error('advanceToHeadStream finished without a final chunk');
       }
-      const result: AdvanceToHeadResult = {
-        // Derive-only diff is never streamed (the stream carries RowChanges).
-        changes: [],
-        version,
-        numChanges,
-        rowChanges: acc,
-        timings,
-        reset,
-      };
-      if (sigDeltas !== undefined) {
-        result.sigDeltas = sigDeltas;
-      }
-      return result;
     },
   };
 }
@@ -1278,7 +1340,67 @@ export class GoIVMClient {
       abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
     },
   ): Promise<AdvanceToHeadResult> {
-    const handler = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    const rowChanges: RowChange[] = [];
+    let finalChunk: AdvanceToHeadStreamChunk | undefined;
+    for await (const chunk of this.advanceToHeadStreamChunks(
+      clientGroupID,
+      initEpoch,
+      appID,
+      opts,
+    )) {
+      for (const rc of chunk.changes) rowChanges.push(rc);
+      if (chunk.final) finalChunk = chunk;
+    }
+    const result: AdvanceToHeadResult = {
+      changes: [],
+      version: finalChunk?.version ?? '',
+      numChanges: finalChunk?.numChanges ?? 0,
+      rowChanges,
+      timings: finalChunk?.timings,
+      reset: finalChunk?.reset,
+    };
+    if (finalChunk?.sigDeltas !== undefined) {
+      result.sigDeltas = finalChunk.sigDeltas;
+    }
+    return result;
+  }
+
+  advanceToHeadStreamChunks(
+    clientGroupID: string,
+    initEpoch: number,
+    appID: string,
+    opts?: CallOptions & {
+      /**
+       * Arms Go's port of TS's economic advancement-abort
+       * (#shouldAdvanceYieldMaybeAbortAdvance): totalHydrationTimeMs is the
+       * CG's measured re-hydrate cost — the price of the reset an abort
+       * triggers — computed by PipelineDriver.totalHydrationTimeMs() so the
+       * decision inputs are identical to TS's own. Omitted → abort disarmed
+       * (old-server pairs ignore the extra fields — additive msgpack).
+       */
+      abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
+    },
+  ): AsyncIterableIterator<AdvanceToHeadStreamChunk> {
+    const buffered: AdvanceToHeadStreamChunk[] = [];
+    let wake: (() => void) | null = null;
+    let done = false;
+    let error: Error | null = null;
+    let closed = false;
+
+    const notify = () => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+
+    const handler = createAdvanceToHeadStreamChunkAccumulator(
+      chunk => {
+        if (closed) return;
+        buffered.push(chunk);
+        notify();
+      },
+      {rowMode: true},
+    );
     const base: Record<string, unknown> = appID
       ? {clientGroupID, initEpoch, appID}
       : {clientGroupID, initEpoch};
@@ -1287,7 +1409,8 @@ export class GoIVMClient {
       base.totalHydrationTimeMs = opts.abortBudget.totalHydrationTimeMs;
       if (opts.abortBudget.suppressAbort) base.suppressAbort = true;
     }
-    await this.#call('advanceToHeadStream', base, {
+
+    void this.#call('advanceToHeadStream', base, {
       // Compute-bound: no timeout in-process. The advance's bound is the
       // ECONOMIC abort riding this request (abortBudget), not wall-clock —
       // exactly TS's own advance discipline.
@@ -1297,8 +1420,70 @@ export class GoIVMClient {
       clientGroupID: opts?.clientGroupID ?? clientGroupID,
       onPartial: handler.onFrame,
       onRow: handler.onRow,
-    });
-    return handler.finish();
+    }).then(
+      () => {
+        try {
+          handler.finish();
+          done = true;
+        } catch (e) {
+          if (closed) {
+            done = true;
+          } else {
+            error = e instanceof Error ? e : new Error(String(e));
+          }
+        }
+        notify();
+      },
+      (e: unknown) => {
+        if (closed) {
+          done = true;
+        } else {
+          error = e instanceof Error ? e : new Error(String(e));
+        }
+        notify();
+      },
+    );
+
+    const iterator: AsyncIterableIterator<AdvanceToHeadStreamChunk> = {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next: async (): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
+        for (;;) {
+          if (closed) {
+            return {value: undefined, done: true};
+          }
+          const entry = buffered.shift();
+          if (entry !== undefined) {
+            return {value: entry, done: false};
+          }
+          if (error !== null) {
+            const e = error;
+            error = null;
+            closed = true;
+            throw e;
+          }
+          if (done) {
+            closed = true;
+            return {value: undefined, done: true};
+          }
+          await new Promise<void>(resolve => {
+            wake = resolve;
+          });
+        }
+      },
+      return: (): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
+        closed = true;
+        buffered.length = 0;
+        return Promise.resolve({value: undefined, done: true});
+      },
+      throw: (e?: unknown): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
+        closed = true;
+        buffered.length = 0;
+        return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    };
+    return iterator;
   }
 
   /**

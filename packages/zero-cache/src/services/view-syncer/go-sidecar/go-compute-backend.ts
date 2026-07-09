@@ -15,6 +15,7 @@ import type {ZeroConfig} from '../../../config/zero-config.ts';
 import {RetryableAdvanceError} from './go-ivm-client.ts';
 import type {
   AdvanceToHeadResult,
+  AdvanceToHeadStreamChunk,
   HydrateResult as GoHydrateResult,
   TableData,
 } from './go-ivm-client.ts';
@@ -289,6 +290,48 @@ export class GoComputeBackend {
         ),
       ),
     );
+  }
+
+  async *advanceToHeadStreamChunks(abortBudget?: {
+    totalHydrationTimeMs: number;
+  }): AsyncIterableIterator<AdvanceToHeadStreamChunk> {
+    const delaysMs = [100, 500, 2000];
+    for (let attempt = 0; ; attempt++) {
+      let yielded = false;
+      try {
+        if (this.#restartGate) await this.#restartGate;
+        const stream = this.#client().advanceToHeadStreamChunks(
+          this.#clientGroupID,
+          this.#sidecarInitEpoch,
+          this.#appID,
+          {
+            ...this.#cgOpts(),
+            ...(abortBudget ? {abortBudget} : {}),
+          },
+        );
+        for await (const chunk of stream) {
+          yielded = true;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        if (
+          yielded ||
+          !(err instanceof RetryableAdvanceError) ||
+          attempt >= delaysMs.length
+        ) {
+          throw err;
+        }
+        const delay = Math.round(delaysMs[attempt] * (0.5 + Math.random()));
+        this.#log(
+          'warn',
+          `advanceToHeadStream failed clean before streaming; retrying in ` +
+            `place (attempt ${attempt + 1}/${delaysMs.length}, ${delay}ms): ` +
+            err.message,
+        );
+        await new Promise<void>(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
 
   // Pinned cgID for the client's per-group fairness semaphore.

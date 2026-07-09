@@ -2591,8 +2591,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           pokers,
         );
       } catch (e) {
+        await pokers.cancel();
         if (e instanceof ResetPipelinesSignal) {
-          await pokers.cancel();
           return e;
         }
         throw e;

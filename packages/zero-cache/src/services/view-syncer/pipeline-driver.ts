@@ -76,6 +76,7 @@ import {
 } from './go-sidecar/go-compute-backend.ts';
 import type {
   AdvanceToHeadResult,
+  AdvanceToHeadStreamChunk,
   TableTiming,
 } from './go-sidecar/go-ivm-client.ts';
 import {
@@ -163,7 +164,7 @@ function goSigDeltaRecord(
 export type AdvanceResult = {
   version: string;
   numChanges: number;
-  changes: Iterable<RowChange | 'yield'>;
+  changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>;
   // P2c observability: when Go-primary serves user queries via advanceToHead,
   // `version` above is the RECONCILED watermark min(tsVersion, goVersion). These
   // expose the two un-reconciled authorities so the view-syncer can assert
@@ -1931,6 +1932,29 @@ export class PipelineDriver {
     }
   }
 
+  #xorRowSetSignature(queryID: string, delta: bigint): void {
+    const cur = this.#rowSetSignatures.get(queryID) ?? 0n;
+    this.#rowSetSignatures.set(queryID, cur ^ delta);
+  }
+
+  #applyGoAdvanceSigDeltas(
+    sigDeltas: Readonly<Record<string, string>> | undefined,
+    fallbackDeltas: ReadonlyMap<string, bigint>,
+  ): void {
+    const applied = new Set<string>();
+    if (sigDeltas !== undefined) {
+      for (const [queryID, delta] of Object.entries(sigDeltas)) {
+        this.#xorRowSetSignature(queryID, parseSignature(delta));
+        applied.add(queryID);
+      }
+    }
+    for (const [queryID, delta] of fallbackDeltas) {
+      if (!applied.has(queryID)) {
+        this.#xorRowSetSignature(queryID, delta);
+      }
+    }
+  }
+
   /**
    * Returns the value of the row with the given primary key `pk`,
    * or `undefined` if there is no such row. The pipeline must have been
@@ -2102,86 +2126,17 @@ export class PipelineDriver {
       [Symbol.iterator]: () => buffered[Symbol.iterator](),
     };
 
-    // Kick the Go RPC in flight while TS does its work. Go independently
-    // leapfrogs its OWN Snapshotter (advanceToHead trigger), derives its OWN
-    // diff, and drives its OWN engine frame-coordinated. Go is self-consistent
-    // (no frame-timing drift). Go reports its own watermark V_go, which we
-    // reconcile with TS's V_ts below (§10: CVR stamps at min(V_ts, V_go)).
-    //
-    // Error classification is shared via #classifyGoPrimaryAdvanceError: bucket
-    // by failure mode so each is observable; protocol/stale-epoch escalate
-    // (re-throw), restart/unclassified drop the delta + schedule a reset (the
-    // "miss exactly one delta" contract; recovery rebuilds Go's state).
-    const goPromise: Promise<
-      | {
-          changes: RowChange[];
-          goVersion: string | undefined;
-          sigDeltas?: Record<string, string> | undefined;
-        }
-      | {reset: ResetPipelinesSignal}
-    > = this.#goBackend!
-      .advanceToHeadStream({
-        // Arm Go's economic advancement-abort with TS's own inputs: the
-        // CG's priced re-hydrate cost (Go-owned entries record the
-        // TS-observed hydrate WALL — goHydrationCostMs — the same units
-        // TS-native entries carry), escalated 2× per consecutive abort
-        // and floored at the minimum true cost of a Go reset
-        // (goAdvanceAbortBudgetMs) so a structurally-tiny budget
-        // (internal-only / TTL-expired CGs price at ~0) cannot loop
-        // abort→reset→abort. Go aborts on TS's formula →
-        // AdvanceAbortedError → 'advancement-timeout' reset — the
-        // identical recovery a TS-native abort takes. This replaces the
-        // wall-clock RPC timeout as the only load-coupled bound on the
-        // advance.
-        totalHydrationTimeMs: goAdvanceAbortBudgetMs(
-          this.totalHydrationTimeMs(),
-          this.#consecutiveAdvanceAborts,
-        ),
-      })
-      .then(goDerived => {
-        if (goDerived.reset) {
-          // F2: a Go-reported reset (truncate / permissions change / engine
-          // reset) means Go's user pipelines must full-re-hydrate. The
-          // legacy path (#scheduleGoReset + stamp prev) floored THIS cycle's
-          // watermark safely, but the async Go reset rebuilds at head and
-          // DISCARDS its hydrate output — so the (prev→head] user delta is
-          // never delivered. For a TRUNCATE that means the deleted rows stay
-          // on every client's screen indefinitely (TS-native does a full
-          // re-hydrate for the same signal). Escalate to a full pipeline
-          // reset so the view-syncer re-hydrates at head, re-delivering the
-          // current state as an idempotent superset.
-          this.#lc.info?.(
-            `[go-primary] Go reported reset ${goDerived.reset.reason} ` +
-              `(${goDerived.reset.msg}); escalating to pipeline reset`,
-          );
-          return {
-            reset: new ResetPipelinesSignal(
-              `Go reported reset ${goDerived.reset.reason} ` +
-                `(${goDerived.reset.msg})`,
-              'go-primary-drop',
-            ),
-          };
-        }
-        this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
-        return {
-          changes: goDerived.rowChanges as unknown as RowChange[],
-          goVersion: goDerived.version,
-          sigDeltas: goDerived.sigDeltas,
-        };
-      })
-      .catch(e => {
-        // F2: a dropped advance (sidecar restart / engine not initialized /
-        // RPC timeout / unclassified) escalates to a full pipeline reset
-        // rather than committing an empty delta floored at prev — the
-        // latter permanently skips the (prev→head] user changes because the
-        // scheduled Go reset rebuilds at head and discards its hydrate
-        // output (see #classifyGoPrimaryAdvanceError). Protocol/stale errors
-        // still reject goPromise (re-thrown) and never reach here.
-        const classified = this.#classifyGoPrimaryAdvanceError(e);
-        return classified instanceof ResetPipelinesSignal
-          ? {reset: classified}
-          : {changes: classified, goVersion: diff.prev.version};
-      });
+    const abortBudget = {
+      totalHydrationTimeMs: goAdvanceAbortBudgetMs(
+        this.totalHydrationTimeMs(),
+        this.#consecutiveAdvanceAborts,
+      ),
+    };
+
+    const goIterator = this.#goBackend!
+      .advanceToHeadStreamChunks(abortBudget)
+      [Symbol.asyncIterator]();
+    const firstGoChunkPromise = goIterator.next();
 
     // Run TS's #advance over the replay buffer. Only internal-query pipelines
     // are connected, so user-table pushes are no-ops on TS — the iterator
@@ -2202,135 +2157,239 @@ export class PipelineDriver {
       }
     }
 
-    const goOutcome = await goPromise;
-    if ('reset' in goOutcome) {
-      // F2: the Go advance dropped a user delta or reported a truncate/reset.
-      // Return the signal so the view-syncer re-hydrates every query at head
-      // (the gap heals as an idempotent superset). The TS internal-query work
-      // above is discarded — the reset re-establishes it. Correct over fast.
-      return goOutcome.reset;
+    let firstGoChunk: AdvanceToHeadStreamChunk;
+    try {
+      const first = await firstGoChunkPromise;
+      if (first.done) {
+        throw new Error('advanceToHeadStream finished before first frame');
+      }
+      firstGoChunk = first.value;
+    } catch (e) {
+      const classified = this.#classifyGoPrimaryAdvanceError(e);
+      return classified instanceof ResetPipelinesSignal
+        ? classified
+        : {
+            version: diff.prev.version,
+            numChanges,
+            changes: classified,
+          };
     }
-    const {changes: goResults, goVersion} = goOutcome;
-    // A completed drive advance ends the abort streak — the next budget
-    // returns to 1× (see escalatedAbortBudgetMs).
-    this.#consecutiveAdvanceAborts = 0;
-    let goVersionFinal = goVersion;
-    let goResultsFinal = goResults;
-    let goSigDeltasFinal = mergeGoSigDeltas(
-      undefined,
-      goOutcome.sigDeltas,
-      goResults,
-    );
 
-    // P2c clamp (inverted-edge guard): if Go came back BEHIND TS
-    // (V_go < V_ts — rare; Go re-init/lag left its snapshotter pinned behind),
-    // committing now stamps the CVR at min=V_go while TS's internal changes
-    // (lmid / mutationResults) already reflect V_ts > V_go — an lmid ack AHEAD
-    // of its user data, i.e. a torn cross-engine view. We can't clamp the
-    // internal changes DOWN to min (they're already derived, version-less, and
-    // would be LOST — the snapshotter consumed to V_ts), so instead LIFT Go UP
-    // to V_ts: re-run advanceToHead (Go leapfrogs further toward head, which is
-    // ≥ V_ts since the replica head only grows) and accumulate its extra user
-    // RowChanges, until V_go ≥ V_ts. Bounded; only fires in the inverted edge,
-    // so the common path (V_go ≥ V_ts) is untouched. If Go still can't catch up
-    // (genuinely wedged), we fall through to min() — the watermark stays safe,
-    // the torn window persists one cycle.
-    if (goVersionFinal !== undefined && goVersionFinal < version) {
-      const MAX_CATCHUP = 3;
-      for (let i = 0; i < MAX_CATCHUP && goVersionFinal < version; i++) {
-        let next: AdvanceToHeadResult;
-        try {
-          next = await this.#goBackend!.advanceToHeadStream({
-            // Same economic bound as the main drive advance (escalation +
-            // reset-cost floor included — a catch-up abort feeds the same
-            // streak): a slow catch-up is exactly the "cheaper to reset"
-            // case.
-            totalHydrationTimeMs: goAdvanceAbortBudgetMs(
-              this.totalHydrationTimeMs(),
-              this.#consecutiveAdvanceAborts,
-            ),
-          });
-        } catch (e) {
-          // User's-audit staleness hole: a failed catch-up is NOT safely
-          // absorbable the way "still behind after MAX_CATCHUP" is. The
-          // documented handling for an advanceToHead error — e.g. the
-          // economic advancement-abort — is reset/re-hydrate; swallowing it
-          // here committed at min with Go's engine stuck a window behind
-          // (stale serving), and a diff that only GROWS made the wedge
-          // permanent.
-          // Classify exactly like the main advance path: protocol /
-          // stale-epoch / data-error re-throw (via the classifier),
-          // sidecar / unclassified escalate to an immediate pipeline reset.
-          const classified = this.#classifyGoPrimaryAdvanceError(e);
-          if (classified instanceof ResetPipelinesSignal) {
-            return classified;
+    const resetFromGo = (reset: {reason: string; msg: string}) => {
+      this.#lc.info?.(
+        `[go-primary] Go reported reset ${reset.reason} ` +
+          `(${reset.msg}); escalating to pipeline reset`,
+      );
+      return new ResetPipelinesSignal(
+        `Go reported reset ${reset.reason} (${reset.msg})`,
+        'go-primary-drop',
+      );
+    };
+
+    const collectGoChunks = async (
+      firstChunk: AdvanceToHeadStreamChunk,
+    ): Promise<AdvanceToHeadResult> => {
+      const rowChanges: RowChange[] = [];
+      let finalChunk: AdvanceToHeadStreamChunk | undefined;
+      const consume = (chunk: AdvanceToHeadStreamChunk) => {
+        for (const rc of chunk.changes) {
+          rowChanges.push(rc as unknown as RowChange);
+        }
+        if (chunk.final) {
+          finalChunk = chunk;
+        }
+      };
+      consume(firstChunk);
+      for (;;) {
+        const next = await goIterator.next();
+        if (next.done) break;
+        consume(next.value);
+      }
+      return {
+        changes: [],
+        version: finalChunk?.version ?? firstChunk.version ?? '',
+        numChanges: finalChunk?.numChanges ?? firstChunk.numChanges ?? 0,
+        rowChanges,
+        timings: finalChunk?.timings,
+        reset: finalChunk?.reset,
+        sigDeltas: finalChunk?.sigDeltas,
+      };
+    };
+
+    const headerGoVersion =
+      firstGoChunk.header === true && firstGoChunk.version
+        ? firstGoChunk.version
+        : undefined;
+
+    if (firstGoChunk.reset) {
+      return resetFromGo(firstGoChunk.reset);
+    }
+
+    if (
+      firstGoChunk.header !== true ||
+      firstGoChunk.final ||
+      (headerGoVersion !== undefined && headerGoVersion < version)
+    ) {
+      let goDerived: AdvanceToHeadResult;
+      try {
+        goDerived = await collectGoChunks(firstGoChunk);
+      } catch (e) {
+        const classified = this.#classifyGoPrimaryAdvanceError(e);
+        return classified instanceof ResetPipelinesSignal
+          ? classified
+          : {
+              version: diff.prev.version,
+              numChanges,
+              changes: classified,
+            };
+      }
+      if (goDerived.reset) {
+        return resetFromGo(goDerived.reset);
+      }
+      this.#recordGoPrimaryAdvanceTimings(goDerived.timings);
+      let goVersionFinal = goDerived.version;
+      let goResultsFinal = goDerived.rowChanges as unknown as RowChange[];
+      let goSigDeltasFinal = mergeGoSigDeltas(
+        undefined,
+        goDerived.sigDeltas,
+        goResultsFinal,
+      );
+
+      if (goVersionFinal !== undefined && goVersionFinal < version) {
+        const MAX_CATCHUP = 3;
+        for (let i = 0; i < MAX_CATCHUP && goVersionFinal < version; i++) {
+          let next: AdvanceToHeadResult;
+          try {
+            next = await this.#goBackend!.advanceToHeadStream({
+              totalHydrationTimeMs: goAdvanceAbortBudgetMs(
+                this.totalHydrationTimeMs(),
+                this.#consecutiveAdvanceAborts,
+              ),
+            });
+          } catch (e) {
+            const classified = this.#classifyGoPrimaryAdvanceError(e);
+            if (classified instanceof ResetPipelinesSignal) {
+              return classified;
+            }
+            this.#lc.warn?.(
+              `[go-primary] catch-up advanceToHead failed: ${String(e)}; ` +
+                `committing at min`,
+            );
+            break;
           }
-          // Defensive: the RowChange[] bucket is never produced today —
-          // keep the legacy commit-at-min disposition if it ever is.
+          if (next.reset) {
+            this.#lc.info?.(
+              `[go-primary] Go reported reset during catch-up ` +
+                `(${next.reset.reason}); escalating to pipeline reset`,
+            );
+            return new ResetPipelinesSignal(
+              `Go reported reset during catch-up ${next.reset.reason} ` +
+                `(${next.reset.msg})`,
+              'go-primary-drop',
+            );
+          }
+          this.#recordGoPrimaryAdvanceTimings(next.timings);
+          const nextRows = next.rowChanges as unknown as RowChange[];
+          goSigDeltasFinal = mergeGoSigDeltas(
+            goSigDeltasFinal,
+            next.sigDeltas,
+            nextRows,
+          );
+          goResultsFinal = [...goResultsFinal, ...nextRows];
+          goVersionFinal = next.version;
+        }
+        if (goVersionFinal < version) {
           this.#lc.warn?.(
-            `[go-primary] catch-up advanceToHead failed: ${String(e)}; ` +
-              `committing at min`,
-          );
-          break;
-        }
-        if (next.reset) {
-          // F2: a reset during catch-up (truncate/permissions) leaves the same
-          // permanent gap as the main reset branch — the async Go reset rebuilds
-          // at head and discards its hydrate output. Escalate to a full pipeline
-          // reset so the view-syncer re-hydrates at head.
-          this.#lc.info?.(
-            `[go-primary] Go reported reset during catch-up ` +
-              `(${next.reset.reason}); escalating to pipeline reset`,
-          );
-          return new ResetPipelinesSignal(
-            `Go reported reset during catch-up ${next.reset.reason} ` +
-              `(${next.reset.msg})`,
-            'go-primary-drop',
+            `[go-primary] Go still behind TS after catch-up ` +
+              `(V_ts=${version}, V_go=${goVersionFinal}); committing at min — ` +
+              `rare transient, control-plane ack may lead data by one cycle`,
           );
         }
-        this.#recordGoPrimaryAdvanceTimings(next.timings);
-        const nextRows = next.rowChanges as unknown as RowChange[];
-        goSigDeltasFinal = mergeGoSigDeltas(
-          goSigDeltasFinal,
-          next.sigDeltas,
-          nextRows,
-        );
-        goResultsFinal = [...goResultsFinal, ...nextRows];
-        goVersionFinal = next.version;
       }
-      if (goVersionFinal < version) {
-        this.#lc.warn?.(
-          `[go-primary] Go still behind TS after catch-up ` +
-            `(V_ts=${version}, V_go=${goVersionFinal}); committing at min — ` +
-            `rare transient, control-plane ack may lead data by one cycle`,
-        );
+
+      this.#consecutiveAdvanceAborts = 0;
+      const reconciled = reconcileGoPrimaryWatermark(version, goVersionFinal);
+      this.#noteGoDataVersion(goVersionFinal);
+
+      const trackedTsChanges = this.#trackRowSetSignatures(tsChanges);
+      const trackedGoResults = this.#trackRowSetSignatures(
+        goResultsFinal,
+        goSigDeltaRecord(goSigDeltasFinal),
+      );
+      function* yieldMerged(): Iterable<RowChange | 'yield'> {
+        yield* trackedTsChanges;
+        yield* trackedGoResults;
       }
+
+      return {
+        version: reconciled.version,
+        numChanges,
+        changes: yieldMerged(),
+        tsVersion: reconciled.tsVersion,
+        goVersion: reconciled.goVersion,
+      };
     }
 
-    // P2c reconciliation: the CVR stateVersion is a completeness floor, so it
-    // may only be committed at a version BOTH authorities have crossed. TS's
-    // internal data is at `version` (V_ts); Go's user data is at `goVersionFinal`
-    // (V_go, post-catch-up). Stamp at min(V_ts, V_go) — under-claiming is safe
-    // (the ahead side's extra rows are an idempotent superset delivered at the
-    // committed patchVersion), over-claiming risks a client missing a change in
-    // the gap. In push mode `goVersion` is undefined and the watermark is V_ts.
-    const reconciled = reconcileGoPrimaryWatermark(version, goVersionFinal);
-    // Gen-6: remember Go's data-plane version — warm hydrates on this CG read
-    // Go's post-advance frame, so the CVR hydrate stamp (hydrateVersion) must
-    // cover it or gap rows arrive under an unbumped CVR version (cvr.ts:778).
-    this.#noteGoDataVersion(goVersionFinal);
+    const reconciled = reconcileGoPrimaryWatermark(version, headerGoVersion);
+    const self = this;
+    async function* yieldMerged(): AsyncIterable<RowChange | 'yield'> {
+      yield* self.#trackRowSetSignatures(tsChanges);
 
-    // Merge: TS internal-query events + Go user-query events. The two
-    // sets are table-disjoint by construction (internal tables filtered
-    // out of Go; user tables have stub pipelines in TS that don't emit).
-    const trackedTsChanges = this.#trackRowSetSignatures(tsChanges);
-    const trackedGoResults = this.#trackRowSetSignatures(
-      goResultsFinal,
-      goSigDeltaRecord(goSigDeltasFinal),
-    );
-    function* yieldMerged(): Iterable<RowChange | 'yield'> {
-      yield* trackedTsChanges;
-      yield* trackedGoResults;
+      const fallbackDeltas = new Map<string, bigint>();
+      let finalSigDeltas: Record<string, string> | undefined;
+      let finalGoVersion = headerGoVersion;
+      try {
+        for (;;) {
+          const next = await goIterator.next();
+          if (next.done) break;
+          const chunk = next.value;
+          if (chunk.reset) {
+            throw resetFromGo(chunk.reset);
+          }
+          for (const change of chunk.changes as unknown as RowChange[]) {
+            if (change.type !== ChangeType.EDIT) {
+              const unit = rowIDSignatureUnit({
+                schema: '',
+                table: change.table,
+                rowKey: change.rowKey as RowKey,
+              });
+              fallbackDeltas.set(
+                change.queryID,
+                (fallbackDeltas.get(change.queryID) ?? 0n) ^ unit,
+              );
+            }
+            yield change;
+          }
+          if (chunk.final) {
+            self.#recordGoPrimaryAdvanceTimings(chunk.timings);
+            finalSigDeltas = chunk.sigDeltas;
+            finalGoVersion = chunk.version || finalGoVersion;
+          }
+        }
+      } catch (e) {
+        if (e instanceof ResetPipelinesSignal) {
+          throw e;
+        }
+        const classified = self.#classifyGoPrimaryAdvanceError(e);
+        if (classified instanceof ResetPipelinesSignal) {
+          throw classified;
+        }
+        throw new ResetPipelinesSignal(
+          'Go advance stream failed after emitting observable chunks; ' +
+            'discarding partial streamed rows and rehydrating',
+          'go-primary-drop',
+        );
+      }
+
+      if (finalGoVersion !== undefined && finalGoVersion < version) {
+        throw new ResetPipelinesSignal(
+          `Go final version ${finalGoVersion} fell behind TS version ${version}`,
+          'go-primary-drop',
+        );
+      }
+      self.#consecutiveAdvanceAborts = 0;
+      self.#noteGoDataVersion(finalGoVersion);
+      self.#applyGoAdvanceSigDeltas(finalSigDeltas, fallbackDeltas);
     }
 
     return {
