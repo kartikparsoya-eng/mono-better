@@ -1179,6 +1179,52 @@ describe('view-syncer/pipeline-driver', () => {
     );
   });
 
+  test('Go-primary batch hydrate stores the planned AST for reset re-register', async () => {
+    const rawAst: AST = {table: 'issues'};
+    let sentAst: AST | undefined;
+    const fakeBackend = {
+      initialized: true,
+      pinnedVersion: undefined,
+      initEngine: vi.fn().mockResolvedValue(undefined),
+      whenRecovered: vi.fn().mockResolvedValue(undefined),
+      hydrateManyStreamPull: vi.fn(async function* (
+        queries: {
+          queryID: string;
+          ast: AST;
+        }[],
+      ) {
+        sentAst = queries[0].ast;
+        yield {
+          queryID: 'queryID1',
+          changes: [],
+          timingMs: 0,
+          final: true,
+        };
+      }),
+      removeQuery: vi.fn().mockResolvedValue(undefined),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const p = goPrimaryPipelines(fakeBackend, 'go-batch-planned-ast');
+    p.init(clientSchema);
+
+    const chunks = [];
+    for await (const chunk of p.goHydrateBatchStream([
+      {
+        transformationHash: 'hash-go-batch',
+        queryID: 'queryID1',
+        ast: rawAst,
+      },
+    ])) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toHaveLength(1);
+    expect(fakeBackend.hydrateManyStreamPull).toHaveBeenCalledTimes(1);
+    expect(sentAst).toBeDefined();
+    expect(sentAst).not.toEqual(rawAst);
+    expect(p.queries().get('queryID1')?.transformedAst).toEqual(sentAst);
+  });
+
   test('Go-primary advance returns after Go header before final rows finish', async () => {
     const goPipelines = (fakeBackend: unknown) => {
       goBackendMock.backend = fakeBackend;

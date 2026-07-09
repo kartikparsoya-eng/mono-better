@@ -1573,8 +1573,12 @@ export class PipelineDriver {
     // F1: about to register Go-owned user stubs — record the build mode.
     this.#goUserPipelineMode = 'go';
 
-    const byQueryID = new Map<string, (typeof queries)[number]>();
-    for (const q of userQueries) byQueryID.set(q.queryID, q);
+    const plannedUserQueries = userQueries.map(q => ({
+      ...q,
+      ast: this.#planAstForGo(q.ast),
+    }));
+    const byQueryID = new Map<string, (typeof plannedUserQueries)[number]>();
+    for (const q of plannedUserQueries) byQueryID.set(q.queryID, q);
 
     // PULL delivery (ABI v3, DESIGN-duplex-streaming): Go produces each row
     // only as this generator's consumer demands it — the for-await below IS
@@ -1588,9 +1592,9 @@ export class PipelineDriver {
     // interleaves their rows.
     const batchHydrateStartMs = performance.now();
     const stream = this.#goBackend!.hydrateManyStreamPull(
-      userQueries.map(q => ({
+      plannedUserQueries.map(q => ({
         queryID: q.queryID,
-        ast: this.#planAstForGo(q.ast),
+        ast: q.ast,
       })),
     );
     try {
@@ -1620,7 +1624,7 @@ export class PipelineDriver {
               ? goHydrationCostMs(
                   r.timingMs,
                   (performance.now() - batchHydrateStartMs) /
-                    userQueries.length,
+                    plannedUserQueries.length,
                 )
               : (r.timingMs ?? 0),
             transformedAst: q.ast,
