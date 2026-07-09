@@ -109,6 +109,7 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       for (const msg of [
         'chunk order violation: got 3 expected 2',
         'stream finished without a final chunk',
+        'advanceToHeadStream header missing version',
         'Frame too large: 80000000 bytes',
         'protocolRev mismatch: client 4 server 3',
       ]) {
@@ -137,7 +138,9 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
         'panic: FromSQLiteType(number): int64 9999999999999999 exceeds JS MAX_SAFE_INTEGER',
         'panic: cannot compare values of different types: string(x) and float64(1)',
       ]) {
-        expect(classifyGoPrimaryAdvanceError(new Error(msg))).toBe('data-error');
+        expect(classifyGoPrimaryAdvanceError(new Error(msg))).toBe(
+          'data-error',
+        );
       }
     });
 
@@ -221,7 +224,9 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
       // classified protocol (checked first). Both re-throw, so behaviour is
       // identical — this pins the documented precedence so a future refactor
       // does not accidentally reorder it into a DROP bucket.
-      const e = new StaleInitEpochError('chunk order violation during teardown');
+      const e = new StaleInitEpochError(
+        'chunk order violation during teardown',
+      );
       expect(classifyGoPrimaryAdvanceError(e)).toBe('protocol');
     });
 
@@ -271,7 +276,9 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
         yield 2;
         throw thrown;
       }
-      const signal = drainDiffCatchingReset(truncatingDiff(), e => seen.push(e));
+      const signal = drainDiffCatchingReset(truncatingDiff(), e =>
+        seen.push(e),
+      );
       // Same instance (reason preserved) — the caller returns it unchanged so
       // the view-syncer's reason metric/log is accurate.
       expect(signal).toBe(thrown);
@@ -293,7 +300,10 @@ describe('view-syncer/pipeline-driver: Go-primary drop-path decisions', () => {
 
     test('onEntry throwing a ResetPipelinesSignal is also caught and returned', () => {
       // Defensive: the signal can originate from onEntry-side processing too.
-      const thrown = new ResetPipelinesSignal('schema changed', 'schema-change');
+      const thrown = new ResetPipelinesSignal(
+        'schema changed',
+        'schema-change',
+      );
       const signal = drainDiffCatchingReset([1, 2, 3], e => {
         if (e === 2) {
           throw thrown;

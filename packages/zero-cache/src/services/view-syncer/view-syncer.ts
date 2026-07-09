@@ -2126,7 +2126,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           for (const q of addQueries) byID.set(q.id, q);
           let count = 0;
           let goComputeMs = 0;
-          for await (const {queryID, changes, timingMs, final} of pipelines.goHydrateBatchStream(
+          for await (const {
+            queryID,
+            changes,
+            timingMs,
+            final,
+          } of pipelines.goHydrateBatchStream(
             addQueries.map(q => ({
               transformationHash: q.transformationHash,
               queryID: q.id,
@@ -2590,22 +2595,23 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           updater,
           pokers,
         );
+
+        // Commit the changes and update the CVR snapshot.
+        this.#cvr = await this.#flushUpdater(lc, updater);
+        const finalVersion = this.#cvr.version;
+
+        // Signal clients to commit.
+        await startAsyncSpan(tracer, 'vs.#advancePipelines.pokeEnd', () =>
+          pokers.end(finalVersion),
+        );
       } catch (e) {
         await pokers.cancel();
+        this.#cvrStore.discardPendingWrites();
         if (e instanceof ResetPipelinesSignal) {
           return e;
         }
         throw e;
       }
-
-      // Commit the changes and update the CVR snapshot.
-      this.#cvr = await this.#flushUpdater(lc, updater);
-      const finalVersion = this.#cvr.version;
-
-      // Signal clients to commit.
-      await startAsyncSpan(tracer, 'vs.#advancePipelines.pokeEnd', () =>
-        pokers.end(finalVersion),
-      );
 
       const wallTime = performance.now() - start;
       const totalProcessTime = timer.totalElapsed();

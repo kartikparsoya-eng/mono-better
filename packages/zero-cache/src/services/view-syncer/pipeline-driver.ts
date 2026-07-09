@@ -154,7 +154,7 @@ function goSigDeltaRecord(
     return undefined;
   }
   return Object.fromEntries(
-    [...merged.deltas].map(([queryID, delta]) => [
+    Array.from(merged.deltas, ([queryID, delta]) => [
       queryID,
       formatSignature(delta),
     ]),
@@ -441,6 +441,7 @@ export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   if (
     msg.includes('chunk order violation') ||
     msg.includes('finished without a final chunk') ||
+    msg.includes('header missing version') ||
     msg.includes('Frame too large') ||
     msg.includes('protocolRev mismatch')
   ) {
@@ -2225,6 +2226,11 @@ export class PipelineDriver {
       return resetFromGo(firstGoChunk.reset);
     }
 
+    if (firstGoChunk.header === true && headerGoVersion === undefined) {
+      await goIterator.return?.();
+      throw new Error('advanceToHeadStream header missing version');
+    }
+
     if (
       firstGoChunk.header !== true ||
       firstGoChunk.final ||
@@ -2374,11 +2380,9 @@ export class PipelineDriver {
         if (classified instanceof ResetPipelinesSignal) {
           throw classified;
         }
-        throw new ResetPipelinesSignal(
-          'Go advance stream failed after emitting observable chunks; ' +
-            'discarding partial streamed rows and rehydrating',
-          'go-primary-drop',
-        );
+        throw e;
+      } finally {
+        await goIterator.return?.();
       }
 
       if (finalGoVersion !== undefined && finalGoVersion < version) {
@@ -3295,8 +3299,9 @@ export function pgTypeToGoType(
     t === 'TIMESTAMPTZ' ||
     t === 'TIMESTAMP WITH TIME ZONE' ||
     t === 'TIMESTAMP WITHOUT TIME ZONE'
-  )
+  ) {
     return 'number';
+  }
   if (t === 'JSON' || t === 'JSONB') return 'json';
   // Explicitly recognised string-shaped types — keep this list growing.
   if (
@@ -3309,8 +3314,9 @@ export function pgTypeToGoType(
     t === 'UUID' ||
     t === 'CITEXT' ||
     t === 'NAME'
-  )
+  ) {
     return 'string';
+  }
   // Postgres array types (e.g. INT4[], TEXT[]) are handled by the early
   // `isArray` check above (which also catches enum-arrays and the legacy
   // |TEXT_ARRAY[] form). The previous `t.endsWith('[]')` here was redundant

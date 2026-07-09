@@ -482,6 +482,25 @@ describe('view-syncer/pipeline-driver', () => {
     ];
   }
 
+  function goPrimaryPipelines(fakeBackend: unknown, clientGroupID: string) {
+    goBackendMock.backend = fakeBackend;
+    const storage = new Database(lc, ':memory:');
+    storage.prepare(CREATE_STORAGE_TABLE).run();
+    return new PipelineDriver(
+      lc,
+      testLogConfig,
+      new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
+      shardID,
+      new DatabaseStorage(storage).createClientGroupStorage(clientGroupID),
+      'pipeline-driver.test.ts',
+      new InspectorDelegate(undefined),
+      () => 200,
+      undefined,
+      {goSidecar: {enabled: true}} as never,
+      {} as never,
+    );
+  }
+
   test('replica version', () => {
     pipelines.init(clientSchema);
     expect(pipelines.replicaVersion).toBe('123');
@@ -1120,15 +1139,13 @@ describe('view-syncer/pipeline-driver', () => {
           numChanges: 1,
         };
       }),
-      advanceToHeadStream: vi
-        .fn()
-        .mockResolvedValueOnce({
-          changes: [],
-          version: '134',
-          numChanges: 1,
-          rowChanges: [catchUpRow],
-          sigDeltas: {queryID1: catchUpDelta},
-        }),
+      advanceToHeadStream: vi.fn().mockResolvedValueOnce({
+        changes: [],
+        version: '134',
+        numChanges: 1,
+        rowChanges: [catchUpRow],
+        sigDeltas: {queryID1: catchUpDelta},
+      }),
       destroy: vi.fn().mockResolvedValue(undefined),
     };
     const p = goPipelines(fakeBackend);
@@ -1172,9 +1189,7 @@ describe('view-syncer/pipeline-driver', () => {
         testLogConfig,
         new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
         shardID,
-        new DatabaseStorage(storage).createClientGroupStorage(
-          'go-stream-test',
-        ),
+        new DatabaseStorage(storage).createClientGroupStorage('go-stream-test'),
         'pipeline-driver.test.ts',
         new InspectorDelegate(undefined),
         () => 200,
@@ -1253,7 +1268,9 @@ describe('view-syncer/pipeline-driver', () => {
       '134',
       messages.insert('issues', {id: '4', closed: 0}),
     );
-    const advancePromise = Promise.resolve(p.advance(NO_TIME_ADVANCEMENT_TIMER));
+    const advancePromise = Promise.resolve(
+      p.advance(NO_TIME_ADVANCEMENT_TIMER),
+    );
     try {
       const early = await Promise.race([
         advancePromise.then(() => 'resolved' as const),
@@ -1275,6 +1292,143 @@ describe('view-syncer/pipeline-driver', () => {
     expect(fakeBackend.advanceToHeadStreamChunks).toHaveBeenCalledTimes(1);
     expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
     expect(p.rowSetSignature('queryID1')).toEqual(BigInt(`0x${sigDelta}`));
+  });
+
+  test('Go-primary streamed advance rejects a header without version', async () => {
+    const returnSpy = vi.fn(() => ({
+      done: true as const,
+      value: undefined,
+    }));
+    const fakeBackend = {
+      initialized: true,
+      pinnedVersion: undefined,
+      initEngine: vi.fn().mockResolvedValue(undefined),
+      whenRecovered: vi.fn().mockResolvedValue(undefined),
+      hydrate: vi.fn().mockResolvedValue({
+        changes: [],
+        timingMs: 0,
+        sigDelta: '0',
+      }),
+      removeQuery: vi.fn().mockResolvedValue(undefined),
+      advanceToHeadStream: vi.fn(),
+      advanceToHeadStreamChunks: vi.fn(() => ({
+        [Symbol.asyncIterator]() {
+          let sentHeader = false;
+          return {
+            next() {
+              if (sentHeader) {
+                return {done: true as const, value: undefined};
+              }
+              sentHeader = true;
+              return {
+                done: false as const,
+                value: {
+                  changes: [],
+                  final: false,
+                  header: true,
+                  numChanges: 1,
+                },
+              };
+            },
+            return: returnSpy,
+          };
+        },
+      })),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const p = goPrimaryPipelines(fakeBackend, 'go-stream-missing-version');
+    p.init(clientSchema);
+    expect([
+      ...(await p.addQuery(
+        'hash-go-stream-missing-version',
+        'queryID1',
+        {table: 'issues', orderBy: [['id', 'desc']]},
+        startTimer(),
+      )),
+    ]).toEqual([]);
+
+    replicator.processTransaction(
+      '134',
+      messages.insert('issues', {id: '4', closed: 0}),
+    );
+    await expect(p.advance(NO_TIME_ADVANCEMENT_TIMER)).rejects.toThrow(
+      /advanceToHeadStream header missing version/,
+    );
+    expect(returnSpy).toHaveBeenCalledTimes(1);
+    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
+  });
+
+  test('Go-primary streamed advance rethrows late protocol errors after rows', async () => {
+    const goRow: RowChange = {
+      type: ChangeType.ADD,
+      queryID: 'queryID1',
+      table: 'issues',
+      rowKey: {id: 'go-streamed-before-error'},
+      row: {id: 'go-streamed-before-error', closed: false, _0_version: '134'},
+    };
+    const lateProtocolError = new Error(
+      'advanceToHeadStream finished without a final chunk',
+    );
+    const fakeBackend = {
+      initialized: true,
+      pinnedVersion: undefined,
+      initEngine: vi.fn().mockResolvedValue(undefined),
+      whenRecovered: vi.fn().mockResolvedValue(undefined),
+      hydrate: vi.fn().mockResolvedValue({
+        changes: [],
+        timingMs: 0,
+        sigDelta: '0',
+      }),
+      removeQuery: vi.fn().mockResolvedValue(undefined),
+      advanceToHeadStream: vi.fn(),
+      advanceToHeadStreamChunks: vi.fn(async function* () {
+        yield {
+          changes: [],
+          final: false,
+          header: true,
+          version: '134',
+          numChanges: 1,
+        };
+        yield {
+          changes: [goRow],
+          final: false,
+          version: '134',
+          numChanges: 1,
+        };
+        throw lateProtocolError;
+      }),
+      destroy: vi.fn().mockResolvedValue(undefined),
+    };
+    const p = goPrimaryPipelines(fakeBackend, 'go-stream-late-protocol');
+    p.init(clientSchema);
+    expect([
+      ...(await p.addQuery(
+        'hash-go-stream-late-protocol',
+        'queryID1',
+        {table: 'issues', orderBy: [['id', 'desc']]},
+        startTimer(),
+      )),
+    ]).toEqual([]);
+
+    replicator.processTransaction(
+      '134',
+      messages.insert('issues', {id: '4', closed: 0}),
+    );
+    const advanced = await p.advance(NO_TIME_ADVANCEMENT_TIMER);
+    if (advanced instanceof ResetPipelinesSignal) {
+      throw new Error(`unexpected reset: ${advanced.message}`);
+    }
+
+    const rows: RowChange[] = [];
+    await expect(
+      (async () => {
+        for await (const change of advanced.changes) {
+          if (change !== 'yield') rows.push(change);
+        }
+      })(),
+    ).rejects.toThrow(/advanceToHeadStream finished without a final chunk/);
+    expect(rows).toEqual([goRow]);
+    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
   });
 
   test('timeout on slow advancement', () => {

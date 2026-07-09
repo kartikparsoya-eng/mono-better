@@ -481,6 +481,20 @@ export class CVRStore {
     return this.#rowCache.getRowRecords();
   }
 
+  #clearPendingWrites(): void {
+    this.#writes.clear();
+    this.#pendingInstanceWrite = undefined;
+    this.#pendingRowRecordUpdates.clear();
+    this.#forceUpdates.clear();
+    this.#pendingQueryUpdates.clear();
+    this.#pendingDesireUpdates.clear();
+    this.#pendingQueryPartialUpdates.clear();
+  }
+
+  discardPendingWrites(): void {
+    this.#clearPendingWrites();
+  }
+
   putRowRecord(row: RowRecord): void {
     this.#pendingRowRecordUpdates.set(row.id, row);
   }
@@ -1217,13 +1231,7 @@ export class CVRStore {
       this.#rowCache.clear();
       throw e;
     } finally {
-      this.#writes.clear();
-      this.#pendingInstanceWrite = undefined;
-      this.#pendingRowRecordUpdates.clear();
-      this.#forceUpdates.clear();
-      this.#pendingQueryUpdates.clear();
-      this.#pendingDesireUpdates.clear();
-      this.#pendingQueryPartialUpdates.clear();
+      this.#clearPendingWrites();
     }
   }
 
