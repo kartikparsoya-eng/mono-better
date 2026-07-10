@@ -17,9 +17,9 @@
 import {existsSync} from 'node:fs';
 import {afterAll, describe, expect, test} from 'vitest';
 import type {RowChange} from './go-ivm-client.ts';
+import {makeTestReplica} from './napi-test-fixtures.ts';
 import {isGoNapiAddonAvailable} from './napi/index.ts';
 import {SidecarManager} from './sidecar-manager.ts';
-import {makeTestReplica} from './napi-test-fixtures.ts';
 
 const LIB_PATH =
   process.env.GOIVM_TEST_LIB ??
@@ -80,21 +80,18 @@ describe.skipIf(!available)('SidecarManager (napi transport)', () => {
         },
       },
     });
-    const results: {
-      queryID: string;
-      changes: RowChange[];
-      timingMs: number | undefined;
-    }[] = [];
-    await client.addQueriesStream(
+    const changes: RowChange[] = [];
+    for await (const entry of client.addQueriesStreamPull(
       'cg-mgr-napi',
       [{queryID: 'q-mgr', ast: {table: 'items', orderBy: [['id', 'asc']]}}],
       initEpoch,
-      r => results.push(r),
-    );
-    expect(results).toHaveLength(1);
-    expect(
-      results[0].changes.map(ch => (ch.row as {label: string}).label),
-    ).toEqual(['one', 'two']);
+    )) {
+      changes.push(...entry.changes);
+    }
+    expect(changes.map(ch => (ch.row as {label: string}).label)).toEqual([
+      'one',
+      'two',
+    ]);
   });
 
   test('stop() reaches terminal state and getClient refuses', async () => {

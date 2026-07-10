@@ -4,7 +4,6 @@ export type {
   RowChange as GoRowChange,
   TableSchema,
   TableTiming as GoTableTiming,
-  HydrateResult as GoHydrateResult,
 } from './go-ivm-client.ts';
 export {SidecarManager} from './sidecar-manager.ts';
 export type {SidecarConfig, SidecarStatus} from './sidecar-manager.ts';

@@ -3,10 +3,9 @@
 // client dispatch, covering BOTH planes:
 //
 //   - frame plane: init / ping round-trips (msgpack, kind 1)
-//   - row plane:   addQueriesStream + advanceToHeadStream with rowMode (kinds 2/3)
+//   - row plane:   addQueriesStreamPull + advanceToHeadStreamChunks with rowMode (kinds 2/3)
 //
-// Table-mode fixture: the removal sweep deleted memory mode (loadRows), so
-// all data is pre-seeded into a SQLite replica BEFORE the addon starts.
+// Table-mode fixture: all data is pre-seeded into a SQLite replica BEFORE the addon starts.
 // init is schema-only; the Go engine reads rows from the replica.
 //
 // GATED: requires the out-of-band build artifacts —
@@ -167,6 +166,51 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     return client;
   }
 
+  type HydrateEntry = {
+    queryID: string;
+    changes: RowChange[];
+    timingMs: number | undefined;
+    sigDelta?: string | undefined;
+    final: boolean;
+    chunkIndex?: number | undefined;
+  };
+
+  async function collectHydrateEntries(
+    c: GoIVMClient,
+    clientGroupID: string,
+    queries: {queryID: string; ast: unknown}[],
+    initEpoch: number,
+    opts?: {window?: number},
+  ): Promise<HydrateEntry[]> {
+    const entries: HydrateEntry[] = [];
+    for await (const entry of c.addQueriesStreamPull(
+      clientGroupID,
+      queries,
+      initEpoch,
+      opts,
+    )) {
+      entries.push(entry);
+    }
+    return entries;
+  }
+
+  async function collectHydrateRows(
+    c: GoIVMClient,
+    clientGroupID: string,
+    queries: {queryID: string; ast: unknown}[],
+    initEpoch: number,
+    opts?: {window?: number},
+  ): Promise<RowChange[]> {
+    const entries = await collectHydrateEntries(
+      c,
+      clientGroupID,
+      queries,
+      initEpoch,
+      opts,
+    );
+    return entries.flatMap(entry => entry.changes);
+  }
+
   afterAll(() => {
     client.close();
   });
@@ -198,33 +242,30 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     usersEpoch = initEpoch;
   });
 
-  test('row plane: addQueriesStream delivers per-row records', async () => {
+  test('row plane: addQueriesStreamPull delivers per-row records', async () => {
     const c = ensureStarted();
-    const results: {
-      queryID: string;
-      changes: RowChange[];
-      timingMs: number | undefined;
-      final?: boolean;
-    }[] = [];
-    await c.addQueriesStream(
+    const results = await collectHydrateEntries(
+      c,
       'cg-napi',
       [{queryID: 'q-all', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
       usersEpoch,
-      r => results.push(r),
     );
-    expect(results).toHaveLength(1);
-    const r = results[0];
-    expect(r.queryID).toBe('q-all');
-    expect(r.changes).toHaveLength(3);
-    expect(r.changes.map(ch => (ch.row as {name: string}).name)).toEqual([
+    const nonFinal = results.filter(r => !r.final);
+    const finals = results.filter(r => r.final);
+    expect(nonFinal).toHaveLength(3);
+    expect(nonFinal.every(r => r.queryID === 'q-all')).toBe(true);
+    expect(nonFinal.every(r => r.changes.length === 1)).toBe(true);
+    expect(finals).toHaveLength(1);
+    const changes = nonFinal.flatMap(r => r.changes);
+    expect(changes.map(ch => (ch.row as {name: string}).name)).toEqual([
       'alice',
       'bob',
       'carol',
     ]);
-    expect(r.changes[0].rowKey).toEqual({id: 'u1'});
-    expect(r.changes[0].table).toBe('users');
-    expect(r.changes[0].type).toBe(0);
-    expect(r.changes[0].row).toEqual({
+    expect(changes[0].rowKey).toEqual({id: 'u1'});
+    expect(changes[0].table).toBe('users');
+    expect(changes[0].type).toBe(0);
+    expect(changes[0].row).toEqual({
       id: 'u1',
       name: 'alice',
       age: 30,
@@ -234,17 +275,11 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
 
   test('row plane: chunked streams one delivery per row', async () => {
     const c = ensureStarted();
-    const deliveries: {
-      changes: RowChange[];
-      final?: boolean;
-      chunkIndex?: number;
-    }[] = [];
-    await c.addQueriesStream(
+    const deliveries = await collectHydrateEntries(
+      c,
       'cg-napi',
       [{queryID: 'q-chunked', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
       usersEpoch,
-      r => deliveries.push(r),
-      {chunked: true},
     );
     const nonFinal = deliveries.filter(d => !d.final);
     const finals = deliveries.filter(d => d.final);
@@ -306,7 +341,8 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     const resA: RowChange[] = [];
     const resB: RowChange[] = [];
     await Promise.all([
-      c.addQueriesStream(
+      collectHydrateRows(
+        c,
         'cg-napi',
         [
           {
@@ -315,9 +351,9 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
           },
         ],
         usersEpoch,
-        r => resA.push(...r.changes),
-      ),
-      c.addQueriesStream(
+      ).then(rows => resA.push(...rows)),
+      collectHydrateRows(
+        c,
         'cg-napi',
         [
           {
@@ -326,8 +362,7 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
           },
         ],
         usersEpoch,
-        r => resB.push(...r.changes),
-      ),
+      ).then(rows => resB.push(...rows)),
     ]);
     // Plain local dylibs skip the drive-advance test above, so u9 is only
     // present when this file runs against the wal2-linked dylib.
@@ -338,16 +373,15 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     expect(resB.every(ch => ch.queryID === 'q-conc-b')).toBe(true);
   });
 
-  // ── cross-plane type-conversion correctness ───────────────────────
-  // For identical engine rows, rowMode (flat records) and frame mode
-  // (msgpack positional decode) must produce deep-equal JS values.
+  // ── row-plane type-conversion correctness ─────────────────────────
+  // Production pull rowMode must decode SQLite-provenance values into the JS
+  // shapes expected by PipelineDriver.
   // SQLite-provenance coercion is covered on the Go side by
   // TestABIHost_RowModeTableModeCoercion; this covers the JS decode half
   // with values that are edge cases for the decode path but storable in
-  // SQLite (the removal sweep deleted loadRows, so values go through
-  // SQLite rather than msgpack — Infinity/-0/subnormals are no longer
-  // representable).
-  test('cross-plane: rowMode and frame mode decode identical edge values', async () => {
+  // SQLite rather than synthetic msgpack rows — Infinity/-0/subnormals are
+  // no longer representable).
+  test('row plane: pull decode preserves edge values', async () => {
     const c = ensureStarted();
     const {initEpoch} = await c.init('cg-edge', {
       tables: {
@@ -367,16 +401,13 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       },
     });
 
-    const hydrate = async (queryID: string) => {
-      const out: RowChange[] = [];
-      await c.addQueriesStream(
+    const hydrate = (queryID: string) =>
+      collectHydrateRows(
+        c,
         'cg-edge',
         [{queryID, ast: {table: 'edge', orderBy: [['id', 'asc']]}}],
         initEpoch,
-        r => out.push(...r.changes),
       );
-      return out;
-    };
     const viaRecords = await hydrate('q-edge-rows');
 
     expect(viaRecords).toHaveLength(edgeRows.length);
@@ -402,8 +433,8 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     expect(byID.get('e06')?.label).toBe('ünïcödé');
   });
 
-  // ── lifecycle: RPC timeout mid-row-stream ─────────────────────────
-  test('lifecycle: timeout mid-stream drops late records, client stays usable', async () => {
+  // ── lifecycle: consumer cancel mid-row-stream ─────────────────────
+  test('lifecycle: consumer cancel mid-stream drops late records, client stays usable', async () => {
     const c = ensureStarted();
     const {initEpoch} = await c.init('cg-late', {
       tables: {
@@ -420,35 +451,36 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
       },
     });
 
-    await expect(
-      c.addQueriesStream(
-        'cg-late',
-        [
-          {
-            queryID: 'q-timeout',
-            ast: {table: 'bulk', orderBy: [['id', 'asc']]},
-          },
-        ],
-        initEpoch,
-        () => {},
-        {timeoutMs: 1},
-      ),
-    ).rejects.toThrow(/timed out/);
+    const it = c.addQueriesStreamPull(
+      'cg-late',
+      [
+        {
+          queryID: 'q-cancel',
+          ast: {table: 'bulk', orderBy: [['id', 'asc']]},
+        },
+      ],
+      initEpoch,
+      {window: 1},
+    );
+    const first = await it.next();
+    expect(first.done).toBe(false);
+    expect(first.value?.final).toBe(false);
+    expect(first.value?.changes).toHaveLength(1);
+    await it.return?.();
 
     await new Promise(r => setTimeout(r, 250));
     expect(await c.ping()).toBe('pong');
 
-    const out: RowChange[] = [];
-    await c.addQueriesStream(
+    const out = await collectHydrateRows(
+      c,
       'cg-late',
       [
         {
-          queryID: 'q-after-timeout',
+          queryID: 'q-after-cancel',
           ast: {table: 'bulk', orderBy: [['id', 'asc']], limit: 3},
         },
       ],
       initEpoch,
-      r => out.push(...r.changes),
     );
     expect(out.map(ch => (ch.row as {id: string}).id)).toEqual([
       'k00000',
@@ -495,8 +527,8 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     await it.return?.();
 
     await new Promise(r => setTimeout(r, 100));
-    const out: RowChange[] = [];
-    await c.addQueriesStream(
+    const out = await collectHydrateRows(
+      c,
       'cg-pull-e2e',
       [
         {
@@ -505,7 +537,6 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
         },
       ],
       initEpoch,
-      r => out.push(...r.changes),
     );
     expect(out).toHaveLength(200);
   });

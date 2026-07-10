@@ -75,7 +75,7 @@ describe('divideGoConnCeilingsForWorkers', () => {
     expect(env.GO_IVM_MAX_IDLE_CONNS).toBe('16');
   });
 
-  test('single worker is a no-op (socket topology / W=1)', () => {
+  test('single worker is a no-op (W=1)', () => {
     const env: Record<string, string | undefined> = {
       GO_IVM_MAX_OPEN_CONNS: '1024',
     };

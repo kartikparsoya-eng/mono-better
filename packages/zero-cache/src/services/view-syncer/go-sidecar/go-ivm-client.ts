@@ -134,7 +134,7 @@ export type CallOptions = {
   /**
    * Streaming callback. When set, intermediate response frames for this
    * id route here; the call promise resolves on the final terminal frame.
-   * Used by `addQueriesStream`.
+   * Used by the hydrate and advance streaming RPCs.
    */
   onPartial?: (value: unknown) => void;
   /**
@@ -162,13 +162,6 @@ export type TableTiming = {
   /** ivm.ChangeType: 0=add, 1=remove, 2=edit. */
   type: number;
   ms: number;
-};
-
-/** Hydrate result, with optional per-query wall-time. */
-export type HydrateResult = {
-  changes: RowChange[];
-  timingMs: number | undefined;
-  sigDelta?: string | undefined;
 };
 
 // --- Positional (protocolRev 9) RowChange decoding ---
@@ -243,9 +236,9 @@ function extractChanges(value: unknown): RowChange[] {
 
 // --- Streaming accumulators ---
 //
-// `addQueriesStream` and `advanceToHeadStream` receive partial frames from
-// Go that need to be reassembled into one result. These factory functions
-// own the reassembly logic so it can be unit-tested in isolation.
+// The wire-level hydrate and advance stream methods receive partial frames
+// from Go that need ordering/final-frame validation. These factory functions
+// own that state-machine logic so it can be unit-tested in isolation.
 //
 // Defensive invariants enforced here (all throw on violation):
 //   - ChunkIndex arrives strictly in monotonic order (0, 1, 2, ...) — a
@@ -644,8 +637,7 @@ export class TimeoutError extends Error {
 }
 
 /**
- * Terminal sentinel for streaming RPCs (addQueriesStream /
- * advanceToHeadStream). Go emits this as a plain-string Result on the final
+ * Terminal sentinel for streaming RPCs. Go emits this as a plain-string Result on the final
  * frame; everything else is a partial. Reserved — handlers MUST NOT emit a
  * string-valued partial that collides with this constant. See D6 collision
  * defense in #dispatchResponsePayload below.
@@ -653,7 +645,7 @@ export class TimeoutError extends Error {
 const STREAM_DONE_SENTINEL = 'done';
 
 /**
- * RPC error code Go uses when a mutating call (addQuery* / advance*)
+ * RPC error code Go uses when a mutating call (hydrate / advance)
  * carries an initEpoch that doesn't match the cgID's current
  * epoch on the sidecar. The caller is a torn-down view-syncer instance
  * whose RPC raced past the next instance's init for the same cgID; without
@@ -933,59 +925,6 @@ export class GoIVMClient {
     };
   }
 
-  // Batch hydrate over the streaming RPC: Go builds all pipelines and
-  // hydrates them in parallel goroutines; `onResult` fires per query as each
-  // Go goroutine finishes (in completion order, not input order).
-  // Resolves on the terminal "done" frame. Cuts tail latency on batches
-  // with uneven hydration costs.
-  //
-  // Wire-level chunking (protocol rev 3+): Go may emit multiple partial
-  // frames per query, each carrying up to `hydrateChunkSize` (10k) rows
-  // with monotonically increasing `chunkIndex`. The frame with
-  // `final: true` is the per-query completion marker. This client
-  // accumulates chunks per queryID and invokes the caller's `onResult`
-  // exactly once per query — preserving the existing per-query contract
-  // so view-syncer code doesn't need to change.
-  //
-  // The win is operationally: Go-side memory pressure is relieved (large
-  // results no longer buffered as one big msgpack frame), and the wire
-  // gets first bytes of large hydrations sooner. The TS-side memory
-  // footprint here is unchanged from the per-query contract — bounding
-  // TS-side memory would require pushing chunks through to the
-  // view-syncer (a separate change).
-  async addQueriesStream(
-    clientGroupID: string,
-    queries: {queryID: string; ast: unknown}[],
-    initEpoch: number,
-    onResult: (r: {
-      queryID: string;
-      changes: RowChange[];
-      timingMs: number | undefined;
-      sigDelta?: string | undefined;
-      final?: boolean;
-      chunkIndex?: number;
-    }) => void,
-    opts?: CallOptions & {chunked?: boolean},
-  ): Promise<void> {
-    // Per-row delivery rides the in-process transport's row plane.
-    const handler = createHydrateStreamAccumulator(onResult, {
-      chunked: opts?.chunked ?? false,
-      rowMode: true,
-    });
-    await this.#call(
-      'addQueriesStream',
-      {clientGroupID, queries, initEpoch, rowMode: true},
-      {
-        // Compute-bound: no timeout in-process (TS hydration has none either).
-        timeoutMs: computeBoundTimeoutMs(opts?.timeoutMs),
-        clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
-        onPartial: handler.onFrame,
-        onRow: handler.onRow,
-      },
-    );
-    handler.finish();
-  }
-
   /**
    * Pull-mode batch hydrate (ABI v3, DESIGN-duplex-streaming): returns an
    * AsyncIterableIterator over per-delivery entries — one row-bearing entry
@@ -1195,41 +1134,6 @@ export class GoIVMClient {
       },
     };
     return iterator;
-  }
-
-  // Single-query hydrate over the STREAMING path. Identical return contract to
-  // {@link addQuery}, but routes through addQueriesStream so the result is
-  // chunked on the Go side (byte-aware, softChunkBytes ~8MB) instead of shipped
-  // as one unbounded msgpack frame. A wide-result query (e.g. allTickets) can
-  // encode to >MAX_FRAME_SIZE, which the receive loop SKIPS — orphaning the RPC
-  // into a 60s timeout that freezes the client group. Non-streaming addQuery
-  // has no such bound; this is its safe replacement for the hydrate hot path.
-  async addQueryStream(
-    clientGroupID: string,
-    queryID: string,
-    ast: unknown,
-    initEpoch: number,
-    opts?: CallOptions,
-  ): Promise<HydrateResult> {
-    let result: HydrateResult | undefined;
-    await this.addQueriesStream(
-      clientGroupID,
-      [{queryID, ast}],
-      initEpoch,
-      r => {
-        result = {changes: r.changes, timingMs: r.timingMs};
-        if (r.sigDelta !== undefined) {
-          result.sigDelta = r.sigDelta;
-        }
-      },
-      opts,
-    );
-    if (result === undefined) {
-      // The Go engine always emits a terminal Final frame per query (even
-      // empty), so onResult must have fired exactly once. Defensive.
-      throw new Error(`addQueryStream: no result frame for query ${queryID}`);
-    }
-    return result;
   }
 
   /** Remove a query pipeline from a client group's engine. */

@@ -13,11 +13,7 @@
 
 import type {ZeroConfig} from '../../../config/zero-config.ts';
 import {RetryableAdvanceError} from './go-ivm-client.ts';
-import type {
-  AdvanceToHeadStreamChunk,
-  HydrateResult as GoHydrateResult,
-  TableData,
-} from './go-ivm-client.ts';
+import type {AdvanceToHeadStreamChunk, TableData} from './go-ivm-client.ts';
 import type {SidecarManager} from './sidecar-manager.ts';
 
 export type QueryAST = unknown;
@@ -55,8 +51,8 @@ export class GoComputeBackend {
   #initEpoch = -1;
   /**
    * Per-cgID init epoch the sidecar issues on every {@link client.init}.
-   * Threaded through every subsequent mutating RPC (loadRows / addQuery* /
-   * advance*) so the sidecar rejects calls from a torn-down instance
+   * Threaded through every subsequent mutating RPC (hydrate / advance) so the
+   * sidecar rejects calls from a torn-down instance
    * whose RPC raced past a fresh init for the same cgID.
    * `-1` = not yet init'd (any call would fail validation anyway).
    */
@@ -210,23 +206,6 @@ export class GoComputeBackend {
     }
   }
 
-  async hydrate(queryID: string, ast: QueryAST): Promise<GoHydrateResult> {
-    if (this.#restartGate) await this.#restartGate;
-    // Route through the STREAMING single-query path: a wide-result query
-    // hydrated via non-streaming addQuery encodes to one unbounded frame that
-    // can exceed the wire cap, get SKIPPED by the TS reader, and orphan the RPC
-    // into a 60s timeout (the cold-hydrate freeze). addQueryStream chunks it.
-    return this.#withReinitRetry(() =>
-      this.#client().addQueryStream(
-        this.#clientGroupID,
-        queryID,
-        ast,
-        this.#sidecarInitEpoch,
-        this.#cgOpts(),
-      ),
-    );
-  }
-
   hydrateStreamPull(
     queryID: string,
     ast: QueryAST,
@@ -245,7 +224,7 @@ export class GoComputeBackend {
    * Pull-mode batch hydrate (ABI v3): Go produces rows only as the returned
    * iterator is consumed; return()/throw() cancels the Go producer.
    *
-   * NO #withReinitRetry here — deliberately. The consumer processes entries
+   * No transparent replay here — deliberately. The consumer processes entries
    * as they arrive, so a mid-stream sidecar restart is never replay-safe
    * (a replay would double-count the delivered entries: double-XORed
    * row-set signatures and duplicate CVR rows). A restart rejects the
@@ -326,76 +305,6 @@ export class GoComputeBackend {
     return {clientGroupID: this.#clientGroupID};
   }
 
-  // Two retry-worthy error classes:
-  //   1. "engine not initialized" — sidecar restarted after our onRestart
-  //      listener fired the re-init RPC; race window between the two. Force
-  //      re-init then retry (REVIEW-final MED-TS-4).
-  //   2. "Sidecar is not running" — getClient() threw because the manager is
-  //      mid-restart. Without this branch, in-flight advance/hydrate RPCs
-  //      propagate as Internal WebSocket errors to clients (sidecar-kill
-  //      drill finding). Await the manager's running state and retry once.
-  async #withReinitRetry<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-
-      // Restart-window detection: when the sidecar dies, RPCs surface as
-      // one of "Sidecar is not running" (getClient threw), "Connection
-      // closed" (socket dropped mid-RPC), or "Not connected" (socket nulled
-      // between slot acquire and write). Don't string-match every variant
-      // — if the manager isn't `running` right now, treat any error as
-      // restart-related and retry once the engine is rebuilt.
-      const sidecarUnavailable =
-        this.#manager.status !== 'running' ||
-        msg.includes('Sidecar is not running') ||
-        msg.includes('Connection closed') ||
-        msg.includes('Not connected');
-      if (sidecarUnavailable) {
-        try {
-          await this.#manager.waitForRunning();
-        } catch {
-          // Manager hit terminal state — surface the original so the
-          // caller can decide whether to fall back.
-          throw err;
-        }
-        // Sidecar process is back, but THIS backend's per-clientGroup
-        // engine isn't initialized until the onRestart listener finishes
-        // init+loadRows. Retrying now would hit a freshly-spawned Go with
-        // no rows for this group and silently return empty results.
-        //   (a) listener already started: whenInitialized() awaits it.
-        //   (b) listener microtask hasn't fired yet: whenInitialized()
-        //       returns Promise.resolve() and `initialized` stays false,
-        //       so we force init ourselves (idempotent via withInitSlot).
-        await this.whenInitialized();
-        if (!this.initialized) {
-          const ok = await this.#reinitPerCGAndRegisterQueries(
-            'reinit-retry-sidecar-restart',
-            this.#getCurrentTables(),
-          );
-          if (!ok) {
-            throw err;
-          }
-        }
-        return await fn();
-      }
-
-      if (!msg.includes('engine not initialized')) throw err;
-      this.#log(
-        'warn',
-        'caught "engine not initialized" from Go; forcing re-init and retrying',
-      );
-      const ok = await this.#reinitPerCGAndRegisterQueries(
-        'reinit-retry-engine-not-initialized',
-        this.#getCurrentTables(),
-      );
-      if (!ok) {
-        throw err; // surface original
-      }
-      return await fn();
-    }
-  }
-
   // Rejects on failure — callers either ignore or surface depending on context.
   async removeQuery(queryID: string): Promise<void> {
     await this.#client().removeQuery(
@@ -448,10 +357,10 @@ export class GoComputeBackend {
 
   async #doInit(tables: Record<string, TableData>): Promise<void> {
     // Dedup: if an init is already in flight for this backend, reuse it.
-    // Without this, the onRestart listener + the #withReinitRetry path can
-    // BOTH call #doInit concurrently after a sidecar restart. Two inits
-    // interleave their init+loadRows+addQueries RPCs at the wire level,
-    // each fresh init landing between the other's loadRows chunks → engine
+    // Without this, restart/reset paths can both call #doInit concurrently
+    // after a sidecar restart. Two inits
+    // interleave their init + hydrate re-register RPCs at the wire level,
+    // each fresh init landing between the other's table-source bindings → engine
     // ends up with duplicate row sets (sidecar-kill drill caught this:
     // audit saw ts_count=N, go_count=2N exactly).
     if (this.#currentInitPromise) {
@@ -538,10 +447,8 @@ export class GoComputeBackend {
   // Shared per-CG reinit path. Used by:
   //   1. #onSidecarRestart  (manager-level restart)
   //   2. resetEngine        (intentional reset from PipelineDriver)
-  //   3. #withReinitRetry's two error branches (sidecar-unavailable,
-  //      engine-not-initialized)
   //
-  // All these paths used to call only #doInit, which loads sources but
+  // Both paths used to call only #doInit, which loads sources but
   // does NOT re-register queries — leaving Go with zero pipelines while
   // TS still had registered queries → every subsequent advance returned
   // {changes:[], timings:[]} and the client view froze silently with
@@ -593,18 +500,10 @@ export class GoComputeBackend {
       const queries = this.#getCurrentQueries();
       if (queries.length > 0) {
         try {
-          // STREAMING re-register: the result is discarded (we only need Go's
-          // pipeline state rebuilt), but non-streaming addQueries would still
-          // ship every query's full result as one unbounded frame just to throw
-          // it away — a fat-frame orphan risk on a CG with large queries. The
-          // chunked stream bounds the frame; the no-op onResult drops the rows.
-          await this.#client().addQueriesStream(
-            this.#clientGroupID,
-            queries,
-            this.#sidecarInitEpoch,
-            () => {},
-            this.#cgOpts(),
-          );
+          for await (const _ of this.hydrateManyStreamPull(queries)) {
+            // Re-register only: drain the prod pull stream so Go rebuilds
+            // pipeline state, but discard rows because TS already owns CVR.
+          }
           this.#log(
             'info',
             `[${reason}] re-registered ${queries.length} queries`,

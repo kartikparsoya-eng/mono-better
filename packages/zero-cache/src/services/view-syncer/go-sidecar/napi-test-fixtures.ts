@@ -1,15 +1,14 @@
 // Shared table-mode test fixture for the NAPI E2E tests. Creates a SQLite
 // replica with the _zero metadata tables, matching the Go side's
-// makeReplica pattern (fixtures_test.go). The removal sweep deleted memory
-// mode (loadRows-fed MemorySource), so the Go engine always reads from a
+// makeReplica pattern (fixtures_test.go). The Go engine always reads from a
 // real SQLite file. Tests pre-seed data into the replica BEFORE the addon
 // starts, then init is schema-only.
 
-import {Database} from '../../../../../zqlite/src/db.ts';
-import {createSilentLogContext} from '../../../../../shared/src/logging-test-utils.ts';
 import {mkdtempSync} from 'node:fs';
-import {join} from 'node:path';
 import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createSilentLogContext} from '../../../../../shared/src/logging-test-utils.ts';
+import {Database} from '../../../../../zqlite/src/db.ts';
 
 export type ReplicaHandle = {
   path: string;
@@ -35,21 +34,17 @@ export function makeTestReplica(): ReplicaHandle {
   db.pragma('journal_mode = WAL');
   db.exec(ZERO_REPLICATION_STATE);
   db.exec(ZERO_CHANGE_LOG);
-  db
-    .prepare(
-      'INSERT INTO "_zero.replicationState" (stateVersion, lock) VALUES (?, 1)',
-    )
-    .run('0000000001');
+  db.prepare(
+    'INSERT INTO "_zero.replicationState" (stateVersion, lock) VALUES (?, 1)',
+  ).run('0000000001');
 
   return {
     path,
     db,
     bumpVersion: (version: string) => {
-      db
-        .prepare(
-          'INSERT OR REPLACE INTO "_zero.replicationState" (stateVersion, lock) VALUES (?, 1)',
-        )
-        .run(version);
+      db.prepare(
+        'INSERT OR REPLACE INTO "_zero.replicationState" (stateVersion, lock) VALUES (?, 1)',
+      ).run(version);
     },
     addChangeLog: (
       version: string,
@@ -58,11 +53,9 @@ export function makeTestReplica(): ReplicaHandle {
       rowKey: string,
       op: string,
     ) => {
-      db
-        .prepare(
-          'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion","pos","table","rowKey","op") VALUES (?,?,?,?,?)',
-        )
-        .run(version, pos, table, rowKey, op);
+      db.prepare(
+        'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion","pos","table","rowKey","op") VALUES (?,?,?,?,?)',
+      ).run(version, pos, table, rowKey, op);
     },
   };
 }
