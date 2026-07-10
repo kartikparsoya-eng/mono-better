@@ -2,16 +2,12 @@ import {describe, expect, test} from 'vitest';
 import {
   divideGoConnCeilingsForWorkers,
   isProtocolMismatchError,
-  isVersionMethodNotFoundError,
 } from './sidecar-manager.ts';
 
-// The version handshake (SidecarManager #start) wraps the version RPC in a
-// try/catch that intentionally SWALLOWS a "method not found" error — a sidecar
-// predating the version RPC must stay usable — but MUST re-throw a genuine
-// protocol-revision mismatch, because accepting an incompatible wire protocol
-// silently corrupts every subsequent RPC. Pre-fix the catch swallowed BOTH,
-// so a mismatched sidecar was accepted and ran with a wrong protocol rev.
-// isProtocolMismatchError is the predicate that splits the two cases.
+// The version handshake must complete before the manager reaches `running`.
+// `isProtocolMismatchError` only classifies the explicit protocol-revision
+// mismatch that the handshake throws; every other version() failure is a hard
+// startup failure too, just with a different label/message.
 describe('view-syncer/go-sidecar/sidecar-manager: protocol-mismatch gate', () => {
   test('the exact mismatch error the handshake throws → re-throw (true)', () => {
     // Constructed identically to the throw site (sidecar-manager.ts:495-497).
@@ -22,14 +18,10 @@ describe('view-syncer/go-sidecar/sidecar-manager: protocol-mismatch gate', () =>
     expect(isProtocolMismatchError(err)).toBe(true);
   });
 
-  test('"method not found" from an older sidecar → swallow (false)', () => {
-    // The ONLY case the catch is allowed to absorb: a pre-version-RPC sidecar.
+  test('"method not found" from an older sidecar is not a compatibility fallback', () => {
     expect(
       isProtocolMismatchError(new Error('method not found: version')),
     ).toBe(false);
-    expect(
-      isVersionMethodNotFoundError(new Error('method not found: version')),
-    ).toBe(true);
   });
 
   test('an unrelated transport error → not a compatibility fallback', () => {
@@ -37,11 +29,6 @@ describe('view-syncer/go-sidecar/sidecar-manager: protocol-mismatch gate', () =>
     // startup must fail instead of marking the manager running.
     expect(
       isProtocolMismatchError(new Error('Connection closed before response')),
-    ).toBe(false);
-    expect(
-      isVersionMethodNotFoundError(
-        new Error('Connection closed before response'),
-      ),
     ).toBe(false);
   });
 

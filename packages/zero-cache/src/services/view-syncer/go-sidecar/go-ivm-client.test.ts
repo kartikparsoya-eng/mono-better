@@ -57,6 +57,8 @@ describe('createHydrateStreamAccumulator', () => {
       queryID: 'q1',
       changes: [row('a'), row('b')],
       timingMs: 5,
+      final: true,
+      chunkIndex: 0,
     });
   });
 
@@ -79,18 +81,19 @@ describe('createHydrateStreamAccumulator', () => {
       changes: [row('a')],
       timingMs: 5,
       sigDelta: '1577071b99a74425',
+      final: true,
+      chunkIndex: 0,
     });
   });
 
-  test('multi-chunk: accumulates rows in order, fires onResult only on final', () => {
+  test('multi-chunk: emits each production chunk as it arrives', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
     h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
     h.onFrame({queryID: 'q1', ...posFrame(['b']), chunkIndex: 1, final: false});
 
-    // Should not have fired yet — final hasn't arrived
-    expect(onResult).not.toHaveBeenCalled();
+    expect(onResult).toHaveBeenCalledTimes(2);
 
     h.onFrame({
       queryID: 'q1',
@@ -101,15 +104,32 @@ describe('createHydrateStreamAccumulator', () => {
     });
     h.finish();
 
-    expect(onResult).toHaveBeenCalledTimes(1);
-    expect(onResult).toHaveBeenCalledWith({
-      queryID: 'q1',
-      changes: [row('a'), row('b'), row('c')],
-      timingMs: 12,
-    });
+    expect(onResult.mock.calls.map(c => c[0])).toEqual([
+      {
+        queryID: 'q1',
+        changes: [row('a')],
+        timingMs: undefined,
+        final: false,
+        chunkIndex: 0,
+      },
+      {
+        queryID: 'q1',
+        changes: [row('b')],
+        timingMs: undefined,
+        final: false,
+        chunkIndex: 1,
+      },
+      {
+        queryID: 'q1',
+        changes: [row('c')],
+        timingMs: 12,
+        final: true,
+        chunkIndex: 2,
+      },
+    ]);
   });
 
-  test('multiple queries: independent per-queryID accumulation', () => {
+  test('multiple queries: independent per-queryID finalization', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
@@ -131,37 +151,46 @@ describe('createHydrateStreamAccumulator', () => {
     });
     h.finish();
 
-    expect(onResult).toHaveBeenCalledTimes(2);
-    // q2 finalized first
+    expect(onResult).toHaveBeenCalledTimes(3);
     expect(onResult).toHaveBeenNthCalledWith(1, {
+      queryID: 'q1',
+      changes: [row('a')],
+      timingMs: undefined,
+      final: false,
+      chunkIndex: 0,
+    });
+    expect(onResult).toHaveBeenNthCalledWith(2, {
       queryID: 'q2',
       changes: [row('x', 'q2')],
       timingMs: 3,
+      final: true,
+      chunkIndex: 0,
     });
-    expect(onResult).toHaveBeenNthCalledWith(2, {
+    expect(onResult).toHaveBeenNthCalledWith(3, {
       queryID: 'q1',
-      changes: [row('a'), row('b')],
+      changes: [row('b')],
       timingMs: 7,
+      final: true,
+      chunkIndex: 1,
     });
   });
 
-  test('chunk-order gap: skipped index throws immediately', () => {
+  test('chunk-order backwards jump throws immediately', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
-    h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 0, final: false});
-    // Skip chunkIndex=1, jump to 2 — should throw
+    h.onFrame({queryID: 'q1', ...posFrame(['a']), chunkIndex: 2, final: false});
     expect(() =>
       h.onFrame({
         queryID: 'q1',
         ...posFrame(['b']),
-        chunkIndex: 2,
+        chunkIndex: 1,
         final: true,
       }),
     ).toThrow(
-      /addQueriesStream chunk order violation for queryID=q1: expected chunkIndex=1, got 2/,
+      /addQueriesStream chunk order violation for queryID=q1: expected chunkIndex=3, got 1/,
     );
-    expect(onResult).not.toHaveBeenCalled();
+    expect(onResult).toHaveBeenCalledTimes(1);
   });
 
   test('chunk-order duplicate: same index twice throws', () => {
@@ -195,7 +224,7 @@ describe('createHydrateStreamAccumulator', () => {
     expect(() => h.finish()).toThrow(
       /addQueriesStream finished but 1 queries never received a final chunk: q2/,
     );
-    expect(onResult).toHaveBeenCalledTimes(1);
+    expect(onResult).toHaveBeenCalledTimes(2);
     expect(onResult).toHaveBeenCalledWith(
       expect.objectContaining({queryID: 'q1'}),
     );
@@ -212,31 +241,37 @@ describe('createHydrateStreamAccumulator', () => {
       queryID: 'q1',
       changes: [],
       timingMs: 0,
+      final: true,
+      chunkIndex: 0,
     });
   });
 
-  test('legacy sidecar compat: frame without final defaults to final=true', () => {
-    // Pre-protocol-rev-3 sidecars sent partial frames without `final` —
-    // accumulator treats them as single-frame and delivers immediately.
+  test('frame without final/chunkIndex is rejected', () => {
     const onResult = vi.fn();
     const h = createHydrateStreamAccumulator(onResult);
 
-    h.onFrame({queryID: 'q1', ...posFrame(['a']), timingMs: 4}); // no chunkIndex, no final
-    h.finish();
-
-    expect(onResult).toHaveBeenCalledWith({
-      queryID: 'q1',
-      changes: [row('a')],
-      timingMs: 4,
-    });
+    expect(() =>
+      h.onFrame({
+        queryID: 'q1',
+        ...posFrame(['a']),
+        timingMs: 4,
+      }),
+    ).toThrow(/addQueriesStream frame missing numeric chunkIndex/);
+    expect(() =>
+      h.onFrame({
+        queryID: 'q1',
+        ...posFrame(['a']),
+        chunkIndex: 0,
+        timingMs: 4,
+      }),
+    ).toThrow(/addQueriesStream frame missing boolean final/);
   });
 });
 
-function advanceChunkHarness(opts?: {rowMode?: boolean}) {
+function advanceChunkHarness() {
   const chunks: AdvanceToHeadStreamChunk[] = [];
-  const h = createAdvanceToHeadStreamChunkAccumulator(
-    chunk => chunks.push(chunk),
-    opts,
+  const h = createAdvanceToHeadStreamChunkAccumulator(chunk =>
+    chunks.push(chunk),
   );
   return {h, chunks};
 }
@@ -399,13 +434,13 @@ describe('createAdvanceToHeadStreamChunkAccumulator', () => {
     ]);
   });
 
-  test('chunk-order gap throws immediately', () => {
+  test('chunk-order backwards jump throws immediately', () => {
     const {h} = advanceChunkHarness();
-    h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
+    h.onFrame({...posFrame(['a']), chunkIndex: 2, final: false});
     expect(() =>
-      h.onFrame({...posFrame(['b']), chunkIndex: 2, final: true}),
+      h.onFrame({...posFrame(['b']), chunkIndex: 1, final: true}),
     ).toThrow(
-      /advanceToHeadStream chunk order violation: expected chunkIndex=1, got 2/,
+      /advanceToHeadStream chunk order violation: expected chunkIndex=3, got 1/,
     );
   });
 
@@ -437,7 +472,7 @@ describe('createAdvanceToHeadStreamChunkAccumulator', () => {
   // --- rowMode (NAPI transport, two-plane delivery) ---
 
   test('rowMode: rows via onRow emit chunks before final frame', () => {
-    const {h, chunks} = advanceChunkHarness({rowMode: true});
+    const {h, chunks} = advanceChunkHarness();
     // Rows arrive individually as records; row-bearing partials produce NO
     // frame at all, so the final frame's chunkIndex has a gap.
     h.onRow(row('a'));
@@ -465,7 +500,7 @@ describe('createAdvanceToHeadStreamChunkAccumulator', () => {
   });
 
   test('rowMode: fallback rows in frames interleave with records in queue order', () => {
-    const {h, chunks} = advanceChunkHarness({rowMode: true});
+    const {h, chunks} = advanceChunkHarness();
     h.onRow(row('a'));
     // A non-encodable change rides a fallback frame between records.
     h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
@@ -491,7 +526,7 @@ describe('createAdvanceToHeadStreamChunkAccumulator', () => {
   });
 
   test('rowMode: chunkIndex gaps allowed, backwards still throws', () => {
-    const {h} = advanceChunkHarness({rowMode: true});
+    const {h} = advanceChunkHarness();
     h.onFrame({...posFrame(['a']), chunkIndex: 3, final: false});
     expect(() =>
       h.onFrame({...posFrame(['b']), chunkIndex: 2, final: false}),
@@ -499,7 +534,7 @@ describe('createAdvanceToHeadStreamChunkAccumulator', () => {
   });
 
   test('rowMode: row record after final frame throws', () => {
-    const {h} = advanceChunkHarness({rowMode: true});
+    const {h} = advanceChunkHarness();
     h.onFrame({chunkIndex: 0, final: true, version: '0000000013'});
     expect(() => h.onRow(row('x'))).toThrow(
       /advanceToHeadStream received row record after final frame/,

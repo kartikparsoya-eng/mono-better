@@ -10,23 +10,11 @@ import {GoIVMClient} from './go-ivm-client.ts';
 import {loadGoNapiAddon, type GoNapiAddon} from './napi/index.ts';
 
 /**
- * D5: Protocol-version fallback counter. Pre-fix the catch-and-warn path
- * for "version RPC not implemented" left no metric — operators couldn't
- * tell whether a deployed sidecar was actually using the new wire protocol
- * or silently running in compatibility mode. Now every fallback bumps
- * this counter; non-zero on a dashboard means an older sidecar is in
- * the field and the next protocol-breaking change will need migration.
- *
  * D10: Sidecar init-failure counter with {reason} label. Each failure mode
  * (dlopen failure, ping fail, version mismatch) increments with its own
  * label so dashboards can attribute initial-start failures vs mid-flight
  * crashes.
  */
-const protocolFallbackCounter = getOrCreateCounter(
-  'sync',
-  'ivm.sidecar-protocol-fallback',
-  'Sidecar version RPC failed; client fell back to assumed-compatible mode',
-);
 const initFailureCounter = getOrCreateCounter(
   'sync',
   'ivm.sidecar-init-failure',
@@ -202,23 +190,12 @@ export function sanitizeGoMemLimitEnv(
 
 /**
  * True iff `err` is the wire-protocol-revision mismatch raised during the
- * version handshake (#start). That handshake's catch intentionally SWALLOWS a
- * "method not found" error so a pre-version-RPC sidecar stays usable, but it
- * MUST re-throw a genuine revision mismatch — silently accepting an
- * incompatible wire protocol corrupts every subsequent RPC. This predicate is
- * the seam that splits "swallow" from "escalate"; pinned by sidecar-manager.test.ts.
+ * version handshake (#start). Startup fails on every version() error; this
+ * predicate only keeps the mismatch classifier stable for metrics/tests.
  */
 export function isProtocolMismatchError(err: unknown): boolean {
   return (
     err instanceof Error && err.message.includes('protocol revision mismatch')
-  );
-}
-
-export function isVersionMethodNotFoundError(err: unknown): boolean {
-  return (
-    err instanceof Error &&
-    /method not found/i.test(err.message) &&
-    /\bversion\b/i.test(err.message)
   );
 }
 
@@ -425,36 +402,18 @@ export class SidecarManager {
       );
     }
     // Verify wire protocol version (REVIEW-final MED-CROSS-5).
-    try {
-      const v = await client.version();
-      if (v.protocolRev !== EXPECTED_PROTOCOL_REV) {
-        const msg =
-          `Sidecar protocol revision mismatch: client expects ${EXPECTED_PROTOCOL_REV}, ` +
-          `sidecar (v${v.version}) is at ${v.protocolRev}. Refusing to use this sidecar.`;
-        this.#config.logger('error', msg);
-        throw new Error(msg);
-      }
-      this.#config.logger(
-        'info',
-        `Sidecar version ${v.version} (protocol rev ${v.protocolRev})`,
-      );
-    } catch (err) {
-      // Re-throw every verified-handshake failure except the one backward-
-      // compatibility case: older sidecars that do not implement version().
-      if (!isVersionMethodNotFoundError(err)) {
-        throw err;
-      }
-      // If the version RPC isn't implemented (older sidecar), warn loudly
-      // but don't refuse — operators can roll out a new client first.
-      // D5: also bump the fallback counter so dashboards can detect this
-      // (operators kept missing the warn log in busy stdout).
-      protocolFallbackCounter.add(1);
-      this.#config.logger(
-        'warn',
-        'Sidecar does not implement version RPC; assuming compatibility (consider upgrading)',
-        err,
-      );
+    const v = await client.version();
+    if (v.protocolRev !== EXPECTED_PROTOCOL_REV) {
+      const msg =
+        `Sidecar protocol revision mismatch: client expects ${EXPECTED_PROTOCOL_REV}, ` +
+        `sidecar (v${v.version}) is at ${v.protocolRev}. Refusing to use this sidecar.`;
+      this.#config.logger('error', msg);
+      throw new Error(msg);
     }
+    this.#config.logger(
+      'info',
+      `Sidecar version ${v.version} (protocol rev ${v.protocolRev})`,
+    );
 
     this.#status = 'running';
     this.#epoch++;

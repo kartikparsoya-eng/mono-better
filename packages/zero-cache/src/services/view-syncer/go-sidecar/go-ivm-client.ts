@@ -248,11 +248,10 @@ function extractChanges(value: unknown): RowChange[] {
 //     without signaling completion for that query/call.
 
 /**
- * Accumulator for `addQueriesStream` partial frames. Reassembles per
- * `queryID` and invokes `onResult` exactly once per query, on the frame
- * carrying `final=true`. After the streaming RPC resolves, call
- * `finish()` to verify no queryID is left orphaned (Go sent "done"
- * without a final for it).
+ * Validator/adapter for production `addQueriesStream` row-mode pull frames.
+ * Rows are delivered as individual records and terminal per-query frames carry
+ * `final=true`. After the streaming RPC resolves, call `finish()` to verify no
+ * queryID is left orphaned (Go sent "done" without a final for it).
  *
  * Returned object is stateful — do not reuse across calls.
  */
@@ -262,29 +261,18 @@ export function createHydrateStreamAccumulator(
     changes: RowChange[];
     timingMs: number | undefined;
     sigDelta?: string | undefined;
-    final?: boolean;
-    chunkIndex?: number;
+    final: boolean;
+    chunkIndex: number;
   }) => void,
-  opts?: {chunked?: boolean; rowMode?: boolean},
 ): {
   onFrame: (value: unknown) => void;
   onRow: (change: RowChange) => void;
   finish: () => void;
 } {
-  // When true, deliver each partial frame straight to onResult (carrying its
-  // own final/chunkIndex) instead of buffering per queryID until final. Lets
-  // the caller start poke delivery on the FIRST chunk instead of waiting for
-  // the whole query. The ordering + duplicate-final guards below still apply.
-  // Default false = original accumulate-until-final behavior (unit tests and
-  // all non-streaming callers rely on the exact {queryID,changes,timingMs}
-  // shape emitted in that branch).
-  const chunked = opts?.chunked === true;
   // Row mode (NAPI transport): rows arrive individually via onRow (kind-3
   // records, routed per queryID); FRAMES carry only fallback rows + each
-  // query's terminal final. chunkIndex continuity is relaxed to
-  // non-decreasing (row-bearing partials produce no frame). See the
-  // advance accumulator's rowMode note.
-  const rowMode = opts?.rowMode === true;
+  // query's terminal final. chunkIndex continuity is relaxed to non-decreasing
+  // because row-bearing partials produce no frame.
   const acc = new Map<
     string,
     {changes: RowChange[]; expectedNextIndex: number; rowChunkIndex: number}
@@ -314,26 +302,18 @@ export function createHydrateStreamAccumulator(
         );
       }
       const entry = entryFor(change.queryID);
-      if (chunked) {
-        // Per-chunk consumers get each row as its own 1-row non-final
-        // delivery with a synthetic per-query chunk counter (records don't
-        // carry chunkIndex; the addon queue guarantees order). NOTE: this
-        // synthetic counter shares a numeric space with the ENGINE's frame
-        // chunkIndex (fallback frames + the terminal final) but counts
-        // different things — (queryID, chunkIndex) is NOT a unique key
-        // across the two planes and must never be used as one. Consumers
-        // key on `final` only (view-syncer gates once-per-query metrics on
-        // it); the wire-order guarantee comes from the addon queue.
-        onResult({
-          queryID: change.queryID,
-          changes: [change],
-          timingMs: undefined,
-          final: false,
-          chunkIndex: entry.rowChunkIndex++,
-        });
-        return;
-      }
-      entry.changes.push(change);
+      // Per-chunk consumers get each row as its own 1-row non-final delivery
+      // with a synthetic per-query chunk counter (records don't carry
+      // chunkIndex; the addon queue guarantees order). This synthetic counter
+      // shares a numeric space with the engine's frame chunkIndex but counts
+      // different things, so consumers must key on `final`, not chunkIndex.
+      onResult({
+        queryID: change.queryID,
+        changes: [change],
+        timingMs: undefined,
+        final: false,
+        chunkIndex: entry.rowChunkIndex++,
+      });
     },
     onFrame: (value: unknown) => {
       const v = value as {
@@ -344,8 +324,14 @@ export function createHydrateStreamAccumulator(
         timingMs?: number;
         sigDelta?: string;
       };
-      const chunkIndex = v.chunkIndex ?? 0;
-      const final = v.final ?? true; // older sidecars sent unchunked frames
+      if (typeof v.chunkIndex !== 'number') {
+        throw new Error('addQueriesStream frame missing numeric chunkIndex');
+      }
+      if (typeof v.final !== 'boolean') {
+        throw new Error('addQueriesStream frame missing boolean final');
+      }
+      const chunkIndex = v.chunkIndex;
+      const final = v.final;
       const chunk = extractChanges(value);
 
       if (finalized.has(v.queryID)) {
@@ -367,11 +353,7 @@ export function createHydrateStreamAccumulator(
       // means a wire-level bug — fail loudly rather than silently
       // delivering misordered or partial results. Row mode: gaps expected
       // (row-bearing partials ship as records); backwards = reordering.
-      if (
-        rowMode
-          ? chunkIndex < entry.expectedNextIndex
-          : chunkIndex !== entry.expectedNextIndex
-      ) {
+      if (chunkIndex < entry.expectedNextIndex) {
         throw new Error(
           `addQueriesStream chunk order violation for queryID=${v.queryID}: ` +
             `expected chunkIndex=${entry.expectedNextIndex}, got ${chunkIndex}`,
@@ -379,60 +361,28 @@ export function createHydrateStreamAccumulator(
       }
       entry.expectedNextIndex = chunkIndex + 1;
 
-      if (chunked) {
-        // Per-chunk delivery: hand this frame straight through (no per-queryID
-        // accumulation). timingMs is only meaningful on the terminal frame
-        // (Go sets it there — see engine.go flush()), so pass it only when
-        // final; non-final chunks carry undefined.
-        if (final) {
-          acc.delete(v.queryID);
-          finalized.add(v.queryID);
-        }
-        const result: {
-          queryID: string;
-          changes: RowChange[];
-          timingMs: number | undefined;
-          sigDelta?: string | undefined;
-          final: boolean;
-          chunkIndex: number;
-        } = {
-          queryID: v.queryID,
-          changes: chunk,
-          timingMs: final ? v.timingMs : undefined,
-          final,
-          chunkIndex,
-        };
-        if (final && v.sigDelta !== undefined) {
-          result.sigDelta = v.sigDelta;
-        }
-        onResult(result);
-        return;
-      }
-
-      if (chunk.length > 0) {
-        // Push instead of concat: concat allocates a new array each call,
-        // multiplying transient memory on multi-chunk queries.
-        for (const rc of chunk) entry.changes.push(rc);
-      }
-
       if (final) {
         acc.delete(v.queryID);
         finalized.add(v.queryID);
-        const result: {
-          queryID: string;
-          changes: RowChange[];
-          timingMs: number | undefined;
-          sigDelta?: string | undefined;
-        } = {
-          queryID: v.queryID,
-          changes: entry.changes,
-          timingMs: v.timingMs,
-        };
-        if (v.sigDelta !== undefined) {
-          result.sigDelta = v.sigDelta;
-        }
-        onResult(result);
       }
+      const result: {
+        queryID: string;
+        changes: RowChange[];
+        timingMs: number | undefined;
+        sigDelta?: string | undefined;
+        final: boolean;
+        chunkIndex: number;
+      } = {
+        queryID: v.queryID,
+        changes: chunk,
+        timingMs: final ? v.timingMs : undefined,
+        final,
+        chunkIndex,
+      };
+      if (final && v.sigDelta !== undefined) {
+        result.sigDelta = v.sigDelta;
+      }
+      onResult(result);
     },
 
     finish: () => {
@@ -451,7 +401,6 @@ export function createHydrateStreamAccumulator(
 
 export function createAdvanceToHeadStreamChunkAccumulator(
   onResult: (chunk: AdvanceToHeadStreamChunk) => void,
-  opts?: {rowMode?: boolean},
 ): {
   onFrame: (value: unknown) => void;
   onRow: (change: RowChange) => void;
@@ -465,7 +414,6 @@ export function createAdvanceToHeadStreamChunkAccumulator(
   // chunkIndex continuity is NOT observable frame-to-frame (row-bearing
   // partials produce no frame at all), so the strict monotonicity check
   // is relaxed to "non-decreasing" in row mode.
-  const rowMode = opts?.rowMode === true;
   let expectedNextIndex = 0;
   let gotFinal = false;
   let gotHeader = false;
@@ -491,8 +439,14 @@ export function createAdvanceToHeadStreamChunkAccumulator(
         reset?: {reason: string; msg: string};
         sigDeltas?: Record<string, string>;
       };
-      const chunkIndex = v.chunkIndex ?? 0;
-      const final = v.final ?? true; // belt-and-braces for older sidecars
+      if (typeof v.chunkIndex !== 'number') {
+        throw new Error('advanceToHeadStream frame missing numeric chunkIndex');
+      }
+      if (typeof v.final !== 'boolean') {
+        throw new Error('advanceToHeadStream frame missing boolean final');
+      }
+      const chunkIndex = v.chunkIndex;
+      const final = v.final;
       const header = v.header === true;
       const chunk = extractChanges(value);
 
@@ -527,11 +481,7 @@ export function createAdvanceToHeadStreamChunkAccumulator(
       // a partial advance to the CVR.
       // Row mode: index GAPS are expected (row-bearing partials ship as
       // records, not frames), but going backwards still means reordering.
-      if (
-        rowMode
-          ? chunkIndex < expectedNextIndex
-          : chunkIndex !== expectedNextIndex
-      ) {
+      if (chunkIndex < expectedNextIndex) {
         throw new Error(
           `advanceToHeadStream chunk order violation: ` +
             `expected chunkIndex=${expectedNextIndex}, got ${chunkIndex}`,
@@ -962,7 +912,7 @@ export class GoIVMClient {
     timingMs: number | undefined;
     sigDelta?: string | undefined;
     final: boolean;
-    chunkIndex?: number | undefined;
+    chunkIndex: number;
   }> {
     const napi = this.#napi;
     if (!napi) {
@@ -977,7 +927,7 @@ export class GoIVMClient {
       timingMs: number | undefined;
       sigDelta?: string | undefined;
       final: boolean;
-      chunkIndex?: number | undefined;
+      chunkIndex: number;
     };
     const buffered: Entry[] = [];
     let wake: (() => void) | null = null;
@@ -1000,21 +950,18 @@ export class GoIVMClient {
     // Reuse the accumulator in chunked+rowMode: every record and every
     // frame becomes exactly one onResult entry, preserving wire order and
     // the chunk-order/duplicate-final guards.
-    const handler = createHydrateStreamAccumulator(
-      r => {
-        if (closed) return;
-        buffered.push({
-          queryID: r.queryID,
-          changes: r.changes,
-          timingMs: r.timingMs,
-          ...(r.sigDelta !== undefined ? {sigDelta: r.sigDelta} : {}),
-          final: r.final ?? true,
-          chunkIndex: r.chunkIndex,
-        });
-        notify();
-      },
-      {chunked: true, rowMode: true},
-    );
+    const handler = createHydrateStreamAccumulator(r => {
+      if (closed) return;
+      buffered.push({
+        queryID: r.queryID,
+        changes: r.changes,
+        timingMs: r.timingMs,
+        ...(r.sigDelta !== undefined ? {sigDelta: r.sigDelta} : {}),
+        final: r.final,
+        chunkIndex: r.chunkIndex,
+      });
+      notify();
+    });
 
     void this.#call(
       'addQueriesStream',
@@ -1191,14 +1138,11 @@ export class GoIVMClient {
       w?.();
     };
 
-    const handler = createAdvanceToHeadStreamChunkAccumulator(
-      chunk => {
-        if (closed) return;
-        buffered.push(chunk);
-        notify();
-      },
-      {rowMode: true},
-    );
+    const handler = createAdvanceToHeadStreamChunkAccumulator(chunk => {
+      if (closed) return;
+      buffered.push(chunk);
+      notify();
+    });
     const base: Record<string, unknown> = appID
       ? {clientGroupID, initEpoch, appID}
       : {clientGroupID, initEpoch};
@@ -1386,7 +1330,7 @@ export class GoIVMClient {
         waiters = [];
         this.#perGroupWaiters.set(cgID, waiters);
       }
-      await new Promise<void>(resolve => waiters!.push(resolve));
+      await new Promise<void>(resolve => waiters.push(resolve));
     }
     this.#perGroupInFlight.set(
       cgID,
