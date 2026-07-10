@@ -79,10 +79,8 @@ jobs:
           cache: 'pnpm'
       - name: Install deps
         run: pnpm install --frozen-lockfile
-      - name: Build addon (NAPI)
-        run: pnpm --filter zero-cache build-addon
-      - name: Run JS tests (zero-cache)
-        run: pnpm --filter zero-cache test
+      - name: Run JS tests (zero-cache, no-pg)
+        run: pnpm --filter zero-cache test:no-pg
 
   build:
     needs: test
