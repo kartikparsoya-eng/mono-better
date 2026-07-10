@@ -77,8 +77,27 @@ jobs:
         with:
           node-version: '22'
           cache: 'pnpm'
+      - name: Checkout go-ivm (for libgoivm.so build)
+        uses: actions/checkout@v4
+        with:
+          repository: kartikparsoya-eng/go-ivm
+          ref: feat/napi-transport
+          path: go-ivm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go-ivm/go.mod'
+          cache: true
+          cache-dependency-path: go-ivm/go.sum
       - name: Install deps
         run: pnpm install --frozen-lockfile
+      - name: Build libgoivm.so (NAPI c-shared)
+        run: |
+          cd go-ivm && CGO_ENABLED=1 go build -tags napilib -buildmode=c-shared \
+            -o /tmp/libgoivm.so ./cmd/sidecar
+      - name: Build addon (NAPI)
+        run: |
+          cd packages/zero-cache/src/services/view-syncer/go-sidecar/napi \
+            && npx --yes node-gyp rebuild
       - name: Run JS tests (zero-cache, no-pg)
         run: pnpm --filter zero-cache test:no-pg
 
