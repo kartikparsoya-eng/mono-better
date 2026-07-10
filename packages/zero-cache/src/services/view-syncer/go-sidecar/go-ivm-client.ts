@@ -1027,6 +1027,7 @@ export class GoIVMClient {
         // Idempotent; unknown reqID (RPC already settled) is a no-op.
         napi.streamCancel(reqID);
       }
+      notify();
     };
 
     const iterator: AsyncIterableIterator<Entry> = {

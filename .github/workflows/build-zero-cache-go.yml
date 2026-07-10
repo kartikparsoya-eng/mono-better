@@ -68,7 +68,23 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/zero-cache-go
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+      - name: Build addon (NAPI)
+        run: pnpm --filter zero-cache build-addon
+      - name: Run JS tests (zero-cache)
+        run: pnpm --filter zero-cache test
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

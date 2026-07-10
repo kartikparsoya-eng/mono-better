@@ -151,6 +151,16 @@ process.env.GO_IVM_REPLICA_DB_PATH = replica.path;
 
 const available = isGoNapiAddonAvailable() && existsSync(LIB_PATH);
 
+if (!available && process.env.CI === 'true') {
+  throw new Error(
+    `NAPI E2E tests cannot run: build artifacts missing in CI. ` +
+      `Addon: ${isGoNapiAddonAvailable() ? 'present' : 'missing'}, ` +
+      `Lib: ${existsSync(LIB_PATH) ? 'present' : 'missing'} (${LIB_PATH}). ` +
+      `Build with: npx node-gyp rebuild (napi/) && ` +
+      `go build -tags napilib -buildmode=c-shared -o ${LIB_PATH} ./cmd/sidecar`,
+  );
+}
+
 describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
   const client = new GoIVMClient();
   let started = false;

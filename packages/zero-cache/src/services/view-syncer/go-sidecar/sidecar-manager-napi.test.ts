@@ -39,6 +39,14 @@ replica.db
 
 const available = isGoNapiAddonAvailable() && existsSync(LIB_PATH);
 
+if (!available && process.env.CI === 'true') {
+  throw new Error(
+    `SidecarManager NAPI E2E tests cannot run: build artifacts missing in CI. ` +
+      `Addon: ${isGoNapiAddonAvailable() ? 'present' : 'missing'}, ` +
+      `Lib: ${existsSync(LIB_PATH) ? 'present' : 'missing'} (${LIB_PATH}).`,
+  );
+}
+
 describe.skipIf(!available)('SidecarManager (napi transport)', () => {
   const manager = new SidecarManager({
     napiLibPath: LIB_PATH,

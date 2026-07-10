@@ -1620,6 +1620,7 @@ export class PipelineDriver {
           });
         }
         const changesArr = r.changes as RowChange[];
+        const sigDelta = r.final ? r.sigDelta : undefined;
         function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
           for (const rc of changesArr) {
             yield rc;
@@ -1627,11 +1628,26 @@ export class PipelineDriver {
         }
         yield {
           queryID: q.queryID,
-          changes: this.#trackRowSetSignatures(yieldGoHydration()),
+          changes: this.#trackRowSetSignatures(
+            yieldGoHydration(),
+            sigDelta !== undefined ? {[q.queryID]: sigDelta} : undefined,
+          ),
           timingMs: r.timingMs,
           final: r.final,
         };
+        if (r.final && sigDelta !== undefined && changesArr.length === 0) {
+          this.#xorRowSetSignature(q.queryID, parseSignature(sigDelta));
+        }
         if (r.final) byQueryID.delete(q.queryID);
+      }
+      if (byQueryID.size > 0) {
+        for (const queryID of byQueryID.keys()) {
+          this.#rowSetSignatures.delete(queryID);
+        }
+        const missing = [...byQueryID.keys()].join(', ');
+        throw new Error(
+          `goHydrateBatchStream: ${byQueryID.size} queries never received a final frame: ${missing}`,
+        );
       }
     } catch (e) {
       // Finding 9: a stream that died mid-query leaves that query's XOR

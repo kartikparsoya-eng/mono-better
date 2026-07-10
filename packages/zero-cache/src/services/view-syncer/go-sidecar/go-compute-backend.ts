@@ -161,6 +161,15 @@ export class GoComputeBackend {
    * (REVIEW-final HIGH-TS-1.)
    */
   whenInitialized(): Promise<void> {
+    // If a restart reinit is in progress, wait for the FULL reinit
+    // (init + query re-registration) before resolving. #doInit sets
+    // #initialized=true before re-registration drains, so checking
+    // this.initialized alone would let batch hydrate start while Go
+    // still has zero pipelines — every advance returns empty changes
+    // and the client view freezes silently.
+    if (this.#restartGate) {
+      return this.#restartGate.catch(() => undefined);
+    }
     if (this.initialized) return Promise.resolve();
     if (this.#currentInitPromise) {
       // Wrap to swallow rejection — callers self-check `initialized`
