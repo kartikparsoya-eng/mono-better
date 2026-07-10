@@ -298,6 +298,55 @@ describe('view-syncer/service', () => {
     });
   });
 
+  test('rejects a different user after restoring a persisted client group pin', async () => {
+    const client = connect(SYNC_CONTEXT, [
+      {op: 'put', hash: 'query-hash1', ast: ISSUES_QUERY},
+    ]);
+    await nextPoke(client);
+
+    const cvrStore = new CVRStore(
+      lc,
+      cvrDB,
+      SHARD,
+      TASK_ID,
+      serviceID,
+      ON_FAILURE,
+    );
+    expect((await cvrStore.load(lc, Date.now())).pinnedUserID).toBe('user-1');
+
+    await vs.stop();
+    await viewSyncerDone;
+    const restarted = restartViewSyncer({
+      databaseStorage,
+      replicaDbFile,
+      cvrDB,
+      config,
+      customQueryTransformer,
+      setTimeoutFn,
+    });
+    vs = restarted.vs;
+    viewSyncerDone = restarted.viewSyncerDone;
+
+    const hijackClient = restarted.connect(
+      {
+        ...SYNC_CONTEXT,
+        clientID: 'bar',
+        wsID: 'ws2',
+        userID: 'user-2',
+      },
+      [{op: 'put', hash: 'query-hash2', ast: USERS_QUERY}],
+    );
+    await expect(
+      hijackClient.dequeue(),
+    ).rejects.toThrowErrorMatchingInlineSnapshot(
+      `[ProtocolError: Client groups are pinned to a single userID. Connection userID does not match existing client group userID.]`,
+    );
+
+    const cvr = await cvrStore.load(lc, Date.now());
+    expect(cvr.pinnedUserID).toBe('user-1');
+    expect(cvr.clients.bar).toBeUndefined();
+  });
+
   test('initConnectionMessage with no profileID sets a default profileID based on the client group ID', async () => {
     const oldSyncContext = {
       ...SYNC_CONTEXT,

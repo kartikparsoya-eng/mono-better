@@ -157,6 +157,8 @@ describe('view-syncer/cvr', () => {
             replicaVersion: null,
             clientSchema: null,
             profileID: null,
+            pinnedUserID: null,
+            pinnedUserIDSet: false,
             deleted: false,
             ...row,
           }));
@@ -597,6 +599,64 @@ describe('view-syncer/cvr', () => {
           grantedAt: 1709251200000,
           clientSchema: null,
           profileID: 'p0000039s8200d9a0',
+        },
+      ],
+      clients: [],
+      queries: [],
+      desires: [],
+    });
+  });
+
+  test('persists client group user pin', async () => {
+    const pgStore = new CVRStore(
+      lc,
+      cvrDb,
+      SHARD,
+      'my-task',
+      'abc123',
+      ON_FAILURE,
+    );
+
+    const cvr = await pgStore.load(lc, LAST_CONNECT);
+    const updater = new CVRConfigDrivenUpdater(pgStore, cvr, SHARD);
+    updater.setPinnedUser({id: 'user-1'});
+
+    const {cvr: updated} = await updater.flush(
+      lc,
+      LAST_CONNECT,
+      Date.UTC(2024, 3, 20),
+      ttlClockFromNumber(Date.UTC(2024, 3, 20)),
+    );
+    expect(updated.pinnedUserID).toBe('user-1');
+
+    const pgStore2 = new CVRStore(
+      lc,
+      cvrDb,
+      SHARD,
+      'my-task',
+      'abc123',
+      ON_FAILURE,
+    );
+    const reloaded = await pgStore2.load(lc, LAST_CONNECT);
+    expect(reloaded.pinnedUserID).toBe('user-1');
+
+    const updater2 = new CVRConfigDrivenUpdater(pgStore2, reloaded, SHARD);
+    expect(() => updater2.setPinnedUser({id: 'user-2'})).toThrow(
+      /Client groups are pinned to a single userID/,
+    );
+
+    await expectState(cvrDb, {
+      instances: [
+        {
+          clientGroupID: 'abc123',
+          version: '00',
+          lastActive: 1713571200000,
+          ttlClock: ttlClockFromNumber(1713571200000),
+          clientSchema: null,
+          owner: 'my-task',
+          grantedAt: 1709251200000,
+          pinnedUserID: 'user-1',
+          pinnedUserIDSet: true,
         },
       ],
       clients: [],
@@ -6139,6 +6199,8 @@ describe('view-syncer/cvr', () => {
             "grantedAt": 1709251200000,
             "lastActive": 1709683200000,
             "owner": "my-task",
+            "pinnedUserID": null,
+            "pinnedUserIDSet": false,
             "profileID": null,
             "replicaVersion": "120",
             "ttlClock": 1709683200000,

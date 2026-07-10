@@ -293,6 +293,24 @@ describe('ConnectionContextManager', () => {
     );
   });
 
+  test('restores a durable group userID pin before validating a connection', () => {
+    const manager = new ConnectionContextManagerImpl(lc);
+
+    expect(manager.pinGroupToUser({id: 'user-1'})).toMatchObject({
+      pinnedUser: {id: 'user-1'},
+    });
+    register(manager, 'c1', 'ws1', 'user-2');
+
+    expect(() =>
+      validate(manager, 'c1', 'ws1'),
+    ).toThrowErrorMatchingInlineSnapshot(
+      `[ProtocolError: Client groups are pinned to a single userID. Connection userID does not match existing client group userID.]`,
+    );
+    expect(manager.getConnectionContext(selector('c1', 'ws1'))).toMatchObject({
+      state: 'provisional',
+    });
+  });
+
   test('allows multiple validated connections when stored userIDs match', () => {
     const manager = new ConnectionContextManagerImpl(lc);
     register(manager, 'c1', 'ws1', 'user-1');

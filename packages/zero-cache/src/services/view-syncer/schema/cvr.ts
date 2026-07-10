@@ -36,6 +36,8 @@ export type InstancesRow = {
   replicaVersion: string | null;
   owner: string | null;
   grantedAt: number | null;
+  pinnedUserID: string | null;
+  pinnedUserIDSet: boolean;
   clientSchema: ClientSchema | null;
   profileID: string | null;
 };
@@ -50,6 +52,8 @@ CREATE TABLE ${schema(shard)}.instances (
   "replicaVersion" TEXT,                                -- Identifies the replica (i.e. initial-sync point) from which the CVR data comes.
   "owner"          TEXT,                                -- The ID of the task / server that has been granted ownership of the CVR.
   "grantedAt"      TIMESTAMPTZ,                         -- The time at which the current owner was last granted ownership (most recent connection time).
+  "pinnedUserID"   TEXT,                                -- User ID this client group is pinned to. NULL is also a valid logged-out pin when pinnedUserIDSet is true.
+  "pinnedUserIDSet" BOOL NOT NULL DEFAULT FALSE,         -- Distinguishes logged-out pin (NULL) from old/unpinned CVRs.
   "clientSchema"   JSONB,                               -- ClientSchema of the client group
   "profileID"      TEXT,                                -- Stable profile id ("p..."), falling back to the clientGroupID ("cg{clientGroupID}") for old clients
   "deleted"        BOOL DEFAULT FALSE                   -- Tombstone column for deleted CVRs; instances rows are kept longer for usage stats

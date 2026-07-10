@@ -17,6 +17,7 @@ import {
 import {stringCompare} from '../../../../shared/src/string-compare.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
+import {ErrorKind} from '../../../../zero-protocol/src/error-kind.ts';
 import {ErrorOrigin} from '../../../../zero-protocol/src/error-origin.ts';
 import {ProtocolError} from '../../../../zero-protocol/src/error.ts';
 import {
@@ -65,6 +66,7 @@ export type CVR = {
   queries: Record<string, QueryRecord>;
   clientSchema: ClientSchema | null;
   profileID: string | null;
+  pinnedUserID?: string | null | undefined;
 };
 
 /** Exported immutable CVR type. */
@@ -79,6 +81,7 @@ export type CVRSnapshot = {
   readonly queries: Readonly<Record<string, QueryRecord>>;
   readonly clientSchema: ClientSchema | null;
   readonly profileID: string | null;
+  readonly pinnedUserID?: string | null | undefined;
 };
 
 const CLIENT_LMID_QUERY_ID = 'lmids';
@@ -310,6 +313,22 @@ export class CVRConfigDrivenUpdater extends CVRUpdater {
         );
       }
       this._cvr.profileID = profileID;
+      this._cvrStore.putInstance(this._cvr);
+    }
+  }
+
+  setPinnedUser(user: {readonly id: string | null}) {
+    const current = this._cvr.pinnedUserID;
+    if (current !== undefined && current !== user.id) {
+      throw new ProtocolError({
+        kind: ErrorKind.Unauthorized,
+        message:
+          'Client groups are pinned to a single userID. Connection userID does not match existing client group userID.',
+        origin: ErrorOrigin.ZeroCache,
+      });
+    }
+    if (current === undefined) {
+      this._cvr.pinnedUserID = user.id;
       this._cvrStore.putInstance(this._cvr);
     }
   }

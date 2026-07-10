@@ -219,6 +219,13 @@ export async function initViewSyncerSchema(
     },
   };
 
+  const migratedV17ToV18: Migration = {
+    migrateSchema: async (_, sql) => {
+      await sql`ALTER TABLE ${sql(schema)}.instances ADD COLUMN "pinnedUserID" TEXT`;
+      await sql`ALTER TABLE ${sql(schema)}.instances ADD COLUMN "pinnedUserIDSet" BOOL NOT NULL DEFAULT FALSE`;
+    },
+  };
+
   const schemaVersionMigrationMap: IncrementalMigrationMap = {
     2: migrateV1toV2,
     3: migrateV2ToV3,
@@ -255,6 +262,9 @@ export async function initViewSyncerSchema(
     // each query, used to detect drift on re-hydration of queries containing
     // the Cap operator.
     17: migratedV16ToV17,
+    // V18 persists the client-group user pin so recreated syncers cannot
+    // hydrate an existing CVR under a different user.
+    18: migratedV17ToV18,
   };
 
   await runSchemaMigrations(

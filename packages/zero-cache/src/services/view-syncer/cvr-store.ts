@@ -306,6 +306,8 @@ export class CVRStore {
                  "replicaVersion",
                  "owner",
                  "grantedAt",
+                 "pinnedUserID",
+                 "pinnedUserIDSet",
                  "clientSchema",
                  "profileID",
                  "deleted",
@@ -373,6 +375,8 @@ export class CVRStore {
         replicaVersion,
         owner,
         grantedAt,
+        pinnedUserID,
+        pinnedUserIDSet,
         rowsVersion,
         clientSchema,
         profileID,
@@ -417,6 +421,9 @@ export class CVRStore {
       cvr.ttlClock = ttlClock;
       cvr.replicaVersion = replicaVersion;
       cvr.profileID = profileID;
+      if (pinnedUserIDSet) {
+        cvr.pinnedUserID = pinnedUserID;
+      }
 
       try {
         cvr.clientSchema =
@@ -561,6 +568,7 @@ export class CVRStore {
     lastActive,
     clientSchema,
     profileID,
+    pinnedUserID,
     ttlClock,
   }: Pick<
     CVRSnapshot,
@@ -569,6 +577,7 @@ export class CVRStore {
     | 'lastActive'
     | 'clientSchema'
     | 'profileID'
+    | 'pinnedUserID'
     | 'ttlClock'
   >): void {
     // Overwrite any previously queued instance write — only the last call
@@ -582,6 +591,8 @@ export class CVRStore {
         replicaVersion,
         owner: this.#taskID,
         grantedAt: lastConnectTime,
+        pinnedUserID: pinnedUserID ?? null,
+        pinnedUserIDSet: pinnedUserID !== undefined,
         clientSchema,
         profileID,
       };

@@ -127,6 +127,8 @@ export type ConnectionContextManager = {
       }>
     | undefined;
 
+  pinGroupToUser(user: UserState): Readonly<GroupAuthState>;
+
   failConnection(
     selector: ConnectionSelector,
     revision: number,
@@ -424,29 +426,7 @@ export class ConnectionContextManagerImpl implements ConnectionContextManager {
     // or the WS client's claimed user state if no server validation occurred.
     const incomingUserState = validatedUserState ?? connection.user;
 
-    // Once a client group is validated, every later validated connection must
-    // agree with that pinned identity.
-    if (
-      this.#group.pinnedUser !== undefined &&
-      this.#group.pinnedUser.id !== incomingUserState.id
-    ) {
-      throw new ProtocolErrorWithLevel(
-        {
-          kind: ErrorKind.Unauthorized,
-          message:
-            'Client groups are pinned to a single userID. Connection userID does not match existing client group userID.',
-          origin: ErrorOrigin.ZeroCache,
-        },
-        'warn',
-      );
-    }
-
-    if (this.#group.pinnedUser === undefined) {
-      this.#setGroup({
-        ...this.#group,
-        pinnedUser: incomingUserState,
-      });
-    }
+    this.pinGroupToUser(incomingUserState);
 
     const validatedConnection = this.#storeConnection({
       ...connection,
@@ -460,6 +440,30 @@ export class ConnectionContextManagerImpl implements ConnectionContextManager {
       connection: validatedConnection,
       group: this.getGroupState(),
     };
+  }
+
+  pinGroupToUser(user: UserState): Readonly<GroupAuthState> {
+    const pinnedUser = this.#group.pinnedUser;
+    if (pinnedUser !== undefined && pinnedUser.id !== user.id) {
+      throw new ProtocolErrorWithLevel(
+        {
+          kind: ErrorKind.Unauthorized,
+          message:
+            'Client groups are pinned to a single userID. Connection userID does not match existing client group userID.',
+          origin: ErrorOrigin.ZeroCache,
+        },
+        'warn',
+      );
+    }
+
+    if (pinnedUser === undefined) {
+      this.#setGroup({
+        ...this.#group,
+        pinnedUser: user,
+      });
+    }
+
+    return this.getGroupState();
   }
 
   /** Removes one connection due to failed auth and updates all derived background/deadline state. */

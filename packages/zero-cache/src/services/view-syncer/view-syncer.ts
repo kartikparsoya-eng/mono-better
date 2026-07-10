@@ -480,6 +480,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         this.#cvr = await this.#runPriorityOp(lc, 'loading cvr', () =>
           this.#cvrStore.load(lc, this.#lastConnectTime),
         );
+        this.#restorePinnedUserFromCVR(this.#cvr);
         this.#ttlClock = this.#cvr.ttlClock;
         this.#ttlClockBase = Date.now();
       } else {
@@ -505,6 +506,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         this.#scheduleAuthMaintenance(lc);
       }
     });
+  }
+
+  #restorePinnedUserFromCVR(cvr: CVRSnapshot): void {
+    if (cvr.pinnedUserID !== undefined) {
+      this.connContextManager.pinGroupToUser({id: cvr.pinnedUserID});
+    }
   }
 
   readyState(): Promise<'initialized' | 'draining'> {
@@ -1117,6 +1124,23 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       cvr,
       this.#shard,
     );
+    if (connCtx) {
+      this.#restorePinnedUserFromCVR(cvr);
+      const currentConnCtx =
+        this.connContextManager.mustGetConnectionContext(connCtx);
+      if (
+        currentConnCtx.state !== 'validated' &&
+        !(await this.#validateConnection(currentConnCtx))
+      ) {
+        return cvr;
+      }
+      const pinnedUser = this.connContextManager.getGroupState().pinnedUser;
+      assert(
+        pinnedUser !== undefined,
+        'validated connection must pin client group user',
+      );
+      updater.setPinnedUser(pinnedUser);
+    }
     updater.ensureClient(clientID);
     const patches = fn(updater);
 
