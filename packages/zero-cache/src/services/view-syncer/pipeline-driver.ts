@@ -1564,6 +1564,10 @@ export class PipelineDriver {
       ast: this.#planAstForGo(q.ast),
     }));
     const byQueryID = new Map<string, (typeof plannedUserQueries)[number]>();
+    // Track which queryIDs had a no-op stub registered during this stream
+    // (L12). On failure, these stubs must be cleaned up — otherwise they
+    // linger in #pipelines as stale no-op entries.
+    const stubQueryIDs = new Set<string>();
     for (const q of plannedUserQueries) byQueryID.set(q.queryID, q);
 
     // PULL delivery (ABI v3, DESIGN-duplex-streaming): Go produces each row
@@ -1590,6 +1594,10 @@ export class PipelineDriver {
         // Stub registration once per query (real timingMs lands on the
         // terminal entry), signature tracking, final-gated pruning.
         if (!this.#pipelines.has(q.queryID) || r.final) {
+          // Track stub registration for L12 cleanup on failure.
+          if (!this.#pipelines.has(q.queryID)) {
+            stubQueryIDs.add(q.queryID);
+          }
           // Abort-budget pricing on the terminal entry (stub registrations
           // keep the engine time until then): the batch hydrates its queries
           // in PARALLEL on one pull stream, so attributing each query its
@@ -1621,6 +1629,15 @@ export class PipelineDriver {
         }
         const changesArr = r.changes as RowChange[];
         const sigDelta = r.final ? r.sigDelta : undefined;
+        // Go's sigDelta is the cumulative XOR of ALL rows across ALL partials.
+        // Non-final chunks did per-row XOR (no sigDelta available). Without a
+        // reset, the final chunk's sigDelta would double-count the non-final
+        // rows: sig = perRowXOR(non-final) ^ sigDelta(all) = XOR(final only).
+        // Reset to 0 so the sigDelta becomes the sole contribution:
+        // sig = 0 ^ sigDelta(all) = XOR(all rows) ✓
+        if (r.final && sigDelta !== undefined) {
+          this.#rowSetSignatures.set(q.queryID, 0n);
+        }
         function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
           for (const rc of changesArr) {
             yield rc;
@@ -1661,6 +1678,13 @@ export class PipelineDriver {
       // cancel, sidecar restart, wire errors.
       for (const queryID of byQueryID.keys()) {
         this.#rowSetSignatures.delete(queryID);
+        // L12: remove no-op pipeline stubs registered during this stream.
+        // Without this, a failed hydrate leaves stale no-op entries in
+        // #pipelines (destroy() is a no-op, fetch returns garbage) that
+        // inflate pipeline counts and confuse downstream logic.
+        if (stubQueryIDs.has(queryID)) {
+          this.#pipelines.delete(queryID);
+        }
       }
       throw e;
     }

@@ -683,6 +683,17 @@ export class RetryableAdvanceError extends Error {
  */
 export const RPC_CODE_SCALAR_RESET = -32105;
 
+/**
+ * RPC error code Go uses when a response frame exceeds the wire max
+ * (main.go errCodeFrameTooLarge). The advance or hydrate completed but the
+ * result couldn't be serialized. The classifier maps this to 'protocol' →
+ * CG teardown (the safe recovery: the next hydrate re-reads with fresh
+ * chunks). Before this constant the error fell into the generic else branch
+ * → plain Error → 'unclassified' → also CG teardown, but with a misleading
+ * message and no dedicated test coverage (L7).
+ */
+export const RPC_CODE_FRAME_TOO_LARGE = -32011;
+
 export class ScalarResetError extends Error {
   constructor(message: string) {
     super(message);
@@ -1555,6 +1566,14 @@ export class GoIVMClient {
         // text byte-for-byte; the classifier maps it to that same signal
         // + reason (transparent reset, NOT teardown).
         pending.reject(new ScalarResetError(resp.error.message));
+      } else if (resp.error.code === RPC_CODE_FRAME_TOO_LARGE) {
+        // Frame too large to serialize. The advance/hydrate completed but
+        // the result couldn't be sent. Use a message that the classifier
+        // matches as 'protocol' (msg.includes('Frame too large')) → CG
+        // teardown, the safe recovery (L7).
+        pending.reject(
+          new Error(`Frame too large: ${resp.error.message}`),
+        );
       } else {
         pending.reject(
           new Error(`RPC error ${resp.error.code}: ${resp.error.message}`),
