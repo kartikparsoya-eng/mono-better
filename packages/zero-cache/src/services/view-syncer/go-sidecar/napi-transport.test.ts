@@ -36,8 +36,8 @@ import {existsSync, statSync} from 'node:fs';
 import {afterAll, describe, expect, test} from 'vitest';
 import {GoIVMClient} from './go-ivm-client.ts';
 import type {RowChange} from './go-ivm-client.ts';
-import {isGoNapiAddonAvailable, loadGoNapiAddon} from './napi/index.ts';
 import {makeTestReplica} from './napi-test-fixtures.ts';
+import {isGoNapiAddonAvailable, loadGoNapiAddon} from './napi/index.ts';
 
 const LIB_PATH =
   process.env.GOIVM_TEST_LIB ??
@@ -72,9 +72,7 @@ const replica = makeTestReplica();
 replica.db.exec(
   `CREATE TABLE "users" ("id" TEXT PRIMARY KEY,"name" TEXT,"age" INTEGER,"_0_version" TEXT)`,
 );
-const userInsert = replica.db.prepare(
-  'INSERT INTO "users" VALUES (?,?,?,?)',
-);
+const userInsert = replica.db.prepare('INSERT INTO "users" VALUES (?,?,?,?)');
 userInsert.run('u1', 'alice', 30, '0000000001');
 userInsert.run('u2', 'bob', 25, '0000000001');
 userInsert.run('u3', 'carol', 35, '0000000001');
@@ -97,7 +95,13 @@ const edgeRows: {
     meta: {a: [1, 'x', null], b: {c: true}},
     label: 'plain',
   },
-  {id: 'e03', num: 3.141592653589793, flag: true, meta: [1, 2, 3], label: '🎯emoji🚀'},
+  {
+    id: 'e03',
+    num: 3.141592653589793,
+    flag: true,
+    meta: [1, 2, 3],
+    label: '🎯emoji🚀',
+  },
   {
     id: 'e04',
     num: 0,
@@ -106,7 +110,13 @@ const edgeRows: {
     label: 'a'.repeat(70_000),
   },
   {id: 'e05', num: 42, flag: true, meta: null, label: '\u0000null-byte'},
-  {id: 'e06', num: -9876.54321, flag: false, meta: {emoji: '💥'}, label: 'ünïcödé'},
+  {
+    id: 'e06',
+    num: -9876.54321,
+    flag: false,
+    meta: {emoji: '💥'},
+    label: 'ünïcödé',
+  },
 ];
 const edgeInsert = replica.db.prepare(
   'INSERT INTO "edge" VALUES (?,?,?,?,?,?)',
@@ -125,9 +135,7 @@ for (const r of edgeRows) {
 replica.db.exec(
   `CREATE TABLE "bulk" ("id" TEXT PRIMARY KEY,"n" INTEGER,"_0_version" TEXT)`,
 );
-const bulkInsert = replica.db.prepare(
-  'INSERT INTO "bulk" VALUES (?,?,?)',
-);
+const bulkInsert = replica.db.prepare('INSERT INTO "bulk" VALUES (?,?,?)');
 for (let i = 0; i < 5000; i++) {
   bulkInsert.run(`k${String(i).padStart(5, '0')}`, i, '0000000001');
 }
@@ -253,25 +261,21 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
   // the phantom "database is locked".
   test('row plane: advanceToHeadStream delivers derived changes', async ctx => {
     const c = ensureStarted();
+    if (!LIB_LOOKS_WAL2) {
+      ctx.skip(
+        `advance requires the wal2-linked dylib (BEGIN CONCURRENT); ` +
+          `${LIB_PATH} appears to be a plain (mattn) build — see the ` +
+          `header recipe, then rerun with GOIVM_TEST_LIB=/tmp/libgoivm_wal2.dylib`,
+      );
+    }
+
     replica.db
       .prepare('INSERT INTO "users" VALUES (?,?,?,?)')
       .run('u9', 'zed', 99, '0000000002');
     replica.addChangeLog('0000000002', 0, 'users', '{"id":"u9"}', 's');
     replica.bumpVersion('0000000002');
 
-    let result: Awaited<ReturnType<typeof c.advanceToHeadStream>>;
-    try {
-      result = await c.advanceToHeadStream('cg-napi', usersEpoch, '');
-    } catch (e) {
-      if (!LIB_LOOKS_WAL2 && String(e).includes('database is locked')) {
-        ctx.skip(
-          `advance requires the wal2-linked dylib (BEGIN CONCURRENT); ` +
-            `${LIB_PATH} appears to be a plain (mattn) build — see the ` +
-            `header recipe, then rerun with GOIVM_TEST_LIB=/tmp/libgoivm_wal2.dylib`,
-        );
-      }
-      throw e;
-    }
+    const result = await c.advanceToHeadStream('cg-napi', usersEpoch, '');
     expect(result.rowChanges.length).toBe(2);
     const qids = result.rowChanges.map(ch => ch.queryID).sort();
     expect(qids).toEqual(['q-all', 'q-chunked']);
@@ -291,20 +295,32 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     await Promise.all([
       c.addQueriesStream(
         'cg-napi',
-        [{queryID: 'q-conc-a', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
+        [
+          {
+            queryID: 'q-conc-a',
+            ast: {table: 'users', orderBy: [['id', 'asc']]},
+          },
+        ],
         usersEpoch,
         r => resA.push(...r.changes),
       ),
       c.addQueriesStream(
         'cg-napi',
-        [{queryID: 'q-conc-b', ast: {table: 'users', orderBy: [['id', 'asc']]}}],
+        [
+          {
+            queryID: 'q-conc-b',
+            ast: {table: 'users', orderBy: [['id', 'asc']]},
+          },
+        ],
         usersEpoch,
         r => resB.push(...r.changes),
       ),
     ]);
-    // 4 rows (u1,u2,u3,u9), tagged with their own queryID.
-    expect(resA).toHaveLength(4);
-    expect(resB).toHaveLength(4);
+    // Plain local dylibs skip the drive-advance test above, so u9 is only
+    // present when this file runs against the wal2-linked dylib.
+    const expectedRows = LIB_LOOKS_WAL2 ? 4 : 3;
+    expect(resA).toHaveLength(expectedRows);
+    expect(resB).toHaveLength(expectedRows);
     expect(resA.every(ch => ch.queryID === 'q-conc-a')).toBe(true);
     expect(resB.every(ch => ch.queryID === 'q-conc-b')).toBe(true);
   });
@@ -394,7 +410,12 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     await expect(
       c.addQueriesStream(
         'cg-late',
-        [{queryID: 'q-timeout', ast: {table: 'bulk', orderBy: [['id', 'asc']]}}],
+        [
+          {
+            queryID: 'q-timeout',
+            ast: {table: 'bulk', orderBy: [['id', 'asc']]},
+          },
+        ],
         initEpoch,
         () => {},
         {timeoutMs: 1},
@@ -501,7 +522,7 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     }
     expect(finals).toBe(1);
     expect(seen).toHaveLength(200);
-    expect(seen).toEqual([...seen].sort());
+    expect(seen).toEqual(seen.toSorted());
     expect(new Set(seen).size).toBe(200);
   });
 });
