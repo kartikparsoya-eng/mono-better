@@ -275,17 +275,30 @@ describe.skipIf(!available)('NAPI transport (in-process Go engine)', () => {
     replica.addChangeLog('0000000002', 0, 'users', '{"id":"u9"}', 's');
     replica.bumpVersion('0000000002');
 
-    const result = await c.advanceToHeadStream('cg-napi', usersEpoch, '');
-    expect(result.rowChanges.length).toBe(2);
-    const qids = result.rowChanges.map(ch => ch.queryID).sort();
+    const rowChanges: RowChange[] = [];
+    let finalVersion = '';
+    let sawTimings = false;
+    for await (const chunk of c.advanceToHeadStreamChunks(
+      'cg-napi',
+      usersEpoch,
+      '',
+    )) {
+      rowChanges.push(...chunk.changes);
+      if (chunk.final) {
+        finalVersion = chunk.version ?? '';
+        sawTimings = (chunk.timings?.length ?? 0) > 0;
+      }
+    }
+    expect(rowChanges.length).toBe(2);
+    const qids = rowChanges.map(ch => ch.queryID).sort();
     expect(qids).toEqual(['q-all', 'q-chunked']);
-    for (const ch of result.rowChanges) {
+    for (const ch of rowChanges) {
       expect(ch.type).toBe(0);
       expect(ch.rowKey).toEqual({id: 'u9'});
       expect((ch.row as {name: string}).name).toBe('zed');
     }
-    expect(result.version).toBe('0000000002');
-    expect(result.timings?.length).toBeGreaterThan(0);
+    expect(finalVersion).toBe('0000000002');
+    expect(sawTimings).toBe(true);
   });
 
   test('concurrent hydrates keep rows correctly routed per RPC', async () => {

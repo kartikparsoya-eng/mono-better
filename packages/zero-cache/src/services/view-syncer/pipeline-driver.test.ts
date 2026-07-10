@@ -1152,7 +1152,6 @@ describe('view-syncer/pipeline-driver', () => {
           numChanges: 1,
         };
       }),
-      advanceToHeadStream: vi.fn(),
       destroy: vi.fn().mockResolvedValue(undefined),
     };
     const p = goPipelines(fakeBackend);
@@ -1177,7 +1176,6 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     expect(fakeBackend.advanceToHeadStreamChunks).toHaveBeenCalledTimes(1);
-    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
     expect(p.rowSetSignature('queryID1')).toBe(0n);
   });
 
@@ -1274,16 +1272,6 @@ describe('view-syncer/pipeline-driver', () => {
       }),
       hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
-      advanceToHeadStream: vi.fn(async () => {
-        await finalGate;
-        return {
-          changes: [],
-          version: '134',
-          numChanges: 1,
-          rowChanges: [goRow],
-          sigDeltas: {queryID1: sigDelta},
-        };
-      }),
       advanceToHeadStreamChunks: vi.fn(async function* () {
         yield {
           changes: [],
@@ -1339,12 +1327,11 @@ describe('view-syncer/pipeline-driver', () => {
     }
     expect(rows).toEqual([goRow]);
     expect(fakeBackend.advanceToHeadStreamChunks).toHaveBeenCalledTimes(1);
-    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
     expect(p.rowSetSignature('queryID1')).toEqual(BigInt(`0x${sigDelta}`));
   });
 
   test('Go-primary streamed advance cancels Go iterator when consumer stops during TS replay', async () => {
-    const returnSpy = vi.fn(async () => ({
+    const returnSpy = vi.fn(() => ({
       done: true as const,
       value: undefined,
     }));
@@ -1360,7 +1347,6 @@ describe('view-syncer/pipeline-driver', () => {
       }),
       hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
-      advanceToHeadStream: vi.fn(),
       advanceToHeadStreamChunks: vi.fn(() => ({
         [Symbol.asyncIterator]() {
           let sentHeader = false;
@@ -1439,7 +1425,6 @@ describe('view-syncer/pipeline-driver', () => {
     }
     expect(seen).toBe(1);
     expect(returnSpy).toHaveBeenCalledTimes(1);
-    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
   });
 
   test('Go-primary streamed advance rejects a header without version', async () => {
@@ -1459,7 +1444,6 @@ describe('view-syncer/pipeline-driver', () => {
       }),
       hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
-      advanceToHeadStream: vi.fn(),
       advanceToHeadStreamChunks: vi.fn(() => ({
         [Symbol.asyncIterator]() {
           let sentHeader = false;
@@ -1506,7 +1490,6 @@ describe('view-syncer/pipeline-driver', () => {
       /advanceToHeadStream header missing version/,
     );
     expect(returnSpy).toHaveBeenCalledTimes(1);
-    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
   });
 
   test('Go-primary streamed advance rethrows late protocol errors after rows', async () => {
@@ -1532,7 +1515,6 @@ describe('view-syncer/pipeline-driver', () => {
       }),
       hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
-      advanceToHeadStream: vi.fn(),
       advanceToHeadStreamChunks: vi.fn(async function* () {
         yield {
           changes: [],
@@ -1582,7 +1564,6 @@ describe('view-syncer/pipeline-driver', () => {
       })(),
     ).rejects.toThrow(/advanceToHeadStream finished without a final chunk/);
     expect(rows).toEqual([goRow]);
-    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
   });
 
   test('Go-primary streamed advance rejects clean stream end without final frame', async () => {
@@ -1605,7 +1586,6 @@ describe('view-syncer/pipeline-driver', () => {
       }),
       hydrateStreamPull: emptyHydrateStreamPull(),
       removeQuery: vi.fn().mockResolvedValue(undefined),
-      advanceToHeadStream: vi.fn(),
       advanceToHeadStreamChunks: vi.fn(async function* () {
         yield {
           changes: [],
@@ -1654,7 +1634,6 @@ describe('view-syncer/pipeline-driver', () => {
       })(),
     ).rejects.toThrow(/advanceToHeadStream ended without a final frame/);
     expect(rows).toEqual([goRow]);
-    expect(fakeBackend.advanceToHeadStream).not.toHaveBeenCalled();
   });
 
   test('timeout on slow advancement', () => {

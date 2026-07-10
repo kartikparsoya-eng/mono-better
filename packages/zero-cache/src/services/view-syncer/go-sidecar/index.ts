@@ -1,7 +1,7 @@
 export {GoIVMClient} from './go-ivm-client.ts';
 export type {
+  AdvanceToHeadStreamChunk,
   RowChange as GoRowChange,
-  SnapshotChange,
   TableSchema,
   TableTiming as GoTableTiming,
   HydrateResult as GoHydrateResult,

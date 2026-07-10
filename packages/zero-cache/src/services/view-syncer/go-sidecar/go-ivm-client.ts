@@ -97,39 +97,11 @@ export type InitParams = {
   tables: Record<string, TableData>;
 };
 
-export type SnapshotChange = {
-  table: string;
-  prevValues: Record<string, unknown>[];
-  nextValue: Record<string, unknown> | null;
-};
-
 /**
- * A SnapshotChange the Go sidecar DERIVED itself (advanceToHead), carrying the
- * rowKey TS uses to align it with its own diff. Mirrors snapshotChangeWire on
- * the Go side (cmd/sidecar/advance_to_head.go).
+ * One streaming advance delivery. Row-bearing chunks arrive before the final
+ * metadata frame; callers must consume this iterator directly rather than
+ * waiting for a reassembled rowChanges array.
  */
-export type DerivedSnapshotChange = SnapshotChange & {
-  rowKey: Record<string, unknown>;
-};
-
-/**
- * Result of the advanceToHead RPC: the Go-derived diff + Go's new stateVersion.
- * `reset` is set when the diff aborted on a reset/truncate/permissions-change,
- * in which case `changes` is empty and the caller re-hydrates at `version`.
- */
-export type AdvanceToHeadResult = {
-  // P1 (derive-only): the Go-derived diff for the TS-vs-Go shadow compare.
-  changes: DerivedSnapshotChange[];
-  version: string;
-  numChanges: number;
-  // P2 (drive): the engine RowChanges produced by applying Go's OWN derived
-  // diff to Go's engine (frame-coordinated). Empty in derive-only mode.
-  rowChanges: RowChange[];
-  sigDeltas?: Record<string, string> | undefined;
-  timings?: TableTiming[] | undefined;
-  reset?: {reason: string; msg: string} | undefined;
-};
-
 export type AdvanceToHeadStreamChunk = {
   changes: RowChange[];
   final: boolean;
@@ -480,52 +452,6 @@ export function createHydrateStreamAccumulator(
           `addQueriesStream finished but ${acc.size} queries never received a final chunk: ${missing}`,
         );
       }
-    },
-  };
-}
-
-/**
- * Accumulator for `advanceToHeadStream` partial frames (the streaming
- * push-based advance). Reassembles into one {@link AdvanceToHeadResult},
- * capturing the chunked RowChanges (→ `rowChanges`) plus the
- * advanceToHead-specific `version` + `numChanges` + `reset`, which ride the
- * final frame only.
- *
- * Returned object is stateful — do not reuse across calls.
- */
-export function createAdvanceToHeadStreamAccumulator(opts?: {
-  rowMode?: boolean;
-}): {
-  onFrame: (value: unknown) => void;
-  onRow: (change: RowChange) => void;
-  finish: () => AdvanceToHeadResult;
-} {
-  const acc: RowChange[] = [];
-  let finalResult: AdvanceToHeadStreamChunk | undefined;
-  const handler = createAdvanceToHeadStreamChunkAccumulator(chunk => {
-    for (const rc of chunk.changes) acc.push(rc);
-    if (chunk.final) {
-      finalResult = chunk;
-    }
-  }, opts);
-
-  return {
-    onRow: handler.onRow,
-    onFrame: handler.onFrame,
-    finish: (): AdvanceToHeadResult => {
-      handler.finish();
-      const result: AdvanceToHeadResult = {
-        changes: [],
-        version: finalResult?.version ?? '',
-        numChanges: finalResult?.numChanges ?? 0,
-        rowChanges: acc,
-        timings: finalResult?.timings,
-        reset: finalResult?.reset,
-      };
-      if (finalResult?.sigDeltas !== undefined) {
-        result.sigDeltas = finalResult.sigDeltas;
-      }
-      return result;
     },
   };
 }
@@ -1323,58 +1249,6 @@ export class GoIVMClient {
     );
   }
 
-  /**
-   * Streaming push-based advance (the production advance path). Go derives
-   * its own diff, drives its engine, and emits the resulting RowChanges as
-   * per-row records over the in-process row plane (plus chunked fallback
-   * frames). This method reassembles them into one
-   * {@link AdvanceToHeadResult}.
-   *
-   * Same defensive invariants as {@link addQueriesStream}: chunk-order gaps
-   * throw; missing terminal `final:true` throws.
-   */
-  async advanceToHeadStream(
-    clientGroupID: string,
-    initEpoch: number,
-    appID: string,
-    opts?: CallOptions & {
-      /**
-       * Arms Go's port of TS's economic advancement-abort
-       * (#shouldAdvanceYieldMaybeAbortAdvance): totalHydrationTimeMs is the
-       * CG's measured re-hydrate cost — the price of the reset an abort
-       * triggers — computed by PipelineDriver.totalHydrationTimeMs() so the
-       * decision inputs are identical to TS's own. Omitted → abort disarmed
-       * (old-server pairs ignore the extra fields — additive msgpack).
-       */
-      abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
-      window?: number;
-    },
-  ): Promise<AdvanceToHeadResult> {
-    const rowChanges: RowChange[] = [];
-    let finalChunk: AdvanceToHeadStreamChunk | undefined;
-    for await (const chunk of this.advanceToHeadStreamChunks(
-      clientGroupID,
-      initEpoch,
-      appID,
-      opts,
-    )) {
-      for (const rc of chunk.changes) rowChanges.push(rc);
-      if (chunk.final) finalChunk = chunk;
-    }
-    const result: AdvanceToHeadResult = {
-      changes: [],
-      version: finalChunk?.version ?? '',
-      numChanges: finalChunk?.numChanges ?? 0,
-      rowChanges,
-      timings: finalChunk?.timings,
-      reset: finalChunk?.reset,
-    };
-    if (finalChunk?.sigDeltas !== undefined) {
-      result.sigDeltas = finalChunk.sigDeltas;
-    }
-    return result;
-  }
-
   advanceToHeadStreamChunks(
     clientGroupID: string,
     initEpoch: number,
@@ -1853,12 +1727,11 @@ export class GoIVMClient {
     // We assert partial shape here so the failure surfaces with the
     // useful error.
     //
-    // try/catch around onPartial is load-bearing: accumulators (e.g.
-    // createAdvanceToHeadStreamAccumulator) throw on chunk-order violations
-    // or missing-final invariants. A synchronous throw from this
-    // handler must reject only the offending RPC — we reject the
-    // offending RPC with the throw and continue draining other pending
-    // entries; other CGs' RPCs flow normally.
+    // try/catch around onPartial is load-bearing: stream accumulators throw on
+    // chunk-order violations or missing-final invariants. A synchronous throw
+    // from this handler must reject only the offending RPC — we reject the
+    // offending RPC with the throw and continue draining other pending entries;
+    // other CGs' RPCs flow normally.
     const isStreamTerminal = resp.result === STREAM_DONE_SENTINEL;
     if (pending.onPartial && !isStreamTerminal) {
       if (typeof resp.result !== 'object' || resp.result === null) {

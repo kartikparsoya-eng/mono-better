@@ -14,7 +14,6 @@
 import type {ZeroConfig} from '../../../config/zero-config.ts';
 import {RetryableAdvanceError} from './go-ivm-client.ts';
 import type {
-  AdvanceToHeadResult,
   AdvanceToHeadStreamChunk,
   HydrateResult as GoHydrateResult,
   TableData,
@@ -271,42 +270,14 @@ export class GoComputeBackend {
     );
   }
 
-  // advanceToHeadStream: streaming push-based advance (the production
-  // advance path). Go independently leapfrogs its Snapshotter, derives its
-  // own diff, drives its engine, and streams the RowChanges per row over
-  // the in-process boundary; the client reassembles them into one
-  // AdvanceToHeadResult.
-  //
-  // abortBudget (optional) arms Go's port of TS's economic advancement-abort
-  // — the caller (PipelineDriver's drive path) passes the CG's measured
-  // totalHydrationTimeMs so Go aborts on TS's own formula and the RPC
-  // rejects with AdvanceAbortedError → ResetPipelinesSignal
-  // ('advancement-timeout').
+  // Streaming push-based advance (the production advance path). Go
+  // independently leapfrogs its Snapshotter, derives its own diff, drives its
+  // engine, and streams RowChanges per row over the in-process boundary.
   //
   // Clean-retryable failures (RetryableAdvanceError — Go failed BEFORE any
-  // state moved; the call is idempotent) are retried IN PLACE with bounded
-  // jittered backoff instead of surfacing: TS-native has no transient
-  // advance-failure class, so absorbing these keeps the failure model
-  // TS-identical (a reset here would be Go-only churn; the storm class).
-  advanceToHeadStream(abortBudget?: {
-    totalHydrationTimeMs: number;
-  }): Promise<AdvanceToHeadResult> {
-    return this.#withCleanRetry('advanceToHeadStream', () =>
-      this.#withReinitRetry(() =>
-        this.#client().advanceToHeadStream(
-          this.#clientGroupID,
-          this.#sidecarInitEpoch,
-          this.#appID,
-          {
-            ...this.#cgOpts(),
-            window: this.#pullWindow,
-            ...(abortBudget ? {abortBudget} : {}),
-          },
-        ),
-      ),
-    );
-  }
-
+  // state moved; the call is idempotent) are retried IN PLACE only before this
+  // iterator yields anything. Once any header/row/final is observable, replay
+  // would duplicate streamed effects, so the error surfaces to the caller.
   async *advanceToHeadStreamChunks(abortBudget?: {
     totalHydrationTimeMs: number;
   }): AsyncIterableIterator<AdvanceToHeadStreamChunk> {
@@ -353,41 +324,6 @@ export class GoComputeBackend {
   // Pinned cgID for the client's per-group fairness semaphore.
   #cgOpts(): {clientGroupID: string} {
     return {clientGroupID: this.#clientGroupID};
-  }
-
-  /**
-   * Bounded in-place retry for CLEAN advance failures
-   * (RetryableAdvanceError, RPC_CODE_ADVANCE_CLEAN_RETRYABLE): Go's
-   * failure-atomic snapshotter left nothing moved, so re-running the SAME
-   * call re-derives from the unchanged position — idempotent by
-   * construction. Anything else (including exhausted retries) propagates
-   * unchanged: persistent failure means something is genuinely wedged, and
-   * the TS-shaped disposition for that is the classifier's rethrow → CG
-   * teardown → client reconnect, not a reset loop.
-   */
-  async #withCleanRetry<T>(what: string, fn: () => Promise<T>): Promise<T> {
-    const delaysMs = [100, 500, 2000];
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await fn();
-      } catch (err) {
-        if (
-          !(err instanceof RetryableAdvanceError) ||
-          attempt >= delaysMs.length
-        ) {
-          throw err;
-        }
-        // Full jitter (0.5x–1.5x) so simultaneous clean failures across CGs
-        // don't re-converge on the same instant.
-        const delay = Math.round(delaysMs[attempt] * (0.5 + Math.random()));
-        this.#log(
-          'warn',
-          `${what} failed clean (state untouched); retrying in place ` +
-            `(attempt ${attempt + 1}/${delaysMs.length}, ${delay}ms): ${err.message}`,
-        );
-        await new Promise<void>(resolve => setTimeout(resolve, delay));
-      }
-    }
   }
 
   // Two retry-worthy error classes:

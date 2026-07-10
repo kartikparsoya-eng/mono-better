@@ -13,9 +13,10 @@
 
 import {describe, expect, test, vi} from 'vitest';
 import {
-  createAdvanceToHeadStreamAccumulator,
+  createAdvanceToHeadStreamChunkAccumulator,
   createHydrateStreamAccumulator,
   GoIVMClient,
+  type AdvanceToHeadStreamChunk,
   type RowChange,
   unpack,
 } from './go-ivm-client.ts';
@@ -232,9 +233,18 @@ describe('createHydrateStreamAccumulator', () => {
   });
 });
 
-describe('createAdvanceToHeadStreamAccumulator', () => {
-  test('single-chunk: one final frame yields full AdvanceToHeadResult', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
+function advanceChunkHarness(opts?: {rowMode?: boolean}) {
+  const chunks: AdvanceToHeadStreamChunk[] = [];
+  const h = createAdvanceToHeadStreamChunkAccumulator(
+    chunk => chunks.push(chunk),
+    opts,
+  );
+  return {h, chunks};
+}
+
+describe('createAdvanceToHeadStreamChunkAccumulator', () => {
+  test('single-chunk: one final frame yields one final chunk', () => {
+    const {h, chunks} = advanceChunkHarness();
     h.onFrame({
       ...posFrame(['a', 'b']),
       chunkIndex: 0,
@@ -243,20 +253,23 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
       version: '0000000009',
       numChanges: 2,
     });
-    // Drive-mode RowChanges land in `rowChanges`; the derive-only `changes`
-    // field is always [] for the streaming variant.
-    expect(h.finish()).toEqual({
-      changes: [],
-      version: '0000000009',
-      numChanges: 2,
-      rowChanges: [row('a'), row('b')],
-      timings: [{table: 't', type: 0, ms: 5}],
-      reset: undefined,
-    });
+    h.finish();
+    expect(chunks).toEqual([
+      {
+        changes: [row('a'), row('b')],
+        final: true,
+        chunkIndex: 0,
+        version: '0000000009',
+        numChanges: 2,
+        timings: [{table: 't', type: 0, ms: 5}],
+        reset: undefined,
+        sigDeltas: undefined,
+      },
+    ]);
   });
 
   test('final frame carries Go row-set signature deltas', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
+    const {h, chunks} = advanceChunkHarness();
     h.onFrame({
       ...posFrame(['a']),
       chunkIndex: 0,
@@ -265,17 +278,35 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
       numChanges: 1,
       sigDeltas: {q1: '1577071b99a74425'},
     });
+    h.finish();
 
-    expect(h.finish()).toMatchObject({
-      rowChanges: [row('a')],
-      sigDeltas: {q1: '1577071b99a74425'},
-    });
+    expect(chunks).toEqual([
+      expect.objectContaining({
+        changes: [row('a')],
+        final: true,
+        sigDeltas: {q1: '1577071b99a74425'},
+      }),
+    ]);
   });
 
-  test('multi-chunk: rowChanges accumulate; version+numChanges ride the final frame', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
+  test('multi-chunk: rows are emitted before final metadata', () => {
+    const {h, chunks} = advanceChunkHarness();
     h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
+    expect(chunks).toEqual([
+      {
+        changes: [row('a')],
+        final: false,
+        chunkIndex: 0,
+      },
+    ]);
+
     h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
+    expect(chunks.at(-1)).toEqual({
+      changes: [row('b')],
+      final: false,
+      chunkIndex: 1,
+    });
+
     h.onFrame({
       ...posFrame(['c']),
       chunkIndex: 2,
@@ -284,19 +315,27 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
       version: '0000000010',
       numChanges: 3,
     });
-
-    const result = h.finish();
-    expect(result.rowChanges).toEqual([row('a'), row('b'), row('c')]);
-    expect(result.version).toBe('0000000010');
-    expect(result.numChanges).toBe(3);
-    expect(result.timings).toEqual([{table: 't', type: 1, ms: 2}]);
-    expect(result.changes).toEqual([]);
+    h.finish();
+    expect(chunks).toEqual([
+      {changes: [row('a')], final: false, chunkIndex: 0},
+      {changes: [row('b')], final: false, chunkIndex: 1},
+      {
+        changes: [row('c')],
+        final: true,
+        chunkIndex: 2,
+        version: '0000000010',
+        numChanges: 3,
+        timings: [{table: 't', type: 1, ms: 2}],
+        reset: undefined,
+        sigDeltas: undefined,
+      },
+    ]);
   });
 
   test('version/numChanges on a non-final frame are ignored — only final counts', () => {
     // A buggy sidecar that stamped metadata on a non-final frame must not
     // corrupt the watermark: the final frame is authoritative.
-    const h = createAdvanceToHeadStreamAccumulator();
+    const {h, chunks} = advanceChunkHarness();
     h.onFrame({
       ...posFrame(['a']),
       chunkIndex: 0,
@@ -311,41 +350,58 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
       version: '0000000011',
       numChanges: 2,
     });
-    const result = h.finish();
-    expect(result.version).toBe('0000000011');
-    expect(result.numChanges).toBe(2);
-    expect(result.rowChanges).toEqual([row('a'), row('b')]);
+    h.finish();
+    expect(chunks[0]).toEqual({
+      changes: [row('a')],
+      final: false,
+      chunkIndex: 0,
+    });
+    expect(chunks[1]).toMatchObject({
+      changes: [row('b')],
+      final: true,
+      version: '0000000011',
+      numChanges: 2,
+    });
   });
 
-  test('reset frame: single final frame with reset + version, no rowChanges', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
+  test('reset frame: single final frame with reset + version, no rows', () => {
+    const {h, chunks} = advanceChunkHarness();
     h.onFrame({
       chunkIndex: 0,
       final: true,
       version: '0000000012',
       reset: {reason: 'truncation', msg: 'table issue has been truncated'},
     });
-    const result = h.finish();
-    expect(result.reset).toEqual({
+    h.finish();
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].changes).toEqual([]);
+    expect(chunks[0].reset).toEqual({
       reason: 'truncation',
       msg: 'table issue has been truncated',
     });
-    expect(result.version).toBe('0000000012');
-    expect(result.rowChanges).toEqual([]);
+    expect(chunks[0].version).toBe('0000000012');
   });
 
   test('empty advance: one final frame with no changes', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
+    const {h, chunks} = advanceChunkHarness();
     h.onFrame({chunkIndex: 0, final: true, version: '0000000013'});
-    const result = h.finish();
-    expect(result.rowChanges).toEqual([]);
-    expect(result.version).toBe('0000000013');
-    expect(result.reset).toBeUndefined();
-    expect(result.timings).toBeUndefined();
+    h.finish();
+    expect(chunks).toEqual([
+      {
+        changes: [],
+        final: true,
+        chunkIndex: 0,
+        version: '0000000013',
+        numChanges: 0,
+        timings: undefined,
+        reset: undefined,
+        sigDeltas: undefined,
+      },
+    ]);
   });
 
   test('chunk-order gap throws immediately', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
+    const {h} = advanceChunkHarness();
     h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
     expect(() =>
       h.onFrame({...posFrame(['b']), chunkIndex: 2, final: true}),
@@ -355,7 +411,7 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
   });
 
   test('missing final: finish() throws if no frame had final=true', () => {
-    const h = createAdvanceToHeadStreamAccumulator();
+    const {h} = advanceChunkHarness();
     h.onFrame({...posFrame(['a']), chunkIndex: 0, final: false});
     h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
     expect(() => h.finish()).toThrow(
@@ -365,7 +421,7 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   test('post-final frame throws (audit fix #18)', () => {
     // Same as advanceStream: a chunk after the terminal frame must throw.
-    const h = createAdvanceToHeadStreamAccumulator();
+    const {h} = advanceChunkHarness();
     h.onFrame({
       ...posFrame(['a']),
       chunkIndex: 0,
@@ -381,12 +437,14 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
 
   // --- rowMode (NAPI transport, two-plane delivery) ---
 
-  test('rowMode: rows via onRow + final frame yields full AdvanceToHeadResult', () => {
-    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+  test('rowMode: rows via onRow emit chunks before final frame', () => {
+    const {h, chunks} = advanceChunkHarness({rowMode: true});
     // Rows arrive individually as records; row-bearing partials produce NO
     // frame at all, so the final frame's chunkIndex has a gap.
     h.onRow(row('a'));
+    expect(chunks).toEqual([{changes: [row('a')], final: false}]);
     h.onRow(row('b'));
+    expect(chunks.at(-1)).toEqual({changes: [row('b')], final: false});
     h.onFrame({
       chunkIndex: 2,
       final: true,
@@ -394,18 +452,21 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
       version: '0000000011',
       numChanges: 2,
     });
-    expect(h.finish()).toEqual({
+    h.finish();
+    expect(chunks.at(-1)).toEqual({
       changes: [],
+      final: true,
+      chunkIndex: 2,
       version: '0000000011',
       numChanges: 2,
-      rowChanges: [row('a'), row('b')],
       timings: [{table: 't', type: 0, ms: 3}],
       reset: undefined,
+      sigDeltas: undefined,
     });
   });
 
   test('rowMode: fallback rows in frames interleave with records in queue order', () => {
-    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    const {h, chunks} = advanceChunkHarness({rowMode: true});
     h.onRow(row('a'));
     // A non-encodable change rides a fallback frame between records.
     h.onFrame({...posFrame(['b']), chunkIndex: 1, final: false});
@@ -416,11 +477,22 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
       version: '0000000012',
       numChanges: 3,
     });
-    expect(h.finish().rowChanges).toEqual([row('a'), row('b'), row('c')]);
+    h.finish();
+    expect(chunks.flatMap(c => c.changes)).toEqual([
+      row('a'),
+      row('b'),
+      row('c'),
+    ]);
+    expect(chunks.at(-1)).toMatchObject({
+      changes: [],
+      final: true,
+      version: '0000000012',
+      numChanges: 3,
+    });
   });
 
   test('rowMode: chunkIndex gaps allowed, backwards still throws', () => {
-    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    const {h} = advanceChunkHarness({rowMode: true});
     h.onFrame({...posFrame(['a']), chunkIndex: 3, final: false});
     expect(() =>
       h.onFrame({...posFrame(['b']), chunkIndex: 2, final: false}),
@@ -428,7 +500,7 @@ describe('createAdvanceToHeadStreamAccumulator', () => {
   });
 
   test('rowMode: row record after final frame throws', () => {
-    const h = createAdvanceToHeadStreamAccumulator({rowMode: true});
+    const {h} = advanceChunkHarness({rowMode: true});
     h.onFrame({chunkIndex: 0, final: true, version: '0000000013'});
     expect(() => h.onRow(row('x'))).toThrow(
       /advanceToHeadStream received row record after final frame/,
@@ -504,9 +576,10 @@ describe('positional (rev 9) frame decoding', () => {
   });
 
   test('empty positional frame (no r) yields no changes', () => {
-    const acc = createAdvanceToHeadStreamAccumulator();
-    acc.onFrame({chunkIndex: 0, final: true}); // neither `changes` nor `r`
-    expect(acc.finish().rowChanges).toEqual([]);
+    const {h, chunks} = advanceChunkHarness();
+    h.onFrame({chunkIndex: 0, final: true}); // neither `changes` nor `r`
+    h.finish();
+    expect(chunks[0].changes).toEqual([]);
   });
 
   test('positional frame with r: null (msgpack-null) yields no changes', () => {
@@ -515,9 +588,10 @@ describe('positional (rev 9) frame decoding', () => {
     // r === null rather than r omitted. Before extractChanges guarded null
     // (not just undefined) this reached decodePositionalChanges(…, null) ->
     // null.length -> TypeError, orphaning the advance RPC. Must be inert.
-    const acc = createAdvanceToHeadStreamAccumulator();
-    acc.onFrame({chunkIndex: 0, final: true, r: null});
-    expect(acc.finish().rowChanges).toEqual([]);
+    const {h, chunks} = advanceChunkHarness();
+    h.onFrame({chunkIndex: 0, final: true, r: null});
+    h.finish();
+    expect(chunks[0].changes).toEqual([]);
   });
 
   // Wire-level contract: the bytes below are EXACTLY what the Go sidecar's

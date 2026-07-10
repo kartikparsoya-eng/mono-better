@@ -18,6 +18,7 @@ import {
   computeBoundTimeoutMs,
   GoIVMClient,
   RetryableAdvanceError,
+  type AdvanceToHeadStreamChunk,
   type RowChange,
   ScalarResetError,
 } from './go-ivm-client.ts';
@@ -96,6 +97,16 @@ async function flush(): Promise<void> {
   }
 }
 
+async function collectAdvanceChunks(
+  it: AsyncIterable<AdvanceToHeadStreamChunk>,
+): Promise<AdvanceToHeadStreamChunk[]> {
+  const chunks: AdvanceToHeadStreamChunk[] = [];
+  for await (const chunk of it) {
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
 describe('computeBoundTimeoutMs', () => {
   test('in-process → 0 (no timeout)', () => {
     expect(computeBoundTimeoutMs()).toBe(0);
@@ -113,9 +124,11 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 
-    const p = client.advanceToHeadStream('cg', 1, 'app', {
-      abortBudget: {totalHydrationTimeMs: 123.5},
-    });
+    const p = collectAdvanceChunks(
+      client.advanceToHeadStreamChunks('cg', 1, 'app', {
+        abortBudget: {totalHydrationTimeMs: 123.5},
+      }),
+    );
     await flush();
     expect(host.reqs).toHaveLength(1);
     const req = host.reqs[0];
@@ -126,8 +139,8 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     // suppressAbort omitted (additive; Go treats absent as false).
     expect('suppressAbort' in req.params).toBe(false);
     host.deliverSuccess(req.id);
-    const result = await p;
-    expect(result.version).toBe('0000000002');
+    const chunks = await p;
+    expect(chunks.at(-1)?.version).toBe('0000000002');
   });
 
   test('no abortBudget → no budget fields (old-server pairs see the rev-9 shape)', async () => {
@@ -135,7 +148,9 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 
-    const p = client.advanceToHeadStream('cg', 1, 'app');
+    const p = collectAdvanceChunks(
+      client.advanceToHeadStreamChunks('cg', 1, 'app'),
+    );
     await flush();
     const req = host.reqs[0];
     expect(req.params.pullMode).toBe(true);
@@ -154,9 +169,10 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     const msg =
       'Advancement exceeded timeout at 1499 of 30000 changes after 234.56789 ms. ' +
       'Advancement time limited based on total hydration time of 120.5 ms.';
-    const p = client.advanceToHeadStream('cg', 1, 'app', {
+    const it = client.advanceToHeadStreamChunks('cg', 1, 'app', {
       abortBudget: {totalHydrationTimeMs: 120.5},
     });
+    const p = it.next();
     await flush();
     host.deliver(host.reqs[0].id, undefined, {code: -32103, message: msg});
     await expect(p).rejects.toSatisfy(
@@ -169,7 +185,8 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     const host = makeAdvanceFakeHost(client);
     client.connectNapi(host.addon);
 
-    const p = client.advanceToHeadStream('cg', 1, 'app');
+    const it = client.advanceToHeadStreamChunks('cg', 1, 'app');
+    const p = it.next();
     await flush();
     host.deliver(host.reqs[0].id, undefined, {
       code: -32104,
@@ -189,7 +206,8 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     client.connectNapi(host.addon);
 
     const msg = 'Scalar subquery value changed for users: alice -> bob';
-    const p = client.advanceToHeadStream('cg', 1, 'app');
+    const it = client.advanceToHeadStreamChunks('cg', 1, 'app');
+    const p = it.next();
     await flush();
     host.deliver(host.reqs[0].id, undefined, {code: -32105, message: msg});
     await expect(p).rejects.toSatisfy(
@@ -204,14 +222,14 @@ describe('GoIVMClient.advanceToHeadStream (follow-TS failure contract)', () => {
     client.connectNapi(host.addon);
 
     let settled: 'resolved' | 'rejected' | undefined;
-    const p = client
-      .advanceToHeadStream('cg', 1, 'app', {
+    const p = collectAdvanceChunks(
+      client.advanceToHeadStreamChunks('cg', 1, 'app', {
         abortBudget: {totalHydrationTimeMs: 1},
-      })
-      .then(
-        () => (settled = 'resolved'),
-        () => (settled = 'rejected'),
-      );
+      }),
+    ).then(
+      () => (settled = 'resolved'),
+      () => (settled = 'rejected'),
+    );
     // 10 minutes — the pre-fix 120s TimeoutError would have fired 5x over.
     // The bound on a slow advance is Go's ECONOMIC abort (the budget riding
     // the request), not TS wall-clock.
