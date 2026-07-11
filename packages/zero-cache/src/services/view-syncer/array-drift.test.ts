@@ -42,9 +42,7 @@ function stableStringify(v: unknown): string {
   const keys = Object.keys(obj).sort();
   return (
     '{' +
-    keys
-      .map(k => JSON.stringify(k) + ':' + stableStringify(obj[k]))
-      .join(',') +
+    keys.map(k => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') +
     '}'
   );
 }
@@ -152,7 +150,11 @@ describe('user_group_mappings 2-byte shadow drift (fixed)', () => {
       if (k === 'onCallSetNumbers') {
         tsType = 'json';
         goType = pgTypeToGoType('int4[]'); // 'json' — the fix
-      } else if (k === 'createdAt' || k === 'updatedAt' || k === 'onCallSetNumber') {
+      } else if (
+        k === 'createdAt' ||
+        k === 'updatedAt' ||
+        k === 'onCallSetNumber'
+      ) {
         tsType = 'number';
         goType = 'number';
       } else {
@@ -183,14 +185,7 @@ describe('user_group_mappings 2-byte shadow drift (fixed)', () => {
   test('drift would scale with array length but delta was always exactly +2', () => {
     // The +2 was from the two quote chars JSON.stringify adds around a string.
     // It did NOT depend on array length — it was always exactly 2.
-    const cases = [
-      [1],
-      [1, 2],
-      [1, 2, 3],
-      [1, 2, 3, 4, 5],
-      [42],
-      [],
-    ];
+    const cases = [[1], [1, 2], [1, 2, 3], [1, 2, 3, 4, 5], [42], []];
     for (const arr of cases) {
       const sv = toSQLiteType('json', arr);
       const ts = stableStringify(tsFromSQLiteType('json', sv));

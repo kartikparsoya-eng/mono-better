@@ -18,7 +18,10 @@ import {join} from 'node:path';
 
 export type GoNapiAddon = {
   /** dlopen + goivm_start. Throws on ABI mismatch / missing symbols. */
-  start(libPath: string, onDelivery: (kind: number, payload: Buffer) => void): void;
+  start(
+    libPath: string,
+    onDelivery: (kind: number, payload: Buffer) => void,
+  ): void;
   /** Forward one request frame (no length prefix). Returns goivm rc (0=ok). */
   send(payload: Buffer): number;
   /** ABI version of the loaded library; -1 before start. */

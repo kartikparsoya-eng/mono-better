@@ -34,7 +34,12 @@ class Writer {
   }
 
   u32(v: number): this {
-    this.#chunks.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
+    this.#chunks.push(
+      v & 0xff,
+      (v >>> 8) & 0xff,
+      (v >>> 16) & 0xff,
+      (v >>> 24) & 0xff,
+    );
     return this;
   }
 
@@ -62,13 +67,20 @@ class Writer {
 
 // groupDef: [f64 reqID][u32 groupID][str queryID][str table]
 //           [u16 ncols]([str col])*[u16 npk]([u16 pkIdx][str pkCol])*
-function makeDef(reqID: number, groupID: number, cols: string[], pk: string[]): Buffer {
+function makeDef(
+  reqID: number,
+  groupID: number,
+  cols: string[],
+  pk: string[],
+): Buffer {
   const w = new Writer().f64(reqID).u32(groupID).shortStr('q1').shortStr('t1');
   w.u16(cols.length);
   for (const c of cols) w.shortStr(c);
   w.u16(pk.length);
   for (const p of pk) {
-    w.u16(Math.max(cols.indexOf(p), 0xffff & -1) === -1 ? 0xffff : cols.indexOf(p));
+    w.u16(
+      Math.max(cols.indexOf(p), 0xffff & -1) === -1 ? 0xffff : cols.indexOf(p),
+    );
     w.shortStr(p);
   }
   return w.buf();
@@ -140,15 +152,29 @@ describe('napi-records decoder (pure)', () => {
   test('duplicate groupDef throws (Go must intern)', () => {
     const reg = new RowGroupRegistry();
     reg.addGroupDef(makeDef(6, 0, ['id'], ['id']));
-    expect(() => reg.addGroupDef(makeDef(6, 0, ['id'], ['id']))).toThrow(/duplicate groupDef/);
+    expect(() => reg.addGroupDef(makeDef(6, 0, ['id'], ['id']))).toThrow(
+      /duplicate groupDef/,
+    );
   });
 
   test('remove record: PK values in PK order, rowKey only', () => {
     const reg = new RowGroupRegistry();
     reg.addGroupDef(makeDef(8, 1, ['id', 'n'], ['id']));
-    const w = new Writer().f64(8).u32(1).u8(1 /* remove */).u8(5).u32(2).u8(0x7a).u8(0x39); // "z9"
+    const w = new Writer()
+      .f64(8)
+      .u32(1)
+      .u8(1 /* remove */)
+      .u8(5)
+      .u32(2)
+      .u8(0x7a)
+      .u8(0x39); // "z9"
     const {change} = reg.decodeRow(w.buf());
-    expect(change).toMatchObject({type: 1, queryID: 'q1', table: 't1', rowKey: {id: 'z9'}});
+    expect(change).toMatchObject({
+      type: 1,
+      queryID: 'q1',
+      table: 't1',
+      rowKey: {id: 'z9'},
+    });
     expect((change as {row?: unknown}).row).toBeUndefined();
   });
 
@@ -185,7 +211,14 @@ describe('napi-records decoder (pure)', () => {
     const rec = Buffer.concat([w.buf(), Buffer.from(labelBytes)]);
     const {change} = decodeRowRecord(rec, (r, g) =>
       r === 13 && g === 0
-        ? {reqID: 13, groupID: 0, queryID: 'q1', table: 't1', cols: ['id', 'label'], pk: ['id']}
+        ? {
+            reqID: 13,
+            groupID: 0,
+            queryID: 'q1',
+            table: 't1',
+            cols: ['id', 'label'],
+            pk: ['id'],
+          }
         : undefined,
     );
     expect((change.row as {label: string}).label).toBe(label);
@@ -198,7 +231,9 @@ describe('napi-records decoder (pure)', () => {
 // cmd/sidecar/rowplane.go stageAppendLocked; order within a batch is the Go
 // emit order (nothing may overtake the stage).
 describe('iterateBatch', () => {
-  function batchOf(...subs: Array<{kind: number; payload: Uint8Array}>): Buffer {
+  function batchOf(
+    ...subs: Array<{kind: number; payload: Uint8Array}>
+  ): Buffer {
     const parts: number[] = [];
     for (const {kind, payload} of subs) {
       const hdr = Buffer.alloc(5);
@@ -236,7 +271,10 @@ describe('iterateBatch', () => {
   });
 
   test('truncated header throws (ABI-mismatch class)', () => {
-    const batch = batchOf({kind: DELIVERY_KIND_ROW, payload: new Uint8Array([1])});
+    const batch = batchOf({
+      kind: DELIVERY_KIND_ROW,
+      payload: new Uint8Array([1]),
+    });
     // Chop mid-header of a phantom second record.
     const bad = Buffer.concat([batch, Buffer.from([3, 0, 0])]);
     expect(() => [...iterateBatch(bad)]).toThrow(/header truncated/);

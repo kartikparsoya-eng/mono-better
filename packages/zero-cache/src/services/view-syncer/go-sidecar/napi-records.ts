@@ -227,7 +227,9 @@ export function decodeRowRecord(
       case VAL_BLOB:
         return unpack(r.longBytes());
       default:
-        throw new Error(`row record: unknown value tag ${tag} at offset ${r.off - 1}`);
+        throw new Error(
+          `row record: unknown value tag ${tag} at offset ${r.off - 1}`,
+        );
     }
   };
 
@@ -235,11 +237,18 @@ export function decodeRowRecord(
     const rowKey: Record<string, unknown> = {};
     for (const pkCol of def.pk) rowKey[pkCol] = readValue();
     if (r.off !== r.length) {
-      throw new Error(`row record (remove): ${r.length - r.off} trailing bytes`);
+      throw new Error(
+        `row record (remove): ${r.length - r.off} trailing bytes`,
+      );
     }
     return {
       reqID,
-      change: {type, queryID: def.queryID, table: def.table, rowKey} as RowChange,
+      change: {
+        type,
+        queryID: def.queryID,
+        table: def.table,
+        rowKey,
+      } as RowChange,
     };
   }
 
@@ -252,7 +261,13 @@ export function decodeRowRecord(
   for (const pkCol of def.pk) rowKey[pkCol] = row[pkCol];
   return {
     reqID,
-    change: {type, queryID: def.queryID, table: def.table, rowKey, row} as RowChange,
+    change: {
+      type,
+      queryID: def.queryID,
+      table: def.table,
+      rowKey,
+      row,
+    } as RowChange,
   };
 }
 

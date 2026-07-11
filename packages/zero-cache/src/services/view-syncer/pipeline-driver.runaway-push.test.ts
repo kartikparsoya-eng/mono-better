@@ -22,7 +22,11 @@ import {
   ReplicationMessages,
   type FakeReplicator,
 } from '../replicator/test-utils.ts';
-import {PipelineDriver, type AdvanceResult, type RowChange} from './pipeline-driver.ts';
+import {
+  PipelineDriver,
+  type AdvanceResult,
+  type RowChange,
+} from './pipeline-driver.ts';
 import {Snapshotter} from './snapshotter.ts';
 
 describe('view-syncer/pipeline-driver', () => {
@@ -195,7 +199,11 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     let elapsed = 0;
-    const advResult1 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++, running: () => true}) as AdvanceResult;
+    const advResult1 = pipelines.advance({
+      elapsedLap: () => 0,
+      totalElapsed: () => elapsed++,
+      running: () => true,
+    }) as AdvanceResult;
     expect(() => [
       ...(advResult1.changes as Iterable<RowChange | 'yield'>),
     ]).toThrowErrorMatchingInlineSnapshot(
@@ -226,7 +234,11 @@ describe('view-syncer/pipeline-driver', () => {
     );
 
     let elapsed = 0;
-    const advResult2 = pipelines.advance({elapsedLap: () => 0, totalElapsed: () => elapsed++, running: () => true}) as AdvanceResult;
+    const advResult2 = pipelines.advance({
+      elapsedLap: () => 0,
+      totalElapsed: () => elapsed++,
+      running: () => true,
+    }) as AdvanceResult;
     expect(() => [
       ...(advResult2.changes as Iterable<RowChange | 'yield'>),
     ]).toThrowErrorMatchingInlineSnapshot(

@@ -1571,9 +1571,7 @@ export class GoIVMClient {
         // the result couldn't be sent. Use a message that the classifier
         // matches as 'protocol' (msg.includes('Frame too large')) → CG
         // teardown, the safe recovery (L7).
-        pending.reject(
-          new Error(`Frame too large: ${resp.error.message}`),
-        );
+        pending.reject(new Error(`Frame too large: ${resp.error.message}`));
       } else {
         pending.reject(
           new Error(`RPC error ${resp.error.code}: ${resp.error.message}`),

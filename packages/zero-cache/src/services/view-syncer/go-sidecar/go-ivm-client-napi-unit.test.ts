@@ -72,7 +72,10 @@ describe('GoIVMClient host-death delivery (A3)', () => {
     // late-record guard that drops payloads with unknown reqIDs).
     client.handleNapiDelivery(
       4,
-      Buffer.from('goivm host pump terminated: io: read/write on closed pipe', 'utf8'),
+      Buffer.from(
+        'goivm host pump terminated: io: read/write on closed pipe',
+        'utf8',
+      ),
     );
 
     // Pending RPC rejects promptly with the host-death reason.
@@ -108,7 +111,9 @@ describe('GoIVMClient per-group fairness (A1)', () => {
     const hogs: Promise<unknown>[] = [];
     for (let i = 0; i < 16; i++) {
       hogs.push(
-        client.removeQuery('cg-hog', `q${i}`, 1, {timeoutMs: 2_000}).catch(() => {}),
+        client
+          .removeQuery('cg-hog', `q${i}`, 1, {timeoutMs: 2_000})
+          .catch(() => {}),
       );
     }
     // All 16 must have hit the wire (they only contend within their group).
@@ -119,13 +124,17 @@ describe('GoIVMClient per-group fairness (A1)', () => {
     // bucketed under GLOBAL_KEY, so cg-hog's 16 in-flight RPCs consumed the
     // ONE shared 16-slot bucket and this call parked in #acquireSlot —
     // never reaching the wire (worker-wide head-blocking).
-    const other = client.removeQuery('cg-other', 'q', 1, {timeoutMs: 2_000}).catch(() => {});
+    const other = client
+      .removeQuery('cg-other', 'q', 1, {timeoutMs: 2_000})
+      .catch(() => {});
     await new Promise(r => setTimeout(r, 10));
     expect(wire.length).toBe(17);
 
     // And a 17th call from the HOG group still parks (the per-group cap is
     // enforced where it should be): wire count stays 17.
-    const hog17 = client.removeQuery('cg-hog', 'q17', 1, {timeoutMs: 1_000}).catch(() => {});
+    const hog17 = client
+      .removeQuery('cg-hog', 'q17', 1, {timeoutMs: 1_000})
+      .catch(() => {});
     await new Promise(r => setTimeout(r, 10));
     expect(wire.length).toBe(17);
 

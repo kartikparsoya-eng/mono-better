@@ -29,7 +29,9 @@ describe('sanitizeGoMemLimitEnv (finding 11)', () => {
   test('malformed GO_IVM_GOMEMLIMIT is deleted with a loud log', () => {
     // Pre-fix this value skipped the per-worker percent fallback in
     // #startNapi AND failed Go-side parsing — no memory ceiling at all.
-    const env: Record<string, string | undefined> = {GO_IVM_GOMEMLIMIT: '4G!garbage'};
+    const env: Record<string, string | undefined> = {
+      GO_IVM_GOMEMLIMIT: '4G!garbage',
+    };
     const logs = run(env);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatch(/invalid GO_IVM_GOMEMLIMIT/);
