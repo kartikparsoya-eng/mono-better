@@ -4,6 +4,8 @@ import {
   GO_ADVANCE_ABORT_BUDGET_FLOOR_MS,
   goAdvanceAbortBudgetMs,
   goHydrationCostMs,
+  shouldSuppressAbort,
+  SUPPRESS_ABORT_AFTER_STREAK,
 } from './pipeline-driver.ts';
 
 // Gen-5 (2026-07-07 abort-loop forensics) — pins for the two pure inputs
@@ -80,9 +82,7 @@ describe('escalatedAbortBudgetMs (consecutive-abort convergence backstop)', () =
     ).toBeLessThan(trueWorkMs);
     // …which is why the SENT budget goes through goAdvanceAbortBudgetMs:
     // the reset-cost floor clears the gap regardless of streak state.
-    expect(goAdvanceAbortBudgetMs(storedBudget, 0)).toBeGreaterThan(
-      trueWorkMs,
-    );
+    expect(goAdvanceAbortBudgetMs(storedBudget, 0)).toBeGreaterThan(trueWorkMs);
   });
 });
 
@@ -115,5 +115,29 @@ describe('goAdvanceAbortBudgetMs (the budget actually sent to Go)', () => {
     // transactions cost seconds — must still abort.
     expect(GO_ADVANCE_ABORT_BUDGET_FLOOR_MS).toBeGreaterThan(110);
     expect(GO_ADVANCE_ABORT_BUDGET_FLOOR_MS).toBeLessThan(1000);
+  });
+});
+
+describe('shouldSuppressAbort (terminal escalation for abort streaks)', () => {
+  test('no suppression while the budget-escalation lever still has headroom', () => {
+    expect(shouldSuppressAbort(0)).toBe(false);
+    expect(shouldSuppressAbort(1)).toBe(false);
+    expect(shouldSuppressAbort(2)).toBe(false);
+  });
+
+  test('suppresses once the maxed budget has itself aborted', () => {
+    expect(shouldSuppressAbort(SUPPRESS_ABORT_AFTER_STREAK)).toBe(true);
+    expect(shouldSuppressAbort(SUPPRESS_ABORT_AFTER_STREAK + 5)).toBe(true);
+  });
+
+  test('the threshold aligns with the escalation cap — suppression fires only when doubling is exhausted', () => {
+    // By the time suppression fires, further streak growth cannot raise the
+    // budget any more (the exp cap in escalatedAbortBudgetMs is saturated) —
+    // suppression is a terminal lever, never a substitute for escalation
+    // that still had headroom.
+    const base = 1000;
+    expect(escalatedAbortBudgetMs(base, SUPPRESS_ABORT_AFTER_STREAK)).toBe(
+      escalatedAbortBudgetMs(base, SUPPRESS_ABORT_AFTER_STREAK + 1),
+    );
   });
 });

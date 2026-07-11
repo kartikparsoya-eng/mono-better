@@ -338,6 +338,29 @@ export function escalatedAbortBudgetMs(
 }
 
 /**
+ * Terminal escalation for an abort streak: once consecutiveAborts reaches
+ * this, escalatedAbortBudgetMs has been maxed (8×, exp caps at 3) and STILL
+ * aborted — the budget lever is exhausted, and every further advance would
+ * abort at the same backlog position forever. Send suppressAbort=true on the
+ * next advance: one un-abortable catch-up clears the backlog (Go's
+ * GO_IVM_ADVANCE_BUDGET_MS wall backstop, 60s, still bounds it — and with it
+ * the WAL pin), the advance completes, and the streak resets to 0. This is
+ * what makes an unbounded abort→reset loop structurally impossible, which in
+ * turn is why the view-syncer's reset breaker exempts 'advancement-timeout'
+ * resets from CG teardown (classifyResetReason: 'economic').
+ */
+export const SUPPRESS_ABORT_AFTER_STREAK = 3;
+
+/**
+ * Pure decision: suppress the economic abort on the advance about to be
+ * issued? True exactly when the streak says the maxed-out budget already
+ * failed (see SUPPRESS_ABORT_AFTER_STREAK).
+ */
+export function shouldSuppressAbort(consecutiveAborts: number): boolean {
+  return consecutiveAborts >= SUPPRESS_ABORT_AFTER_STREAK;
+}
+
+/**
  * The minimum abort budget ever sent to Go — the price floor of a Go reset.
  *
  * Why a floor exists at all (2026-07-07 rerun forensics): 50/77 residual
@@ -619,6 +642,17 @@ export class PipelineDriver {
    * starting at 1× is correct.
    */
   #consecutiveAdvanceAborts = 0;
+  /**
+   * Advances sent with suppressAbort=true because the abort streak exhausted
+   * the budget-escalation lever (see SUPPRESS_ABORT_AFTER_STREAK). Should be
+   * near-zero in steady state; a sustained rate means the budget pricing is
+   * chronically under the true advance cost at this catalog.
+   */
+  readonly #advanceAbortSuppressed = getOrCreateCounter(
+    'sync',
+    'ivm.advance-abort-suppressed',
+    'Go advances issued with the economic abort suppressed (abort-streak catch-up)',
+  );
   /**
    * A resolved scalar subquery's value changed mid-advance in Go — resolves
    * as ResetPipelinesSignal('scalar-subquery'), identical to TS-native's
@@ -2157,11 +2191,21 @@ export class PipelineDriver {
       [Symbol.iterator]: () => buffered[Symbol.iterator](),
     };
 
+    const suppressAbort = shouldSuppressAbort(this.#consecutiveAdvanceAborts);
+    if (suppressAbort) {
+      this.#advanceAbortSuppressed.add(1);
+      this.#lc.warn?.(
+        `[go-primary] advance abort streak=${this.#consecutiveAdvanceAborts} ` +
+          `exhausted the budget escalation — suppressing the economic abort ` +
+          `for this advance (60s wall backstop still applies)`,
+      );
+    }
     const abortBudget = {
       totalHydrationTimeMs: goAdvanceAbortBudgetMs(
         this.totalHydrationTimeMs(),
         this.#consecutiveAdvanceAborts,
       ),
+      ...(suppressAbort ? {suppressAbort: true} : {}),
     };
 
     const goIterator = this.#goBackend!

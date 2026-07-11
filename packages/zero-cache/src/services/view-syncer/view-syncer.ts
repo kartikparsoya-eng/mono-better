@@ -106,6 +106,7 @@ import {
   type RowID,
 } from './schema/types.ts';
 import {ResetPipelinesSignal} from './snapshotter.ts';
+import type {ResetPipelinesReason} from './snapshotter.ts';
 import {tracer} from './tracer.ts';
 import {
   ttlClockAsNumber,
@@ -201,6 +202,65 @@ export const TTL_TIMER_HYSTERESIS = 50; // ms
 export const RESET_CIRCUIT_LIMIT = 2;
 export const RESET_CIRCUIT_WINDOW_MS = 20_000;
 
+// Transient-class breaker: sidecar restarts / Go-unavailable windows produce a
+// bounded burst of lawful resets while the outage lasts (reset-degrade fires
+// once, reset-recovered fires once, drops during the restart each reset once).
+// The deterministic 2/20s limit reads a normal restart cycle as a reset-proof
+// loop and tears the CG down mid-recovery — making the outage WORSE (reconnect
+// + cold re-hydrate on top of the restart). A genuine flapping loop still
+// clears this looser bar within a minute.
+export const TRANSIENT_RESET_CIRCUIT_LIMIT = 6;
+export const TRANSIENT_RESET_CIRCUIT_WINDOW_MS = 60_000;
+
+/**
+ * The breaker's premise — "N resets in a short window ⇒ the error is
+ * reset-proof ⇒ teardown is the only way out" — is only sound for a subset of
+ * {@link ResetPipelinesReason}s. Classify each reason by what a repeat
+ * actually means:
+ *
+ * - `deterministic`: should-be-unreachable invariant recoveries. A repeat
+ *   really does mean a reset-proof loop → keep the fast 2/20s trip.
+ * - `transient`: Go backend outage/restart windows. Repeats are bounded by
+ *   the outage, not by a loop → looser 6/60s trip catches genuine flapping.
+ * - `economic`: the advancement-timeout is a STRATEGY (re-hydrating is priced
+ *   cheaper than continuing the advance), not a failure — under sustained
+ *   write load every large batch lawfully resets. Never tear down: the abort
+ *   convergence is owned by the budget escalation + suppressAbort catch-up in
+ *   pipeline-driver.ts (goAdvanceAbortBudgetMs / SUPPRESS_ABORT_AFTER_STREAK),
+ *   which makes an unbounded abort→reset loop structurally impossible.
+ * - `lawful`: externally-caused structural events (a migration touching three
+ *   tables = three lawful resets). Resetting IS the designed handling; a
+ *   teardown adds a client reconnect for zero benefit.
+ *
+ * (The original breaker motivation — unclassified Go panics — no longer flows
+ * through resets at all: 'unclassified'/'data-error' advance failures re-throw
+ * directly to CG teardown in pipeline-driver.ts.)
+ */
+export type ResetReasonClass =
+  | 'deterministic'
+  | 'transient'
+  | 'economic'
+  | 'lawful';
+
+export function classifyResetReason(
+  reason: ResetPipelinesReason,
+): ResetReasonClass {
+  switch (reason) {
+    case 'watermark-regression':
+      return 'deterministic';
+    case 'go-primary-unavailable':
+    case 'go-primary-drop':
+      return 'transient';
+    case 'advancement-timeout':
+      return 'economic';
+    case 'schema-change':
+    case 'truncation':
+    case 'permissions-change':
+    case 'scalar-subquery':
+      return 'lawful';
+  }
+}
+
 /**
  * Pure decision for the reset circuit breaker. Prunes reset timestamps older
  * than the window and reports whether a new reset would exceed the limit (i.e.
@@ -214,6 +274,56 @@ export function resetCircuitDecision(
 ): {trip: boolean; pruned: number[]} {
   const pruned = recentResetTimes.filter(t => nowMs - t < windowMs);
   return {trip: pruned.length >= limit, pruned};
+}
+
+/** Per-class sliding windows for the tiered breaker (only the classes that
+ * can trip carry state). */
+export type ResetCircuitBuckets = {
+  deterministic: number[];
+  transient: number[];
+};
+
+export function emptyResetCircuitBuckets(): ResetCircuitBuckets {
+  return {deterministic: [], transient: []};
+}
+
+/**
+ * Reason-tiered breaker decision. Returns the reason's class, whether this
+ * reset must escalate to a CG teardown, and the updated buckets: pruned, and
+ * — when not tripping — with `nowMs` recorded in the reason's bucket.
+ * `economic` and `lawful` resets never trip and are never recorded.
+ */
+export function resetCircuitDecisionByReason(
+  reason: ResetPipelinesReason,
+  buckets: ResetCircuitBuckets,
+  nowMs: number,
+): {cls: ResetReasonClass; trip: boolean; buckets: ResetCircuitBuckets} {
+  const cls = classifyResetReason(reason);
+  const next: ResetCircuitBuckets = {
+    deterministic: resetCircuitDecision(buckets.deterministic, nowMs).pruned,
+    transient: resetCircuitDecision(
+      buckets.transient,
+      nowMs,
+      TRANSIENT_RESET_CIRCUIT_LIMIT,
+      TRANSIENT_RESET_CIRCUIT_WINDOW_MS,
+    ).pruned,
+  };
+  let trip = false;
+  switch (cls) {
+    case 'deterministic':
+      trip = next.deterministic.length >= RESET_CIRCUIT_LIMIT;
+      break;
+    case 'transient':
+      trip = next.transient.length >= TRANSIENT_RESET_CIRCUIT_LIMIT;
+      break;
+    case 'economic':
+    case 'lawful':
+      break;
+  }
+  if (!trip && (cls === 'deterministic' || cls === 'transient')) {
+    next[cls].push(nowMs);
+  }
+  return {cls, trip, buckets: next};
 }
 
 type CustomQueryTransformMode = 'all' | 'missing';
@@ -239,13 +349,16 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   //
   // Note: It is fine to update this variable outside of the lock.
   #lastConnectTime = Date.now();
-  // Sliding window of recent pipeline-reset timestamps (ms) for the reset
-  // circuit breaker. More than RESET_CIRCUIT_LIMIT resets within
-  // RESET_CIRCUIT_WINDOW_MS means a reset-proof error is looping → tear down
-  // the CG (loud) instead of resetting again. Per-instance: a fresh
-  // view-syncer after reconnect starts clean, so the cost of a persistent
-  // failure is a slow reconnect cycle, not a tight reset storm.
-  #recentResetTimes: number[] = [];
+  // Per-reason-class sliding windows of recent pipeline-reset timestamps (ms)
+  // for the tiered reset circuit breaker (see classifyResetReason). Too many
+  // same-class resets within the class's window means a reset-proof error is
+  // looping → tear down the CG (loud) instead of resetting again. Cleared by
+  // every successful advance (half-open semantics: the "reset-proof loop"
+  // inference is only sound for back-to-back failures with no forward
+  // progress between them). Per-instance: a fresh view-syncer after reconnect
+  // starts clean, so the cost of a persistent failure is a slow reconnect
+  // cycle, not a tight reset storm.
+  #resetCircuitBuckets: ResetCircuitBuckets = emptyResetCircuitBuckets();
 
   /**
    * The TTL clock is used to determine the time at which queries are considered
@@ -365,7 +478,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   // Circuit breaker: a reset-proof error (deterministic panic that survives a
   // rebuild) would otherwise reset → re-hydrate → re-panic → reset forever
   // (the 5–8s p99 storm). Counts how often the breaker tripped and forced a CG
-  // teardown instead of an N+1th reset. See #recentResetTimes / RESET_CIRCUIT_*.
+  // teardown instead of an N+1th reset. See #resetCircuitBuckets /
+  // classifyResetReason / RESET_CIRCUIT_*.
   readonly #pipelineResetCircuitTripped = getOrCreateCounter(
     'sync',
     'pipeline-reset-circuit-tripped',
@@ -562,29 +676,44 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           if (this.#pipelinesSynced) {
             const result = await this.#advancePipelines(lc, cvr);
             if (result === 'success') {
+              // Half-open: a completed advance is forward progress, so any
+              // earlier resets were not a reset-proof loop. Start the breaker
+              // windows fresh.
+              this.#resetCircuitBuckets = emptyResetCircuitBuckets();
               return;
             }
-            // Reset circuit breaker: if we've already reset
-            // RESET_CIRCUIT_LIMIT times in the last RESET_CIRCUIT_WINDOW_MS,
-            // this error is reset-proof (deterministic — survives the rebuild).
-            // Resetting again would loop forever (the p99 storm). Tear down the
-            // CG loudly instead; the client reconnects into a fresh instance.
+            // Tiered reset circuit breaker: only reason classes for which a
+            // repeat implies a reset-proof loop can escalate to teardown
+            // (see classifyResetReason). Economic aborts and lawful
+            // structural resets ARE the designed handling — resetting again
+            // is correct, and tearing down would convert a working recovery
+            // into a client-visible reconnect.
             const nowMs = Date.now();
-            const {trip, pruned} = resetCircuitDecision(
-              this.#recentResetTimes,
+            const {cls, trip, buckets} = resetCircuitDecisionByReason(
+              result.reason,
+              this.#resetCircuitBuckets,
               nowMs,
             );
-            this.#recentResetTimes = pruned;
+            this.#resetCircuitBuckets = buckets;
             if (trip) {
-              this.#pipelineResetCircuitTripped.add(1, {reason: result.reason});
+              this.#pipelineResetCircuitTripped.add(1, {
+                reason: result.reason,
+                class: cls,
+              });
+              const [limit, windowMs] =
+                cls === 'deterministic'
+                  ? [RESET_CIRCUIT_LIMIT, RESET_CIRCUIT_WINDOW_MS]
+                  : [
+                      TRANSIENT_RESET_CIRCUIT_LIMIT,
+                      TRANSIENT_RESET_CIRCUIT_WINDOW_MS,
+                    ];
               throw new Error(
-                `reset circuit breaker tripped: ${pruned.length + 1} pipeline ` +
-                  `resets within ${RESET_CIRCUIT_WINDOW_MS}ms ` +
+                `reset circuit breaker tripped: ${limit + 1} ${cls} pipeline ` +
+                  `resets within ${windowMs}ms ` +
                   `(reason=${result.reason}) — tearing down CG instead of ` +
                   `reset-looping on a reset-proof error: ${result.message}`,
               );
             }
-            this.#recentResetTimes.push(nowMs);
             lc.info?.(`resetting pipelines: ${result.message}`);
             this.#pipelineResets.add(1, {reason: result.reason});
             this.#pipelines.reset(clientSchema);

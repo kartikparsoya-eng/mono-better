@@ -268,6 +268,7 @@ export class GoComputeBackend {
   // would duplicate streamed effects, so the error surfaces to the caller.
   async *advanceToHeadStreamChunks(abortBudget?: {
     totalHydrationTimeMs: number;
+    suppressAbort?: boolean;
   }): AsyncIterableIterator<AdvanceToHeadStreamChunk> {
     const delaysMs = [100, 500, 2000];
     for (let attempt = 0; ; attempt++) {
