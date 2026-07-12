@@ -1,27 +1,27 @@
-import type {LogContext} from '@rocicorp/logger';
-import {type Resolver, resolver} from '@rocicorp/resolver';
-import type {PendingQuery, Row} from 'postgres';
-import {startAsyncSpan} from '../../../../otel/src/span.ts';
-import {CustomKeyMap} from '../../../../shared/src/custom-key-map.ts';
-import {must} from '../../../../shared/src/must.ts';
-import {promiseVoid} from '../../../../shared/src/resolved-promises.ts';
-import * as Mode from '../../db/mode-enum.ts';
-import {runTx} from '../../db/run-transaction.ts';
-import {TransactionPool} from '../../db/transaction-pool.ts';
+import type { LogContext } from "@rocicorp/logger";
+import { type Resolver, resolver } from "@rocicorp/resolver";
+import type { PendingQuery, Row } from "postgres";
+import { startAsyncSpan } from "../../../../otel/src/span.ts";
+import { CustomKeyMap } from "../../../../shared/src/custom-key-map.ts";
+import { must } from "../../../../shared/src/must.ts";
+import { promiseVoid } from "../../../../shared/src/resolved-promises.ts";
+import * as Mode from "../../db/mode-enum.ts";
+import { runTx } from "../../db/run-transaction.ts";
+import { TransactionPool } from "../../db/transaction-pool.ts";
 import {
   getOrCreateCounter,
   getOrCreateLatencyHistogram,
-} from '../../observability/metrics.ts';
-import {type PostgresDB, type PostgresTransaction} from '../../types/pg.ts';
-import {rowIDString} from '../../types/row-key.ts';
-import {cvrSchema, type ShardID} from '../../types/shards.ts';
-import {checkVersion, type CVRFlushStats} from './cvr-store.ts';
-import type {CVRSnapshot} from './cvr.ts';
+} from "../../observability/metrics.ts";
+import { type PostgresDB, type PostgresTransaction } from "../../types/pg.ts";
+import { rowIDString } from "../../types/row-key.ts";
+import { cvrSchema, type ShardID } from "../../types/shards.ts";
+import { checkVersion, type CVRFlushStats } from "./cvr-store.ts";
+import type { CVRSnapshot } from "./cvr.ts";
 import {
   rowRecordToRowsRow,
   type RowsRow,
   rowsRowToRowRecord,
-} from './schema/cvr.ts';
+} from "./schema/cvr.ts";
 import {
   cmpVersions,
   type CVRVersion,
@@ -30,10 +30,10 @@ import {
   type RowRecord,
   versionString,
   versionToNullableCookie,
-} from './schema/types.ts';
-import {tracer} from './tracer.ts';
+} from "./schema/types.ts";
+import { tracer } from "./tracer.ts";
 
-const FLUSH_TYPE_ATTRIBUTE = 'flush.type';
+const FLUSH_TYPE_ATTRIBUTE = "flush.type";
 
 /**
  * The RowRecordCache is an in-memory cache of the `cvr.rows` tables that
@@ -105,15 +105,15 @@ export class RowRecordCache {
   #flushing: Resolver<void> | null = null;
 
   readonly #cvrFlushTime = getOrCreateLatencyHistogram(
-    'sync',
-    'cvr.flush-time',
-    'Time to flush a CVR transaction. This includes both synchronous ' +
-      'and asynchronous flushes, distinguished by the flush.type attribute.',
+    "sync",
+    "cvr.flush-time",
+    "Time to flush a CVR transaction. This includes both synchronous " +
+      "and asynchronous flushes, distinguished by the flush.type attribute.",
   );
   readonly #cvrRowsFlushed = getOrCreateCounter(
-    'sync',
-    'cvr.rows-flushed',
-    'Number of (changed) rows flushed to a CVR',
+    "sync",
+    "cvr.rows-flushed",
+    "Number of (changed) rows flushed to a CVR",
   );
 
   constructor(
@@ -136,7 +136,7 @@ export class RowRecordCache {
 
   recordSyncFlushStats(stats: CVRFlushStats, elapsedMs: number) {
     this.#cvrFlushTime.recordMs(elapsedMs, {
-      [FLUSH_TYPE_ATTRIBUTE]: 'sync',
+      [FLUSH_TYPE_ATTRIBUTE]: "sync",
     });
     if (stats.rowsDeferred === 0) {
       this.#cvrRowsFlushed.add(stats.rows);
@@ -145,7 +145,7 @@ export class RowRecordCache {
 
   #recordAsyncFlushStats(rows: number, elapsedMs: number) {
     this.#cvrFlushTime.recordMs(elapsedMs, {
-      [FLUSH_TYPE_ATTRIBUTE]: 'async',
+      [FLUSH_TYPE_ATTRIBUTE]: "async",
     });
     this.#cvrRowsFlushed.add(rows);
   }
@@ -167,8 +167,8 @@ export class RowRecordCache {
     try {
       const cache = await startAsyncSpan(
         tracer,
-        'RowRecordCache.load',
-        async span => {
+        "RowRecordCache.load",
+        async (span) => {
           const cache: CustomKeyMap<RowID, RowRecord> = new CustomKeyMap(
             rowIDString,
           );
@@ -183,14 +183,14 @@ export class RowRecordCache {
               "refCounts"
             FROM ${this.#cvr(`rows`)}
               WHERE "clientGroupID" = ${this.#cvrID} AND "refCounts" IS NOT NULL`
-            // TODO(arv): Arbitrary page size
+            // TODO: Arbitrary page size
             .cursor(5000)) {
             for (const row of rows) {
               const rowRecord = rowsRowToRowRecord(row);
               cache.set(rowRecord.id, rowRecord);
             }
           }
-          span.setAttribute('rows', cache.size);
+          span.setAttribute("rows", cache.size);
           return cache;
         },
       );
@@ -259,9 +259,9 @@ export class RowRecordCache {
       while (this.#pendingRowsVersion !== this.#flushedRowsVersion) {
         const start = performance.now();
 
-        const {rows, rowsVersion} = await runTx(
+        const { rows, rowsVersion } = await runTx(
           this.#db,
-          tx => {
+          (tx) => {
             // Note: This code block is synchronous, guaranteeing that the
             // #pendingRowsVersion is consistent with the #pending rows.
             const rows = this.#pending.size;
@@ -270,13 +270,13 @@ export class RowRecordCache {
             // overhead. Instead, just catch and log exception(s); the outer
             // transaction will properly fail.
             void Promise.all(
-              this.executeRowUpdates(tx, rowsVersion, this.#pending, 'force'),
-            ).catch(e => this.#lc.error?.(`error flushing cvr rows`, e));
+              this.executeRowUpdates(tx, rowsVersion, this.#pending, "force"),
+            ).catch((e) => this.#lc.error?.(`error flushing cvr rows`, e));
 
             this.#pending.clear();
-            return {rows, rowsVersion};
+            return { rows, rowsVersion };
           },
-          {mode: Mode.READ_COMMITTED},
+          { mode: Mode.READ_COMMITTED },
         );
         const elapsed = performance.now() - start;
         this.#lc.info?.(
@@ -309,7 +309,7 @@ export class RowRecordCache {
    */
   flushed(lc: LogContext): Promise<void> {
     if (this.#flushing) {
-      lc.debug?.('awaiting pending row flush');
+      lc.debug?.("awaiting pending row flush");
       return this.#flushing.promise;
     }
     return promiseVoid;
@@ -334,7 +334,7 @@ export class RowRecordCache {
     }
 
     const startMs = Date.now();
-    const start = afterVersion ? versionString(afterVersion) : '';
+    const start = afterVersion ? versionString(afterVersion) : "";
     const end = versionString(upToCVR.version);
     lc.debug?.(`scanning row patches for clients from ${start}`);
 
@@ -345,14 +345,16 @@ export class RowRecordCache {
     await this.flushed(lc);
     const flushMs = Date.now() - startMs;
 
-    const reader = new TransactionPool(lc, {mode: Mode.READONLY}).run(this.#db);
+    const reader = new TransactionPool(lc, { mode: Mode.READONLY }).run(
+      this.#db,
+    );
     try {
       // Verify that we are reading the right version of the CVR.
-      await reader.processReadTask(tx =>
+      await reader.processReadTask((tx) =>
         checkVersion(tx, this.#schema, this.#cvrID, current),
       );
 
-      const {query} = await reader.processReadTask(tx => {
+      const { query } = await reader.processReadTask((tx) => {
         const query =
           excludeQueryHashes.length === 0
             ? tx<RowsRow[]>`SELECT
@@ -363,7 +365,7 @@ export class RowRecordCache {
               "rowVersion",
               "patchVersion",
               "refCounts"
-            FROM ${this.#cvr('rows')}
+            FROM ${this.#cvr("rows")}
         WHERE "clientGroupID" = ${this.#cvrID}
           AND "patchVersion" > ${start}
           AND "patchVersion" <= ${end}`
@@ -376,12 +378,12 @@ export class RowRecordCache {
               "rowVersion",
               "patchVersion",
               "refCounts"
-            FROM ${this.#cvr('rows')}
+            FROM ${this.#cvr("rows")}
         WHERE "clientGroupID" = ${this.#cvrID}
           AND "patchVersion" > ${start}
           AND "patchVersion" <= ${end}
           AND ("refCounts" IS NULL OR NOT "refCounts" ?| ${excludeQueryHashes})`;
-        return {query};
+        return { query };
       });
 
       yield* query.cursor(10000);
@@ -399,11 +401,11 @@ export class RowRecordCache {
     tx: PostgresTransaction,
     version: CVRVersion,
     rowUpdates: Map<RowID, RowRecord | null>,
-    mode: 'allow-defer' | 'force',
+    mode: "allow-defer" | "force",
     lc = this.#lc,
   ): PendingQuery<Row[]>[] {
     if (
-      mode === 'allow-defer' &&
+      mode === "allow-defer" &&
       // defer if pending rows are being flushed
       (this.#flushing !== null ||
         // or if the new batch is above the limit.
@@ -416,7 +418,7 @@ export class RowRecordCache {
       version: versionString(version),
     };
     const pending: PendingQuery<Row[]>[] = [
-      tx`INSERT INTO ${this.#cvr('rowsVersion')} ${tx(rowsVersion)}
+      tx`INSERT INTO ${this.#cvr("rowsVersion")} ${tx(rowsVersion)}
            ON CONFLICT ("clientGroupID") 
            DO UPDATE SET ${tx(rowsVersion)}`,
     ];
@@ -426,7 +428,7 @@ export class RowRecordCache {
       if (row === null) {
         pending.push(
           tx`
-          DELETE FROM ${this.#cvr('rows')}
+          DELETE FROM ${this.#cvr("rows")}
             WHERE "clientGroupID" = ${this.#cvrID}
               AND "schema" = ${id.schema}
               AND "table" = ${id.table}
@@ -440,7 +442,7 @@ export class RowRecordCache {
     if (rowRecordRows.length) {
       pending.push(
         tx`
-  INSERT INTO ${this.#cvr('rows')}(
+  INSERT INTO ${this.#cvr("rows")}(
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
   ) SELECT
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"

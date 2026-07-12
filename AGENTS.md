@@ -197,284 +197,166 @@ Zero is a streaming database:
 - Zero schema definitions are separate from PostgreSQL schema
 - Apps like zbugs demonstrate the connection between PostgreSQL tables and Zero schemas
 
-## Go IVM Sidecar (experimental)
+## Go IVM (in-process engine)
 
 `zero-cache` can optionally offload IVM compute (advance + hydrate) to a
-companion Go process called the "Go IVM sidecar". When enabled, the
-PipelineDriver dispatches the hot path to the sidecar over a Unix socket
-using MessagePack-RPC instead of running the TS operator tree inline.
+Go engine running **in-process** via a NAPI c-shared library
+(`libgoivm.so`). Each zero-cache syncer worker dlopens the library at
+startup via `ZERO_GO_SIDECAR_NAPI_LIB_PATH`. There is no socket
+transport, no separate sidecar process, and no spawn/fallback machinery.
+When enabled, the PipelineDriver dispatches the hot path to the Go engine
+via direct ABI calls using MessagePack-RPC framing over a `net.Pipe`
+instead of running the TS operator tree inline.
 
 ### Configuration
 
-All sidecar settings live under the `goSidecar` group of `zero-config.ts`
-and are validated by the same valita schema as the rest of zero-cache.
+Sidecar settings live under the `goSidecar` group of `zero-config.ts`:
 
-- `ZERO_GO_SIDECAR_ENABLED=true` — enable the sidecar.
-- `ZERO_GO_SIDECAR_SHADOW_MODE=true` — run both TS and Go paths and
-  compare results. TS is source of truth; mismatches are logged at
-  `error` level. Requires `ZERO_GO_SIDECAR_ENABLED=true`. Used to
-  validate the sidecar before flipping to Go-primary.
-- `ZERO_GO_SIDECAR_SHADOW_VERBOSE=true` — include full row contents in
-  shadow-mode mismatch logs (default: redacted to type + queryID +
-  rowKey for PII safety).
-- `ZERO_GO_SIDECAR_BINARY_PATH=/path/to/go-ivm-sidecar` — path to the
-  compiled binary. Default: `go-ivm-sidecar` (PATH lookup).
-- `ZERO_GO_SIDECAR_DRIFT_AUDIT_INTERVAL_MS=60000` — in Go-primary mode
-  (enabled=true, shadowMode=false), how often each PipelineDriver runs a
-  sampled-shadow drift audit. The audit picks one random active query
-  per interval, re-hydrates it on both TS and Go from the current
-  snapshot, and compares. Mismatches are logged at error level and
-  surfaced via the `ivm.drift-audit-mismatches` metric (paired with
-  `ivm.drift-audit-runs` and `ivm.drift-audit-skips`). Set to `0` to
-  disable. Has no effect in shadow mode (which audits every query).
-  Audit `ok` events log at `debug` level — to verify the audit is
-  actually firing (and not just `enabled`), bump `ZERO_LOG_LEVEL=debug`
-  and look for `[shadow] drift-audit (queryID): TS and Go match`.
-- `ZERO_GO_SIDECAR_DRIFT_AUDIT_SQL_GROUND_TRUTH=true` — within each
-  drift-audit cycle, also run a raw SQL query on the snapshot's SQLite
-  replica as a third opinion (in addition to the TS-audit comparison).
-  Catches Go-vs-SQL set and content drift directly, which is more
-  trustworthy than Go-vs-TS-audit alone (the TS audit pipeline has
-  known boundary-drop edges). Defaults to `true`; set to `false` to
-  skip the SQL re-query if it shows measurable replica load — the
-  audit then falls back to the legacy TS-vs-Go set comparison only.
-  Has no effect when the audit itself is disabled.
-- `ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=true` — opt into shared-sidecar
-  mode (see "Shared sidecar mode" below). When true, the worker's
-  `SidecarManager` skips spawn and binary-existence checks and just
-  connects to `goSidecar.socketPath`. Requires `goSidecar.socketPath`
-  to be set.
-- `ZERO_GO_SIDECAR_SOCKET_PATH=/tmp/go-ivm-shared.sock` — explicit
-  Unix-socket path for the sidecar. Used together with
-  `externallyManaged=true`. Without it, each worker spawns its own
-  sidecar at `/tmp/go-ivm-<pid>.sock`.
+- `ZERO_GO_SIDECAR_ENABLED=true` — enable the Go IVM in-process engine.
+- `ZERO_GO_SIDECAR_NAPI_LIB_PATH=/opt/go-ivm/libgoivm.so` — path to the
+  c-shared library. Default: `libgoivm.so` (PATH lookup).
+- `ZERO_GO_SIDECAR_PULL_WINDOW` — pull-mode hydration credit window
+  (ABI v3 demand-gated streaming). Default is set in `zero-config.ts`.
 
-##### Go-primary cutover flags (TS-side; resolved by precedence at dispatch)
+### Engine-side env (read by the Go library at startup)
 
-These select how Go participates beyond shadow mode. They are independent
-booleans whose valid combinations are resolved in `pipeline-driver.ts`
-(shadow wins over any primary flag). For a SPAWNED sidecar, zero-cache now
-derives the matching `GO_IVM_*` env automatically (see "Sidecar-side env");
-for an `externallyManaged` sidecar the owner must set the `GO_IVM_*` env to
-match, OR rely on the appID/mode now carried on the `advanceToHead` wire.
-
-- `ZERO_GO_SIDECAR_ADVANCE_TO_HEAD=true` — Go derives its OWN snapshot
-  diff via the `advanceToHead` RPC (requires the sidecar armed with
-  `GO_IVM_ADVANCE_TO_HEAD=true` + table mode).
-- `ZERO_GO_SIDECAR_ADVANCE_DRIVE=true` — Go drives its OWN engine
-  frame-coordinated (implies `advanceToHead`; needs `GO_IVM_ADVANCE_DRIVE`
-  + `GO_IVM_SOURCE_MODE=table` on the sidecar).
-- `ZERO_GO_SIDECAR_GO_PRIMARY_TRIGGER=true` — Go-primary serving via the
-  trigger path (Go derives its own diff + drives its own engine). The CVR
-  watermark is committed at `min(V_ts, V_go)` (see pipeline-driver
-  `reconcileGoPrimaryWatermark`).
-- `ZERO_GO_SIDECAR_LEAN_PRIMARY=true` — TS holds only STUB user pipelines
-  (Go owns them); only meaningful with `goPrimaryTrigger`.
-
-#### Sidecar-side env (read by the `go-ivm-sidecar` binary itself)
-
-- `GO_IVM_GOGC=200` — GC target percent (`debug.SetGCPercent`). The sidecar is
+- `GO_IVM_GOGC=200` — GC target percent (`debug.SetGCPercent`). The engine is
   allocation-heavy (~8.6k objects per ~1k-row hydrate, dominated by the per-row
-  `Row` map), and at the Go default `GOGC=100` the GC — not the cores — caps
-  multi-CG parallel scaling: the cross-CG parallel speedup measured **2.6× at 16
-  CGs at GOGC=100 vs 4.9× at GOGC=800** (`engine/tablesource_bench_test.go`
-  `TableSourceMulti`). The sidecar therefore defaults to a moderate `GOGC=200`
-  (2×). Set `GO_IVM_GOGC=off` to disable GC, or any integer to tune. The
-  standard `GOGC` env takes precedence when `GO_IVM_GOGC` is unset.
-- `GO_IVM_GOMEMLIMIT=<bytes>` — soft memory cap (`debug.SetMemoryLimit`). The
-  principled high-throughput config: set this to the container's memory budget
-  and run a high/off `GOGC` so GC only fires near the cap — maximizing multi-core
-  throughput while never OOMing.
-
-
-- `GO_IVM_PARALLEL_THRESHOLD=2` — min connection count per MemorySource
-  at which `genPushAndWriteParallel` (per-pipeline goroutine fan-out)
-  kicks in for an advance push. The engine default is **2** (lowered
-  from the historical 4 because dashboard-shaped workloads typically
-  had 2-3 queries per source per cg and never crossed the old
-  threshold). Set higher to suppress fan-out when goroutine spawn cost
-  dominates the actual push work (rarely useful — measure first).
-  Empty / non-numeric values keep the engine default.
-- `GO_IVM_PPROF_ADDR=127.0.0.1:6060` — when set, the sidecar opens a
-  `net/http/pprof` endpoint at this address with block + mutex
-  profiling enabled at sample rate 1. ~5% overhead; leave unset in
-  prod. Used to capture CPU / alloc / block / mutex / heap profiles
-  via `go tool pprof http://addr/debug/pprof/<type>`. See
-  `go-ivm/PERF-REVIEW.md` § "How to reproduce the profile" for the
-  capture recipe.
+  `Row` map). At the Go default `GOGC=100` the GC caps multi-CG parallel scaling:
+  cross-CG parallel speedup measured 2.6× at 16 CGs at GOGC=100 vs 4.9× at
+  GOGC=800 (`engine/tablesource_bench_test.go` `TableSourceMulti`). The engine
+  defaults to `GOGC=200`. Set `GO_IVM_GOGC=off` to disable GC. The standard
+  `GOGC` env takes precedence when `GO_IVM_GOGC` is unset.
+- `GO_IVM_GOMEMLIMIT=<bytes>` — soft memory cap (`debug.SetMemoryLimit`). Set
+  to the container's memory budget and run a high/off `GOGC` so GC fires near
+  the cap.
+- `GO_IVM_GOMEMLIMIT_PERCENT=40` — alternative: set as a percentage of
+  container memory (Docker default). Mutually exclusive with
+  `GO_IVM_GOMEMLIMIT`.
+- `GO_IVM_PARALLEL_THRESHOLD=2` — min connection count per source at which
+  parallel push fan-out kicks in. Default 2.
+- `GO_IVM_HYDRATE_PARALLELISM=4` — hydrate lane count (readers = 2× lanes).
+- `GO_IVM_ADVANCE_PARALLELISM=4` — advance fanout workers (default ON;
+  `false` disables).
+- `GO_IVM_MAX_OPEN_CONNS=1024` — per-worker SQLite connection pool ceiling.
+- `GO_IVM_DELIVER_TIMEOUT_SEC=55` — row-plane park deadline. Default 55s,
+  kept below the 60s advance budget.
+- `GO_IVM_ADVANCE_BUDGET_MS=60000` — wall-clock advance backstop.
+- `GO_IVM_WEDGE_WATCHDOG_SEC=90` — CG handler wedge detection threshold.
+- `GO_IVM_CHUNK_SIZE=100` — streaming chunk size (both hydrate and advance).
+- `GO_IVM_PPROF_ADDR=127.0.0.1:6060` — when set, opens a `net/http/pprof`
+  endpoint. ~5% overhead; leave unset in prod.
 
 ### Decoder / Row representation
 
-The sidecar's `ivm.Row` is `map[string]Value` — faithful port of TS's
+The Go engine's `ivm.Row` is `map[string]Value` — faithful port of TS's
 `Record<string, Value>` (`zero-protocol/src/data.ts`). Numeric coercion
 happens at msgpack decode time via a custom `Row.DecodeMsgpack` that
-coerces integer column values to `float64` inline. This replaced the
-legacy post-decode reflection-walk normalize for Row data
-(`walkForNumericNormalize` in `cmd/sidecar/main.go`), measurably cutting
-total allocations by ~41% on the live-load profile while preserving
-TS↔Go equivalence (verified by 96+ drift audits and two 30-minute
-sustained-load soaks with 0 mismatches).
-
-The walk is still applied to non-Row payloads (e.g.,
-`builder.ValuePos.Value` AST literals) — those positions can carry
-int* values from clients but don't dominate the alloc profile.
+coerces integer column values to `float64` inline, cutting total
+allocations by ~41% on the live-load profile while preserving TS↔Go
+equivalence. A reflection-walk normalize is still applied to non-Row
+payloads (e.g., `builder.ValuePos.Value` AST literals).
 
 OTel traces from the sidecar use the standard OTLP env vars
 (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
 `OTEL_SERVICE_NAME`). Tracing is disabled when no endpoint is set.
 
-### Shared sidecar mode (`externallyManaged`)
+### Engine reinit and error handling
 
-By default each `zero-cache` syncer worker spawns its own sidecar
-process. With `ZERO_NUM_SYNC_WORKERS=N`, you get N sidecars. Each
-sidecar holds the engines for whichever client groups happen to be
-routed to its worker, so as N rises the average client-groups-per-
-sidecar drops — shrinking the inter-cg parallelism each sidecar can
-sustain and adding N replicator subscriptions / restart machineries.
+If the NAPI library fails to load (missing file, wrong arch, dlopen
+error), the PipelineDriver dispatch falls through to the TS-native
+path. The Go path is always optional; user-facing correctness depends
+only on the TS path.
 
-Shared-sidecar mode collapses all workers onto one external sidecar
-process so all client groups colocate. Wire-up:
+Once loaded, a Go engine crash (panic) is recovered transparently:
 
-1. The deployment owner (typically the container entrypoint) spawns
-   `/path/to/go-ivm-sidecar /tmp/go-ivm-shared.sock` as a background
-   process and waits for the socket to appear.
-2. Each zero-cache worker sets:
-   ```
-   ZERO_GO_SIDECAR_ENABLED=true
-   ZERO_GO_SIDECAR_EXTERNALLY_MANAGED=true
-   ZERO_GO_SIDECAR_SOCKET_PATH=/tmp/go-ivm-shared.sock
-   ```
-3. The `SidecarManager` in each worker connects (instead of spawning),
-   verifies the protocol revision, and installs a 2-second
-   `isConnected()` health-check ticker. On disconnect (the external
-   sidecar crashed or restarted), the ticker routes through the same
-   `#handleRestartTrigger` pipeline as the spawned-process path —
-   incrementing the sliding-window failure counter, queuing
-   `waitForRunning()` callers, and firing `onRestart` listeners when
-   the reconnect succeeds.
-4. The external owner is responsible for actually keeping the sidecar
-   process alive; `SidecarManager` only reconnects.
-
-`SidecarManager.stop()` in externallyManaged mode tears down the
-client and the health-check ticker but **does not** kill the sidecar
-process or unlink the socket — the owner does that.
-
-Workers=1 + shared sidecar is the recommended pairing for Go-primary:
-no replicator duplication, no V8 GC overhead from extra workers, and
-no fragmentation of cg state across sidecars.
-
-### Sidecar restart + fallback behavior
-
-If the binary doesn't exist or fails its initial spawn, the
-PipelineDriver dispatch falls through to the TS-native path. The Go
-path is always optional; user-facing correctness depends only on the
-TS path.
-
-Once running, an in-process sidecar crash (SIGKILL, OOM, panic) is
-recovered transparently to clients:
-
-- `SidecarManager` respawns the binary under a sliding-window failure
-  cap (`maxRestartsInWindow` over `restartWindowMs`, defaults 5 / 60s).
-- `GoComputeBackend.waitForRunning()` queues in-flight RPCs across the
-  restart window instead of failing them.
-- The `onRestart` listener re-runs `init` + chunked `loadRows` + query
-  re-registration before any further advance/hydrate touches Go.
-- `advance()` calls in flight at the moment of the crash do NOT replay
-  their diff after re-init (Go's new state already reflects it); they
-  return empty `{changes, timings}` and clients miss exactly ONE delta
-  from the IVM stream. Subsequent advances are correct.
-- `#doInit` deduplicates concurrent calls so the onRestart listener and
-  any retry path don't race on `loadRows` (which previously caused
-  doubled row sets).
+- `SidecarManager` detects the crash via the init epoch barrier and
+  re-initializes the engine under a sliding-window failure cap.
+- `GoComputeBackend.waitForRunning()` queues in-flight RPCs across
+  the reinit window instead of failing them.
+- The `onRestart` listener re-runs `init` + query re-registration
+  before any further advance/hydrate touches Go.
+- `advance()` calls in flight at the moment of the crash return empty
+  `{changes, timings}`; clients miss exactly ONE delta. Subsequent
+  advances are correct.
 - Hydrate / `addQueriesStream` calls retry against the re-initialized
   engine after re-init completes.
-- Mid-handshake spawn failure (e.g., `#waitForReady` times out, ping or
-  version RPC fails after the process spawned) advances the state
-  machine instead of wedging. In spawned mode the wedged process is
-  SIGKILLed so its `'exit'` handler re-routes; in externally-managed
-  mode `#handleRestartTrigger` is re-invoked explicitly (no
-  `proc.on('exit')` exists to fall back on). Either path eventually
-  trips the failure cap.
-- Node's `'error'` event on the spawned `ChildProcess` is explicitly
-  caught (defense against an unhandled-error worker crash on spawn-time
-  failures like ENOENT / EACCES / wrong arch).
 
-If the failure cap is exceeded (`'failed'` terminal state),
-`waitForRunning()` rejects and dispatch falls through to TS for the
-remainder of the process lifetime.
+If the failure cap is exceeded, `waitForRunning()` rejects and
+dispatch falls through to TS for the remainder of the process lifetime.
 
-The drift audit (when running) catches state divergence with a triple
-guard — Snapshotter version + `#tableSourcesVersion` (TableSource DB
-binding) + `GoComputeBackend.epoch` (manager restart counter) — so a
-restart that lands mid-audit is detected and the audit is skipped
-rather than reporting a false-positive mismatch.
+### Reset circuit breaker
 
-### Wire protocol
+The view-syncer implements a reason-tiered reset circuit breaker to
+prevent cascading CG teardowns:
 
-Length-prefixed (4-byte big-endian) MessagePack frames over Unix socket.
-RPC methods: `ping`, `version`, `init`, `loadRows`, `addQuery`,
-`addQueries`, `addQueriesStream`, `removeQuery`, `advance`,
-`advanceStream`, `destroy`.
+- **Deterministic** (watermark-regression): fast trip — 2 resets in 20s.
+- **Transient** (go-primary-unavailable, go-primary-drop): loose trip
+  — 6 resets in 60s.
+- **Economic** (advancement-timeout): never trips — abort/reset cycles
+  are handled by the suppressAbort escalation instead.
+- **Lawful** (schema-change, truncation, permissions-change,
+  scalar-subquery): never trips.
 
-`addQueriesStream` (hydrate) and `advanceStream` (advance) are streaming
-variants. Each emits one OR MORE partial frames (same request id)
-followed by exactly one `"done"` terminal frame. The TS client routes
-partial frames to an `onPartial` callback; the call promise resolves on
-`"done"`.
+Per-class sliding windows are cleared on every successful advance
+(half-open semantics). The trip metric carries a class label.
 
-**Chunking contract** (protocol rev 7+): partial frames carry
+### suppressAbort escalation
+
+After 3 consecutive abort-doubling cycles (`SUPPRESS_ABORT_AFTER_STREAK`),
+the next `advanceToHeadStream` sends `suppressAbort=true` for an
+un-abortable catch-up. The streak resets on success. Go's 60s wall
+clock backstop still bounds the advance. This makes the economic
+class's never-trip breaker safe: an unbounded abort→reset loop is
+structurally impossible.
+
+### NAPI ABI
+
+The Go IVM engine exposes a c-shared ABI (`cmd/sidecar/napi_lib.go`)
+called via the NAPI addon (`go-sidecar/napi/`). RPC methods: `ping`,
+`version`, `init`, `addQueriesStream`, `removeQuery`,
+`advanceToHeadStream`, `destroy`.
+
+`addQueriesStream` (hydrate) and `advanceToHeadStream` (advance) are
+streaming methods. Each emits one OR MORE partial frames (same request
+id) followed by exactly one `"done"` terminal frame. The TS client
+routes partial frames to an `onPartial` callback; the call promise
+resolves on `"done"`.
+
+**Chunking contract** (protocol rev 12): partial frames carry
 `chunkIndex` (monotonically increasing) and `final` (bool, true on the
-last frame). The Go side chunks at 10,000 RowChanges per frame
-(`hydrateChunkSize` / `advanceChunkSize`, matching the view-syncer's
-`CURSOR_PAGE_SIZE`). For `addQueriesStream`, chunks are scoped per
-`queryID`: each query may produce multiple frames, exactly one per
-query has `final=true`, and the TS client accumulates them per `queryID`
-before invoking its caller's `onResult`. For `advanceStream`, the whole
-call produces one chunk sequence with cumulative `timings` only on the
-final frame.
-
-The view-syncer uses `addQueriesStream` so fast queries' RowChanges
-reach clients before slow queries in the same batch finish, and
-`advanceStream` so large snapshot diffs (e.g., from bulk imports) don't
-buffer as one giant msgpack frame on the Go side.
+last frame). The Go side chunks at 10,000 RowChanges per frame. For
+`addQueriesStream`, chunks are scoped per `queryID`: each query may
+produce multiple frames, exactly one per query has `final=true`. For
+`advanceToHeadStream`, the whole call produces one chunk sequence with
+cumulative `timings` only on the final frame.
 
 Defensive invariants enforced by the TS client (throws on violation):
-- `chunkIndex` arrives in monotonic order — wire-level bug if not
+- `chunkIndex` arrives in monotonic order
 - every `addQueriesStream` `queryID` ends with `final=true` before "done"
-- every `advanceStream` call sees at least one `final=true` before "done"
+- every `advanceToHeadStream` call sees at least one `final=true` before "done"
 
 The TS client refuses to talk to a sidecar reporting a different
-`protocolRev` than its constant in `sidecar-manager.ts` (currently 9).
+`protocolRev` than its constant in `sidecar-manager.ts` (currently 12).
 
 ### Operational concerns
 
-- **Sidecar topology** — default is one sidecar per `zero-cache` syncer
-  worker, shared across the ViewSyncers in that worker via per-cg FIFO
-  queues on the Go side. Set `goSidecar.externallyManaged=true` +
-  `goSidecar.socketPath=...` to switch to one sidecar per zero-cache
-  process (shared across all workers); the deployment owner is then
-  responsible for spawning the sidecar before workers start.
-- **Worker-count tuning** — with default (per-worker) sidecars,
-  bumping `ZERO_NUM_SYNC_WORKERS` shards client groups across more
-  sidecars, shrinking per-sidecar batches and lowering inter-cg
-  parallelism. Empirically measured (5-min, 10-user soak) p99
-  regression 70ms → 180ms when going 2→4 workers in per-worker mode.
-  In shared-sidecar mode worker count no longer affects sidecar
-  concurrency, so the recommended default is `ZERO_NUM_SYNC_WORKERS=1`
-  + shared sidecar.
-- **Parallel-push threshold** — the sidecar engine fans out per-source
-  push across pipeline connections when a source has ≥
-  `GO_IVM_PARALLEL_THRESHOLD` connections (default 2, env-tunable).
-  Lower this in workloads with low per-source query counts; raise it
-  if goroutine spawn cost is visible in profiles.
-- Sidecar memory grows linearly with active client groups × table data.
+- **Engine topology** — each `zero-cache` syncer worker hosts its own
+  Go engine instance via NAPI in-process. Per-cg FIFO queues on the Go
+  side serialize work within each engine.
+- **Worker-count tuning** — `ZERO_NUM_SYNC_WORKERS` controls V8
+  parallelism and the number of Go engine instances. Each worker's
+  engine has its own SQLite connection pool. The default is 8 workers.
+- **Parallel advance** — `GO_IVM_ADVANCE_PARALLELISM` controls advance
+  fanout workers (default 4, default ON). Set to 1 for serial/TS-faithful
+  fanout.
+- **Hydrate parallelism** — `GO_IVM_HYDRATE_PARALLELISM` controls hydrate
+  lane count (default 4, readers = 2× lanes).
+- Engine memory grows linearly with active client groups × table data.
   Groups idle for 30+ minutes are auto-evicted on the Go side.
-- Sidecar restart triggers per-`GoComputeBackend` reinit (init + chunked
-  loadRows + re-register queries) before advance/hydrate calls resume.
-  In externallyManaged mode "restart" is detected by the connection
-  health-check ticker (default 2s); same reinit path runs.
-- See `go-ivm/REVIEW-final.md` for the current production-readiness gate
-  list.
+- Engine reinit triggers per-`GoComputeBackend` reinit (init +
+  re-register queries) before advance/hydrate calls resume.
+- See `go-ivm/PROD-PATH.md` for the production configuration map.
 
 ## Known Gotchas
 

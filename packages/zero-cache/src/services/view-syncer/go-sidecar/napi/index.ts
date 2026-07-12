@@ -12,9 +12,9 @@
 // Missing artifacts surface as a descriptive throw from loadGoNapiBridge;
 // callers feature-detect with isGoNapiAddonAvailable().
 
-import {existsSync} from 'node:fs';
-import {createRequire} from 'node:module';
-import {join} from 'node:path';
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 
 export type GoNapiAddon = {
   /** dlopen + goivm_start. Throws on ABI mismatch / missing symbols. */
@@ -28,7 +28,7 @@ export type GoNapiAddon = {
   abiVersion(): number;
   /**
    * Grant `n` pull credits to the in-flight pullMode RPC `reqID` (ABI v3,
-   * DESIGN-duplex-streaming). Direct synchronous call into the Go library
+   * Direct synchronous call into the Go library
    * — O(1) leaf-mutex registry op, never blocks the JS thread. Unknown
    * reqID is a silent no-op (RPC already settled).
    */
@@ -40,18 +40,18 @@ export type GoNapiAddon = {
    * terminal error frame. Idempotent; unknown reqID is a no-op.
    */
   streamCancel(reqID: number): void;
-  // NOTE: no shutdown() — removed (scale review). Calling goivm_shutdown on
-  // the JS thread deadlocks against TSFN backpressure and racing deliveries
-  // are a use-after-free; the Go host lives until process exit (see addon.c).
+  // NOTE: no shutdown() — calling goivm_shutdown on the JS thread deadlocks
+  // against TSFN backpressure and racing deliveries are a use-after-free; the
+  // Go host lives until process exit (see addon.c).
 };
 
 const require = createRequire(import.meta.url);
 
 const ADDON_PATH = join(
-  new URL('.', import.meta.url).pathname,
-  'build',
-  'Release',
-  'goivm_napi.node',
+  new URL(".", import.meta.url).pathname,
+  "build",
+  "Release",
+  "goivm_napi.node",
 );
 
 export function isGoNapiAddonAvailable(): boolean {

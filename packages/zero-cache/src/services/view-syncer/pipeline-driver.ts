@@ -1,20 +1,20 @@
-import type {LogContext} from '@rocicorp/logger';
-import {assert, unreachable} from '../../../../shared/src/asserts.ts';
-import {deepEqual, type JSONValue} from '../../../../shared/src/json.ts';
-import {must} from '../../../../shared/src/must.ts';
-import type {AST, LiteralValue} from '../../../../zero-protocol/src/ast.ts';
-import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
-import type {Row} from '../../../../zero-protocol/src/data.ts';
-import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
-import {buildPipeline} from '../../../../zql/src/builder/builder.ts';
+import type { LogContext } from "@rocicorp/logger";
+import { assert, unreachable } from "../../../../shared/src/asserts.ts";
+import { deepEqual, type JSONValue } from "../../../../shared/src/json.ts";
+import { must } from "../../../../shared/src/must.ts";
+import type { AST, LiteralValue } from "../../../../zero-protocol/src/ast.ts";
+import type { ClientSchema } from "../../../../zero-protocol/src/client-schema.ts";
+import type { Row } from "../../../../zero-protocol/src/data.ts";
+import type { PrimaryKey } from "../../../../zero-protocol/src/primary-key.ts";
+import { buildPipeline } from "../../../../zql/src/builder/builder.ts";
 import {
   Debug,
   runtimeDebugFlags,
-} from '../../../../zql/src/builder/debug-delegate.ts';
-import {ChangeIndex} from '../../../../zql/src/ivm/change-index.ts';
-import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
-import type {Change} from '../../../../zql/src/ivm/change.ts';
-import type {Node} from '../../../../zql/src/ivm/data.ts';
+} from "../../../../zql/src/builder/debug-delegate.ts";
+import { ChangeIndex } from "../../../../zql/src/ivm/change-index.ts";
+import { ChangeType } from "../../../../zql/src/ivm/change-type.ts";
+import type { Change } from "../../../../zql/src/ivm/change.ts";
+import type { Node } from "../../../../zql/src/ivm/data.ts";
 import {
   skipYields,
   throwOutput,
@@ -22,8 +22,8 @@ import {
   type Input,
   type Output,
   type Storage,
-} from '../../../../zql/src/ivm/operator.ts';
-import type {SourceSchema} from '../../../../zql/src/ivm/schema.ts';
+} from "../../../../zql/src/ivm/operator.ts";
+import type { SourceSchema } from "../../../../zql/src/ivm/schema.ts";
 import {
   type Source,
   type SourceChange,
@@ -31,63 +31,63 @@ import {
   makeSourceChangeAdd,
   makeSourceChangeEdit,
   makeSourceChangeRemove,
-} from '../../../../zql/src/ivm/source.ts';
-import {planQuery} from '../../../../zql/src/planner/planner-builder.ts';
-import type {ConnectionCostModel} from '../../../../zql/src/planner/planner-connection.ts';
-import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
-import {MeasurePushOperator} from '../../../../zql/src/query/measure-push-operator.ts';
-import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
-import type {Database} from '../../../../zqlite/src/db.ts';
+} from "../../../../zql/src/ivm/source.ts";
+import { planQuery } from "../../../../zql/src/planner/planner-builder.ts";
+import type { ConnectionCostModel } from "../../../../zql/src/planner/planner-connection.ts";
+import { completeOrdering } from "../../../../zql/src/query/complete-ordering.ts";
+import { MeasurePushOperator } from "../../../../zql/src/query/measure-push-operator.ts";
+import type { ClientGroupStorage } from "../../../../zqlite/src/database-storage.ts";
+import type { Database } from "../../../../zqlite/src/db.ts";
 import {
   resolveSimpleScalarSubqueries,
   type CompanionSubquery,
-} from '../../../../zqlite/src/resolve-scalar-subqueries.ts';
-import {createSQLiteCostModel} from '../../../../zqlite/src/sqlite-cost-model.ts';
-import {TableSource} from '../../../../zqlite/src/table-source.ts';
+} from "../../../../zqlite/src/resolve-scalar-subqueries.ts";
+import { createSQLiteCostModel } from "../../../../zqlite/src/sqlite-cost-model.ts";
+import { TableSource } from "../../../../zqlite/src/table-source.ts";
 import {
   reloadPermissionsIfChanged,
   type LoadedPermissions,
-} from '../../auth/load-permissions.ts';
-import type {LogConfig, ZeroConfig} from '../../config/zero-config.ts';
-import {computeZqlSpecs, mustGetTableSpec} from '../../db/lite-tables.ts';
-import type {LiteAndZqlSpec, LiteTableSpec} from '../../db/specs.ts';
+} from "../../auth/load-permissions.ts";
+import type { LogConfig, ZeroConfig } from "../../config/zero-config.ts";
+import { computeZqlSpecs, mustGetTableSpec } from "../../db/lite-tables.ts";
+import type { LiteAndZqlSpec, LiteTableSpec } from "../../db/specs.ts";
 import {
   getOrCreateCounter,
   getOrCreateLatencyHistogram,
-} from '../../observability/metrics.ts';
-import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
+} from "../../observability/metrics.ts";
+import type { InspectorDelegate } from "../../server/inspector-delegate.ts";
 import {
   max as maxLexiVersion,
   min as minLexiVersion,
-} from '../../types/lexi-version.ts';
-import {isEnum as isLiteEnum, isArray} from '../../types/lite.ts';
-import {type RowKey} from '../../types/row-key.ts';
-import {type ShardID} from '../../types/shards.ts';
+} from "../../types/lexi-version.ts";
+import { isEnum as isLiteEnum, isArray } from "../../types/lite.ts";
+import { type RowKey } from "../../types/row-key.ts";
+import { type ShardID } from "../../types/shards.ts";
 import {
   getSubscriptionState,
   ZERO_VERSION_COLUMN_NAME,
-} from '../replicator/schema/replication-state.ts';
-import {checkClientSchema} from './client-schema.ts';
+} from "../replicator/schema/replication-state.ts";
+import { checkClientSchema } from "./client-schema.ts";
 import {
   type GoComputeBackend,
   createGoComputeBackend,
   isGoSidecarEnabled,
   goPullWindow,
-} from './go-sidecar/go-compute-backend.ts';
+} from "./go-sidecar/go-compute-backend.ts";
 import type {
   AdvanceToHeadStreamChunk,
   TableTiming,
-} from './go-sidecar/go-ivm-client.ts';
+} from "./go-sidecar/go-ivm-client.ts";
 import {
   AdvanceAbortedError,
   PermanentDataError,
   ScalarResetError,
   StaleInitEpochError,
-} from './go-sidecar/go-ivm-client.ts';
-import type {SidecarManager} from './go-sidecar/sidecar-manager.ts';
-import {parseSignature, rowIDSignatureUnit} from './row-set-signature.ts';
-import type {Snapshotter} from './snapshotter.ts';
-import {ResetPipelinesSignal, type SnapshotDiff} from './snapshotter.ts';
+} from "./go-sidecar/go-ivm-client.ts";
+import type { SidecarManager } from "./go-sidecar/sidecar-manager.ts";
+import { parseSignature, rowIDSignatureUnit } from "./row-set-signature.ts";
+import type { Snapshotter } from "./snapshotter.ts";
+import { ResetPipelinesSignal, type SnapshotDiff } from "./snapshotter.ts";
 
 type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
   readonly type: Op;
@@ -108,8 +108,8 @@ export type RowChange = RowAdd | RowRemove | RowEdit;
 export type AdvanceResult = {
   version: string;
   numChanges: number;
-  changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>;
-  // P2c observability: when Go-primary serves user queries via advanceToHead,
+  changes: Iterable<RowChange | "yield"> | AsyncIterable<RowChange | "yield">;
+  //  observability: when Go-primary serves user queries via advanceToHead,
   // `version` above is the RECONCILED watermark min(tsVersion, goVersion). These
   // expose the two un-reconciled authorities so the view-syncer can assert
   // monotonicity / log the split. Both undefined on the TS-only and push paths
@@ -119,7 +119,7 @@ export type AdvanceResult = {
 };
 
 /**
- * P2c watermark reconciliation (DESIGN-snapshotter-port.md §10). In Go-primary
+ *  watermark reconciliation. In Go-primary
  * trigger mode the user-query data is at Go's `goVersion` (V_go) while
  * internal/control-plane data is at TS's `tsVersion` (V_ts). The CVR
  * stateVersion is a COMPLETENESS FLOOR — client catchup/poke keys off the
@@ -138,15 +138,19 @@ export type AdvanceResult = {
 export function reconcileGoPrimaryWatermark(
   tsVersion: string,
   goVersion: string | undefined,
-): {version: string; tsVersion: string; goVersion: string | undefined} {
+): { version: string; tsVersion: string; goVersion: string | undefined } {
   // Treat empty string same as undefined — Go omitting `version` on the
   // final frame decodes as '' via `v.version ?? ''` in go-ivm-client.ts.
   // Without this guard, '' < "00" in lexi-version min() regresses the
   // CVR watermark to '' causing full re-hydration for all clients.
-  if (goVersion === undefined || goVersion === '') {
-    return {version: tsVersion, tsVersion, goVersion: undefined};
+  if (goVersion === undefined || goVersion === "") {
+    return { version: tsVersion, tsVersion, goVersion: undefined };
   }
-  return {version: minLexiVersion(tsVersion, goVersion), tsVersion, goVersion};
+  return {
+    version: minLexiVersion(tsVersion, goVersion),
+    tsVersion,
+    goVersion,
+  };
 }
 
 /**
@@ -166,7 +170,7 @@ export function reconcileGoPrimaryWatermark(
  * stateVersion ≥ cvr.stateVersion (all three inputs are ≥ it — each
  * authority and the CVR only advance), and stamping AT the data's version
  * is exactly stock semantics (stock's single snapshot makes data version ≡
- * stamp). Empty/undefined/null Go components are ignored (pre-gen-6
+ * stamp). Empty/undefined/null Go components are ignored (prior
  * sidecar, no advance yet).
  */
 export function goHydrateStampVersion(
@@ -175,17 +179,17 @@ export function goHydrateStampVersion(
   goDataVersion: string | null,
 ): string {
   const versions: [string, ...string[]] = [tsVersion];
-  if (goPinnedVersion !== undefined && goPinnedVersion !== '') {
+  if (goPinnedVersion !== undefined && goPinnedVersion !== "") {
     versions.push(goPinnedVersion);
   }
-  if (goDataVersion !== null && goDataVersion !== '') {
+  if (goDataVersion !== null && goDataVersion !== "") {
     versions.push(goDataVersion);
   }
   return maxLexiVersion(...versions);
 }
 
 /**
- * F1 advance-dispatch decision (Go-primary mode). Given the LIVE
+ *  advance-dispatch decision (Go-primary mode). Given the LIVE
  * Go backend availability and the mode the CURRENT user-query pipelines were
  * built in (#goUserPipelineMode), decide how advance() must proceed. The two
  * reset outcomes make advance() RETURN a ResetPipelinesSignal (never throw it)
@@ -209,23 +213,20 @@ export function goHydrateStampVersion(
  *                     would loop every advance for the whole outage / cooldown).
  */
 export type GoPrimaryDispatchDecision =
-  | 'go-advance'
-  | 'reset-recovered'
-  | 'reset-degrade'
-  | 'ts-native';
+  "go-advance" | "reset-recovered" | "reset-degrade" | "ts-native";
 
 export function decideGoPrimaryDispatch(
   goInitialized: boolean,
-  pipelineMode: 'go' | 'ts' | undefined,
+  pipelineMode: "go" | "ts" | undefined,
 ): GoPrimaryDispatchDecision {
   if (goInitialized) {
-    return pipelineMode === 'ts' ? 'reset-recovered' : 'go-advance';
+    return pipelineMode === "ts" ? "reset-recovered" : "go-advance";
   }
-  return pipelineMode === 'go' ? 'reset-degrade' : 'ts-native';
+  return pipelineMode === "go" ? "reset-degrade" : "ts-native";
 }
 
 /**
- * F2 classification of a Go-primary advance RPC failure (advanceToHeadStream)
+ *  classification of a Go-primary advance RPC failure (advanceToHeadStream)
  * as a PURE decision — the metric counters and logging live in
  * the #classifyGoPrimaryAdvanceError method that wraps this.
  *
@@ -270,13 +271,13 @@ export function decideGoPrimaryDispatch(
  * behaviourally identical here).
  */
 export type GoAdvanceErrorClass =
-  | 'protocol'
-  | 'stale-epoch'
-  | 'data-error'
-  | 'advance-aborted'
-  | 'scalar-reset'
-  | 'sidecar'
-  | 'unclassified';
+  | "protocol"
+  | "stale-epoch"
+  | "data-error"
+  | "advance-aborted"
+  | "scalar-reset"
+  | "sidecar"
+  | "unclassified";
 
 /**
  * Gen-5 (2026-07-07 abort-loop forensics): the two pure inputs that keep
@@ -406,28 +407,28 @@ export function goAdvanceAbortBudgetMs(
 export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   const msg = e instanceof Error ? e.message : String(e);
   if (
-    msg.includes('chunk order violation') ||
-    msg.includes('finished without a final chunk') ||
-    msg.includes('header missing version') ||
-    msg.includes('Frame too large') ||
-    msg.includes('protocolRev mismatch')
+    msg.includes("chunk order violation") ||
+    msg.includes("finished without a final chunk") ||
+    msg.includes("header missing version") ||
+    msg.includes("Frame too large") ||
+    msg.includes("protocolRev mismatch")
   ) {
-    return 'protocol';
+    return "protocol";
   }
   if (e instanceof StaleInitEpochError) {
-    return 'stale-epoch';
+    return "stale-epoch";
   }
   // Go's economic advancement-abort (RPC_CODE_ADVANCE_ABORTED). Checked via
   // instanceof after the protocol patterns (an abort message can never match
   // them, but the pinned precedence stays untouched).
   if (e instanceof AdvanceAbortedError) {
-    return 'advance-aborted';
+    return "advance-aborted";
   }
   // Scalar-subquery reset (RPC_CODE_SCALAR_RESET): Go's companion pipeline
   // detected a resolved scalar value change mid-advance. Same disposition as
   // TS-native's own throw at :1468 — reset with reason 'scalar-subquery'.
   if (e instanceof ScalarResetError) {
-    return 'scalar-reset';
+    return "scalar-reset";
   }
   // Permanent data error (RPC_CODE_DATA_ERROR → PermanentDataError): bad
   // replica data the sidecar can't represent. Checked before the 'sidecar' /
@@ -436,24 +437,24 @@ export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
   // catches any DataError that reached us as a plain Error (defense in depth).
   if (
     e instanceof PermanentDataError ||
-    msg.includes('FromSQLiteType') ||
-    msg.includes('cannot compare values of different types')
+    msg.includes("FromSQLiteType") ||
+    msg.includes("cannot compare values of different types")
   ) {
-    return 'data-error';
+    return "data-error";
   }
   if (
-    msg.includes('Sidecar is not running') ||
-    msg.includes('Connection closed') ||
-    msg.includes('Not connected') ||
-    msg.includes('engine not initialized')
+    msg.includes("Sidecar is not running") ||
+    msg.includes("Connection closed") ||
+    msg.includes("Not connected") ||
+    msg.includes("engine not initialized")
   ) {
-    return 'sidecar';
+    return "sidecar";
   }
-  return 'unclassified';
+  return "unclassified";
 }
 
 /**
- * F3 (keystone): eagerly drain a snapshotter diff, invoking `onEntry` for each
+ * eagerly drain a snapshotter diff, invoking `onEntry` for each
  * change, but CATCH the ResetPipelinesSignal the diff iterator throws on a
  * truncate / schema change and RETURN it instead of letting it propagate. The
  * Go-primary advance paths buffer the diff eagerly (so both TS and Go can
@@ -577,18 +578,18 @@ export class PipelineDriver {
   #permissions: LoadedPermissions | null = null;
 
   readonly #advanceTime = getOrCreateLatencyHistogram(
-    'sync',
-    'ivm.advance-time',
-    'Time to advance all queries for a given client group in response to a single change.',
+    "sync",
+    "ivm.advance-time",
+    "Time to advance all queries for a given client group in response to a single change.",
   );
 
   readonly #conflictRowsDeleted = getOrCreateCounter(
-    'sync',
-    'ivm.conflict-rows-deleted',
-    'Number of rows deleted because they conflicted with added row',
+    "sync",
+    "ivm.conflict-rows-deleted",
+    "Number of rows deleted because they conflicted with added row",
   );
 
-  // Bucketed counter for advance-dropped events in Go-primary mode. Pre-C5
+  // Bucketed counter for advance-dropped events in Go-primary mode. previously
   // fix, ALL errors from Go's advance were silently swallowed as
   // empty changes — the CVR committed the empty diff and the client view
   // diverged with no operator-visible signal. The forensics gap was total:
@@ -596,29 +597,29 @@ export class PipelineDriver {
   // a stale-epoch error, and a sidecar restart all looked identical.
   // Each reason gets its own counter so dashboards can distinguish them.
   readonly #advanceDroppedProtocol = getOrCreateCounter(
-    'sync',
-    'ivm.advance-dropped-protocol',
-    'Go-primary advance dropped due to wire-protocol violation (escalated to restart)',
+    "sync",
+    "ivm.advance-dropped-protocol",
+    "Go-primary advance dropped due to wire-protocol violation (escalated to restart)",
   );
   readonly #advanceDroppedDataError = getOrCreateCounter(
-    'sync',
-    'ivm.advance-dropped-data-error',
-    'Go-primary advance hit permanent bad replica data (CG torn down, NOT reset — prevents reset storm)',
+    "sync",
+    "ivm.advance-dropped-data-error",
+    "Go-primary advance hit permanent bad replica data (CG torn down, NOT reset — prevents reset storm)",
   );
   readonly #advanceDroppedSidecar = getOrCreateCounter(
-    'sync',
-    'ivm.advance-dropped-sidecar',
-    'Go-primary advance dropped due to sidecar unavailability / restart',
+    "sync",
+    "ivm.advance-dropped-sidecar",
+    "Go-primary advance dropped due to sidecar unavailability / restart",
   );
   readonly #advanceDroppedStaleEpoch = getOrCreateCounter(
-    'sync',
-    'ivm.advance-dropped-stale-epoch',
-    'Go-primary advance dropped due to stale initEpoch (torn-down view-syncer)',
+    "sync",
+    "ivm.advance-dropped-stale-epoch",
+    "Go-primary advance dropped due to stale initEpoch (torn-down view-syncer)",
   );
   readonly #advanceDroppedOther = getOrCreateCounter(
-    'sync',
-    'ivm.advance-dropped-other',
-    'Go-primary advance failed unclassified (escalated to CG teardown — TS semantics for unexpected errors)',
+    "sync",
+    "ivm.advance-dropped-other",
+    "Go-primary advance failed unclassified (escalated to CG teardown — TS semantics for unexpected errors)",
   );
   /**
    * Go's economic advancement-abort fired (TS's own formula running inside
@@ -627,8 +628,8 @@ export class PipelineDriver {
    * can tell economically-justified resets from failure-driven ones.
    */
   readonly #advanceAbortedEconomic = getOrCreateCounter(
-    'sync',
-    'ivm.advance-aborted-economic',
+    "sync",
+    "ivm.advance-aborted-economic",
     "Go advance hit the economic advancement-abort (reset via TS's advancement-timeout path)",
   );
 
@@ -649,9 +650,9 @@ export class PipelineDriver {
    * chronically under the true advance cost at this catalog.
    */
   readonly #advanceAbortSuppressed = getOrCreateCounter(
-    'sync',
-    'ivm.advance-abort-suppressed',
-    'Go advances issued with the economic abort suppressed (abort-streak catch-up)',
+    "sync",
+    "ivm.advance-abort-suppressed",
+    "Go advances issued with the economic abort suppressed (abort-streak catch-up)",
   );
   /**
    * A resolved scalar subquery's value changed mid-advance in Go — resolves
@@ -659,8 +660,8 @@ export class PipelineDriver {
    * companion-push throw. Counted separately from failure-driven resets.
    */
   readonly #advanceScalarReset = getOrCreateCounter(
-    'sync',
-    'ivm.advance-scalar-reset',
+    "sync",
+    "ivm.advance-scalar-reset",
     "Go advance hit a scalar-subquery value change (reset via TS's scalar-subquery path)",
   );
   /**
@@ -669,9 +670,9 @@ export class PipelineDriver {
    * attribute so dashboards can attribute restarts to the trigger.
    */
   readonly #goResetScheduled = getOrCreateCounter(
-    'sync',
-    'ivm.go-reset-scheduled',
-    'Go engine resets scheduled (label: reason)',
+    "sync",
+    "ivm.go-reset-scheduled",
+    "Go engine resets scheduled (label: reason)",
   );
 
   readonly #inspectorDelegate: InspectorDelegate;
@@ -689,7 +690,7 @@ export class PipelineDriver {
    */
   #goDataVersion: string | null = null;
   /**
-   * F1: how the CURRENT user-query pipelines were built, so the advance
+   * how the CURRENT user-query pipelines were built, so the advance
    * dispatch can detect a Go-availability flip and rebuild in the right mode.
    *   'go'      — Go-owned stubs (TS emits nothing for user queries).
    *   'ts'      — real TS pipelines (degraded because Go was unavailable at
@@ -703,13 +704,13 @@ export class PipelineDriver {
    * Go-down advance) is what keeps the degradation a ONE-TIME event instead of
    * a reset loop for the whole outage / drift-breaker cooldown.
    */
-  #goUserPipelineMode: 'go' | 'ts' | undefined = undefined;
+  #goUserPipelineMode: "go" | "ts" | undefined = undefined;
   /** Set while #scheduleGoReset is running; collapses concurrent reset requests. */
   #goResetInFlight = false;
   /**
    * Set whenever a reset is requested *during* an in-flight reset, so we
-   * reschedule once the current one completes. Plain boolean dropped the
-   * second request entirely — REVIEW-final MED-SHADOW-2.
+   * reschedule once the current one completes. A plain boolean would drop
+   * the second request entirely.
    */
   #goResetDirty = false;
   /** Retry attempts of the current reset cycle; resets to 0 on success. */
@@ -733,7 +734,7 @@ export class PipelineDriver {
     config?: ZeroConfig,
     sidecarManager?: SidecarManager,
   ) {
-    this.#lc = lc.withContext('clientGroupID', clientGroupID);
+    this.#lc = lc.withContext("clientGroupID", clientGroupID);
     this.#snapshotter = snapshotter;
     this.#storage = storage;
     this.#shardID = shardID;
@@ -753,7 +754,7 @@ export class PipelineDriver {
             () => this.#currentTablesForGo(),
             // Re-register the active queries after a restart-driven reinit,
             // otherwise Go would have empty pipelines while TS thinks they
-            // exist (REVIEW-final restart-correctness gap).
+            // exist (a restart-correctness gap).
             //
             // Filter out internal control-plane queries (permissions /
             // clients / mutations). Go never registers a Source for those
@@ -775,7 +776,7 @@ export class PipelineDriver {
                   queryID,
                   ast: p.transformedAst,
                 })),
-            // O2: make the shard's appID authoritative on the advanceToHead
+            // Make the shard's appID authoritative on the advanceToHead
             // wire so the sidecar watches the right permissions table even if
             // its GO_IVM_APP_ID env was set inconsistently.
             // pullWindow: ABI v3 credit-gated hydration window (see
@@ -792,14 +793,14 @@ export class PipelineDriver {
   // <appID>.permissions and <appID>_<shard>.clients are Zero's control
   // plane; user tables live in a different schema (no app-prefix).
   #isInternalTable(name: string): boolean {
-    const {appID, shardNum} = this.#shardID;
+    const { appID, shardNum } = this.#shardID;
     return (
       name.startsWith(`${appID}.`) || name.startsWith(`${appID}_${shardNum}.`)
     );
   }
 
   #isInternalQueryID(queryID: string): boolean {
-    return queryID === 'lmids' || queryID === 'mutationResults';
+    return queryID === "lmids" || queryID === "mutationResults";
   }
 
   /**
@@ -813,7 +814,7 @@ export class PipelineDriver {
       columns: Record<
         string,
         {
-          type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+          type: "boolean" | "number" | "string" | "null" | "json";
           optional?: boolean;
         }
       >;
@@ -840,7 +841,7 @@ export class PipelineDriver {
     // caller (resetEngine / #scheduleGoReset) abandon the reset cleanly.
     if (this.#snapshotter.destroyed) {
       throw new Error(
-        'snapshotter destroyed — CG torn down; aborting Go (re-)init',
+        "snapshotter destroyed — CG torn down; aborting Go (re-)init",
       );
     }
     // The sidecar's leaves read SQLite directly (table mode), so shipping
@@ -853,7 +854,7 @@ export class PipelineDriver {
         columns: Record<
           string,
           {
-            type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+            type: "boolean" | "number" | "string" | "null" | "json";
             optional?: boolean;
           }
         >;
@@ -880,12 +881,12 @@ export class PipelineDriver {
       const columns: Record<
         string,
         {
-          type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+          type: "boolean" | "number" | "string" | "null" | "json";
           optional?: boolean;
         }
       > = {};
       for (const [col, colSpec] of Object.entries(spec.tableSpec.columns)) {
-        // HIGH-1: forward nullability so Go's nullable-aware SQL (IS NULL /
+        // Forward nullability so Go's nullable-aware SQL (IS NULL /
         // (? IS NULL OR field > ?)) fires for cursor pagination through a NULL
         // on a nullable order column — otherwise Go yields 0 rows where TS
         // yields N. notNull may be true/false/null/undefined; only an explicit
@@ -902,10 +903,12 @@ export class PipelineDriver {
       // [primaryKey] when liteTableSpec didn't capture uniqueKeys, so the
       // Go resolver still has something useful for the common pk-only
       // case rather than treating the table as having no unique keys.
-      const tableSpec = spec.tableSpec as unknown as {uniqueKeys?: string[][]};
+      const tableSpec = spec.tableSpec as unknown as {
+        uniqueKeys?: string[][];
+      };
       const uniqueKeys: string[][] =
         tableSpec.uniqueKeys && tableSpec.uniqueKeys.length > 0
-          ? tableSpec.uniqueKeys.map(k => [...k])
+          ? tableSpec.uniqueKeys.map((k) => [...k])
           : [[...spec.tableSpec.primaryKey]];
       tables[name] = {
         columns,
@@ -929,7 +932,7 @@ export class PipelineDriver {
    * Must only be called once.
    */
   init(clientSchema: ClientSchema) {
-    assert(!this.#snapshotter.initialized(), 'Already initialized');
+    assert(!this.#snapshotter.initialized(), "Already initialized");
     this.#snapshotter.init();
     this.#initAndResetCommon(clientSchema);
     this.#maybeInitGoBackend(clientSchema);
@@ -945,13 +948,13 @@ export class PipelineDriver {
     const promise = this.#goBackend.initEngine(tables);
     this.#goInitPromise = promise;
     promise
-      .then(() => this.#lc.info?.('Go backend initialized'))
-      .catch(err => {
-        this.#lc.error?.('Go backend init failed:', err);
+      .then(() => this.#lc.info?.("Go backend initialized"))
+      .catch((err) => {
+        this.#lc.error?.("Go backend init failed:", err);
         // Don't leave a rejected promise sitting on #goInitPromise — the
         // dispatch path would await it and throw, killing the ViewSyncer.
         // Null it so dispatch falls through to the TS path based purely on
-        // the initialized flag (REVIEW-final MED-CROSS-2 / MEDIUM-3 dual).
+        // the initialized flag.
         if (this.#goInitPromise === promise) this.#goInitPromise = null;
       });
   }
@@ -963,15 +966,15 @@ export class PipelineDriver {
    */
   #maybeResetGoBackend() {
     if (!this.#goBackend || !this.#goBackend.initialized) return;
-    this.#lc.info?.('Resetting Go backend (snapshot leapfrog)');
+    this.#lc.info?.("Resetting Go backend (snapshot leapfrog)");
     // CRIT-5: resetEngine reads the snapshot itself at reinit time (after
     // its destroy await) — do not pre-capture here.
     const promise = this.#goBackend.resetEngine();
     this.#goInitPromise = promise;
     promise
-      .then(() => this.#lc.info?.('Go backend reset complete'))
-      .catch(err => {
-        this.#lc.error?.('Go backend reset failed:', err);
+      .then(() => this.#lc.info?.("Go backend reset complete"))
+      .catch((err) => {
+        this.#lc.error?.("Go backend reset failed:", err);
         if (this.#goInitPromise === promise) this.#goInitPromise = null;
       });
   }
@@ -999,7 +1002,7 @@ export class PipelineDriver {
     this.#tables.clear();
     this.#allTableNames.clear();
     this.#rowSetSignatures.clear();
-    // F1: pipelines are gone; the next (re-)registration sets the mode afresh
+    // pipelines are gone; the next (re-)registration sets the mode afresh
     // for the live Go state.
     this.#goUserPipelineMode = undefined;
     this.#initAndResetCommon(clientSchema);
@@ -1008,13 +1011,13 @@ export class PipelineDriver {
   }
 
   #initAndResetCommon(clientSchema: ClientSchema) {
-    const {db, version} = this.#snapshotter.current();
+    const { db, version } = this.#snapshotter.current();
     this.#tableSourcesVersion = version;
     const fullTables = new Map<string, LiteTableSpec>();
     computeZqlSpecs(
       this.#lc,
       db.db,
-      {includeBackfillingColumns: false},
+      { includeBackfillingColumns: false },
       this.#tableSpecs,
       fullTables,
     );
@@ -1035,13 +1038,13 @@ export class PipelineDriver {
       primaryKeys.set(table, spec.tableSpec.primaryKey);
     }
     buildPrimaryKeys(clientSchema, primaryKeys);
-    const {replicaVersion} = getSubscriptionState(db);
+    const { replicaVersion } = getSubscriptionState(db);
     this.#replicaVersion = replicaVersion;
   }
 
   /** @returns The replica version. The PipelineDriver must have been initialized. */
   get replicaVersion(): string {
-    return must(this.#replicaVersion, 'Not yet initialized');
+    return must(this.#replicaVersion, "Not yet initialized");
   }
 
   /**
@@ -1050,7 +1053,7 @@ export class PipelineDriver {
    * iteration has begun.
    */
   currentVersion(): string {
-    assert(this.initialized(), 'Not yet initialized');
+    assert(this.initialized(), "Not yet initialized");
     return this.#snapshotter.current().version;
   }
 
@@ -1093,7 +1096,7 @@ export class PipelineDriver {
    * out-of-order report cannot shrink the hydrate stamp.
    */
   #noteGoDataVersion(version: string | undefined): void {
-    if (version === undefined || version === '') {
+    if (version === undefined || version === "") {
       return;
     }
     if (this.#goDataVersion === null || version > this.#goDataVersion) {
@@ -1105,7 +1108,7 @@ export class PipelineDriver {
    * Returns the current upstream {app}.permissions, or `null` if none are defined.
    */
   currentPermissions(): LoadedPermissions | null {
-    assert(this.initialized(), 'Not yet initialized');
+    assert(this.initialized(), "Not yet initialized");
     const res = reloadPermissionsIfChanged(
       this.#lc,
       this.#snapshotter.current().db,
@@ -1116,7 +1119,7 @@ export class PipelineDriver {
     if (res.changed) {
       this.#permissions = res.permissions;
       this.#lc.debug?.(
-        'Reloaded permissions',
+        "Reloaded permissions",
         JSON.stringify(this.#permissions),
       );
     }
@@ -1124,7 +1127,7 @@ export class PipelineDriver {
   }
 
   advanceWithoutDiff(): string {
-    const {db, version} = this.#snapshotter.advanceWithoutDiff().curr;
+    const { db, version } = this.#snapshotter.advanceWithoutDiff().curr;
     for (const table of this.#tables.values()) {
       table.setDB(db.db);
     }
@@ -1153,11 +1156,11 @@ export class PipelineDriver {
   // planner's `flip: true` decorations (which route OR-with-CSQ through
   // FlippedJoin + UnionFanIn merge-with-dedup) never reach Go, so Go's plain
   // Join + applyOr path attaches the inner-CSQ relationship and the streamer
-  // over-emits it (H18-cont).
+  // over-emits it (continued).
   #planAstForGo(ast: AST): AST {
     const planned = completeOrdering(
       ast,
-      tableName => must(this.#getSource(tableName)).tableSchema.primaryKey,
+      (tableName) => must(this.#getSource(tableName)).tableSchema.primaryKey,
     );
     if (!this.#costModels) {
       return planned;
@@ -1217,11 +1220,11 @@ export class PipelineDriver {
 
   #resolveScalarSubqueries(ast: AST): {
     ast: AST;
-    companionRows: {table: string; row: Row}[];
+    companionRows: { table: string; row: Row }[];
     companions: CompanionSubquery[];
     companionInputs: Input[];
   } {
-    const companionRows: {table: string; row: Row}[] = [];
+    const companionRows: { table: string; row: Row }[] = [];
     const companionInputs: Input[] = [];
 
     const executor = (
@@ -1231,14 +1234,14 @@ export class PipelineDriver {
       const input = buildPipeline(
         subqueryAST,
         {
-          getSource: name => this.#getSource(name),
+          getSource: (name) => this.#getSource(name),
           createStorage: () => this.#createStorage(),
           decorateSourceInput: (input: SourceInput): Input => input,
-          decorateInput: input => input,
+          decorateInput: (input) => input,
           addEdge() {},
-          decorateFilterInput: input => input,
+          decorateFilterInput: (input) => input,
         },
-        'scalar-subquery',
+        "scalar-subquery",
       );
       // Consume the full stream rather than using first() to avoid
       // triggering early return on Take's #initialFetch assertion.
@@ -1253,17 +1256,17 @@ export class PipelineDriver {
         companionInputs.push(input);
         return undefined;
       }
-      companionRows.push({table: subqueryAST.table, row: node.row as Row});
+      companionRows.push({ table: subqueryAST.table, row: node.row as Row });
       companionInputs.push(input);
       return (node.row[childField] as LiteralValue) ?? null;
     };
 
-    const {ast: resolved, companions} = resolveSimpleScalarSubqueries(
+    const { ast: resolved, companions } = resolveSimpleScalarSubqueries(
       ast,
       this.#tableSpecs,
       executor,
     );
-    return {ast: resolved, companionRows, companions, companionInputs};
+    return { ast: resolved, companionRows, companions, companionInputs };
   }
 
   /**
@@ -1288,10 +1291,10 @@ export class PipelineDriver {
     timer: Timer,
     queryName?: string,
   ):
-    | Iterable<RowChange | 'yield'>
-    | AsyncIterable<RowChange | 'yield'>
+    | Iterable<RowChange | "yield">
+    | AsyncIterable<RowChange | "yield">
     | Promise<
-        Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>
+        Iterable<RowChange | "yield"> | AsyncIterable<RowChange | "yield">
       > {
     // If Go backend init is pending, await it first
     if (
@@ -1346,10 +1349,10 @@ export class PipelineDriver {
     timer: Timer,
     queryName?: string,
   ):
-    | Iterable<RowChange | 'yield'>
-    | AsyncIterable<RowChange | 'yield'>
+    | Iterable<RowChange | "yield">
+    | AsyncIterable<RowChange | "yield">
     | Promise<
-        Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>
+        Iterable<RowChange | "yield"> | AsyncIterable<RowChange | "yield">
       > {
     // Internal queries (lmids, mutationResults, queries rooted at the
     // <appID>.permissions or <appID>_<shard>.clients tables) always
@@ -1372,17 +1375,17 @@ export class PipelineDriver {
       );
     }
     // When Go backend is active, hydrate via sidecar (Go-owned
-    // stub pipeline). F1: record the build mode so a later Go-availability flip
+    // stub pipeline). record the build mode so a later Go-availability flip
     // triggers a rebuild instead of a silent freeze / double-emit.
     if (this.#goBackend?.initialized) {
-      this.#goUserPipelineMode = 'go';
+      this.#goUserPipelineMode = "go";
       return this.#goHydrate(transformationHash, queryID, query, queryName);
     }
     // Real TS pipeline. In a Go-primary deployment this is the DEGRADED path
     // (Go unavailable at build time); mark it so advance() serves TS-native and
-    // rebuilds Go-owned stubs once Go recovers (F1).
+    // rebuilds Go-owned stubs once Go recovers
     if (this.#goBackend) {
-      this.#goUserPipelineMode = 'ts';
+      this.#goUserPipelineMode = "ts";
     }
     return this.#trackRowSetSignatures(
       this.#addQueryImpl(transformationHash, queryID, query, timer, queryName),
@@ -1394,13 +1397,13 @@ export class PipelineDriver {
     queryID: string,
     query: AST,
     queryName?: string,
-  ): Promise<AsyncIterable<RowChange | 'yield'>> {
+  ): Promise<AsyncIterable<RowChange | "yield">> {
     this.removeQuery(queryID);
     // Plan the AST the same way the batch path does so Go's pipeline
     // gets the planner's flip:true annotation and the side-effect of
     // creating TableSources in this.#tables (via #planAstForGo →
     // completeOrdering → #getSource). Without this, single-query
-    // hydrate fed Go a raw AST → H18-class over-emit on OR-with-CSQ
+    // hydrate fed Go a raw AST →  over-emit on OR-with-CSQ
     // shapes, and post-reconnect getRow() panicked because the
     // TableSource was never created. (Audit fix F.)
     const planned = this.#planAstForGo(query);
@@ -1426,11 +1429,11 @@ export class PipelineDriver {
       transformedAst: planned,
       transformationHash,
       companions: [],
-      ...(queryName !== undefined && {queryName}),
+      ...(queryName !== undefined && { queryName }),
     });
 
     const self = this;
-    async function* yieldGoHydration(): AsyncIterable<RowChange | 'yield'> {
+    async function* yieldGoHydration(): AsyncIterable<RowChange | "yield"> {
       let i = 0;
       let sawFinal = false;
       let fallbackDelta = 0n;
@@ -1439,11 +1442,11 @@ export class PipelineDriver {
         for await (const r of stream) {
           for (const rc of r.changes as RowChange[]) {
             if (i > 0 && i % 100 === 0) {
-              yield 'yield';
+              yield "yield";
             }
             if (rc.type !== ChangeType.EDIT) {
               fallbackDelta ^= rowIDSignatureUnit({
-                schema: '',
+                schema: "",
                 table: rc.table,
                 rowKey: rc.rowKey as RowKey,
               });
@@ -1489,8 +1492,7 @@ export class PipelineDriver {
    * Batch hydrate multiple queries via the Go sidecar (Go-primary mode),
    * streaming per-query results AS SOON as Go finishes that query.
    * Tail-latency optimisation: fast queries reach the WebSocket client
-   * before slow queries in the same batch complete (REVIEW-final perf-opt
-   * streaming).
+   * before slow queries in the same batch complete.
    *
    * The returned iterable yields entries in COMPLETION order, not input
    * order — callers must not rely on positional correspondence with
@@ -1508,7 +1510,7 @@ export class PipelineDriver {
     }[],
   ): AsyncIterable<{
     queryID: string;
-    changes: Iterable<RowChange | 'yield'>;
+    changes: Iterable<RowChange | "yield">;
     // Go's per-query engine COMPUTE wall-time (engine.go hydrateEntry,
     // `time.Since(start)` — fetch+materialize, excludes RPC/serialize).
     // Surfaced so the view-syncer records the engine-compute span into
@@ -1574,9 +1576,9 @@ export class PipelineDriver {
           q.queryName,
         ),
       );
-      function* dropYields(): Iterable<RowChange | 'yield'> {
+      function* dropYields(): Iterable<RowChange | "yield"> {
         for (const c of raw) {
-          if (c !== 'yield') yield c;
+          if (c !== "yield") yield c;
         }
       }
       yield {
@@ -1590,21 +1592,21 @@ export class PipelineDriver {
     if (userQueries.length === 0) {
       return;
     }
-    // F1: about to register Go-owned user stubs — record the build mode.
-    this.#goUserPipelineMode = 'go';
+    // about to register Go-owned user stubs — record the build mode.
+    this.#goUserPipelineMode = "go";
 
-    const plannedUserQueries = userQueries.map(q => ({
+    const plannedUserQueries = userQueries.map((q) => ({
       ...q,
       ast: this.#planAstForGo(q.ast),
     }));
     const byQueryID = new Map<string, (typeof plannedUserQueries)[number]>();
     // Track which queryIDs had a no-op stub registered during this stream
-    // (L12). On failure, these stubs must be cleaned up — otherwise they
+    // cleanup on failure. On failure, these stubs must be cleaned up — otherwise they
     // linger in #pipelines as stale no-op entries.
     const stubQueryIDs = new Set<string>();
     for (const q of plannedUserQueries) byQueryID.set(q.queryID, q);
 
-    // PULL delivery (ABI v3, DESIGN-duplex-streaming): Go produces each row
+    // PULL delivery (ABI v3): Go produces each row
     // only as this generator's consumer demands it — the for-await below IS
     // the demand clock (view-syncer pulls one entry, forwards to the pokers,
     // awaits downstream, pulls the next; Go stays ≤ pullWindow deliveries
@@ -1616,7 +1618,7 @@ export class PipelineDriver {
     // interleaves their rows.
     const batchHydrateStartMs = performance.now();
     const stream = this.#goBackend!.hydrateManyStreamPull(
-      plannedUserQueries.map(q => ({
+      plannedUserQueries.map((q) => ({
         queryID: q.queryID,
         ast: q.ast,
       })),
@@ -1628,7 +1630,7 @@ export class PipelineDriver {
         // Stub registration once per query (real timingMs lands on the
         // terminal entry), signature tracking, final-gated pruning.
         if (!this.#pipelines.has(q.queryID) || r.final) {
-          // Track stub registration for L12 cleanup on failure.
+          // Track stub registration for cleanup on failure.
           if (!this.#pipelines.has(q.queryID)) {
             stubQueryIDs.add(q.queryID);
           }
@@ -1658,7 +1660,7 @@ export class PipelineDriver {
             transformedAst: q.ast,
             transformationHash: q.transformationHash,
             companions: [],
-            ...(q.queryName !== undefined && {queryName: q.queryName}),
+            ...(q.queryName !== undefined && { queryName: q.queryName }),
           });
         }
         const changesArr = r.changes as RowChange[];
@@ -1672,7 +1674,7 @@ export class PipelineDriver {
         if (r.final && sigDelta !== undefined) {
           this.#rowSetSignatures.set(q.queryID, 0n);
         }
-        function* yieldGoHydration(): Iterable<RowChange | 'yield'> {
+        function* yieldGoHydration(): Iterable<RowChange | "yield"> {
           for (const rc of changesArr) {
             yield rc;
           }
@@ -1681,7 +1683,7 @@ export class PipelineDriver {
           queryID: q.queryID,
           changes: this.#trackRowSetSignatures(
             yieldGoHydration(),
-            sigDelta !== undefined ? {[q.queryID]: sigDelta} : undefined,
+            sigDelta !== undefined ? { [q.queryID]: sigDelta } : undefined,
           ),
           timingMs: r.timingMs,
           final: r.final,
@@ -1695,7 +1697,7 @@ export class PipelineDriver {
         for (const queryID of byQueryID.keys()) {
           this.#rowSetSignatures.delete(queryID);
         }
-        const missing = [...byQueryID.keys()].join(', ');
+        const missing = [...byQueryID.keys()].join(", ");
         throw new Error(
           `goHydrateBatchStream: ${byQueryID.size} queries never received a final frame: ${missing}`,
         );
@@ -1712,7 +1714,7 @@ export class PipelineDriver {
       // cancel, sidecar restart, wire errors.
       for (const queryID of byQueryID.keys()) {
         this.#rowSetSignatures.delete(queryID);
-        // L12: remove no-op pipeline stubs registered during this stream.
+        // remove no-op pipeline stubs registered during this stream.
         // Without this, a failed hydrate leaves stale no-op entries in
         // #pipelines (destroy() is a no-op, fetch returns garbage) that
         // inflate pipeline counts and confuse downstream logic.
@@ -1738,8 +1740,7 @@ export class PipelineDriver {
     if (!this.#goBackend) return;
     // Use the backend's whenInitialized() which is restart-aware. The plain
     // #goInitPromise can resolve from a prior epoch's init while a restart's
-    // re-init is mid-flight — that path silently fell through to TS
-    // (REVIEW-final HIGH-TS-1).
+    // re-init is mid-flight — that path silently fell through to TS.
     await this.#goBackend.whenInitialized();
     // Also drain the explicit init promise (covers the very-first init
     // before any whenInitialized state exists).
@@ -1759,10 +1760,10 @@ export class PipelineDriver {
     query: AST,
     timer: Timer,
     queryName?: string,
-  ): Iterable<RowChange | 'yield'> {
+  ): Iterable<RowChange | "yield"> {
     assert(
       this.initialized(),
-      'Pipeline driver must be initialized before adding queries',
+      "Pipeline driver must be initialized before adding queries",
     );
     this.removeQuery(queryID);
     const debugDelegate = runtimeDebugFlags.trackRowsVended
@@ -1775,7 +1776,7 @@ export class PipelineDriver {
 
     assert(
       this.#advanceContext === null,
-      'Cannot hydrate while advance is in progress',
+      "Cannot hydrate while advance is in progress",
     );
     this.#hydrateContext = {
       timer,
@@ -1793,7 +1794,7 @@ export class PipelineDriver {
         {
           debug: debugDelegate,
           enableNotExists: true, // Server-side can handle NOT EXISTS
-          getSource: name => this.#getSource(name),
+          getSource: (name) => this.#getSource(name),
           createStorage: () => this.#createStorage(),
           decorateSourceInput: (input: SourceInput, _queryID: string): Input =>
             new MeasurePushOperator(
@@ -1806,20 +1807,20 @@ export class PipelineDriver {
               ),
               queryID,
               this.#inspectorDelegate,
-              'query-update-server',
+              "query-update-server",
             ),
-          decorateInput: input => input,
+          decorateInput: (input) => input,
           addEdge() {},
-          decorateFilterInput: input => input,
+          decorateFilterInput: (input) => input,
         },
         queryID,
         costModel,
       );
       const schema = input.getSchema();
       input.setOutput({
-        push: change => {
+        push: (change) => {
           const streamer = this.#streamer;
-          assert(streamer, 'must #startAccumulating() before pushing changes');
+          assert(streamer, "must #startAccumulating() before pushing changes");
           streamer.accumulate(queryID, schema, [change]);
           return [];
         },
@@ -1832,7 +1833,7 @@ export class PipelineDriver {
         this.#tableSpecs,
       );
 
-      for (const {table, row} of companionRows) {
+      for (const { table, row } of companionRows) {
         const primaryKey = mustGetPrimaryKey(this.#primaryKeys, table);
         yield {
           type: ChangeType.ADD,
@@ -1848,8 +1849,8 @@ export class PipelineDriver {
         if (hydrationTimeMs > this.#logConfig.slowHydrateThreshold) {
           let totalRowsConsidered = 0;
           const lc = this.#lc
-            .withContext('queryID', queryID)
-            .withContext('hydrationTimeMs', hydrationTimeMs);
+            .withContext("queryID", queryID)
+            .withContext("hydrationTimeMs", hydrationTimeMs);
           for (const tableName of this.#tables.keys()) {
             const entries = Object.entries(
               debugDelegate?.getVendedRowCounts()[tableName] ?? {},
@@ -1858,7 +1859,7 @@ export class PipelineDriver {
               (acc, entry) => acc + entry[1],
               0,
             );
-            lc.info?.(tableName + ' VENDED: ', entries);
+            lc.info?.(tableName + " VENDED: ", entries);
           }
           lc.info?.(`Total rows considered: ${totalRowsConsidered}`);
         }
@@ -1871,7 +1872,7 @@ export class PipelineDriver {
         const meta = companionMeta[i];
         const companionInput = companionInputs[i];
         const companionSchema = companionInput.getSchema();
-        const {childField, resolvedValue} = meta;
+        const { childField, resolvedValue } = meta;
         companionInput.setOutput({
           push: (change: Change) => {
             let newValue: LiteralValue | null | undefined;
@@ -1892,19 +1893,23 @@ export class PipelineDriver {
               throw new ResetPipelinesSignal(
                 `Scalar subquery value changed for ${meta.ast.table}: ` +
                   `${String(resolvedValue)} -> ${String(newValue)}`,
-                'scalar-subquery',
+                "scalar-subquery",
               );
             }
             const streamer = this.#streamer;
             assert(
               streamer,
-              'must #startAccumulating() before pushing changes',
+              "must #startAccumulating() before pushing changes",
             );
             streamer.accumulate(queryID, companionSchema, [change]);
             return [];
           },
         });
-        liveCompanions.push({input: companionInput, childField, resolvedValue});
+        liveCompanions.push({
+          input: companionInput,
+          childField,
+          resolvedValue,
+        });
       }
 
       // Note: hydrationTimeMs is a wall-clock measurement taken across the
@@ -1917,14 +1922,14 @@ export class PipelineDriver {
         hydrationTimeMs,
         transformedAst: resolvedQuery,
         transformationHash,
-        ...(queryName !== undefined && {queryName}),
+        ...(queryName !== undefined && { queryName }),
         companions: liveCompanions,
       });
     } catch (e) {
       logQueryFailure(
         this.#lc,
-        {queryHash: queryID, transformationHash, queryName},
-        'query hydration failed',
+        { queryHash: queryID, transformationHash, queryName },
+        "query hydration failed",
         e,
       );
       throw e;
@@ -1967,12 +1972,12 @@ export class PipelineDriver {
    * {@link advance}.
    */
   *#trackRowSetSignatures(
-    changes: Iterable<RowChange | 'yield'>,
+    changes: Iterable<RowChange | "yield">,
     sigDeltas?: Readonly<Record<string, string>>,
-  ): Iterable<RowChange | 'yield'> {
+  ): Iterable<RowChange | "yield"> {
     const appliedDeltas = new Set<string>();
     for (const change of changes) {
-      if (change !== 'yield' && change.type !== ChangeType.EDIT) {
+      if (change !== "yield" && change.type !== ChangeType.EDIT) {
         const sigDelta = sigDeltas?.[change.queryID];
         if (sigDelta !== undefined) {
           if (!appliedDeltas.has(change.queryID)) {
@@ -1986,7 +1991,7 @@ export class PipelineDriver {
         } else {
           const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
           const unit = rowIDSignatureUnit({
-            schema: '',
+            schema: "",
             table: change.table,
             rowKey: change.rowKey as RowKey,
           });
@@ -2026,7 +2031,7 @@ export class PipelineDriver {
    * initialized.
    */
   getRow(table: string, pk: RowKey): Row | undefined {
-    assert(this.initialized(), 'Not yet initialized');
+    assert(this.initialized(), "Not yet initialized");
     // Include the table name in the error message. Without it a bare-must()
     // failure during CVR catchup ("Unexpected undefined value") fires before
     // ViewSyncer's outer must can wrap it with "Missing row ...", obscuring
@@ -2035,7 +2040,7 @@ export class PipelineDriver {
     const source = must(
       this.#tables.get(table),
       `pipelineDriver.getRow: no TableSource for table=${table} ` +
-        `(pk=${JSON.stringify(pk)}). Known tables: ${[...this.#tables.keys()].join(',')}`,
+        `(pk=${JSON.stringify(pk)}). Known tables: ${[...this.#tables.keys()].join(",")}`,
     );
     return source.getRow(pk as Row);
   }
@@ -2059,7 +2064,7 @@ export class PipelineDriver {
     | Promise<AdvanceResult | ResetPipelinesSignal> {
     assert(
       this.initialized(),
-      'Pipeline driver must be initialized before advancing',
+      "Pipeline driver must be initialized before advancing",
     );
     // If Go backend init is pending, await it first
     if (
@@ -2082,7 +2087,7 @@ export class PipelineDriver {
       this.#tableSpecs,
       this.#allTableNames,
     );
-    const {prev, curr, changes} = diff;
+    const { prev, curr, changes } = diff;
     this.#lc.debug?.(
       `advance ${prev.version} => ${curr.version}: ${changes} changes`,
     );
@@ -2099,7 +2104,7 @@ export class PipelineDriver {
           this.#goUserPipelineMode,
         )
       ) {
-        case 'go-advance':
+        case "go-advance":
           // Go-primary: dual-run TS + Go on disjoint table sets. Go gets the
           // diff with internal tables filtered out and handles user queries.
           // TS handles internal queries (lmids, mutationResults) via its real
@@ -2107,27 +2112,27 @@ export class PipelineDriver {
           // setOutput callback), so TS's #advance walks the full diff but only
           // emits for internal queries. Merging is safe (table-disjoint sets).
           return this.#goPrimaryAdvance(diff, timer, curr.version, changes);
-        case 'reset-recovered':
+        case "reset-recovered":
           // Go recovered but user pipelines were degraded to real TS while it
           // was down — running #goPrimaryAdvance now would DOUBLE-emit user
           // rows (TS's real pipelines AND Go both emit). Rebuild as stubs.
           return new ResetPipelinesSignal(
-            'Go backend recovered; rebuilding Go-owned pipelines ' +
-              '(were degraded to TS while Go was unavailable)',
-            'go-primary-unavailable',
+            "Go backend recovered; rebuilding Go-owned pipelines " +
+              "(were degraded to TS while Go was unavailable)",
+            "go-primary-unavailable",
           );
-        case 'reset-degrade':
+        case "reset-degrade":
           // Go is DOWN in primary mode with Go-owned STUB pipelines; the
           // TS-native advance below would emit NOTHING for them — a silent
           // freeze with the cookie advancing past the gap (watermark
           // over-claim). Reset so re-registration (which checks `initialized`)
           // rebuilds REAL TS pipelines → graceful TS-serving.
           return new ResetPipelinesSignal(
-            'Go backend unavailable in primary mode at advance time; ' +
-              'rebuilding TS pipelines (avoids silent watermark over-claim)',
-            'go-primary-unavailable',
+            "Go backend unavailable in primary mode at advance time; " +
+              "rebuilding TS pipelines (avoids silent watermark over-claim)",
+            "go-primary-unavailable",
           );
-        case 'ts-native':
+        case "ts-native":
           // Pipelines are already real TS (or none) — the TS-native advance
           // below serves correctly; do NOT reset (that would loop every advance
           // for the whole outage / drift-breaker cooldown).
@@ -2163,12 +2168,12 @@ export class PipelineDriver {
       nextValue: Readonly<Row> | null;
       rowKey: RowKey;
     }> = [];
-    // F3 (keystone): consume the diff EAGERLY to buffer it for both engines, but
+    // consume the diff EAGERLY to buffer it for both engines, but
     // route through drainDiffCatchingReset so the ResetPipelinesSignal the diff
     // iterator throws on a truncate / schema change is RETURNED (graceful
     // view-syncer reset + re-hydrate) instead of escaping #advancePipelines into
     // run()'s outer catch (full client-group teardown on every truncate).
-    const resetSignal = drainDiffCatchingReset(diff, entry => {
+    const resetSignal = drainDiffCatchingReset(diff, (entry) => {
       if (this.#isInternalTable(entry.table)) {
         // TS advances its real internal-query pipelines from these
         // (lmids / mutationResults); always replay them.
@@ -2205,19 +2210,20 @@ export class PipelineDriver {
         this.totalHydrationTimeMs(),
         this.#consecutiveAdvanceAborts,
       ),
-      ...(suppressAbort ? {suppressAbort: true} : {}),
+      ...(suppressAbort ? { suppressAbort: true } : {}),
     };
 
-    const goIterator = this.#goBackend!
-      .advanceToHeadStreamChunks(abortBudget)
-      [Symbol.asyncIterator]();
+    const goIterator =
+      this.#goBackend!.advanceToHeadStreamChunks(abortBudget)[
+        Symbol.asyncIterator
+      ]();
     const firstGoChunkPromise = goIterator.next();
 
     let firstGoChunk: AdvanceToHeadStreamChunk;
     try {
       const first = await firstGoChunkPromise;
       if (first.done) {
-        throw new Error('advanceToHeadStream finished before first frame');
+        throw new Error("advanceToHeadStream finished before first frame");
       }
       firstGoChunk = first.value;
     } catch (e) {
@@ -2231,41 +2237,41 @@ export class PipelineDriver {
           };
     }
 
-    const resetFromGo = (reset: {reason: string; msg: string}) => {
+    const resetFromGo = (reset: { reason: string; msg: string }) => {
       this.#lc.info?.(
         `[go-primary] Go reported reset ${reset.reason} ` +
           `(${reset.msg}); escalating to pipeline reset`,
       );
       return new ResetPipelinesSignal(
         `Go reported reset ${reset.reason} (${reset.msg})`,
-        'go-primary-drop',
+        "go-primary-drop",
       );
     };
 
     if (firstGoChunk.header !== true || firstGoChunk.final) {
       await goIterator.return?.();
       throw new Error(
-        'advanceToHeadStream expected non-final header as first frame',
+        "advanceToHeadStream expected non-final header as first frame",
       );
     }
 
     const headerGoVersion = firstGoChunk.version;
     if (headerGoVersion === undefined) {
       await goIterator.return?.();
-      throw new Error('advanceToHeadStream header missing version');
+      throw new Error("advanceToHeadStream header missing version");
     }
 
     if (headerGoVersion < version) {
       await goIterator.return?.();
       return new ResetPipelinesSignal(
         `Go header version ${headerGoVersion} fell behind TS version ${version}`,
-        'go-primary-drop',
+        "go-primary-drop",
       );
     }
 
     const reconciled = reconcileGoPrimaryWatermark(version, headerGoVersion);
     const self = this;
-    async function* yieldMerged(): AsyncIterable<RowChange | 'yield'> {
+    async function* yieldMerged(): AsyncIterable<RowChange | "yield"> {
       const fallbackDeltas = new Map<string, bigint>();
       let finalSigDeltas: Record<string, string> | undefined;
       let finalGoVersion = headerGoVersion;
@@ -2286,7 +2292,7 @@ export class PipelineDriver {
             const chunk = next.value;
             if (sawFinal) {
               throw new Error(
-                'advanceToHeadStream yielded a frame after the final frame',
+                "advanceToHeadStream yielded a frame after the final frame",
               );
             }
             if (chunk.reset) {
@@ -2295,7 +2301,7 @@ export class PipelineDriver {
             for (const change of chunk.changes as unknown as RowChange[]) {
               if (change.type !== ChangeType.EDIT) {
                 const unit = rowIDSignatureUnit({
-                  schema: '',
+                  schema: "",
                   table: change.table,
                   rowKey: change.rowKey as RowKey,
                 });
@@ -2328,12 +2334,12 @@ export class PipelineDriver {
       }
 
       if (!sawFinal) {
-        throw new Error('advanceToHeadStream ended without a final frame');
+        throw new Error("advanceToHeadStream ended without a final frame");
       }
       if (finalGoVersion !== undefined && finalGoVersion < version) {
         throw new ResetPipelinesSignal(
           `Go final version ${finalGoVersion} fell behind TS version ${version}`,
-          'go-primary-drop',
+          "go-primary-drop",
         );
       }
       self.#consecutiveAdvanceAborts = 0;
@@ -2375,10 +2381,10 @@ export class PipelineDriver {
     for (const t of timings) {
       this.#advanceTime.recordMs(t.ms, {
         table: t.table,
-        type: t.type === 0 ? 'add' : t.type === 1 ? 'remove' : 'edit',
+        type: t.type === 0 ? "add" : t.type === 1 ? "remove" : "edit",
       });
       for (const qid of tableToQueries.get(t.table) ?? []) {
-        this.#inspectorDelegate.addMetric('query-update-server', t.ms, qid);
+        this.#inspectorDelegate.addMetric("query-update-server", t.ms, qid);
       }
     }
   }
@@ -2396,12 +2402,12 @@ export class PipelineDriver {
    *   2. StaleInitEpochError: this instance was torn down and a successor's
    *      epoch took over. Retrying is futile — RE-THROW so teardown completes.
    *   3. Sidecar unavailable / restart-related: the advance can't be trusted.
-   *      F2: return a ResetPipelinesSignal so the view-syncer re-hydrates all
+   *      return a ResetPipelinesSignal so the view-syncer re-hydrates all
    *      pipelines at head. The legacy "return [] + #scheduleGoReset" path
    *      floored this cycle's watermark at prev but the async Go reset rebuilt
    *      at head with its hydrate output DISCARDED — the (prev→head] user delta
    *      was never delivered (permanent gap). A full re-hydrate heals it.
-   *   4. Other unclassified (incl. RPC timeouts under load): same F2 escalation.
+   *   4. Other unclassified (incl. RPC timeouts under load): same  escalation.
    *
    * Returns a ResetPipelinesSignal for the drop cases (caller RETURNS it from
    * #goPrimaryAdvance → graceful re-hydrate); throws for the escalation cases
@@ -2413,20 +2419,20 @@ export class PipelineDriver {
     const msg = e instanceof Error ? e.message : String(e);
 
     switch (classifyGoPrimaryAdvanceError(e)) {
-      case 'protocol':
+      case "protocol":
         this.#advanceDroppedProtocol.add(1);
         this.#lc.error?.(
           `[go-primary] Go advance failed with PROTOCOL VIOLATION (escalating): ${msg}`,
         );
         throw e;
-      case 'stale-epoch':
+      case "stale-epoch":
         this.#advanceDroppedStaleEpoch.add(1);
         this.#lc.warn?.(
           `[go-primary] Go advance rejected by sidecar (stale initEpoch); ` +
             `this view-syncer instance is torn down: ${msg}`,
         );
         throw e;
-      case 'data-error':
+      case "data-error":
         // Permanent bad replica data — re-throw (CG teardown) like
         // TS-native's UnsupportedValueError. NEVER reset: a reset re-reads the
         // same row and re-panics, looping forever AND re-paying every CG's
@@ -2438,7 +2444,7 @@ export class PipelineDriver {
             `NOT resetting — bad replica data, retry cannot fix): ${msg}`,
         );
         throw e;
-      case 'advance-aborted':
+      case "advance-aborted":
         // Go's economic abort — TS's own advancement-timeout, computed inside
         // the Go advance with the same inputs (elapsed vs the CG's priced
         // totalHydrationTimeMs, progress vs numChanges). Resolve to the SAME
@@ -2449,8 +2455,8 @@ export class PipelineDriver {
         this.#consecutiveAdvanceAborts++;
         this.#advanceAbortedEconomic.add(1);
         this.#lc.info?.(`[go-primary] ${msg}`);
-        return new ResetPipelinesSignal(msg, 'advancement-timeout');
-      case 'scalar-reset':
+        return new ResetPipelinesSignal(msg, "advancement-timeout");
+      case "scalar-reset":
         // A resolved scalar subquery's value changed mid-advance (Go's
         // companion detection, engine.ScalarResetError → -32105). TS-native
         // throws ResetPipelinesSignal('scalar-subquery') from its own
@@ -2460,8 +2466,8 @@ export class PipelineDriver {
         // reload"-class client symptom on a designed-for seamless path.
         this.#advanceScalarReset.add(1);
         this.#lc.info?.(`[go-primary] scalar-subquery reset: ${msg}`);
-        return new ResetPipelinesSignal(msg, 'scalar-subquery');
-      case 'sidecar':
+        return new ResetPipelinesSignal(msg, "scalar-subquery");
+      case "sidecar":
         this.#advanceDroppedSidecar.add(1);
         this.#lc.warn?.(
           `[go-primary] Go advance dropped (sidecar restart in flight); ` +
@@ -2469,9 +2475,9 @@ export class PipelineDriver {
         );
         return new ResetPipelinesSignal(
           `Go advance dropped (sidecar restart): ${msg}`,
-          'go-primary-drop',
+          "go-primary-drop",
         );
-      case 'unclassified':
+      case "unclassified":
         // TS semantics for an unexpected error: RE-THROW → run()'s outer
         // catch → CG teardown → clients reconnect (with their own backoff —
         // natural admission control). This bucket used to DROP → reset,
@@ -2505,7 +2511,7 @@ export class PipelineDriver {
     // there is nothing to reset — resetEngine would re-read a CLOSED snapshot
     // connection in #currentTablesForGo and fail-loop ("database connection is
     // not open" per table, ×N, then a failed reset that retries). The CG is
-    // gone; skip cleanly. (More likely under the P2c trigger path, whose longer
+    // gone; skip cleanly. (More likely under the  trigger path, whose longer
     // advanceToHead window widens the reset-vs-teardown overlap.)
     if (this.#snapshotter.destroyed) {
       this.#lc.debug?.(
@@ -2517,10 +2523,10 @@ export class PipelineDriver {
     // metric reflects the real trigger rate, not just the post-dedup
     // executed-resets count. Dashboard queries that want executed count can
     // sum minus dirty-coalesced count separately.
-    this.#goResetScheduled.add(1, {reason});
+    this.#goResetScheduled.add(1, { reason });
     if (this.#goResetInFlight) {
       // Don't drop the request — record it so we re-fire after the in-flight
-      // reset completes (REVIEW-final MED-SHADOW-2).
+      // reset completes.
       this.#goResetDirty = true;
       return;
     }
@@ -2536,7 +2542,7 @@ export class PipelineDriver {
         this.#lc.info?.(`[go-reset] Go reset complete (${reason})`);
         this.#goResetRetries = 0;
       })
-      .catch(err => {
+      .catch((err) => {
         // If the snapshotter was torn down DURING the reset (destroy raced the
         // resetEngine destroy-await → #currentTablesForGo read a closed conn),
         // the CG is gone — abandon cleanly instead of logging an error and
@@ -2580,10 +2586,10 @@ export class PipelineDriver {
     timer: Timer,
     numChanges: number,
     suppressAbort: boolean = false,
-  ): Iterable<RowChange | 'yield'> {
+  ): Iterable<RowChange | "yield"> {
     assert(
       this.#hydrateContext === null,
-      'Cannot advance while hydration is in progress',
+      "Cannot advance while hydration is in progress",
     );
     const totalHydrationTimeMs = this.totalHydrationTimeMs();
     this.#advanceContext = {
@@ -2599,20 +2605,20 @@ export class PipelineDriver {
         `${totalHydrationTimeMs} ms.`,
     );
     try {
-      for (const {table, prevValues, nextValue} of diff) {
+      for (const { table, prevValues, nextValue } of diff) {
         // Advance progress is checked each time a row is fetched
         // from a TableSource during push processing, but some pushes
         // don't read any rows.  Check progress here before processing
         // the next change.
         if (this.#shouldAdvanceYieldMaybeAbortAdvance()) {
-          yield 'yield';
+          yield "yield";
         }
         const start = timer.totalElapsed();
 
         // `type` label for the #advanceTime histogram. Previously left
         // undeclared → recorded as undefined, while the Go path passes a
-        // real string; histogram dimensions diverged. REVIEW-final MED-TS-5.
-        let type: 'add' | 'remove' | 'edit' | undefined;
+        // real string; histogram dimensions diverged.
+        let type: "add" | "remove" | "edit" | undefined;
         try {
           const tableSource = this.#tables.get(table);
           if (!tableSource) {
@@ -2634,7 +2640,7 @@ export class PipelineDriver {
               if (nextValue) {
                 this.#conflictRowsDeleted.add(1);
               }
-              type = 'remove';
+              type = "remove";
               yield* this.#push(
                 tableSource,
                 makeSourceChangeRemove(prevValue as Row),
@@ -2643,13 +2649,13 @@ export class PipelineDriver {
           }
           if (nextValue) {
             if (editOldRow) {
-              type = 'edit';
+              type = "edit";
               yield* this.#push(
                 tableSource,
                 makeSourceChangeEdit(nextValue as Row, editOldRow),
               );
             } else {
-              type = 'add';
+              type = "add";
               yield* this.#push(
                 tableSource,
                 makeSourceChangeAdd(nextValue as Row),
@@ -2668,7 +2674,7 @@ export class PipelineDriver {
       }
 
       // Set the new snapshot on all TableSources.
-      const {curr} = diff;
+      const { curr } = diff;
       for (const table of this.#tables.values()) {
         table.setDB(curr.db.db);
       }
@@ -2690,7 +2696,7 @@ export class PipelineDriver {
       // snapshotter exposes). The caller's restart machinery is
       // responsible for rebuilding any operator state that depends
       // on the dropped diff.
-      const {curr} = diff;
+      const { curr } = diff;
       if (this.#tableSourcesVersion !== curr.version) {
         for (const table of this.#tables.values()) {
           table.setDB(curr.db.db);
@@ -2710,7 +2716,7 @@ export class PipelineDriver {
     const tableSpec = mustGetTableSpec(this.#tableSpecs, tableName);
     const primaryKey = mustGetPrimaryKey(this.#primaryKeys, tableName);
 
-    const {db} = this.#snapshotter.current();
+    const { db } = this.#snapshotter.current();
     source = new TableSource(
       this.#lc,
       this.#logConfig,
@@ -2741,7 +2747,7 @@ export class PipelineDriver {
     if (this.#advanceContext) {
       return this.#shouldAdvanceYieldMaybeAbortAdvance();
     }
-    throw new Error('shouldYield called outside of hydration or advancement');
+    throw new Error("shouldYield called outside of hydration or advancement");
   }
 
   /**
@@ -2776,7 +2782,7 @@ export class PipelineDriver {
         `Advancement exceeded timeout at ${pos} of ${numChanges} changes ` +
           `after ${elapsed} ms. Advancement time limited based on total ` +
           `hydration time of ${totalHydrationTimeMs} ms.`,
-        'advancement-timeout',
+        "advancement-timeout",
       );
     }
     // The async boundaries in #goPrimaryAdvance (the setImmediate yields in
@@ -2796,12 +2802,12 @@ export class PipelineDriver {
   *#push(
     source: TableSource,
     change: SourceChange,
-  ): Iterable<RowChange | 'yield'> {
+  ): Iterable<RowChange | "yield"> {
     this.#startAccumulating();
     try {
       for (const val of source.genPush(change)) {
-        if (val === 'yield') {
-          yield 'yield';
+        if (val === "yield") {
+          yield "yield";
         }
         for (const changeOrYield of this.#stopAccumulating().stream()) {
           yield changeOrYield;
@@ -2816,18 +2822,18 @@ export class PipelineDriver {
   }
 
   #startAccumulating() {
-    assert(this.#streamer === null, 'Streamer already started');
+    assert(this.#streamer === null, "Streamer already started");
     this.#streamer = new Streamer(
       must(this.#primaryKeys),
       this.#tableSpecs,
       (queryID, error) =>
-        this.#logQueryFailure(queryID, 'query pipeline failed', error),
+        this.#logQueryFailure(queryID, "query pipeline failed", error),
     );
   }
 
   #stopAccumulating(): Streamer {
     const streamer = this.#streamer;
-    assert(streamer, 'Streamer not started');
+    assert(streamer, "Streamer not started");
     this.#streamer = null;
     return streamer;
   }
@@ -2849,8 +2855,7 @@ class Streamer {
   readonly #primaryKeys: Map<string, PrimaryKey>;
   readonly #tableSpecs: Map<string, LiteAndZqlSpec>;
   readonly #logQueryFailure:
-    | ((queryID: string, error: unknown) => void)
-    | undefined;
+    ((queryID: string, error: unknown) => void) | undefined;
 
   constructor(
     primaryKeys: Map<string, PrimaryKey>,
@@ -2865,19 +2870,19 @@ class Streamer {
   readonly #changes: [
     queryID: string,
     schema: SourceSchema,
-    changes: Iterable<Change | 'yield'>,
+    changes: Iterable<Change | "yield">,
   ][] = [];
 
   accumulate(
     queryID: string,
     schema: SourceSchema,
-    changes: Iterable<Change | 'yield'>,
+    changes: Iterable<Change | "yield">,
   ): this {
     this.#changes.push([queryID, schema, changes]);
     return this;
   }
 
-  *stream(): Iterable<RowChange | 'yield'> {
+  *stream(): Iterable<RowChange | "yield"> {
     for (const [queryID, schema, changes] of this.#changes) {
       try {
         yield* this.#streamChanges(queryID, schema, changes);
@@ -2891,16 +2896,16 @@ class Streamer {
   *#streamChanges(
     queryID: string,
     schema: SourceSchema,
-    changes: Iterable<Change | 'yield'>,
-  ): Iterable<RowChange | 'yield'> {
+    changes: Iterable<Change | "yield">,
+  ): Iterable<RowChange | "yield"> {
     // We do not sync rows gathered by the permissions
     // system to the client.
-    if (schema.system === 'permissions') {
+    if (schema.system === "permissions") {
       return;
     }
 
     for (const change of changes) {
-      if (change === 'yield') {
+      if (change === "yield") {
         yield change;
         continue;
       }
@@ -2925,7 +2930,7 @@ class Streamer {
         }
         case ChangeType.EDIT:
           yield* this.#streamNodes(queryID, schema, type, () => [
-            {row: change[ChangeIndex.NODE].row, relationships: {}},
+            { row: change[ChangeIndex.NODE].row, relationships: {} },
           ]);
           break;
         default:
@@ -2938,34 +2943,34 @@ class Streamer {
     queryID: string,
     schema: SourceSchema,
     op: ChangeType.ADD | ChangeType.REMOVE | ChangeType.EDIT,
-    nodes: () => Iterable<Node | 'yield'>,
-  ): Iterable<RowChange | 'yield'> {
-    const {tableName: table, system} = schema;
+    nodes: () => Iterable<Node | "yield">,
+  ): Iterable<RowChange | "yield"> {
+    const { tableName: table, system } = schema;
 
     const primaryKey = must(this.#primaryKeys.get(table));
     const spec = must(this.#tableSpecs.get(table)).tableSpec;
 
     // We do not sync rows gathered by the permissions
     // system to the client.
-    if (system === 'permissions') {
+    if (system === "permissions") {
       return;
     }
 
     for (const node of nodes()) {
-      if (node === 'yield') {
+      if (node === "yield") {
         yield node;
         continue;
       }
-      const {relationships} = node;
-      let {row} = node;
+      const { relationships } = node;
+      let { row } = node;
       const rowKey = getRowKey(primaryKey, row);
       if (op !== ChangeType.REMOVE) {
         const rowVersion = row[ZERO_VERSION_COLUMN_NAME];
         if (
-          typeof rowVersion === 'string' &&
-          rowVersion < (spec.minRowVersion ?? '00')
+          typeof rowVersion === "string" &&
+          rowVersion < (spec.minRowVersion ?? "00")
         ) {
-          row = {...row, [ZERO_VERSION_COLUMN_NAME]: spec.minRowVersion};
+          row = { ...row, [ZERO_VERSION_COLUMN_NAME]: spec.minRowVersion };
         }
       }
 
@@ -3020,11 +3025,11 @@ class QueryFailureLoggingOperator implements Input, Output {
     this.#input.destroy();
   }
 
-  fetch(req: FetchRequest): Iterable<Node | 'yield'> {
+  fetch(req: FetchRequest): Iterable<Node | "yield"> {
     return this.#input.fetch(req);
   }
 
-  *push(change: Change): Iterable<'yield'> {
+  *push(change: Change): Iterable<"yield"> {
     try {
       yield* this.#output.push(change, this);
     } catch (e) {
@@ -3035,7 +3040,7 @@ class QueryFailureLoggingOperator implements Input, Output {
           transformationHash: this.#transformationHash,
           queryName: this.#queryName,
         },
-        'query pipeline failed',
+        "query pipeline failed",
         e,
       );
       throw e;
@@ -3055,18 +3060,18 @@ function logQueryFailure(
   let queryLC = lc;
   if (queryInfo) {
     queryLC = queryLC
-      .withContext('queryHash', queryInfo.queryHash)
-      .withContext('transformationHash', queryInfo.transformationHash);
+      .withContext("queryHash", queryInfo.queryHash)
+      .withContext("transformationHash", queryInfo.transformationHash);
     if (queryInfo.queryName !== undefined) {
-      queryLC = queryLC.withContext('queryName', queryInfo.queryName);
+      queryLC = queryLC.withContext("queryName", queryInfo.queryName);
     }
   }
   queryLC.error?.(message, error);
 }
 
-function* toAdds(nodes: Iterable<Node | 'yield'>): Iterable<Change | 'yield'> {
+function* toAdds(nodes: Iterable<Node | "yield">): Iterable<Change | "yield"> {
   for (const node of nodes) {
-    if (node === 'yield') {
+    if (node === "yield") {
       yield node;
       continue;
     }
@@ -3075,7 +3080,7 @@ function* toAdds(nodes: Iterable<Node | 'yield'>): Iterable<Change | 'yield'> {
 }
 
 function getRowKey(cols: PrimaryKey, row: Row): RowKey {
-  return Object.fromEntries(cols.map(col => [col, must(row[col])]));
+  return Object.fromEntries(cols.map((col) => [col, must(row[col])]));
 }
 
 /**
@@ -3088,7 +3093,7 @@ export function* hydrate(
   hash: string,
   clientSchema: ClientSchema,
   tableSpecs: Map<string, LiteAndZqlSpec>,
-): Iterable<RowChange | 'yield'> {
+): Iterable<RowChange | "yield"> {
   const res = input.fetch({});
   const streamer = new Streamer(
     buildPrimaryKeys(clientSchema),
@@ -3102,7 +3107,7 @@ export function* hydrateInternal(
   hash: string,
   primaryKeys: Map<string, PrimaryKey>,
   tableSpecs: Map<string, LiteAndZqlSpec>,
-): Iterable<RowChange | 'yield'> {
+): Iterable<RowChange | "yield"> {
   const res = input.fetch({});
   const streamer = new Streamer(primaryKeys, tableSpecs).accumulate(
     hash,
@@ -3116,7 +3121,9 @@ function buildPrimaryKeys(
   clientSchema: ClientSchema,
   primaryKeys: Map<string, PrimaryKey> = new Map<string, PrimaryKey>(),
 ) {
-  for (const [tableName, {primaryKey}] of Object.entries(clientSchema.tables)) {
+  for (const [tableName, { primaryKey }] of Object.entries(
+    clientSchema.tables,
+  )) {
     primaryKeys.set(tableName, primaryKey as unknown as PrimaryKey);
   }
   return primaryKeys;
@@ -3126,7 +3133,7 @@ function mustGetPrimaryKey(
   primaryKeys: Map<string, PrimaryKey> | null,
   table: string,
 ): PrimaryKey {
-  const pKeys = must(primaryKeys, 'primaryKey map must be non-null');
+  const pKeys = must(primaryKeys, "primaryKey map must be non-null");
 
   const rv = pKeys.get(table);
   assert(
@@ -3161,7 +3168,7 @@ function scalarValuesEqual(
  * Go), arrays (Postgres `int4[]` literal text, e.g. `{1,2,3}`), INTERVAL,
  * geometric types, network types, range types. We now log a one-time
  * warning per unrecognized type so operators see the gap, and document
- * the explicit-handling exceptions (REVIEW-final MED-TS-2).
+ * the explicit-handling exceptions.
  *
  * Caller-side de-dup of warnings is handled via a module-level Set so a
  * 50-table schema doesn't produce 50 lines for the same unknown type.
@@ -3170,7 +3177,7 @@ const pgTypeWarningsSeen = new Set<string>();
 export function pgTypeToGoType(
   pgType: string,
   warn?: (msg: string) => void,
-): 'string' | 'number' | 'boolean' | 'null' | 'json' {
+): "string" | "number" | "boolean" | "null" | "json" {
   // dataType may be in "lite type string" format: "bool|nn", "int4|nn",
   // "varchar(255)|nn" etc. Extract the upstream type (before any pipe
   // delimiter), strip any "(N)" args (e.g. char(32) → char), and lowercase —
@@ -3181,9 +3188,9 @@ export function pgTypeToGoType(
   // bare FLOAT, and never stripped `(N)` (so `varchar(255)` fell through to
   // the unknown→string warn path). Keep this list byte-for-byte aligned with
   // pgToZqlTypeMap — if a type is added there, add it here too.
-  const delim = pgType.indexOf('|');
+  const delim = pgType.indexOf("|");
   const upstream = delim > 0 ? pgType.substring(0, delim) : pgType;
-  const argStart = upstream.indexOf('(');
+  const argStart = upstream.indexOf("(");
   const t = (argStart > 0 ? upstream.substring(0, argStart) : upstream)
     .trim()
     .toUpperCase();
@@ -3199,7 +3206,7 @@ export function pgTypeToGoType(
   // per enum-array column (two extra `\"` chars from JSON.stringify on the
   // Go side vs a bare array on the TS side). isArray also catches the legacy
   // `|TEXT_ARRAY[]` form that the plain `t.endsWith('[]')` missed.
-  if (isArray(pgType)) return 'json';
+  if (isArray(pgType)) return "json";
   // Enums: the LiteTypeString carries a `|TEXT_ENUM` attribute (e.g.
   // `TicketPriority|NOT_NULL|TEXT_ENUM`) that the upstream-name extraction above
   // strips, so a user-defined enum name fell through to the "unrecognised type"
@@ -3208,59 +3215,59 @@ export function pgTypeToGoType(
   // (`dataTypeToZqlValueType`) likewise returns 'string' for enums. Map to
   // 'string' WITHOUT a warning — this is correct, not a gap. Checked before the
   // name lookups so an enum named like a builtin can't be mis-typed.
-  if (isLiteEnum(pgType)) return 'string';
-  if (t === 'BOOL' || t === 'BOOLEAN') return 'boolean';
+  if (isLiteEnum(pgType)) return "string";
+  if (t === "BOOL" || t === "BOOLEAN") return "boolean";
   if (
     // Integer + serial families (PG rewrites SERIAL → INTEGER, but the
     // declared type may still surface as serial in a lite type string).
-    t === 'SMALLINT' ||
-    t === 'INTEGER' ||
-    t === 'INT' ||
-    t === 'INT2' ||
-    t === 'INT4' ||
-    t === 'INT8' ||
-    t === 'BIGINT' ||
-    t === 'SMALLSERIAL' ||
-    t === 'SERIAL' ||
-    t === 'SERIAL2' ||
-    t === 'SERIAL4' ||
-    t === 'SERIAL8' ||
-    t === 'BIGSERIAL' ||
+    t === "SMALLINT" ||
+    t === "INTEGER" ||
+    t === "INT" ||
+    t === "INT2" ||
+    t === "INT4" ||
+    t === "INT8" ||
+    t === "BIGINT" ||
+    t === "SMALLSERIAL" ||
+    t === "SERIAL" ||
+    t === "SERIAL2" ||
+    t === "SERIAL4" ||
+    t === "SERIAL8" ||
+    t === "BIGSERIAL" ||
     // Real / floating / fixed-point.
-    t === 'REAL' ||
-    t === 'DOUBLE PRECISION' ||
-    t === 'FLOAT' ||
-    t === 'FLOAT4' ||
-    t === 'FLOAT8' ||
-    t === 'NUMERIC' ||
-    t === 'DECIMAL' ||
-    // Date / time — all mapped to number (epoch-ish) like the canonical map.
-    t === 'DATE' ||
-    t === 'TIME' ||
-    t === 'TIMETZ' ||
-    t === 'TIME WITH TIME ZONE' ||
-    t === 'TIME WITHOUT TIME ZONE' ||
-    t === 'TIMESTAMP' ||
-    t === 'TIMESTAMPTZ' ||
-    t === 'TIMESTAMP WITH TIME ZONE' ||
-    t === 'TIMESTAMP WITHOUT TIME ZONE'
+    t === "REAL" ||
+    t === "DOUBLE PRECISION" ||
+    t === "FLOAT" ||
+    t === "FLOAT4" ||
+    t === "FLOAT8" ||
+    t === "NUMERIC" ||
+    t === "DECIMAL" ||
+    // Date / time — all mapped to number (epoch-based) like the canonical map.
+    t === "DATE" ||
+    t === "TIME" ||
+    t === "TIMETZ" ||
+    t === "TIME WITH TIME ZONE" ||
+    t === "TIME WITHOUT TIME ZONE" ||
+    t === "TIMESTAMP" ||
+    t === "TIMESTAMPTZ" ||
+    t === "TIMESTAMP WITH TIME ZONE" ||
+    t === "TIMESTAMP WITHOUT TIME ZONE"
   ) {
-    return 'number';
+    return "number";
   }
-  if (t === 'JSON' || t === 'JSONB') return 'json';
+  if (t === "JSON" || t === "JSONB") return "json";
   // Explicitly recognised string-shaped types — keep this list growing.
   if (
-    t === 'TEXT' ||
-    t === 'VARCHAR' ||
-    t === 'CHARACTER VARYING' ||
-    t === 'CHAR' ||
-    t === 'CHARACTER' ||
-    t === 'BPCHAR' ||
-    t === 'UUID' ||
-    t === 'CITEXT' ||
-    t === 'NAME'
+    t === "TEXT" ||
+    t === "VARCHAR" ||
+    t === "CHARACTER VARYING" ||
+    t === "CHAR" ||
+    t === "CHARACTER" ||
+    t === "BPCHAR" ||
+    t === "UUID" ||
+    t === "CITEXT" ||
+    t === "NAME"
   ) {
-    return 'string';
+    return "string";
   }
   // Postgres array types (e.g. INT4[], TEXT[]) are handled by the early
   // `isArray` check above (which also catches enum-arrays and the legacy
@@ -3268,14 +3275,14 @@ export function pgTypeToGoType(
   // and missed the enum-array case (isLiteEnum fired first → 'string').
   // BYTEA: text-encoded binary (hex on PG side via SQLite replica). Both
   // sides treat as string for now; document the limitation.
-  if (t === 'BYTEA') {
+  if (t === "BYTEA") {
     if (warn && !pgTypeWarningsSeen.has(t)) {
       pgTypeWarningsSeen.add(t);
       warn(
         `BYTEA treated as text-encoded string — binary content opaque to Go IVM`,
       );
     }
-    return 'string';
+    return "string";
   }
   // Truly unknown type — fall back to string but log once so the gap is
   // visible. Operators can add explicit mappings as they appear.
@@ -3285,5 +3292,5 @@ export function pgTypeToGoType(
       `unrecognised PostgreSQL type "${t}" mapped to 'string' — Go IVM may produce wrong results`,
     );
   }
-  return 'string';
+  return "string";
 }

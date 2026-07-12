@@ -4,8 +4,8 @@
 // delivery queue. Each clientGroupID maps to its own Engine; groups run in
 // parallel and the client multiplexes the single in-process channel.
 
-import {trace} from '@opentelemetry/api';
-import {Packr, Unpackr} from 'msgpackr';
+import { trace } from "@opentelemetry/api";
+import { Packr, Unpackr } from "msgpackr";
 import {
   DELIVERY_KIND_BATCH,
   DELIVERY_KIND_FRAME,
@@ -14,8 +14,8 @@ import {
   DELIVERY_KIND_ROW,
   RowGroupRegistry,
   iterateBatch,
-} from './napi-records.ts';
-import type {GoNapiAddon} from './napi/index.ts';
+} from "./napi-records.ts";
+import type { GoNapiAddon } from "./napi/index.ts";
 
 /**
  * Build a W3C traceparent string from the currently-active OTel span, or
@@ -28,7 +28,7 @@ function getActiveTraceparent(): string | undefined {
     const ctx = span.spanContext();
     if (!ctx.traceId || !ctx.spanId) return undefined;
     // version-format: 00-{traceId}-{spanId}-{traceFlags hex}
-    const flags = (ctx.traceFlags & 0xff).toString(16).padStart(2, '0');
+    const flags = (ctx.traceFlags & 0xff).toString(16).padStart(2, "0");
     return `00-${ctx.traceId}-${ctx.spanId}-${flags}`;
   } catch {
     return undefined;
@@ -61,7 +61,7 @@ export const unpack = (buf: Buffer | Uint8Array) =>
 // --- Types ---
 
 export type ColumnSchema = {
-  type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+  type: "boolean" | "number" | "string" | "null" | "json";
   optional?: boolean;
 };
 
@@ -111,7 +111,7 @@ export type AdvanceToHeadStreamChunk = {
   numChanges?: number | undefined;
   sigDeltas?: Record<string, string> | undefined;
   timings?: TableTiming[] | undefined;
-  reset?: {reason: string; msg: string} | undefined;
+  reset?: { reason: string; msg: string } | undefined;
 };
 
 export type RowChange = {
@@ -128,7 +128,7 @@ export type CallOptions = {
   /**
    * Optional clientGroupID for per-group fairness in the in-flight semaphore.
    * Without this, a single group flooding requests starves all other groups
-   * sharing the same `GoIVMClient`. REVIEW-final CRITICAL-CROSS-2.
+   * sharing the same `GoIVMClient`.
    */
   clientGroupID?: string;
   /**
@@ -193,7 +193,12 @@ function decodePositionalChanges(
       for (let j = 0; j < e.k.length; j++) rowKey[e.k[j]] = arr[2 + j];
       // A remove carries no row — matches the legacy decode where the omitted
       // `row` field left rc.row undefined (downstream keys removes by rowKey).
-      out[i] = {type, queryID: e.q, table: e.t, rowKey} as unknown as RowChange;
+      out[i] = {
+        type,
+        queryID: e.q,
+        table: e.t,
+        rowKey,
+      } as unknown as RowChange;
     } else {
       const row: Record<string, unknown> = {};
       for (let j = 0; j < e.c.length; j++) row[e.c[j]] = arr[2 + j];
@@ -201,7 +206,7 @@ function decodePositionalChanges(
       // pure lookup so rowKey[pk] === row[pk].
       const rowKey: Record<string, unknown> = {};
       for (let j = 0; j < e.k.length; j++) rowKey[e.k[j]] = row[e.k[j]];
-      out[i] = {type, queryID: e.q, table: e.t, rowKey, row};
+      out[i] = { type, queryID: e.q, table: e.t, rowKey, row };
     }
   }
   return out;
@@ -275,7 +280,7 @@ export function createHydrateStreamAccumulator(
   // because row-bearing partials produce no frame.
   const acc = new Map<
     string,
-    {changes: RowChange[]; expectedNextIndex: number; rowChunkIndex: number}
+    { changes: RowChange[]; expectedNextIndex: number; rowChunkIndex: number }
   >();
   // Tracks queryIDs that already saw final=true. Without this, a duplicate
   // final frame for the same queryID would resurrect a fresh entry (since
@@ -288,7 +293,7 @@ export function createHydrateStreamAccumulator(
   const entryFor = (queryID: string) => {
     let entry = acc.get(queryID);
     if (!entry) {
-      entry = {changes: [], expectedNextIndex: 0, rowChunkIndex: 0};
+      entry = { changes: [], expectedNextIndex: 0, rowChunkIndex: 0 };
       acc.set(queryID, entry);
     }
     return entry;
@@ -324,11 +329,11 @@ export function createHydrateStreamAccumulator(
         timingMs?: number;
         sigDelta?: string;
       };
-      if (typeof v.chunkIndex !== 'number') {
-        throw new Error('addQueriesStream frame missing numeric chunkIndex');
+      if (typeof v.chunkIndex !== "number") {
+        throw new Error("addQueriesStream frame missing numeric chunkIndex");
       }
-      if (typeof v.final !== 'boolean') {
-        throw new Error('addQueriesStream frame missing boolean final');
+      if (typeof v.final !== "boolean") {
+        throw new Error("addQueriesStream frame missing boolean final");
       }
       const chunkIndex = v.chunkIndex;
       const final = v.final;
@@ -343,7 +348,7 @@ export function createHydrateStreamAccumulator(
 
       let entry = acc.get(v.queryID);
       if (!entry) {
-        entry = {changes: [], expectedNextIndex: 0, rowChunkIndex: 0};
+        entry = { changes: [], expectedNextIndex: 0, rowChunkIndex: 0 };
         acc.set(v.queryID, entry);
       }
 
@@ -390,7 +395,7 @@ export function createHydrateStreamAccumulator(
       // (sent "done") without emitting a final chunk for them — caller
       // would silently miss the result. Surface explicitly.
       if (acc.size > 0) {
-        const missing = [...acc.keys()].join(',');
+        const missing = [...acc.keys()].join(",");
         throw new Error(
           `addQueriesStream finished but ${acc.size} queries never received a final chunk: ${missing}`,
         );
@@ -422,10 +427,10 @@ export function createAdvanceToHeadStreamChunkAccumulator(
     onRow: (change: RowChange) => {
       if (gotFinal) {
         throw new Error(
-          'advanceToHeadStream received row record after final frame',
+          "advanceToHeadStream received row record after final frame",
         );
       }
-      onResult({changes: [change], final: false});
+      onResult({ changes: [change], final: false });
     },
     onFrame: (value: unknown) => {
       const v = value as {
@@ -436,14 +441,14 @@ export function createAdvanceToHeadStreamChunkAccumulator(
         timings?: TableTiming[];
         version?: string;
         numChanges?: number;
-        reset?: {reason: string; msg: string};
+        reset?: { reason: string; msg: string };
         sigDeltas?: Record<string, string>;
       };
-      if (typeof v.chunkIndex !== 'number') {
-        throw new Error('advanceToHeadStream frame missing numeric chunkIndex');
+      if (typeof v.chunkIndex !== "number") {
+        throw new Error("advanceToHeadStream frame missing numeric chunkIndex");
       }
-      if (typeof v.final !== 'boolean') {
-        throw new Error('advanceToHeadStream frame missing boolean final');
+      if (typeof v.final !== "boolean") {
+        throw new Error("advanceToHeadStream frame missing boolean final");
       }
       const chunkIndex = v.chunkIndex;
       const final = v.final;
@@ -453,15 +458,15 @@ export function createAdvanceToHeadStreamChunkAccumulator(
       if (header) {
         if (gotFinal) {
           throw new Error(
-            'advanceToHeadStream received header after final frame',
+            "advanceToHeadStream received header after final frame",
           );
         }
         if (gotHeader) {
-          throw new Error('advanceToHeadStream received duplicate header');
+          throw new Error("advanceToHeadStream received duplicate header");
         }
         if (chunk.length > 0 || final) {
           throw new Error(
-            'advanceToHeadStream header must be non-final and rowless',
+            "advanceToHeadStream header must be non-final and rowless",
           );
         }
         gotHeader = true;
@@ -504,7 +509,7 @@ export function createAdvanceToHeadStreamChunkAccumulator(
       };
       if (final) {
         result.timings = v.timings;
-        result.version = v.version ?? '';
+        result.version = v.version ?? "";
         result.numChanges = v.numChanges ?? 0;
         result.reset = v.reset;
         result.sigDeltas = v.sigDeltas;
@@ -518,7 +523,7 @@ export function createAdvanceToHeadStreamChunkAccumulator(
         // `done` arrived without any frame carrying final=true — a Go-side bug
         // (the advance MUST always emit a terminal frame). Surface so we
         // don't silently return a partial result that would corrupt the CVR.
-        throw new Error('advanceToHeadStream finished without a final chunk');
+        throw new Error("advanceToHeadStream finished without a final chunk");
       }
     },
   };
@@ -527,22 +532,22 @@ export function createAdvanceToHeadStreamChunkAccumulator(
 // --- RPC (msgpack) ---
 
 type RPCRequest = {
-  jsonrpc: '2.0';
+  jsonrpc: "2.0";
   method: string;
   params?: unknown;
   id: number;
   /**
    * Optional W3C traceparent header for cross-process trace correlation.
    * Forwarded as-is by Go; logged on slow handlers. Full Go-side OTel SDK
-   * integration is a separate feature (REVIEW-final MED-CROSS-4).
+   * integration is a separate feature.
    */
   traceparent?: string;
 };
 
 type RPCResponse = {
-  jsonrpc: '2.0';
+  jsonrpc: "2.0";
   result?: unknown;
-  error?: {code: number; message: string};
+  error?: { code: number; message: string };
   id: number;
 };
 
@@ -573,7 +578,7 @@ export function computeBoundTimeoutMs(override?: number): number {
 }
 const MAX_IN_FLIGHT = 1024; // global semaphore: caps concurrent pending RPCs
 const MAX_IN_FLIGHT_PER_GROUP = 16; // per-clientGroupID fairness cap
-const GLOBAL_KEY = '__global__'; // bucket for ping / unscoped calls
+const GLOBAL_KEY = "__global__"; // bucket for ping / unscoped calls
 // IDs are uint32 to stay JS-safe regardless of how long the client lives.
 // Pending map dedupes inflight collisions; with MAX_IN_FLIGHT=1024 the
 // chance of an in-flight collision in a uint32 space is essentially zero.
@@ -582,17 +587,17 @@ const MAX_ID = 0xffff_ffff;
 export class TimeoutError extends Error {
   constructor(method: string, ms: number) {
     super(`RPC ${method} timed out after ${ms}ms`);
-    this.name = 'TimeoutError';
+    this.name = "TimeoutError";
   }
 }
 
 /**
  * Terminal sentinel for streaming RPCs. Go emits this as a plain-string Result on the final
  * frame; everything else is a partial. Reserved — handlers MUST NOT emit a
- * string-valued partial that collides with this constant. See D6 collision
+ * string-valued partial that collides with this constant. See the collision
  * defense in #dispatchResponsePayload below.
  */
-const STREAM_DONE_SENTINEL = 'done';
+const STREAM_DONE_SENTINEL = "done";
 
 /**
  * RPC error code Go uses when a mutating call (hydrate / advance)
@@ -608,7 +613,7 @@ export const RPC_CODE_STALE_INIT_EPOCH = -32101;
 export class StaleInitEpochError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'StaleInitEpochError';
+    this.name = "StaleInitEpochError";
   }
 }
 
@@ -621,14 +626,14 @@ export class StaleInitEpochError extends Error {
  * down the CG — matching TS-native's UnsupportedValueError throw — instead of
  * escalating to a pipeline reset. Reset CANNOT fix bad data: it re-hydrates,
  * re-reads the same row, re-panics, resets again → an infinite reset storm
- * that also re-pays every CG's hydrate cost (the 5–8s p99 incident).
+ * that also re-pays every CG's hydrate cost (5–8s p99).
  */
 export const RPC_CODE_DATA_ERROR = -32102;
 
 export class PermanentDataError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'PermanentDataError';
+    this.name = "PermanentDataError";
   }
 }
 
@@ -648,7 +653,7 @@ export const RPC_CODE_ADVANCE_ABORTED = -32103;
 export class AdvanceAbortedError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'AdvanceAbortedError';
+    this.name = "AdvanceAbortedError";
   }
 }
 
@@ -666,7 +671,7 @@ export const RPC_CODE_ADVANCE_CLEAN_RETRYABLE = -32104;
 export class RetryableAdvanceError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'RetryableAdvanceError';
+    this.name = "RetryableAdvanceError";
   }
 }
 
@@ -690,14 +695,14 @@ export const RPC_CODE_SCALAR_RESET = -32105;
  * CG teardown (the safe recovery: the next hydrate re-reads with fresh
  * chunks). Before this constant the error fell into the generic else branch
  * → plain Error → 'unclassified' → also CG teardown, but with a misleading
- * message and no dedicated test coverage (L7).
+ * message and no dedicated test coverage (frame-too-large classification).
  */
 export const RPC_CODE_FRAME_TOO_LARGE = -32011;
 
 export class ScalarResetError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'ScalarResetError';
+    this.name = "ScalarResetError";
   }
 }
 
@@ -705,10 +710,10 @@ export class ScalarResetError extends Error {
 
 export class GoIVMClient {
   readonly #onLog:
-    | ((level: 'info' | 'warn' | 'error', msg: string, err?: unknown) => void)
+    | ((level: "info" | "warn" | "error", msg: string, err?: unknown) => void)
     | undefined;
   /**
-   * A2 (scale review): invoked ONCE when the in-process (NAPI) transport is
+   * A2 (architecture review): invoked ONCE when the in-process (NAPI) transport is
    * detected dead (goivm_send rc != 0 — the pump/host has exited). The
    * embedder (SidecarManager) routes this to its fatal-exit path: a dead
    * in-process engine cannot be restarted (dlopen is once-per-process) and
@@ -749,19 +754,19 @@ export class GoIVMClient {
   #slotWaiters: Array<() => void> = [];
   // Per-clientGroupID in-flight counters and waiter queues. Prevents one
   // rogue group from monopolizing the global MAX_IN_FLIGHT pool and
-  // starving every other ViewSyncer (REVIEW-final CRITICAL-CROSS-2).
+  // starving every other ViewSyncer.
   #perGroupInFlight = new Map<string, number>();
   #perGroupWaiters = new Map<string, Array<() => void>>();
   /**
    * IDs that recently timed out. Late responses for them must be dropped,
-   * not routed to a freshly-issued same-ID call (REVIEW-final LOW-TS-2).
+   * not routed to a freshly-issued same-ID call.
    * Bounded eviction in #nextId so the set doesn't grow unbounded.
    */
   #recentlyTimedOut = new Set<number>();
 
   constructor(options?: {
     onLog?: (
-      level: 'info' | 'warn' | 'error',
+      level: "info" | "warn" | "error",
       msg: string,
       err?: unknown,
     ) => void;
@@ -804,7 +809,7 @@ export class GoIVMClient {
     this.#perGroupWaiters = new Map();
     for (const waiters of perGroup.values()) for (const w of waiters) w();
     this.#perGroupInFlight.clear();
-    this.#log('error', `napi transport fatal: ${err.message}`, err);
+    this.#log("error", `napi transport fatal: ${err.message}`, err);
     this.#onFatal?.(err);
   }
 
@@ -822,7 +827,7 @@ export class GoIVMClient {
   close(): void {
     this.#napi = null;
     // Reject anything still pending so callers don't hang.
-    const err = new Error('Client closed');
+    const err = new Error("Client closed");
     for (const [, p] of this.#pending) {
       if (p.timer) clearTimeout(p.timer);
       p.reject(err);
@@ -850,44 +855,44 @@ export class GoIVMClient {
    * hydrate reads. The caller stamps its CVR hydrate updater at
    * max(tsVersion, version) so rows written after TS's own (earlier)
    * snapshot pin are never received under an unbumped CVR version
-   * (cvr.ts "Expected CVR version to have been bumped" — gen-6).
-   * `version` is undefined only against a pre-gen-6 sidecar.
+   * (cvr.ts "Expected CVR version to have been bumped" — the init handshake).
+   * `version` is undefined only against a prior sidecar.
    */
   async init(
     clientGroupID: string,
     params: InitParams,
     opts?: CallOptions,
-  ): Promise<{initEpoch: number; version: string | undefined}> {
+  ): Promise<{ initEpoch: number; version: string | undefined }> {
     // init can be slow on first start; allow longer default.
     const result = (await this.#call(
-      'init',
-      {clientGroupID, ...params},
+      "init",
+      { clientGroupID, ...params },
       // A1: forward the group so heavyweight RPCs take PER-GROUP fairness
       // slots. Pre-fix every wrapper except advanceToHeadStream bucketed
       // under GLOBAL_KEY — ONE shared 16-slot cap for all CGs' init/
       // hydrate/advance traffic, so 16 slow CGs head-blocked every other
-      // CG on the worker (the per-group cap existed but was dead code).
+      // CG on the worker (the per-group cap existed but was unreachable).
       {
         timeoutMs: opts?.timeoutMs ?? 120_000,
         clientGroupID: opts?.clientGroupID ?? clientGroupID,
       },
-    )) as {status?: string; initEpoch?: number; version?: string} | 'ok';
-    if (typeof result !== 'object' || typeof result.initEpoch !== 'number') {
+    )) as { status?: string; initEpoch?: number; version?: string } | "ok";
+    if (typeof result !== "object" || typeof result.initEpoch !== "number") {
       throw new Error(
-        'init: sidecar did not return initEpoch — protocol mismatch',
+        "init: sidecar did not return initEpoch — protocol mismatch",
       );
     }
     return {
       initEpoch: result.initEpoch,
       version:
-        typeof result.version === 'string' && result.version !== ''
+        typeof result.version === "string" && result.version !== ""
           ? result.version
           : undefined,
     };
   }
 
   /**
-   * Pull-mode batch hydrate (ABI v3, DESIGN-duplex-streaming): returns an
+   * Pull-mode batch hydrate (ABI v3): returns an
    * AsyncIterableIterator over per-delivery entries — one row-bearing entry
    * per Go-side gated delivery (chunkSize=1 ⇒ one row), plus each query's
    * ungated terminal `final` entry. Go produces ONLY as this iterator is
@@ -914,9 +919,9 @@ export class GoIVMClient {
    */
   addQueriesStreamPull(
     clientGroupID: string,
-    queries: {queryID: string; ast: unknown}[],
+    queries: { queryID: string; ast: unknown }[],
     initEpoch: number,
-    opts?: CallOptions & {window?: number},
+    opts?: CallOptions & { window?: number },
   ): AsyncIterableIterator<{
     queryID: string;
     changes: RowChange[];
@@ -927,7 +932,7 @@ export class GoIVMClient {
   }> {
     const napi = this.#napi;
     if (!napi) {
-      throw new Error('addQueriesStreamPull requires the NAPI transport');
+      throw new Error("addQueriesStreamPull requires the NAPI transport");
     }
     const window = Math.max(1, Math.floor(opts?.window ?? 64));
     const lowWater = Math.max(1, Math.floor(window / 2));
@@ -961,13 +966,13 @@ export class GoIVMClient {
     // Reuse the accumulator in chunked+rowMode: every record and every
     // frame becomes exactly one onResult entry, preserving wire order and
     // the chunk-order/duplicate-final guards.
-    const handler = createHydrateStreamAccumulator(r => {
+    const handler = createHydrateStreamAccumulator((r) => {
       if (closed) return;
       buffered.push({
         queryID: r.queryID,
         changes: r.changes,
         timingMs: r.timingMs,
-        ...(r.sigDelta !== undefined ? {sigDelta: r.sigDelta} : {}),
+        ...(r.sigDelta !== undefined ? { sigDelta: r.sigDelta } : {}),
         final: r.final,
         chunkIndex: r.chunkIndex,
       });
@@ -975,7 +980,7 @@ export class GoIVMClient {
     });
 
     void this.#call(
-      'addQueriesStream',
+      "addQueriesStream",
       {
         clientGroupID,
         queries,
@@ -989,11 +994,11 @@ export class GoIVMClient {
         clientGroupID: opts?.clientGroupID ?? clientGroupID, // A1: per-group fairness
         onPartial: handler.onFrame,
         onRow: handler.onRow,
-        onStreamOpen: id => {
+        onStreamOpen: (id) => {
           reqID = id;
           if (closed) {
             throw new Error(
-              'addQueriesStreamPull cancelled before request send',
+              "addQueriesStreamPull cancelled before request send",
             );
           }
         },
@@ -1048,7 +1053,7 @@ export class GoIVMClient {
       next: async (): Promise<IteratorResult<Entry>> => {
         for (;;) {
           if (closed) {
-            return {value: undefined, done: true};
+            return { value: undefined, done: true };
           }
           const entry = buffered.shift();
           if (entry !== undefined) {
@@ -1066,7 +1071,7 @@ export class GoIVMClient {
                 napi.streamCredit(reqID, topUp);
               }
             }
-            return {value: entry, done: false};
+            return { value: entry, done: false };
           }
           if (error !== null) {
             const e = error;
@@ -1076,16 +1081,16 @@ export class GoIVMClient {
           }
           if (done) {
             closed = true;
-            return {value: undefined, done: true};
+            return { value: undefined, done: true };
           }
-          await new Promise<void>(resolve => {
+          await new Promise<void>((resolve) => {
             wake = resolve;
           });
         }
       },
       return: (): Promise<IteratorResult<Entry>> => {
         cancel();
-        return Promise.resolve({value: undefined, done: true});
+        return Promise.resolve({ value: undefined, done: true });
       },
       throw: (e?: unknown): Promise<IteratorResult<Entry>> => {
         cancel();
@@ -1103,8 +1108,8 @@ export class GoIVMClient {
     opts?: CallOptions,
   ): Promise<void> {
     await this.#call(
-      'removeQuery',
-      {clientGroupID, queryID, initEpoch},
+      "removeQuery",
+      { clientGroupID, queryID, initEpoch },
       {
         ...opts,
         clientGroupID: opts?.clientGroupID ?? clientGroupID,
@@ -1125,13 +1130,13 @@ export class GoIVMClient {
        * decision inputs are identical to TS's own. Omitted → abort disarmed
        * (old-server pairs ignore the extra fields — additive msgpack).
        */
-      abortBudget?: {totalHydrationTimeMs: number; suppressAbort?: boolean};
+      abortBudget?: { totalHydrationTimeMs: number; suppressAbort?: boolean };
       window?: number;
     },
   ): AsyncIterableIterator<AdvanceToHeadStreamChunk> {
     const napi = this.#napi;
     if (!napi) {
-      throw new Error('advanceToHeadStreamChunks requires the NAPI transport');
+      throw new Error("advanceToHeadStreamChunks requires the NAPI transport");
     }
     const window = Math.max(1, Math.floor(opts?.window ?? 64));
     const lowWater = Math.max(1, Math.floor(window / 2));
@@ -1150,14 +1155,14 @@ export class GoIVMClient {
       w?.();
     };
 
-    const handler = createAdvanceToHeadStreamChunkAccumulator(chunk => {
+    const handler = createAdvanceToHeadStreamChunkAccumulator((chunk) => {
       if (closed) return;
       buffered.push(chunk);
       notify();
     });
     const base: Record<string, unknown> = appID
-      ? {clientGroupID, initEpoch, appID}
-      : {clientGroupID, initEpoch};
+      ? { clientGroupID, initEpoch, appID }
+      : { clientGroupID, initEpoch };
     base.rowMode = true;
     base.pullMode = true;
     base.pullWindow = window;
@@ -1166,7 +1171,7 @@ export class GoIVMClient {
       if (opts.abortBudget.suppressAbort) base.suppressAbort = true;
     }
 
-    void this.#call('advanceToHeadStream', base, {
+    void this.#call("advanceToHeadStream", base, {
       // Compute-bound: no timeout in-process. The advance's bound is the
       // ECONOMIC abort riding this request (abortBudget), not wall-clock —
       // exactly TS's own advance discipline.
@@ -1176,11 +1181,11 @@ export class GoIVMClient {
       clientGroupID: opts?.clientGroupID ?? clientGroupID,
       onPartial: handler.onFrame,
       onRow: handler.onRow,
-      onStreamOpen: id => {
+      onStreamOpen: (id) => {
         reqID = id;
         if (closed) {
           throw new Error(
-            'advanceToHeadStreamChunks cancelled before request send',
+            "advanceToHeadStreamChunks cancelled before request send",
           );
         }
       },
@@ -1227,7 +1232,7 @@ export class GoIVMClient {
       next: async (): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
         for (;;) {
           if (closed) {
-            return {value: undefined, done: true};
+            return { value: undefined, done: true };
           }
           const entry = buffered.shift();
           if (entry !== undefined) {
@@ -1245,7 +1250,7 @@ export class GoIVMClient {
                 napi.streamCredit(reqID, topUp);
               }
             }
-            return {value: entry, done: false};
+            return { value: entry, done: false };
           }
           if (error !== null) {
             const e = error;
@@ -1255,16 +1260,16 @@ export class GoIVMClient {
           }
           if (done) {
             closed = true;
-            return {value: undefined, done: true};
+            return { value: undefined, done: true };
           }
-          await new Promise<void>(resolve => {
+          await new Promise<void>((resolve) => {
             wake = resolve;
           });
         }
       },
       return: (): Promise<IteratorResult<AdvanceToHeadStreamChunk>> => {
         cancel();
-        return Promise.resolve({value: undefined, done: true});
+        return Promise.resolve({ value: undefined, done: true });
       },
       throw: (
         e?: unknown,
@@ -1292,8 +1297,8 @@ export class GoIVMClient {
     opts?: CallOptions,
   ): Promise<void> {
     await this.#call(
-      'destroy',
-      {clientGroupID, initEpoch},
+      "destroy",
+      { clientGroupID, initEpoch },
       {
         ...opts,
         clientGroupID: opts?.clientGroupID ?? clientGroupID,
@@ -1303,7 +1308,7 @@ export class GoIVMClient {
 
   /** Ping the sidecar. */
   async ping(opts?: CallOptions): Promise<string> {
-    return (await this.#call('ping', undefined, {
+    return (await this.#call("ping", undefined, {
       timeoutMs: opts?.timeoutMs ?? 5_000,
     })) as string;
   }
@@ -1311,19 +1316,19 @@ export class GoIVMClient {
   /**
    * Query sidecar version and protocol revision. Used by `SidecarManager`
    * to refuse to talk to an incompatible build during rolling deploys
-   * (REVIEW-final MED-CROSS-5).
+   *
    */
   async version(
     opts?: CallOptions,
-  ): Promise<{version: string; protocolRev: number}> {
-    return (await this.#call('version', undefined, {
+  ): Promise<{ version: string; protocolRev: number }> {
+    return (await this.#call("version", undefined, {
       timeoutMs: opts?.timeoutMs ?? 5_000,
-    })) as {version: string; protocolRev: number};
+    })) as { version: string; protocolRev: number };
   }
 
   // --- Private ---
 
-  #log(level: 'info' | 'warn' | 'error', msg: string, err?: unknown): void {
+  #log(level: "info" | "warn" | "error", msg: string, err?: unknown): void {
     // No console fallback — callers without a logger get silence by design.
     // SidecarManager wires its own logger through to here.
     this.#onLog?.(level, msg, err);
@@ -1332,17 +1337,17 @@ export class GoIVMClient {
   async #acquireSlot(cgID: string): Promise<void> {
     // Global cap first — a hard safety bound on aggregate in-flight RPCs.
     if (this.#pending.size >= MAX_IN_FLIGHT) {
-      await new Promise<void>(resolve => this.#slotWaiters.push(resolve));
+      await new Promise<void>((resolve) => this.#slotWaiters.push(resolve));
     }
     // Then per-group cap so one client group can't starve others
-    // (REVIEW-final CRITICAL-CROSS-2).
+    //
     while ((this.#perGroupInFlight.get(cgID) ?? 0) >= MAX_IN_FLIGHT_PER_GROUP) {
       let waiters = this.#perGroupWaiters.get(cgID);
       if (!waiters) {
         waiters = [];
         this.#perGroupWaiters.set(cgID, waiters);
       }
-      await new Promise<void>(resolve => waiters.push(resolve));
+      await new Promise<void>((resolve) => waiters.push(resolve));
     }
     this.#perGroupInFlight.set(
       cgID,
@@ -1383,7 +1388,7 @@ export class GoIVMClient {
     // collisions in uint32 space are practically impossible. We also skip:
     //   - IDs currently in #pending (a wrap-around collision)
     //   - IDs recently timed-out (a delayed response could route to the new
-    //     pending entry); REVIEW-final LOW-TS-2.
+    //     pending entry).
     let id = this.#nextID;
     for (let tries = 0; tries < 32; tries++) {
       this.#nextID = id >= MAX_ID ? 1 : id + 1;
@@ -1391,7 +1396,7 @@ export class GoIVMClient {
       id = this.#nextID;
     }
     // Extremely unlikely; bubble up rather than risk wrong-response routing.
-    throw new Error('Could not allocate unused RPC id');
+    throw new Error("Could not allocate unused RPC id");
   }
 
   async #call(
@@ -1406,7 +1411,7 @@ export class GoIVMClient {
     const napi = this.#napi;
     if (!napi) {
       this.#releaseSlot(cgID);
-      throw new Error('Not connected');
+      throw new Error("Not connected");
     }
 
     const id = this.#nextId();
@@ -1470,10 +1475,10 @@ export class GoIVMClient {
         return;
       }
 
-      const req: RPCRequest = {jsonrpc: '2.0', method, params, id};
+      const req: RPCRequest = { jsonrpc: "2.0", method, params, id };
       // Attach the active W3C traceparent if available — Go-side can log
       // it for slow handlers and a future Go OTel SDK can resume the
-      // trace (REVIEW-final MED-CROSS-4).
+      // trace.
       const tp = getActiveTraceparent();
       if (tp) req.traceparent = tp;
       let payload: Buffer;
@@ -1518,7 +1523,7 @@ export class GoIVMClient {
       resp = unpack(payload) as RPCResponse;
     } catch (e) {
       this.#log(
-        'warn',
+        "warn",
         `failed to decode response frame: ${(e as Error).message}`,
       );
       return;
@@ -1527,7 +1532,7 @@ export class GoIVMClient {
     // Coerce id to Number: msgpackr decodes Go's uint64 (9-byte non-compact
     // encoding) as BigInt, which won't match the Number key stored in
     // #pending when the request was sent.
-    const respId = typeof resp.id === 'bigint' ? Number(resp.id) : resp.id;
+    const respId = typeof resp.id === "bigint" ? Number(resp.id) : resp.id;
     const pending = this.#pending.get(respId);
     if (!pending) return;
 
@@ -1570,7 +1575,7 @@ export class GoIVMClient {
         // Frame too large to serialize. The advance/hydrate completed but
         // the result couldn't be sent. Use a message that the classifier
         // matches as 'protocol' (msg.includes('Frame too large')) → CG
-        // teardown, the safe recovery (L7).
+        // teardown, the safe recovery (frame-too-large classification).
         pending.reject(new Error(`Frame too large: ${resp.error.message}`));
       } else {
         pending.reject(
@@ -1583,7 +1588,7 @@ export class GoIVMClient {
     // terminal "done" sentinel. Go emits "done" as a plain string Result;
     // any other Result shape is a partial.
     //
-    // Sentinel collision defense (D6): partial values are ALWAYS objects
+    // Sentinel collision defense: partial values are ALWAYS objects
     // (chunk-metadata records); the literal string "done" is reserved as
     // the terminal sentinel. If a partial were ever emitted as the string
     // "done" (Go-side bug or replay), the equality check below would
@@ -1600,7 +1605,7 @@ export class GoIVMClient {
     // other CGs' RPCs flow normally.
     const isStreamTerminal = resp.result === STREAM_DONE_SENTINEL;
     if (pending.onPartial && !isStreamTerminal) {
-      if (typeof resp.result !== 'object' || resp.result === null) {
+      if (typeof resp.result !== "object" || resp.result === null) {
         if (pending.timer) clearTimeout(pending.timer);
         this.#pending.delete(respId);
         pending.reject(
@@ -1637,7 +1642,7 @@ export class GoIVMClient {
   // exception would be an uncaughtException).
   #handleDelivery(kind: number, payload: Buffer): void {
     if (kind === DELIVERY_KIND_FRAME) {
-      // Containment (scale review): #dispatchResponsePayload guards its
+      // Containment (architecture review): #dispatchResponsePayload guards its
       // msgpack decode internally, but a post-decode throw (e.g. an error
       // branch stringifying exotic values) escaped this TSFN callback as an
       // uncaughtException — a worker crash for one bad frame. There may be
@@ -1648,7 +1653,7 @@ export class GoIVMClient {
         this.#dispatchResponsePayload(payload);
       } catch (err) {
         this.#log(
-          'error',
+          "error",
           `NAPI frame dispatch error: ${(err as Error).message}`,
           err,
         );
@@ -1663,7 +1668,7 @@ export class GoIVMClient {
     // first 8 bytes are not a reqID, so the guard would silently drop it.
     if (kind === DELIVERY_KIND_HOST_DEATH) {
       const reason =
-        payload.length > 0 ? payload.toString('utf8') : 'no reason given';
+        payload.length > 0 ? payload.toString("utf8") : "no reason given";
       this.#napiFatal(new Error(`go-ivm in-process host died: ${reason}`));
       return;
     }
@@ -1685,7 +1690,7 @@ export class GoIVMClient {
         // class. Per-sub-record dispatch errors never reach here: each is
         // contained by the recursive call's own try/catch.
         this.#log(
-          'error',
+          "error",
           `NAPI batch framing error: ${(err as Error).message}`,
           err,
         );
@@ -1712,7 +1717,7 @@ export class GoIVMClient {
         return;
       }
       if (kind === DELIVERY_KIND_ROW) {
-        const {reqID, change} = this.#rowGroups.decodeRow(payload);
+        const { reqID, change } = this.#rowGroups.decodeRow(payload);
         const pending = this.#pending.get(reqID);
         if (!pending) return; // timed-out / settled RPC: drop late rows
         if (!pending.onRow) {
@@ -1724,7 +1729,7 @@ export class GoIVMClient {
         return;
       }
       this.#log(
-        'warn',
+        "warn",
         `unknown NAPI delivery kind ${kind} (${payload.length} bytes)`,
       );
     } catch (err) {
@@ -1746,7 +1751,7 @@ export class GoIVMClient {
         );
       } else {
         this.#log(
-          'error',
+          "error",
           `NAPI delivery error (kind=${kind}): ${(err as Error).message}`,
           err,
         );

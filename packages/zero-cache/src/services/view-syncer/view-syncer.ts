@@ -1,96 +1,96 @@
-import {Lock} from '@rocicorp/lock';
-import type {LogContext} from '@rocicorp/logger';
-import {resolver} from '@rocicorp/resolver';
-import type {Row} from 'postgres';
+import { Lock } from "@rocicorp/lock";
+import type { LogContext } from "@rocicorp/logger";
+import { resolver } from "@rocicorp/resolver";
+import type { Row } from "postgres";
 import {
   manualSpan,
   startAsyncSpan,
   startSpan,
-} from '../../../../otel/src/span.ts';
-import {assert, unreachable} from '../../../../shared/src/asserts.ts';
-import {stringify} from '../../../../shared/src/bigint-json.ts';
-import {CustomKeyMap} from '../../../../shared/src/custom-key-map.ts';
-import {must} from '../../../../shared/src/must.ts';
-import {randInt} from '../../../../shared/src/rand.ts';
-import type {AST} from '../../../../zero-protocol/src/ast.ts';
-import type {ChangeDesiredQueriesMessage} from '../../../../zero-protocol/src/change-desired-queries.ts';
+} from "../../../../otel/src/span.ts";
+import { assert, unreachable } from "../../../../shared/src/asserts.ts";
+import { stringify } from "../../../../shared/src/bigint-json.ts";
+import { CustomKeyMap } from "../../../../shared/src/custom-key-map.ts";
+import { must } from "../../../../shared/src/must.ts";
+import { randInt } from "../../../../shared/src/rand.ts";
+import type { AST } from "../../../../zero-protocol/src/ast.ts";
+import type { ChangeDesiredQueriesMessage } from "../../../../zero-protocol/src/change-desired-queries.ts";
 import type {
   InitConnectionBody,
   InitConnectionMessage,
-} from '../../../../zero-protocol/src/connect.ts';
-import type {ErroredQuery} from '../../../../zero-protocol/src/custom-queries.ts';
-import type {DeleteClientsMessage} from '../../../../zero-protocol/src/delete-clients.ts';
-import type {Downstream} from '../../../../zero-protocol/src/down.ts';
-import {ErrorKind} from '../../../../zero-protocol/src/error-kind.ts';
-import {ErrorOrigin} from '../../../../zero-protocol/src/error-origin.ts';
+} from "../../../../zero-protocol/src/connect.ts";
+import type { ErroredQuery } from "../../../../zero-protocol/src/custom-queries.ts";
+import type { DeleteClientsMessage } from "../../../../zero-protocol/src/delete-clients.ts";
+import type { Downstream } from "../../../../zero-protocol/src/down.ts";
+import { ErrorKind } from "../../../../zero-protocol/src/error-kind.ts";
+import { ErrorOrigin } from "../../../../zero-protocol/src/error-origin.ts";
 import {
   isProtocolError,
   ProtocolError,
   type TransformFailedBody,
-} from '../../../../zero-protocol/src/error.ts';
+} from "../../../../zero-protocol/src/error.ts";
 import type {
   InspectUpBody,
   InspectUpMessage,
-} from '../../../../zero-protocol/src/inspect-up.ts';
-import type {UpdateAuthMessage} from '../../../../zero-protocol/src/update-auth.ts';
-import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
-import {clampTTL, MAX_TTL_MS} from '../../../../zql/src/query/ttl.ts';
-import {isAuthErrorBody, type Auth} from '../../auth/auth.ts';
+} from "../../../../zero-protocol/src/inspect-up.ts";
+import type { UpdateAuthMessage } from "../../../../zero-protocol/src/update-auth.ts";
+import { ChangeType } from "../../../../zql/src/ivm/change-type.ts";
+import { clampTTL, MAX_TTL_MS } from "../../../../zql/src/query/ttl.ts";
+import { isAuthErrorBody, type Auth } from "../../auth/auth.ts";
 import {
   transformAndHashQuery,
   type TransformedAndHashed,
-} from '../../auth/read-authorizer.ts';
-import type {NormalizedZeroConfig} from '../../config/normalize.ts';
+} from "../../auth/read-authorizer.ts";
+import type { NormalizedZeroConfig } from "../../config/normalize.ts";
 import type {
   CustomQueryTransformer,
   HashedTransformResponse,
-} from '../../custom-queries/transform-query.ts';
+} from "../../custom-queries/transform-query.ts";
 import {
   getOrCreateCounter,
   getOrCreateLatencyHistogram,
   getOrCreateUpDownCounter,
-} from '../../observability/metrics.ts';
-import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
+} from "../../observability/metrics.ts";
+import type { InspectorDelegate } from "../../server/inspector-delegate.ts";
 import {
   getLogLevel,
   ProtocolErrorWithLevel,
   wrapWithProtocolError,
-} from '../../types/error-with-level.ts';
-import type {PostgresDB} from '../../types/pg.ts';
-import {rowIDString, type RowKey} from '../../types/row-key.ts';
-import type {ShardID} from '../../types/shards.ts';
-import type {Source} from '../../types/streams.ts';
-import {Subscription} from '../../types/subscription.ts';
-import type {ReplicaState} from '../replicator/replicator.ts';
-import {ZERO_VERSION_COLUMN_NAME} from '../replicator/schema/replication-state.ts';
-import type {ActivityBasedService} from '../service.ts';
+} from "../../types/error-with-level.ts";
+import type { PostgresDB } from "../../types/pg.ts";
+import { rowIDString, type RowKey } from "../../types/row-key.ts";
+import type { ShardID } from "../../types/shards.ts";
+import type { Source } from "../../types/streams.ts";
+import { Subscription } from "../../types/subscription.ts";
+import type { ReplicaState } from "../replicator/replicator.ts";
+import { ZERO_VERSION_COLUMN_NAME } from "../replicator/schema/replication-state.ts";
+import type { ActivityBasedService } from "../service.ts";
 import {
   ClientHandler,
   startPoke,
   type PatchToVersion,
   type PokeHandler,
   type RowPatch,
-} from './client-handler.ts';
+} from "./client-handler.ts";
 import type {
   ConnectionContext,
   ConnectionContextManager,
   ConnectionSelector,
   ConnectionValidation,
-} from './connection-context-manager.ts';
-import {ClientNotFoundError, CVRStore} from './cvr-store.ts';
-import type {CVRUpdater} from './cvr.ts';
+} from "./connection-context-manager.ts";
+import { ClientNotFoundError, CVRStore } from "./cvr-store.ts";
+import type { CVRUpdater } from "./cvr.ts";
 import {
   CVRConfigDrivenUpdater,
   CVRQueryDrivenUpdater,
   nextEvictionTime,
   type CVRSnapshot,
   type RowUpdate,
-} from './cvr.ts';
-import type {DrainCoordinator} from './drain-coordinator.ts';
-import {handleInspect} from './inspect-handler.ts';
-import type {PipelineDriver} from './pipeline-driver.ts';
-import {type RowChange} from './pipeline-driver.ts';
-import {parseSignature} from './row-set-signature.ts';
+} from "./cvr.ts";
+import type { DrainCoordinator } from "./drain-coordinator.ts";
+import { handleInspect } from "./inspect-handler.ts";
+import type { PipelineDriver } from "./pipeline-driver.ts";
+import { type RowChange } from "./pipeline-driver.ts";
+import { parseSignature } from "./row-set-signature.ts";
 import {
   cmpVersions,
   EMPTY_CVR_VERSION,
@@ -104,17 +104,17 @@ import {
   type NullableCVRVersion,
   type QueryRecord,
   type RowID,
-} from './schema/types.ts';
-import {ResetPipelinesSignal} from './snapshotter.ts';
-import type {ResetPipelinesReason} from './snapshotter.ts';
-import {tracer} from './tracer.ts';
+} from "./schema/types.ts";
+import { ResetPipelinesSignal } from "./snapshotter.ts";
+import type { ResetPipelinesReason } from "./snapshotter.ts";
+import { tracer } from "./tracer.ts";
 import {
   ttlClockAsNumber,
   ttlClockFromNumber,
   type TTLClock,
-} from './ttl-clock.ts';
+} from "./ttl-clock.ts";
 
-const PROTOCOL_VERSION_ATTR = 'protocol.version';
+const PROTOCOL_VERSION_ATTR = "protocol.version";
 
 export interface ViewSyncer {
   initConnection(
@@ -166,10 +166,10 @@ function shutdownBeforeInitializationError(): ProtocolErrorWithLevel {
   return new ProtocolErrorWithLevel(
     {
       kind: ErrorKind.Internal,
-      message: 'shut down before initialization completed',
+      message: "shut down before initialization completed",
       origin: ErrorOrigin.ZeroCache,
     },
-    'warn',
+    "warn",
   );
 }
 
@@ -237,27 +237,24 @@ export const TRANSIENT_RESET_CIRCUIT_WINDOW_MS = 60_000;
  * directly to CG teardown in pipeline-driver.ts.)
  */
 export type ResetReasonClass =
-  | 'deterministic'
-  | 'transient'
-  | 'economic'
-  | 'lawful';
+  "deterministic" | "transient" | "economic" | "lawful";
 
 export function classifyResetReason(
   reason: ResetPipelinesReason,
 ): ResetReasonClass {
   switch (reason) {
-    case 'watermark-regression':
-      return 'deterministic';
-    case 'go-primary-unavailable':
-    case 'go-primary-drop':
-      return 'transient';
-    case 'advancement-timeout':
-      return 'economic';
-    case 'schema-change':
-    case 'truncation':
-    case 'permissions-change':
-    case 'scalar-subquery':
-      return 'lawful';
+    case "watermark-regression":
+      return "deterministic";
+    case "go-primary-unavailable":
+    case "go-primary-drop":
+      return "transient";
+    case "advancement-timeout":
+      return "economic";
+    case "schema-change":
+    case "truncation":
+    case "permissions-change":
+    case "scalar-subquery":
+      return "lawful";
   }
 }
 
@@ -271,9 +268,9 @@ export function resetCircuitDecision(
   nowMs: number,
   limit: number = RESET_CIRCUIT_LIMIT,
   windowMs: number = RESET_CIRCUIT_WINDOW_MS,
-): {trip: boolean; pruned: number[]} {
-  const pruned = recentResetTimes.filter(t => nowMs - t < windowMs);
-  return {trip: pruned.length >= limit, pruned};
+): { trip: boolean; pruned: number[] } {
+  const pruned = recentResetTimes.filter((t) => nowMs - t < windowMs);
+  return { trip: pruned.length >= limit, pruned };
 }
 
 /** Per-class sliding windows for the tiered breaker (only the classes that
@@ -284,7 +281,7 @@ export type ResetCircuitBuckets = {
 };
 
 export function emptyResetCircuitBuckets(): ResetCircuitBuckets {
-  return {deterministic: [], transient: []};
+  return { deterministic: [], transient: [] };
 }
 
 /**
@@ -297,7 +294,7 @@ export function resetCircuitDecisionByReason(
   reason: ResetPipelinesReason,
   buckets: ResetCircuitBuckets,
   nowMs: number,
-): {cls: ResetReasonClass; trip: boolean; buckets: ResetCircuitBuckets} {
+): { cls: ResetReasonClass; trip: boolean; buckets: ResetCircuitBuckets } {
   const cls = classifyResetReason(reason);
   const next: ResetCircuitBuckets = {
     deterministic: resetCircuitDecision(buckets.deterministic, nowMs).pruned,
@@ -310,23 +307,23 @@ export function resetCircuitDecisionByReason(
   };
   let trip = false;
   switch (cls) {
-    case 'deterministic':
+    case "deterministic":
       trip = next.deterministic.length >= RESET_CIRCUIT_LIMIT;
       break;
-    case 'transient':
+    case "transient":
       trip = next.transient.length >= TRANSIENT_RESET_CIRCUIT_LIMIT;
       break;
-    case 'economic':
-    case 'lawful':
+    case "economic":
+    case "lawful":
       break;
   }
-  if (!trip && (cls === 'deterministic' || cls === 'transient')) {
+  if (!trip && (cls === "deterministic" || cls === "transient")) {
     next[cls].push(nowMs);
   }
-  return {cls, trip, buckets: next};
+  return { cls, trip, buckets: next };
 }
 
-type CustomQueryTransformMode = 'all' | 'missing';
+type CustomQueryTransformMode = "all" | "missing";
 
 export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   readonly id: string;
@@ -394,7 +391,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   readonly #lock = new Lock();
   readonly #cvrStore: CVRStore;
   readonly #stopped = resolver();
-  readonly #initialized = resolver<'initialized'>();
+  readonly #initialized = resolver<"initialized">();
 
   #cvr: CVRSnapshot | undefined;
   #pipelinesSynced = false;
@@ -407,23 +404,23 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   // Track query replacements for thrashing detection
   readonly #queryReplacements = new Map<
     string,
-    {count: number; windowStart: number}
+    { count: number; windowStart: number }
   >();
 
   readonly #activeClients = getOrCreateUpDownCounter(
-    'sync',
-    'active-clients',
-    'Number of active sync clients',
+    "sync",
+    "active-clients",
+    "Number of active sync clients",
   );
   readonly #hydrations = getOrCreateCounter(
-    'sync',
-    'hydration',
-    'Number of query hydrations',
+    "sync",
+    "hydration",
+    "Number of query hydrations",
   );
   readonly #hydrationTime = getOrCreateLatencyHistogram(
-    'sync',
-    'hydration-time',
-    'Time to hydrate a query.',
+    "sync",
+    "hydration-time",
+    "Time to hydrate a query.",
   );
   // End-to-end hydrate wall-clock: engine compute + RPC + delivery of the
   // hydrated rows. On the TS path there is no sidecar RPC, so this is the
@@ -436,44 +433,44 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   // hydration-time is a FAIR e2e test that is Go-pessimistic (Go's span
   // includes the RPC tax, TS's has none).
   readonly #hydrationE2ETime = getOrCreateLatencyHistogram(
-    'sync',
-    'hydration-e2e-time',
-    'Time to hydrate a query end-to-end (engine compute + RPC + delivery).',
+    "sync",
+    "hydration-e2e-time",
+    "Time to hydrate a query end-to-end (engine compute + RPC + delivery).",
   );
   readonly #transactionAdvanceTime = getOrCreateLatencyHistogram(
-    'sync',
-    'advance-time',
-    'Time to advance all queries for a given client group after applying a new transaction to the replica.',
+    "sync",
+    "advance-time",
+    "Time to advance all queries for a given client group after applying a new transaction to the replica.",
   );
   readonly #queryTransformations = getOrCreateCounter(
-    'sync',
-    'query.transformations',
-    'Number of query transformations performed',
+    "sync",
+    "query.transformations",
+    "Number of query transformations performed",
   );
   readonly #queryTransformationTime = getOrCreateLatencyHistogram(
-    'sync',
-    'query.transformation-time',
-    'Time to transform custom queries via API server.',
+    "sync",
+    "query.transformation-time",
+    "Time to transform custom queries via API server.",
   );
   readonly #queryTransformationHashChanges = getOrCreateCounter(
-    'sync',
-    'query.transformation-hash-changes',
-    'Number of times query transformation hash changed',
+    "sync",
+    "query.transformation-hash-changes",
+    "Number of times query transformation hash changed",
   );
   readonly #queryTransformationNoOps = getOrCreateCounter(
-    'sync',
-    'query.transformation-no-ops',
-    'Number of times query transformation resulted in no-op (hash unchanged)',
+    "sync",
+    "query.transformation-no-ops",
+    "Number of times query transformation resulted in no-op (hash unchanged)",
   );
   readonly #lockWaitTime = getOrCreateLatencyHistogram(
-    'sync',
-    'lock-wait-time',
-    'Time spent waiting to acquire the ViewSyncer lock.',
+    "sync",
+    "lock-wait-time",
+    "Time spent waiting to acquire the ViewSyncer lock.",
   );
   readonly #pipelineResets = getOrCreateCounter(
-    'sync',
-    'pipeline-resets',
-    'Number of pipeline resets',
+    "sync",
+    "pipeline-resets",
+    "Number of pipeline resets",
   );
   // Circuit breaker: a reset-proof error (deterministic panic that survives a
   // rebuild) would otherwise reset → re-hydrate → re-panic → reset forever
@@ -481,18 +478,18 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   // teardown instead of an N+1th reset. See #resetCircuitBuckets /
   // classifyResetReason / RESET_CIRCUIT_*.
   readonly #pipelineResetCircuitTripped = getOrCreateCounter(
-    'sync',
-    'pipeline-reset-circuit-tripped',
-    'CG torn down because resets exceeded the circuit-breaker rate (reset storm)',
+    "sync",
+    "pipeline-reset-circuit-tripped",
+    "CG torn down because resets exceeded the circuit-breaker rate (reset storm)",
   );
   readonly #rowSetSignatureDrifts = getOrCreateCounter(
-    'sync',
-    'query.row-set-signature-drifts',
-    'Number of times re-hydration of an unchanged query produced a different ' +
-      'row-set signature than what is stored in the CVR (forcing a configVersion ' +
-      'bump and full re-execution). Expected to be near-zero in steady state; ' +
-      'persistent non-zero values indicate non-deterministic query execution ' +
-      '(e.g. Cap operator picking different N-row subsets).',
+    "sync",
+    "query.row-set-signature-drifts",
+    "Number of times re-hydration of an unchanged query produced a different " +
+      "row-set signature than what is stored in the CVR (forcing a configVersion " +
+      "bump and full re-execution). Expected to be near-zero in steady state; " +
+      "persistent non-zero values indicate non-deterministic query execution " +
+      "(e.g. Cap operator picking different N-row subsets).",
   );
 
   readonly #inspectorDelegate: InspectorDelegate;
@@ -558,26 +555,26 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     fn: (lc: LogContext, cvr: CVRSnapshot) => Promise<void> | void,
   ): Promise<void> {
     const rid = randomID();
-    this.#lc.debug?.('about to acquire lock for cvr ', rid);
+    this.#lc.debug?.("about to acquire lock for cvr ", rid);
     const lockWaitStart = performance.now();
     return this.#lock.withLock(async () => {
       this.#lockWaitTime.recordMs(performance.now() - lockWaitStart);
-      this.#lc.debug?.('acquired lock in #runInLockWithCVR ', rid);
-      const lc = this.#lc.withContext('lock', rid);
+      this.#lc.debug?.("acquired lock in #runInLockWithCVR ", rid);
+      const lc = this.#lc.withContext("lock", rid);
       if (!this.#stateChanges.active) {
         // view-syncer has been shutdown. this can be a backlog of tasks
         // queued on the lock, or it can be a race condition in which a
         // client connects before the ViewSyncer has been deleted from the
         // ServiceRunner.
-        this.#lc.debug?.('state changes are inactive');
+        this.#lc.debug?.("state changes are inactive");
         clearTimeout(this.#expiredQueriesTimer);
         throw new ProtocolErrorWithLevel(
           {
             kind: ErrorKind.Rehome,
-            message: 'Reconnect required',
+            message: "Reconnect required",
             origin: ErrorOrigin.ZeroCache,
           },
-          'info',
+          "info",
         );
       }
       // If all clients have disconnected, cancel all pending work.
@@ -590,8 +587,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         return;
       }
       if (!this.#cvr) {
-        this.#lc.debug?.('loading cvr');
-        this.#cvr = await this.#runPriorityOp(lc, 'loading cvr', () =>
+        this.#lc.debug?.("loading cvr");
+        this.#cvr = await this.#runPriorityOp(lc, "loading cvr", () =>
           this.#cvrStore.load(lc, this.#lastConnectTime),
         );
         this.#restorePinnedUserFromCVR(this.#cvr);
@@ -624,11 +621,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
   #restorePinnedUserFromCVR(cvr: CVRSnapshot): void {
     if (cvr.pinnedUserID !== undefined) {
-      this.connContextManager.pinGroupToUser({id: cvr.pinnedUserID});
+      this.connContextManager.pinGroupToUser({ id: cvr.pinnedUserID });
     }
   }
 
-  readyState(): Promise<'initialized' | 'draining'> {
+  readyState(): Promise<"initialized" | "draining"> {
     return Promise.race([
       this.#initialized.promise,
       this.#drainCoordinator.draining,
@@ -641,21 +638,21 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // This ensures authData and cvr.clientSchema are available before
       // transforming custom queries (dependency on authData) and building
       // pipelines (dependency on cvr.clientSchema).
-      if ((await this.readyState()) === 'draining') {
+      if ((await this.readyState()) === "draining") {
         this.#lc.debug?.(`draining view-syncer ${this.id} before running`);
         void this.stop();
       }
-      for await (const {state} of this.#stateChanges) {
+      for await (const { state } of this.#stateChanges) {
         if (this.#drainCoordinator.shouldDrain()) {
           this.#lc.debug?.(`draining view-syncer ${this.id} (elective)`);
           break;
         }
-        assert(state === 'version-ready', 'state should be version-ready'); // This is the only state change used.
+        assert(state === "version-ready", "state should be version-ready"); // This is the only state change used.
 
         await this.#runInLockWithCVR(async (lc, cvr) => {
           const clientSchema = must(
             cvr.clientSchema,
-            'cvr.clientSchema missing after initialization',
+            "cvr.clientSchema missing after initialization",
           );
           if (!this.#pipelines.initialized()) {
             // On the first version-ready signal, connect to the replica.
@@ -663,7 +660,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
           if (
             cvr.replicaVersion !== null &&
-            cvr.version.stateVersion !== '00' &&
+            cvr.version.stateVersion !== "00" &&
             this.#pipelines.replicaVersion < cvr.replicaVersion
           ) {
             const message = `Cannot sync from older replica: CVR=${
@@ -675,7 +672,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
           if (this.#pipelinesSynced) {
             const result = await this.#advancePipelines(lc, cvr);
-            if (result === 'success') {
+            if (result === "success") {
               // Half-open: a completed advance is forward progress, so any
               // earlier resets were not a reset-proof loop. Start the breaker
               // windows fresh.
@@ -689,7 +686,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             // is correct, and tearing down would convert a working recovery
             // into a client-visible reconnect.
             const nowMs = Date.now();
-            const {cls, trip, buckets} = resetCircuitDecisionByReason(
+            const { cls, trip, buckets } = resetCircuitDecisionByReason(
               result.reason,
               this.#resetCircuitBuckets,
               nowMs,
@@ -701,7 +698,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
                 class: cls,
               });
               const [limit, windowMs] =
-                cls === 'deterministic'
+                cls === "deterministic"
                   ? [RESET_CIRCUIT_LIMIT, RESET_CIRCUIT_WINDOW_MS]
                   : [
                       TRANSIENT_RESET_CIRCUIT_LIMIT,
@@ -715,7 +712,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               );
             }
             lc.info?.(`resetting pipelines: ${result.message}`);
-            this.#pipelineResets.add(1, {reason: result.reason});
+            this.#pipelineResets.add(1, { reason: result.reason });
             this.#pipelines.reset(clientSchema);
             this.#pipelinesSynced = false;
             this.connContextManager.setSharedRetransformReady(false);
@@ -743,7 +740,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           await this.#syncQueryPipelineSet(
             lc,
             cvr,
-            'missing',
+            "missing",
             undefined,
             driftedQueryIDs,
           );
@@ -769,7 +766,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // was stopped.
       await this.#cvrStore
         .flushed(this.#lc)
-        .catch(e => this.#lc[getLogLevel(e)]?.(e));
+        .catch((e) => this.#lc[getLogLevel(e)]?.(e));
       this.#lc.info?.(`view-syncer ${this.id} finished`);
       this.#stopped.resolve();
     }
@@ -781,11 +778,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     cvr: CVRSnapshot,
   ): Promise<void> => {
     if (hasExpiredQueries(cvr)) {
-      lc = lc.withContext('method', '#removeExpiredQueries');
-      lc.debug?.('Queries have expired');
+      lc = lc.withContext("method", "#removeExpiredQueries");
+      lc.debug?.("Queries have expired");
       // #syncQueryPipelineSet() will remove the expired queries.
       if (this.#pipelinesSynced) {
-        await this.#syncQueryPipelineSet(lc, cvr, 'missing', undefined);
+        await this.#syncQueryPipelineSet(lc, cvr, "missing", undefined);
       }
     }
 
@@ -836,7 +833,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // All lock tasks check for shutdown so that queued work is immediately
       // canceled when clients disconnect. Queue an empty task to ensure that
       // this check happens.
-      void this.#runInLockWithCVR(() => {}).catch(e =>
+      void this.#runInLockWithCVR(() => {}).catch((e) =>
         // If an error occurs (e.g. ownership change), propagate the error
         // to the main run() loop via the #stateChanges Subscription.
         this.#stateChanges.fail(e),
@@ -890,14 +887,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   }
 
   #stopExpireTimer() {
-    this.#lc.debug?.('Stopping expired queries timer');
+    this.#lc.debug?.("Stopping expired queries timer");
     clearTimeout(this.#expiredQueriesTimer);
     this.#expiredQueriesTimer = 0;
   }
 
   #stopAuthMaintenanceTimer() {
     if (this.#authMaintenanceTimer !== 0) {
-      this.#lc.debug?.('Stopping auth maintenance timer');
+      this.#lc.debug?.("Stopping auth maintenance timer");
     }
     clearTimeout(this.#authMaintenanceTimer);
     this.#authMaintenanceTimer = 0;
@@ -914,7 +911,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
     const plan = this.connContextManager.planMaintenance();
     if (plan.earliestDeadlineAt === undefined) {
-      lc.debug?.('No auth maintenance wakeup scheduled');
+      lc.debug?.("No auth maintenance wakeup scheduled");
       return;
     }
 
@@ -943,11 +940,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   async #runAuthMaintenance(lc: LogContext, _cvr: CVRSnapshot): Promise<void> {
     const plan = this.connContextManager.planMaintenance();
     if (plan.dueRevalidations.length === 0 && !plan.dueRetransform) {
-      lc.debug?.('Auth maintenance woke up with no due work');
+      lc.debug?.("Auth maintenance woke up with no due work");
       return;
     }
 
-    lc.debug?.('Auth maintenance woke up with pending work', {
+    lc.debug?.("Auth maintenance woke up with pending work", {
       dueRevalidations: plan.dueRevalidations.length,
       dueRetransform: plan.dueRetransform,
     });
@@ -958,14 +955,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       } catch (e) {
         if (isProtocolError(e) && isTransformFailedError(e)) {
           lc.warn?.(
-            'Scheduled auth revalidation failed; deferring auth maintenance',
+            "Scheduled auth revalidation failed; deferring auth maintenance",
             {
               clientID: connCtx.clientID,
               wsID: connCtx.wsID,
               message: e.message,
             },
           );
-          this.connContextManager.deferMaintenance('revalidate');
+          this.connContextManager.deferMaintenance("revalidate");
           return;
         }
         throw e;
@@ -984,21 +981,21 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     selector: ConnectionSelector,
     initConnectionMessage: InitConnectionMessage,
   ): Source<Downstream> {
-    this.#lc.debug?.('viewSyncer.initConnection');
-    return startSpan(tracer, 'vs.initConnection', () => {
+    this.#lc.debug?.("viewSyncer.initConnection");
+    return startSpan(tracer, "vs.initConnection", () => {
       const connCtx =
         this.connContextManager.mustGetConnectionContext(selector);
 
       const lc = this.#lc
-        .withContext('clientID', connCtx.clientID)
-        .withContext('wsID', connCtx.wsID);
+        .withContext("clientID", connCtx.clientID)
+        .withContext("wsID", connCtx.wsID);
 
       // Setup the downstream connection.
       const downstream = Subscription.create<Downstream>({
         cleanup: (_, err) => {
           err
             ? lc[getLogLevel(err)]?.(`client closed with error`, err)
-            : lc.info?.('client closed');
+            : lc.info?.("client closed");
           this.#deleteClientDueToDisconnect(connCtx.clientID, newClient);
           this.#activeClients.add(-1, {
             [PROTOCOL_VERSION_ATTR]: connCtx.protocolVersion,
@@ -1037,7 +1034,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // that if the connection is subsequently closed, the `downstream`
       // subscription can be properly canceled even if #runInLockForClient()
       // has not had a chance to run.
-      void startAsyncSpan(tracer, 'vs.initConnection.async', () =>
+      void startAsyncSpan(tracer, "vs.initConnection.async", () =>
         this.#runInLockForClient(
           connCtx,
           initConnectionMessage,
@@ -1047,10 +1044,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
                 {
                   kind: ErrorKind.InvalidConnectionRequest,
                   message:
-                    'The initConnection message for a new client group must include client schema.',
+                    "The initConnection message for a new client group must include client schema.",
                   origin: ErrorOrigin.ZeroCache,
                 },
-                'warn',
+                "warn",
               );
             }
             // Validate auth before sending any data is sent to this connection.
@@ -1066,7 +1063,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               clientID,
               msg,
               cvr,
-              'all', // re transform all on new connections
+              "all", // re transform all on new connections
               // Until the profileID is required in the URL, default it to
               // `cg${clientGroupID}`, as is done in the schema migration.
               // As clients update to the zero version with the profileID logic,
@@ -1076,11 +1073,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             );
             // this.#authData  and cvr (in particular cvr.clientSchema) have been
             // initialized, signal the run loop to run.
-            this.#initialized.resolve('initialized');
+            this.#initialized.resolve("initialized");
           },
           newClient,
         ),
-      ).catch(e => newClient.fail(e));
+      ).catch((e) => newClient.fail(e));
 
       return downstream;
     });
@@ -1099,7 +1096,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           clientID,
           msg,
           cvr,
-          'missing',
+          "missing",
           undefined,
           this.connContextManager.mustGetConnectionContext(selector),
         ),
@@ -1117,10 +1114,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       async (lc, clientID, _, cvr) => {
         // Avoid revalidation and query re-transformation if the revision is the same
         if (!authRevisionChanged) {
-          lc.debug?.('Auth unchanged, skipping query re-transformation');
+          lc.debug?.("Auth unchanged, skipping query re-transformation");
           return;
         }
-        lc.debug?.('Auth changed, re-validating and re-transforming queries');
+        lc.debug?.("Auth changed, re-validating and re-transforming queries");
 
         const connCtx =
           this.connContextManager.mustGetConnectionContext(selector);
@@ -1140,7 +1137,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           clientID,
           {}, // no config updates, but we want to trigger re-transformation of custom queries if auth changed
           cvr,
-          'all',
+          "all",
           undefined,
           connCtx,
         );
@@ -1154,14 +1151,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   ): Promise<string[]> {
     const deletedClientIDs = await this.#runInLockForClient(
       selector,
-      [msg[0], {deleted: msg[1]}],
+      [msg[0], { deleted: msg[1] }],
       (lc, clientID, msg: Partial<InitConnectionBody>, cvr) =>
         this.#handleConfigUpdate(
           lc,
           clientID,
           msg,
           cvr,
-          'missing',
+          "missing",
           undefined,
           this.connContextManager.mustGetConnectionContext(selector),
         ),
@@ -1172,13 +1169,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   #getTTLClock(now: number): TTLClock {
     // We will update ttlClock with delta from the ttlClockBase to the current time.
     const delta = now - this.#ttlClockBase;
-    assert(this.#ttlClock !== undefined, 'ttlClock should be defined');
+    assert(this.#ttlClock !== undefined, "ttlClock should be defined");
     const ttlClock = ttlClockFromNumber(
       ttlClockAsNumber(this.#ttlClock) + delta,
     );
     assert(
       ttlClockAsNumber(ttlClock) <= now,
-      'ttlClock should be less than or equal to now',
+      "ttlClock should be less than or equal to now",
     );
     this.#ttlClock = ttlClock;
     this.#ttlClockBase = now;
@@ -1186,11 +1183,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   }
 
   #flushUpdater(lc: LogContext, updater: CVRUpdater): Promise<CVRSnapshot> {
-    return startAsyncSpan(tracer, 'vs.#flushUpdater', () =>
-      this.#runPriorityOp(lc, 'flushing cvr', async () => {
+    return startAsyncSpan(tracer, "vs.#flushUpdater", () =>
+      this.#runPriorityOp(lc, "flushing cvr", async () => {
         const now = Date.now();
         const ttlClock = this.#getTTLClock(now);
-        const {cvr, flushed} = await updater.flush(
+        const { cvr, flushed } = await updater.flush(
           lc,
           this.#lastConnectTime,
           now,
@@ -1222,17 +1219,17 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
   #updateTTLClockInCVRWithoutLock(lc: LogContext): void {
     const rid = randomID();
-    lc.debug?.('Syncing ttlClock', rid);
+    lc.debug?.("Syncing ttlClock", rid);
     const start = Date.now();
     const ttlClock = this.#getTTLClock(start);
     this.#cvrStore
       .updateTTLClock(ttlClock, start)
       .then(() => {
-        lc.debug?.('Synced ttlClock', rid, `in ${Date.now() - start} ms`);
+        lc.debug?.("Synced ttlClock", rid, `in ${Date.now() - start} ms`);
       })
-      .catch(e => {
+      .catch((e) => {
         lc.warn?.(
-          'failed to update TTL clock',
+          "failed to update TTL clock",
           rid,
           `after ${Date.now() - start} ms`,
           e,
@@ -1258,7 +1255,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const currentConnCtx =
         this.connContextManager.mustGetConnectionContext(connCtx);
       if (
-        currentConnCtx.state !== 'validated' &&
+        currentConnCtx.state !== "validated" &&
         !(await this.#validateConnection(currentConnCtx))
       ) {
         return cvr;
@@ -1266,7 +1263,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const pinnedUser = this.connContextManager.getGroupState().pinnedUser;
       assert(
         pinnedUser !== undefined,
-        'validated connection must pin client group user',
+        "validated connection must pin client group user",
       );
       updater.setPinnedUser(pinnedUser);
     }
@@ -1282,7 +1279,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const newCVR = this.#cvr;
       await startAsyncSpan(
         tracer,
-        'vs.#updateCVRConfig.pokeClients',
+        "vs.#updateCVRConfig.pokeClients",
         async () => {
           const pokers = startPoke(
             this.#getClients(cvr.version),
@@ -1323,8 +1320,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     ) => Promise<R>,
     newClient?: ClientHandler,
   ): Promise<R | undefined> {
-    this.#lc.debug?.('viewSyncer.#runInLockForClient');
-    const {clientID, wsID} = selector;
+    this.#lc.debug?.("viewSyncer.#runInLockForClient");
+    const { clientID, wsID } = selector;
     const [cmd, body] = msg;
 
     if (newClient || !this.#clients.has(clientID)) {
@@ -1334,23 +1331,23 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     return startAsyncSpan(
       tracer,
       `vs.#runInLockForClient(${cmd})`,
-      async span => {
-        span.setAttribute('clientGroupID', this.id);
-        span.setAttribute('clientID', clientID);
+      async (span) => {
+        span.setAttribute("clientGroupID", this.id);
+        span.setAttribute("clientID", clientID);
         let client: ClientHandler | undefined;
         let result: R | undefined;
         let connCtx: ConnectionContext | undefined;
         try {
           await this.#runInLockWithCVR(async (lc, cvr) => {
             lc = lc
-              .withContext('clientID', clientID)
-              .withContext('wsID', wsID)
-              .withContext('cmd', cmd);
-            lc.debug?.('acquired lock for cvr');
+              .withContext("clientID", clientID)
+              .withContext("wsID", wsID)
+              .withContext("cmd", cmd);
+            lc.debug?.("acquired lock for cvr");
 
             client = this.#clients.get(clientID);
             if (client?.wsID !== wsID) {
-              lc.debug?.('mismatched wsID', client?.wsID, wsID);
+              lc.debug?.("mismatched wsID", client?.wsID, wsID);
               // Only respond to messages of the currently connected client.
               // Connections may have been drained or dropped due to an error.
               return;
@@ -1361,7 +1358,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             if (newClient) {
               assert(
                 newClient === client,
-                'newClient must match existing client',
+                "newClient must match existing client",
               );
               checkClientAndCVRVersions(client.version(), cvr.version);
             } else if (!this.#clients.has(clientID)) {
@@ -1373,9 +1370,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           });
         } catch (e) {
           const lc = this.#lc
-            .withContext('clientID', clientID)
-            .withContext('wsID', wsID)
-            .withContext('cmd', cmd);
+            .withContext("clientID", clientID)
+            .withContext("wsID", wsID)
+            .withContext("cmd", cmd);
           lc[getLogLevel(e)]?.(`closing connection with error`, e);
           if (connCtx) {
             this.connContextManager.failConnection(selector, connCtx.revision);
@@ -1397,7 +1394,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     const clients = [...this.#clients.values()];
     return atVersion
       ? clients.filter(
-          c => cmpVersions(c.version() ?? EMPTY_CVR_VERSION, atVersion) === 0,
+          (c) => cmpVersions(c.version() ?? EMPTY_CVR_VERSION, atVersion) === 0,
         )
       : clients;
   }
@@ -1418,7 +1415,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     profileID: string | undefined,
     connCtx: ConnectionContext,
   ) =>
-    startAsyncSpan(tracer, 'vs.#handleConfigUpdate', async () => {
+    startAsyncSpan(tracer, "vs.#handleConfigUpdate", async () => {
       const deletedClientIDs: string[] = [];
       const deletedClientGroupIDs: string[] = [];
 
@@ -1428,8 +1425,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         clientID,
         customQueryTransformMode,
         connCtx,
-        updater => {
-          const {ttlClock} = cvr;
+        (updater) => {
+          const { ttlClock } = cvr;
           const patches: PatchToVersion[] = [];
 
           if (clientSchema) {
@@ -1446,10 +1443,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           if (desiredQueriesPatch?.length) {
             for (const patch of desiredQueriesPatch) {
               switch (patch.op) {
-                case 'put':
+                case "put":
                   patches.push(...updater.putDesiredQueries(clientID, [patch]));
                   break;
-                case 'del':
+                case "del":
                   patches.push(
                     ...updater.markDesiredQueriesAsInactive(
                       clientID,
@@ -1458,7 +1455,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
                     ),
                   );
                   break;
-                case 'clear':
+                case "clear":
                   patches.push(...updater.clearDesiredQueries(clientID));
                   break;
               }
@@ -1480,7 +1477,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
           if (deleted?.clientIDs?.length) {
             for (const cid of deleted.clientIDs) {
-              assert(cid !== clientID, 'cannot delete self');
+              assert(cid !== clientID, "cannot delete self");
               clientIDsToDelete.add(cid);
             }
           }
@@ -1509,10 +1506,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         const clients = this.#getClients();
         await startAsyncSpan(
           tracer,
-          'vs.#handleConfigUpdate.sendDeleteClients',
+          "vs.#handleConfigUpdate.sendDeleteClients",
           () =>
             Promise.allSettled(
-              clients.map(client =>
+              clients.map((client) =>
                 client.sendDeleteClients(
                   lc,
                   deletedClientIDs,
@@ -1528,14 +1525,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     });
 
   #scheduleExpireEviction(lc: LogContext, cvr: CVRSnapshot): void {
-    const {ttlClock} = cvr;
+    const { ttlClock } = cvr;
     this.#stopExpireTimer();
 
     // first see if there is any inactive query with a ttl.
     const next = nextEvictionTime(cvr);
 
     if (next === undefined) {
-      lc.debug?.('no inactive queries with ttl');
+      lc.debug?.("no inactive queries with ttl");
       // no inactive queries with a ttl. Cancel existing timeout if any.
       return;
     }
@@ -1554,12 +1551,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       ),
     );
 
-    lc.debug?.('Scheduling eviction timer to run in ', delay, 'ms');
+    lc.debug?.("Scheduling eviction timer to run in ", delay, "ms");
     this.#expiredQueriesTimer = this.#setTimeout(() => {
       this.#expiredQueriesTimer = 0;
       this.#runInLockWithCVR((lc, cvr) =>
         this.#removeExpiredQueries(lc, cvr),
-      ).catch(e =>
+      ).catch((e) =>
         // If an error occurs (e.g. ownership change), propagate the error
         // to the main run() loop via the #stateChanges Subscription.
         this.#stateChanges.fail(e),
@@ -1586,7 +1583,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     lc: LogContext,
     cvr: CVRSnapshot,
   ): Promise<Set<string>> {
-    assert(this.#pipelines.initialized(), 'pipelines must be initialized');
+    assert(this.#pipelines.initialized(), "pipelines must be initialized");
 
     // Gen-6: gate on the version the hydrate DATA will be read at, not just
     // TS's snapshot. In Go-primary mode user rows hydrate from Go's own
@@ -1618,16 +1615,16 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
     for (const [, query] of gotQueries) {
       if (
-        query.type !== 'internal' &&
+        query.type !== "internal" &&
         Object.values(query.clientState).every(
-          ({inactivatedAt}) => inactivatedAt !== undefined,
+          ({ inactivatedAt }) => inactivatedAt !== undefined,
         )
       ) {
         inactivatedCount++;
         continue; // No longer desired.
       }
 
-      if (query.type === 'custom') {
+      if (query.type === "custom") {
         customQueries.set(query.id, query);
       } else {
         otherQueries.push(query);
@@ -1640,7 +1637,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     let otherHashMismatchCount = 0;
     if (customQueries.size > 0 && !this.#customQueryTransformer) {
       lc.warn?.(
-        'Custom/named queries were requested but no `ZERO_QUERY_URL` is configured for Zero Cache.',
+        "Custom/named queries were requested but no `ZERO_QUERY_URL` is configured for Zero Cache.",
       );
     }
     const backgroundContext =
@@ -1651,7 +1648,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // authorization validation with current auth context.
       const transformedCustomQueries = await this.#runPriorityOp(
         lc,
-        '#hydrateUnchangedQueries transforming custom queries',
+        "#hydrateUnchangedQueries transforming custom queries",
         () =>
           customQueryTransformer.transform(
             backgroundContext,
@@ -1661,7 +1658,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // Uncached results can also return the authoritative server userID
       // for that snapshot.
       if (
-        transformedCustomQueries.kind === 'success' &&
+        transformedCustomQueries.kind === "success" &&
         !transformedCustomQueries.cached
       ) {
         this.connContextManager.validateConnection(
@@ -1678,7 +1675,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // the client.
       if (Array.isArray(transformedCustomQueries.result)) {
         for (const q of transformedCustomQueries.result) {
-          if ('error' in q) {
+          if ("error" in q) {
             customErrorCount++;
           } else if (
             q.transformationHash !== customQueries.get(q.id)?.transformationHash
@@ -1699,10 +1696,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         must(this.#pipelines.currentPermissions()).permissions ?? {
           tables: {},
         },
-        backgroundContext.auth?.type === 'jwt'
+        backgroundContext.auth?.type === "jwt"
           ? backgroundContext.auth
           : undefined,
-        q.type === 'internal',
+        q.type === "internal",
       );
       if (transformed.transformationHash === q.transformationHash) {
         // only process queries that transformed to the same
@@ -1771,21 +1768,21 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       this.#addQueryMaterializationServerMetric(transformationHash, elapsed);
       this.#inspectorDelegate.addQuery(transformationHash, transformedAst);
       lc.debug?.(`hydrated ${count} rows for ${queryID} (${elapsed} ms)`);
-      manualSpan(tracer, 'vs.hydrateUnchangedQuery', elapsed, {
+      manualSpan(tracer, "vs.hydrateUnchangedQuery", elapsed, {
         hash: queryID,
         transformationHash,
       });
     };
 
-    const hydrateQueries = transformedQueries.map(q => {
+    const hydrateQueries = transformedQueries.map((q) => {
       const queryID = q.id;
       const query = cvr.queries[queryID];
-      const queryName = query.type === 'custom' ? query.name : undefined;
+      const queryName = query.type === "custom" ? query.name : undefined;
       return {
         id: queryID,
         transformationHash: q.transformationHash,
         transformedAst: q.transformedAst,
-        ...(queryName !== undefined && {name: queryName}),
+        ...(queryName !== undefined && { name: queryName }),
       };
     });
 
@@ -1795,32 +1792,32 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
     if (this.#pipelines.canBatchHydrate && hydrateQueries.length > 0) {
       const batchStart = performance.now();
-      const byID = new Map(hydrateQueries.map(q => [q.id, q]));
+      const byID = new Map(hydrateQueries.map((q) => [q.id, q]));
       const counts = new Map<string, number>();
       let completed = 0;
       let totalComputeMs = 0;
 
       await startAsyncSpan(
         tracer,
-        'vs.#hydrateUnchangedQueries.batch',
-        async span => {
-          span.setAttribute('queries', hydrateQueries.length);
+        "vs.#hydrateUnchangedQueries.batch",
+        async (span) => {
+          span.setAttribute("queries", hydrateQueries.length);
           const stream = this.#pipelines.goHydrateBatchStream(
-            hydrateQueries.map(q => ({
+            hydrateQueries.map((q) => ({
               transformationHash: q.transformationHash,
               queryID: q.id,
               ast: q.transformedAst,
-              ...(q.name !== undefined && {queryName: q.name}),
+              ...(q.name !== undefined && { queryName: q.name }),
             })),
           );
-          for await (const {queryID, changes, timingMs, final} of stream) {
+          for await (const { queryID, changes, timingMs, final } of stream) {
             const q = byID.get(queryID);
             if (!q) continue;
 
             let count = counts.get(queryID) ?? 0;
             const consumeStart = performance.now();
             for (const change of changes) {
-              if (change === 'yield') {
+              if (change === "yield") {
                 await yieldProcess(lc);
               } else {
                 count++;
@@ -1849,7 +1846,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           if (byID.size > 0) {
             throw new Error(
               `hydrateUnchangedQueries batch ended before final for ` +
-                `${[...byID.keys()].join(', ')}`,
+                `${[...byID.keys()].join(", ")}`,
             );
           }
         },
@@ -1869,18 +1866,18 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       transformedAst,
     } of transformedQueries) {
       const query = cvr.queries[queryID];
-      const queryName = query.type === 'custom' ? query.name : undefined;
+      const queryName = query.type === "custom" ? query.name : undefined;
       const timer = new TimeSliceTimer(lc);
       let count = 0;
       await startAsyncSpan(
         tracer,
-        'vs.#hydrateUnchangedQueries.addQuery',
-        async span => {
-          span.setAttribute('queryHash', queryID);
-          span.setAttribute('transformationHash', transformationHash);
-          span.setAttribute('table', transformedAst.table);
+        "vs.#hydrateUnchangedQueries.addQuery",
+        async (span) => {
+          span.setAttribute("queryHash", queryID);
+          span.setAttribute("transformationHash", transformationHash);
+          span.setAttribute("table", transformedAst.table);
           if (queryName !== undefined) {
-            span.setAttribute('queryName', queryName);
+            span.setAttribute("queryName", queryName);
           }
           for await (const change of await this.#pipelines.addQuery(
             transformationHash,
@@ -1889,8 +1886,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             await timer.start(),
             queryName,
           )) {
-            if (change === 'yield') {
-              await timer.yieldProcess('yield in hydrateUnchangedQueries');
+            if (change === "yield") {
+              await timer.yieldProcess("yield in hydrateUnchangedQueries");
             } else {
               count++;
             }
@@ -1915,12 +1912,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   #processTransformedCustomQueries(
     lc: LogContext,
     transformedCustomQueries:
-      | (TransformedAndHashed | ErroredQuery)[]
-      | TransformFailedBody,
+      (TransformedAndHashed | ErroredQuery)[] | TransformFailedBody,
     cb: (q: TransformedAndHashed) => void,
     customQueryMap: Map<string, CustomQueryRecord>,
   ): string[] {
-    if ('kind' in transformedCustomQueries) {
+    if ("kind" in transformedCustomQueries) {
       this.#sendQueryTransformErrorToClients(
         customQueryMap,
         transformedCustomQueries,
@@ -1931,8 +1927,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     const appQueryErrors: ErroredQuery[] = [];
 
     for (const q of transformedCustomQueries) {
-      if ('error' in q) {
-        const errorMessage = `Error transforming custom query ${q.name}: ${q.error}${q.details ? ` ${JSON.stringify(q.details)}` : ''}`;
+      if ("error" in q) {
+        const errorMessage = `Error transforming custom query ${q.name}: ${q.error}${q.details ? ` ${JSON.stringify(q.details)}` : ""}`;
         lc.warn?.(errorMessage, q);
         appQueryErrors.push(q);
         continue;
@@ -1941,7 +1937,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     }
 
     this.#sendQueryTransformErrorToClients(customQueryMap, appQueryErrors);
-    return appQueryErrors.map(q => q.id);
+    return appQueryErrors.map((q) => q.id);
   }
 
   #sendQueryTransformErrorToClients(
@@ -1956,13 +1952,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           q,
           `got an error for query ${queryID} that does not map back to a custom query`,
         );
-        Object.keys(q.clientState).forEach(id => clientIds.add(id));
+        Object.keys(q.clientState).forEach((id) => clientIds.add(id));
       }
       return clientIds;
     };
 
     // send the transform failed error to each affected client
-    if ('queryIDs' in errorOrErrors) {
+    if ("queryIDs" in errorOrErrors) {
       for (const clientId of getAffectedClientIDs(errorOrErrors.queryIDs)) {
         this.#clients
           .get(clientId)
@@ -1991,7 +1987,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
   #addQueryMaterializationServerMetric(queryID: string, elapsed: number) {
     this.#inspectorDelegate.addMetric(
-      'query-materialization-server',
+      "query-materialization-server",
       elapsed,
       queryID,
     );
@@ -2012,11 +2008,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     connCtx: ConnectionContext | undefined,
     driftedQueryIDs: Set<string> = new Set(),
   ) {
-    return startAsyncSpan(tracer, 'vs.#syncQueryPipelineSet', async span => {
-      span.setAttribute('clientGroupID', this.id);
+    return startAsyncSpan(tracer, "vs.#syncQueryPipelineSet", async (span) => {
+      span.setAttribute("clientGroupID", this.id);
       assert(
         this.#pipelines.initialized(),
-        'pipelines must be initialized (syncQueryPipelineSet)',
+        "pipelines must be initialized (syncQueryPipelineSet)",
       );
 
       if (this.#ttlClock === undefined) {
@@ -2049,18 +2045,18 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         connCtx ?? this.connContextManager.mustGetBackgroundConnectionContext();
 
       for (const [id, query] of cvrQueryEntires) {
-        if (query.type === 'custom') {
+        if (query.type === "custom") {
           // This should always match, no?
-          assert(id === query.id, 'custom query id mismatch');
+          assert(id === query.id, "custom query id mismatch");
           customQueries.set(id, query);
         } else {
-          otherQueries.push({id, query});
+          otherQueries.push({ id, query });
         }
       }
 
-      for (const {id, query: origQuery} of otherQueries) {
+      for (const { id, query: origQuery } of otherQueries) {
         // This should always match, no?
-        assert(id === origQuery.id, 'query id mismatch');
+        assert(id === origQuery.id, "query id mismatch");
         const transformed = transformAndHashQuery(
           lc,
           origQuery.id,
@@ -2068,10 +2064,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           must(this.#pipelines.currentPermissions()).permissions ?? {
             tables: {},
           },
-          resolvedConnCtx.auth?.type === 'jwt'
+          resolvedConnCtx.auth?.type === "jwt"
             ? resolvedConnCtx.auth
             : undefined,
-          origQuery.type === 'internal',
+          origQuery.type === "internal",
         );
         transformedQueries.push({
           id,
@@ -2082,17 +2078,17 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
       if (customQueries.size > 0 && !this.#customQueryTransformer) {
         lc.warn?.(
-          'Custom/named queries were requested but no `ZERO_QUERY_URL` is configured for Zero Cache.',
+          "Custom/named queries were requested but no `ZERO_QUERY_URL` is configured for Zero Cache.",
         );
       }
 
       let erroredQueryIDs: string[] | undefined;
       const customQueriesToTransform =
-        customQueryTransformMode === 'all'
+        customQueryTransformMode === "all"
           ? [...customQueries.values()]
-          : (customQueryTransformMode satisfies 'missing') &&
+          : (customQueryTransformMode satisfies "missing") &&
             [...customQueries.values()].filter(
-              q => !this.#pipelines.queries().has(q.id),
+              (q) => !this.#pipelines.queries().has(q.id),
             );
       const customQueryTransformer = this.#customQueryTransformer;
       if (customQueryTransformer && customQueriesToTransform.length > 0) {
@@ -2104,7 +2100,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         try {
           transformedCustomQueries = await this.#runPriorityOp(
             lc,
-            '#syncQueryPipelineSet transforming custom queries',
+            "#syncQueryPipelineSet transforming custom queries",
             () =>
               customQueryTransformer.transform(
                 resolvedConnCtx,
@@ -2114,10 +2110,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
           // Check if transform failed entirely (HTTP error or server-side failure).
           // This should disconnect the client and keep existing pipelines intact.
-          if (transformedCustomQueries.kind === 'failed') {
+          if (transformedCustomQueries.kind === "failed") {
             throw new ProtocolErrorWithLevel(
               transformedCustomQueries.result,
-              'warn',
+              "warn",
             );
           } else {
             // If the transform wasn't cached, we mark the connection as validated.
@@ -2130,10 +2126,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
                 transformedCustomQueries.validation,
               );
             }
-            this.#queryTransformations.add(1, {result: 'success'});
+            this.#queryTransformations.add(1, { result: "success" });
           }
         } catch (e) {
-          this.#queryTransformations.add(1, {result: 'error'});
+          this.#queryTransformations.add(1, { result: "error" });
           throw e;
         } finally {
           const transformDuration = performance.now() - transformStart;
@@ -2196,19 +2192,19 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
       const removeQueriesQueryIds: Set<string> = new Set([
         ...Object.values(cvr.queries)
-          .filter(q => expired(ttlClock, q))
-          .map(q => q.id),
+          .filter((q) => expired(ttlClock, q))
+          .map((q) => q.id),
         ...(erroredQueryIDs || []),
       ]);
       const addQueries = transformedQueries
-        .map(({id, origQuery, transformed}) => ({
+        .map(({ id, origQuery, transformed }) => ({
           id,
           ast: transformed.transformedAst,
           transformationHash: transformed.transformationHash,
-          name: origQuery.type === 'custom' ? origQuery.name : undefined,
+          name: origQuery.type === "custom" ? origQuery.name : undefined,
         }))
         .filter(
-          q =>
+          (q) =>
             !removeQueriesQueryIds.has(q.id) &&
             this.#pipelines.queries().get(q.id)?.transformationHash !==
               q.transformationHash,
@@ -2225,10 +2221,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       for (const q of addQueries) {
         const orig = cvr.queries[q.id];
         lc.debug?.(
-          'ViewSyncer adding query',
+          "ViewSyncer adding query",
           q.ast,
-          'transformed from',
-          orig.type === 'custom' ? orig.name : orig.ast,
+          "transformed from",
+          orig.type === "custom" ? orig.name : orig.ast,
         );
       }
 
@@ -2237,7 +2233,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           lc,
           cvr,
           addQueries,
-          Array.from(removeQueriesQueryIds, id => ({id})),
+          Array.from(removeQueriesQueryIds, (id) => ({ id })),
           driftedQueryIDs,
         );
       } else {
@@ -2257,7 +2253,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
     let record = this.#queryReplacements.get(queryID);
     if (!record) {
-      record = {count: 1, windowStart: now};
+      record = { count: 1, windowStart: now };
       this.#queryReplacements.set(queryID, record);
       return;
     }
@@ -2265,7 +2261,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     // If outside the time window, delete the old entry and create a new one
     if (now - record.windowStart > THRASH_WINDOW_MS) {
       this.#queryReplacements.delete(queryID);
-      this.#queryReplacements.set(queryID, {count: 1, windowStart: now});
+      this.#queryReplacements.set(queryID, { count: 1, windowStart: now });
       return;
     }
 
@@ -2289,13 +2285,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       transformationHash: string;
       name?: string | undefined;
     }[],
-    removeQueries: {id: string}[],
+    removeQueries: { id: string }[],
     driftedQueryIDs: Set<string> = new Set(),
   ): Promise<void> {
-    return startAsyncSpan(tracer, 'vs.#addAndRemoveQueries', async () => {
+    return startAsyncSpan(tracer, "vs.#addAndRemoveQueries", async () => {
       assert(
         addQueries.length > 0 || removeQueries.length > 0,
-        'Must have queries to add or remove',
+        "Must have queries to add or remove",
       );
       const start = performance.now();
 
@@ -2314,7 +2310,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // awaitGoInit below happens after the updater exists, too late).
       await this.#pipelines.awaitGoInit();
       const stateVersion = this.#pipelines.hydrateVersion();
-      lc = lc.withContext('stateVersion', stateVersion);
+      lc = lc.withContext("stateVersion", stateVersion);
       lc.info?.(`hydrating ${addQueries.length} queries`);
 
       const updater = new CVRQueryDrivenUpdater(
@@ -2322,7 +2318,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         cvr,
         stateVersion,
         this.#pipelines.replicaVersion,
-        queryID => this.#pipelines.rowSetSignature(queryID),
+        (queryID) => this.#pipelines.rowSetSignature(queryID),
       );
 
       // For queries being re-executed solely due to rowSetSignature drift
@@ -2330,7 +2326,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // configVersion. Force a bump so the row diff produced by received()
       // gets propagated to the client via a poke. Must happen before
       // startPoke so the pokers see the final cookie version.
-      if (addQueries.some(q => driftedQueryIDs.has(q.id))) {
+      if (addQueries.some((q) => driftedQueryIDs.has(q.id))) {
         updater.ensureNewVersion();
       }
 
@@ -2338,7 +2334,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       try {
         // Note: This kicks off background PG queries for CVR data associated with the
         // executed and removed queries.
-        const {queryPatches, newVersion} = updater.trackQueries(
+        const { queryPatches, newVersion } = updater.trackQueries(
           lc,
           addQueries,
           removeQueries,
@@ -2383,7 +2379,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           // yield each query's RowChanges to the WebSocket pokers AS SOON as
           // Go finishes that query — instead of waiting for the slowest one
           // in the batch. Tail-latency win for batches with uneven hydrate
-          // cost (REVIEW-final perf-opt streaming).
+          // cost.
           if (pipelines.canBatchHydrate && addQueries.length > 0) {
             const batchStart = performance.now();
             const byID = new Map<string, (typeof addQueries)[number]>();
@@ -2396,7 +2392,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               timingMs,
               final,
             } of pipelines.goHydrateBatchStream(
-              addQueries.map(q => ({
+              addQueries.map((q) => ({
                 transformationHash: q.transformationHash,
                 queryID: q.id,
                 ast: q.ast,
@@ -2409,7 +2405,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               const q = byID.get(queryID);
               if (!q) continue;
               const consumeStart = performance.now();
-              yield* changes as Iterable<RowChange | 'yield'>;
+              yield* changes as Iterable<RowChange | "yield">;
               const consumeElapsed = performance.now() - consumeStart;
               // Per-chunk streaming: this loop body runs once per CHUNK, so the
               // yield* above delivers each chunk's rows to the pokers as soon as
@@ -2429,7 +2425,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               // compute, which is the span #hydrationTime measures on the TS
               // path. Recording this (not the TS-side consumption of
               // already-computed Go rows) keeps hydration_time apples-to-apples
-              // across engines; the old code recorded consumeElapsed
+              // across engines; consumeElapsed was recorded
               // for Go user queries, which excluded Go's own compute and
               // understated Go.
               const computeMs = timingMs ?? consumeElapsed;
@@ -2437,12 +2433,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               goComputeMs += computeMs;
               self.#addQueryMaterializationServerMetric(q.id, computeMs);
               if (computeMs > slowHydrateThreshold) {
-                lc.warn?.('Slow query materialization', computeMs, q.ast);
+                lc.warn?.("Slow query materialization", computeMs, q.ast);
               }
-              manualSpan(tracer, 'vs.addAndConsumeQuery', computeMs, {
+              manualSpan(tracer, "vs.addAndConsumeQuery", computeMs, {
                 hash: q.id,
                 transformationHash: q.transformationHash,
-                ...(q.name !== undefined && {name: q.name}),
+                ...(q.name !== undefined && { name: q.name }),
               });
               count++;
             }
@@ -2467,11 +2463,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
           for (const q of addQueries) {
             let queryLC = lc
-              .withContext('hash', q.id)
-              .withContext('queryHash', q.id)
-              .withContext('transformationHash', q.transformationHash);
+              .withContext("hash", q.id)
+              .withContext("queryHash", q.id)
+              .withContext("transformationHash", q.transformationHash);
             if (q.name !== undefined) {
-              queryLC = queryLC.withContext('queryName', q.name);
+              queryLC = queryLC.withContext("queryName", q.name);
             }
             queryLC.debug?.(`adding pipeline for query`, q.ast);
 
@@ -2485,7 +2481,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             const iterable = result instanceof Promise ? await result : result;
             let queryTotal = 0;
             for await (const c of iterable) {
-              if (c !== 'yield') {
+              if (c !== "yield") {
                 queryTotal++;
               }
               yield c;
@@ -2497,12 +2493,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             self.#inspectorDelegate.addQuery(q.id, q.ast);
 
             if (elapsed > slowHydrateThreshold) {
-              queryLC.warn?.('Slow query materialization', elapsed, q.ast);
+              queryLC.warn?.("Slow query materialization", elapsed, q.ast);
             }
-            manualSpan(tracer, 'vs.addAndConsumeQuery', elapsed, {
+            manualSpan(tracer, "vs.addAndConsumeQuery", elapsed, {
               hash: q.id,
               transformationHash: q.transformationHash,
-              ...(q.name !== undefined && {name: q.name}),
+              ...(q.name !== undefined && { name: q.name }),
             });
           }
           hydrations.add(1);
@@ -2520,7 +2516,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
         await startAsyncSpan(
           tracer,
-          'vs.#syncQueryPipelineSet.deleteUnreferencedRows',
+          "vs.#syncQueryPipelineSet.deleteUnreferencedRows",
           async () => {
             for (const patch of await updater.deleteUnreferencedRows(lc)) {
               await activePokers.addPatch(patch);
@@ -2538,12 +2534,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           lc,
           cvr,
           finalVersion,
-          addQueries.map(q => q.id),
+          addQueries.map((q) => q.id),
           activePokers,
         );
 
         // Signal clients to commit.
-        await startAsyncSpan(tracer, 'vs.#syncQueryPipelineSet.pokeEnd', () =>
+        await startAsyncSpan(tracer, "vs.#syncQueryPipelineSet.pokeEnd", () =>
           activePokers.end(finalVersion),
         );
 
@@ -2585,14 +2581,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     excludeQueryHashes: string[] = [],
     usePokers?: PokeHandler,
   ) {
-    return startAsyncSpan(tracer, 'vs.#catchupClients', async span => {
+    return startAsyncSpan(tracer, "vs.#catchupClients", async (span) => {
       current ??= cvr.version;
       const clients = this.#getClients();
       const pokers = usePokers ?? startPoke(clients, cvr.version);
-      span.setAttribute('numClients', clients.length);
+      span.setAttribute("numClients", clients.length);
 
       const catchupFrom = clients
-        .map(c => c.version())
+        .map((c) => c.version())
         .reduce((a, b) => (cmpVersions(a, b) < 0 ? a : b), cvr.version);
 
       // This is an AsyncGenerator which won't execute until awaited.
@@ -2622,28 +2618,28 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       let rowPatchCount = 0;
       for await (const rows of rowPatches) {
         for (const row of rows) {
-          const {schema, table} = row;
+          const { schema, table } = row;
           const rowKey = row.rowKey as RowKey;
           const toVersion = versionFromString(row.patchVersion);
 
-          const id: RowID = {schema, table, rowKey};
+          const id: RowID = { schema, table, rowKey };
           let patch: RowPatch;
           if (!row.refCounts) {
-            patch = {type: 'row', op: 'del', id};
+            patch = { type: "row", op: "del", id };
           } else {
             const row = must(
               this.#pipelines.getRow(table, rowKey),
               `Missing row ${table}:${stringify(rowKey)}`,
             );
-            const {contents} = contentsAndVersion(row);
-            patch = {type: 'row', op: 'put', id, contents};
+            const { contents } = contentsAndVersion(row);
+            patch = { type: "row", op: "put", id, contents };
           }
-          const patchToVersion = {patch, toVersion};
+          const patchToVersion = { patch, toVersion };
           await pokers.addPatch(patchToVersion);
           rowPatchCount++;
         }
       }
-      span.setAttribute('rowPatchCount', rowPatchCount);
+      span.setAttribute("rowPatchCount", rowPatchCount);
       if (rowPatchCount) {
         lc.debug?.(`sent ${rowPatchCount} row patches`);
       }
@@ -2662,18 +2658,18 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   #processChanges(
     lc: LogContext,
     timer: TimeSliceTimer,
-    changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
+    changes: Iterable<RowChange | "yield"> | AsyncIterable<RowChange | "yield">,
     updater: CVRQueryDrivenUpdater,
     pokers: PokeHandler,
   ) {
-    return startAsyncSpan(tracer, 'vs.#processChanges', async () => {
+    return startAsyncSpan(tracer, "vs.#processChanges", async () => {
       const start = performance.now();
 
       const rows = new CustomKeyMap<RowID, RowUpdate>(rowIDString);
       let total = 0;
 
       const processBatch = () =>
-        startAsyncSpan(tracer, 'processBatch', async () => {
+        startAsyncSpan(tracer, "processBatch", async () => {
           const wallElapsed = performance.now() - start;
           total += rows.size;
           lc.debug?.(
@@ -2683,9 +2679,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
           await startAsyncSpan(
             tracer,
-            'processBatch.flushToClient',
-            async span => {
-              span.setAttribute('patches', patches.length);
+            "processBatch.flushToClient",
+            async (span) => {
+              span.setAttribute("patches", patches.length);
               for (const patch of patches) {
                 await pokers.addPatch(patch);
               }
@@ -2694,18 +2690,18 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           rows.clear();
         });
 
-      await startAsyncSpan(tracer, 'loopingChanges', async span => {
+      await startAsyncSpan(tracer, "loopingChanges", async (span) => {
         for await (const change of changes) {
-          if (change === 'yield') {
-            await timer.yieldProcess('yield in processChanges');
+          if (change === "yield") {
+            await timer.yieldProcess("yield in processChanges");
             continue;
           }
-          const {type, queryID, table, rowKey, row} = change;
-          const rowID: RowID = {schema: '', table, rowKey: rowKey as RowKey};
+          const { type, queryID, table, rowKey, row } = change;
+          const rowID: RowID = { schema: "", table, rowKey: rowKey as RowKey };
 
           let parsedRow = rows.get(rowID);
           if (!parsedRow) {
-            parsedRow = {refCounts: {}};
+            parsedRow = { refCounts: {} };
             rows.set(rowID, parsedRow);
           }
           parsedRow.refCounts[queryID] ??= 0;
@@ -2714,7 +2710,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             // IVM can output multiple versions of a row as it goes through its
             // intermediate stages. Always update the version and contents;
             // the last version will reflect the final state.
-            const {version, contents} = contentsAndVersion(row);
+            const { version, contents } = contentsAndVersion(row);
             parsedRow.version = version;
             parsedRow.contents = contents;
           };
@@ -2741,7 +2737,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         if (rows.size) {
           await processBatch();
         }
-        span.setAttribute('totalRows', total);
+        span.setAttribute("totalRows", total);
       });
     });
   }
@@ -2757,12 +2753,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   #advancePipelines(
     lc: LogContext,
     cvr: CVRSnapshot,
-  ): Promise<'success' | ResetPipelinesSignal> {
-    return startAsyncSpan(tracer, 'vs.#advancePipelines', async span => {
-      span.setAttribute('clientGroupID', this.id);
+  ): Promise<"success" | ResetPipelinesSignal> {
+    return startAsyncSpan(tracer, "vs.#advancePipelines", async (span) => {
+      span.setAttribute("clientGroupID", this.id);
       assert(
         this.#pipelines.initialized(),
-        'pipelines must be initialized (advancePipelines',
+        "pipelines must be initialized (advancePipelines",
       );
       const start = performance.now();
 
@@ -2771,7 +2767,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const advanceResult = this.#pipelines.advance(timer);
       const resolved =
         advanceResult instanceof Promise ? await advanceResult : advanceResult;
-      // F1/F2/F3 keystone: in Go-primary mode advance() RETURNS a
+      // in Go-primary mode advance() RETURNS a
       // ResetPipelinesSignal (instead of throwing it) when the Go backend is
       // unavailable, a user delta was dropped, or a truncate/schema-change
       // aborted the diff. Returning it here (rather than letting it escape as a
@@ -2780,10 +2776,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       if (resolved instanceof ResetPipelinesSignal) {
         return resolved;
       }
-      const {version, numChanges, changes, tsVersion, goVersion} = resolved;
-      lc = lc.withContext('newVersion', version);
+      const { version, numChanges, changes, tsVersion, goVersion } = resolved;
+      lc = lc.withContext("newVersion", version);
 
-      // P2c: in Go-primary trigger mode `version` is the RECONCILED watermark
+      // in Go-primary trigger mode `version` is the RECONCILED watermark
       // min(tsVersion, goVersion) — user-query data comes from Go (at goVersion)
       // while internal/control-plane data comes from TS (at tsVersion). The
       // CVR stateVersion is a completeness floor, so it must never exceed either
@@ -2801,11 +2797,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         );
       }
 
-      // H2: the reconciled Go-primary watermark must never regress below the
+      // the reconciled Go-primary watermark must never regress below the
       // committed CVR version — CVRQueryDrivenUpdater asserts `stateVersion >=
       // cvr.version.stateVersion` and throws a bare Error otherwise, which would
       // escape as an unrecoverable CG teardown. This should be unreachable (each
-      // authority only advances, and H1 removed the full-V_ts reset excursion),
+      // authority only advances, and removed the full-V_ts reset excursion),
       // but if a non-monotone reconcile ever slips through, convert it into a
       // recoverable full re-hydrate instead of crashing.
       if (version < cvr.version.stateVersion) {
@@ -2815,17 +2811,17 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         );
         return new ResetPipelinesSignal(
           `watermark regression ${version} < ${cvr.version.stateVersion}`,
-          'watermark-regression',
+          "watermark-regression",
         );
       }
 
-      // Probably need a new updater type. CVRAdvancementUpdater?
+      // TODO: consider a dedicated CVR advancement updater type.
       const updater = new CVRQueryDrivenUpdater(
         this.#cvrStore,
         cvr,
         version,
         this.#pipelines.replicaVersion,
-        queryID => this.#pipelines.rowSetSignature(queryID),
+        (queryID) => this.#pipelines.rowSetSignature(queryID),
       );
       // Gen-6 (advance-path equality): when the reconciled watermark lands
       // exactly ON the committed CVR stateVersion (Go pinned at the CVR
@@ -2870,7 +2866,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         const finalVersion = this.#cvr.version;
 
         // Signal clients to commit.
-        await startAsyncSpan(tracer, 'vs.#advancePipelines.pokeEnd', () =>
+        await startAsyncSpan(tracer, "vs.#advancePipelines.pokeEnd", () =>
           pokers.end(finalVersion),
         );
       } catch (e) {
@@ -2888,7 +2884,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         `finished processing advancement of ${numChanges} changes ((process: ${totalProcessTime} ms, wall: ${wallTime} ms))`,
       );
       this.#transactionAdvanceTime.recordMs(totalProcessTime);
-      return 'success';
+      return "success";
     });
   }
 
@@ -2928,8 +2924,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     const attemptRetransform = async (connCtx: ConnectionContext) => {
       await this.#syncQueryPipelineSet(
         lc,
-        must(this.#cvr, 'cvr missing during auth maintenance retransform'),
-        'all',
+        must(this.#cvr, "cvr missing during auth maintenance retransform"),
+        "all",
         connCtx,
       );
       this.connContextManager.markBackgroundRetransformSuccess(
@@ -2947,7 +2943,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // The timer may have fired using an old deadline. If there is no longer a
       // selected validated connection, shared background retransform is simply
       // unschedulable until one exists again.
-      lc.debug?.('Skipping background retransform with no selected connection');
+      lc.debug?.("Skipping background retransform with no selected connection");
       return;
     }
 
@@ -2959,7 +2955,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         if (isProtocolError(e)) {
           if (isAuthErrorBody(e.errorBody)) {
             lc.warn?.(
-              'Background retransform auth failed; failing connection and searching for replacement',
+              "Background retransform auth failed; failing connection and searching for replacement",
               {
                 clientID: backgroundConnCtx.clientID,
                 message: e.message,
@@ -2968,13 +2964,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             this.#failMaintenanceConnection(backgroundConnCtx, e);
           } else if (isTransformFailedError(e)) {
             lc.warn?.(
-              'Background retransform failed; deferring auth maintenance',
+              "Background retransform failed; deferring auth maintenance",
               {
                 clientID: backgroundConnCtx.clientID,
                 message: e.message,
               },
             );
-            this.connContextManager.deferMaintenance('retransform');
+            this.connContextManager.deferMaintenance("retransform");
             return;
           }
         } else {
@@ -2989,13 +2985,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         // there is no credential left that can safely drive shared background
         // reads.
         lc.debug?.(
-          'No replacement connection available for background retransform',
+          "No replacement connection available for background retransform",
         );
         return;
       }
 
       lc.debug?.(
-        'Retrying background retransform with replacement connection',
+        "Retrying background retransform with replacement connection",
         {
           clientID: replacementConnCtx.clientID,
           wsID: replacementConnCtx.wsID,
@@ -3010,12 +3006,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       let validation: ConnectionValidation | undefined = undefined;
       if (this.#customQueryTransformer) {
         const response = await this.#customQueryTransformer.validate(connCtx);
-        if (response.kind === 'TransformFailed') {
-          throw new ProtocolErrorWithLevel(response, 'warn');
+        if (response.kind === "TransformFailed") {
+          throw new ProtocolErrorWithLevel(response, "warn");
         }
         validation = response.validation;
       } else {
-        validation = {kind: 'client-fallback'};
+        validation = { kind: "client-fallback" };
       }
 
       this.connContextManager.validateConnection(
@@ -3027,7 +3023,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     } catch (e) {
       if (isProtocolError(e) && isAuthErrorBody(e.errorBody)) {
         this.#lc.warn?.(
-          'Connection auth validation failed; invalidating connection',
+          "Connection auth validation failed; invalidating connection",
           {
             clientID: connCtx.clientID,
             wsID: connCtx.wsID,
@@ -3059,7 +3055,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   }
 
   stop(): Promise<void> {
-    this.#lc.info?.('stopping view syncer');
+    this.#lc.info?.("stopping view syncer");
     this.connContextManager.setSharedRetransformReady(false);
     this.#initialized.reject(shutdownBeforeInitializationError());
     this.#stateChanges.cancel();
@@ -3093,7 +3089,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
    * This should only be used in tests that don't call initConnection().
    */
   markInitialized() {
-    this.#initialized.resolve('initialized');
+    this.#initialized.resolve("initialized");
   }
 }
 
@@ -3102,7 +3098,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 // Default 10000 matches Go IVM's hydrateChunkSize / advanceChunkSize so
 // the streaming chunk boundary aligns with the CVR flush boundary.
 const CURSOR_PAGE_SIZE = parseInt(
-  process.env.ZERO_CURSOR_PAGE_SIZE ?? '10000',
+  process.env.ZERO_CURSOR_PAGE_SIZE ?? "10000",
   10,
 );
 
@@ -3126,14 +3122,14 @@ function yieldProcess(_lc: LogContext) {
 }
 
 function contentsAndVersion(row: Row) {
-  const {[ZERO_VERSION_COLUMN_NAME]: version, ...contents} = row;
-  if (typeof version !== 'string' || version.length === 0) {
+  const { [ZERO_VERSION_COLUMN_NAME]: version, ...contents } = row;
+  if (typeof version !== "string" || version.length === 0) {
     throw new Error(`Invalid _0_version in ${stringify(row)}`);
   }
-  return {contents, version};
+  return { contents, version };
 }
 
-const NEW_CVR_VERSION = {stateVersion: '00'};
+const NEW_CVR_VERSION = { stateVersion: "00" };
 
 function checkClientAndCVRVersions(
   client: NullableCVRVersion,
@@ -3144,7 +3140,7 @@ function checkClientAndCVRVersions(
     cmpVersions(client, NEW_CVR_VERSION) > 0
   ) {
     // CVR is empty but client is not.
-    throw new ClientNotFoundError('Client not found');
+    throw new ClientNotFoundError("Client not found");
   }
 
   if (cmpVersions(client, cvr) > 0) {
@@ -3172,12 +3168,12 @@ function expired(
   ttlClock: TTLClock,
   q: InternalQueryRecord | ClientQueryRecord | CustomQueryRecord,
 ): boolean {
-  if (q.type === 'internal') {
+  if (q.type === "internal") {
     return false;
   }
 
   for (const clientState of Object.values(q.clientState)) {
-    const {ttl, inactivatedAt} = clientState;
+    const { ttl, inactivatedAt } = clientState;
     if (inactivatedAt === undefined) {
       return false;
     }
@@ -3194,7 +3190,7 @@ function expired(
 }
 
 function hasExpiredQueries(cvr: CVRSnapshot): boolean {
-  const {ttlClock} = cvr;
+  const { ttlClock } = cvr;
   for (const q of Object.values(cvr.queries)) {
     if (expired(ttlClock, q)) {
       return true;
@@ -3232,12 +3228,12 @@ export class TimeSliceTimer {
   }
 
   #startLap() {
-    assert(this.#start === 0, 'already running');
+    assert(this.#start === 0, "already running");
     this.#start = performance.now();
   }
 
   elapsedLap() {
-    assert(this.#start !== 0, 'not running');
+    assert(this.#start !== 0, "not running");
     return performance.now() - this.#start;
   }
 
@@ -3258,7 +3254,7 @@ export class TimeSliceTimer {
   }
 
   #stopLap() {
-    assert(this.#start !== 0, 'not running');
+    assert(this.#start !== 0, "not running");
     this.#total += performance.now() - this.#start;
     this.#start = 0;
   }

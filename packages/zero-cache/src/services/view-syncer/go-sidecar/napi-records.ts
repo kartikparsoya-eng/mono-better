@@ -22,15 +22,15 @@
 //
 // All integers little-endian. reqID is f64 (RPC ids are JS numbers).
 
-import type {RowChange} from './go-ivm-client.ts';
-import {unpack} from './go-ivm-client.ts';
+import type { RowChange } from "./go-ivm-client.ts";
+import { unpack } from "./go-ivm-client.ts";
 
 /** Delivery kinds on the addon's single ordered queue. */
 export const DELIVERY_KIND_FRAME = 1;
 export const DELIVERY_KIND_GROUP_DEF = 2;
 export const DELIVERY_KIND_ROW = 3;
 /**
- * Host death (A3): the in-process Go host's pump died unexpectedly — no
+ * Host death: the in-process Go host's pump died unexpectedly — no
  * response will ever arrive again. Payload is a UTF-8 reason string, NOT a
  * record (no reqID header). Emitted by go-ivm abi.go's death watcher;
  * never emitted on deliberate shutdown. ABI v2.
@@ -56,7 +56,7 @@ export const DELIVERY_KIND_BATCH = 5;
  */
 export function* iterateBatch(
   payload: Buffer,
-): IterableIterator<{kind: number; payload: Buffer}> {
+): IterableIterator<{ kind: number; payload: Buffer }> {
   let off = 0;
   while (off < payload.length) {
     if (off + 5 > payload.length) {
@@ -72,7 +72,7 @@ export function* iterateBatch(
         `batch sub-record body truncated at offset ${off} (want ${len} bytes, have ${payload.length - off})`,
       );
     }
-    yield {kind, payload: payload.subarray(off, off + len)};
+    yield { kind, payload: payload.subarray(off, off + len) };
     off += len;
   }
 }
@@ -149,18 +149,15 @@ class RecordReader {
   i64(): number | bigint {
     const v = this.#view.getBigInt64(this.off, true);
     this.off += 8;
-    // Mirror the FRAME plane exactly — NOT "safe integers become numbers"
-    // (user's-audit BigInt decode edge; the old MAX_SAFE_INTEGER split here
-    // was wrong about msgpackr): Go's frame encoder (vmihailenco
-    // UseCompactInts) picks the smallest wire width, so values in
-    // [-2^31, 2^32) ship as ≤32-bit ints that msgpackr decodes as Number,
-    // while anything wider ships as int64/uint64 (0xd3/0xcf) that msgpackr
-    // (mono's options: useBigIntExtension:false, default int64AsType)
-    // decodes as BigInt — INCLUDING values inside the safe-integer range,
-    // e.g. millisecond timestamps. Row-plane values must be
-    // indistinguishable from frame-decoded ones downstream (canonical
-    // JSON, CVR row serialization, shadow compare), so apply the same
-    // width boundary, not Number.MAX_SAFE_INTEGER.
+    // Mirror the FRAME plane's int decoding: Go's frame encoder
+    // (vmihailenco UseCompactInts) picks the smallest wire width, so
+    // values in [-2^31, 2^32) ship as ≤32-bit ints that msgpackr decodes
+    // as Number, while anything wider ships as int64/uint64 (0xd3/0xcf)
+    // that msgpackr (mono's options: useBigIntExtension:false, default
+    // int64AsType) decodes as BigInt — including values inside the
+    // safe-integer range (e.g. millisecond timestamps). Row-plane
+    // values must be indistinguishable from frame-decoded ones
+    // downstream, so apply the same width boundary.
     return v >= -2147483648n && v <= 4294967295n ? Number(v) : v;
   }
 }
@@ -184,7 +181,7 @@ export function decodeGroupDef(payload: Buffer): RowGroupDef {
   if (r.off !== r.length) {
     throw new Error(`groupDef record: ${r.length - r.off} trailing bytes`);
   }
-  return {reqID, groupID, queryID, table, cols, pk};
+  return { reqID, groupID, queryID, table, cols, pk };
 }
 
 /**
@@ -196,7 +193,7 @@ export function decodeGroupDef(payload: Buffer): RowGroupDef {
 export function decodeRowRecord(
   payload: Buffer,
   groupOf: (reqID: number, groupID: number) => RowGroupDef | undefined,
-): {reqID: number; change: RowChange} {
+): { reqID: number; change: RowChange } {
   const r = new RecordReader(payload);
   const reqID = r.f64();
   const groupID = r.u32();
@@ -295,7 +292,7 @@ export class RowGroupRegistry {
     return def;
   }
 
-  decodeRow(payload: Buffer): {reqID: number; change: RowChange} {
+  decodeRow(payload: Buffer): { reqID: number; change: RowChange } {
     return decodeRowRecord(payload, (reqID, groupID) =>
       this.#byReq.get(reqID)?.get(groupID),
     );

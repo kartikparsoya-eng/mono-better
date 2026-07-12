@@ -3,18 +3,17 @@
 // PipelineDriver remains the single source of truth for state, snapshots,
 // permissions, and the row-set signature; this class only sees ASTs and diffs.
 //
-// Restart safety: the sidecar client is resolved through SidecarManager on
-// every call, and a restart subscription invalidates #initialized so the
-// next advance/hydrate re-inits via getCurrentTables before proceeding.
-// Init is schema-only: the table-mode sidecar reads rows from SQLite
-// directly.
+// The sidecar client is resolved through SidecarManager on every call, and a
+// restart subscription invalidates #initialized so the next advance/hydrate
+// re-inits via getCurrentTables before proceeding. Init is schema-only: the
+// table-mode sidecar reads rows from SQLite directly.
 //
 // Feature flag: ZERO_GO_SIDECAR_ENABLED=true.
 
-import type {ZeroConfig} from '../../../config/zero-config.ts';
-import {RetryableAdvanceError} from './go-ivm-client.ts';
-import type {AdvanceToHeadStreamChunk, TableData} from './go-ivm-client.ts';
-import type {SidecarManager} from './sidecar-manager.ts';
+import type { ZeroConfig } from "../../../config/zero-config.ts";
+import { RetryableAdvanceError } from "./go-ivm-client.ts";
+import type { AdvanceToHeadStreamChunk, TableData } from "./go-ivm-client.ts";
+import type { SidecarManager } from "./sidecar-manager.ts";
 
 export type QueryAST = unknown;
 
@@ -22,7 +21,7 @@ export interface TableSchemaSpec {
   columns: Record<
     string,
     {
-      type: 'boolean' | 'number' | 'string' | 'null' | 'json';
+      type: "boolean" | "number" | "string" | "null" | "json";
       optional?: boolean | undefined;
     }
   >;
@@ -30,13 +29,13 @@ export interface TableSchemaSpec {
 }
 
 export type GoBackendLogger = (
-  level: 'info' | 'warn' | 'error',
+  level: "info" | "warn" | "error",
   msg: string,
   err?: unknown,
 ) => void;
 
 /** Callback returning the queries this backend should re-register after a restart-driven re-init. */
-export type GetCurrentQueries = () => {queryID: string; ast: unknown}[];
+export type GetCurrentQueries = () => { queryID: string; ast: unknown }[];
 
 export class GoComputeBackend {
   readonly #manager: SidecarManager;
@@ -59,20 +58,19 @@ export class GoComputeBackend {
   #sidecarInitEpoch = -1;
   /**
    * The stateVersion Go's per-CG snapshotter pinned at on the LAST
-   * successful init — the frame the first hydrate reads (gen-6). The
+   * successful init — the frame the first hydrate reads. The
    * PipelineDriver maxes this into the CVR hydrate-updater stateVersion so
    * rows Go hydrates from a frame ahead of TS's own snapshot pin are never
    * received under an unbumped CVR version (cvr.ts:778 teardown).
-   * Undefined until init succeeds or against a pre-gen-6 sidecar.
+   * Undefined until init succeeds or against a prior sidecar.
    */
   #pinnedVersion: string | undefined = undefined;
   /** Promise resolving when the *current* epoch's init finishes (resolve OR reject). */
   #currentInitPromise: Promise<void> | null = null;
   /**
    * In-flight restart promise. While set, advance/hydrate calls await it
-   * before issuing the RPC — prevents advance-against-empty-engine race
-   * during the window between source re-init and pipeline re-attach
-   * (REVIEW-final MED-CROSS-6 + restart correctness gap).
+   * before issuing the RPC — prevents an advance-against-empty-engine race
+   * during the window between source re-init and pipeline re-attach.
    */
   #restartGate: Promise<void> | null = null;
   #unsubscribe: (() => void) | null = null;
@@ -94,23 +92,22 @@ export class GoComputeBackend {
     this.#getCurrentTables = getCurrentTables;
     this.#getCurrentQueries = getCurrentQueries;
     this.#pullWindow = Math.max(1, Math.floor(options?.pullWindow ?? 64));
-    // O2: send the appID on the advanceToHead wire so the sidecar uses the
+    // Send the appID on the advanceToHead wire so the sidecar uses the
     // SHARD's appID for its snapshotter's permissions-table watch instead of
     // relying solely on the GO_IVM_APP_ID env (which an externally-managed
     // owner could set inconsistently). Empty string ⇒ Go falls back to its env.
-    this.#appID = options?.appID ?? '';
+    this.#appID = options?.appID ?? "";
     // No console fallback: callers without a logger get silence by design.
     const noop: GoBackendLogger = () => {};
     const raw = options?.logger ?? noop;
     // Wrap caller's logger to prepend cgID on every line. Without this, drift
     // recovery / restart / breaker logs from N concurrent backends look
     // identical in the syncer's stdout — operators have no way to tell which
-    // CG is misbehaving. Pre-fix the only cgID hint came from the message
-    // bodies where authors happened to include it; many lines didn't.
+    // CG is misbehaving.
     const cgTag = `[cg=${clientGroupID}]`;
     this.#log = (level, msg, err) => raw(level, `${cgTag} ${msg}`, err);
 
-    this.#unsubscribe = manager.onRestart(epoch =>
+    this.#unsubscribe = manager.onRestart((epoch) =>
       this.#onSidecarRestart(epoch),
     );
   }
@@ -120,7 +117,7 @@ export class GoComputeBackend {
   }
 
   /**
-   * Go's snapshotter pin from the last successful init (gen-6). Only
+   * Go's snapshotter pin from the last successful init . Only
    * meaningful while {@link initialized}; monotone across re-inits (a
    * re-init pins at the then-current head, which only grows).
    */
@@ -158,7 +155,6 @@ export class GoComputeBackend {
    * Restart awareness: a sidecar restart's onRestart listener replaces
    * #currentInitPromise with the new epoch's init, so case 2 here waits
    * for the NEW one — preventing a stale "ready" mid-restart.
-   * (REVIEW-final HIGH-TS-1.)
    */
   whenInitialized(): Promise<void> {
     // If a restart reinit is in progress, wait for the FULL reinit
@@ -192,26 +188,23 @@ export class GoComputeBackend {
           this.#cgOpts(),
         );
       } catch (err) {
-        this.#log('warn', 'destroy before reset failed (continuing)', err);
+        this.#log("warn", "destroy before reset failed (continuing)", err);
       }
     }
-    // CRIT-5: read the snapshot HERE — after the destroy round-trip and
-    // immediately before reinit — not at schedule time. Capturing it early
-    // (in #scheduleGoReset / #maybeResetGoBackend) meant mutations that
-    // landed during the destroy + network window were missing from the
-    // loaded rows, so the next #snapshotter.advance() diff applied against
-    // state that didn't match the just-loaded data → drift → another reset
-    // → loop. The other #reinitPerCGAndRegisterQueries call sites already
-    // capture via #getCurrentTables() at reinit time; this matches them.
+    // Read the snapshot HERE — after the destroy round-trip and immediately
+    // before reinit — not at schedule time. Capturing it early meant mutations
+    // that landed during the destroy + network window were missing from the
+    // loaded rows, causing drift. The other reinit call sites already capture
+    // via #getCurrentTables() at reinit time; this matches them.
     const tables = this.#getCurrentTables();
     // Full rebuild: init engine + re-register queries. The bare #doInit
     // path that lived here used to leave Go with zero pipelines while TS
     // still had registered queries — every subsequent advance returned
     // empty changes and the client view froze silently. See
     // #reinitPerCGAndRegisterQueries.
-    const ok = await this.#reinitPerCGAndRegisterQueries('reset', tables);
+    const ok = await this.#reinitPerCGAndRegisterQueries("reset", tables);
     if (!ok) {
-      throw new Error('resetEngine: reinit + query re-registration failed');
+      throw new Error("resetEngine: reinit + query re-registration failed");
     }
   }
 
@@ -226,7 +219,7 @@ export class GoComputeBackend {
     final: boolean;
     chunkIndex?: number | undefined;
   }> {
-    return this.hydrateManyStreamPull([{queryID, ast}]);
+    return this.hydrateManyStreamPull([{ queryID, ast }]);
   }
 
   /**
@@ -241,7 +234,7 @@ export class GoComputeBackend {
    * path re-hydrates from a clean slate.
    */
   hydrateManyStreamPull(
-    queries: {queryID: string; ast: QueryAST}[],
+    queries: { queryID: string; ast: QueryAST }[],
   ): AsyncIterableIterator<{
     queryID: string;
     changes: unknown[];
@@ -254,7 +247,7 @@ export class GoComputeBackend {
       this.#clientGroupID,
       queries,
       this.#sidecarInitEpoch,
-      {...this.#cgOpts(), window: this.#pullWindow},
+      { ...this.#cgOpts(), window: this.#pullWindow },
     );
   }
 
@@ -282,7 +275,7 @@ export class GoComputeBackend {
           {
             ...this.#cgOpts(),
             window: this.#pullWindow,
-            ...(abortBudget ? {abortBudget} : {}),
+            ...(abortBudget ? { abortBudget } : {}),
           },
         );
         for await (const chunk of stream) {
@@ -300,19 +293,19 @@ export class GoComputeBackend {
         }
         const delay = Math.round(delaysMs[attempt] * (0.5 + Math.random()));
         this.#log(
-          'warn',
+          "warn",
           `advanceToHeadStream failed clean before streaming; retrying in ` +
             `place (attempt ${attempt + 1}/${delaysMs.length}, ${delay}ms): ` +
             err.message,
         );
-        await new Promise<void>(resolve => setTimeout(resolve, delay));
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
       }
     }
   }
 
   // Pinned cgID for the client's per-group fairness semaphore.
-  #cgOpts(): {clientGroupID: string} {
-    return {clientGroupID: this.#clientGroupID};
+  #cgOpts(): { clientGroupID: string } {
+    return { clientGroupID: this.#clientGroupID };
   }
 
   // Rejects on failure — callers either ignore or surface depending on context.
@@ -328,8 +321,8 @@ export class GoComputeBackend {
   // Resolves when no per-CG recovery is in flight. Callers that dispatch
   // a new query/advance can await this BEFORE deciding TS vs Go, so a
   // brief recovery window doesn't cause a fall-through to TS that
-  // creates a phantom TS pipeline (audit H7). Resolves immediately when
-  // no recovery is active.
+  // creates a phantom TS pipeline. Resolves immediately when no recovery
+  // is active.
   async whenRecovered(): Promise<void> {
     if (this.#restartGate) {
       await this.#restartGate;
@@ -352,7 +345,7 @@ export class GoComputeBackend {
         );
       } catch (err) {
         // Best-effort: the sidecar may already be gone.
-        this.#log('warn', 'destroy failed (ignoring)', err);
+        this.#log("warn", "destroy failed (ignoring)", err);
       }
     }
   }
@@ -377,11 +370,10 @@ export class GoComputeBackend {
       return this.#currentInitPromise;
     }
     // Track the in-flight init so whenInitialized() callers wait for the
-    // CURRENT epoch's init, not a stale resolved promise from a prior
-    // epoch (REVIEW-final HIGH-TS-1).
+    // CURRENT epoch's init, not a stale resolved promise from a prior epoch.
     // Concurrency-cap across backends via the SidecarManager's slot
     // semaphore so a wave of view-syncer startups doesn't stampede SQLite
-    // reads (REVIEW-final MED-CROSS-1).
+    // reads.
     const initPromise = this.#manager.withInitSlot(() => this.#runInit(tables));
     this.#currentInitPromise = initPromise;
     try {
@@ -414,7 +406,7 @@ export class GoComputeBackend {
     }
     const initResult = await client.init(
       this.#clientGroupID,
-      {tables: tablesNoRows},
+      { tables: tablesNoRows },
       this.#cgOpts(),
     );
     // Stash the sidecar's per-cgID epoch so all subsequent mutating RPCs
@@ -426,12 +418,12 @@ export class GoComputeBackend {
     if (initResult.version !== undefined) {
       this.#pinnedVersion = initResult.version;
     } else {
-      // Pre-gen-6 sidecar: the CVR hydrate stamp falls back to TS's own
+      // Prior sidecar: the CVR hydrate stamp falls back to TS's own
       // version and the version-skew window stays open. Loud, once per init.
       this.#log(
-        'warn',
-        'init returned no snapshotter pin version (old sidecar?); ' +
-          'CVR hydrate stamps fall back to the TS snapshot version',
+        "warn",
+        "init returned no snapshotter pin version (older sidecar build?); " +
+          "CVR hydrate stamps fall back to the TS snapshot version",
       );
     }
 
@@ -441,14 +433,14 @@ export class GoComputeBackend {
 
   async #onSidecarRestart(epoch: number): Promise<void> {
     if (this.#destroyed) return;
-    this.#log('info', `sidecar restarted to epoch ${epoch}; re-initializing`);
+    this.#log("info", `sidecar restarted to epoch ${epoch}; re-initializing`);
     this.#currentInitPromise = null;
     const ok = await this.#reinitPerCGAndRegisterQueries(
       `sidecar-restart-epoch-${epoch}`,
       this.#getCurrentTables(),
     );
     if (ok) {
-      this.#log('info', `re-initialized after restart (epoch ${epoch})`);
+      this.#log("info", `re-initialized after restart (epoch ${epoch})`);
     }
     // On failure, the helper already left #initialized=false so
     // PipelineDriver falls back to TS.
@@ -458,13 +450,11 @@ export class GoComputeBackend {
   //   1. #onSidecarRestart  (manager-level restart)
   //   2. resetEngine        (intentional reset from PipelineDriver)
   //
-  // Both paths used to call only #doInit, which loads sources but
-  // does NOT re-register queries — leaving Go with zero pipelines while
-  // TS still had registered queries → every subsequent advance returned
-  // {changes:[], timings:[]} and the client view froze silently with
-  // no error logged anywhere. Only #onSidecarRestart got it right; the
-  // per-CG recovery paths shared the same bug. Centralizing here so the
-  // contract is unified.
+  // Both paths must re-register queries — #doInit alone loads sources but
+  // does NOT re-register queries, leaving Go with zero pipelines while TS
+  // still has registered queries (every subsequent advance returns empty
+  // changes and the client view freezes silently). Centralizing here so
+  // the contract is unified.
   //
   // Concurrency: holds #restartGate for the duration so concurrent
   // advance/hydrate from PipelineDriver await instead of racing the
@@ -490,7 +480,7 @@ export class GoComputeBackend {
 
     this.#initialized = false;
     let resolveGate!: () => void;
-    this.#restartGate = new Promise<void>(resolve => {
+    this.#restartGate = new Promise<void>((resolve) => {
       resolveGate = resolve;
     });
 
@@ -515,24 +505,24 @@ export class GoComputeBackend {
             // pipeline state, but discard rows because TS already owns CVR.
           }
           this.#log(
-            'info',
+            "info",
             `[${reason}] re-registered ${queries.length} queries`,
           );
         } catch (qerr) {
           this.#initialized = false;
-          this.#log('error', `[${reason}] re-register queries failed`, qerr);
+          this.#log("error", `[${reason}] re-register queries failed`, qerr);
           return false;
         }
       } else {
         this.#log(
-          'info',
+          "info",
           `[${reason}] re-init complete (no queries to register)`,
         );
       }
       return true;
     } catch (err) {
       this.#initialized = false;
-      this.#log('error', `[${reason}] re-init failed`, err);
+      this.#log("error", `[${reason}] re-init failed`, err);
       return false;
     } finally {
       this.#restartGate = null;
@@ -548,7 +538,7 @@ export class GoComputeBackend {
 // which is what tests want.
 
 export function isGoSidecarEnabled(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+  config: Pick<ZeroConfig, "goSidecar"> | undefined,
 ): boolean {
   return config?.goSidecar?.enabled === true;
 }
@@ -557,7 +547,7 @@ export function isGoSidecarEnabled(
 // to ≥ 1: W=0 would strand the stream (zero opening credit and no consumer
 // deliveries to trigger top-ups).
 export function goPullWindow(
-  config: Pick<ZeroConfig, 'goSidecar'> | undefined,
+  config: Pick<ZeroConfig, "goSidecar"> | undefined,
 ): number {
   const w = config?.goSidecar?.pullWindow ?? 64;
   return Math.max(1, Math.floor(w));
@@ -571,10 +561,10 @@ export function createGoComputeBackend(
   clientGroupID: string,
   getCurrentTables: () => Record<string, TableData>,
   getCurrentQueries: GetCurrentQueries,
-  options?: {logger?: GoBackendLogger; appID?: string; pullWindow?: number},
+  options?: { logger?: GoBackendLogger; appID?: string; pullWindow?: number },
 ): GoComputeBackend | null {
   try {
-    if (sidecarManager.status !== 'running') return null;
+    if (sidecarManager.status !== "running") return null;
     // Touch getClient to fail-fast if the manager refuses (status race).
     sidecarManager.getClient();
     return new GoComputeBackend(

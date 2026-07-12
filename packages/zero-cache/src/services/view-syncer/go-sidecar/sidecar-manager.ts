@@ -1,38 +1,37 @@
 // Owns the in-process Go engine lifecycle: dlopen via the goivm_napi addon,
-// health-ping + protocol handshake, and terminal-failure handling. One shared
+// health-ping + protocol handshake, and failure handling. One shared
 // GoIVMClient per zero-cache worker. The Go runtime cannot be unloaded or
 // restarted in-process, so there is no restart machinery: any start failure
 // is terminal ('failed' → callers fall back to TS), and a post-start fatal
 // crashes the worker so the supervisor restores a working state.
 
-import {getOrCreateCounter} from '../../../observability/metrics.ts';
-import {GoIVMClient} from './go-ivm-client.ts';
-import {loadGoNapiAddon, type GoNapiAddon} from './napi/index.ts';
+import { getOrCreateCounter } from "../../../observability/metrics.ts";
+import { GoIVMClient } from "./go-ivm-client.ts";
+import { loadGoNapiAddon, type GoNapiAddon } from "./napi/index.ts";
 
 /**
- * D10: Sidecar init-failure counter with {reason} label. Each failure mode
+ * Sidecar init-failure counter with {reason} label. Each failure mode
  * (dlopen failure, ping fail, version mismatch) increments with its own
  * label so dashboards can attribute initial-start failures vs mid-flight
  * crashes.
  */
 const initFailureCounter = getOrCreateCounter(
-  'sync',
-  'ivm.sidecar-init-failure',
-  'Sidecar initial-start attempt failed (label: reason)',
+  "sync",
+  "ivm.sidecar-init-failure",
+  "Sidecar initial-start attempt failed (label: reason)",
 );
 
 /**
  * Wire protocol revision this client expects. Bumped in lockstep with
  * `sidecarProtocolRev` in `go-ivm/cmd/sidecar/main.go`. A mismatch refuses
- * to start the manager (REVIEW-final MED-CROSS-5).
+ * to start the manager.
  */
 const EXPECTED_PROTOCOL_REV = 12;
 
 /**
  * Cold-start init concurrency cap. When N ViewSyncers start simultaneously,
  * they all call `initEngine` against the same engine. Without a cap, the
- * init reads stampede. This semaphore lets only a few proceed at once
- * (REVIEW-final MED-CROSS-1).
+ * init reads stampede. This semaphore lets only a few proceed at once.
  */
 const INIT_CONCURRENCY = 4;
 
@@ -44,14 +43,14 @@ const INIT_CONCURRENCY = 4;
  */
 function classifyInitFailure(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
-  if (msg.includes('protocol revision mismatch')) return 'protocol-mismatch';
-  if (msg.includes('health check failed')) return 'health-check-fail';
-  if (msg.includes('terminal state: failed')) return 'sliding-window-exceeded';
-  return 'other';
+  if (msg.includes("protocol revision mismatch")) return "protocol-mismatch";
+  if (msg.includes("health check failed")) return "health-check-fail";
+  if (msg.includes("terminal state: failed")) return "sliding-window-exceeded";
+  return "other";
 }
 
 export type SidecarLogger = (
-  level: 'info' | 'warn' | 'error',
+  level: "info" | "warn" | "error",
   msg: string,
   err?: unknown,
 ) => void;
@@ -85,20 +84,19 @@ export type SidecarConfig = {
    * Extra environment variables to set BEFORE the dlopen (the Go runtime
    * snapshots environ at load). Used to derive the engine-side `GO_IVM_*`
    * flags (e.g. app-id) from the SAME zero-cache config that drives the TS
-   * dispatch decision, so the two sides can't silently disagree on mode
-   * (O1).
+   * dispatch decision, so the two sides can't silently disagree on mode.
    */
   spawnEnv?: Record<string, string>;
 };
 
-export type SidecarStatus = 'stopped' | 'starting' | 'running' | 'failed';
+export type SidecarStatus = "stopped" | "starting" | "running" | "failed";
 
 export type RestartListener = (epoch: number) => void | Promise<void>;
 
 /**
  * Divides the container-wide SQLite connection ceilings across the napi
- * workers (napi review M8, companion to the GOMEMLIMIT_PERCENT division in
- * #startNapi): GO_IVM_MAX_OPEN_CONNS / GO_IVM_MAX_IDLE_CONNS are written
+ * workers (companion to the GOMEMLIMIT_PERCENT division in #startNapi):
+ * GO_IVM_MAX_OPEN_CONNS / GO_IVM_MAX_IDLE_CONNS are written
  * for the one-shared-sidecar topology (image defaults 1024/128). In napi
  * mode every syncer worker opens its OWN replica pools, so N workers ×
  * 1024 conns × ~GO_IVM_CONN_CACHE_KB of C-side page cache overcommits the
@@ -117,9 +115,9 @@ export function divideGoConnCeilingsForWorkers(
   }
   const divide = (key: string, floor: number): void => {
     const raw = env[key];
-    if (raw === undefined || raw === '') {
+    if (raw === undefined || raw === "") {
       logger(
-        'warn',
+        "warn",
         `${key} is unset with ${workers} napi workers — the Go package ` +
           `default applies PER WORKER (C-side page cache multiplies by ` +
           `worker count); set it to the container budget to enable division`,
@@ -128,25 +126,25 @@ export function divideGoConnCeilingsForWorkers(
     }
     const n = Number(raw);
     if (!Number.isFinite(n) || n <= 0) {
-      logger('warn', `invalid ${key}=${JSON.stringify(raw)} — leaving as-is`);
+      logger("warn", `invalid ${key}=${JSON.stringify(raw)} — leaving as-is`);
       return;
     }
     const per = Math.max(floor, Math.ceil(n / workers));
     env[key] = String(per);
     logger(
-      'info',
+      "info",
       `${key}: ${per} conns for this worker's pools (container budget ` +
         `${n} ÷ ${workers} workers)`,
     );
   };
-  divide('GO_IVM_MAX_OPEN_CONNS', 8);
-  divide('GO_IVM_MAX_IDLE_CONNS', 2);
+  divide("GO_IVM_MAX_OPEN_CONNS", 8);
+  divide("GO_IVM_MAX_IDLE_CONNS", 2);
 }
 
 /**
  * Validates the two absolute Go memory-limit env vars before the napi
- * dlopen (scale review). Syntax mirrors the Go runtime's GOMEMLIMIT: an
- * integer byte count with an optional B / KiB / MiB / GiB / TiB suffix
+ * dlopen. Syntax mirrors the Go runtime's GOMEMLIMIT: an integer byte count
+ * with an optional B / KiB / MiB / GiB / TiB suffix
  * ("off" is also legal for GOMEMLIMIT). Invalid values are DELETED with a
  * loud log:
  *
@@ -168,7 +166,7 @@ export function sanitizeGoMemLimitEnv(
   const gi = env.GO_IVM_GOMEMLIMIT;
   if (gi !== undefined && !VALID_GO_MEM_LIMIT.test(gi)) {
     logger(
-      'error',
+      "error",
       `invalid GO_IVM_GOMEMLIMIT ${JSON.stringify(gi)} — ignoring it ` +
         `(want bytes or a KiB/MiB/GiB/TiB suffix); the per-worker percent ` +
         `budget applies instead`,
@@ -176,9 +174,9 @@ export function sanitizeGoMemLimitEnv(
     delete env.GO_IVM_GOMEMLIMIT;
   }
   const gml = env.GOMEMLIMIT;
-  if (gml !== undefined && gml !== 'off' && !VALID_GO_MEM_LIMIT.test(gml)) {
+  if (gml !== undefined && gml !== "off" && !VALID_GO_MEM_LIMIT.test(gml)) {
     logger(
-      'error',
+      "error",
       `invalid GOMEMLIMIT ${JSON.stringify(gml)} — deleting it (the Go ` +
         `runtime FATALS on a malformed GOMEMLIMIT at load, which would ` +
         `crash-loop this worker); the per-worker percent budget applies ` +
@@ -195,16 +193,16 @@ export function sanitizeGoMemLimitEnv(
  */
 export function isProtocolMismatchError(err: unknown): boolean {
   return (
-    err instanceof Error && err.message.includes('protocol revision mismatch')
+    err instanceof Error && err.message.includes("protocol revision mismatch")
   );
 }
 
 export class SidecarManager {
-  readonly #config: Required<Omit<SidecarConfig, 'logger'>> & {
+  readonly #config: Required<Omit<SidecarConfig, "logger">> & {
     logger: SidecarLogger;
   };
   #client: GoIVMClient | null = null;
-  #status: SidecarStatus = 'stopped';
+  #status: SidecarStatus = "stopped";
   #epoch = 0;
   #firstStartComplete = false;
   #listeners = new Set<RestartListener>();
@@ -215,7 +213,7 @@ export class SidecarManager {
   #runningResolve: () => void = () => {};
   #runningReject: (err: Error) => void = () => {};
   #runningPromise: Promise<void> = Promise.resolve();
-  /** Init concurrency cap state (REVIEW-final MED-CROSS-1). */
+  /** Init concurrency cap state. */
   #initInFlight = 0;
   #initWaiters: Array<() => void> = [];
   /**
@@ -232,7 +230,7 @@ export class SidecarManager {
     const noop: SidecarLogger = () => {};
     const logger: SidecarLogger = config.logger ?? noop;
     this.#config = {
-      napiLibPath: config.napiLibPath ?? 'libgoivm.so',
+      napiLibPath: config.napiLibPath ?? "libgoivm.so",
       numSyncWorkers: config.numSyncWorkers ?? 1,
       fatalExit:
         config.fatalExit ??
@@ -252,8 +250,8 @@ export class SidecarManager {
   // has reached a terminal state ('failed' / 'stopped'). Used by clients to
   // queue calls across the start window instead of failing fast.
   waitForRunning(): Promise<void> {
-    if (this.#status === 'running') return Promise.resolve();
-    if (this.#status === 'failed' || this.#status === 'stopped') {
+    if (this.#status === "running") return Promise.resolve();
+    if (this.#status === "failed" || this.#status === "stopped") {
       return Promise.reject(
         new Error(`Sidecar reached terminal state: ${this.#status}`),
       );
@@ -269,11 +267,11 @@ export class SidecarManager {
   /**
    * Run `fn` while holding one of the manager's init slots. When the slot
    * cap is reached, the call awaits until another init completes. Prevents
-   * cold-start stampedes across many ViewSyncers (REVIEW-final MED-CROSS-1).
+   * cold-start stampedes across many ViewSyncers.
    */
   async withInitSlot<T>(fn: () => Promise<T>): Promise<T> {
     if (this.#initInFlight >= INIT_CONCURRENCY) {
-      await new Promise<void>(resolve => this.#initWaiters.push(resolve));
+      await new Promise<void>((resolve) => this.#initWaiters.push(resolve));
     }
     this.#initInFlight++;
     try {
@@ -305,25 +303,25 @@ export class SidecarManager {
    * Throws if the dlopen/handshake fails.
    */
   async start(): Promise<void> {
-    if (this.#status === 'running') return;
+    if (this.#status === "running") return;
     // Idempotent during 'starting': a second concurrent start() must NOT
     // start a second host or replace the pending #runningPromise (which
     // would orphan the first caller's await). Hand back the in-flight
     // promise so both callers resolve/reject together.
-    if (this.#status === 'starting') return this.#runningPromise;
+    if (this.#status === "starting") return this.#runningPromise;
     // Terminal state: starting again would sidestep the one-shot dlopen
     // guard. Reject explicitly so callers know to stay on TS-only.
-    if (this.#status === 'failed') {
-      throw new Error('Sidecar reached terminal state: failed');
+    if (this.#status === "failed") {
+      throw new Error("Sidecar reached terminal state: failed");
     }
 
-    this.#status = 'starting';
+    this.#status = "starting";
 
     // Initialize #runningPromise to a fresh pending promise BEFORE
     // calling #spawn. The constructor defaults it to Promise.resolve()
-    // (sentinel), and pre-fix start() never replaced it — so any caller
-    // who invoked waitForRunning() between start()-set-status-to-starting
-    // and #spawn-completes-and-replaces-the-promise would receive the
+    // (sentinel); without replacing it here, any caller who invoked
+    // waitForRunning() between start()-set-status-to-starting and
+    // #spawn-completes-and-replaces-the-promise would receive the
     // resolved sentinel and proceed as if the sidecar were ready.
     this.#runningPromise = new Promise<void>((res, rej) => {
       this.#runningResolve = res;
@@ -340,9 +338,9 @@ export class SidecarManager {
     } catch (err) {
       // Transition to 'failed' and surface the error so callers can fall
       // back to TS (nothing was ever Go-owned on a startup failure).
-      this.#status = 'failed';
+      this.#status = "failed";
       const reason = classifyInitFailure(err);
-      initFailureCounter.add(1, {reason});
+      initFailureCounter.add(1, { reason });
       this.#runningReject(
         err instanceof Error
           ? err
@@ -357,24 +355,23 @@ export class SidecarManager {
    * Throws if the engine is not running.
    */
   getClient(): GoIVMClient {
-    if (!this.#client || this.#status !== 'running') {
+    if (!this.#client || this.#status !== "running") {
       throw new Error(`Sidecar is not running (status: ${this.#status})`);
     }
     return this.#client;
   }
 
   /**
-   * Stop the manager. The in-process host has NO shutdown export (removed
-   * in the scale review: calling goivm_shutdown on the JS thread deadlocks
-   * against TSFN backpressure and racing deliveries are a use-after-free).
-   * The host can never be restarted in-process anyway, so the only stop()
-   * caller that matters is worker shutdown — where process exit reclaims
-   * everything. The idle host holds no client groups after close()
-   * rejected the pendings.
+   * Stop the manager. The in-process host has NO shutdown export (calling
+   * goivm_shutdown on the JS thread deadlocks against TSFN backpressure and
+   * racing deliveries are a use-after-free). The host can never be restarted
+   * in-process anyway, so the only stop() caller that matters is worker
+   * shutdown — where process exit reclaims everything. The idle host holds
+   * no client groups after close() rejected the pendings.
    */
   stop(): Promise<void> {
-    this.#status = 'stopped';
-    this.#runningReject(new Error('Sidecar reached terminal state: stopped'));
+    this.#status = "stopped";
+    this.#runningReject(new Error("Sidecar reached terminal state: stopped"));
 
     if (this.#client) {
       this.#client.close();
@@ -393,34 +390,34 @@ export class SidecarManager {
 
     const client = this.#client;
     if (!client) {
-      throw new Error('transport establishment did not produce a client');
+      throw new Error("transport establishment did not produce a client");
     }
     const pong = await client.ping();
-    if (pong !== 'pong') {
+    if (pong !== "pong") {
       throw new Error(
         `Sidecar health check failed: expected 'pong', got '${pong}'`,
       );
     }
-    // Verify wire protocol version (REVIEW-final MED-CROSS-5).
+    // Verify wire protocol version.
     const v = await client.version();
     if (v.protocolRev !== EXPECTED_PROTOCOL_REV) {
       const msg =
         `Sidecar protocol revision mismatch: client expects ${EXPECTED_PROTOCOL_REV}, ` +
         `sidecar (v${v.version}) is at ${v.protocolRev}. Refusing to use this sidecar.`;
-      this.#config.logger('error', msg);
+      this.#config.logger("error", msg);
       throw new Error(msg);
     }
     this.#config.logger(
-      'info',
+      "info",
       `Sidecar version ${v.version} (protocol rev ${v.protocolRev})`,
     );
 
-    this.#status = 'running';
+    this.#status = "running";
     this.#epoch++;
     // Explicit startup line: operators grep for this to confirm the Go path
     // is engaged on a fresh deploy.
     this.#config.logger(
-      'info',
+      "info",
       `Go sidecar manager running in-process via napi (epoch ${this.#epoch})`,
     );
     this.#runningResolve();
@@ -433,8 +430,8 @@ export class SidecarManager {
       for (const listener of this.#listeners) {
         Promise.resolve()
           .then(() => listener(epoch))
-          .catch(err =>
-            this.#config.logger('error', 'restart listener failed', err),
+          .catch((err) =>
+            this.#config.logger("error", "restart listener failed", err),
           );
       }
     } else {
@@ -455,33 +452,33 @@ export class SidecarManager {
   #startNapi(): void {
     if (this.#napiAddon) {
       throw new Error(
-        'in-process Go host cannot be restarted (Go runtimes cannot ' +
-          're-initialize in a loaded library); worker restart required',
+        "in-process Go host cannot be restarted (Go runtimes cannot " +
+          "re-initialize in a loaded library); worker restart required",
       );
     }
     // Env BEFORE dlopen: the Go runtime snapshots environ when the library
     // loads (rt0 init), so os.Getenv inside newServerFromEnv sees only what
     // exists at that moment. Same GO_IVM_* keys, same values as the config
-    // that drives the TS dispatch (O1: worker and engine can't silently
+    // that drives the TS dispatch (worker and engine can't silently
     // disagree on mode).
     for (const [k, val] of Object.entries(this.#config.spawnEnv)) {
       process.env[k] = val;
     }
-    // Go memory budget (REVIEW-napi-transport MED): GO_IVM_GOMEMLIMIT_PERCENT
-    // is a CONTAINER-wide budget share, written for the one-shared-sidecar
-    // topology (image default 40). In napi mode every syncer worker loads
-    // its own Go runtime, so N workers × 40% = 40N% overcommit — the
-    // container OOMs under load with every Go heap individually "under
-    // budget". Divide the container share across workers (floor 3%) unless
-    // the operator pinned an absolute limit (GO_IVM_GOMEMLIMIT / GOMEMLIMIT)
-    // or an explicit per-worker share (GO_IVM_NAPI_GOMEMLIMIT_PERCENT).
+    // Go memory budget: GO_IVM_GOMEMLIMIT_PERCENT is a CONTAINER-wide
+    // budget share, written for the one-shared-sidecar topology (image
+    // default 40). In napi mode every syncer worker loads its own Go
+    // runtime, so N workers × 40% = 40N% overcommit — the container OOMs
+    // under load with every Go heap individually "under budget". Divide
+    // the container share across workers (floor 3%) unless the operator
+    // pinned an absolute limit (GO_IVM_GOMEMLIMIT / GOMEMLIMIT) or an
+    // explicit per-worker share (GO_IVM_NAPI_GOMEMLIMIT_PERCENT).
     //
-    // Scale review: validate the pinned limits FIRST. A malformed
-    // GO_IVM_GOMEMLIMIT used to skip this fallback while ALSO failing to
-    // parse on the Go side (no limit at all, GOGC=200 → container OOM);
-    // a malformed GOMEMLIMIT FATALS the Go runtime at dlopen (an
-    // unbootable, crash-looping worker). sanitizeGoMemLimitEnv strips
-    // invalid values with a loud log so the percent fallback applies.
+    // Validate the pinned limits FIRST. A malformed GO_IVM_GOMEMLIMIT
+    // would skip this fallback while ALSO failing to parse on the Go
+    // side (no limit at all, GOGC=200 → container OOM); a malformed
+    // GOMEMLIMIT FATALS the Go runtime at dlopen (an unbootable,
+    // crash-looping worker). sanitizeGoMemLimitEnv strips invalid values
+    // with a loud log so the percent fallback applies.
     sanitizeGoMemLimitEnv(process.env, this.#config.logger);
     if (!process.env.GO_IVM_GOMEMLIMIT && !process.env.GOMEMLIMIT) {
       const workers = Math.max(1, this.#config.numSyncWorkers);
@@ -493,14 +490,14 @@ export class SidecarManager {
           : Math.max(3, Math.floor(base / workers));
       process.env.GO_IVM_GOMEMLIMIT_PERCENT = String(per);
       this.#config.logger(
-        'info',
+        "info",
         `Go memory budget: ${per}% of cgroup for this worker's runtime ` +
           `(container share ${base}% ÷ ${workers} workers)`,
       );
     }
     // C-side SQLite ceilings are per-ENGINE, and napi runs one engine per
     // worker — divide the container-wide conn budgets the same way as the
-    // memory share above (napi review M8).
+    // memory share above.
     divideGoConnCeilingsForWorkers(
       process.env,
       Math.max(1, this.#config.numSyncWorkers),
@@ -510,18 +507,15 @@ export class SidecarManager {
     const client = new GoIVMClient({
       onLog: (level, msg, err) =>
         this.#config.logger(level, `client: ${msg}`, err),
-      // A2 (scale review): the client detects in-process host death
-      // (goivm_send rc != 0) and latches its transport dead. Route that to
-      // the terminal-failure path (status 'failed' → fatalExit). Without
-      // this wiring the branch was dead code: the manager stayed 'running'
-      // with a dead engine and every Go-owned CG spun in per-CG reset loops
-      // the supervisor never saw. Skip when already terminal — a send
-      // racing a deliberate stop() (status 'stopped') must not crash a
-      // cleanly-shutting-down worker.
-      onFatal: err => {
-        if (this.#status === 'stopped' || this.#status === 'failed') return;
+      // The client detects in-process host death (goivm_send rc != 0)
+      // and latches its transport dead. Route that to the failure path
+      // (status 'failed' → fatalExit). Skip when already terminal — a
+      // send racing a deliberate stop() (status 'stopped') must not
+      // crash a cleanly-shutting-down worker.
+      onFatal: (err) => {
+        if (this.#status === "stopped" || this.#status === "failed") return;
         this.#config.logger(
-          'error',
+          "error",
           `in-process Go engine fatal: ${err.message}`,
           err,
         );
@@ -535,7 +529,7 @@ export class SidecarManager {
     this.#napiAddon = addon;
     this.#client = client;
     this.#config.logger(
-      'info',
+      "info",
       `in-process Go engine loaded (lib ${this.#config.napiLibPath}, ` +
         `abi v${addon.abiVersion()})`,
     );
@@ -546,26 +540,26 @@ export class SidecarManager {
    * to restart — the Go host lives (and dies) with this worker and cannot
    * be re-initialized.
    *
-   * CRASH, don't degrade (REVIEW-napi-transport B3): "fall back to TS"
-   * does not exist once client groups are Go-owned — the user pipelines
-   * are STUBS, so a worker that keeps running serves nothing for those CGs
-   * and nothing ever heals it. Startup failures never reach here (they
-   * route through start()'s catch → graceful 'failed' → TS fallback, sound
-   * because nothing was ever Go-owned); this is the POST-START path —
-   * wired live (A2) from GoIVMClient's onFatal, which fires when
-   * goivm_send returns rc != 0 (host receive loop gone). It MUST crash so
-   * the supervisor restores a working state (fresh worker, fresh dlopen).
+   * CRASH, don't degrade: "fall back to TS" does not exist once client
+   * groups are Go-owned — the user pipelines are STUBS, so a worker that
+   * keeps running serves nothing for those CGs and nothing ever heals it.
+   * Startup failures never reach here (they route through start()'s catch
+   * → graceful 'failed' → TS fallback, sound because nothing was ever
+   * Go-owned); this is the POST-START path — wired from GoIVMClient's
+   * onFatal, which fires when goivm_send returns rc != 0 (host receive
+   * loop gone). It MUST crash so the supervisor restores a working state
+   * (fresh worker, fresh dlopen).
    */
   #handleFatal(): void {
-    this.#status = 'failed';
-    initFailureCounter.add(1, {reason: 'napi-no-restart'});
-    this.#runningReject(new Error('Sidecar reached terminal state: failed'));
+    this.#status = "failed";
+    initFailureCounter.add(1, { reason: "napi-no-restart" });
+    this.#runningReject(new Error("Sidecar reached terminal state: failed"));
     this.#config.logger(
-      'error',
-      'In-process Go engine failed post-start; it cannot be restarted ' +
-        'in-process and TS fallback is unsound for Go-owned client groups ' +
-        '(Go-owned stubs). Crashing the worker so the supervisor ' +
-        'restores a working state.',
+      "error",
+      "In-process Go engine failed post-start; it cannot be restarted " +
+        "in-process and TS fallback is unsound for Go-owned client groups " +
+        "(Go-owned stubs). Crashing the worker so the supervisor " +
+        "restores a working state.",
     );
     this.#config.fatalExit();
   }
