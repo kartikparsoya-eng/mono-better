@@ -237,4 +237,4 @@ WORKDIR /app/packages/zero-cache
 # sidecar to spawn/await — each syncer worker dlopens libgoivm.so itself.
 LABEL org.opencontainers.image.go-ivm-image="${GO_IVM_IMAGE}"
 
-CMD ["npx", "tsx", "./src/server/runner/main.ts"]
+CMD ["pnpm", "exec", "tsx", "./src/server/runner/main.ts"]
