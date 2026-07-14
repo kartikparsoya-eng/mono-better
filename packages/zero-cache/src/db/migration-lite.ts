@@ -146,6 +146,23 @@ export async function runSchemaMigrations(
       db.exec('ANALYZE main');
       log.info?.('ANALYZE completed');
     } else {
+      // Bounded ANALYZE ensures sqlite_stat1 is populated for the query
+      // planner's cost model. Without this, a Litestream-restored replica
+      // at the current schema version skips the migration branch (which
+      // runs unbounded ANALYZE above) and the planner has no stats to
+      // decide join flips — silently defaulting to no-flip (N+1 queries).
+      // analysis_limit=1000 samples ~1000 rows per index — approximate
+      // stats, which is all the planner's flip decision needs. The
+      // replicator's write worker uses the same limit (replicator.ts:134).
+      db.pragma('analysis_limit = 1000');
+      db.exec('ANALYZE main');
+      const stat1Count = db
+        .prepare('SELECT COUNT(*) as c FROM sqlite_stat1')
+        .get() as {c: number} | undefined;
+      log.info?.(
+        `ANALYZE completed (sqlite_stat1 rows: ${stat1Count?.c ?? 0})`,
+      );
+
       // Run optimize whenever opening an sqlite db file as recommended in
       // https://www.sqlite.org/pragma.html#pragma_optimize
       // It is important to run the same initialization steps as is done
@@ -154,9 +171,6 @@ export async function runSchemaMigrations(
       // similarly detected in the change-streamer, facilitating an eventual
       // recovery by resyncing the replica anew.
       db.pragma('optimize = 0x10002');
-
-      // TODO: Investigate running `integrity_check` or `quick_check` as well,
-      // provided that they are not inordinately expensive on large databases.
     }
 
     db.pragma('synchronous = NORMAL');
