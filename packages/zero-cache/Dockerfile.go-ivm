@@ -76,8 +76,9 @@ RUN corepack enable && corepack prepare pnpm@11.5.3 --activate
 # (the `...` filter suffix includes workspace dependencies). Native
 # builds (esbuild, msgpackr-extract, @rocicorp/zero-sqlite3, …) run per
 # the allowBuilds list in pnpm-workspace.yaml. devDependencies are
-# included deliberately — the container runs `npx tsx`, and tsx is a
-# zero-cache devDependency. --frozen-lockfile: the image must install
+# included deliberately. tsx is installed globally (below) since pnpm's
+# strict resolution does not hoist transitive deps to .bin.
+# --frozen-lockfile: the image must install
 # EXACTLY what pnpm-lock.yaml pins — a stale lockfile fails the build
 # loudly instead of silently resolving fresh versions (H2).
 RUN pnpm install --filter zero-cache... --frozen-lockfile 2>&1 | tail -5
@@ -92,6 +93,11 @@ RUN pnpm add -w \
     @opentelemetry/auto-instrumentations-node \
     @opentelemetry/sdk-node \
     2>&1 | tail -5
+
+# Install tsx globally — pnpm's strict resolution does not hoist it to
+# .bin (tsx is a transitive dep, not a direct dep of zero-cache). The
+# container entrypoint uses tsx to run the zero-cache server.
+RUN npm install -g tsx
 
 # Now copy all source
 COPY . .
@@ -237,4 +243,4 @@ WORKDIR /app/packages/zero-cache
 # sidecar to spawn/await — each syncer worker dlopens libgoivm.so itself.
 LABEL org.opencontainers.image.go-ivm-image="${GO_IVM_IMAGE}"
 
-CMD ["pnpm", "exec", "tsx", "./src/server/runner/main.ts"]
+CMD ["tsx", "./src/server/runner/main.ts"]
