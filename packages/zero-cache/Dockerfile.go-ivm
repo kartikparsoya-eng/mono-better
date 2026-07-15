@@ -232,7 +232,13 @@ ENV ZERO_LITESTREAM_CONFIG_PATH=/etc/litestream.yml
 # operators who don't enable tracing. Set
 # OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 + OTEL_SERVICE_NAME
 # at deploy time to turn it on.
-ENV NODE_OPTIONS='--require @opentelemetry/auto-instrumentations-node/register'
+# Node.js runtime tuning for 40-50 CGs:
+# - UV_THREADPOOL_SIZE=16: libuv async I/O (DNS, fs, crypto) shared across all
+#   workers. Default 4 is a bottleneck at 50 CGs for WebSocket handshakes
+#   and CVR writes.
+# - max-old-space-size=4096: explicit Node.js heap cap. Pre-prod, generous.
+ENV UV_THREADPOOL_SIZE=16
+ENV NODE_OPTIONS='--require @opentelemetry/auto-instrumentations-node/register --max-old-space-size=4096'
 
 EXPOSE 4848
 
