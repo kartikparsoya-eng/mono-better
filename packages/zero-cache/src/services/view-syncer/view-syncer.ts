@@ -89,6 +89,9 @@ import {
 import type {DrainCoordinator} from './drain-coordinator.ts';
 import {handleInspect} from './inspect-handler.ts';
 import type {PipelineDriver} from './pipeline-driver.ts';
+import type {RustIVMDriver} from './rust-ivm-driver.ts';
+
+type PipelineDriverLike = PipelineDriver | RustIVMDriver;
 import {type RowChange} from './pipeline-driver.ts';
 import {parseSignature} from './row-set-signature.ts';
 import {
@@ -202,7 +205,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
   readonly #shard: ShardID;
   readonly #lc: LogContext;
-  readonly #pipelines: PipelineDriver;
+  readonly #pipelines: PipelineDriverLike;
   readonly #stateChanges: Subscription<ReplicaState>;
   readonly #drainCoordinator: DrainCoordinator;
   readonly #keepaliveMs: number;
@@ -342,7 +345,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     taskID: string,
     clientGroupID: string,
     cvrDb: PostgresDB,
-    pipelineDriver: PipelineDriver,
+    pipelineDriver: PipelineDriverLike,
     versionChanges: Subscription<ReplicaState>,
     drainCoordinator: DrainCoordinator,
     slowHydrateThreshold: number,
@@ -1504,13 +1507,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           if (queryName !== undefined) {
             span.setAttribute('queryName', queryName);
           }
-          for (const change of this.#pipelines.addQuery(
+          const addResult = this.#pipelines.addQuery(
             transformationHash,
             queryID,
             transformedAst,
             await timer.start(),
             queryName,
-          )) {
+          );
+          const addIterable = addResult instanceof Promise ? await addResult : addResult;
+          for await (const change of addIterable) {
             if (change === 'yield') {
               await timer.yieldProcess('yield in hydrateUnchangedQueries');
             } else {
@@ -2007,7 +2012,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // is properly processed by the time-slice queue.
       await yieldProcess(lc);
 
-      function* generateRowChanges(slowHydrateThreshold: number) {
+      async function* generateRowChanges(slowHydrateThreshold: number) {
         for (const q of addQueries) {
           let queryLC = lc
             .withContext('hash', q.id)
@@ -2018,13 +2023,17 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
           queryLC.debug?.(`adding pipeline for query`, q.ast);
 
-          yield* pipelines.addQuery(
+          const result = pipelines.addQuery(
             q.transformationHash,
             q.id,
             q.ast,
             timer.startWithoutYielding(),
             q.name,
           );
+          const iterable = result instanceof Promise ? await result : result;
+          for await (const c of iterable) {
+            yield c;
+          }
           const elapsed = timer.stop();
           totalProcessTime += elapsed;
 
@@ -2192,7 +2201,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   #processChanges(
     lc: LogContext,
     timer: TimeSliceTimer,
-    changes: Iterable<RowChange | 'yield'>,
+    changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
     updater: CVRQueryDrivenUpdater,
     pokers: PokeHandler,
   ) {
@@ -2225,7 +2234,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         });
 
       await startAsyncSpan(tracer, 'loopingChanges', async span => {
-        for (const change of changes) {
+        for await (const change of changes) {
           if (change === 'yield') {
             await timer.yieldProcess('yield in processChanges');
             continue;
@@ -2321,7 +2330,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         await this.#processChanges(
           lc,
           await timer.start(),
-          changes,
+          changes as Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
           updater,
           pokers,
         );
