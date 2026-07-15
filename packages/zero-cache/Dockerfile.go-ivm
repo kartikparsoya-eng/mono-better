@@ -148,9 +148,9 @@ ARG CURSOR_PAGE_SIZE=100
 # reader-pool floor K = 2×N. Empty = code default. PARALLELISM remains a
 # legacy fallback for both hydrate and advance when the split knobs are unset.
 # GO_IVM_HYDRATE_LANES / GO_IVM_HYDRATE_READERS override hydrate facets.
-ARG PARALLELISM=
-ARG HYDRATE_PARALLELISM=
-ARG ADVANCE_PARALLELISM=
+ARG PARALLELISM=4
+ARG HYDRATE_PARALLELISM=4
+ARG ADVANCE_PARALLELISM=1
 # Syncer worker routing. Load-aware sticky assignment is safe as a prod
 # default; controlled rehome is an active drain/reconnect action and stays
 # opt-in unless explicitly pinned by the image build or deploy env.
@@ -171,6 +171,11 @@ ENV GO_IVM_CHUNK_SIZE=${CHUNK_SIZE}
 ENV GO_IVM_PARALLELISM=${PARALLELISM}
 ENV GO_IVM_HYDRATE_PARALLELISM=${HYDRATE_PARALLELISM}
 ENV GO_IVM_ADVANCE_PARALLELISM=${ADVANCE_PARALLELISM}
+# Parallel advance is OFF (serial). Advance fanout cannot provide I/O
+# parallelism because all sources in a CG share one SQLite connection.
+# Set GO_IVM_PARALLEL_ADVANCE=true to enable (only helps when Go-side
+# operator compute dominates over fetch I/O).
+ENV GO_IVM_PARALLEL_ADVANCE=false
 ENV GO_IVM_HYDRATE_CHUNK_SIZE=${HYDRATE_CHUNK_SIZE}
 ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
 ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
