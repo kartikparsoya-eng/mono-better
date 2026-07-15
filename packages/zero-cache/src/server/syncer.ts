@@ -26,6 +26,7 @@ import {
 } from '../services/view-syncer/connection-context-manager.ts';
 import type {DrainCoordinator} from '../services/view-syncer/drain-coordinator.ts';
 import {PipelineDriver} from '../services/view-syncer/pipeline-driver.ts';
+import {RustIVMDriver} from '../services/view-syncer/rust-ivm-driver.ts';
 import {Snapshotter} from '../services/view-syncer/snapshotter.ts';
 import {ViewSyncerService} from '../services/view-syncer/view-syncer.ts';
 import {ProtocolErrorWithLevel} from '../types/error-with-level.ts';
@@ -200,6 +201,41 @@ export default async function runWorker(
     );
     const normalYieldThresholdMs = Math.max(config.yieldThresholdMs, 2);
 
+    const useRustIVM = env.USE_RUST_IVM === 'true';
+    const snapshotter = new Snapshotter(logger, replicaFile, shard);
+    const storage = operatorStorage.createClientGroupStorage(id);
+    const yieldThreshold = () =>
+      isPriorityOpRunning()
+        ? priorityOpRunningYieldThresholdMs
+        : normalYieldThresholdMs;
+
+    const driver = useRustIVM
+      ? new RustIVMDriver(
+          logger,
+          config.log,
+          snapshotter,
+          shard,
+          storage,
+          id,
+          inspectorDelegate,
+          yieldThreshold,
+          config.enableQueryPlanner,
+          config,
+          replicaFile,
+        )
+      : new PipelineDriver(
+          logger,
+          config.log,
+          snapshotter,
+          shard,
+          storage,
+          id,
+          inspectorDelegate,
+          yieldThreshold,
+          config.enableQueryPlanner,
+          config,
+        );
+
     return new ViewSyncerService(
       config,
       logger,
@@ -207,21 +243,7 @@ export default async function runWorker(
       config.taskID,
       id,
       cvrDB,
-      new PipelineDriver(
-        logger,
-        config.log,
-        new Snapshotter(logger, replicaFile, shard),
-        shard,
-        operatorStorage.createClientGroupStorage(id),
-        id,
-        inspectorDelegate,
-        () =>
-          isPriorityOpRunning()
-            ? priorityOpRunningYieldThresholdMs
-            : normalYieldThresholdMs,
-        config.enableQueryPlanner,
-        config,
-      ),
+      driver,
       sub,
       drainCoordinator,
       config.log.slowHydrateThreshold,
