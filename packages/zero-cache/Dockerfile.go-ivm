@@ -183,16 +183,16 @@ ENV ZERO_SYNCER_CONTROLLED_REHOME=${SYNCER_CONTROLLED_REHOME}
 # The engine logs "replica pool pressure" every 10s when conns start queueing
 # — raise this if that line appears. SidecarManager divides these ceilings
 # across the ZERO_NUM_SYNC_WORKERS in-process engines.
-ENV GO_IVM_MAX_OPEN_CONNS=200
+ENV GO_IVM_MAX_OPEN_CONNS=256
 # Idle cap = 2× expected CGs. Idle conns are cheap (fd + CONN_CACHE_KB page
 # cache, already inside the MAX_OPEN memory budget); the engine's 90s
 # ConnMaxIdle reaper still trims truly idle ones. The engine self-clamps
 # idle ≤ open.
-ENV GO_IVM_MAX_IDLE_CONNS=100
+ENV GO_IVM_MAX_IDLE_CONNS=128
 # Per-conn SQLite page cache in KB. C-side malloc — OUTSIDE GOMEMLIMIT's
 # view — scales as 2 pools × conns × cache: at 200 conns × 512KB = 200MB.
 # Hot pages stay in the shared, evictable OS page cache.
-ENV GO_IVM_CONN_CACHE_KB=512
+ENV GO_IVM_CONN_CACHE_KB=768
 # GC percent: 400 measured optimal in ART (GOGC=200 was 2% slower on p50,
 # GOGC=800 caused excess memory). High GOGC + GOMEMLIMIT cap = low GC
 # pressure without unbounded heap growth.
@@ -202,7 +202,7 @@ ENV GO_IVM_GOGC=400
 # node syncer workers, so they must not claim the whole budget. 60% gives
 # Go the majority (it's the primary workload) while leaving 40% for Node.js
 # poke/CVR/WebSocket work. Explicit GO_IVM_GOMEMLIMIT / GOMEMLIMIT override.
-ENV GO_IVM_GOMEMLIMIT_PERCENT=60
+ENV GO_IVM_GOMEMLIMIT_PERCENT=70
 # Estimated-bytes budget per streamed partial frame. Row-count chunk caps
 # alone let 10k fat rows (>6.4KB avg: message bodies, canvas JSON) encode
 # past the 64MB wire frame cap — a deterministic hydrate failure loop.
@@ -214,7 +214,7 @@ ENV GO_IVM_CHUNK_SOFT_BYTES=8388608
 # more; 4 is the right size for 40-50 CGs (sandbox soak: bounded memory,
 # no cross-worker contention). Code defaults for upstream.maxConns (20)
 # and cvr.maxConns (30) are both >= 4.
-ENV ZERO_NUM_SYNC_WORKERS=4
+ENV ZERO_NUM_SYNC_WORKERS=6
 # Litestream paths for the replicator role's continuous backup. When
 # ZERO_LITESTREAM_BACKUP_URL is set at deploy time (e.g. an S3/GCS URL),
 # zero-cache will use these binaries; when unset, backup is skipped.
