@@ -31,7 +31,6 @@ import {
 } from '../services/view-syncer/go-sidecar/index.ts';
 import {deriveGoSidecarSpawnEnv} from '../services/view-syncer/go-sidecar/spawn-env.ts';
 import {PipelineDriver} from '../services/view-syncer/pipeline-driver.ts';
-import {RustIVMDriver} from '../services/view-syncer/rust-ivm-driver.ts';
 import {Snapshotter} from '../services/view-syncer/snapshotter.ts';
 import {ViewSyncerService} from '../services/view-syncer/view-syncer.ts';
 import {ProtocolErrorWithLevel} from '../types/error-with-level.ts';
@@ -246,39 +245,22 @@ export default async function runWorker(
       config.taskID,
       id,
       cvrDB,
-      process.env.USE_RUST_IVM === 'true'
-        ? new RustIVMDriver(
-            logger,
-            config.log,
-            new Snapshotter(logger, replicaFile, shard),
-            shard,
-            operatorStorage.createClientGroupStorage(id),
-            id,
-            inspectorDelegate,
-            () =>
-              isPriorityOpRunning()
-                ? priorityOpRunningYieldThresholdMs
-                : normalYieldThresholdMs,
-            config.enableQueryPlanner,
-            config,
-            replicaFile,
-          )
-        : new PipelineDriver(
-            logger,
-            config.log,
-            new Snapshotter(logger, replicaFile, shard),
-            shard,
-            operatorStorage.createClientGroupStorage(id),
-            id,
-            inspectorDelegate,
-            () =>
-              isPriorityOpRunning()
-                ? priorityOpRunningYieldThresholdMs
-                : normalYieldThresholdMs,
-            config.enableQueryPlanner,
-            config,
-            sidecarManager,
-          ),
+      new PipelineDriver(
+        logger,
+        config.log,
+        new Snapshotter(logger, replicaFile, shard),
+        shard,
+        operatorStorage.createClientGroupStorage(id),
+        id,
+        inspectorDelegate,
+        () =>
+          isPriorityOpRunning()
+            ? priorityOpRunningYieldThresholdMs
+            : normalYieldThresholdMs,
+        config.enableQueryPlanner,
+        config,
+        sidecarManager,
+      ),
       sub,
       drainCoordinator,
       config.log.slowHydrateThreshold,
