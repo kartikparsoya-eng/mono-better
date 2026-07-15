@@ -70,7 +70,7 @@ export type SidecarConfig = {
   /**
    * Invoked when the in-process (napi) transport fails POST-START — a
    * terminal state (the Go runtime cannot re-initialize) where "fall back
-   * to TS" is unsound: the user pipelines are STUBS (Go-owned), so a
+   * to TS" is unsound: the user pipelines are Go-owned, so a
    * worker that keeps running serves nothing for its Go-owned client
    * groups and nothing ever heals it. Default crashes the worker
    * (process.exit(1)) so the supervisor restores a working state.
@@ -541,7 +541,7 @@ export class SidecarManager {
    * be re-initialized.
    *
    * CRASH, don't degrade: "fall back to TS" does not exist once client
-   * groups are Go-owned — the user pipelines are STUBS, so a worker that
+   * groups are Go-owned — the user pipelines are Go-owned, so a worker that
    * keeps running serves nothing for those CGs and nothing ever heals it.
    * Startup failures never reach here (they route through start()'s catch
    * → graceful 'failed' → TS fallback, sound because nothing was ever

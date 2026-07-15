@@ -824,7 +824,7 @@ export class PipelineDriver {
       rows: Record<string, unknown>[];
     }
   > {
-    // MED-8 (dispatch) invariant: this method is called from the Go backend's
+    // Dispatch invariant: this method is called from the Go backend's
     // (re-)init callback, which can run from the restart handler OUTSIDE the
     // ViewSyncer lock. It is safe ONLY because it is fully SYNCHRONOUS — the
     // snapshot reference captured here is read consistently through to the end
@@ -967,7 +967,7 @@ export class PipelineDriver {
   #maybeResetGoBackend() {
     if (!this.#goBackend || !this.#goBackend.initialized) return;
     this.#lc.info?.("Resetting Go backend (snapshot leapfrog)");
-    // CRIT-5: resetEngine reads the snapshot itself at reinit time (after
+    // resetEngine reads the snapshot itself at reinit time (after
     // its destroy await) — do not pre-capture here.
     const promise = this.#goBackend.resetEngine();
     this.#goInitPromise = promise;
@@ -1170,7 +1170,7 @@ export class PipelineDriver {
     if (!costModel) {
       return planned;
     }
-    // MED-10 (dispatch): cost-model planning is an optimisation, not a
+    // cost-model planning is an optimisation, not a
     // correctness requirement — the ordering-completed `planned` AST already
     // runs correctly on Go. A planner fault on a skewed/edge-case schema
     // previously threw out of here and killed the whole hydrate/advance
@@ -1195,7 +1195,7 @@ export class PipelineDriver {
   destroy(): Promise<void> {
     this.#storage.destroy();
     this.#snapshotter.destroy();
-    // MED-5 (dispatch): await the Go engine teardown rather than fire-and-
+    // await the Go engine teardown rather than fire-and-
     // forget. On a shared sidecar a rapid recycle — a new ViewSyncer for the
     // SAME client group starting before this one's teardown lands — could
     // otherwise race this group's destroy RPC against the new engine's init,
@@ -2122,7 +2122,7 @@ export class PipelineDriver {
             "go-primary-unavailable",
           );
         case "reset-degrade":
-          // Go is DOWN in primary mode with Go-owned STUB pipelines; the
+          // Go is DOWN in primary mode with Go-owned stub pipelines; the
           // TS-native advance below would emit NOTHING for them — a silent
           // freeze with the cookie advancing past the gap (watermark
           // over-claim). Reset so re-registration (which checks `initialized`)
@@ -2180,7 +2180,7 @@ export class PipelineDriver {
         buffered.push(entry);
         return;
       }
-      // User-table change (lean primary): TS holds only STUB user pipelines
+      // User-table change (lean primary): TS holds only stub user pipelines
       // (Go owns them) and keeps its user TableSources current via the snapshot
       // setDB in #advance — NOT via these pushes — so replaying user changes on
       // TS is pure redundant work; drop them from TS's replay buffer. Go
@@ -2533,7 +2533,7 @@ export class PipelineDriver {
     this.#goResetInFlight = true;
     const MAX_RESET_RETRIES = 3;
     this.#lc.warn?.(`[go-reset] Scheduling Go reset (${reason})`);
-    // CRIT-5: resetEngine reads the snapshot at reinit time (after its
+    // resetEngine reads the snapshot at reinit time (after its
     // destroy await), not now — pre-capturing here loaded a stale snapshot
     // and amplified drift into a reset loop.
     this.#goInitPromise = this.#goBackend.resetEngine();
@@ -3183,7 +3183,7 @@ export function pgTypeToGoType(
   // delimiter), strip any "(N)" args (e.g. char(32) → char), and lowercase —
   // exactly mirroring `formatTypeForLookup` in types/pg-data-type.ts so this
   // Go-dispatch mapping stays in lock-step with the canonical
-  // `pgToZqlTypeMap`. MED-5/6/7/9: the previous hand-rolled list was a
+  // `pgToZqlTypeMap`. The previous hand-rolled list was a
   // divergent copy that dropped TIME/TIMETZ, bare INT, the SERIAL family,
   // bare FLOAT, and never stripped `(N)` (so `varchar(255)` fell through to
   // the unknown→string warn path). Keep this list byte-for-byte aligned with
