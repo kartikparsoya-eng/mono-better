@@ -176,51 +176,45 @@ ENV GO_IVM_ADVANCE_CHUNK_SIZE=${ADVANCE_CHUNK_SIZE}
 ENV ZERO_CURSOR_PAGE_SIZE=${CURSOR_PAGE_SIZE}
 ENV ZERO_SYNCER_LOAD_AWARE_ROUTING=${SYNCER_LOAD_AWARE_ROUTING}
 ENV ZERO_SYNCER_CONTROLLED_REHOME=${SYNCER_CONTROLLED_REHOME}
-# --- Production-scale memory/connection guards (2026-06-11 audit) ---
+# --- Production-scale memory/connection guards (sized for 40-50 active CGs) ---
 # Replica read+writable pool ceilings. The engine's package default (256)
-# is sized for ~128 drive-mode CGs (2 pinned snapshotter conns per CG);
-# production runs hundreds of CGs, and pool exhaustion surfaces as silent
-# Conn() blocking → TS-side RPC timeouts → CG reset storms. 1024 supports
-# ~400 CGs with headroom; each SQLite conn costs GO_IVM_CONN_CACHE_KB of
-# page cache. The engine logs "replica pool pressure" every 10s when conns
-# start queueing — raise this if that line appears. SidecarManager divides
-# these ceilings across the ZERO_NUM_SYNC_WORKERS in-process engines.
-ENV GO_IVM_MAX_OPEN_CONNS=1024
-# Idle cap = open cap (2026-07-07 latency forensics): the old 128 (÷8
-# workers = 16 idle vs 128 open per worker) made every hydrate burst churn
-# fresh SQLite opens against a multi-hundred-MB replica — pod telemetry
-# showed 70s of cumulative read-pool wait per 10s window at sampled in-use
-# as low as 0-25/128, a uniform ~36× steady-latency tax on warm hydrates.
-# Idle conns are cheap (fd + CONN_CACHE_KB page cache, already inside
-# the MAX_OPEN memory budget below); the engine's 90s ConnMaxIdle reaper
-# still trims truly idle ones. The engine also self-clamps idle ≤ open.
-ENV GO_IVM_MAX_IDLE_CONNS=1024
-# Per-conn SQLite page cache in KB. This is C-side malloc — OUTSIDE
-# GOMEMLIMIT's view — and scales as pools × conns × cache: at 1024 conns
-# the SQLite default (~2MB) is up to ~4GB of invisible memory. 1MB/conn
-# halves that; hot pages stay in the shared, evictable OS page cache.
-ENV GO_IVM_CONN_CACHE_KB=1024
+# is sized for ~128 drive-mode CGs (2 pinned snapshotter conns per CG).
+# For 40-50 active CGs: 50 CGs × 2 snapshotter conns = 100, ×3 headroom = 200.
+# The engine logs "replica pool pressure" every 10s when conns start queueing
+# — raise this if that line appears. SidecarManager divides these ceilings
+# across the ZERO_NUM_SYNC_WORKERS in-process engines.
+ENV GO_IVM_MAX_OPEN_CONNS=200
+# Idle cap = 2× expected CGs. Idle conns are cheap (fd + CONN_CACHE_KB page
+# cache, already inside the MAX_OPEN memory budget); the engine's 90s
+# ConnMaxIdle reaper still trims truly idle ones. The engine self-clamps
+# idle ≤ open.
+ENV GO_IVM_MAX_IDLE_CONNS=100
+# Per-conn SQLite page cache in KB. C-side malloc — OUTSIDE GOMEMLIMIT's
+# view — scales as 2 pools × conns × cache: at 200 conns × 512KB = 200MB.
+# Hot pages stay in the shared, evictable OS page cache.
+ENV GO_IVM_CONN_CACHE_KB=512
+# GC percent: 400 measured optimal in ART (GOGC=200 was 2% slower on p50,
+# GOGC=800 caused excess memory). High GOGC + GOMEMLIMIT cap = low GC
+# pressure without unbounded heap growth.
+ENV GO_IVM_GOGC=400
 # Soft Go heap ceiling as a percentage of the container's cgroup memory
 # limit (GOMEMLIMIT). The in-process engines share the container with the
-# node syncer workers, so they must not claim the whole budget. Soft
-# limit: GC works harder near the cap instead of the kernel OOM-killing
-# the whole container (which takes down every CG plus the node workers).
-# Explicit GO_IVM_GOMEMLIMIT / GOMEMLIMIT override the percentage.
-ENV GO_IVM_GOMEMLIMIT_PERCENT=40
+# node syncer workers, so they must not claim the whole budget. 60% gives
+# Go the majority (it's the primary workload) while leaving 40% for Node.js
+# poke/CVR/WebSocket work. Explicit GO_IVM_GOMEMLIMIT / GOMEMLIMIT override.
+ENV GO_IVM_GOMEMLIMIT_PERCENT=60
 # Estimated-bytes budget per streamed partial frame. Row-count chunk caps
 # alone let 10k fat rows (>6.4KB avg: message bodies, canvas JSON) encode
 # past the 64MB wire frame cap — a deterministic hydrate failure loop.
 # 8MB leaves ample margin for msgpack overhead under the 64MB cap.
 ENV GO_IVM_CHUNK_SOFT_BYTES=8388608
-# workers=8: V8 event-loop parallelism for poke/cvr/websocket work that
-# stays TS-side. Each worker hosts its own in-process Go engine; the Go
-# side's compute parallelism comes from GO_IVM_HYDRATE_PARALLELISM and
-# GO_IVM_ADVANCE_PARALLELISM within each engine. Prod Grafana shows ELU
-# headroom supports ~24 workers; 8 is
-# the correctness-gated minimum (sandbox soak: bounded memory, no
-# cross-worker contention). Code defaults for upstream.maxConns (20) and
-# cvr.maxConns (30) are both >= 8.
-ENV ZERO_NUM_SYNC_WORKERS=8
+# workers=4: V8 event-loop parallelism for poke/cvr/websocket work that
+# stays TS-side. Each worker hosts its own in-process Go engine (~12 CGs
+# per worker at 50 active CGs). Prod Grafana shows ELU headroom supports
+# more; 4 is the right size for 40-50 CGs (sandbox soak: bounded memory,
+# no cross-worker contention). Code defaults for upstream.maxConns (20)
+# and cvr.maxConns (30) are both >= 4.
+ENV ZERO_NUM_SYNC_WORKERS=4
 # Litestream paths for the replicator role's continuous backup. When
 # ZERO_LITESTREAM_BACKUP_URL is set at deploy time (e.g. an S3/GCS URL),
 # zero-cache will use these binaries; when unset, backup is skipped.
