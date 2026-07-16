@@ -17,7 +17,7 @@ import {
 } from '../replicator/schema/replication-state.ts';
 import {checkClientSchema} from './client-schema.ts';
 import type {Snapshotter} from './snapshotter.ts';
-import {type SnapshotDiff} from './snapshotter.ts';
+import {ResetPipelinesSignal} from './snapshotter.ts';
 import {
   reloadPermissionsIfChanged,
   type LoadedPermissions,
@@ -292,28 +292,6 @@ export class RustIVMDriver {
     this.#replicaVersion = replicaVersion;
   }
 
-  gotComplete(queryID: string): boolean {
-    return this.#queryInfo.has(queryID);
-  }
-
-  async awaitGoInit(): Promise<void> {
-    if (this.#initPromise) {
-      await this.#initPromise;
-    }
-  }
-
-  get canBatchHydrate(): boolean {
-    return false;
-  }
-
-  hydrateVersion(): string {
-    return this.currentVersion();
-  }
-
-  async *goHydrateBatchStream(): AsyncGenerator<never, void, unknown> {
-    throw new Error('goHydrateBatchStream not supported by RustIVMDriver');
-  }
-
   get replicaVersion(): string {
     return must(this.#replicaVersion, 'Not yet initialized');
   }
@@ -428,92 +406,83 @@ export class RustIVMDriver {
     }
   }
 
-  advance(timer: Timer): {
-    version: string;
-    numChanges: number;
-    changes: AsyncIterable<RowChange | 'yield'>;
-  } {
+  async advance(timer: Timer): Promise<
+    | {version: string; numChanges: number; changes: AsyncIterable<RowChange | 'yield'>}
+    | ResetPipelinesSignal
+  > {
     assert(this.initialized(), 'Pipeline driver must be initialized before advancing');
-    const diff = this.#snapshotter.advance(
-      this.#tableSpecs,
-      this.#allTableNames,
-    );
-    const {prev, curr, changes: numChanges} = diff;
-    this.#lc.debug?.(`advance ${prev.version} => ${curr.version}: ${numChanges} changes`);
+
+    // Rust derives its own diff from the snapshotter.
+    // TS never computes a diff or sends SourceChange[] — just calls
+    // advanceToHeadStreaming and pulls RowChanges.
+    //
+    // The first row from the iterator is a header (changeType=-1) with
+    // version, numChanges, aborted in the rowKey field. We await it here
+    // so the version is available synchronously before rows stream.
+    const iterator = await this.#engine.advanceToHeadStreaming();
+
+    // Pull the header row first — it carries version + numChanges.
+    const headerRow = await iterator.next();
+    if (headerRow === null || headerRow === undefined) {
+      throw new Error('advanceToHeadStreaming ended before header row');
+    }
+    if (headerRow.changeType !== -1) {
+      throw new Error('advanceToHeadStreaming expected header row (changeType=-1) as first row');
+    }
+    const version = headerRow.rowKey['version']?.strVal ?? '';
+    const numChanges = headerRow.rowKey['numChanges']?.f64Val ?? 0;
+    const aborted = headerRow.rowKey['aborted']?.boolVal ?? false;
+    this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
+
+    // Update replicaVersion immediately — the version is now known.
+    if (version) {
+      this.#replicaVersion = version;
+    }
 
     return {
-      version: curr.version,
+      version,
       numChanges,
-      changes: this.#advance(diff, timer, numChanges),
+      changes: this.#advanceToHeadRows(iterator, aborted),
     };
   }
 
-  async *#advance(
-    diff: SnapshotDiff,
-    _timer: Timer,
-    _numChanges: number,
+  async *#advanceToHeadRows(
+    iterator: {next: () => Promise<NapiRowChange | null>},
+    aborted: boolean,
   ): AsyncIterable<RowChange | 'yield'> {
-    // Push changes per table to the worker thread (push-based for advance).
-    // Worker pushes results to a queue; we pull via iterator.next() (pull-based boundary).
-    for (const {table, prevValues, nextValue} of diff) {
-      const primaryKey = this.#primaryKeys.get(table);
-      if (!primaryKey) continue;
+    let count = 0;
 
-      const sourceChanges: NapiSourceChange[] = [];
-      let editOldRow: Row | undefined = undefined;
-      for (const prevValue of prevValues) {
-        if (
-          nextValue &&
-          JSON.stringify(getRowKey(primaryKey, prevValue)) ===
-            JSON.stringify(getRowKey(primaryKey, nextValue))
-        ) {
-          editOldRow = prevValue;
-        } else {
-          sourceChanges.push({
-            table,
-            changeType: 'remove',
-            row: rowToNapi(prevValue),
-          });
-        }
-      }
-      if (nextValue) {
-        if (editOldRow) {
-          sourceChanges.push({
-            table,
-            changeType: 'edit',
-            row: rowToNapi(nextValue),
-            oldRow: rowToNapi(editOldRow),
-          });
-        } else {
-          sourceChanges.push({
-            table,
-            changeType: 'add',
-            row: rowToNapi(nextValue),
-          });
-        }
+    while (true) {
+      const row = await iterator.next();
+      if (row === null || row === undefined) break;
+
+      // Reset signal row (changeType=-2): throw ResetPipelinesSignal.
+      if (row.changeType === -2) {
+        const reason = row.rowKey['reason']?.strVal ?? 'schema-change';
+        const msg = row.rowKey['msg']?.strVal ?? 'advance reset';
+        throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
       }
 
-      if (sourceChanges.length > 0) {
-        // PULL-BASED: get iterator, pull rows one at a time.
-        const iterator = await this.#engine.advanceWithDiffStreaming(sourceChanges);
-        while (true) {
-          const row = await iterator.next();
-          if (row === null || row === undefined) break;
-          const change = napiToRowChange(row);
-          // Track rowSetSignature locally (XOR for ADD/REMOVE, skip EDIT).
-          if (change.type !== ChangeType.EDIT) {
-            const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
-            const unit = rowIDSignatureUnit({
-              schema: '',
-              table: change.table,
-              rowKey: change.rowKey as RowKey,
-            });
-            this.#rowSetSignatures.set(change.queryID, cur ^ unit);
-          }
-          yield change;
-        }
+      const change = napiToRowChange(row);
+      // Track rowSetSignature locally (XOR for ADD/REMOVE, skip EDIT).
+      if (change.type !== ChangeType.EDIT) {
+        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+        const unit = rowIDSignatureUnit({
+          schema: '',
+          table: change.table,
+          rowKey: change.rowKey as RowKey,
+        });
+        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+      }
+      yield change;
+      count++;
+      if (count % 100 === 0) {
         yield 'yield';
       }
+    }
+
+    if (aborted) {
+      this.#lc.warn?.(`advanceToHead: aborted after ${count} changes (budget exceeded)`);
     }
   }
 }
