@@ -5,6 +5,7 @@
 // is terminal ('failed' → callers fall back to TS), and a post-start fatal
 // crashes the worker so the supervisor restores a working state.
 
+import {availableParallelism} from 'node:os';
 import { getOrCreateCounter } from "../../../observability/metrics.ts";
 import { GoIVMClient } from "./go-ivm-client.ts";
 import { loadGoNapiAddon, type GoNapiAddon } from "./napi/index.ts";
@@ -493,6 +494,26 @@ export class SidecarManager {
         "info",
         `Go memory budget: ${per}% of cgroup for this worker's runtime ` +
           `(container share ${base}% ÷ ${workers} workers)`,
+      );
+    }
+    // Go CPU budget: GOMAXPROCS is the companion division to GOMEMLIMIT
+    // above. Go 1.25's cgroup-aware default reads the container quota and
+    // sizes the runtime to the FULL quota — so with W workers each Go
+    // runtime claims C cores, producing W×C Go OS threads + W JS event
+    // loops + GC all on C cores. The JS event loop is the victim: it grants
+    // pull credit, schedules advances, and writes pokes — so over-subscription
+    // collapses poke delivery while Go compute churns (the exact signature
+    // seen in ART: pokes/put drops to <5% under load, full recovery in
+    // quiesce). Divide when not explicitly pinned.
+    if (!process.env.GOMAXPROCS) {
+      const workers = Math.max(1, this.#config.numSyncWorkers);
+      const quota = availableParallelism(); // respects cgroup limits
+      const per = Math.max(1, Math.floor(quota / workers));
+      process.env.GOMAXPROCS = String(per);
+      this.#config.logger(
+        "info",
+        `Go CPU budget: GOMAXPROCS=${per} for this worker ` +
+          `(container quota ${quota} ÷ ${workers} workers)`,
       );
     }
     // C-side SQLite ceilings are per-ENGINE, and napi runs one engine per
