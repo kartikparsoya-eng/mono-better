@@ -132,8 +132,25 @@ class RecordReader {
     return this.#view.getUint8(this.off++);
   }
 
+  // L5: subarray silently CLAMPS on overflow (unlike the DataView getters,
+  // which throw RangeError), so a truncated/corrupt record could assemble a
+  // short slice and slip past the `off === length` trailing-bytes guard.
+  // Bound-check before each variable-length read so a malformed record throws
+  // (caught by #handleDelivery -> rejects the owning RPC) instead of silently
+  // producing a wrong row. Producer is the trusted in-process Go lib, so this
+  // is defense-in-depth.
+  #ensure(n: number): void {
+    if (this.off + n > this.#bytes.length) {
+      throw new Error(
+        `RecordReader: read of ${n} bytes at offset ${this.off} exceeds ` +
+          `buffer length ${this.#bytes.length} (malformed record)`,
+      );
+    }
+  }
+
   shortStr(): string {
     const n = this.u16();
+    this.#ensure(n);
     const s = utf8.decode(this.#bytes.subarray(this.off, this.off + n));
     this.off += n;
     return s;
@@ -141,6 +158,7 @@ class RecordReader {
 
   longBytes(): Uint8Array {
     const n = this.u32();
+    this.#ensure(n);
     const b = this.#bytes.subarray(this.off, this.off + n);
     this.off += n;
     return b;

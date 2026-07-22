@@ -268,22 +268,32 @@ error), the PipelineDriver dispatch falls through to the TS-native
 path. The Go path is always optional; user-facing correctness depends
 only on the TS path.
 
-Once loaded, a Go engine crash (panic) is recovered transparently:
+**NAPI in-process transport (current):** the engine is dlopen'd into the
+syncer worker, so it CANNOT be restarted in-process. A post-start host
+death — `goivm_send` returning rc != 0 (the Go receive loop is gone) —
+fires `onFatal` → `SidecarManager.#handleFatal`, which marks the manager
+`failed` (`initFailureCounter` reason `napi-no-restart`), rejects the
+running promise, and calls `fatalExit()` (`process.exit(1)`). The
+supervisor then restores a working state with a fresh worker + fresh
+dlopen. TS fallback is deliberately NOT attempted for a post-start crash:
+Go-owned client groups hold Go-owned stub pipelines, so silently serving
+them from TS would double-emit. Crash-don't-degrade is the design.
 
-- `SidecarManager` detects the crash via the init epoch barrier and
-  re-initializes the engine under a sliding-window failure cap.
-- `GoComputeBackend.waitForRunning()` queues in-flight RPCs across
-  the reinit window instead of failing them.
-- The `onRestart` listener re-runs `init` + query re-registration
-  before any further advance/hydrate touches Go.
-- `advance()` calls in flight at the moment of the crash return empty
-  `{changes, timings}`; clients miss exactly ONE delta. Subsequent
-  advances are correct.
-- Hydrate / `addQueriesStream` calls retry against the re-initialized
-  engine after re-init completes.
+The graceful in-process reinit machinery below (`onRestart`,
+`waitForRunning` queueing across a reinit window, "miss exactly ONE
+delta") describes the OBSOLETE out-of-process socket-sidecar transport
+and does NOT apply to the napi transport — those code paths are inert
+post-start here (`sidecar-manager.ts` `#handleFatal` is terminal):
 
-If the failure cap is exceeded, `waitForRunning()` rejects and
-dispatch falls through to TS for the remainder of the process lifetime.
+- ~~`SidecarManager` re-initializes the engine under a failure cap.~~
+- ~~`GoComputeBackend.waitForRunning()` queues in-flight RPCs across
+  the reinit window.~~
+- ~~The `onRestart` listener re-runs `init` + query re-registration.~~
+- ~~`advance()` in flight at the crash returns empty `{changes, timings}`;
+  clients miss exactly ONE delta.~~
+
+The LOAD-TIME fallback above still holds: if the library fails to dlopen
+at startup, dispatch runs entirely on the TS-native path.
 
 ### Reset circuit breaker
 

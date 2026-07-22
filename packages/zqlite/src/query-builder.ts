@@ -166,6 +166,32 @@ export function orderByToSQL(order: Ordering, reverse: boolean): SQLQuery {
  * Converts filters (conditions) to SQL WHERE clause.
  * This applies all filters present in the AST for a query to the source.
  */
+/**
+ * The exhaustive set of operators simpleConditionToSQL will interpolate into
+ * generated SQL. `filter.op` originates from a client-sent AST, so it is
+ * untrusted; without this whitelist an unexpected op is spliced raw via
+ * `sql.__dangerous__rawValue`. Rejecting fail-closed makes an unsupported
+ * query a deterministic error instead of malformed SQL, and keeps this TS
+ * path aligned with the Go engine's `allowedOps` (drift-ledger D2). New
+ * protocol operators must be added here explicitly, with parity tests.
+ */
+const allowedOps: ReadonlySet<string> = new Set([
+  '=',
+  '!=',
+  '>',
+  '<',
+  '>=',
+  '<=',
+  'LIKE',
+  'NOT LIKE',
+  'ILIKE',
+  'NOT ILIKE',
+  'IN',
+  'NOT IN',
+  'IS',
+  'IS NOT',
+]);
+
 export function filtersToSQL(filters: NoSubqueryCondition): SQLQuery {
   switch (filters.type) {
     case 'simple':
@@ -188,11 +214,25 @@ export function filtersToSQL(filters: NoSubqueryCondition): SQLQuery {
             sql` OR `,
           )})`
         : sql`FALSE`;
+    default:
+      // A condition tree whose type is not simple/and/or is malformed input
+      // (the AST is decoded at runtime). Fail closed rather than widen to
+      // TRUE — aligns with the Go engine (drift-ledger D3).
+      throw new Error(
+        `unsupported condition type ${JSON.stringify(
+          (filters as {type: unknown}).type,
+        )}`,
+      );
   }
 }
 
 function simpleConditionToSQL(filter: SimpleCondition): SQLQuery {
   const {op} = filter;
+  // Reject any operator outside the whitelist BEFORE it reaches the raw
+  // interpolation below (drift-ledger D2).
+  if (!allowedOps.has(op)) {
+    throw new Error(`unsupported condition operator ${JSON.stringify(op)}`);
+  }
   if (op === 'IN' || op === 'NOT IN') {
     switch (filter.right.type) {
       case 'literal':

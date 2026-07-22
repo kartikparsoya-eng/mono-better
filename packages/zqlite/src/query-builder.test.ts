@@ -328,3 +328,37 @@ test('ILIKE matches case-insensitively across Unicode (needs ICU lower())', () =
   // with ICU. Umlauts/accents/Cyrillic are the clean cases.)
   expect(rows).toEqual(['MÜLLER']);
 });
+
+// Drift-ledger D2: reject operators outside the whitelist fail-closed, aligning
+// with the Go engine's allowedOps. An untrusted client op must not be spliced
+// raw into SQL.
+test('filtersToSQL rejects an operator outside the whitelist (D2)', () => {
+  const bad = {
+    type: 'simple',
+    op: '; DROP TABLE x; --',
+    left: {type: 'column', name: 'id'},
+    right: {type: 'literal', value: 1},
+  } as unknown as NoSubqueryCondition;
+  expect(() => filtersToSQL(bad)).toThrow(/unsupported condition operator/);
+});
+
+// A whitelisted operator still builds normally (positive control).
+test('filtersToSQL accepts a whitelisted operator (D2 control)', () => {
+  const ok = {
+    type: 'simple',
+    op: '=',
+    left: {type: 'column', name: 'id'},
+    right: {type: 'literal', value: 1},
+  } as unknown as NoSubqueryCondition;
+  expect(() => filtersToSQL(ok)).not.toThrow();
+});
+
+// Drift-ledger D3: reject a malformed condition type fail-closed instead of
+// widening to TRUE, aligning with the Go engine.
+test('filtersToSQL rejects an unknown condition type (D3)', () => {
+  const bad = {
+    type: 'nonsense',
+    conditions: [],
+  } as unknown as NoSubqueryCondition;
+  expect(() => filtersToSQL(bad)).toThrow(/unsupported condition type/);
+});

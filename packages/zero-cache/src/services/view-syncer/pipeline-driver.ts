@@ -1302,15 +1302,21 @@ export class PipelineDriver {
       this.#goBackend &&
       !this.#goBackend.initialized
     ) {
-      return this.#goInitPromise.then(() =>
+      // M1: handle BOTH settle arms with the same dispatch. If Go init/reset
+      // REJECTS, the raw promise must not escape — that throw would reach
+      // run()'s outer catch and tear down the whole CG. #goInitPromise is
+      // nulled by its own .catch (see #maybeInitGoBackend), so the retry sees
+      // Go as uninitialized and #addQueryDispatch degrades to the TS-native
+      // path (mirrors awaitGoInit's swallow-and-fall-back).
+      const dispatch = () =>
         this.#addQueryDispatch(
           transformationHash,
           queryID,
           query,
           timer,
           queryName,
-        ),
-      );
+        );
+      return this.#goInitPromise.then(dispatch, dispatch);
     }
     // If a per-CG recovery is in flight (drift, sidecar-restart, etc.),
     // wait for it to finish before deciding TS vs Go. Pre-fix the
@@ -2072,7 +2078,10 @@ export class PipelineDriver {
       this.#goBackend &&
       !this.#goBackend.initialized
     ) {
-      return this.#goInitPromise.then(() => this.#advanceDispatch(timer));
+      // M1: see #addQuery — a rejected Go init/reset must degrade to the
+      // TS-native advance, not escape and tear down the CG.
+      const dispatch = () => this.#advanceDispatch(timer);
+      return this.#goInitPromise.then(dispatch, dispatch);
     }
     return this.#advanceDispatch(timer);
   }
