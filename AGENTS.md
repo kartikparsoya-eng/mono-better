@@ -236,8 +236,11 @@ Sidecar settings live under the `goSidecar` group of `zero-config.ts`:
 - `GO_IVM_PARALLEL_THRESHOLD=2` — min connection count per source at which
   parallel push fan-out kicks in. Default 2.
 - `GO_IVM_HYDRATE_PARALLELISM=4` — hydrate lane count (readers = 2× lanes).
-- `GO_IVM_ADVANCE_PARALLELISM=4` — advance fanout workers (default ON;
-  `false` disables).
+- `GO_IVM_PARALLEL_ADVANCE=false` — advance-fanout master switch. Advance
+  push is SERIAL by default (TS-faithful); `Dockerfile.go-ivm` bakes
+  `false`. The parallel fanout path is shadow-only.
+- `GO_IVM_ADVANCE_PARALLELISM=4` — advance fanout worker COUNT only; a
+  no-op while `GO_IVM_PARALLEL_ADVANCE=false`.
 - `GO_IVM_MAX_OPEN_CONNS=1024` — per-worker SQLite connection pool ceiling.
 - `GO_IVM_DELIVER_TIMEOUT_SEC=55` — row-plane park deadline. Default 55s,
   kept below the 60s advance budget.
@@ -357,9 +360,13 @@ The TS client refuses to talk to a sidecar reporting a different
 - **Worker-count tuning** — `ZERO_NUM_SYNC_WORKERS` controls V8
   parallelism and the number of Go engine instances. Each worker's
   engine has its own SQLite connection pool. The default is 8 workers.
-- **Parallel advance** — `GO_IVM_ADVANCE_PARALLELISM` controls advance
-  fanout workers (default 4, default ON). Set to 1 for serial/TS-faithful
-  fanout.
+- **Advance push is SERIAL** — `GO_IVM_PARALLEL_ADVANCE=false` (baked in
+  `Dockerfile.go-ivm`; code default off). This matches TS's single-threaded
+  advance and avoids `s.mu` + SQLite-conn-mutex contention on the one
+  prev-tx conn (PAR>1 is counterproductive for fetch-heavy advances). The
+  advance LEAF fetch is lazy end-to-end (`fetchDuringPushStream`, TS
+  `statement.iterate()` semantics). `GO_IVM_ADVANCE_PARALLELISM` only sets a
+  worker count for the shadow-only parallel fanout path — inert in prod.
 - **Hydrate parallelism** — `GO_IVM_HYDRATE_PARALLELISM` controls hydrate
   lane count (default 4, readers = 2× lanes).
 - Engine memory grows linearly with active client groups × table data.
