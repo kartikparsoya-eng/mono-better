@@ -583,6 +583,23 @@ export class PipelineDriver {
     "Time to advance all queries for a given client group in response to a single change.",
   );
 
+  // Wall time the TS view-syncer spends BLOCKED on the Go backend advance
+  // stream (the NAPI/RPC round-trip + Go compute delivered over the wire)
+  // for one client-group advance — accumulated across the header frame and
+  // every subsequent chunk `.next()`. This is the span MED-CROSS-3 promised
+  // but never actually recorded. Decomposition:
+  //   advance-go-rpc-time  = RPC round-trip + Go compute (this metric)
+  //   ivm.advance-time     = Go per-table compute (summed; #recordGoPrimaryAdvanceTimings)
+  //   ⇒ advance-go-rpc-time − Σ ivm.advance-time ≈ pure NAPI transport
+  //   ⇒ advance-time (view-syncer, whole batch) − advance-go-rpc-time
+  //                                          ≈ TS-side reconcile + poke + CVR
+  // Only populated in Go-primary; the TS-native path never crosses the wire.
+  readonly #advanceGoRpcTime = getOrCreateLatencyHistogram(
+    "sync",
+    "ivm.advance-go-rpc-time",
+    "Wall time the TS view-syncer spent blocked on the Go backend advance stream (NAPI/RPC round-trip + Go compute delivered over the wire) for a single client-group advance.",
+  );
+
   readonly #conflictRowsDeleted = getOrCreateCounter(
     "sync",
     "ivm.conflict-rows-deleted",
@@ -2222,20 +2239,31 @@ export class PipelineDriver {
       ...(suppressAbort ? { suppressAbort: true } : {}),
     };
 
+    // Accumulates the wall time spent awaiting Go stream frames across this
+    // advance. Captured by the yieldMerged closure below (a `let`, so the
+    // closure's `+=` mutates this same binding) and recorded to
+    // #advanceGoRpcTime once the stream is fully consumed / closed.
+    let goRpcWallMs = 0;
     const goIterator =
       this.#goBackend!.advanceToHeadStreamChunks(abortBudget)[
         Symbol.asyncIterator
       ]();
+    const rpcStart0 = performance.now();
     const firstGoChunkPromise = goIterator.next();
 
     let firstGoChunk: AdvanceToHeadStreamChunk;
     try {
       const first = await firstGoChunkPromise;
+      goRpcWallMs += performance.now() - rpcStart0;
       if (first.done) {
         throw new Error("advanceToHeadStream finished before first frame");
       }
       firstGoChunk = first.value;
     } catch (e) {
+      // Time-to-first-frame failure is still a real RPC sample. yieldMerged
+      // never runs on this path, so record here before the early return.
+      goRpcWallMs += performance.now() - rpcStart0;
+      this.#advanceGoRpcTime.recordMs(goRpcWallMs);
       const classified = this.#classifyGoPrimaryAdvanceError(e);
       return classified instanceof ResetPipelinesSignal
         ? classified
@@ -2296,7 +2324,9 @@ export class PipelineDriver {
 
         try {
           for (;;) {
+            const rpcStartN = performance.now();
             const next = await goIterator.next();
+            goRpcWallMs += performance.now() - rpcStartN;
             if (next.done) break;
             const chunk = next.value;
             if (sawFinal) {
@@ -2340,6 +2370,10 @@ export class PipelineDriver {
         }
       } finally {
         await goIterator.return?.();
+        // One sample per advance that entered the stream (success, streaming
+        // error, or reset). The time-to-first-frame-failure path records its
+        // own sample and never reaches here, so no double-count.
+        self.#advanceGoRpcTime.recordMs(goRpcWallMs);
       }
 
       if (!sawFinal) {
