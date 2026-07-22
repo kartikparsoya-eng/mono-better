@@ -111,6 +111,10 @@ export type AdvanceToHeadStreamChunk = {
   numChanges?: number | undefined;
   sigDeltas?: Record<string, string> | undefined;
   timings?: TableTiming[] | undefined;
+  // Engine-internal end-to-end advance wall (ms), Final frame only. Includes
+  // the drive-mode diff-derivation phase that Σ timings omits, so it splits
+  // the advance-go-rpc-time gap into true wire latency vs uncounted Go compute.
+  goWallMs?: number | undefined;
   reset?: { reason: string; msg: string } | undefined;
 };
 
@@ -439,6 +443,7 @@ export function createAdvanceToHeadStreamChunkAccumulator(
         final?: boolean;
         header?: boolean;
         timings?: TableTiming[];
+        goWallMs?: number;
         version?: string;
         numChanges?: number;
         reset?: { reason: string; msg: string };
@@ -509,6 +514,7 @@ export function createAdvanceToHeadStreamChunkAccumulator(
       };
       if (final) {
         result.timings = v.timings;
+        result.goWallMs = v.goWallMs;
         result.version = v.version ?? "";
         result.numChanges = v.numChanges ?? 0;
         result.reset = v.reset;

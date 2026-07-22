@@ -600,6 +600,19 @@ export class PipelineDriver {
     "Wall time the TS view-syncer spent blocked on the Go backend advance stream (NAPI/RPC round-trip + Go compute delivered over the wire) for a single client-group advance.",
   );
 
+  // Go-reported engine-internal end-to-end wall of the whole advance (entry →
+  // terminal flush), INCLUDING the drive-mode diff-derivation phase that
+  // Σ ivm.advance-time omits. Splits the advance-go-rpc-time gap:
+  //   advance-go-rpc-time − advance-go-internal-time ≈ TRUE wire latency
+  //   advance-go-internal-time − Σ ivm.advance-time  ≈ uncounted diff/fetch work
+  // If this ≈ advance-go-rpc-time, the gap is Go compute (SQLite/diff), NOT
+  // transport — and positional-rows/wire-format is the wrong lever.
+  readonly #advanceGoInternalTime = getOrCreateLatencyHistogram(
+    "sync",
+    "ivm.advance-go-internal-time",
+    "Engine-internal end-to-end wall time of a Go-primary advance as measured inside the Go sidecar (diff derivation + pushes + fanout + serialization), excluding the RPC/NAPI wire latency.",
+  );
+
   readonly #conflictRowsDeleted = getOrCreateCounter(
     "sync",
     "ivm.conflict-rows-deleted",
@@ -2353,6 +2366,9 @@ export class PipelineDriver {
             }
             if (chunk.final) {
               self.#recordGoPrimaryAdvanceTimings(chunk.timings);
+              if (chunk.goWallMs !== undefined) {
+                self.#advanceGoInternalTime.recordMs(chunk.goWallMs);
+              }
               finalSigDeltas = chunk.sigDeltas;
               finalGoVersion = chunk.version || finalGoVersion;
               sawFinal = true;
