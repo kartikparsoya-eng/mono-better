@@ -170,7 +170,9 @@ export class GoComputeBackend {
     if (this.#currentInitPromise) {
       // Wrap to swallow rejection — callers self-check `initialized`
       // afterward; we don't want them to have to try/catch.
-      return this.#currentInitPromise.catch(() => undefined);
+      return this.#currentInitPromise.catch((err) => {
+        this.#log("warn", "init promise rejected (caller will check initialized)", err);
+      });
     }
     return Promise.resolve();
   }

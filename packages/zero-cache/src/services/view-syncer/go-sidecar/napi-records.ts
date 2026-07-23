@@ -111,24 +111,28 @@ class RecordReader {
   }
 
   f64(): number {
+    this.#ensure(8);
     const v = this.#view.getFloat64(this.off, true);
     this.off += 8;
     return v;
   }
 
   u32(): number {
+    this.#ensure(4);
     const v = this.#view.getUint32(this.off, true);
     this.off += 4;
     return v;
   }
 
   u16(): number {
+    this.#ensure(2);
     const v = this.#view.getUint16(this.off, true);
     this.off += 2;
     return v;
   }
 
   u8(): number {
+    this.#ensure(1);
     return this.#view.getUint8(this.off++);
   }
 
@@ -165,6 +169,7 @@ class RecordReader {
   }
 
   i64(): number | bigint {
+    this.#ensure(8);
     const v = this.#view.getBigInt64(this.off, true);
     this.off += 8;
     // Mirror the FRAME plane's int decoding: Go's frame encoder

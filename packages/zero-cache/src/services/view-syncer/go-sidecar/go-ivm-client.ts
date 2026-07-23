@@ -1118,6 +1118,7 @@ export class GoIVMClient {
       { clientGroupID, queryID, initEpoch },
       {
         ...opts,
+        timeoutMs: opts?.timeoutMs ?? 120_000,
         clientGroupID: opts?.clientGroupID ?? clientGroupID,
       },
     );
@@ -1307,6 +1308,7 @@ export class GoIVMClient {
       { clientGroupID, initEpoch },
       {
         ...opts,
+        timeoutMs: opts?.timeoutMs ?? 120_000,
         clientGroupID: opts?.clientGroupID ?? clientGroupID,
       },
     );
