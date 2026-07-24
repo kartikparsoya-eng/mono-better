@@ -1,5 +1,11 @@
 import type {LogContext} from '@rocicorp/logger';
 import {assert} from '../../../../shared/src/asserts.ts';
+
+// RUST_IVM_STREAM_ROWS=1: stream rows one-at-a-time via ThreadsafeFunction
+// instead of materializing the full result array. O(1) JS objects in flight
+// vs O(result). Dark flag — default OFF (eager array path, byte-identical).
+const STREAM_ROWS = process.env['RUST_IVM_STREAM_ROWS'] === '1';
+
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
@@ -42,6 +48,7 @@ export interface NapiRowChange {
   table: string;
   rowKey: Record<string, NapiValue>;
   row?: Record<string, NapiValue>;
+  isHidden: boolean;
 }
 
 export interface NapiQuerySpec {
@@ -146,6 +153,76 @@ function buildPrimaryKeys(
   }
   return primaryKeys;
 }
+
+// ---------------------------------------------------------------------------
+// AsyncQueue — bounded bridge between TSFN callbacks and async generators
+// ---------------------------------------------------------------------------
+
+/**
+ * A simple async queue that bridges the napi ThreadsafeFunction (push model)
+ * with the view-syncer's `for await` consumption (pull model).
+ *
+ * The TSFN callback calls `push()` synchronously; the async generator drains
+ * via `for await`. With TSFN Blocking mode + the actor thread parking on a
+ * full TSFN queue, at most O(1) rows are in flight.
+ */
+class AsyncQueue<T> implements AsyncIterable<T> {
+  #items: T[] = [];
+  #waiters: {
+    resolve: (r: IteratorResult<T>) => void;
+    reject: (e: unknown) => void;
+  }[] = [];
+  #done = false;
+  #error: unknown = null;
+
+  push(item: T): void {
+    if (this.#done) return;
+    const waiter = this.#waiters.shift();
+    if (waiter) {
+      waiter.resolve({value: item, done: false});
+    } else {
+      this.#items.push(item);
+    }
+  }
+
+  close(): void {
+    this.#done = true;
+    for (const w of this.#waiters) {
+      if (this.#error) {
+        w.reject(this.#error);
+      } else {
+        w.resolve({value: undefined, done: true});
+      }
+    }
+    this.#waiters = [];
+  }
+
+  error(e: unknown): void {
+    this.#error = e;
+    this.close();
+  }
+
+  async next(): Promise<IteratorResult<T>> {
+    if (this.#items.length > 0) {
+      return {value: this.#items.shift()!, done: false};
+    }
+    if (this.#done) {
+      if (this.#error) throw this.#error;
+      return {value: undefined, done: true};
+    }
+    return new Promise((resolve, reject) => {
+      this.#waiters.push({resolve, reject});
+    });
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {next: () => this.next()};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// RustIVMDriver
+// ---------------------------------------------------------------------------
 
 export class RustIVMDriver {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -346,9 +423,17 @@ export class RustIVMDriver {
     });
     this.#rowSetSignatures.set(queryID, 0n);
 
-    // ASYNC: hydration runs on this engine's actor thread (off the JS event
-    // loop), so concurrent client groups hydrate in parallel. Resolves to the
-    // full row array (the addon already materialised it).
+    if (STREAM_ROWS) {
+      yield* this.#addQueryStreaming(queryID, query);
+    } else {
+      yield* this.#addQueryEager(queryID, query);
+    }
+  }
+
+  async *#addQueryEager(
+    queryID: string,
+    query: AST,
+  ): AsyncIterable<RowChange | 'yield'> {
     const out = await this.#engine.addQueriesStreaming([
       {queryId: queryID, astJson: JSON.stringify(query)},
     ]);
@@ -356,7 +441,6 @@ export class RustIVMDriver {
     let count = 0;
     for (const row of out) {
       const change = napiToRowChange(row);
-      // Track rowSetSignature locally (XOR for ADD/REMOVE, skip EDIT).
       if (change.type !== ChangeType.EDIT) {
         const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
         const unit = rowIDSignatureUnit({
@@ -374,32 +458,64 @@ export class RustIVMDriver {
     }
   }
 
+  async *#addQueryStreaming(
+    queryID: string,
+    query: AST,
+  ): AsyncIterable<RowChange | 'yield'> {
+    const queue = new AsyncQueue<RowChange | 'yield'>();
+
+    this.#engine
+      .addQueriesStreamingRows(
+        [{queryId: queryID, astJson: JSON.stringify(query)}],
+        (row: NapiRowChange) => {
+          const change = napiToRowChange(row);
+          if (change.type !== ChangeType.EDIT) {
+            const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+            const unit = rowIDSignatureUnit({
+              schema: '',
+              table: change.table,
+              rowKey: change.rowKey as RowKey,
+            });
+            this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+          }
+          queue.push(change);
+        },
+      )
+      .then(() => queue.close())
+      .catch((e: unknown) => queue.error(e));
+
+    let count = 0;
+    for await (const change of queue) {
+      yield change;
+      count++;
+      if (count % 100 === 0) {
+        yield 'yield';
+      }
+    }
+  }
+
   async advance(_timer: Timer): Promise<
-    | {version: string; numChanges: number; changes: Iterable<RowChange | 'yield'>}
+    | {version: string; numChanges: number; changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>}
     | ResetPipelinesSignal
   > {
     assert(this.initialized(), 'Pipeline driver must be initialized before advancing');
 
-    // Rust derives its own diff from the snapshotter. ASYNC: the advance runs
-    // on this engine's actor thread (off the JS event loop), so advances for
-    // concurrent client groups run in parallel. Resolves to [header(-1), ...rows]
-    // (with a trailing -2 row iff the engine reported a legit reset_reason).
-    //
-    // ERROR CONTRACT (matches TS): an engine PANIC (e.g. a source-drift assert
-    // "Add duplicate row") is NOT turned into a reset — the addon rejects this
-    // promise, so `await` throws a raw Error that propagates out of advance() →
-    // #advancePipelines re-throws → the view-syncer tears down and the client
-    // reconnects, exactly as the TS PipelineDriver does when its source asserts
-    // throw. Only advance_result.reset_reason maps to a ResetPipelinesSignal.
+    if (STREAM_ROWS) {
+      return this.#advanceStreaming();
+    }
+    return this.#advanceEager();
+  }
+
+  async #advanceEager(): Promise<
+    | {version: string; numChanges: number; changes: Iterable<RowChange | 'yield'>}
+    | ResetPipelinesSignal
+  > {
     const rows = await this.#engine.advanceToHeadStreaming();
 
     const headerRow = rows[0];
     if (headerRow === null || headerRow === undefined) {
       throw new Error('advanceToHeadStreaming returned no rows');
     }
-    // A legit reset that emitted no header (reset_reason set before the version
-    // was known) arrives as a lone -2 row → ResetPipelinesSignal (in-place
-    // reset). Panics do NOT reach here — they reject the promise (above).
     if (headerRow.changeType === -2) {
       const reason = headerRow.rowKey['reason']?.strVal ?? 'schema-change';
       const msg = headerRow.rowKey['msg']?.strVal ?? 'advance reset';
@@ -413,7 +529,6 @@ export class RustIVMDriver {
     const aborted = headerRow.rowKey['aborted']?.boolVal ?? false;
     this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
 
-    // Update replicaVersion immediately — the version is now known.
     if (version) {
       this.#replicaVersion = version;
     }
@@ -422,6 +537,53 @@ export class RustIVMDriver {
       version,
       numChanges,
       changes: this.#advanceToHeadRows(rows, aborted),
+    };
+  }
+
+  async #advanceStreaming(): Promise<
+    | {version: string; numChanges: number; changes: AsyncIterable<RowChange | 'yield'>}
+    | ResetPipelinesSignal
+  > {
+    const queue = new AsyncQueue<NapiRowChange>();
+    let headerResolve: ((row: NapiRowChange) => void) | null = null;
+    const headerPromise = new Promise<NapiRowChange>(r => {
+      headerResolve = r;
+    });
+
+    this.#engine
+      .advanceToHeadStreamingRows((row: NapiRowChange) => {
+        if (headerResolve) {
+          headerResolve(row);
+          headerResolve = null;
+        } else {
+          queue.push(row);
+        }
+      })
+      .then(() => queue.close())
+      .catch((e: unknown) => queue.error(e));
+
+    const header = await headerPromise;
+    if (header.changeType === -2) {
+      const reason = header.rowKey['reason']?.strVal ?? 'schema-change';
+      const msg = header.rowKey['msg']?.strVal ?? 'advance reset';
+      return new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
+    }
+    if (header.changeType !== -1) {
+      throw new Error('advanceToHeadStreaming expected header row (changeType=-1) as first row');
+    }
+    const version = header.rowKey['version']?.strVal ?? '';
+    const numChanges = header.rowKey['numChanges']?.f64Val ?? 0;
+    const aborted = header.rowKey['aborted']?.boolVal ?? false;
+    this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
+
+    if (version) {
+      this.#replicaVersion = version;
+    }
+
+    return {
+      version,
+      numChanges,
+      changes: this.#advanceToHeadRowsStreaming(queue, aborted),
     };
   }
 
@@ -435,7 +597,6 @@ export class RustIVMDriver {
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
 
-      // Reset signal row (changeType=-2): throw ResetPipelinesSignal.
       if (row.changeType === -2) {
         const reason = row.rowKey['reason']?.strVal ?? 'schema-change';
         const msg = row.rowKey['msg']?.strVal ?? 'advance reset';
@@ -443,7 +604,41 @@ export class RustIVMDriver {
       }
 
       const change = napiToRowChange(row);
-      // Track rowSetSignature locally (XOR for ADD/REMOVE, skip EDIT).
+      if (change.type !== ChangeType.EDIT) {
+        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+        const unit = rowIDSignatureUnit({
+          schema: '',
+          table: change.table,
+          rowKey: change.rowKey as RowKey,
+        });
+        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+      }
+      yield change;
+      count++;
+      if (count % 100 === 0) {
+        yield 'yield';
+      }
+    }
+
+    if (aborted) {
+      this.#lc.warn?.(`advanceToHead: aborted after ${count} changes (budget exceeded)`);
+    }
+  }
+
+  async *#advanceToHeadRowsStreaming(
+    queue: AsyncQueue<NapiRowChange>,
+    aborted: boolean,
+  ): AsyncIterable<RowChange | 'yield'> {
+    let count = 0;
+
+    for await (const row of queue) {
+      if (row.changeType === -2) {
+        const reason = row.rowKey['reason']?.strVal ?? 'schema-change';
+        const msg = row.rowKey['msg']?.strVal ?? 'advance reset';
+        throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
+      }
+
+      const change = napiToRowChange(row);
       if (change.type !== ChangeType.EDIT) {
         const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
         const unit = rowIDSignatureUnit({
