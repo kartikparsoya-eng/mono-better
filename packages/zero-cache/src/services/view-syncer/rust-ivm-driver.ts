@@ -382,18 +382,24 @@ export class RustIVMDriver {
 
     // Rust derives its own diff from the snapshotter. ASYNC: the advance runs
     // on this engine's actor thread (off the JS event loop), so advances for
-    // concurrent client groups run in parallel. Resolves to the full row array:
-    // [header(-1), ...rows] normally, or a lone reset row (-2) if the advance
-    // panicked (caught in the addon and surfaced as a pipeline reset).
+    // concurrent client groups run in parallel. Resolves to [header(-1), ...rows]
+    // (with a trailing -2 row iff the engine reported a legit reset_reason).
+    //
+    // ERROR CONTRACT (matches TS): an engine PANIC (e.g. a source-drift assert
+    // "Add duplicate row") is NOT turned into a reset — the addon rejects this
+    // promise, so `await` throws a raw Error that propagates out of advance() →
+    // #advancePipelines re-throws → the view-syncer tears down and the client
+    // reconnects, exactly as the TS PipelineDriver does when its source asserts
+    // throw. Only advance_result.reset_reason maps to a ResetPipelinesSignal.
     const rows = await this.#engine.advanceToHeadStreaming();
 
     const headerRow = rows[0];
     if (headerRow === null || headerRow === undefined) {
       throw new Error('advanceToHeadStreaming returned no rows');
     }
-    // Panic path: a lone reset row (-2) with no header. Surface it as a reset
-    // rather than throwing a generic error (the addon's catch_unwind turns an
-    // engine panic into this so the driver can rehydrate cleanly).
+    // A legit reset that emitted no header (reset_reason set before the version
+    // was known) arrives as a lone -2 row → ResetPipelinesSignal (in-place
+    // reset). Panics do NOT reach here — they reject the promise (above).
     if (headerRow.changeType === -2) {
       const reason = headerRow.rowKey['reason']?.strVal ?? 'schema-change';
       const msg = headerRow.rowKey['msg']?.strVal ?? 'advance reset';
