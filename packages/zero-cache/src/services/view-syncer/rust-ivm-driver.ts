@@ -1,16 +1,16 @@
 import type {LogContext} from '@rocicorp/logger';
 import {assert} from '../../../../shared/src/asserts.ts';
-import {must} from '../../../../shared/src/must.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
-import type {Row} from '../../../../zero-protocol/src/data.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
+import {must} from '../../../../shared/src/must.ts';
+import {type RowKey} from '../../types/row-key.ts';
+import type {Row} from '../../../../zero-protocol/src/data.ts';
 import type {LogConfig, ZeroConfig} from '../../config/zero-config.ts';
 import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
 import {computeZqlSpecs} from '../../db/lite-tables.ts';
 import type {LiteAndZqlSpec} from '../../db/specs.ts';
 import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
-import {type RowKey} from '../../types/row-key.ts';
 import {type ShardID} from '../../types/shards.ts';
 import {
   getSubscriptionState,
@@ -44,6 +44,11 @@ export interface NapiRowChange {
   row?: Record<string, NapiValue>;
 }
 
+export interface NapiQuerySpec {
+  queryId: string;
+  astJson: string;
+}
+
 export interface NapiQueryResult {
   queryId: string;
   changes: NapiRowChange[];
@@ -67,16 +72,18 @@ export interface NapiTableSpec {
   table: string;
   columns: Record<string, {type: string; optional: boolean}>;
   primaryKey: string[];
+  minRowVersion?: string;
 }
 
 // Try to load the native addon (use createRequire for ESM compatibility with tsx)
 import {createRequire} from 'node:module';
 const nodeRequire = createRequire(import.meta.url);
 let RustIvmEngineClass: unknown = null;
+const addonPath = process.env['RUST_IVM_ADDON_PATH'] ?? '../../../../../../rust-ivm/napi/rust-ivm.node';
 try {
-  RustIvmEngineClass = (nodeRequire('../../../../../rust-ivm/napi/rust-ivm.node') as {RustIvmEngine: new () => unknown}).RustIvmEngine;
-} catch {
-  // Addon not available - will be caught at construction time
+  RustIvmEngineClass = (nodeRequire(addonPath) as {RustIvmEngine: new () => unknown}).RustIvmEngine;
+} catch (e) {
+  console.error('[rust-ivm-driver] Failed to load addon from', addonPath, ':', (e as Error).message);
 }
 
 export type {Timer} from './pipeline-driver.ts';
@@ -96,22 +103,6 @@ type QueryInfo = {
   readonly queryName?: string | undefined;
 };
 
-function toNapiValue(val: unknown): NapiValue {
-  if (val === null || val === undefined) {
-    return {kind: 'null'};
-  }
-  if (typeof val === 'boolean') {
-    return {kind: 'bool', boolVal: val};
-  }
-  if (typeof val === 'number') {
-    return {kind: 'f64', f64Val: val};
-  }
-  if (typeof val === 'string') {
-    return {kind: 'str', strVal: val};
-  }
-  return {kind: 'json', jsonVal: JSON.stringify(val)};
-}
-
 function fromNapiValue(val: NapiValue): unknown {
   switch (val.kind) {
     case 'null':
@@ -129,21 +120,11 @@ function fromNapiValue(val: NapiValue): unknown {
   }
 }
 
-function rowToNapi(row: Row): Record<string, NapiValue> {
-  const result: Record<string, NapiValue> = {};
-  for (const [k, v] of Object.entries(row)) {
-    result[k] = toNapiValue(v);
-  }
-  return result;
-}
-
 function napiToRow(row: Record<string, NapiValue> | undefined): Row | undefined {
   if (!row) return undefined;
-  const result: Row = {};
-  for (const [k, v] of Object.entries(row)) {
-    result[k] = fromNapiValue(v);
-  }
-  return result;
+  return Object.fromEntries(
+    Object.entries(row).map(([k, v]) => [k, fromNapiValue(v)]),
+  ) as Row;
 }
 
 function napiToRowChange(c: NapiRowChange): RowChange {
@@ -154,10 +135,6 @@ function napiToRowChange(c: NapiRowChange): RowChange {
     rowKey: napiToRow(c.rowKey) ?? {},
     row: napiToRow(c.row),
   };
-}
-
-function getRowKey(cols: PrimaryKey, row: Row): RowKey {
-  return Object.fromEntries(cols.map(col => [col, must(row[col])] as const));
 }
 
 function buildPrimaryKeys(
@@ -223,15 +200,13 @@ export class RustIVMDriver {
   }
 
   reset(clientSchema: ClientSchema) {
-    void this.#engine.reset();
+    this.#engine.reset();
     this.#queryInfo.clear();
     this.#rowSetSignatures.clear();
     void this.#initAndResetCommon(clientSchema);
   }
 
-  #initPromise: Promise<void> | null = null;
-
-  async #initAndResetCommon(clientSchema: ClientSchema) {
+  #initAndResetCommon(clientSchema: ClientSchema) {
     const {db} = this.#snapshotter.current();
     const fullTables = new Map<string, unknown>();
     computeZqlSpecs(
@@ -239,13 +214,13 @@ export class RustIVMDriver {
       db.db,
       {includeBackfillingColumns: false},
       this.#tableSpecs,
-      fullTables,
+      fullTables as any,
     );
     checkClientSchema(
       this.#shardID,
       clientSchema,
       this.#tableSpecs,
-      fullTables,
+      fullTables as any,
     );
     this.#allTableNames.clear();
     for (const table of fullTables.keys()) {
@@ -269,24 +244,18 @@ export class RustIVMDriver {
       tableSpecs.push({
         table,
         columns,
-        primaryKey: spec.tableSpec.primaryKey,
+        primaryKey: [...spec.tableSpec.primaryKey],
+        ...(spec.tableSpec.minRowVersion && {minRowVersion: spec.tableSpec.minRowVersion}),
       });
-      if (spec.tableSpec.minRowVersion) {
-        this.#engine.setTableSpec(table, spec.tableSpec.minRowVersion);
-      }
     }
     // Pass db_path to init() so sources + SQLite path are set atomically on
     // the worker thread (avoids race where setDatabasePath runs before Init).
-    this.#initPromise = this.#engine.init(
+    this.#engine.init(
       tableSpecs,
       this.#replicaFile || null,
+      this.#shardID.appID,
     );
-    try {
-      await this.#initPromise;
-      this.#lc.info?.(`RustIVMDriver: init complete, db=${this.#replicaFile}`);
-    } catch (e) {
-      this.#lc.error?.(`RustIVMDriver: init failed: ${(e as Error).message}`);
-    }
+    this.#lc.info?.(`RustIVMDriver: init complete, db=${this.#replicaFile}`);
 
     const {replicaVersion} = getSubscriptionState(db);
     this.#replicaVersion = replicaVersion;
@@ -322,7 +291,9 @@ export class RustIVMDriver {
   }
 
   destroy() {
-    this.#engine.destroy();
+    // The engine is a JS-owned value — it's cleaned up by GC/Drop.
+    // We still call destroy() for explicit cleanup (clears pipelines/sources).
+    this.#engine.destroy?.();
     this.#storage.destroy();
     this.#snapshotter.destroy();
   }
@@ -336,7 +307,7 @@ export class RustIVMDriver {
   }
 
   removeQuery(queryID: string) {
-    void this.#engine.removeQuery(queryID);
+    this.#engine.removeQuery(queryID);
     this.#queryInfo.delete(queryID);
     this.#rowSetSignatures.delete(queryID);
   }
@@ -375,18 +346,15 @@ export class RustIVMDriver {
     });
     this.#rowSetSignatures.set(queryID, 0n);
 
-    // PULL-BASED: get a stream iterator from the worker thread.
-    // Worker pushes rows to a queue in the background; we pull via next().
-    // This matches TS: `for await (const change of await pipelines.addQuery(...))`.
-    const iterator = await this.#engine.addQueriesStreaming([
-      {queryId: queryID, ast: query},
+    // ASYNC: hydration runs on this engine's actor thread (off the JS event
+    // loop), so concurrent client groups hydrate in parallel. Resolves to the
+    // full row array (the addon already materialised it).
+    const out = await this.#engine.addQueriesStreaming([
+      {queryId: queryID, astJson: JSON.stringify(query)},
     ]);
 
     let count = 0;
-    // Pull rows one at a time — true streaming, no collecting.
-    while (true) {
-      const row = await iterator.next();
-      if (row === null || row === undefined) break;
+    for (const row of out) {
       const change = napiToRowChange(row);
       // Track rowSetSignature locally (XOR for ADD/REMOVE, skip EDIT).
       if (change.type !== ChangeType.EDIT) {
@@ -406,25 +374,30 @@ export class RustIVMDriver {
     }
   }
 
-  async advance(timer: Timer): Promise<
-    | {version: string; numChanges: number; changes: AsyncIterable<RowChange | 'yield'>}
+  async advance(_timer: Timer): Promise<
+    | {version: string; numChanges: number; changes: Iterable<RowChange | 'yield'>}
     | ResetPipelinesSignal
   > {
     assert(this.initialized(), 'Pipeline driver must be initialized before advancing');
 
-    // Rust derives its own diff from the snapshotter.
-    // TS never computes a diff or sends SourceChange[] — just calls
-    // advanceToHeadStreaming and pulls RowChanges.
-    //
-    // The first row from the iterator is a header (changeType=-1) with
-    // version, numChanges, aborted in the rowKey field. We await it here
-    // so the version is available synchronously before rows stream.
-    const iterator = await this.#engine.advanceToHeadStreaming();
+    // Rust derives its own diff from the snapshotter. ASYNC: the advance runs
+    // on this engine's actor thread (off the JS event loop), so advances for
+    // concurrent client groups run in parallel. Resolves to the full row array:
+    // [header(-1), ...rows] normally, or a lone reset row (-2) if the advance
+    // panicked (caught in the addon and surfaced as a pipeline reset).
+    const rows = await this.#engine.advanceToHeadStreaming();
 
-    // Pull the header row first — it carries version + numChanges.
-    const headerRow = await iterator.next();
+    const headerRow = rows[0];
     if (headerRow === null || headerRow === undefined) {
-      throw new Error('advanceToHeadStreaming ended before header row');
+      throw new Error('advanceToHeadStreaming returned no rows');
+    }
+    // Panic path: a lone reset row (-2) with no header. Surface it as a reset
+    // rather than throwing a generic error (the addon's catch_unwind turns an
+    // engine panic into this so the driver can rehydrate cleanly).
+    if (headerRow.changeType === -2) {
+      const reason = headerRow.rowKey['reason']?.strVal ?? 'schema-change';
+      const msg = headerRow.rowKey['msg']?.strVal ?? 'advance reset';
+      return new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
     }
     if (headerRow.changeType !== -1) {
       throw new Error('advanceToHeadStreaming expected header row (changeType=-1) as first row');
@@ -442,19 +415,19 @@ export class RustIVMDriver {
     return {
       version,
       numChanges,
-      changes: this.#advanceToHeadRows(iterator, aborted),
+      changes: this.#advanceToHeadRows(rows, aborted),
     };
   }
 
-  async *#advanceToHeadRows(
-    iterator: {next: () => Promise<NapiRowChange | null>},
+  *#advanceToHeadRows(
+    rows: NapiRowChange[],
     aborted: boolean,
-  ): AsyncIterable<RowChange | 'yield'> {
+  ): Iterable<RowChange | 'yield'> {
     let count = 0;
 
-    while (true) {
-      const row = await iterator.next();
-      if (row === null || row === undefined) break;
+    // Skip index 0 (the header row consumed by advance()).
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
 
       // Reset signal row (changeType=-2): throw ResetPipelinesSignal.
       if (row.changeType === -2) {

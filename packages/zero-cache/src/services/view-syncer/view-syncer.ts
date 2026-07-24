@@ -2306,7 +2306,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const start = performance.now();
 
       const timer = new TimeSliceTimer(lc);
-      const {version, numChanges, changes} = this.#pipelines.advance(timer);
+      // await: RustIVMDriver.advance is async (runs on the engine actor thread);
+      // the TS PipelineDriver.advance is sync — await handles both.
+      const advanceResult = await this.#pipelines.advance(timer);
+      if (advanceResult instanceof ResetPipelinesSignal) {
+        return advanceResult;
+      }
+      const {version, numChanges, changes} = advanceResult;
       lc = lc.withContext('newVersion', version);
 
       // Probably need a new updater type. CVRAdvancementUpdater?
