@@ -1,10 +1,11 @@
 import type {LogContext} from '@rocicorp/logger';
 import {assert} from '../../../../shared/src/asserts.ts';
 
-// RUST_IVM_STREAM_ROWS=1: stream rows one-at-a-time via ThreadsafeFunction
-// instead of materializing the full result array. O(1) JS objects in flight
-// vs O(result). Dark flag — default OFF (eager array path, byte-identical).
-const STREAM_ROWS = process.env['RUST_IVM_STREAM_ROWS'] === '1';
+// Stream rows one-at-a-time via ThreadsafeFunction instead of materializing
+// the full result array. O(1) JS objects in flight vs O(result). Default ON
+// — matches TS's per-row streaming invariant. Set RUST_IVM_STREAM_ROWS=0 to
+// fall back to the eager array path (for debugging/diffing only).
+const STREAM_ROWS = process.env['RUST_IVM_STREAM_ROWS'] !== '0';
 
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
