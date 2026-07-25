@@ -468,7 +468,7 @@ export class RustIVMDriver {
     this.#engine
       .addQueriesStreamingRows(
         [{queryId: queryID, astJson: JSON.stringify(query)}],
-        (row: NapiRowChange) => {
+        (_err: unknown, row: NapiRowChange) => {
           const change = napiToRowChange(row);
           if (change.type !== ChangeType.EDIT) {
             const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
@@ -552,7 +552,7 @@ export class RustIVMDriver {
     });
 
     this.#engine
-      .advanceToHeadStreamingRows((row: NapiRowChange) => {
+      .advanceToHeadStreamingRows((_err: unknown, row: NapiRowChange) => {
         if (headerResolve) {
           headerResolve(row);
           headerResolve = null;
