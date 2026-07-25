@@ -165,7 +165,14 @@ function buildPrimaryKeys(
  *
  * The TSFN callback calls `push()` synchronously; the async generator drains
  * via `for await`. With TSFN Blocking mode + the actor thread parking on a
- * full TSFN queue, at most O(1) rows are in flight.
+ * Bounded bridge between TSFN callbacks and async generators.
+ *
+ * The TSFN callback calls `push()` synchronously; the async generator drains
+ * via `for await`. The queue is capped at `maxBuffer` items — when full,
+ * `push()` returns false, signaling the caller to pause production. With the
+ * bounded TSFN (max_queue_size=1), at most maxBuffer+1 rows are in flight
+ * per client group. This caps JS heap usage under concurrent load (50 CGs ×
+ * maxBuffer items × ~1KB/row = bounded, not O(result-set)).
  */
 class AsyncQueue<T> implements AsyncIterable<T> {
   #items: T[] = [];
@@ -175,14 +182,47 @@ class AsyncQueue<T> implements AsyncIterable<T> {
   }[] = [];
   #done = false;
   #error: unknown = null;
+  #maxBuffer: number;
+  #drainWaiters: (() => void)[] = [];
 
-  push(item: T): void {
-    if (this.#done) return;
+  constructor(maxBuffer = 256) {
+    this.#maxBuffer = maxBuffer;
+  }
+
+  /**
+   * Push an item. Returns true if the queue has room for more, false if the
+   * buffer is full (producer should pause). The TSFN callback can check this
+   * to apply backpressure — though with max_queue_size=1 the TSFN itself
+   * already blocks the actor thread, so this is a second safety net for the
+   * JS-side buffer.
+   */
+  push(item: T): boolean {
+    if (this.#done) return false;
     const waiter = this.#waiters.shift();
     if (waiter) {
       waiter.resolve({value: item, done: false});
-    } else {
-      this.#items.push(item);
+      return this.#items.length < this.#maxBuffer;
+    }
+    this.#items.push(item);
+    return this.#items.length < this.#maxBuffer;
+  }
+
+  /**
+   * Wait until the buffer drains below maxBuffer. Called by the TSFN
+   * callback path when push() returns false.
+   */
+  async waitForDrain(): Promise<void> {
+    if (this.#items.length < this.#maxBuffer) return;
+    return new Promise(resolve => {
+      this.#drainWaiters.push(resolve);
+    });
+  }
+
+  #notifyDrainWaiters(): void {
+    if (this.#items.length < this.#maxBuffer) {
+      const waiters = this.#drainWaiters;
+      this.#drainWaiters = [];
+      for (const w of waiters) w();
     }
   }
 
@@ -196,6 +236,8 @@ class AsyncQueue<T> implements AsyncIterable<T> {
       }
     }
     this.#waiters = [];
+    for (const w of this.#drainWaiters) w();
+    this.#drainWaiters = [];
   }
 
   error(e: unknown): void {
@@ -205,7 +247,9 @@ class AsyncQueue<T> implements AsyncIterable<T> {
 
   async next(): Promise<IteratorResult<T>> {
     if (this.#items.length > 0) {
-      return {value: this.#items.shift()!, done: false};
+      const item = this.#items.shift()!;
+      this.#notifyDrainWaiters();
+      return {value: item, done: false};
     }
     if (this.#done) {
       if (this.#error) throw this.#error;
