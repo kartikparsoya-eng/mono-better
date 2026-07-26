@@ -446,7 +446,8 @@ export function classifyGoPrimaryAdvanceError(e: unknown): GoAdvanceErrorClass {
     msg.includes("Sidecar is not running") ||
     msg.includes("Connection closed") ||
     msg.includes("Not connected") ||
-    msg.includes("engine not initialized")
+    msg.includes("engine not initialized") ||
+    msg.includes("client group destroyed")
   ) {
     return "sidecar";
   }

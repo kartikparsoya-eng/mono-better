@@ -93,12 +93,20 @@ export function getOrCreateUpDownCounter(
   name: string,
   opts: string | Options,
 ): UpDownCounter {
-  return upDownCounters(name, name =>
+  const raw = upDownCounters(name, name =>
     getMeter().createUpDownCounter(
       `zero.${category}.${name}`,
       typeof opts === 'string' ? {description: opts} : opts,
     ),
   );
+  // Wrap to merge workerAttributes so forked syncer workers produce distinct
+  // series — same fix the histograms got. Without this, counters like
+  // row-set-signature-drifts and reset-class counters collide at multi-worker
+  // scale (last-write-wins → non-monotonic).
+  return {
+    add: (value: number, attributes?: Attributes) =>
+      raw.add(value, {...workerAttributes, ...attributes}),
+  };
 }
 
 /**
@@ -198,12 +206,17 @@ export function getOrCreateCounter(
   name: string,
   opts: string | Options,
 ): Counter {
-  return counters(name, name =>
+  const raw = counters(name, name =>
     getMeter().createCounter(
       `zero.${category}.${name}`,
       typeof opts === 'string' ? {description: opts} : opts,
     ),
   );
+  // Wrap to merge workerAttributes — same fix the histograms got.
+  return {
+    add: (value: number, attributes?: Attributes) =>
+      raw.add(value, {...workerAttributes, ...attributes}),
+  };
 }
 
 const gauges = cache<ObservableGauge>();
@@ -223,10 +236,27 @@ export function getOrCreateGauge(
   name: string,
   opts: string | Options,
 ): ObservableGauge {
+  // Gauges use addCallback — the callback is invoked by the meter, so we
+  // can't wrap the add path. Callers that need worker-distinguished series
+  // should use observeWithWorker() below, or merge workerAttributes in
+  // their callback.
   return gauges(name, name =>
     getMeter().createObservableGauge(
       `zero.${category}.${name}`,
       typeof opts === 'string' ? {description: opts} : opts,
     ),
   );
+}
+
+/**
+ * Observe a gauge value with the per-process worker attributes merged in.
+ * Use this in gauge callbacks instead of result.observe() when the gauge
+ * is emitted from a forked syncer worker to ensure distinct series.
+ */
+export function observeWithWorker(
+  result: {observe: (value: number, attributes?: Attributes) => void},
+  value: number,
+  attributes?: Attributes,
+): void {
+  result.observe(value, {...workerAttributes, ...attributes});
 }

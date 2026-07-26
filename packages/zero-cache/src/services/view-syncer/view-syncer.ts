@@ -212,6 +212,16 @@ export const RESET_CIRCUIT_WINDOW_MS = 20_000;
 export const TRANSIENT_RESET_CIRCUIT_LIMIT = 6;
 export const TRANSIENT_RESET_CIRCUIT_WINDOW_MS = 60_000;
 
+// Economic-reset watchdog: 'advancement-timeout' resets are exempt from the
+// tiered breaker (they're the designed recovery), but a CG that aborts every
+// advance — even after suppressAbort fires and the 60s wall backstop takes
+// over — will loop reset→re-hydrate→abort forever with no escalation path.
+// This watchdog counts consecutive economic resets with zero successful
+// advances in between; when it exceeds the limit, the CG is torn down so the
+// client reconnects into a fresh view-syncer instead of silently spinning.
+export const ECONOMIC_RESET_WATCHDOG_LIMIT = 10;
+export const ECONOMIC_RESET_WATCHDOG_WINDOW_MS = 5 * 60_000; // 5 min
+
 /**
  * The breaker's premise — "N resets in a short window ⇒ the error is
  * reset-proof ⇒ teardown is the only way out" — is only sound for a subset of
@@ -356,6 +366,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   // starts clean, so the cost of a persistent failure is a slow reconnect
   // cycle, not a tight reset storm.
   #resetCircuitBuckets: ResetCircuitBuckets = emptyResetCircuitBuckets();
+  // Consecutive economic-reset timestamps (ms) for the economic-reset
+  // watchdog. Cleared on any successful advance. When the count exceeds
+  // ECONOMIC_RESET_WATCHDOG_LIMIT within the window, the CG is torn down.
+  #economicResetTimestamps: number[] = [];
 
   /**
    * The TTL clock is used to determine the time at which queries are considered
@@ -677,6 +691,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               // earlier resets were not a reset-proof loop. Start the breaker
               // windows fresh.
               this.#resetCircuitBuckets = emptyResetCircuitBuckets();
+              this.#economicResetTimestamps = [];
               return;
             }
             // Tiered reset circuit breaker: only reason classes for which a
@@ -692,6 +707,32 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
               nowMs,
             );
             this.#resetCircuitBuckets = buckets;
+            // Economic-reset watchdog: 'advancement-timeout' resets are exempt
+            // from the tiered breaker, but a CG stuck in an abort→reset loop
+            // with zero successful advances must eventually escalate to
+            // teardown instead of spinning forever.
+            if (cls === "economic") {
+              const windowStart = nowMs - ECONOMIC_RESET_WATCHDOG_WINDOW_MS;
+              this.#economicResetTimestamps = this.#economicResetTimestamps.filter(
+                ts => ts > windowStart,
+              );
+              this.#economicResetTimestamps.push(nowMs);
+              if (
+                this.#economicResetTimestamps.length >=
+                ECONOMIC_RESET_WATCHDOG_LIMIT
+              ) {
+                this.#pipelineResetCircuitTripped.add(1, {
+                  reason: result.reason,
+                  class: cls,
+                });
+                throw new Error(
+                  `economic-reset watchdog tripped: ${this.#economicResetTimestamps.length} ` +
+                    `economic resets within ${ECONOMIC_RESET_WATCHDOG_WINDOW_MS}ms ` +
+                    `with zero successful advances (reason=${result.reason}) — ` +
+                    `tearing down CG instead of looping: ${result.message}`,
+                );
+              }
+            }
             if (trip) {
               this.#pipelineResetCircuitTripped.add(1, {
                 reason: result.reason,

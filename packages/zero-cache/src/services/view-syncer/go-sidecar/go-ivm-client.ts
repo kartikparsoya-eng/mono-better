@@ -705,6 +705,15 @@ export const RPC_CODE_SCALAR_RESET = -32105;
  */
 export const RPC_CODE_FRAME_TOO_LARGE = -32011;
 
+/**
+ * RPC error code Go uses when a SINGLE RowChange exceeds the wire max.
+ * Unlike RPC_CODE_FRAME_TOO_LARGE (an entire response frame that exceeded
+ * the cap), a single row > 64MB is a permanent data condition — no chunk
+ * size adjustment can fix it. Classified as 'data-error' on the TS side
+ * so it's attributed correctly and doesn't loop as a protocol bug.
+ */
+export const RPC_CODE_ROW_TOO_LARGE = -32012;
+
 export class ScalarResetError extends Error {
   constructor(message: string) {
     super(message);
@@ -1585,6 +1594,11 @@ export class GoIVMClient {
         // matches as 'protocol' (msg.includes('Frame too large')) → CG
         // teardown, the safe recovery (frame-too-large classification).
         pending.reject(new Error(`Frame too large: ${resp.error.message}`));
+      } else if (resp.error.code === RPC_CODE_ROW_TOO_LARGE) {
+        // A single row exceeds the 64MB wire cap — permanent data condition.
+        // Classified as 'data-error' → PermanentDataError → CG teardown
+        // (one teardown, correctly attributed, not a protocol-bug loop).
+        pending.reject(new PermanentDataError(`Single row too large: ${resp.error.message}`));
       } else {
         pending.reject(
           new Error(`RPC error ${resp.error.code}: ${resp.error.message}`),

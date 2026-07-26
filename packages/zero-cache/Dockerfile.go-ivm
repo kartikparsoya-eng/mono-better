@@ -203,11 +203,13 @@ ENV GO_IVM_CONN_CACHE_KB=768
 # pressure without unbounded heap growth.
 ENV GO_IVM_GOGC=400
 # Soft Go heap ceiling as a percentage of the container's cgroup memory
-# limit (GOMEMLIMIT). The in-process engines share the container with the
-# node syncer workers, so they must not claim the whole budget. 60% gives
-# Go the majority (it's the primary workload) while leaving 40% for Node.js
-# poke/CVR/WebSocket work. Explicit GO_IVM_GOMEMLIMIT / GOMEMLIMIT override.
-ENV GO_IVM_GOMEMLIMIT_PERCENT=70
+# limit (GOMEMLIMIT). Each forked syncer worker applies this percentage
+# to the SAME cgroup limit, so N workers × P% = N×P% total Go heap claim.
+# With 6 workers, 70% × 6 = 420% — the soft limit can never engage and the
+# kernel OOM-kills all workers at once. Fix: divide by worker count so the
+# aggregate stays ~70% (6 × 11% ≈ 66%), leaving ~34% for V8 heaps + page cache.
+# Set explicit GO_IVM_GOMEMLIMIT to override the percentage-based calculation.
+ENV GO_IVM_GOMEMLIMIT_PERCENT=11
 # Estimated-bytes budget per streamed partial frame. Row-count chunk caps
 # alone let 10k fat rows (>6.4KB avg: message bodies, canvas JSON) encode
 # past the 64MB wire frame cap — a deterministic hydrate failure loop.
