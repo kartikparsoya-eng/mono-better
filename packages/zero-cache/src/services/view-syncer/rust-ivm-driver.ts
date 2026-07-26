@@ -174,7 +174,7 @@ function buildPrimaryKeys(
  * per client group. This caps JS heap usage under concurrent load (50 CGs ×
  * maxBuffer items × ~1KB/row = bounded, not O(result-set)).
  */
-class AsyncQueue<T> implements AsyncIterable<T> {
+export class AsyncQueue<T> implements AsyncIterable<T> {
   #items: T[] = [];
   #waiters: {
     resolve: (r: IteratorResult<T>) => void;
@@ -263,6 +263,31 @@ class AsyncQueue<T> implements AsyncIterable<T> {
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {next: () => this.next()};
   }
+}
+
+/**
+ * Close an AsyncQueue on the next macrotask instead of immediately.
+ *
+ * The napi streaming methods signal completion two ways: (1) each row arrives
+ * via a TSFN callback (a libuv macrotask), and (2) the returned Promise
+ * resolves when `compute()` finishes on the worker thread. These are separate
+ * channels, so the Promise can resolve while the final row's TSFN callback is
+ * still queued. If we called `queue.close()` directly in `.then()` (a
+ * microtask), `#done` would be set before that callback ran and its `push()`
+ * would silently drop the row.
+ *
+ * `setImmediate` defers close to the check phase, which libuv runs AFTER the
+ * poll phase where the TSFN callback is dispatched. Because the TSFN is bounded
+ * (`max_queue_size=1`, Blocking) there is at most one undelivered row when the
+ * Promise resolves, and no row is ever enqueued after it — so one deferral is
+ * sufficient for the queue to drain before it closes.
+ *
+ * NOTE: this correctness argument depends on the TSFN staying small-bounded. If
+ * `max_queue_size` is ever raised for throughput, prefer an explicit
+ * end-of-stream sentinel over event-loop-phase timing.
+ */
+export function deferClose<T>(queue: AsyncQueue<T>): void {
+  setImmediate(() => queue.close());
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +551,7 @@ export class RustIVMDriver {
           queue.push(change);
         },
       )
-      .then(() => queue.close())
+      .then(() => deferClose(queue))
       .catch((e: unknown) => queue.error(e));
 
     let count = 0;
@@ -604,7 +629,7 @@ export class RustIVMDriver {
           queue.push(row);
         }
       })
-      .then(() => queue.close())
+      .then(() => deferClose(queue))
       .catch((e: unknown) => queue.error(e));
 
     const header = await headerPromise;
