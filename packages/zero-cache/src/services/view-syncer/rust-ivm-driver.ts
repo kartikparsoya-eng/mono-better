@@ -554,13 +554,31 @@ export class RustIVMDriver {
       .then(() => deferClose(queue))
       .catch((e: unknown) => queue.error(e));
 
+    // If the consumer abandons this stream early (break / thrown error /
+    // client teardown), cancel the engine so the actor stops producing and
+    // close the queue so any further pushed rows are dropped — otherwise the
+    // engine materializes the whole result into a queue nobody drains
+    // (O(result) memory + wasted compute). cancel() is out-of-band and
+    // non-blocking; destroy() is fire-and-forget, so neither can wedge here.
     let count = 0;
-    for await (const change of queue) {
-      yield change;
-      count++;
-      if (count % 100 === 0) {
-        yield 'yield';
+    let completed = false;
+    try {
+      for await (const change of queue) {
+        yield change;
+        count++;
+        if (count % 100 === 0) {
+          yield 'yield';
+        }
       }
+      completed = true;
+    } finally {
+      // Only cancel on EARLY exit; on normal completion the engine already
+      // finished and the token resets at the next op anyway. close() is
+      // idempotent (deferClose already ran on success).
+      if (!completed) {
+        this.#engine.cancel?.();
+      }
+      queue.close();
     }
   }
 
@@ -616,8 +634,10 @@ export class RustIVMDriver {
   > {
     const queue = new AsyncQueue<NapiRowChange>();
     let headerResolve: ((row: NapiRowChange) => void) | null = null;
-    const headerPromise = new Promise<NapiRowChange>(r => {
-      headerResolve = r;
+    let headerReject: ((e: unknown) => void) | null = null;
+    const headerPromise = new Promise<NapiRowChange>((resolve, reject) => {
+      headerResolve = resolve;
+      headerReject = reject;
     });
 
     this.#engine
@@ -625,12 +645,21 @@ export class RustIVMDriver {
         if (headerResolve) {
           headerResolve(row);
           headerResolve = null;
+          headerReject = null;
         } else {
           queue.push(row);
         }
       })
       .then(() => deferClose(queue))
-      .catch((e: unknown) => queue.error(e));
+      .catch((e: unknown) => {
+        // The engine can fail BEFORE emitting the header (snapshotter advance
+        // error, or engine/snapshotter not initialized): no callback fires, so
+        // `await headerPromise` below would hang forever. Reject it as well as
+        // erroring the queue, so the failure propagates as a teardown like TS.
+        // If the header already arrived, headerReject is null (no-op).
+        queue.error(e);
+        headerReject?.(e);
+      });
 
     const header = await headerPromise;
     if (header.changeType === -2) {
@@ -700,29 +729,42 @@ export class RustIVMDriver {
     aborted: boolean,
   ): AsyncIterable<RowChange | 'yield'> {
     let count = 0;
+    let completed = false;
 
-    for await (const row of queue) {
-      if (row.changeType === -2) {
-        const reason = row.rowKey['reason']?.strVal ?? 'schema-change';
-        const msg = row.rowKey['msg']?.strVal ?? 'advance reset';
-        throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
-      }
+    // A thrown ResetPipelinesSignal (or the consumer abandoning early) exits
+    // this generator mid-stream. On early exit, cancel the engine + close the
+    // queue so the actor stops producing and further pushes are dropped, rather
+    // than materializing the remaining changes into an undrained queue.
+    try {
+      for await (const row of queue) {
+        if (row.changeType === -2) {
+          const reason = row.rowKey['reason']?.strVal ?? 'schema-change';
+          const msg = row.rowKey['msg']?.strVal ?? 'advance reset';
+          throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
+        }
 
-      const change = napiToRowChange(row);
-      if (change.type !== ChangeType.EDIT) {
-        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
-        const unit = rowIDSignatureUnit({
-          schema: '',
-          table: change.table,
-          rowKey: change.rowKey as RowKey,
-        });
-        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+        const change = napiToRowChange(row);
+        if (change.type !== ChangeType.EDIT) {
+          const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+          const unit = rowIDSignatureUnit({
+            schema: '',
+            table: change.table,
+            rowKey: change.rowKey as RowKey,
+          });
+          this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+        }
+        yield change;
+        count++;
+        if (count % 100 === 0) {
+          yield 'yield';
+        }
       }
-      yield change;
-      count++;
-      if (count % 100 === 0) {
-        yield 'yield';
+      completed = true;
+    } finally {
+      if (!completed) {
+        this.#engine.cancel?.();
       }
+      queue.close();
     }
 
     if (aborted) {
