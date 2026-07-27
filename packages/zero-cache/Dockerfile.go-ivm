@@ -195,8 +195,11 @@ ENV GO_IVM_MAX_OPEN_CONNS=256
 # idle ≤ open.
 ENV GO_IVM_MAX_IDLE_CONNS=128
 # Per-conn SQLite page cache in KB. C-side malloc — OUTSIDE GOMEMLIMIT's
-# view — scales as 2 pools × conns × cache: at 200 conns × 512KB = 200MB.
-# Hot pages stay in the shared, evictable OS page cache.
+# view — scales as 2 pools × conns × cache. At 256 max conns × 768KB =
+# ~384MB C-heap PER WORKER (worst case, all conns open). In practice
+# ~8 CGs/worker × 2 conns = 16 conns × 768KB ≈ 12MB/worker. Hot pages
+# stay in the shared, evictable OS page cache. Compounds the GOMEMLIMIT
+# gap (H-4) — budget against the per-worker share if RSS exceeds cgroup.
 ENV GO_IVM_CONN_CACHE_KB=768
 # GC percent: 400 measured optimal in ART (GOGC=200 was 2% slower on p50,
 # GOGC=800 caused excess memory). High GOGC + GOMEMLIMIT cap = low GC
@@ -215,12 +218,12 @@ ENV GO_IVM_GOMEMLIMIT_PERCENT=11
 # past the 64MB wire frame cap — a deterministic hydrate failure loop.
 # 8MB leaves ample margin for msgpack overhead under the 64MB cap.
 ENV GO_IVM_CHUNK_SOFT_BYTES=8388608
-# workers=4: V8 event-loop parallelism for poke/cvr/websocket work that
-# stays TS-side. Each worker hosts its own in-process Go engine (~12 CGs
+# workers=6: V8 event-loop parallelism for poke/cvr/websocket work that
+# stays TS-side. Each worker hosts its own in-process Go engine (~8 CGs
 # per worker at 50 active CGs). Prod Grafana shows ELU headroom supports
-# more; 4 is the right size for 40-50 CGs (sandbox soak: bounded memory,
+# more; 6 is the right size for 40-50 CGs (sandbox soak: bounded memory,
 # no cross-worker contention). Code defaults for upstream.maxConns (20)
-# and cvr.maxConns (30) are both >= 4.
+# and cvr.maxConns (30) are both >= 6.
 ENV ZERO_NUM_SYNC_WORKERS=6
 # Litestream paths for the replicator role's continuous backup. When
 # ZERO_LITESTREAM_BACKUP_URL is set at deploy time (e.g. an S3/GCS URL),
