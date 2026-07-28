@@ -15,6 +15,11 @@ import {type RowKey} from '../../types/row-key.ts';
 import type {Row} from '../../../../zero-protocol/src/data.ts';
 import type {LogConfig, ZeroConfig} from '../../config/zero-config.ts';
 import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
+import {createSQLiteCostModel} from '../../../../zqlite/src/sqlite-cost-model.ts';
+import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
+import {planQuery} from '../../../../zql/src/planner/planner-builder.ts';
+import type {ConnectionCostModel} from '../../../../zql/src/planner/planner-connection.ts';
+import type {Database} from '../../../../zqlite/src/db.ts';
 import {computeZqlSpecs} from '../../db/lite-tables.ts';
 import type {LiteAndZqlSpec} from '../../db/specs.ts';
 import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
@@ -306,6 +311,7 @@ export class RustIVMDriver {
   readonly #tableSpecs = new Map<string, LiteAndZqlSpec>();
   readonly #allTableNames = new Set<string>();
   readonly #primaryKeys = new Map<string, PrimaryKey>();
+  readonly #costModels: WeakMap<Database, ConnectionCostModel> | undefined;
   #replicaVersion: string | null = null;
   #permissions: LoadedPermissions | null = null;
   #queryInfo = new Map<string, QueryInfo>();
@@ -321,7 +327,7 @@ export class RustIVMDriver {
     clientGroupID: string,
     _inspectorDelegate: InspectorDelegate,
     _yieldThresholdMs: () => number,
-    _enablePlanner?: boolean,
+    enablePlanner?: boolean,
     config?: ZeroConfig,
     replicaFile?: string,
   ) {
@@ -334,6 +340,7 @@ export class RustIVMDriver {
     this.#storage = storage;
     this.#config = config;
     this.#replicaFile = replicaFile ?? '';
+    this.#costModels = enablePlanner ? new WeakMap() : undefined;
   }
 
   init(clientSchema: ClientSchema) {
@@ -413,8 +420,18 @@ export class RustIVMDriver {
   }
 
   currentVersion(): string {
+    // Return #replicaVersion (kept in sync by init/advance/advanceWithoutDiff)
+    // instead of this.#snapshotter.current().version. The RustIVMDriver has TWO
+    // snapshotters: the TS Snapshotter (used by advanceWithoutDiff/currentPermissions)
+    // and the Rust Snapshotter (used by advance via the NAPI engine). They can
+    // diverge because advance() advances only the Rust snapshotter. If the CVR
+    // was set to V2 by advance() but the TS snapshotter is still at V1,
+    // currentVersion() returning V1 < V2 causes a "stateVersion must be >=
+    // cvr.version.stateVersion" assert on reconnect. #replicaVersion is updated
+    // by both advance() and advanceWithoutDiff(), so it always reflects the
+    // latest version regardless of which snapshotter was advanced.
     assert(this.initialized(), 'Not yet initialized');
-    return this.#snapshotter.current().version;
+    return must(this.#replicaVersion, 'Not yet initialized');
   }
 
   currentPermissions(): LoadedPermissions | null {
@@ -434,6 +451,9 @@ export class RustIVMDriver {
 
   advanceWithoutDiff(): string {
     const {version} = this.#snapshotter.advanceWithoutDiff().curr;
+    // Keep #replicaVersion in sync so currentVersion() returns the latest
+    // version (see currentVersion() comment for the two-snapshotter issue).
+    this.#replicaVersion = version;
     return version;
   }
 
@@ -477,6 +497,51 @@ export class RustIVMDriver {
     return this.#addQueryImpl(transformationHash, queryID, query, queryName);
   }
 
+  #ensureCostModelExistsIfEnabled(db: Database) {
+    let existing = this.#costModels?.get(db);
+    if (existing) {
+      return existing;
+    }
+    if (this.#costModels) {
+      const costModel = createSQLiteCostModel(db, this.#tableSpecs);
+      this.#costModels.set(db, costModel);
+      return costModel;
+    }
+    return undefined;
+  }
+
+  // Plans an AST through the same completeOrdering + cost-model planner pass
+  // that PipelineDriver applies for TS/Go — keeps the AST sent to Rust in
+  // sync with what TS materializes. Without this the planner's `flip: true`
+  // decorations (which route OR-with-CSQ through FlippedJoin + UnionFanIn
+  // merge-with-dedup) never reach Rust, so Rust's plain Join + applyOr path
+  // is used instead — correct but ~5-7x slower on OR-with-CSQ advances.
+  #planAst(ast: AST): AST {
+    const planned = completeOrdering(
+      ast,
+      tableName =>
+        must(this.#primaryKeys.get(tableName), `no primary key for table '${tableName}'`),
+    );
+    if (!this.#costModels) {
+      return planned;
+    }
+    const db = this.#snapshotter.current().db.db;
+    const costModel = this.#ensureCostModelExistsIfEnabled(db);
+    if (!costModel) {
+      return planned;
+    }
+    try {
+      return planQuery(planned, costModel);
+    } catch (e) {
+      this.#lc.warn?.(
+        `[rust-ivm] cost-model planning failed; falling back to unplanned ` +
+          `ordering for this query`,
+        e,
+      );
+      return planned;
+    }
+  }
+
   async *#addQueryImpl(
     transformationHash: string,
     queryID: string,
@@ -486,17 +551,19 @@ export class RustIVMDriver {
     assert(this.initialized(), 'Pipeline driver must be initialized before adding queries');
     this.removeQuery(queryID);
 
+    const planned = this.#planAst(query);
+
     this.#queryInfo.set(queryID, {
-      transformedAst: query,
+      transformedAst: planned,
       transformationHash,
       ...(queryName !== undefined && {queryName}),
     });
     this.#rowSetSignatures.set(queryID, 0n);
 
     if (STREAM_ROWS) {
-      yield* this.#addQueryStreaming(queryID, query);
+      yield* this.#addQueryStreaming(queryID, planned);
     } else {
-      yield* this.#addQueryEager(queryID, query);
+      yield* this.#addQueryEager(queryID, planned);
     }
   }
 
