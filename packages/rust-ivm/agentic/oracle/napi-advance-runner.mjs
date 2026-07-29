@@ -426,6 +426,28 @@ function netAdvanceFromViews(hydrate, finalView) {
         row: rc.row,
         isHidden: rc.isHidden,
       });
+    } else if (oldRc.isHidden === true && rc.isHidden !== true) {
+      // Visibility transition: hidden → visible (content unchanged).
+      // From the client's perspective this row just appeared → ADD.
+      changes.push({
+        changeType: 0,
+        queryId: rc.queryId,
+        table: rc.table,
+        rowKey: rc.rowKey,
+        row: rc.row,
+        isHidden: rc.isHidden,
+      });
+    } else if (oldRc.isHidden !== true && rc.isHidden === true) {
+      // Visibility transition: visible → hidden (content unchanged).
+      // From the client's perspective this row disappeared → REMOVE.
+      changes.push({
+        changeType: 1,
+        queryId: rc.queryId,
+        table: rc.table,
+        rowKey: rc.rowKey,
+        row: null,
+        isHidden: rc.isHidden,
+      });
     } else if (JSON.stringify(canon(oldRc.row)) !== JSON.stringify(canon(rc.row))) {
       changes.push({
         changeType: 2,

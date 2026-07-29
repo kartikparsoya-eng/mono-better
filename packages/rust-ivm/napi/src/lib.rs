@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
+use napi::bindgen_prelude::AsyncTask;
 use napi::{bindgen_prelude::*, Env, Error as NapiError, Status, Task, JsFunction};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, ErrorStrategy};
 use napi_derive::napi;
@@ -505,6 +506,19 @@ fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value {
 // ---------------------------------------------------------------------------
 
 /// The engine state held directly on the JS thread.
+fn row_to_json(row: &rusqlite::Row, i: usize) -> std::result::Result<serde_json::Value, String> {
+    let v = row
+        .get::<_, rusqlite::types::Value>(i)
+        .map_err(|e| format!("col {}: {}", i, e))?;
+    Ok(match v {
+        rusqlite::types::Value::Null => serde_json::Value::Null,
+        rusqlite::types::Value::Integer(i) => serde_json::Value::Number(i.into()),
+        rusqlite::types::Value::Real(f) => serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or_else(|| 0.into())),
+        rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+        rusqlite::types::Value::Blob(b) => serde_json::Value::String(String::from_utf8_lossy(&b).into_owned()),
+    })
+}
+
 struct EngineState {
     engine: Option<Engine>,
     snapshotter: Option<Snapshotter>,
@@ -851,6 +865,97 @@ impl RustIvmEngine {
         })
     }
 
+    /// Run a read-only SQL query against the snapshotter's current connection
+    /// and return the rows as a JSON array of objects. This is the single-owner
+    /// escape hatch: TS never opens its own replica.db connection; all reads go
+    /// through the Rust-owned snapshotter connection.
+    ///
+    /// Errors if the snapshotter isn't initialized or the query fails.
+    #[napi]
+    pub fn read_query(&self, sql: String) -> Result<String> {
+        self.handle.call(move |state| -> std::result::Result<String, String> {
+            let snap = state
+                .snapshotter
+                .as_ref()
+                .ok_or_else(|| "Snapshotter not initialized".to_string())?;
+            let conn = snap
+                .current_conn()
+                .map_err(|e| format!("No current snapshot: {}", e))?;
+            let conn = conn.borrow();
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| format!("prepare: {}", e))?;
+            let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let mut rows: Vec<serde_json::Value> = Vec::new();
+            let mut raw_rows = stmt
+                .query(rusqlite::params![])
+                .map_err(|e| format!("query: {}", e))?;
+            while let Some(row) = raw_rows
+                .next()
+                .map_err(|e| format!("row: {}", e))?
+            {
+                let mut obj = serde_json::Map::with_capacity(cols.len());
+                for (i, name) in cols.iter().enumerate() {
+                    let v = row_to_json(row, i)?;
+                    obj.insert(name.clone(), v);
+                }
+                rows.push(serde_json::Value::Object(obj));
+            }
+            Ok(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()))
+        })?.map_err(NapiError::from_reason)
+    }
+
+    /// Advance the Rust snapshotter to head WITHOUT computing a diff
+    /// (mirrors TS Snapshotter.advanceWithoutDiff()). Returns the new version.
+    ///
+    /// Used by the view-syncer's permission-invalidations path and by the
+    /// CVR invalidation check. No engine work is triggered.
+    #[napi]
+    pub fn advance_without_diff(&self) -> Result<String> {
+        self.handle.call(|state| -> std::result::Result<String, String> {
+            let snap = state
+                .snapshotter
+                .as_mut()
+                .ok_or_else(|| "Snapshotter not initialized".to_string())?;
+            snap.advance_without_diff()
+                .map(|v| v.to_string())
+                .map_err(|e| format!("advance_without_diff: {}", e))
+        })?.map_err(NapiError::from_reason)
+    }
+
+    /// Read the subscription state (replicaVersion + watermark) from replica.db
+    /// via the Rust snapshotter's current connection. Returns JSON
+    /// `{"replicaVersion": "...", "watermark": "..."}`.
+    ///
+    /// Mirrors TS `getSubscriptionState()`. The Rust engine owns replica.db,
+    /// so this is the single-owner read path.
+    #[napi]
+    pub fn get_subscription_state(&self, _app_id: String) -> Result<String> {
+        // Mirrors TS getSubscriptionState() — table names are always _zero.*.
+        // app_id is accepted for API compatibility but not used in the query.
+        let sql = "SELECT c.replicaVersion, s.stateVersion as watermark \
+             FROM \"_zero.replicationConfig\" as c \
+             JOIN \"_zero.replicationState\" as s ON c.lock = s.lock";
+        self.handle.call(move |state| -> std::result::Result<String, String> {
+            let snap = state
+                .snapshotter
+                .as_ref()
+                .ok_or_else(|| "Snapshotter not initialized".to_string())?;
+            let conn = snap
+                .current_conn()
+                .map_err(|e| format!("No current snapshot: {}", e))?;
+            let conn = conn.borrow();
+            let (replica_version, watermark) = conn.query_row(&sql, [], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            }).map_err(|e| format!("subscription state: {}", e))?;
+            let obj = serde_json::json!({
+                "replicaVersion": replica_version,
+                "watermark": watermark,
+            });
+            Ok(obj.to_string())
+        })?.map_err(NapiError::from_reason)
+    }
+
     /// Explicit teardown on client-group drop (rust-ivm-driver.destroy()).
     /// Frees the engine graph, its SQLite reader connections, and the
     /// snapshotter's replica handles NOW rather than waiting for the JS object
@@ -859,20 +964,16 @@ impl RustIvmEngine {
     /// release. The actor thread itself is cheap (blocked on recv) and still
     /// exits on GC; this just avoids holding SQLite fds + IVM memory per dropped
     /// CG until the next GC cycle.
-    #[napi]
-    pub fn destroy(&self) -> Result<()> {
-        // Fire-and-forget: never block the JS event loop. If the actor is
-        // momentarily parked inside a streaming tsfn.call (which only drains
-        // when the event loop runs), a blocking destroy would deadlock the loop
-        // against itself. The teardown runs as soon as the actor is free; the
-        // driver's finally already flips cancel() so the actor stops promptly.
-        self.handle.call_detached(|state| {
-            if let Some(ref mut eng) = state.engine {
-                eng.destroy();
-            }
-            *state = EngineState::default();
-        });
-        Ok(())
+    ///
+    /// ASYNC (Promise): blocks until the actor thread confirms teardown.
+    /// This is the single-owner design — no TS connection races with Rust's
+    /// because there IS no TS connection. The Rust side drops everything
+    /// before the Promise resolves.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn destroy(&self) -> AsyncTask<DestroyTask> {
+        AsyncTask::new(DestroyTask {
+            handle: self.handle.clone(),
+        })
     }
 
     #[napi]
@@ -1331,5 +1432,36 @@ fn value_to_napi(v: &Value) -> NapiValue {
         Value::F64(n) => NapiValue { kind: "f64".into(), bool_val: None, f64_val: Some(*n), str_val: None, json_val: None },
         Value::Str(s) => NapiValue { kind: "str".into(), bool_val: None, f64_val: None, str_val: Some(s.to_string()), json_val: None },
         Value::Json(j) => NapiValue { kind: "json".into(), bool_val: None, f64_val: None, str_val: None, json_val: Some(j.to_string()) },
+    }
+}
+
+/// Async task for `destroy()`. Runs the teardown on the actor thread and
+/// confirms via the reply channel, so the returned Promise resolves only
+/// after all SQLite connections + engine graph are dropped.
+///
+/// Single-owner design: this is the ONLY teardown path. No TS connection
+/// exists to race with.
+pub struct DestroyTask {
+    handle: EngineHandle,
+}
+
+impl Task for DestroyTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.handle.call(|state| {
+            if let Some(ref mut eng) = state.engine {
+                eng.destroy();
+            }
+            if let Some(ref mut snap) = state.snapshotter {
+                snap.destroy();
+            }
+            *state = EngineState::default();
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
     }
 }

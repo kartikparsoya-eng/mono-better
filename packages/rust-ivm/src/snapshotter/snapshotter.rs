@@ -172,6 +172,25 @@ impl Snapshotter {
         })
     }
 
+    /// Advance to head WITHOUT computing a diff (matches TS Snapshotter.advanceWithoutDiff()).
+    /// Swaps prev/curr so curr is now at head. Returns the new curr version.
+    ///
+    /// FAILURE-ATOMIC: the swap commits only after the new head pin succeeds.
+    /// On error, prev/curr are untouched — the caller may retry in place.
+    pub fn advance_without_diff(&mut self) -> Result<&str, String> {
+        let next = if let Some(mut prev_snap) = self.prev.take() {
+            prev_snap.reset_to_head()?;
+            prev_snap
+        } else {
+            Snapshot::create(&self.db_file, self.page_cache_size_kib)?
+        };
+
+        // Commit the swap: prev = old curr, curr = next at head.
+        self.prev = self.curr.take();
+        self.curr = Some(next);
+        Ok(&self.curr.as_ref().unwrap().version)
+    }
+
     /// Re-pin the current snapshot at the latest replica head on its existing
     /// connection. Called before the first hydrate: init() pins curr at
     /// handleInit time, but the replicator may have advanced by the time

@@ -212,7 +212,6 @@ export default async function runWorker(
         ? new RustIVMDriver(
             logger,
             config.log,
-            new Snapshotter(logger, replicaFile, shard),
             shard,
             operatorStorage.createClientGroupStorage(id),
             id,

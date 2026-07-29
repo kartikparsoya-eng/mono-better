@@ -2558,7 +2558,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     // Wait for existing lock logic to complete before
     // cleaning up the pipelines and closing db connections.
     await this.#lock.withLock(() => {});
-    this.#pipelines.destroy();
+    await this.#pipelines.destroy();
   }
 
   /**

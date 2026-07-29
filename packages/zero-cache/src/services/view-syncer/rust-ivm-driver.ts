@@ -15,10 +15,7 @@ import {type RowKey} from '../../types/row-key.ts';
 import type {Row} from '../../../../zero-protocol/src/data.ts';
 import type {LogConfig, ZeroConfig} from '../../config/zero-config.ts';
 import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
-import {createSQLiteCostModel} from '../../../../zqlite/src/sqlite-cost-model.ts';
 import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
-import {planQuery} from '../../../../zql/src/planner/planner-builder.ts';
-import type {ConnectionCostModel} from '../../../../zql/src/planner/planner-connection.ts';
 import type {Database} from '../../../../zqlite/src/db.ts';
 import {computeZqlSpecs} from '../../db/lite-tables.ts';
 import type {LiteAndZqlSpec} from '../../db/specs.ts';
@@ -28,7 +25,6 @@ import {
   getSubscriptionState,
 } from '../replicator/schema/replication-state.ts';
 import {checkClientSchema} from './client-schema.ts';
-import type {Snapshotter} from './snapshotter.ts';
 import {ResetPipelinesSignal} from './snapshotter.ts';
 import {
   reloadPermissionsIfChanged,
@@ -38,6 +34,7 @@ import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
 import {
   rowIDSignatureUnit,
 } from './row-set-signature.ts';
+import type {StatementRunner} from '../../db/statements.ts';
 
 // NAPI addon types
 export interface NapiValue {
@@ -303,7 +300,6 @@ export class RustIVMDriver {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   readonly #engine: any;
   readonly #lc: LogContext;
-  readonly #snapshotter: Snapshotter;
   readonly #shardID: ShardID;
   readonly #storage: ClientGroupStorage;
   readonly #config: ZeroConfig | undefined;
@@ -311,17 +307,19 @@ export class RustIVMDriver {
   readonly #tableSpecs = new Map<string, LiteAndZqlSpec>();
   readonly #allTableNames = new Set<string>();
   readonly #primaryKeys = new Map<string, PrimaryKey>();
-  readonly #costModels: WeakMap<Database, ConnectionCostModel> | undefined;
+  // Cost model disabled for single-owner: no TS Database to prepare
+  // statements against. completeOrdering alone is correct (slower on
+  // OR-with-CSQ). TODO: expose cost model via Rust NAPI.
   #replicaVersion: string | null = null;
   #permissions: LoadedPermissions | null = null;
   #queryInfo = new Map<string, QueryInfo>();
   readonly #rowSetSignatures = new Map<string, bigint>();
   #totalHydrationTimeMs = 0;
+  #initialized = false;
 
   constructor(
     lc: LogContext,
     _logConfig: LogConfig,
-    snapshotter: Snapshotter,
     shardID: ShardID,
     storage: ClientGroupStorage,
     clientGroupID: string,
@@ -335,22 +333,51 @@ export class RustIVMDriver {
     this.#lc = lc.withContext('clientGroupID', clientGroupID);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.#engine = new (RustIvmEngineClass as any)();
-    this.#snapshotter = snapshotter;
     this.#shardID = shardID;
     this.#storage = storage;
     this.#config = config;
     this.#replicaFile = replicaFile ?? '';
-    this.#costModels = enablePlanner ? new WeakMap() : undefined;
+    void enablePlanner; // cost model disabled for single-owner
+  }
+
+  // Single-owner design: the Rust engine exclusively owns replica.db's
+  // connection. All TS reads go through NAPI methods on the Rust side.
+  // This minimal StatementRunner adapter lets computeZqlSpecs and
+  // getSubscriptionState run unchanged against the Rust-owned connection.
+  #runner(): object {
+    const engine = this.#engine;
+    const readQuery = (sql: string): Record<string, unknown>[] =>
+      JSON.parse(engine.readQuery(sql)) as Record<string, unknown>[];
+    return {
+      get: (sql: string) => readQuery(sql)[0],
+      all: (sql: string) => readQuery(sql),
+      prepare: (sql: string) => {
+        const rows = readQuery(sql);
+        return {
+          all: () => rows,
+          get: () => rows[0],
+          iterate: function* (): Generator<Record<string, unknown>> {
+            yield* rows;
+          },
+          raw: function* (): Generator<unknown[]> {
+            for (const row of rows) yield Object.values(row);
+          },
+        };
+      },
+      modify: () => {
+        throw new Error('read-only');
+      },
+    };
   }
 
   init(clientSchema: ClientSchema) {
-    assert(!this.#snapshotter.initialized(), 'Already initialized');
-    this.#snapshotter.init();
+    assert(!this.#initialized, 'Already initialized');
+    this.#initialized = true;
     void this.#initAndResetCommon(clientSchema);
   }
 
   initialized(): boolean {
-    return this.#snapshotter.initialized();
+    return this.#initialized;
   }
 
   reset(clientSchema: ClientSchema) {
@@ -361,11 +388,11 @@ export class RustIVMDriver {
   }
 
   #initAndResetCommon(clientSchema: ClientSchema) {
-    const {db} = this.#snapshotter.current();
+    const runner = this.#runner();
     const fullTables = new Map<string, unknown>();
     computeZqlSpecs(
       this.#lc,
-      db.db,
+      runner as unknown as Database,
       {includeBackfillingColumns: false},
       this.#tableSpecs,
       fullTables as any,
@@ -411,7 +438,9 @@ export class RustIVMDriver {
     );
     this.#lc.info?.(`RustIVMDriver: init complete, db=${this.#replicaFile}`);
 
-    const {replicaVersion} = getSubscriptionState(db);
+    const {replicaVersion} = getSubscriptionState(
+      this.#runner() as unknown as StatementRunner,
+    );
     this.#replicaVersion = replicaVersion;
   }
 
@@ -420,16 +449,8 @@ export class RustIVMDriver {
   }
 
   currentVersion(): string {
-    // Return #replicaVersion (kept in sync by init/advance/advanceWithoutDiff)
-    // instead of this.#snapshotter.current().version. The RustIVMDriver has TWO
-    // snapshotters: the TS Snapshotter (used by advanceWithoutDiff/currentPermissions)
-    // and the Rust Snapshotter (used by advance via the NAPI engine). They can
-    // diverge because advance() advances only the Rust snapshotter. If the CVR
-    // was set to V2 by advance() but the TS snapshotter is still at V1,
-    // currentVersion() returning V1 < V2 causes a "stateVersion must be >=
-    // cvr.version.stateVersion" assert on reconnect. #replicaVersion is updated
-    // by both advance() and advanceWithoutDiff(), so it always reflects the
-    // latest version regardless of which snapshotter was advanced.
+    // #replicaVersion is updated by init/advance/advanceWithoutDiff.
+    // Single-owner: only the Rust engine has a replica connection.
     assert(this.initialized(), 'Not yet initialized');
     return must(this.#replicaVersion, 'Not yet initialized');
   }
@@ -438,7 +459,7 @@ export class RustIVMDriver {
     assert(this.initialized(), 'Not yet initialized');
     const res = reloadPermissionsIfChanged(
       this.#lc,
-      this.#snapshotter.current().db,
+      this.#runner() as unknown as StatementRunner,
       this.#shardID.appID,
       this.#permissions,
       this.#config,
@@ -450,19 +471,19 @@ export class RustIVMDriver {
   }
 
   advanceWithoutDiff(): string {
-    const {version} = this.#snapshotter.advanceWithoutDiff().curr;
-    // Keep #replicaVersion in sync so currentVersion() returns the latest
-    // version (see currentVersion() comment for the two-snapshotter issue).
+    // Single-owner: the Rust engine advances its own snapshotter.
+    const version = this.#engine.advanceWithoutDiff();
     this.#replicaVersion = version;
     return version;
   }
 
-  destroy() {
-    // The engine is a JS-owned value — it's cleaned up by GC/Drop.
-    // We still call destroy() for explicit cleanup (clears pipelines/sources).
-    this.#engine.destroy?.();
+  async destroy(): Promise<void> {
+    // Single-owner teardown: the Rust engine owns every SQLite connection.
+    // Await its destroy() so the Promise only resolves once the actor thread
+    // confirms all connections are closed + engine graph freed. No TS
+    // connection exists to race with.
+    await this.#engine.destroy();
     this.#storage.destroy();
-    this.#snapshotter.destroy();
   }
 
   queries(): ReadonlyMap<string, QueryInfo> {
@@ -497,49 +518,12 @@ export class RustIVMDriver {
     return this.#addQueryImpl(transformationHash, queryID, query, queryName);
   }
 
-  #ensureCostModelExistsIfEnabled(db: Database) {
-    let existing = this.#costModels?.get(db);
-    if (existing) {
-      return existing;
-    }
-    if (this.#costModels) {
-      const costModel = createSQLiteCostModel(db, this.#tableSpecs);
-      this.#costModels.set(db, costModel);
-      return costModel;
-    }
-    return undefined;
-  }
-
-  // Plans an AST through the same completeOrdering + cost-model planner pass
-  // that PipelineDriver applies for TS/Go — keeps the AST sent to Rust in
-  // sync with what TS materializes. Without this the planner's `flip: true`
-  // decorations (which route OR-with-CSQ through FlippedJoin + UnionFanIn
-  // merge-with-dedup) never reach Rust, so Rust's plain Join + applyOr path
-  // is used instead — correct but ~5-7x slower on OR-with-CSQ advances.
   #planAst(ast: AST): AST {
-    const planned = completeOrdering(
+    return completeOrdering(
       ast,
       tableName =>
         must(this.#primaryKeys.get(tableName), `no primary key for table '${tableName}'`),
     );
-    if (!this.#costModels) {
-      return planned;
-    }
-    const db = this.#snapshotter.current().db.db;
-    const costModel = this.#ensureCostModelExistsIfEnabled(db);
-    if (!costModel) {
-      return planned;
-    }
-    try {
-      return planQuery(planned, costModel);
-    } catch (e) {
-      this.#lc.warn?.(
-        `[rust-ivm] cost-model planning failed; falling back to unplanned ` +
-          `ordering for this query`,
-        e,
-      );
-      return planned;
-    }
   }
 
   async *#addQueryImpl(

@@ -5,7 +5,6 @@ import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import {createSchema} from '../../../../zero-schema/src/builder/schema-builder.ts';
 import {
-  boolean,
   number,
   string,
   table,
@@ -22,7 +21,6 @@ import {
   CREATE_STORAGE_TABLE,
   DatabaseStorage,
 } from '../../../../zqlite/src/database-storage.ts';
-import {Snapshotter} from './snapshotter.ts';
 import {RustIVMDriver} from './rust-ivm-driver.ts';
 
 // Tests for the #planAst feature: verifies the driver runs completeOrdering +
@@ -136,7 +134,6 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     const driver = new RustIVMDriver(
       lc,
       testLogConfig,
-      new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
       shardID,
       new DatabaseStorage(storage).createClientGroupStorage('planner-test-cg'),
       'planner-test-cg',
@@ -217,7 +214,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     expect(ast!.where).toBeDefined();
     expect(ast!.where!.type).toBe('correlatedSubquery');
     // After planQuery, flip is always set (true or false), never undefined.
-    expect(ast!.where!.flip).toBeDefined();
+    expect((ast!.where as any).flip).toBeDefined();
   });
 
   test('enablePlanner=false: planAst does NOT add flip', async () => {
@@ -228,7 +225,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     expect(ast!.where).toBeDefined();
     expect(ast!.where!.type).toBe('correlatedSubquery');
     // Without planning, the raw AST has flip: undefined.
-    expect(ast!.where!.flip).toBeUndefined();
+    expect((ast!.where as any).flip).toBeUndefined();
   });
 
   test('enablePlanner=true: cost model flips when inner table is small', async () => {
@@ -238,7 +235,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     expect(ast).toBeDefined();
     // With 200 issues and 5 comments + ANALYZE, the cost model should
     // estimate flipping (scan 5 comments, lookup issues by PK) is cheaper.
-    expect(ast!.where!.flip).toBe(true);
+    expect((ast!.where as any).flip).toBe(true);
   });
 
   test('enablePlanner=true: OR + flipped subquery gets flip:true', async () => {
@@ -247,7 +244,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
 
     expect(ast).toBeDefined();
     expect(ast!.where!.type).toBe('or');
-    const csq = ast!.where!.conditions[1];
+    const csq = (ast!.where as any).conditions[1];
     expect(csq.type).toBe('correlatedSubquery');
     expect(csq.flip).toBe(true);
   });
@@ -260,7 +257,6 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     const driver = new RustIVMDriver(
       warnLc,
       testLogConfig,
-      new Snapshotter(warnLc, dbFile.path, {appID: shardID.appID}),
       shardID,
       new DatabaseStorage(storage).createClientGroupStorage('planner-fallback-cg'),
       'planner-fallback-cg',
