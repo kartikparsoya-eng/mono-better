@@ -505,6 +505,25 @@ fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value {
 // NAPI Engine — a JS-thread-confined value
 // ---------------------------------------------------------------------------
 
+/// Convert a JSON value to a rusqlite bind value.
+fn json_to_rusqlite(v: &serde_json::Value) -> std::result::Result<rusqlite::types::Value, String> {
+    Ok(match v {
+        serde_json::Value::Null => rusqlite::types::Value::Null,
+        serde_json::Value::Bool(b) => rusqlite::types::Value::Integer(*b as i64),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                rusqlite::types::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                rusqlite::types::Value::Real(f)
+            } else {
+                rusqlite::types::Value::Null
+            }
+        }
+        serde_json::Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+        _ => return Err(format!("unsupported bind type: {}", v)),
+    })
+}
+
 /// The engine state held directly on the JS thread.
 fn row_to_json(row: &rusqlite::Row, i: usize) -> std::result::Result<serde_json::Value, String> {
     let v = row
@@ -909,9 +928,10 @@ impl RustIvmEngine {
     /// escape hatch: TS never opens its own replica.db connection; all reads go
     /// through the Rust-owned snapshotter connection.
     ///
+    /// `params` is an optional JSON array of bind values, e.g. `["schema", "table"]`.
     /// Errors if the snapshotter isn't initialized or the query fails.
     #[napi]
-    pub fn read_query(&self, sql: String) -> Result<String> {
+    pub fn read_query(&self, sql: String, params: Option<String>) -> Result<String> {
         self.handle.call(move |state| -> std::result::Result<String, String> {
             let snap = state
                 .snapshotter
@@ -925,9 +945,24 @@ impl RustIvmEngine {
                 .prepare(&sql)
                 .map_err(|e| format!("prepare: {}", e))?;
             let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+            // Parse bind params from JSON array string.
+            let bind_values: Vec<rusqlite::types::Value> = if let Some(ref p) = params {
+                let arr: serde_json::Value = serde_json::from_str(p)
+                    .map_err(|e| format!("params parse: {}", e))?;
+                match arr {
+                    serde_json::Value::Array(a) => {
+                        a.iter().map(json_to_rusqlite).collect::<std::result::Result<Vec<_>, _>>()?
+                    }
+                    _ => return Err("params must be a JSON array".to_string()),
+                }
+            } else {
+                Vec::new()
+            };
+
             let mut rows: Vec<serde_json::Value> = Vec::new();
             let mut raw_rows = stmt
-                .query(rusqlite::params![])
+                .query(rusqlite::params_from_iter(bind_values.iter()))
                 .map_err(|e| format!("query: {}", e))?;
             while let Some(row) = raw_rows
                 .next()

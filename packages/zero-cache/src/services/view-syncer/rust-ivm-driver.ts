@@ -344,23 +344,25 @@ export class RustIVMDriver {
   // connection. All TS reads go through NAPI methods on the Rust side.
   // This minimal StatementRunner adapter lets computeZqlSpecs and
   // getSubscriptionState run unchanged against the Rust-owned connection.
+  // Bind params are passed as a JSON array to engine.readQuery.
   #runner(): object {
     const engine = this.#engine;
-    const readQuery = (sql: string): Record<string, unknown>[] =>
-      JSON.parse(engine.readQuery(sql)) as Record<string, unknown>[];
+    const readQuery = (sql: string, params?: unknown[]): Record<string, unknown>[] =>
+      JSON.parse(
+        engine.readQuery(sql, params ? JSON.stringify(params) : null),
+      ) as Record<string, unknown>[];
     return {
-      get: (sql: string) => readQuery(sql)[0],
-      all: (sql: string) => readQuery(sql),
+      get: (sql: string, ...args: unknown[]) => readQuery(sql, args)[0],
+      all: (sql: string, ...args: unknown[]) => readQuery(sql, args),
       prepare: (sql: string) => {
-        const rows = readQuery(sql);
         return {
-          all: () => rows,
-          get: () => rows[0],
-          iterate: function* (): Generator<Record<string, unknown>> {
-            yield* rows;
+          all: (...args: unknown[]) => readQuery(sql, args),
+          get: (...args: unknown[]) => readQuery(sql, args)[0],
+          iterate: function* (...args: unknown[]): Generator<Record<string, unknown>> {
+            yield* readQuery(sql, args);
           },
-          raw: function* (): Generator<unknown[]> {
-            for (const row of rows) yield Object.values(row);
+          raw: function* (...args: unknown[]): Generator<unknown[]> {
+            for (const row of readQuery(sql, args)) yield Object.values(row);
           },
         };
       },
