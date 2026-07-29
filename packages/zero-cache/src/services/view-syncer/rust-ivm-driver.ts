@@ -312,6 +312,7 @@ export class RustIVMDriver {
   // OR-with-CSQ). TODO: expose cost model via Rust NAPI.
   #replicaVersion: string | null = null;
   #permissions: LoadedPermissions | null = null;
+  #permissionsVersion: string | null = null;
   #queryInfo = new Map<string, QueryInfo>();
   readonly #rowSetSignatures = new Map<string, bigint>();
   #totalHydrationTimeMs = 0;
@@ -467,6 +468,15 @@ export class RustIVMDriver {
 
   currentPermissions(): LoadedPermissions | null {
     assert(this.initialized(), 'Not yet initialized');
+    // Cache: only re-query permissions when the replica version changes.
+    // In TS this is a direct SQLite call (microseconds), but in the Rust
+    // single-owner path each read_query goes through the actor thread
+    // (synchronous NAPI call). Without caching, this fires on every
+    // query batch — blocking the JS event loop dozens of times per
+    // hydration cycle.
+    if (this.#permissions !== null && this.#permissionsVersion === this.#replicaVersion) {
+      return this.#permissions;
+    }
     const res = reloadPermissionsIfChanged(
       this.#lc,
       this.#runner() as unknown as StatementRunner,
@@ -477,6 +487,7 @@ export class RustIVMDriver {
     if (res.changed) {
       this.#permissions = res.permissions;
     }
+    this.#permissionsVersion = this.#replicaVersion;
     return this.#permissions;
   }
 
