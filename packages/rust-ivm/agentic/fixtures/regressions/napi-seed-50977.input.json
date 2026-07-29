@@ -1,0 +1,604 @@
+{
+ "name": "fuzz.seed-50977",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "id2": "string",
+    "c0": "string",
+    "c1": "number|null",
+    "c2": "string|null",
+    "c3": "string",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id",
+    "id2"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "id2": "v0",
+     "c0": "abc",
+     "c1": -1e+100,
+     "c2": "🦀rust",
+     "c3": "null",
+     "fk": "t0-r53"
+    },
+    {
+     "id": "t1-r1",
+     "id2": "v1",
+     "c0": "_",
+     "c1": -1e+100,
+     "c2": "\t\n",
+     "c3": "\t\n",
+     "fk": "t0-r2"
+    },
+    {
+     "id": "t1-r2",
+     "id2": "v2",
+     "c0": "🎉🎊",
+     "c1": 9007199254740991,
+     "c2": "café",
+     "c3": "日本語",
+     "fk": "t0-r53"
+    },
+    {
+     "id": "t1-r3",
+     "id2": "v0",
+     "c0": "",
+     "c1": 3.14159265358979,
+     "c2": "null",
+     "c3": "a",
+     "fk": "t0-r17"
+    },
+    {
+     "id": "t1-r4",
+     "id2": "v1",
+     "c0": "",
+     "c1": 123456789,
+     "c2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c3": "a",
+     "fk": "t0-r25"
+    },
+    {
+     "id": "t1-r5",
+     "id2": "v2",
+     "c0": "a",
+     "c1": 0,
+     "c2": "🎉🎊",
+     "c3": "_",
+     "fk": "t0-r22"
+    },
+    {
+     "id": "t1-r6",
+     "id2": "v0",
+     "c0": "A",
+     "c1": 9007199254740991,
+     "c2": "[]",
+     "c3": "A",
+     "fk": "t0-r29"
+    },
+    {
+     "id": "t1-r7",
+     "id2": "v1",
+     "c0": "null",
+     "c1": 1000000,
+     "c2": null,
+     "c3": "abc",
+     "fk": "t0-r6"
+    },
+    {
+     "id": "t1-r8",
+     "id2": "v2",
+     "c0": "0",
+     "c1": 1,
+     "c2": "b",
+     "c3": "café",
+     "fk": "t0-r38"
+    }
+   ]
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "string",
+    "c2": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t2-r0",
+     "c0": "",
+     "c1": "b",
+     "c2": -9007199254740991,
+     "fk": "t0-r9"
+    },
+    {
+     "id": "t2-r1",
+     "c0": "_",
+     "c1": "0",
+     "c2": -9007199254740991,
+     "fk": "t0-r37"
+    },
+    {
+     "id": "t2-r2",
+     "c0": "🎉🎊",
+     "c1": "%",
+     "c2": -1,
+     "fk": "t0-r6"
+    },
+    {
+     "id": "t2-r3",
+     "c0": "0",
+     "c1": "[]",
+     "c2": 0,
+     "fk": "t0-r56"
+    },
+    {
+     "id": "t2-r4",
+     "c0": "A",
+     "c1": "ZZZ",
+     "c2": 2.5,
+     "fk": "t0-r48"
+    },
+    {
+     "id": "t2-r5",
+     "c0": "A",
+     "c1": "a",
+     "c2": -1,
+     "fk": "t0-r40"
+    },
+    {
+     "id": "t2-r6",
+     "c0": "héllo",
+     "c1": "b",
+     "c2": 10,
+     "fk": "t0-r2"
+    },
+    {
+     "id": "t2-r7",
+     "c0": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c1": "null",
+     "c2": 3.14159265358979,
+     "fk": "t0-r14"
+    },
+    {
+     "id": "t2-r8",
+     "c0": "🦀rust",
+     "c1": "'apos'",
+     "c2": 3.14159265358979,
+     "fk": "t0-r48"
+    },
+    {
+     "id": "t2-r9",
+     "c0": "'apos'",
+     "c1": "_",
+     "c2": 0.5,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t2-r10",
+     "c0": "ﬀ",
+     "c1": "'apos'",
+     "c2": -0.5,
+     "fk": "t0-r42"
+    },
+    {
+     "id": "t2-r11",
+     "c0": "",
+     "c1": "null",
+     "c2": 1000000,
+     "fk": "t0-r31"
+    },
+    {
+     "id": "t2-r12",
+     "c0": "true",
+     "c1": "{}",
+     "c2": 0.1,
+     "fk": "t0-r15"
+    },
+    {
+     "id": "t2-r13",
+     "c0": "b",
+     "c1": "false",
+     "c2": 9007199254740991,
+     "fk": "t0-r46"
+    },
+    {
+     "id": "t2-r14",
+     "c0": "[]",
+     "c1": "🦀rust",
+     "c2": 10,
+     "fk": "t0-r20"
+    },
+    {
+     "id": "t2-r15",
+     "c0": "b",
+     "c1": "false",
+     "c2": 3.14159265358979,
+     "fk": "t0-r32"
+    },
+    {
+     "id": "t2-r16",
+     "c0": "ZZZ",
+     "c1": "false",
+     "c2": 0.30000000000000004,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t2-r17",
+     "c0": "a b",
+     "c1": "",
+     "c2": 1e+100,
+     "fk": "t0-r36"
+    },
+    {
+     "id": "t2-r18",
+     "c0": "ZZZ",
+     "c1": "héllo",
+     "c2": 0,
+     "fk": "t0-r10"
+    },
+    {
+     "id": "t2-r19",
+     "c0": "0",
+     "c1": "_",
+     "c2": 0.1,
+     "fk": "t0-r25"
+    },
+    {
+     "id": "t2-r20",
+     "c0": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c1": "café",
+     "c2": -1e+100,
+     "fk": "t0-r31"
+    },
+    {
+     "id": "t2-r21",
+     "c0": "[]",
+     "c1": "\t\n",
+     "c2": -1,
+     "fk": "t0-r38"
+    },
+    {
+     "id": "t2-r22",
+     "c0": "héllo",
+     "c1": "'apos'",
+     "c2": -0.5,
+     "fk": "t0-r28"
+    },
+    {
+     "id": "t2-r23",
+     "c0": "🦀rust",
+     "c1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c2": 0.30000000000000004,
+     "fk": "t0-r56"
+    },
+    {
+     "id": "t2-r24",
+     "c0": "[]",
+     "c1": "b",
+     "c2": -1000000,
+     "fk": "t0-r45"
+    },
+    {
+     "id": "t2-r25",
+     "c0": "🦀rust",
+     "c1": "true",
+     "c2": 9007199254740991,
+     "fk": "t0-r29"
+    },
+    {
+     "id": "t2-r26",
+     "c0": "a b",
+     "c1": "a b",
+     "c2": 0.1,
+     "fk": "t0-r54"
+    },
+    {
+     "id": "t2-r27",
+     "c0": "abc",
+     "c1": "a b",
+     "c2": 0.5,
+     "fk": "t0-r14"
+    },
+    {
+     "id": "t2-r28",
+     "c0": "ﬀ",
+     "c1": "\t\n",
+     "c2": 1000000,
+     "fk": "t0-r0"
+    },
+    {
+     "id": "t2-r29",
+     "c0": "'apos'",
+     "c1": "0",
+     "c2": 9007199254740991,
+     "fk": "t0-r47"
+    },
+    {
+     "id": "t2-r30",
+     "c0": "日本語",
+     "c1": "{}",
+     "c2": 0.1,
+     "fk": "t0-r28"
+    },
+    {
+     "id": "t2-r31",
+     "c0": "{}",
+     "c1": "🦀rust",
+     "c2": 1000000,
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t2-r32",
+     "c0": "ZZZ",
+     "c1": "null",
+     "c2": -0.5,
+     "fk": "t0-r31"
+    },
+    {
+     "id": "t2-r33",
+     "c0": "b",
+     "c1": "[]",
+     "c2": -10,
+     "fk": "t0-r13"
+    },
+    {
+     "id": "t2-r34",
+     "c0": "café",
+     "c1": "[]",
+     "c2": -1000000,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t2-r35",
+     "c0": "\"quoted\"",
+     "c1": "\"quoted\"",
+     "c2": -3.75,
+     "fk": "t0-r15"
+    },
+    {
+     "id": "t2-r36",
+     "c0": "[]",
+     "c1": "\t\n",
+     "c2": -1e+100,
+     "fk": "t0-r13"
+    },
+    {
+     "id": "t2-r37",
+     "c0": "[]",
+     "c1": "\"quoted\"",
+     "c2": -0.5,
+     "fk": "t0-r10"
+    },
+    {
+     "id": "t2-r39",
+     "c0": "ZZZ",
+     "c1": "",
+     "c2": 1e-10,
+     "fk": "t0-r35"
+    },
+    {
+     "id": "t2-r40",
+     "c0": "\t\n",
+     "c1": "b",
+     "c2": 0.30000000000000004,
+     "fk": "t0-r51"
+    },
+    {
+     "id": "t2-r41",
+     "c0": "%",
+     "c1": "café",
+     "c2": 1e-10,
+     "fk": "t0-r40"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 8
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p375",
+    "c0": "[]",
+    "c1": true
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-p375",
+    "c0": "[]",
+    "c1": true
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r5",
+    "id2": "v2",
+    "c0": "a",
+    "c1": 0,
+    "c2": "🎉🎊",
+    "c3": "_",
+    "fk": "t0-r22"
+   },
+   "row": {
+    "id": "t1-r5",
+    "id2": "v2",
+    "c0": "a",
+    "c1": 1000000,
+    "c2": "🎉🎊",
+    "c3": "_",
+    "fk": "t0-r22"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t2",
+   "oldRow": {
+    "id": "t2-r28",
+    "c0": "ﬀ",
+    "c1": "\t\n",
+    "c2": 1000000,
+    "fk": "t0-r0"
+   },
+   "row": {
+    "id": "t2-r28",
+    "c0": "ﬀ",
+    "c1": "\t\n",
+    "c2": 123456789,
+    "fk": "t0-r0"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p376",
+    "id2": "%",
+    "c0": "true",
+    "c1": -1000000,
+    "c2": null,
+    "c3": "日本語",
+    "fk": "t0-r39"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p377",
+    "id2": "🦀rust",
+    "c0": "abc",
+    "c1": null,
+    "c2": "a",
+    "c3": "{}",
+    "fk": "t0-r35"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r6",
+    "id2": "v0",
+    "c0": "A",
+    "c1": 9007199254740991,
+    "c2": "[]",
+    "c3": "A",
+    "fk": "t0-r29"
+   },
+   "row": {
+    "id": "t1-r6",
+    "id2": "v0",
+    "c0": "A",
+    "c1": 9007199254740991,
+    "c2": "[]",
+    "c3": "A",
+    "fk": "t0-r60"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p378",
+    "c0": "null",
+    "c1": true
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p379",
+    "id2": "b",
+    "c0": "b",
+    "c1": -0.5,
+    "c2": null,
+    "c3": "true",
+    "fk": "t0-r26"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r6",
+    "id2": "v0",
+    "c0": "A",
+    "c1": 9007199254740991,
+    "c2": "[]",
+    "c3": "A",
+    "fk": "t0-r60"
+   },
+   "row": {
+    "id": "t1-r6",
+    "id2": "v0",
+    "c0": "A",
+    "c1": null,
+    "c2": "[]",
+    "c3": "A",
+    "fk": "t0-r60"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t2",
+   "oldRow": {
+    "id": "t2-r37",
+    "c0": "[]",
+    "c1": "\"quoted\"",
+    "c2": -0.5,
+    "fk": "t0-r10"
+   },
+   "row": {
+    "id": "t2-r37",
+    "c0": "ZZZ",
+    "c1": "\"quoted\"",
+    "c2": -0.5,
+    "fk": "t0-r10"
+   }
+  }
+ ]
+}
