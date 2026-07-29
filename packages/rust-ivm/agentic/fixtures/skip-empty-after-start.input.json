@@ -1,0 +1,21 @@
+{
+ "name": "skip.empty.after.start",
+ "sourceKind": "memory",
+ "tables": {
+  "t": {
+   "columns": {"id": "string", "n": "number"},
+   "primaryKey": ["id"],
+   "rows": [
+    {"id": "a", "n": 1},
+    {"id": "b", "n": 2}
+   ]
+  }
+ },
+ "ast": {
+  "table": "t",
+  "orderBy": [["n", "asc"], ["id", "asc"]],
+  "start": {"row": {"id": "z", "n": 3}, "exclusive": true}
+ },
+ "format": {"singular": false, "relationships": {}},
+ "pushes": []
+}

@@ -1,0 +1,23 @@
+# Rust build artifacts
+/target/
+napi/target/
+
+# Napi native addon
+*.node
+napi/*.node
+
+# Agentic loop logs (regenerated)
+agentic/logs/
+
+# API keys (never commit)
+agentic/keys.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Orchestrator build caches + fuzz cursor + queue lock
+.shared-target-w*/
+agentic/fuzz/.seed-cursor
+agentic/queue/.lock/

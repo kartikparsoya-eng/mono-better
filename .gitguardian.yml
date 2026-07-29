@@ -1,0 +1,15 @@
+version: 2
+
+secret:
+  ignored_paths:
+    # Fuzzer-generated fixtures contain random high-entropy strings that
+    # trigger GitGuardian's generic secret detectors. They are test data,
+    # not credentials.
+    - 'packages/rust-ivm/agentic/fixtures/**'
+    - 'packages/rust-ivm/agentic/fuzz/**'
+    - 'packages/rust-ivm/agentic/oracle/**'
+    - 'packages/rust-ivm/agentic/queue/**'
+    - 'packages/rust-ivm/agentic/.recoveries'
+    # The vendored SQLite amalgamation is public-domain upstream code.
+    - 'packages/rust-ivm/wal2-sqlite/**'
+    - 'packages/rust-ivm/napi/wal2-sqlite/**'

@@ -1,0 +1,166 @@
+{
+ "name": "fuzz.seed-203727",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "string",
+    "c2": "boolean|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "🦀rust",
+     "c1": "A",
+     "c2": false
+    },
+    {
+     "id": "t0-r1",
+     "c0": "_",
+     "c1": "héllo",
+     "c2": false
+    },
+    {
+     "id": "t0-r2",
+     "c0": "a b",
+     "c1": "",
+     "c2": true
+    },
+    {
+     "id": "t0-r3",
+     "c0": "a",
+     "c1": "héllo",
+     "c2": null
+    },
+    {
+     "id": "t0-r4",
+     "c0": "b",
+     "c1": "ZZZ",
+     "c2": true
+    },
+    {
+     "id": "t0-r5",
+     "c0": "_",
+     "c1": "%",
+     "c2": null
+    },
+    {
+     "id": "t0-r6",
+     "c0": "héllo",
+     "c1": "héllo",
+     "c2": true
+    },
+    {
+     "id": "t0-r7",
+     "c0": "_",
+     "c1": "héllo",
+     "c2": true
+    },
+    {
+     "id": "t0-r8",
+     "c0": "ZZZ",
+     "c1": "a",
+     "c2": false
+    },
+    {
+     "id": "t0-r9",
+     "c0": "A",
+     "c1": "a",
+     "c2": false
+    },
+    {
+     "id": "t0-r10",
+     "c0": "0",
+     "c1": "0",
+     "c2": false
+    },
+    {
+     "id": "t0-r11",
+     "c0": "a",
+     "c1": "null",
+     "c2": true
+    },
+    {
+     "id": "t0-r12",
+     "c0": "a",
+     "c1": "_",
+     "c2": false
+    },
+    {
+     "id": "t0-r13",
+     "c0": "",
+     "c1": "ﬀ",
+     "c2": false
+    },
+    {
+     "id": "t0-r14",
+     "c0": "a b",
+     "c1": "abc",
+     "c2": true
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "simple",
+   "op": "IN",
+   "left": {
+    "type": "column",
+    "name": "id"
+   },
+   "right": {
+    "type": "literal",
+    "value": [
+     "t0-r8",
+     "t0-r1"
+    ]
+   }
+  },
+  "limit": 7
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r1",
+    "c0": "_",
+    "c1": "héllo",
+    "c2": false
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r3",
+    "c0": "a",
+    "c1": "héllo",
+    "c2": null
+   },
+   "row": {
+    "id": "t0-r3",
+    "c0": "a",
+    "c1": "b",
+    "c2": null
+   }
+  }
+ ]
+}

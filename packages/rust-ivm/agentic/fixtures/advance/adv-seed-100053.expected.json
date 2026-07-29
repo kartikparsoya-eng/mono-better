@@ -1,0 +1,680 @@
+{
+ "advance": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "日本語",
+    "c3": "ﬀ",
+    "fk": "t0-r17",
+    "id": "t1-p669"
+   },
+   "rowKey": {
+    "id": "t1-p669"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "0",
+    "c3": "A",
+    "fk": "t0-r11",
+    "id": "t1-p668"
+   },
+   "rowKey": {
+    "id": "t1-p668"
+   },
+   "table": "t1"
+  }
+ ],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "abc",
+    "c3": "\"quoted\"",
+    "fk": "t0-r48",
+    "id": "t1-r13"
+   },
+   "rowKey": {
+    "id": "t1-r13"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "café",
+    "c3": "ﬀ",
+    "fk": "t0-r45",
+    "id": "t1-r4"
+   },
+   "rowKey": {
+    "id": "t1-r4"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "abc",
+    "c3": null,
+    "fk": "t0-r43",
+    "id": "t1-r14"
+   },
+   "rowKey": {
+    "id": "t1-r14"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "🎉🎊",
+    "c3": "[]",
+    "fk": "t0-r31",
+    "id": "t1-r3"
+   },
+   "rowKey": {
+    "id": "t1-r3"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "🎉🎊",
+    "c3": "\t\n",
+    "fk": "t0-r30",
+    "id": "t1-r6"
+   },
+   "rowKey": {
+    "id": "t1-r6"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "null",
+    "c3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "fk": "t0-r21",
+    "id": "t1-r2"
+   },
+   "rowKey": {
+    "id": "t1-r2"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "ZZZ",
+    "c3": "{}",
+    "fk": "t0-r19",
+    "id": "t1-r1"
+   },
+   "rowKey": {
+    "id": "t1-r1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "日本語",
+    "c3": "ﬀ",
+    "fk": "t0-r17",
+    "id": "t1-p669"
+   },
+   "rowKey": {
+    "id": "t1-p669"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "0",
+    "c3": "A",
+    "fk": "t0-r11",
+    "id": "t1-p668"
+   },
+   "rowKey": {
+    "id": "t1-p668"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "abc",
+    "c3": "{}",
+    "fk": "t0-r8",
+    "id": "t1-r15"
+   },
+   "rowKey": {
+    "id": "t1-r15"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "ZZZ",
+    "c3": "a b",
+    "fk": "t0-r7",
+    "id": "t1-r7"
+   },
+   "rowKey": {
+    "id": "t1-r7"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "ZZZ",
+    "c3": null,
+    "fk": "t0-r59",
+    "id": "t1-r10"
+   },
+   "rowKey": {
+    "id": "t1-r10"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "%",
+    "c3": "a",
+    "fk": "t0-r57",
+    "id": "t1-r9"
+   },
+   "rowKey": {
+    "id": "t1-r9"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "",
+    "c3": "%",
+    "fk": "t0-r55",
+    "id": "t1-r5"
+   },
+   "rowKey": {
+    "id": "t1-r5"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "ﬀ",
+    "c3": "",
+    "fk": "t0-r46",
+    "id": "t1-r17"
+   },
+   "rowKey": {
+    "id": "t1-r17"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "abc",
+    "c3": "a",
+    "fk": "t0-r43",
+    "id": "t1-r16"
+   },
+   "rowKey": {
+    "id": "t1-r16"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "b",
+    "c3": "",
+    "fk": "t0-r34",
+    "id": "t1-r18"
+   },
+   "rowKey": {
+    "id": "t1-r18"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "null",
+    "c3": null,
+    "fk": "t0-r21",
+    "id": "t1-r11"
+   },
+   "rowKey": {
+    "id": "t1-r11"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "abc",
+    "c3": "\"quoted\"",
+    "fk": "t0-r20",
+    "id": "t1-r0"
+   },
+   "rowKey": {
+    "id": "t1-r0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "false",
+    "c3": null,
+    "fk": "t0-r2",
+    "id": "t1-r12"
+   },
+   "rowKey": {
+    "id": "t1-r12"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "\t\n",
+    "c3": null,
+    "fk": "t0-r12",
+    "id": "t1-r8"
+   },
+   "rowKey": {
+    "id": "t1-r8"
+   },
+   "table": "t1"
+  }
+ ],
+ "hydrate": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "abc",
+    "c3": "\"quoted\"",
+    "fk": "t0-r48",
+    "id": "t1-r13"
+   },
+   "rowKey": {
+    "id": "t1-r13"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "café",
+    "c3": "ﬀ",
+    "fk": "t0-r45",
+    "id": "t1-r4"
+   },
+   "rowKey": {
+    "id": "t1-r4"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "abc",
+    "c3": null,
+    "fk": "t0-r43",
+    "id": "t1-r14"
+   },
+   "rowKey": {
+    "id": "t1-r14"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": false,
+    "c2": "🎉🎊",
+    "c3": "[]",
+    "fk": "t0-r31",
+    "id": "t1-r3"
+   },
+   "rowKey": {
+    "id": "t1-r3"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "🎉🎊",
+    "c3": "\t\n",
+    "fk": "t0-r30",
+    "id": "t1-r6"
+   },
+   "rowKey": {
+    "id": "t1-r6"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "null",
+    "c3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "fk": "t0-r21",
+    "id": "t1-r2"
+   },
+   "rowKey": {
+    "id": "t1-r2"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": true,
+    "c2": "ZZZ",
+    "c3": "{}",
+    "fk": "t0-r19",
+    "id": "t1-r1"
+   },
+   "rowKey": {
+    "id": "t1-r1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "abc",
+    "c3": "{}",
+    "fk": "t0-r8",
+    "id": "t1-r15"
+   },
+   "rowKey": {
+    "id": "t1-r15"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "ZZZ",
+    "c3": "a b",
+    "fk": "t0-r7",
+    "id": "t1-r7"
+   },
+   "rowKey": {
+    "id": "t1-r7"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "ZZZ",
+    "c3": null,
+    "fk": "t0-r59",
+    "id": "t1-r10"
+   },
+   "rowKey": {
+    "id": "t1-r10"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "%",
+    "c3": "a",
+    "fk": "t0-r57",
+    "id": "t1-r9"
+   },
+   "rowKey": {
+    "id": "t1-r9"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "",
+    "c3": "%",
+    "fk": "t0-r55",
+    "id": "t1-r5"
+   },
+   "rowKey": {
+    "id": "t1-r5"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "ﬀ",
+    "c3": "",
+    "fk": "t0-r46",
+    "id": "t1-r17"
+   },
+   "rowKey": {
+    "id": "t1-r17"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "abc",
+    "c3": "a",
+    "fk": "t0-r43",
+    "id": "t1-r16"
+   },
+   "rowKey": {
+    "id": "t1-r16"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "b",
+    "c3": "",
+    "fk": "t0-r34",
+    "id": "t1-r18"
+   },
+   "rowKey": {
+    "id": "t1-r18"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "null",
+    "c3": null,
+    "fk": "t0-r21",
+    "id": "t1-r11"
+   },
+   "rowKey": {
+    "id": "t1-r11"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": true,
+    "c2": "abc",
+    "c3": "\"quoted\"",
+    "fk": "t0-r20",
+    "id": "t1-r0"
+   },
+   "rowKey": {
+    "id": "t1-r0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "false",
+    "c3": null,
+    "fk": "t0-r2",
+    "id": "t1-r12"
+   },
+   "rowKey": {
+    "id": "t1-r12"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": false,
+    "c2": "\t\n",
+    "c3": null,
+    "fk": "t0-r12",
+    "id": "t1-r8"
+   },
+   "rowKey": {
+    "id": "t1-r8"
+   },
+   "table": "t1"
+  }
+ ]
+}

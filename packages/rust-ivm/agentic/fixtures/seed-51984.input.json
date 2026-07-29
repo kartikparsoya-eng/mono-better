@@ -1,0 +1,178 @@
+{
+ "name": "fuzz.seed-51984",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "string|null",
+    "c2": "number|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r1",
+     "c0": false,
+     "c1": null,
+     "c2": -1000000
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "boolean|null",
+    "c2": "string",
+    "c3": "number|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r26",
+     "c0": -1,
+     "c1": false,
+     "c2": "_",
+     "c3": 10,
+     "fk": "t0-r1"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "and",
+   "conditions": [
+    {
+     "type": "simple",
+     "op": ">",
+     "left": {
+      "type": "column",
+      "name": "id"
+     },
+     "right": {
+      "type": "literal",
+      "value": "abc"
+     }
+    },
+    {
+     "type": "correlatedSubquery",
+     "related": {
+      "correlation": {
+       "parentField": [
+        "id"
+       ],
+       "childField": [
+        "fk"
+       ]
+      },
+      "subquery": {
+       "table": "t1",
+       "alias": "zsubq_t1",
+       "orderBy": [
+        [
+         "id",
+         "asc"
+        ]
+       ],
+       "where": {
+        "type": "simple",
+        "op": "IN",
+        "left": {
+         "type": "column",
+         "name": "id"
+        },
+        "right": {
+         "type": "literal",
+         "value": [
+          "ZZZ",
+          "a",
+          "t1-r37"
+         ]
+        }
+       }
+      }
+     },
+     "op": "EXISTS"
+    },
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ]
+        }
+       },
+       "op": "EXISTS"
+      },
+      {
+       "type": "simple",
+       "op": "<=",
+       "left": {
+        "type": "column",
+        "name": "id"
+       },
+       "right": {
+        "type": "literal",
+        "value": "t0-r19"
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "id"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         "ﬀ"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}

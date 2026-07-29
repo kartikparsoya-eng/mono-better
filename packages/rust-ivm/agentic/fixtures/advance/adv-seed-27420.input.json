@@ -1,0 +1,178 @@
+{
+ "name": "fuzz.seed-27420",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "number",
+    "c2": "string",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  }
+ },
+ "ast": {
+  "table": "t1",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p222",
+    "c0": 1000000,
+    "c1": -1e+100
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p223",
+    "c0": true,
+    "c1": 2,
+    "c2": "日本語",
+    "fk": "t0-r25"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-p222",
+    "c0": 1000000,
+    "c1": -1e+100
+   },
+   "row": {
+    "id": "t0-p222",
+    "c0": 10,
+    "c1": -1e+100
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-p222",
+    "c0": 10,
+    "c1": -1e+100
+   },
+   "row": {
+    "id": "t0-p222",
+    "c0": 10,
+    "c1": -10
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t1",
+   "row": {
+    "id": "t1-p223",
+    "c0": true,
+    "c1": 2,
+    "c2": "日本語",
+    "fk": "t0-r25"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p224",
+    "c0": false,
+    "c1": 0.1,
+    "c2": "",
+    "fk": "t0-r14"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-p224",
+    "c0": false,
+    "c1": 0.1,
+    "c2": "",
+    "fk": "t0-r14"
+   },
+   "row": {
+    "id": "t1-p224",
+    "c0": false,
+    "c1": -0.5,
+    "c2": "",
+    "fk": "t0-r14"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-p224",
+    "c0": false,
+    "c1": -0.5,
+    "c2": "",
+    "fk": "t0-r14"
+   },
+   "row": {
+    "id": "t1-p224",
+    "c0": false,
+    "c1": -0.5,
+    "c2": "ﬀ",
+    "fk": "t0-r14"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p225",
+    "c0": -0.5,
+    "c1": -1
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-p224",
+    "c0": false,
+    "c1": -0.5,
+    "c2": "ﬀ",
+    "fk": "t0-r14"
+   },
+   "row": {
+    "id": "t1-p224",
+    "c0": false,
+    "c1": 3.14159265358979,
+    "c2": "ﬀ",
+    "fk": "t0-r14"
+   }
+  }
+ ]
+}

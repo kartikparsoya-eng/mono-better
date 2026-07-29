@@ -1,0 +1,39 @@
+{
+  "name": "take.fetch.partition-limit-0",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {"id": "string"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "i1"},
+        {"id": "i2"}
+      ]
+    },
+    "comment": {
+      "columns": {"id": "string", "issueID": "string", "created": "number"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "c1", "issueID": "i1", "created": 100},
+        {"id": "c2", "issueID": "i1", "created": 200},
+        {"id": "c3", "issueID": "i1", "created": 300}
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "related": [
+      {
+        "correlation": {"parentField": ["id"], "childField": ["issueID"]},
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [["created", "asc"], ["id", "asc"]],
+          "limit": 0
+        }
+      }
+    ]
+  },
+  "format": {"singular": false, "relationships": {"comments": {"singular": false, "relationships": {}}}},
+  "pushes": []
+}

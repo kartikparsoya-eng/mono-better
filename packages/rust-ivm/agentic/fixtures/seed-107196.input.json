@@ -1,0 +1,185 @@
+{
+ "name": "fuzz.seed-107196",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "number|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "ZZZ",
+     "c1": 1000000
+    },
+    {
+     "id": "t0-r1",
+     "c0": "0",
+     "c1": 0.1
+    },
+    {
+     "id": "t0-r2",
+     "c0": "a b",
+     "c1": 123456789
+    },
+    {
+     "id": "t0-r3",
+     "c0": "héllo",
+     "c1": 2.5
+    },
+    {
+     "id": "t0-r4",
+     "c0": "null",
+     "c1": null
+    },
+    {
+     "id": "t0-r5",
+     "c0": "ZZZ",
+     "c1": null
+    },
+    {
+     "id": "t0-r6",
+     "c0": "a b",
+     "c1": 1000000
+    },
+    {
+     "id": "t0-r7",
+     "c0": "_",
+     "c1": 2
+    },
+    {
+     "id": "t0-r8",
+     "c0": "a",
+     "c1": -1000000
+    },
+    {
+     "id": "t0-r9",
+     "c0": "%",
+     "c1": null
+    },
+    {
+     "id": "t0-r10",
+     "c0": "a",
+     "c1": null
+    },
+    {
+     "id": "t0-r11",
+     "c0": "ZZZ",
+     "c1": 0.30000000000000004
+    },
+    {
+     "id": "t0-r12",
+     "c0": "b",
+     "c1": 2.5
+    },
+    {
+     "id": "t0-r13",
+     "c0": "ﬀ",
+     "c1": 123456789
+    },
+    {
+     "id": "t0-r14",
+     "c0": "_",
+     "c1": 0.1
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "and",
+   "conditions": [
+    {
+     "type": "simple",
+     "op": "=",
+     "left": {
+      "type": "column",
+      "name": "c1"
+     },
+     "right": {
+      "type": "literal",
+      "value": 1000000
+     }
+    },
+    {
+     "type": "simple",
+     "op": "IN",
+     "left": {
+      "type": "column",
+      "name": "id"
+     },
+     "right": {
+      "type": "literal",
+      "value": [
+       "t0-r2",
+       "",
+       "t0-r12",
+       "t0-r0"
+      ]
+     }
+    }
+   ]
+  },
+  "limit": 9
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r9",
+    "c0": "%",
+    "c1": null
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r2",
+    "c0": "a b",
+    "c1": 123456789
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r8",
+    "c0": "a",
+    "c1": -1000000
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r13",
+    "c0": "ﬀ",
+    "c1": 123456789
+   },
+   "row": {
+    "id": "t0-r13",
+    "c0": "ﬀ",
+    "c1": 123456789
+   }
+  }
+ ],
+ "enableNotExists": true
+}

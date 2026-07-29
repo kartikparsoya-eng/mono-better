@@ -1,0 +1,79 @@
+{
+  "name": "join.push.fetch-one-parent-remove-parent",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "i1"
+        }
+      ]
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": []
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "related": [
+      {
+        "system": "client",
+        "correlation": {
+          "parentField": [
+            "id"
+          ],
+          "childField": [
+            "issueID"
+          ]
+        },
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "comments": {
+        "singular": false,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": [
+    {
+      "type": "remove",
+      "table": "issue",
+      "row": {
+        "id": "i1"
+      }
+    }
+  ]
+}

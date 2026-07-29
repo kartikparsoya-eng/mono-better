@@ -1,0 +1,27 @@
+{
+  "name": "take.limit-desc",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {"id": "string", "n": "number", "text": "string|null"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "i1", "n": 1, "text": "a"},
+        {"id": "i2", "n": 2, "text": "b"},
+        {"id": "i3", "n": 3, "text": null},
+        {"id": "i4", "n": 4, "text": "d"}
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [["n", "desc"]],
+    "limit": 2
+  },
+  "format": {"singular": false, "relationships": {}},
+  "pushes": [
+    {"type": "add", "table": "issue", "row": {"id": "i5", "n": 5, "text": "e"}},
+    {"type": "edit", "table": "issue", "oldRow": {"id": "i2", "n": 2, "text": "b"}, "row": {"id": "i2", "n": 10, "text": "B"}},
+    {"type": "remove", "table": "issue", "row": {"id": "i4", "n": 4, "text": "d"}}
+  ]
+}

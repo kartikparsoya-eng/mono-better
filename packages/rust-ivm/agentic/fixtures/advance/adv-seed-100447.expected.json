@@ -1,0 +1,79 @@
+{
+ "advance": [],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": "abc",
+    "c1": "b",
+    "c2": true,
+    "c3": "a b",
+    "fk": "t0-r35",
+    "id": "t1-r3",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r3",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": "a",
+    "c1": "{}",
+    "c2": true,
+    "c3": "🦀rust",
+    "fk": "t0-r23",
+    "id": "t1-r1",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r1",
+    "id2": "v1"
+   },
+   "table": "t1"
+  }
+ ],
+ "hydrate": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": "abc",
+    "c1": "b",
+    "c2": true,
+    "c3": "a b",
+    "fk": "t0-r35",
+    "id": "t1-r3",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r3",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": "a",
+    "c1": "{}",
+    "c2": true,
+    "c3": "🦀rust",
+    "fk": "t0-r23",
+    "id": "t1-r1",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r1",
+    "id2": "v1"
+   },
+   "table": "t1"
+  }
+ ]
+}

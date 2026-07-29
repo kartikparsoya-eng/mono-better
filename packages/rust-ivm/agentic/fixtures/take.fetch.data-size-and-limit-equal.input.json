@@ -1,0 +1,24 @@
+{
+  "name": "take.fetch.data-size-and-limit-equal",
+  "sourceKind": "memory",
+  "tables": {
+    "table": {
+      "columns": {"id": "string", "created": "number"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "i1", "created": 100},
+        {"id": "i2", "created": 200},
+        {"id": "i3", "created": 300},
+        {"id": "i4", "created": 400},
+        {"id": "i5", "created": 500}
+      ]
+    }
+  },
+  "ast": {
+    "table": "table",
+    "orderBy": [["created", "asc"], ["id", "asc"]],
+    "limit": 5
+  },
+  "format": {"singular": false, "relationships": {}},
+  "pushes": []
+}

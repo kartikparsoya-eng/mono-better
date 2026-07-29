@@ -92,7 +92,7 @@ export interface NapiTableSpec {
 import {createRequire} from 'node:module';
 const nodeRequire = createRequire(import.meta.url);
 let RustIvmEngineClass: unknown = null;
-const addonPath = process.env['RUST_IVM_ADDON_PATH'] ?? '../../../../../../rust-ivm/napi/rust-ivm.node';
+const addonPath = process.env['RUST_IVM_ADDON_PATH'] ?? '../../../../packages/rust-ivm/napi/rust-ivm.node';
 try {
   RustIvmEngineClass = (nodeRequire(addonPath) as {RustIvmEngine: new () => unknown}).RustIvmEngine;
 } catch (e) {

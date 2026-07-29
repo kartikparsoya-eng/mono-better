@@ -1,0 +1,396 @@
+{
+ "advance": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "café",
+    "c2": -10,
+    "c3": 1e-10,
+    "fk": "t0-r24",
+    "id": "t1-r15",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r15",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 1,
+   "queryId": "q1",
+   "row": null,
+   "rowKey": {
+    "id": "t1-r17",
+    "id2": "v2"
+   },
+   "table": "t1"
+  }
+ ],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "\"quoted\"",
+    "c2": 2,
+    "c3": -1e+100,
+    "fk": "t0-r28",
+    "id": "t1-r13",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r13",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 0.1,
+    "c3": -9007199254740991,
+    "fk": "t0-r42",
+    "id": "t1-r22",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r22",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": null,
+    "c2": 0.30000000000000004,
+    "c3": -3.75,
+    "fk": "t0-r6",
+    "id": "t1-r6",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r6",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 0,
+    "c3": -3.75,
+    "fk": "t0-r21",
+    "id": "t1-r19",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r19",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "c2": 123456789,
+    "c3": -1,
+    "fk": "t0-r16",
+    "id": "t1-r9",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r9",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": null,
+    "c2": 123456789,
+    "c3": -0.5,
+    "fk": "t0-r33",
+    "id": "t1-r12",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r12",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "b",
+    "c2": 10000000000,
+    "c3": 0,
+    "fk": "t0-r6",
+    "id": "t1-r40",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r40",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 2.5,
+    "c3": 0,
+    "fk": "t0-r49",
+    "id": "t1-r30",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r30",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 0.5,
+    "c3": 1e-10,
+    "fk": "t0-r32",
+    "id": "t1-r23",
+    "id2": "v2"
+   },
+   "rowKey": {
+    "id": "t1-r23",
+    "id2": "v2"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "café",
+    "c2": -10,
+    "c3": 1e-10,
+    "fk": "t0-r24",
+    "id": "t1-r15",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r15",
+    "id2": "v0"
+   },
+   "table": "t1"
+  }
+ ],
+ "hydrate": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "\"quoted\"",
+    "c2": 2,
+    "c3": -1e+100,
+    "fk": "t0-r28",
+    "id": "t1-r13",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r13",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 0.1,
+    "c3": -9007199254740991,
+    "fk": "t0-r42",
+    "id": "t1-r22",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r22",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": null,
+    "c2": 0.30000000000000004,
+    "c3": -3.75,
+    "fk": "t0-r6",
+    "id": "t1-r6",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r6",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 0,
+    "c3": -3.75,
+    "fk": "t0-r21",
+    "id": "t1-r19",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r19",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "c2": 123456789,
+    "c3": -1,
+    "fk": "t0-r16",
+    "id": "t1-r9",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r9",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": null,
+    "c2": 123456789,
+    "c3": -0.5,
+    "fk": "t0-r33",
+    "id": "t1-r12",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r12",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "true",
+    "c2": -9007199254740991,
+    "c3": -0.5,
+    "fk": "t0-r56",
+    "id": "t1-r17",
+    "id2": "v2"
+   },
+   "rowKey": {
+    "id": "t1-r17",
+    "id2": "v2"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "b",
+    "c2": 10000000000,
+    "c3": 0,
+    "fk": "t0-r6",
+    "id": "t1-r40",
+    "id2": "v1"
+   },
+   "rowKey": {
+    "id": "t1-r40",
+    "id2": "v1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 2.5,
+    "c3": 0,
+    "fk": "t0-r49",
+    "id": "t1-r30",
+    "id2": "v0"
+   },
+   "rowKey": {
+    "id": "t1-r30",
+    "id2": "v0"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "null",
+    "c2": 0.5,
+    "c3": 1e-10,
+    "fk": "t0-r32",
+    "id": "t1-r23",
+    "id2": "v2"
+   },
+   "rowKey": {
+    "id": "t1-r23",
+    "id2": "v2"
+   },
+   "table": "t1"
+  }
+ ]
+}

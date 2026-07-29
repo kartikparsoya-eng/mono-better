@@ -1,0 +1,65 @@
+{
+ "name": "fuzz.seed-157707",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string",
+    "c2": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r11",
+     "c0": 10,
+     "c1": "ﬀ",
+     "c2": "🦀rust"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "desc"
+   ]
+  ],
+  "start": {
+   "row": {
+    "id": "t0-r1",
+    "c0": 123456789,
+    "c1": "b",
+    "c2": "_"
+   },
+   "exclusive": false
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r11",
+    "c0": 10,
+    "c1": "ﬀ",
+    "c2": "🦀rust"
+   },
+   "row": {
+    "id": "t0-r11",
+    "c0": 0.30000000000000004,
+    "c1": "ﬀ",
+    "c2": "🦀rust"
+   }
+  }
+ ]
+}

@@ -1,0 +1,6 @@
+target/
+.git/
+tests/
+examples/
+PORT-AUDIT.md
+*.md

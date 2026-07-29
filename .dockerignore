@@ -71,3 +71,11 @@ next-env.d.ts
 reflect.config.json
 .reflect/
 bundle-sizes.json
+
+# rust-ivm build artifacts (avoid sending host build cache to Docker context)
+packages/rust-ivm/target/
+packages/rust-ivm/napi/target/
+packages/rust-ivm/*.node
+packages/rust-ivm/napi/*.node
+packages/rust-ivm/agentic/logs/
+packages/rust-ivm/.shared-target-w*/

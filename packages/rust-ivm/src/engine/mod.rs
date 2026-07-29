@@ -1,0 +1,1326 @@
+//! Engine — per-clientGroup IVM engine.
+//!
+//! Port of `pipeline-driver.ts` PipelineDriver class (main branch).
+//! Manages sources, builds pipelines, hydrates queries, processes
+//! incremental advances, tracks row-set signatures, and supports
+//! advance abort (economic circuit breaker).
+//!
+//! Parallel hydration via std::thread::scope (mirrors Go IVM goroutine model).
+
+pub mod worker;
+pub mod parallel_hydrate;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::builder::ast::Ast;
+use crate::builder::builder::{build_pipeline, BuilderDelegate};
+use crate::builder::complete_ordering::complete_ordering;
+use crate::ivm::change::{make_source_change_add, make_source_change_edit, make_source_change_remove, Change, SourceChange};
+use crate::ivm::data::{make_comparator, Row, SortOrder, Value};
+use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared, Storage};
+use crate::ivm::schema::{SourceSchema, System};
+use crate::ivm::source::{CollectOutput, MemorySource, Source};
+use crate::streamer::{RowChange, Streamer, TableSpecInfo};
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+pub struct QuerySpec {
+    pub query_id: String,
+    pub ast: Ast,
+}
+
+pub struct QueryResult {
+    pub query_id: String,
+    pub changes: Vec<RowChange>,
+}
+
+/// Per-query build products carried across the three hydrate phases (build,
+/// hydrate, register). Used by both the serial and parallel hydrate paths.
+pub(crate) struct Built {
+    pub query_id: String,
+    pub ast: Ast,
+    pub pipeline: Shared<dyn Input>,
+    pub collector: Shared<CollectOutput>,
+    pub schema: SourceSchema,
+    pub timer: Instant,
+    pub companion_rows: Vec<(String, Row)>,
+    pub companions: Vec<CompanionBuilt>,
+}
+
+/// A registered pipeline: the pipeline input + its push collector + schema.
+struct PipelineEntry {
+    pipeline: Shared<dyn Input>,
+    collector: Shared<CollectOutput>,
+    schema: SourceSchema,
+    query_id: String,
+    hydration_time_ms: f64,
+    transformed_ast: Ast,
+    /// Live companion pipelines monitoring resolved scalar subqueries for this
+    /// query (empty for queries with no scalar subqueries).
+    companions: Vec<CompanionPipeline>,
+}
+
+// ---------------------------------------------------------------------------
+// Row-set signature tracking (XOR of row hashes per query)
+// Port of TS `#rowSetSignatures` + `#trackRowSetSignatures`.
+// ---------------------------------------------------------------------------
+
+/// Compute the signature unit for a row key (XOR into the query's signature).
+/// Port of TS `rowIDSignatureUnit`.
+fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    table.hash(&mut hasher);
+    for (k, v) in row_key.iter() {
+        k.hash(&mut hasher);
+        format!("{:?}", v).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Advance abort — economic circuit breaker.
+// Port of TS `#shouldAdvanceYieldMaybeAbortAdvance`.
+// ---------------------------------------------------------------------------
+
+/// Minimum advancement time before an abort is considered (ms).
+const MIN_ADVANCEMENT_TIME_LIMIT_MS: f64 = 50.0;
+
+/// Error thrown when advancement exceeds the economic time limit.
+#[derive(Debug)]
+pub struct ResetPipelinesSignal {
+    pub reason: String,
+    pub msg: String,
+}
+
+impl std::fmt::Display for ResetPipelinesSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg)
+    }
+}
+
+impl std::error::Error for ResetPipelinesSignal {}
+
+// ---------------------------------------------------------------------------
+// Scalar-subquery companion monitoring.
+// Port of pipeline-driver.ts scalar-subquery companion pipelines: a resolved
+// scalar subquery is baked into the main query as a literal, and a live
+// companion pipeline watches the subquery table. If the resolved value
+// changes on advance, the whole query must reset+rehydrate (the baked literal
+// is stale) — TS throws ResetPipelinesSignal('scalar-subquery'); we raise
+// ScalarResetError, which the napi boundary maps to its own RPC code (a
+// RESET, not a teardown), unlike source/operator asserts.
+// ---------------------------------------------------------------------------
+
+/// Raised (via `panic_any`) by a companion output when a resolved scalar
+/// subquery's value changes mid-advance. The twin of TS's
+/// `ResetPipelinesSignal('scalar-subquery')`. Message mirrors the TS signal.
+#[derive(Debug, Clone)]
+pub struct ScalarResetError {
+    pub table: String,
+    /// JS-`String()` rendering of the resolved (baked) value — message only.
+    pub resolved: String,
+    /// JS-`String()` rendering of the pushed value — message only.
+    pub new: String,
+}
+
+impl std::fmt::Display for ScalarResetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Scalar subquery value changed for {}: {} -> {}",
+            self.table, self.resolved, self.new
+        )
+    }
+}
+
+impl std::error::Error for ScalarResetError {}
+
+/// Approximate JS `String(v)` for the scalar values a resolvable subquery
+/// yields. `undefined` = no row matched at resolve; `null` = matched but the
+/// field was NULL. Message rendering only — never compared or parsed.
+fn js_scalar_string(value: &Option<Value>, undefined: bool) -> String {
+    if undefined {
+        return "undefined".to_string();
+    }
+    match value {
+        None => "null".to_string(),
+        Some(Value::Null) => "null".to_string(),
+        Some(Value::Bool(b)) => if *b { "true".into() } else { "false".into() },
+        Some(Value::F64(n)) => {
+            // JS Number stringification for the integer/float literals a
+            // resolvable scalar subquery yields.
+            if n.fract() == 0.0 && n.is_finite() {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Some(Value::Str(s)) => s.to_string(),
+        Some(Value::Json(s)) => s.to_string(),
+    }
+}
+
+/// Port of TS `scalarValuesEqual` (strict `a === b` over
+/// `LiteralValue | null | undefined`). JS `===` distinguishes `undefined`
+/// (no row matched) from `null` (row matched, field NULL), so each side
+/// carries an explicit `undefined` flag: flags differ → unequal; both
+/// undefined → equal; otherwise compare the values (with `None`/`Value::Null`
+/// both meaning SQL/JS null).
+fn scalar_values_equal(
+    a: &Option<Value>,
+    a_undefined: bool,
+    b: &Option<Value>,
+    b_undefined: bool,
+) -> bool {
+    if a_undefined != b_undefined {
+        return false;
+    }
+    if a_undefined {
+        return true;
+    }
+    // Normalize None and Value::Null to the same "null" for comparison.
+    let norm = |v: &Option<Value>| -> Option<Value> {
+        match v {
+            None | Some(Value::Null) => None,
+            Some(x) => Some(x.clone()),
+        }
+    };
+    norm(a) == norm(b)
+}
+
+/// Result of `resolve_scalar_subqueries`: the resolved AST plus the live
+/// companion pipelines (built during resolution and kept alive to monitor the
+/// resolved values) and the matched companion rows to emit on hydrate.
+struct ScalarResolveOut {
+    ast: Ast,
+    /// (table, row) for each matched scalar subquery — emitted as ADD rows on
+    /// hydrate so the client's own EXISTS rewrite has the row it needs.
+    companion_rows: Vec<(String, Row)>,
+    companions: Vec<CompanionBuilt>,
+}
+
+/// A companion pipeline built during scalar resolution, awaiting a monitoring
+/// output. `resolved_undefined == true` ⇔ TS `undefined` (no row matched);
+/// `resolved_value == None` with `resolved_undefined == false` ⇔ null.
+struct CompanionBuilt {
+    input: Shared<dyn Input>,
+    table: String,
+    child_field: String,
+    resolved_value: Option<Value>,
+    resolved_undefined: bool,
+}
+
+/// A live companion pipeline attached to a registered query, monitoring a
+/// resolved scalar subquery's value. Port of TS `CompanionPipeline`.
+struct CompanionPipeline {
+    input: Shared<dyn Input>,
+    output: Shared<CompanionOutput>,
+    schema: SourceSchema,
+}
+
+/// The monitoring output for a companion pipeline. On each push it recomputes
+/// the scalar value and raises `ScalarResetError` (via `panic_any`) if it
+/// differs from the resolved (baked) value; otherwise it collects the change
+/// so the advance loop can stream it under the owning query. Port of TS's
+/// companion `setOutput({push})` handler.
+pub struct CompanionOutput {
+    table: String,
+    child_field: String,
+    resolved_value: Option<Value>,
+    resolved_undefined: bool,
+    changes: Vec<Change>,
+}
+
+impl Output for CompanionOutput {
+    fn push(&mut self, change: Change, _pusher: &dyn InputBase) {
+        use crate::ivm::change::ChangeType;
+        let (new_value, new_undefined) = match change.change_type() {
+            ChangeType::Add | ChangeType::Edit => {
+                // TS: newValue = change.node.row[childField] ?? null — never
+                // undefined for ADD/EDIT.
+                let v = match change.node().row.get(&self.child_field) {
+                    None | Some(Value::Null) => None,
+                    Some(x) => Some(x.clone()),
+                };
+                (v, false)
+            }
+            // TS: newValue = undefined for REMOVE.
+            ChangeType::Remove => (None, true),
+            // TS returns [] for CHILD: a relationship-only change does not move
+            // the scalar value — neither reset nor accumulate.
+            ChangeType::Child => return,
+        };
+        if !scalar_values_equal(
+            &new_value,
+            new_undefined,
+            &self.resolved_value,
+            self.resolved_undefined,
+        ) {
+            std::panic::panic_any(ScalarResetError {
+                table: self.table.clone(),
+                resolved: js_scalar_string(&self.resolved_value, self.resolved_undefined),
+                new: js_scalar_string(&new_value, new_undefined),
+            });
+        }
+        self.changes.push(change);
+    }
+}
+
+/// Result of advance_to_head_stream.
+pub struct AdvanceToHeadResult {
+    pub version: String,
+    pub num_changes: usize,
+    pub aborted: bool,
+    pub reset_reason: Option<String>,
+    pub reset_msg: Option<String>,
+}
+
+struct AdvanceContext {
+    timer: Instant,
+    total_hydration_time_ms: f64,
+    num_changes: usize,
+    pos: usize,
+}
+
+impl AdvanceContext {
+    fn should_abort(&self) -> bool {
+        let elapsed = self.timer.elapsed().as_secs_f64() * 1000.0;
+        if elapsed > MIN_ADVANCEMENT_TIME_LIMIT_MS {
+            if elapsed > self.total_hydration_time_ms {
+                return true;
+            }
+            if elapsed > self.total_hydration_time_ms / 2.0
+                && self.pos <= self.num_changes / 2
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engine
+// ---------------------------------------------------------------------------
+
+pub struct Engine {
+    sources: HashMap<String, Shared<dyn Source>>,
+    primary_keys: HashMap<String, Vec<String>>,
+    /// All unique indexes per table (PK plus any unique keys). Used by
+    /// scalar-subquery resolution to decide whether a subquery is "simple"
+    /// (returns at most one deterministic row). Port of TS `#tableSpecs`
+    /// unique-key info.
+    unique_keys: HashMap<String, Vec<Vec<String>>>,
+    table_specs: HashMap<String, TableSpecInfo>,
+    hydrate_lanes: usize,
+    pipelines: Vec<PipelineEntry>,
+    /// XOR signature of the row-set per query.
+    row_set_signatures: HashMap<String, u64>,
+    /// Whether NOT EXISTS is allowed (server-side: true).
+    enable_not_exists: bool,
+    /// Storage factory counter.
+    next_storage_id: usize,
+    /// Cancellation token for advance/hydrate abort.
+    cancellation_token: CancellationToken,
+}
+
+impl Engine {
+    pub fn new(primary_keys: HashMap<String, Vec<String>>, hydrate_lanes: usize) -> Self {
+        Engine {
+            sources: HashMap::new(),
+            primary_keys,
+            unique_keys: HashMap::new(),
+            table_specs: HashMap::new(),
+            hydrate_lanes,
+            pipelines: Vec::new(),
+            row_set_signatures: HashMap::new(),
+            enable_not_exists: true, // server-side
+            next_storage_id: 0,
+            cancellation_token: CancellationToken::new(),
+        }
+    }
+
+    /// Set table spec info (for minRowVersion bumping in Streamer).
+    pub fn set_table_spec(&mut self, table: &str, min_row_version: Option<String>) {
+        self.table_specs.insert(
+            table.to_string(),
+            TableSpecInfo { min_row_version },
+        );
+    }
+
+    /// Set the unique keys for a table (PK plus any unique indexes), used by
+    /// scalar-subquery resolution. Mirrors the unique-key info TS carries in
+    /// its tableSpecs.
+    pub fn set_unique_keys(&mut self, table: &str, keys: Vec<Vec<String>>) {
+        self.unique_keys.insert(table.to_string(), keys);
+    }
+
+    pub fn register_source(&mut self, source: Shared<dyn Source>) {
+        let table_name = source.borrow().table_name().to_string();
+        let pk = source.borrow().primary_key().to_vec();
+        self.primary_keys.insert(table_name.clone(), pk);
+        self.sources.insert(table_name, source);
+    }
+
+    /// Get the row-set signature for a query.
+    /// Port of TS `rowSetSignature()`.
+    pub fn row_set_signature(&self, query_id: &str) -> Option<u64> {
+        self.row_set_signatures.get(query_id).copied()
+    }
+
+    /// Total hydration time across all pipelines.
+    /// Port of TS `totalHydrationTimeMs()`.
+    pub fn total_hydration_time_ms(&self) -> f64 {
+        self.pipelines.iter().map(|p| p.hydration_time_ms).sum()
+    }
+
+    /// Remove a query's pipeline.
+    /// Port of TS `removeQuery()`.
+    pub fn remove_query(&mut self, query_id: &str) {
+        if let Some(pos) = self.pipelines.iter().position(|p| p.query_id == query_id) {
+            self.pipelines[pos].pipeline.borrow_mut().destroy();
+            for c in &self.pipelines[pos].companions {
+                c.input.borrow_mut().destroy();
+            }
+            self.pipelines.remove(pos);
+        }
+        self.row_set_signatures.remove(query_id);
+    }
+
+    /// Build pipelines and hydrate them — STREAMING version.
+    /// Calls `on_row_change` for each RowChange as it's produced, row by row.
+    /// No collecting into Vec — true streaming matching TS generator behavior.
+    pub fn add_queries_streaming<F: FnMut(&RowChange)>(
+        &mut self,
+        queries: &[QuerySpec],
+        mut on_row_change: F,
+    ) -> Vec<QueryResult> {
+        // Reset cancellation at the start of hydration.
+        self.cancellation_token.reset();
+        for q in queries {
+            self.remove_query(&q.query_id);
+        }
+
+        // Phase 1: Resolve scalar subqueries, then build all pipelines
+        // sequentially (mutates source connections). Resolution runs first so
+        // the main pipeline is built from the literal-resolved AST, and the
+        // companion pipelines it builds are retained for advance-time monitoring.
+        let mut built: Vec<Built> = Vec::new();
+
+        for q in queries {
+            let timer = Instant::now();
+            // Resolve scalar subqueries against the live sources (`&self`),
+            // producing the resolved AST + retained live companion pipelines.
+            let resolved = self.resolve_scalar_subqueries(&q.ast);
+
+            let primary_keys = &self.primary_keys;
+            let ast = complete_ordering(&resolved.ast, &|table: &str| {
+                primary_keys.get(table).cloned().unwrap_or_default()
+            });
+            let mut delegate = EngineDelegate {
+                sources: &self.sources,
+                enable_not_exists: self.enable_not_exists,
+            };
+            let pipeline = build_pipeline(&ast, &mut delegate);
+
+            let collector = Rc::new(RefCell::new(CollectOutput::new()));
+            pipeline.borrow().set_output(collector.clone() as OutputHandle);
+
+            let schema = pipeline.borrow().get_schema();
+            built.push(Built {
+                query_id: q.query_id.clone(),
+                ast,
+                pipeline,
+                collector,
+                schema,
+                timer,
+                companion_rows: resolved.companion_rows,
+                companions: resolved.companions,
+            });
+        }
+
+        // Phase 2: Hydrate. Sequential — Rc/RefCell are !Send, so all fetch()
+        // calls run on this thread. After the main query rows, emit the matched
+        // scalar-subquery companion rows as ADDs (TS yields them post-hydrate
+        // so the client's own EXISTS rewrite has the row).
+        let primary_keys = self.primary_keys.clone();
+        let table_specs = self.table_specs.clone();
+
+        // Cancellation: the consumer (view-syncer) may abandon a hydrate mid-
+        // stream (client disconnect / teardown). The driver flips this token
+        // via the out-of-band `cancel()`; we check it between rows so we stop
+        // producing promptly instead of materializing the whole result into a
+        // queue nobody drains. A partially-fetched pipeline is left in an
+        // inconsistent operator state, so on cancel we register NOTHING and
+        // destroy what we built (the queries are being discarded anyway).
+        let mut cancelled = false;
+        'hydrate: for b in &built {
+            if self.cancellation_token.is_cancelled() {
+                cancelled = true;
+                break 'hydrate;
+            }
+            let stream = b.pipeline.borrow().fetch(&Default::default());
+            let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
+            for node in crate::ivm::stream::skip_yields(stream) {
+                if self.cancellation_token.is_cancelled() {
+                    cancelled = true;
+                    break 'hydrate;
+                }
+                let change = crate::ivm::change::make_add_change(node);
+                streamer.accumulate(&b.query_id, &b.schema, std::slice::from_ref(&change));
+                for rc in streamer.stream() {
+                    on_row_change(&rc);
+                }
+            }
+
+            // Companion rows: raw ADD RowChanges for each matched subquery row.
+            for (table, row) in &b.companion_rows {
+                let pk = primary_keys.get(table).cloned().unwrap_or_default();
+                let row_key = crate::streamer::get_row_key(&pk, row);
+                on_row_change(&RowChange {
+                    change_type: crate::ivm::change::ChangeType::Add,
+                    query_id: b.query_id.clone(),
+                    table: table.clone(),
+                    row_key,
+                    row: Some(row.clone()),
+                    is_hidden: false,
+                });
+            }
+        }
+
+        if cancelled {
+            // Discard everything built this call — no partial pipeline is
+            // registered, so a later advance can never run on a half-fetched
+            // graph. The consumer will re-add the query on the next connection.
+            for b in built {
+                b.pipeline.borrow_mut().destroy();
+                for cb in b.companions {
+                    cb.input.borrow_mut().destroy();
+                }
+            }
+            return Vec::new();
+        }
+
+        // Phase 3: Attach monitoring outputs to companion pipelines and
+        // register everything.
+        let mut results = Vec::new();
+        for b in built {
+            let hydration_time_ms = b.timer.elapsed().as_secs_f64() * 1000.0;
+            results.push(QueryResult {
+                query_id: b.query_id.clone(),
+                changes: Vec::new(),
+            });
+
+            let mut live_companions = Vec::with_capacity(b.companions.len());
+            for cb in b.companions {
+                let schema = cb.input.borrow().get_schema();
+                let output = Rc::new(RefCell::new(CompanionOutput {
+                    table: cb.table,
+                    child_field: cb.child_field,
+                    resolved_value: cb.resolved_value,
+                    resolved_undefined: cb.resolved_undefined,
+                    changes: Vec::new(),
+                }));
+                cb.input.borrow().set_output(output.clone() as OutputHandle);
+                live_companions.push(CompanionPipeline {
+                    input: cb.input,
+                    output,
+                    schema,
+                });
+            }
+
+            self.pipelines.push(PipelineEntry {
+                pipeline: b.pipeline,
+                collector: b.collector,
+                schema: b.schema,
+                query_id: b.query_id,
+                hydration_time_ms,
+                transformed_ast: b.ast,
+                companions: live_companions,
+            });
+        }
+
+        results
+    }
+
+    /// Parallel hydrate — coarse: one task per pipeline (DESIGN §2, Phase 1).
+    ///
+    /// Builds all pipelines (Phase 1, same as serial), then dispatches one task
+    /// per pipeline to the `ParallelJob` worker pool. Each worker rebuilds a
+    /// TRANSIENT pipeline from the AST + fresh sources (copied rows for
+    /// `MemorySource`, pooled connection for `TableSource`), fetches it, and
+    /// streams `RowChange`s one at a time. The actor drains in dispatch order
+    /// → byte-identical to serial (§6). Then registers the actor's pipelines
+    /// (Phase 3, same as serial) for advance.
+    ///
+    /// On ANY failure (pool exhaustion, version mismatch, worker panic, first
+    /// error): destroys the built pipelines and falls back to
+    /// `add_queries_streaming` (serial) — one clean reset, no partial results
+    /// committed (S4).
+    ///
+    /// `workers` = bounded pool size. `per_task_bound` = bounded channel cap.
+    pub fn parallel_add_queries_streaming<F: FnMut(&RowChange)>(
+        &mut self,
+        queries: &[QuerySpec],
+        workers: usize,
+        per_task_bound: usize,
+        mut on_row_change: F,
+    ) -> Result<Vec<QueryResult>, crate::engine::worker::ParallelError<String>> {
+        self.cancellation_token.reset();
+        for q in queries {
+            self.remove_query(&q.query_id);
+        }
+
+        // Phase 1: Build all pipelines (same as serial — mutates source
+        // connections, must be sequential).
+        let mut built: Vec<Built> = Vec::new();
+        for q in queries {
+            let timer = Instant::now();
+            let resolved = self.resolve_scalar_subqueries(&q.ast);
+            let primary_keys = &self.primary_keys;
+            let ast = complete_ordering(&resolved.ast, &|table: &str| {
+                primary_keys.get(table).cloned().unwrap_or_default()
+            });
+            let mut delegate = EngineDelegate {
+                sources: &self.sources,
+                enable_not_exists: self.enable_not_exists,
+            };
+            let pipeline = build_pipeline(&ast, &mut delegate);
+            let collector = Rc::new(RefCell::new(CollectOutput::new()));
+            pipeline.borrow().set_output(collector.clone() as OutputHandle);
+            let schema = pipeline.borrow().get_schema();
+            built.push(Built {
+                query_id: q.query_id.clone(),
+                ast: ast.clone(),
+                pipeline,
+                collector,
+                schema,
+                timer,
+                companion_rows: resolved.companion_rows.clone(),
+                companions: resolved.companions,
+            });
+        }
+
+        // Collect all referenced tables across all queries for source spec
+        // extraction.
+        let mut referenced = std::collections::HashSet::new();
+        for b in &built {
+            let tables = crate::engine::parallel_hydrate::referenced_tables(&b.ast);
+            referenced.extend(tables);
+        }
+
+        // Extract Send source specs from the !Send sources.
+        let source_specs =
+            crate::engine::parallel_hydrate::extract_source_specs(&self.sources, &referenced);
+
+        // Build task specs — one per pipeline.
+        let specs: Vec<crate::engine::parallel_hydrate::HydrateTaskSpec> = built
+            .iter()
+            .map(|b| crate::engine::parallel_hydrate::HydrateTaskSpec {
+                query_id: b.query_id.clone(),
+                ast: b.ast.clone(),
+                source_specs: source_specs.clone(),
+                primary_keys: self.primary_keys.clone(),
+                table_specs: self.table_specs.clone(),
+                enable_not_exists: self.enable_not_exists,
+                companion_rows: b.companion_rows.clone(),
+            })
+            .collect();
+
+        // Phase 2: Try parallel hydrate.
+        let cancel = self.cancellation_token.clone();
+        let mut parallel_ok = false;
+        let result = crate::engine::parallel_hydrate::parallel_hydrate_streaming(
+            specs,
+            cancel,
+            workers,
+            per_task_bound,
+            |rc| on_row_change(rc),
+        );
+        match result {
+            Ok(()) => parallel_ok = true,
+            Err(_e) => {
+                // Parallel failed — destroy built pipelines and fall back to
+                // serial. The serial path rebuilds from scratch.
+                for b in &built {
+                    b.pipeline.borrow_mut().destroy();
+                    for cb in &b.companions {
+                        cb.input.borrow_mut().destroy();
+                    }
+                }
+            }
+        }
+
+        if !parallel_ok {
+            // Parallel failed — destroy built pipelines and return Err so the
+            // caller can clear any partial RowChanges already emitted and
+            // re-run serially. We do NOT fall back to serial here because
+            // on_row_change was already called for some rows (the parallel path
+            // streams as it produces); calling add_queries_streaming would
+            // emit duplicates. The caller owns the clear+retry decision.
+            for b in &built {
+                b.pipeline.borrow_mut().destroy();
+                for cb in &b.companions {
+                    cb.input.borrow_mut().destroy();
+                }
+            }
+            return Err(crate::engine::worker::ParallelError::Panic(
+                "parallel hydrate failed — caller should fall back to serial".to_string(),
+            ));
+        }
+
+        // Phase 2b: Fetch the actor's pipelines to set up operator state for
+        // advance. The workers fetched TRANSIENT pipelines — the actor's
+        // pipelines were built but never fetched, so their operators lack the
+        // fetch-time state (join caches, take counters, etc.) that advance
+        // (push) relies on. Discard the output — the workers already emitted
+        // the RowChanges. This is serial but necessary for correctness; the
+        // parallel speedup is on the RowChange emission path (Streamer), not
+        // the raw fetch.
+        //
+        // CRITICAL: must recurse into Node.relationships (RelStream closures),
+        // exactly like the Streamer's stream_nodes does. Without this, child
+        // operators (joins, sources) are never fetched and lack the state that
+        // advance's push relies on → divergent output.
+        for b in &built {
+            if self.cancellation_token.is_cancelled() {
+                break;
+            }
+            let stream = b.pipeline.borrow().fetch(&Default::default());
+            for node in crate::ivm::stream::skip_yields(stream) {
+                recurse_node_relationships(&node);
+            }
+        }
+
+        // Phase 3: Register pipelines (same as serial).
+        let mut results = Vec::new();
+        for b in built {
+            let hydration_time_ms = b.timer.elapsed().as_secs_f64() * 1000.0;
+            results.push(QueryResult {
+                query_id: b.query_id.clone(),
+                changes: Vec::new(),
+            });
+
+            let mut live_companions = Vec::with_capacity(b.companions.len());
+            for cb in b.companions {
+                let schema = cb.input.borrow().get_schema();
+                let output = Rc::new(RefCell::new(CompanionOutput {
+                    table: cb.table,
+                    child_field: cb.child_field,
+                    resolved_value: cb.resolved_value,
+                    resolved_undefined: cb.resolved_undefined,
+                    changes: Vec::new(),
+                }));
+                cb.input.borrow().set_output(output.clone() as OutputHandle);
+                live_companions.push(CompanionPipeline {
+                    input: cb.input,
+                    output,
+                    schema,
+                });
+            }
+
+            self.pipelines.push(PipelineEntry {
+                pipeline: b.pipeline,
+                collector: b.collector,
+                schema: b.schema,
+                query_id: b.query_id,
+                hydration_time_ms,
+                transformed_ast: b.ast,
+                companions: live_companions,
+            });
+        }
+
+        Ok(results)
+    }
+
+    /// Advance with streaming — calls `on_row_change` for each RowChange as produced.
+    pub fn advance_streaming<F: FnMut(&RowChange)>(
+        &mut self,
+        changes: &[(String, SourceChange)],
+        mut on_row_change: F,
+    ) {
+        // Reset cancellation at the start of each advance.
+        self.cancellation_token.reset();
+
+        let total_hydration_time_ms = self.total_hydration_time_ms();
+
+        let advance_ctx = AdvanceContext {
+            timer: Instant::now(),
+            total_hydration_time_ms,
+            num_changes: changes.len(),
+            pos: 0,
+        };
+
+        for (table, change) in changes {
+            if advance_ctx.should_abort() || self.cancellation_token.is_cancelled() {
+                break;
+            }
+
+            if let Some(source) = self.sources.get(table) {
+                for entry in &self.pipelines {
+                    entry.collector.borrow_mut().changes.clear();
+                    for c in &entry.companions {
+                        c.output.borrow_mut().changes.clear();
+                    }
+                }
+
+                // A scalar-subquery value change panics (ScalarResetError)
+                // inside a companion output during this push — propagating out
+                // of advance to the napi boundary as a reset.
+                let _pipeline_changes = source.borrow_mut().push_parallel(change.clone());
+
+                for entry in &self.pipelines {
+                    let collected: Vec<Change> = std::mem::take(&mut entry.collector.borrow_mut().changes);
+                    if !collected.is_empty() {
+                        let mut streamer = Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
+                        streamer.accumulate(&entry.query_id, &entry.schema, &collected);
+                        for rc in streamer.stream() {
+                            on_row_change(&rc);
+                        }
+                    }
+                    // Stream surviving companion changes (the resolved value was
+                    // unchanged) under the owning query, like TS's companion
+                    // `streamer.accumulate(queryID, companionSchema, [change])`.
+                    for c in &entry.companions {
+                        let cc: Vec<Change> = std::mem::take(&mut c.output.borrow_mut().changes);
+                        if !cc.is_empty() {
+                            let mut streamer = Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
+                            streamer.accumulate(&entry.query_id, &c.schema, &cc);
+                            for rc in streamer.stream() {
+                                on_row_change(&rc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build pipelines and hydrate them.
+    /// Delegates to add_queries_streaming — single code path.
+    pub fn add_queries(&mut self, queries: &[QuerySpec]) -> Vec<QueryResult> {
+        let mut by_qid: HashMap<String, Vec<RowChange>> = HashMap::new();
+        let results = self.add_queries_streaming(queries, |rc| {
+            by_qid.entry(rc.query_id.clone()).or_default().push(rc.clone());
+        });
+        for changes in by_qid.values() {
+            for rc in changes {
+                if rc.change_type != crate::ivm::change::ChangeType::Edit {
+                    let sig = *self.row_set_signatures.get(&rc.query_id).unwrap_or(&0);
+                    let unit = row_signature_unit(&rc.table, &rc.row_key);
+                    self.row_set_signatures.insert(rc.query_id.clone(), sig ^ unit);
+                }
+            }
+        }
+        results.into_iter().map(|mut r| {
+            r.changes = by_qid.remove(&r.query_id).unwrap_or_default();
+            r
+        }).collect()
+    }
+
+    /// Advance to head: Rust derives its own diff from the snapshotter,
+    /// pushes the changes through all pipelines, and streams RowChanges.
+    ///
+    /// This is the Go-primary architecture: Rust owns the snapshotter,
+    /// derives the diff from `_zero.changeLog2`, and drives the engine.
+    /// TS never computes a diff or sends SourceChange[] — it just calls
+    /// this method and consumes the RowChange stream.
+    ///
+    /// The snapshotter must be initialized and the diff must be valid.
+    /// Returns the new version string on success.
+    pub fn advance_to_head_stream<F, H>(
+        &mut self,
+        snapshotter: &mut crate::snapshotter::Snapshotter,
+        syncable_tables: &HashMap<String, crate::snapshotter::spec::LiteAndZqlSpec>,
+        all_table_names: &std::collections::HashSet<String>,
+        mut on_header: H,
+        mut on_row_change: F,
+    ) -> Result<AdvanceToHeadResult, crate::snapshotter::DiffError>
+    where
+        F: FnMut(&RowChange),
+        H: FnMut(&str, usize),
+    {
+        // 1. Advance the snapshotter — get the diff between prev and curr.
+        let diff = snapshotter.advance(syncable_tables, all_table_names)
+            .map_err(|e| crate::snapshotter::DiffError::Other(e))?;
+
+        let new_version = diff.curr_version().to_string();
+        let num_changes = diff.changes() as usize;
+
+        // Notify the caller of the header (version + numChanges) BEFORE
+        // iterating the diff. This lets the NAPI layer push the header row
+        // and unblock the JS side so it can start consuming rows while we
+        // continue producing them.
+        on_header(&new_version, num_changes);
+
+        // 2. Economic abort — port of TS #shouldAdvanceYieldMaybeAbortAdvance.
+        let total_hydration_time_ms = self.total_hydration_time_ms();
+        let advance_start = Instant::now();
+        let mut pos = 0usize;
+
+        // 3. Iterate the diff, converting each SnapshotChange to SourceChange(s).
+        let prev_conn = snapshotter.prev_conn()?;
+        let curr_conn = snapshotter.current_conn()?;
+
+        // Point every TableSource at the PREV snapshot while changes are
+        // processed, so validate_change/fetches read prev — exactly as TS
+        // (`pipeline-driver.ts` reads prev during advance, setDB(curr) after).
+        // Without this the sources read a newer (head) snapshot and
+        // validate_change spuriously panics "Add duplicate row". MemorySource
+        // ignores this (no-op).
+        for source in self.sources.values() {
+            source.borrow_mut().set_snapshot_db(prev_conn.clone());
+        }
+
+        // Per-table column types, so raw diff rows are coerced (bool/json) the
+        // same way the fetch path coerces them — otherwise a boolean column
+        // reads Bool on hydrate but F64 on advance and compare_values panics.
+        let table_columns: HashMap<String, HashMap<String, crate::ivm::schema::ColumnType>> = self
+            .sources
+            .iter()
+            .map(|(t, s)| (t.clone(), s.borrow().column_types()))
+            .collect();
+
+        let result = crate::snapshotter::diff::iterate_diff(&diff, &prev_conn, &curr_conn, |sc| {
+            let col_types = table_columns.get(&sc.table);
+            // Economic abort check per-change (TS parity).
+            let elapsed_ms = advance_start.elapsed().as_secs_f64() * 1000.0;
+            if elapsed_ms > MIN_ADVANCEMENT_TIME_LIMIT_MS {
+                // Budget is the total original hydration time — no floor, to
+                // match TS (pipeline-driver.ts:855) and `should_abort` above.
+                let budget = total_hydration_time_ms;
+                if elapsed_ms > budget {
+                    return Err(crate::snapshotter::DiffError::Reset(
+                        crate::snapshotter::ResetPipelinesSignal {
+                            reason: "advancement-timeout",
+                            msg: format!(
+                                "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
+                                elapsed_ms, budget, pos, num_changes
+                            ),
+                        }
+                    ));
+                }
+                if elapsed_ms > budget / 2.0 && pos <= num_changes / 2 {
+                    return Err(crate::snapshotter::DiffError::Reset(
+                        crate::snapshotter::ResetPipelinesSignal {
+                            reason: "advancement-timeout",
+                            msg: format!(
+                                "Advancement timed out at half-budget ({:.0}ms, pos: {}/{})",
+                                elapsed_ms, pos, num_changes
+                            ),
+                        }
+                    ));
+                }
+            }
+            pos += 1;
+
+            // Port of TS pipeline-driver.ts #advance (744-776): the prev_value
+            // whose PK equals next's PK becomes the EDIT old-row and is NOT
+            // removed; every OTHER prev_value (a different-PK unique conflict) is
+            // removed. Then next → EDIT(that old-row) or ADD. (Previously we
+            // removed ALL prev_values including the same-PK one and used
+            // prev_values[0] as the edit-old — an extra REMOVE + wrong old-row
+            // pick for an in-place update, diverging from TS.)
+            let pk_cols = self.primary_keys.get(&sc.table).cloned().unwrap_or_default();
+            let same_pk = |pv: &std::collections::HashMap<String, rusqlite::types::Value>| -> bool {
+                match &sc.next_value {
+                    Some(next) if !pk_cols.is_empty() => pk_cols.iter().all(|col| {
+                        pv.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
+                            == next.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
+                    }),
+                    _ => false,
+                }
+            };
+
+            let mut edit_old_row = None;
+            for prev_row in &sc.prev_values {
+                if same_pk(prev_row) {
+                    edit_old_row = Some(sqlite_value_to_row(prev_row, col_types));
+                } else {
+                    let change = crate::ivm::change::make_source_change_remove(
+                        sqlite_value_to_row(prev_row, col_types),
+                    );
+                    push_source_change(&self.sources, &self.pipelines, &sc.table, change,
+                        &self.primary_keys, &self.table_specs, &mut on_row_change);
+                }
+            }
+
+            if let Some(next) = &sc.next_value {
+                let row = sqlite_value_to_row(next, col_types);
+                let change = if let Some(old_row) = edit_old_row {
+                    crate::ivm::change::make_source_change_edit(row, old_row)
+                } else {
+                    crate::ivm::change::make_source_change_add(row)
+                };
+                push_source_change(&self.sources, &self.pipelines, &sc.table, change,
+                    &self.primary_keys, &self.table_specs, &mut on_row_change);
+            }
+
+            Ok(())
+        });
+
+        // Restore every TableSource to the CURR (head) snapshot for subsequent
+        // reads (incremental fetches + next hydration), on every path — matches
+        // TS `table.setDB(curr.db.db)` after the change loop.
+        for source in self.sources.values() {
+            source.borrow_mut().set_snapshot_db(curr_conn.clone());
+        }
+
+        match result {
+            Ok(()) => Ok(AdvanceToHeadResult {
+                version: new_version,
+                num_changes,
+                aborted: false,
+                reset_reason: None,
+                reset_msg: None,
+            }),
+            Err(crate::snapshotter::DiffError::Reset(sig)) => {
+                Ok(AdvanceToHeadResult {
+                    version: new_version,
+                    num_changes: pos,
+                    aborted: true,
+                    reset_reason: Some(sig.reason.to_string()),
+                    reset_msg: Some(sig.msg),
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Advance: push source changes through all pipelines.
+    /// Delegates to advance_streaming — single code path.
+    pub fn advance(&mut self, changes: &[(String, SourceChange)]) -> Vec<RowChange> {
+        let mut all_row_changes = Vec::new();
+        self.advance_streaming(changes, |rc| {
+            all_row_changes.push(rc.clone());
+        });
+        all_row_changes
+    }
+
+    /// Resolve scalar subqueries in the AST before building the pipeline.
+    /// Port of TS `#resolveScalarSubqueries`.
+    ///
+    /// Simple scalar subqueries (flagged `scalar` and equality-constrained on
+    /// all columns of a unique key) are pre-resolved to literal values by
+    /// building + fetching the subquery pipeline against the live sources. The
+    /// built pipeline is retained as a live companion (returned in
+    /// `ScalarResolveOut.companions`) so a monitoring output can later detect
+    /// a value change on advance. Matched rows are returned in
+    /// `companion_rows` for emission on hydrate.
+    fn resolve_scalar_subqueries(&self, ast: &Ast) -> ScalarResolveOut {
+        use crate::sqlite::resolve_scalar_subqueries::{
+            resolve_simple_scalar_subqueries, ScalarExecutor, TableSpecWithUniqueKeys,
+        };
+
+        // Build the unique-key table specs from the engine's known keys.
+        let table_specs: HashMap<String, TableSpecWithUniqueKeys> = self
+            .unique_keys
+            .iter()
+            .map(|(t, keys)| {
+                (
+                    t.clone(),
+                    TableSpecWithUniqueKeys { unique_keys: keys.clone() },
+                )
+            })
+            .collect();
+
+        let sources = &self.sources;
+        let primary_keys = &self.primary_keys;
+        let enable_not_exists = self.enable_not_exists;
+
+        // Collected during resolution by the executor closure (Fn → interior
+        // mutability). `companion_rows`: matched (table, row) for hydrate.
+        // `companions`: the built live pipelines + resolved values.
+        let companion_rows: RefCell<Vec<(String, Row)>> = RefCell::new(Vec::new());
+        let companions: RefCell<Vec<CompanionBuilt>> = RefCell::new(Vec::new());
+
+        let executor: ScalarExecutor = Box::new(|subquery_ast: &Ast, child_field: &str| {
+            // Build the subquery pipeline against the live sources (mirrors the
+            // main-hydrate build path). complete_ordering first so the pipeline
+            // has a deterministic sort like every other built pipeline.
+            let completed = complete_ordering(subquery_ast, &|table: &str| {
+                primary_keys.get(table).cloned().unwrap_or_default()
+            });
+            let mut delegate = EngineDelegate { sources, enable_not_exists };
+            let input = build_pipeline(&completed, &mut delegate);
+
+            // Consume the full stream (the subquery is at-most-one-row) and
+            // take the first node. Mirrors TS `for (const n of skipYields(...))
+            // node ??= n`.
+            let mut first: Option<crate::ivm::data::Node> = None;
+            let stream = input.borrow().fetch(&Default::default());
+            for node in crate::ivm::stream::skip_yields(stream) {
+                if first.is_none() {
+                    first = Some(node);
+                }
+            }
+
+            match first {
+                None => {
+                    // No row matched → TS `undefined`. Keep the companion alive
+                    // so a future insert that creates the row is detected.
+                    companions.borrow_mut().push(CompanionBuilt {
+                        input: input.clone(),
+                        table: subquery_ast.table.clone(),
+                        child_field: child_field.to_string(),
+                        resolved_value: None,
+                        resolved_undefined: true,
+                    });
+                    (None, false)
+                }
+                Some(node) => {
+                    // TS: (node.row[childField] as LiteralValue) ?? null.
+                    let value = match node.row.get(child_field) {
+                        None | Some(Value::Null) => None,
+                        Some(v) => Some(v.clone()),
+                    };
+                    companion_rows
+                        .borrow_mut()
+                        .push((subquery_ast.table.clone(), node.row.clone()));
+                    companions.borrow_mut().push(CompanionBuilt {
+                        input: input.clone(),
+                        table: subquery_ast.table.clone(),
+                        child_field: child_field.to_string(),
+                        resolved_value: value.clone(),
+                        resolved_undefined: false,
+                    });
+                    (value, true)
+                }
+            }
+        });
+
+        let result = resolve_simple_scalar_subqueries(ast, &table_specs, &executor);
+        drop(executor);
+
+        ScalarResolveOut {
+            ast: result.ast,
+            companion_rows: companion_rows.into_inner(),
+            companions: companions.into_inner(),
+        }
+    }
+
+    /// List active query IDs.
+    pub fn pipeline_query_ids(&self) -> Vec<String> {
+        self.pipelines.iter().map(|p| p.query_id.clone()).collect()
+    }
+
+    /// Check if the engine has been initialized (has sources registered).
+    pub fn initialized(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    /// Get the cancellation token (for wiring into SQLite progress handler).
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
+    }
+
+    /// Cancel any in-progress advance/hydrate.
+    pub fn cancel(&self) {
+        self.cancellation_token.cancel();
+    }
+
+    /// Reset the engine: clear all pipelines and sources.
+    /// Port of TS `reset()`.
+    pub fn reset(&mut self) {
+        for entry in self.pipelines.drain(..) {
+            entry.pipeline.borrow_mut().destroy();
+            for c in &entry.companions {
+                c.input.borrow_mut().destroy();
+            }
+        }
+        self.sources.clear();
+        self.row_set_signatures.clear();
+        self.primary_keys.clear();
+        self.table_specs.clear();
+    }
+
+    /// Get a row by table name and primary key.
+    /// Port of TS `getRow()`.
+    pub fn get_row(&self, table: &str, pk: &[(String, Value)]) -> Option<Row> {
+        let source = self.sources.get(table)?;
+        let data = source.borrow().get_row(pk)?;
+        Some(data)
+    }
+
+    /// Get the sources map (for NAPI to access).
+    pub fn sources(&self) -> &HashMap<String, Shared<dyn Source>> {
+        &self.sources
+    }
+
+    /// Get a mutable reference to a source (for NAPI to add rows).
+    pub fn source_mut(&mut self, table: &str) -> Option<&mut Shared<dyn Source>> {
+        self.sources.get_mut(table)
+    }
+
+    /// Destroy the engine and release all resources.
+    /// Port of TS `destroy()`.
+    pub fn destroy(&mut self) {
+        for entry in self.pipelines.drain(..) {
+            entry.pipeline.borrow_mut().destroy();
+            for c in &entry.companions {
+                c.input.borrow_mut().destroy();
+            }
+        }
+        self.sources.clear();
+        self.row_set_signatures.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BuilderDelegate — complete implementation matching TS.
+// ---------------------------------------------------------------------------
+
+struct EngineDelegate<'a> {
+    sources: &'a HashMap<String, Shared<dyn Source>>,
+    enable_not_exists: bool,
+}
+
+impl<'a> BuilderDelegate for EngineDelegate<'a> {
+    fn get_source(&self, table_name: &str) -> Option<Shared<dyn Source>> {
+        self.sources.get(table_name).cloned()
+    }
+
+    fn enable_not_exists(&self) -> bool {
+        self.enable_not_exists
+    }
+
+    fn create_storage(&mut self) -> Shared<dyn Storage> {
+        Rc::new(RefCell::new(crate::ivm::memory_storage::MemoryStorage::new()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper functions for advance_to_head_stream
+// ---------------------------------------------------------------------------
+
+/// Convert a rusqlite Value map to an IVM Row.
+/// Convert a raw SQLite row (from the snapshotter diff) to an IVM Row, coercing
+/// each column by its declared type via the SAME path the fetch uses
+/// (`sqlite_value_to_ivm`) — so a boolean column becomes `Bool`, not `F64(1)`,
+/// on both the hydrate AND advance paths. Without `col_types`, values pass
+/// through unchanged (matching an untyped source).
+fn sqlite_value_to_row(
+    map: &std::collections::HashMap<String, rusqlite::types::Value>,
+    col_types: Option<&std::collections::HashMap<String, crate::ivm::schema::ColumnType>>,
+) -> crate::ivm::data::Row {
+    let row: crate::ivm::data::Row = Arc::new(
+        map.iter().map(|(k, v)| {
+            let ct = col_types.and_then(|c| c.get(k));
+            let val = crate::sqlite::table_source::sqlite_value_to_ivm(Ok(v.clone()), ct, "", k);
+            (k.clone(), val)
+        }).collect()
+    );
+    row
+}
+
+/// Push a source change through all pipelines and stream RowChanges.
+fn push_source_change(
+    sources: &HashMap<String, Shared<dyn Source>>,
+    pipelines: &[PipelineEntry],
+    table: &str,
+    change: SourceChange,
+    primary_keys: &HashMap<String, Vec<String>>,
+    table_specs: &HashMap<String, crate::streamer::TableSpecInfo>,
+    on_row_change: &mut impl FnMut(&RowChange),
+) {
+    if let Some(source) = sources.get(table) {
+        // Clear collectors (and companion monitors) for this push.
+        for entry in pipelines {
+            entry.collector.borrow_mut().changes.clear();
+            for c in &entry.companions {
+                c.output.borrow_mut().changes.clear();
+            }
+        }
+
+        // Push the change through the source's pipeline. A scalar-subquery
+        // value change panics (ScalarResetError) inside a companion output
+        // here, propagating out as a reset.
+        let _pipeline_changes = source.borrow_mut().push_parallel(change);
+
+        // Collect and stream RowChanges from each pipeline.
+        for entry in pipelines {
+            let collected: Vec<Change> = std::mem::take(&mut entry.collector.borrow_mut().changes);
+            if !collected.is_empty() {
+                let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
+                streamer.accumulate(&entry.query_id, &entry.schema, &collected);
+                for rc in streamer.stream() {
+                    on_row_change(&rc);
+                }
+            }
+            // Surviving companion changes (resolved value unchanged) stream
+            // under the owning query, per TS companion accumulation.
+            for c in &entry.companions {
+                let cc: Vec<Change> = std::mem::take(&mut c.output.borrow_mut().changes);
+                if !cc.is_empty() {
+                    let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
+                    streamer.accumulate(&entry.query_id, &c.schema, &cc);
+                    for rc in streamer.stream() {
+                        on_row_change(&rc);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel hydrate helper — recurse into Node relationships to set up operator
+// state during the actor's state-setup fetch (Phase 2b). Without this, child
+// operators (joins, sources) are never fetched and lack the state that
+// advance's push relies on.
+// ---------------------------------------------------------------------------
+
+fn recurse_node_relationships(node: &crate::ivm::data::Node) {
+    for rel_name in &node.rel_order {
+        if let Some(rel_fn) = node.relationships.get(rel_name) {
+            let stream = rel_fn();
+            for child in crate::ivm::stream::skip_yields(stream) {
+                recurse_node_relationships(&child);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation — Phase 4.
+// ---------------------------------------------------------------------------
+
+/// A cancellation token backed by an Arc<AtomicBool>.
+/// Checked by the engine during advance and by SQLite's progress handler.
+#[derive(Clone)]
+pub struct CancellationToken {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        CancellationToken {
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn reset(&self) {
+        self.cancelled.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}

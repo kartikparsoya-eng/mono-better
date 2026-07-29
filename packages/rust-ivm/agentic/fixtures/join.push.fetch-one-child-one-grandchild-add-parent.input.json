@@ -1,0 +1,123 @@
+{
+  "name": "join.push.fetch-one-child-one-grandchild-add-parent",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": []
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "c1",
+          "issueID": "i1"
+        }
+      ]
+    },
+    "revision": {
+      "columns": {
+        "id": "string",
+        "commentID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "r1",
+          "commentID": "c1"
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "related": [
+      {
+        "system": "client",
+        "correlation": {
+          "parentField": [
+            "id"
+          ],
+          "childField": [
+            "issueID"
+          ]
+        },
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ],
+          "related": [
+            {
+              "system": "client",
+              "correlation": {
+                "parentField": [
+                  "id"
+                ],
+                "childField": [
+                  "commentID"
+                ]
+              },
+              "subquery": {
+                "table": "revision",
+                "alias": "revisions",
+                "orderBy": [
+                  [
+                    "id",
+                    "asc"
+                  ]
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "comments": {
+        "singular": false,
+        "relationships": {
+          "revisions": {
+            "singular": false,
+            "relationships": {}
+          }
+        }
+      }
+    }
+  },
+  "pushes": [
+    {
+      "type": "add",
+      "table": "issue",
+      "row": {
+        "id": "i1"
+      }
+    }
+  ]
+}

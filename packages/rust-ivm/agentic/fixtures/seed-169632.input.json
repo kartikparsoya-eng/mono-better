@@ -1,0 +1,316 @@
+{
+ "name": "fuzz.seed-169632",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "boolean",
+    "c2": "number",
+    "c3": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "b",
+     "c1": false,
+     "c2": -1,
+     "c3": "b"
+    },
+    {
+     "id": "t0-r1",
+     "c0": "ZZZ",
+     "c1": true,
+     "c2": 0.1,
+     "c3": "_"
+    },
+    {
+     "id": "t0-r2",
+     "c0": "ZZZ",
+     "c1": true,
+     "c2": 123456789,
+     "c3": "0"
+    },
+    {
+     "id": "t0-r3",
+     "c0": "_",
+     "c1": true,
+     "c2": 123456789,
+     "c3": "a"
+    },
+    {
+     "id": "t0-r4",
+     "c0": "b",
+     "c1": true,
+     "c2": 1000000,
+     "c3": null
+    },
+    {
+     "id": "t0-r5",
+     "c0": "a",
+     "c1": true,
+     "c2": -1000000,
+     "c3": null
+    },
+    {
+     "id": "t0-r6",
+     "c0": "A",
+     "c1": true,
+     "c2": 10,
+     "c3": "abc"
+    },
+    {
+     "id": "t0-r7",
+     "c0": "ﬀ",
+     "c1": true,
+     "c2": -1000000,
+     "c3": null
+    },
+    {
+     "id": "t0-r8",
+     "c0": "b",
+     "c1": true,
+     "c2": 2,
+     "c3": "0"
+    },
+    {
+     "id": "t0-r9",
+     "c0": "ﬀ",
+     "c1": true,
+     "c2": 1,
+     "c3": ""
+    },
+    {
+     "id": "t0-r10",
+     "c0": "🦀rust",
+     "c1": false,
+     "c2": 0.1,
+     "c3": "null"
+    },
+    {
+     "id": "t0-r11",
+     "c0": "ZZZ",
+     "c1": false,
+     "c2": 1000000,
+     "c3": "héllo"
+    },
+    {
+     "id": "t0-r12",
+     "c0": "0",
+     "c1": false,
+     "c2": 0.30000000000000004,
+     "c3": ""
+    },
+    {
+     "id": "t0-r13",
+     "c0": "0",
+     "c1": true,
+     "c2": 10,
+     "c3": "ﬀ"
+    },
+    {
+     "id": "t0-r14",
+     "c0": "A",
+     "c1": true,
+     "c2": 0,
+     "c3": "ZZZ"
+    },
+    {
+     "id": "t0-r15",
+     "c0": "ZZZ",
+     "c1": true,
+     "c2": 0.30000000000000004,
+     "c3": null
+    },
+    {
+     "id": "t0-r16",
+     "c0": "ZZZ",
+     "c1": false,
+     "c2": 2,
+     "c3": "%"
+    },
+    {
+     "id": "t0-r17",
+     "c0": "héllo",
+     "c1": true,
+     "c2": 1,
+     "c3": "%"
+    },
+    {
+     "id": "t0-r18",
+     "c0": "a b",
+     "c1": true,
+     "c2": 10,
+     "c3": "ﬀ"
+    },
+    {
+     "id": "t0-r19",
+     "c0": "b",
+     "c1": false,
+     "c2": 2,
+     "c3": "a b"
+    },
+    {
+     "id": "t0-r20",
+     "c0": "a b",
+     "c1": true,
+     "c2": -10,
+     "c3": "_"
+    },
+    {
+     "id": "t0-r21",
+     "c0": "🦀rust",
+     "c1": false,
+     "c2": -10,
+     "c3": "_"
+    },
+    {
+     "id": "t0-r22",
+     "c0": "null",
+     "c1": false,
+     "c2": 1000000,
+     "c3": ""
+    },
+    {
+     "id": "t0-r23",
+     "c0": "null",
+     "c1": true,
+     "c2": 1000000,
+     "c3": null
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r21"
+    },
+    {
+     "id": "t1-r1",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r9"
+    },
+    {
+     "id": "t1-r2",
+     "c0": false,
+     "c1": false,
+     "fk": "t0-r56"
+    },
+    {
+     "id": "t1-r3",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r13"
+    },
+    {
+     "id": "t1-r4",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r3"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t1",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "fk",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "simple",
+   "op": "IN",
+   "left": {
+    "type": "column",
+    "name": "c0"
+   },
+   "right": {
+    "type": "literal",
+    "value": [
+     false
+    ]
+   }
+  },
+  "limit": 5,
+  "start": {
+   "row": {
+    "id": "t1-r3",
+    "c0": false,
+    "c1": true,
+    "fk": "t0-r13"
+   },
+   "exclusive": true
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1000",
+    "c0": false,
+    "c1": true,
+    "fk": "t0-r21"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r9",
+    "c0": "ﬀ",
+    "c1": true,
+    "c2": 1,
+    "c3": ""
+   },
+   "row": {
+    "id": "t0-r9",
+    "c0": "ﬀ",
+    "c1": true,
+    "c2": 1,
+    "c3": "héllo"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1001",
+    "c0": false,
+    "c1": true,
+    "fk": "t0-r49"
+   }
+  }
+ ]
+}

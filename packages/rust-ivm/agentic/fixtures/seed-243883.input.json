@@ -1,0 +1,139 @@
+{
+ "name": "fuzz.seed-243883",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "string",
+    "c2": "boolean|null",
+    "c3": "number|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": false,
+     "c1": "abc",
+     "c2": false,
+     "c3": -3.75
+    },
+    {
+     "id": "t0-r1",
+     "c0": true,
+     "c1": "A",
+     "c2": true,
+     "c3": 1
+    },
+    {
+     "id": "t0-r2",
+     "c0": true,
+     "c1": "abc",
+     "c2": true,
+     "c3": -1000000
+    },
+    {
+     "id": "t0-r3",
+     "c0": true,
+     "c1": "_",
+     "c2": false,
+     "c3": 2
+    },
+    {
+     "id": "t0-r4",
+     "c0": true,
+     "c1": "%",
+     "c2": true,
+     "c3": 1
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "boolean",
+    "c2": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": false,
+     "c1": false,
+     "c2": true,
+     "fk": "t0-r55"
+    },
+    {
+     "id": "t1-r1",
+     "c0": false,
+     "c1": false,
+     "c2": false,
+     "fk": "t0-r10"
+    },
+    {
+     "id": "t1-r2",
+     "c0": false,
+     "c1": false,
+     "c2": false,
+     "fk": "t0-r30"
+    },
+    {
+     "id": "t1-r3",
+     "c0": false,
+     "c1": false,
+     "c2": true,
+     "fk": "t0-r11"
+    },
+    {
+     "id": "t1-r4",
+     "c0": false,
+     "c1": false,
+     "c2": false,
+     "fk": "t0-r33"
+    },
+    {
+     "id": "t1-r5",
+     "c0": false,
+     "c1": true,
+     "c2": true,
+     "fk": "t0-r3"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t1",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "simple",
+   "op": "IN",
+   "left": {
+    "type": "column",
+    "name": "id"
+   },
+   "right": {
+    "type": "literal",
+    "value": [
+     "t1-r5"
+    ]
+   }
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}

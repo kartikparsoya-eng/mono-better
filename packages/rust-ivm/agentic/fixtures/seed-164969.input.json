@@ -1,0 +1,180 @@
+{
+ "name": "fuzz.seed-164969",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": true,
+     "c1": false
+    },
+    {
+     "id": "t0-r1",
+     "c0": true,
+     "c1": true
+    },
+    {
+     "id": "t0-r2",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r3",
+     "c0": false,
+     "c1": false
+    },
+    {
+     "id": "t0-r4",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r5",
+     "c0": false,
+     "c1": false
+    },
+    {
+     "id": "t0-r6",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r7",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r8",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r9",
+     "c0": false,
+     "c1": false
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 4
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r5",
+    "c0": false,
+    "c1": false
+   },
+   "row": {
+    "id": "t0-r5",
+    "c0": false,
+    "c1": false
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": false,
+    "c1": false
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r1",
+    "c0": true,
+    "c1": true
+   },
+   "row": {
+    "id": "t0-r1",
+    "c0": true,
+    "c1": true
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r0",
+    "c0": true,
+    "c1": false
+   },
+   "row": {
+    "id": "t0-r0",
+    "c0": true,
+    "c1": false
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1001",
+    "c0": true,
+    "c1": true
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r0",
+    "c0": true,
+    "c1": false
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": false,
+    "c1": false
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r2",
+    "c0": false,
+    "c1": true
+   }
+  }
+ ],
+ "enableNotExists": true
+}

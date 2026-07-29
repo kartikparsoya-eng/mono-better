@@ -1,0 +1,98 @@
+{
+  "name": "join.push.edit-issue-text",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string",
+        "text": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "i1",
+          "text": "issue 1"
+        }
+      ]
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string",
+        "text": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "c1",
+          "issueID": "i1",
+          "text": "comment 1"
+        },
+        {
+          "id": "c2",
+          "issueID": "i1",
+          "text": "comment 2"
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "related": [
+      {
+        "system": "client",
+        "correlation": {
+          "parentField": [
+            "id"
+          ],
+          "childField": [
+            "issueID"
+          ]
+        },
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "comments": {
+        "singular": false,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": [
+    {
+      "type": "edit",
+      "table": "issue",
+      "row": {
+        "id": "i1",
+        "text": "issue 1 edited"
+      },
+      "oldRow": {
+        "id": "i1",
+        "text": "issue 1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+type	ownership	sharing	lifetime	notes
+Node	owned value	clone (Arc<FxHashMap> inside)	'doesn't matter' — value type	move freely into iterators/closures
+Row	Arc<FxHashMap<String, Value>>	Arc clone (cheap)	immutable, 'static	clone into closures freely
+Value	enum (Null/Bool/F64/Str(Arc<str>)/Json(Arc<str>))	clone (Arc refcount)	immutable	Str/Json are Arc — clone is pointer bump
+NodeStream	Box<dyn Iterator<Item = Node>>	owned (NOT Cloneable)	'doesn't matter' — owned heap	created by fetch(), consumed once. Wrap lazy iterators with node_stream()
+RelStream	Rc<dyn Fn() -> NodeStream>	Rc clone (cheap)	'static — no borrows	stored in Node.relationships, evaluated on demand. Clone into closures.
+Shared<T>	Rc<RefCell<T>>	Rc clone + RefCell borrow	borrow ends when .borrow() returns	CANNOT hold a RefCell borrow across a yield point — this is why fetch() collects. For lazy: call input.borrow().fetch(req) (returns owned Box<dyn Iterator>), drop borrow, then chain lazily.
+Comparator	Rc<dyn Fn(&Row, &Row) -> Ordering + 'static>	Rc clone	'static	clone into filter/sort closures
+Predicate	Rc<dyn Fn(&Row) -> bool + 'static>	Rc clone	'static	clone into filter closures. Do NOT use Box here — Box moves captured RefCell exclusively.
+OutputHandle	Rc<RefCell<dyn Output>>	Rc clone	borrow via .borrow_mut() for push	shared back-reference in operator graph
+Change	owned enum	clone	'doesn't matter'	Box<Change> inside ChildData.change for recursion
+SharedData	Rc<RefCell<Vec<Row>>>	Rc clone + RefCell borrow	borrow ends when .borrow() returns	MemorySource.data. Clone the Vec out, drop borrow, then iterate lazily.

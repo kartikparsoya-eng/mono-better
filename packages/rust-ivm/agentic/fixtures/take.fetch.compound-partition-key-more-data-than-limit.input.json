@@ -1,0 +1,46 @@
+{
+  "name": "take.fetch.compound-partition-key-more-data-than-limit",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {"id": "string", "issueID": "string", "created": "number"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "p1", "issueID": "i1", "created": 100},
+        {"id": "p2", "issueID": "i1", "created": 200},
+        {"id": "p3", "issueID": "i2", "created": 100},
+        {"id": "p4", "issueID": "i2", "created": 200}
+      ]
+    },
+    "comment": {
+      "columns": {"id": "string", "issueID": "string", "created": "number"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "c1", "issueID": "i1", "created": 100},
+        {"id": "c2", "issueID": "i1", "created": 100},
+        {"id": "c3", "issueID": "i1", "created": 100},
+        {"id": "c4", "issueID": "i1", "created": 200},
+        {"id": "c5", "issueID": "i2", "created": 100},
+        {"id": "c6", "issueID": "i2", "created": 100},
+        {"id": "c7", "issueID": "i2", "created": 200},
+        {"id": "c8", "issueID": "i2", "created": 200}
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "related": [
+      {
+        "correlation": {"parentField": ["issueID", "created"], "childField": ["issueID", "created"]},
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [["created", "asc"], ["id", "asc"]],
+          "limit": 2
+        }
+      }
+    ]
+  },
+  "format": {"singular": false, "relationships": {"comments": {"singular": false, "relationships": {}}}},
+  "pushes": []
+}

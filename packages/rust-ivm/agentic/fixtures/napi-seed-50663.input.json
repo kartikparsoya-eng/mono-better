@@ -1,0 +1,149 @@
+{
+ "name": "fuzz.seed-50663",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string",
+    "c2": "number|null",
+    "c3": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "desc"
+   ],
+   [
+    "c2",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 12
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p340",
+    "c0": -1,
+    "c1": "🦀rust",
+    "c2": null,
+    "c3": "a b"
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-p340",
+    "c0": -1,
+    "c1": "🦀rust",
+    "c2": null,
+    "c3": "a b"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 10,
+    "c3": "a"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 10,
+    "c3": "a"
+   },
+   "row": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 10,
+    "c3": "0"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 10,
+    "c3": "0"
+   },
+   "row": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 123456789,
+    "c3": "0"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 123456789,
+    "c3": "0"
+   },
+   "row": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 2.5,
+    "c3": "0"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 2.5,
+    "c3": "0"
+   },
+   "row": {
+    "id": "t0-p341",
+    "c0": 10000000000,
+    "c1": "",
+    "c2": 2.5,
+    "c3": "a b"
+   }
+  }
+ ],
+ "enableNotExists": true
+}

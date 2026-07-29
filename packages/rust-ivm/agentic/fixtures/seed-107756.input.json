@@ -1,0 +1,148 @@
+{
+ "name": "fuzz.seed-107756",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": true,
+     "c1": 2
+    },
+    {
+     "id": "t0-r1",
+     "c0": true,
+     "c1": 0.30000000000000004
+    },
+    {
+     "id": "t0-r2",
+     "c0": true,
+     "c1": -10
+    },
+    {
+     "id": "t0-r3",
+     "c0": true,
+     "c1": -1
+    },
+    {
+     "id": "t0-r4",
+     "c0": null,
+     "c1": -10
+    },
+    {
+     "id": "t0-r5",
+     "c0": null,
+     "c1": 2.5
+    },
+    {
+     "id": "t0-r6",
+     "c0": false,
+     "c1": 0.30000000000000004
+    },
+    {
+     "id": "t0-r7",
+     "c0": true,
+     "c1": 2.5
+    },
+    {
+     "id": "t0-r8",
+     "c0": true,
+     "c1": 0.30000000000000004
+    },
+    {
+     "id": "t0-r9",
+     "c0": true,
+     "c1": 10
+    },
+    {
+     "id": "t0-r10",
+     "c0": false,
+     "c1": -1000000
+    },
+    {
+     "id": "t0-r11",
+     "c0": true,
+     "c1": 0
+    },
+    {
+     "id": "t0-r12",
+     "c0": false,
+     "c1": 0.1
+    },
+    {
+     "id": "t0-r13",
+     "c0": true,
+     "c1": -1
+    },
+    {
+     "id": "t0-r14",
+     "c0": null,
+     "c1": 0.30000000000000004
+    },
+    {
+     "id": "t0-r15",
+     "c0": true,
+     "c1": 2
+    },
+    {
+     "id": "t0-r16",
+     "c0": false,
+     "c1": 10
+    },
+    {
+     "id": "t0-r17",
+     "c0": true,
+     "c1": 2
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "desc"
+   ],
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "start": {
+   "row": {
+    "id": "t0-r14",
+    "c0": null,
+    "c1": 0.30000000000000004
+   },
+   "exclusive": true
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": true,
+    "c1": -3.75
+   }
+  }
+ ]
+}

@@ -1,0 +1,144 @@
+{
+ "name": "fuzz.seed-64871",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "string|null",
+    "c2": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r1",
+     "c0": true,
+     "c1": "_",
+     "c2": 1
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "id2": "string",
+    "c0": "number|null",
+    "c1": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id",
+    "id2"
+   ],
+   "rows": []
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c2",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "and",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "NOT IN",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         "ZZZ",
+         "null",
+         "日本語"
+        ]
+       }
+      },
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ]
+        }
+       },
+       "op": "EXISTS",
+       "flip": true
+      },
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ]
+        }
+       },
+       "op": "EXISTS"
+      }
+     ]
+    },
+    {
+     "type": "simple",
+     "op": "NOT LIKE",
+     "left": {
+      "type": "column",
+      "name": "c1"
+     },
+     "right": {
+      "type": "literal",
+      "value": "%b%"
+     }
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}

@@ -1,0 +1,132 @@
+{
+ "name": "fuzz.seed-16189",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "string",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r12",
+     "c0": "a b",
+     "c1": "\t\n",
+     "fk": "t0-r8"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t1",
+  "orderBy": [
+   [
+    "fk",
+    "desc"
+   ],
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "c0",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "IS",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": null
+       }
+      },
+      {
+       "type": "simple",
+       "op": "ILIKE",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": "a%c"
+       }
+      },
+      {
+       "type": "simple",
+       "op": "NOT LIKE",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": "A%"
+       }
+      }
+     ]
+    },
+    {
+     "type": "simple",
+     "op": "LIKE",
+     "left": {
+      "type": "column",
+      "name": "c0"
+     },
+     "right": {
+      "type": "literal",
+      "value": "Z%"
+     }
+    },
+    {
+     "type": "simple",
+     "op": "!=",
+     "left": {
+      "type": "column",
+      "name": "c0"
+     },
+     "right": {
+      "type": "literal",
+      "value": "a b"
+     }
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}

@@ -1,0 +1,90 @@
+{
+ "name": "fuzz.seed-77573",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "boolean|null",
+    "c2": "number",
+    "c3": "number|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": 1,
+     "c1": null,
+     "c2": 0.1,
+     "c3": 2
+    },
+    {
+     "id": "t0-r1",
+     "c0": 0.30000000000000004,
+     "c1": false,
+     "c2": -10,
+     "c3": -1
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "number|null",
+    "c2": "boolean",
+    "c3": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "c2",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 1
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r0",
+    "c0": 1,
+    "c1": null,
+    "c2": 0.1,
+    "c3": 2
+   },
+   "row": {
+    "id": "t0-r0",
+    "c0": 0.1,
+    "c1": null,
+    "c2": 0.1,
+    "c3": 2
+   }
+  }
+ ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "join-utils.compound-key-maps-all-values",
+  "sourceKind": "memory",
+  "tables": {
+    "parent": {
+      "columns": {"pk": "number", "a": "number", "b": "string"},
+      "primaryKey": ["pk"],
+      "rows": [
+        {"pk": 1, "a": 1, "b": "x"}
+      ]
+    },
+    "child": {
+      "columns": {"cid": "number", "a": "number", "b": "string"},
+      "primaryKey": ["cid"],
+      "rows": [
+        {"cid": 1, "a": 1, "b": "x"},
+        {"cid": 2, "a": 1, "b": "y"},
+        {"cid": 3, "a": 2, "b": "x"}
+      ]
+    }
+  },
+  "ast": {
+    "table": "parent",
+    "related": [
+      {
+        "correlation": {"parentField": ["a", "b"], "childField": ["a", "b"]},
+        "subquery": {"table": "child", "alias": "items"}
+      }
+    ]
+  },
+  "format": {"singular": false, "relationships": {"items": {"singular": false, "relationships": {}}}},
+  "pushes": []
+}

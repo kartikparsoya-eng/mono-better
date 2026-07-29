@@ -1,0 +1,171 @@
+{
+ "name": "fuzz.seed-46861",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string|null",
+    "c2": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string",
+    "c2": "boolean",
+    "c3": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": 2,
+     "c1": "a b",
+     "c2": true,
+     "c3": true,
+     "fk": "t0-r25"
+    },
+    {
+     "id": "t1-r1",
+     "c0": 1000000,
+     "c1": "héllo",
+     "c2": false,
+     "c3": true,
+     "fk": "t0-r39"
+    },
+    {
+     "id": "t1-r2",
+     "c0": 123456789,
+     "c1": "ﬀ",
+     "c2": false,
+     "c3": true,
+     "fk": "t0-r52"
+    },
+    {
+     "id": "t1-r3",
+     "c0": 1,
+     "c1": "a",
+     "c2": false,
+     "c3": false,
+     "fk": "t0-r33"
+    },
+    {
+     "id": "t1-r4",
+     "c0": 0.1,
+     "c1": "a b",
+     "c2": false,
+     "c3": false,
+     "fk": "t0-r20"
+    },
+    {
+     "id": "t1-r5",
+     "c0": -1000000,
+     "c1": "a",
+     "c2": false,
+     "c3": false,
+     "fk": "t0-r42"
+    },
+    {
+     "id": "t1-r7",
+     "c0": -1,
+     "c1": "héllo",
+     "c2": false,
+     "c3": true,
+     "fk": "t0-r24"
+    },
+    {
+     "id": "t1-r8",
+     "c0": -10,
+     "c1": "ﬀ",
+     "c2": false,
+     "c3": false,
+     "fk": "t0-r54"
+    },
+    {
+     "id": "t1-r9",
+     "c0": 2.5,
+     "c1": "héllo",
+     "c2": true,
+     "c3": false,
+     "fk": "t0-r12"
+    },
+    {
+     "id": "t1-r14",
+     "c0": 10,
+     "c1": "ZZZ",
+     "c2": true,
+     "c3": false,
+     "fk": "t0-r40"
+    }
+   ]
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "number",
+    "c2": "string",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  }
+ },
+ "ast": {
+  "table": "t1",
+  "orderBy": [
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "fk",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 9
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r14",
+    "c0": 10,
+    "c1": "ZZZ",
+    "c2": true,
+    "c3": false,
+    "fk": "t0-r40"
+   },
+   "row": {
+    "id": "t1-r14",
+    "c0": 10,
+    "c1": "ZZZ",
+    "c2": true,
+    "c3": false,
+    "fk": "t0-r40"
+   }
+  }
+ ],
+ "enableNotExists": true
+}

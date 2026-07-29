@@ -1,0 +1,135 @@
+{
+ "name": "fuzz.seed-167366",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "boolean",
+    "c2": "number|null",
+    "c3": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": 0,
+     "c1": true,
+     "c2": 123456789,
+     "c3": "a b"
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "number|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c3",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "and",
+   "conditions": [
+    {
+     "type": "correlatedSubquery",
+     "related": {
+      "correlation": {
+       "parentField": [
+        "id"
+       ],
+       "childField": [
+        "fk"
+       ]
+      },
+      "subquery": {
+       "table": "t1",
+       "alias": "zsubq_t1",
+       "orderBy": [
+        [
+         "id",
+         "asc"
+        ]
+       ],
+       "where": {
+        "type": "simple",
+        "op": "IS NOT",
+        "left": {
+         "type": "column",
+         "name": "id"
+        },
+        "right": {
+         "type": "literal",
+         "value": null
+        }
+       }
+      }
+     },
+     "op": "NOT EXISTS"
+    },
+    {
+     "type": "correlatedSubquery",
+     "related": {
+      "correlation": {
+       "parentField": [
+        "id"
+       ],
+       "childField": [
+        "fk"
+       ]
+      },
+      "subquery": {
+       "table": "t1",
+       "alias": "zsubq_t1",
+       "orderBy": [
+        [
+         "id",
+         "asc"
+        ]
+       ],
+       "where": {
+        "type": "simple",
+        "op": "=",
+        "left": {
+         "type": "column",
+         "name": "id"
+        },
+        "right": {
+         "type": "literal",
+         "value": "a"
+        }
+       }
+      }
+     },
+     "op": "NOT EXISTS"
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [],
+ "enableNotExists": true
+}

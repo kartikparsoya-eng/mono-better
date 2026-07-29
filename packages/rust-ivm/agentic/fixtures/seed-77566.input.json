@@ -1,0 +1,108 @@
+{
+ "name": "fuzz.seed-77566",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "number|null",
+    "c2": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string|null",
+    "c2": "string|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "string",
+    "c2": "number|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t2-r0",
+     "c0": false,
+     "c1": "abc",
+     "c2": null,
+     "fk": "t0-r46"
+    },
+    {
+     "id": "t2-r1",
+     "c0": true,
+     "c1": "A",
+     "c2": 0,
+     "fk": "t0-r27"
+    },
+    {
+     "id": "t2-r2",
+     "c0": null,
+     "c1": "🦀rust",
+     "c2": -1,
+     "fk": "t0-r47"
+    },
+    {
+     "id": "t2-r3",
+     "c0": false,
+     "c1": "a",
+     "c2": null,
+     "fk": "t0-r0"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t2",
+  "orderBy": [
+   [
+    "c2",
+    "asc"
+   ],
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 3
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t2",
+   "row": {
+    "id": "t2-r3",
+    "c0": true,
+    "c1": "a",
+    "c2": null,
+    "fk": "t0-r0"
+   }
+  }
+ ]
+}

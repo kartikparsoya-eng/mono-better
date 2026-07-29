@@ -1,0 +1,106 @@
+{
+  "name": "join.push.no-fetch-add-parent-add-child-add-child-remove-child-remove-parent",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": []
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": []
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "related": [
+      {
+        "system": "client",
+        "correlation": {
+          "parentField": [
+            "id"
+          ],
+          "childField": [
+            "issueID"
+          ]
+        },
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "comments": {
+        "singular": false,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": [
+    {
+      "type": "add",
+      "table": "issue",
+      "row": {
+        "id": "i1"
+      }
+    },
+    {
+      "type": "add",
+      "table": "comment",
+      "row": {
+        "id": "c1",
+        "issueID": "i1"
+      }
+    },
+    {
+      "type": "add",
+      "table": "comment",
+      "row": {
+        "id": "c2",
+        "issueID": "i1"
+      }
+    },
+    {
+      "type": "remove",
+      "table": "comment",
+      "row": {
+        "id": "c1",
+        "issueID": "i1"
+      }
+    },
+    {
+      "type": "remove",
+      "table": "issue",
+      "row": {
+        "id": "i1"
+      }
+    }
+  ]
+}

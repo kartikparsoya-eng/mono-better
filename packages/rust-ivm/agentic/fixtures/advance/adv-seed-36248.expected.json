@@ -1,0 +1,35 @@
+{
+ "advance": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": "A",
+    "c1": -9007199254740991,
+    "c2": "A",
+    "id": "t0-p644"
+   },
+   "rowKey": {
+    "id": "t0-p644"
+   },
+   "table": "t0"
+  }
+ ],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": "A",
+    "c1": -9007199254740991,
+    "c2": "A",
+    "id": "t0-p644"
+   },
+   "rowKey": {
+    "id": "t0-p644"
+   },
+   "table": "t0"
+  }
+ ],
+ "hydrate": []
+}

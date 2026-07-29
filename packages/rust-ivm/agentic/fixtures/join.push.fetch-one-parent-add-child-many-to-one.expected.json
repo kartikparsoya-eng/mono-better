@@ -1,0 +1,1 @@
+{"finalView":[{"relationships":{"owner":[{"relationships":{},"row":{"id":"u1"}}]},"row":{"id":"i1","ownerID":"u1"}}],"hydrate":[{"relationships":{"owner":[]},"row":{"id":"i1","ownerID":"u1"}}],"pushChanges":[[{"child":{"change":{"node":{"relationships":{},"row":{"id":"u1"}},"type":"add"},"relationshipName":"owner"},"row":{"id":"i1","ownerID":"u1"},"type":"child"}]]}

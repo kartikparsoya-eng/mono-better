@@ -1,0 +1,310 @@
+{
+ "name": "fuzz.seed-69968",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": false,
+     "c1": ""
+    },
+    {
+     "id": "t0-r1",
+     "c0": true,
+     "c1": "b"
+    },
+    {
+     "id": "t0-r2",
+     "c0": false,
+     "c1": "_"
+    },
+    {
+     "id": "t0-r3",
+     "c0": true,
+     "c1": null
+    },
+    {
+     "id": "t0-r4",
+     "c0": false,
+     "c1": "A"
+    },
+    {
+     "id": "t0-r5",
+     "c0": false,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r6",
+     "c0": true,
+     "c1": "abc"
+    },
+    {
+     "id": "t0-r7",
+     "c0": false,
+     "c1": "a"
+    },
+    {
+     "id": "t0-r8",
+     "c0": true,
+     "c1": null
+    },
+    {
+     "id": "t0-r9",
+     "c0": false,
+     "c1": null
+    },
+    {
+     "id": "t0-r10",
+     "c0": false,
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r11",
+     "c0": false,
+     "c1": ""
+    },
+    {
+     "id": "t0-r12",
+     "c0": true,
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r13",
+     "c0": true,
+     "c1": null
+    },
+    {
+     "id": "t0-r14",
+     "c0": true,
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r15",
+     "c0": true,
+     "c1": ""
+    },
+    {
+     "id": "t0-r16",
+     "c0": false,
+     "c1": "héllo"
+    },
+    {
+     "id": "t0-r17",
+     "c0": false,
+     "c1": null
+    },
+    {
+     "id": "t0-r18",
+     "c0": false,
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r19",
+     "c0": false,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r20",
+     "c0": false,
+     "c1": "héllo"
+    },
+    {
+     "id": "t0-r21",
+     "c0": true,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r22",
+     "c0": true,
+     "c1": "a"
+    },
+    {
+     "id": "t0-r23",
+     "c0": false,
+     "c1": "null"
+    },
+    {
+     "id": "t0-r24",
+     "c0": true,
+     "c1": ""
+    },
+    {
+     "id": "t0-r25",
+     "c0": true,
+     "c1": "0"
+    },
+    {
+     "id": "t0-r26",
+     "c0": false,
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r27",
+     "c0": false,
+     "c1": "ZZZ"
+    },
+    {
+     "id": "t0-r28",
+     "c0": false,
+     "c1": "0"
+    },
+    {
+     "id": "t0-r29",
+     "c0": true,
+     "c1": ""
+    },
+    {
+     "id": "t0-r30",
+     "c0": true,
+     "c1": "%"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "id",
+    "desc"
+   ]
+  ],
+  "limit": 10
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r17",
+    "c0": false,
+    "c1": null
+   },
+   "row": {
+    "id": "t0-r17",
+    "c0": true,
+    "c1": null
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r11",
+    "c0": false,
+    "c1": ""
+   },
+   "row": {
+    "id": "t0-r11",
+    "c0": false,
+    "c1": ""
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r3",
+    "c0": true,
+    "c1": null
+   },
+   "row": {
+    "id": "t0-r3",
+    "c0": true,
+    "c1": "a b"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r14",
+    "c0": true,
+    "c1": "🦀rust"
+   },
+   "row": {
+    "id": "t0-r14",
+    "c0": false,
+    "c1": "🦀rust"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r3",
+    "c0": true,
+    "c1": "a b"
+   },
+   "row": {
+    "id": "t0-r3",
+    "c0": true,
+    "c1": "a b"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r29",
+    "c0": true,
+    "c1": ""
+   },
+   "row": {
+    "id": "t0-r29",
+    "c0": true,
+    "c1": "héllo"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r1",
+    "c0": true,
+    "c1": "b"
+   },
+   "row": {
+    "id": "t0-r1",
+    "c0": true,
+    "c1": "b"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": false,
+    "c1": "a b"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1001",
+    "c0": false,
+    "c1": "ZZZ"
+   }
+  }
+ ],
+ "enableNotExists": true
+}

@@ -1,0 +1,350 @@
+{
+ "name": "fuzz.seed-21124",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "string|null",
+    "c2": "string|null",
+    "c3": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "{}",
+     "c1": "%",
+     "c2": "café",
+     "c3": null
+    },
+    {
+     "id": "t0-r1",
+     "c0": "{}",
+     "c1": "a b",
+     "c2": "\"quoted\"",
+     "c3": "%"
+    },
+    {
+     "id": "t0-r2",
+     "c0": "ZZZ",
+     "c1": "_",
+     "c2": "null",
+     "c3": "ZZZ"
+    },
+    {
+     "id": "t0-r3",
+     "c0": "a",
+     "c1": "null",
+     "c2": "ZZZ",
+     "c3": "0"
+    },
+    {
+     "id": "t0-r4",
+     "c0": "ZZZ",
+     "c1": null,
+     "c2": "true",
+     "c3": "ﬀ"
+    },
+    {
+     "id": "t0-r5",
+     "c0": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c1": null,
+     "c2": "café",
+     "c3": null
+    },
+    {
+     "id": "t0-r6",
+     "c0": "🦀rust",
+     "c1": "0",
+     "c2": "🎉🎊",
+     "c3": null
+    },
+    {
+     "id": "t0-r7",
+     "c0": "null",
+     "c1": "true",
+     "c2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c3": "_"
+    },
+    {
+     "id": "t0-r8",
+     "c0": "_",
+     "c1": "b",
+     "c2": null,
+     "c3": "A"
+    },
+    {
+     "id": "t0-r9",
+     "c0": "[]",
+     "c1": "[]",
+     "c2": "a",
+     "c3": "b"
+    },
+    {
+     "id": "t0-r10",
+     "c0": "\"quoted\"",
+     "c1": "{}",
+     "c2": "{}",
+     "c3": null
+    },
+    {
+     "id": "t0-r11",
+     "c0": "🦀rust",
+     "c1": null,
+     "c2": "a b",
+     "c3": "{}"
+    },
+    {
+     "id": "t0-r12",
+     "c0": "\t\n",
+     "c1": "a",
+     "c2": "null",
+     "c3": "café"
+    },
+    {
+     "id": "t0-r13",
+     "c0": "ﬀ",
+     "c1": "a b",
+     "c2": "null",
+     "c3": "A"
+    },
+    {
+     "id": "t0-r14",
+     "c0": "a",
+     "c1": "%",
+     "c2": "🦀rust",
+     "c3": null
+    },
+    {
+     "id": "t0-r15",
+     "c0": "a",
+     "c1": null,
+     "c2": null,
+     "c3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+     "id": "t0-r16",
+     "c0": "%",
+     "c1": null,
+     "c2": "_",
+     "c3": "🦀rust"
+    },
+    {
+     "id": "t0-r18",
+     "c0": "🎉🎊",
+     "c1": "a",
+     "c2": null,
+     "c3": "A"
+    },
+    {
+     "id": "t0-r19",
+     "c0": "🎉🎊",
+     "c1": "0",
+     "c2": "a",
+     "c3": "[]"
+    },
+    {
+     "id": "t0-r20",
+     "c0": "abc",
+     "c1": null,
+     "c2": null,
+     "c3": "🦀rust"
+    },
+    {
+     "id": "t0-r21",
+     "c0": "a",
+     "c1": null,
+     "c2": "\t\n",
+     "c3": null
+    },
+    {
+     "id": "t0-r22",
+     "c0": "false",
+     "c1": "b",
+     "c2": null,
+     "c3": "ZZZ"
+    },
+    {
+     "id": "t0-r23",
+     "c0": "'apos'",
+     "c1": "\t\n",
+     "c2": "🦀rust",
+     "c3": "🎉🎊"
+    },
+    {
+     "id": "t0-r24",
+     "c0": "a b",
+     "c1": "{}",
+     "c2": null,
+     "c3": "b"
+    },
+    {
+     "id": "t0-r25",
+     "c0": "null",
+     "c1": "ZZZ",
+     "c2": "🦀rust",
+     "c3": "%"
+    },
+    {
+     "id": "t0-r26",
+     "c0": "A",
+     "c1": "\"quoted\"",
+     "c2": "a",
+     "c3": null
+    },
+    {
+     "id": "t0-r27",
+     "c0": "héllo",
+     "c1": "🎉🎊",
+     "c2": "null",
+     "c3": "\t\n"
+    },
+    {
+     "id": "t0-r29",
+     "c0": "ﬀ",
+     "c1": "A",
+     "c2": "",
+     "c3": null
+    },
+    {
+     "id": "t0-r30",
+     "c0": "A",
+     "c1": "🦀rust",
+     "c2": "\t\n",
+     "c3": "'apos'"
+    },
+    {
+     "id": "t0-r31",
+     "c0": "\"quoted\"",
+     "c1": "null",
+     "c2": "null",
+     "c3": "🦀rust"
+    },
+    {
+     "id": "t0-r32",
+     "c0": "_",
+     "c1": "abc",
+     "c2": "null",
+     "c3": "café"
+    },
+    {
+     "id": "t0-r33",
+     "c0": "'apos'",
+     "c1": "null",
+     "c2": null,
+     "c3": null
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "number",
+    "c2": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": "🎉🎊",
+     "c1": -10,
+     "c2": 0,
+     "fk": "t0-r5"
+    },
+    {
+     "id": "t1-r1",
+     "c0": "a",
+     "c1": 10000000000,
+     "c2": 10000000000,
+     "fk": "t0-r28"
+    },
+    {
+     "id": "t1-r2",
+     "c0": "a b",
+     "c1": -1,
+     "c2": 0.1,
+     "fk": "t0-r49"
+    },
+    {
+     "id": "t1-r3",
+     "c0": "_",
+     "c1": 0,
+     "c2": 3.14159265358979,
+     "fk": "t0-r45"
+    },
+    {
+     "id": "t1-r4",
+     "c0": "\t\n",
+     "c1": 1000000,
+     "c2": -1e+100,
+     "fk": "t0-r4"
+    },
+    {
+     "id": "t1-r5",
+     "c0": null,
+     "c1": 0.5,
+     "c2": 0.5,
+     "fk": "t0-r39"
+    },
+    {
+     "id": "t1-r6",
+     "c0": "café",
+     "c1": -9007199254740991,
+     "c2": -10,
+     "fk": "t0-r29"
+    },
+    {
+     "id": "t1-r7",
+     "c0": "ﬀ",
+     "c1": 3.14159265358979,
+     "c2": -9007199254740991,
+     "fk": "t0-r18"
+    },
+    {
+     "id": "t1-r8",
+     "c0": "a",
+     "c1": -10,
+     "c2": -3.75,
+     "fk": "t0-r22"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "desc"
+   ]
+  ],
+  "where": {
+   "type": "simple",
+   "op": "IN",
+   "left": {
+    "type": "column",
+    "name": "c3"
+   },
+   "right": {
+    "type": "literal",
+    "value": [
+     "null",
+     "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    ]
+   }
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}

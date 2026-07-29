@@ -1,0 +1,112 @@
+{
+ "name": "fuzz.seed-266950",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "boolean",
+    "c2": "string|null",
+    "c3": "number|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "string",
+    "c2": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": true,
+     "c1": "abc",
+     "c2": -3.75,
+     "fk": "t0-r10"
+    },
+    {
+     "id": "t1-r1",
+     "c0": false,
+     "c1": "🦀rust",
+     "c2": -3.75,
+     "fk": "t0-r46"
+    },
+    {
+     "id": "t1-r2",
+     "c0": false,
+     "c1": "0",
+     "c2": -1000000,
+     "fk": "t0-r0"
+    },
+    {
+     "id": "t1-r3",
+     "c0": true,
+     "c1": "%",
+     "c2": 2,
+     "fk": "t0-r38"
+    },
+    {
+     "id": "t1-r4",
+     "c0": false,
+     "c1": "",
+     "c2": 10,
+     "fk": "t0-r39"
+    },
+    {
+     "id": "t1-r5",
+     "c0": false,
+     "c1": "héllo",
+     "c2": -3.75,
+     "fk": "t0-r12"
+    },
+    {
+     "id": "t1-r6",
+     "c0": false,
+     "c1": "héllo",
+     "c2": 2.5,
+     "fk": "t0-r7"
+    },
+    {
+     "id": "t1-r7",
+     "c0": true,
+     "c1": "A",
+     "c2": -1,
+     "fk": "t0-r26"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "desc"
+   ],
+   [
+    "c2",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [],
+ "enableNotExists": true
+}

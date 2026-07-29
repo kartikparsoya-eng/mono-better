@@ -1,0 +1,286 @@
+{
+ "name": "fuzz.seed-70537",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "boolean|null",
+    "c2": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "",
+     "c1": false,
+     "c2": false
+    },
+    {
+     "id": "t0-r1",
+     "c0": "A",
+     "c1": false,
+     "c2": false
+    },
+    {
+     "id": "t0-r2",
+     "c0": null,
+     "c1": true,
+     "c2": false
+    },
+    {
+     "id": "t0-r3",
+     "c0": "abc",
+     "c1": null,
+     "c2": false
+    },
+    {
+     "id": "t0-r4",
+     "c0": "%",
+     "c1": false,
+     "c2": false
+    },
+    {
+     "id": "t0-r5",
+     "c0": "a",
+     "c1": false,
+     "c2": false
+    },
+    {
+     "id": "t0-r6",
+     "c0": "a",
+     "c1": null,
+     "c2": false
+    },
+    {
+     "id": "t0-r7",
+     "c0": null,
+     "c1": true,
+     "c2": false
+    },
+    {
+     "id": "t0-r8",
+     "c0": null,
+     "c1": false,
+     "c2": false
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "string|null",
+    "c2": "boolean",
+    "c3": "boolean|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": false,
+     "c1": "a",
+     "c2": true,
+     "c3": false,
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t1-r1",
+     "c0": true,
+     "c1": "%",
+     "c2": true,
+     "c3": true,
+     "fk": "t0-r48"
+    },
+    {
+     "id": "t1-r2",
+     "c0": null,
+     "c1": null,
+     "c2": true,
+     "c3": true,
+     "fk": "t0-r45"
+    },
+    {
+     "id": "t1-r3",
+     "c0": true,
+     "c1": "a",
+     "c2": true,
+     "c3": null,
+     "fk": "t0-r43"
+    },
+    {
+     "id": "t1-r4",
+     "c0": false,
+     "c1": "héllo",
+     "c2": true,
+     "c3": true,
+     "fk": "t0-r19"
+    },
+    {
+     "id": "t1-r5",
+     "c0": true,
+     "c1": null,
+     "c2": true,
+     "c3": true,
+     "fk": "t0-r20"
+    },
+    {
+     "id": "t1-r6",
+     "c0": true,
+     "c1": "b",
+     "c2": false,
+     "c3": false,
+     "fk": "t0-r55"
+    },
+    {
+     "id": "t1-r7",
+     "c0": false,
+     "c1": "%",
+     "c2": true,
+     "c3": null,
+     "fk": "t0-r40"
+    },
+    {
+     "id": "t1-r8",
+     "c0": false,
+     "c1": "ﬀ",
+     "c2": true,
+     "c3": false,
+     "fk": "t0-r24"
+    },
+    {
+     "id": "t1-r9",
+     "c0": false,
+     "c1": "null",
+     "c2": false,
+     "c3": true,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t1-r10",
+     "c0": true,
+     "c1": "a b",
+     "c2": false,
+     "c3": false,
+     "fk": "t0-r28"
+    },
+    {
+     "id": "t1-r11",
+     "c0": false,
+     "c1": "ﬀ",
+     "c2": false,
+     "c3": true,
+     "fk": "t0-r49"
+    },
+    {
+     "id": "t1-r12",
+     "c0": false,
+     "c1": "A",
+     "c2": false,
+     "c3": null,
+     "fk": "t0-r5"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c2",
+    "asc"
+   ],
+   [
+    "id",
+    "desc"
+   ]
+  ],
+  "limit": 2,
+  "related": [
+   {
+    "correlation": {
+     "parentField": [
+      "id"
+     ],
+     "childField": [
+      "fk"
+     ]
+    },
+    "subquery": {
+     "table": "t1",
+     "alias": "rel",
+     "orderBy": [
+      [
+       "id",
+       "asc"
+      ]
+     ],
+     "limit": 1,
+     "where": {
+      "type": "simple",
+      "op": "<=",
+      "left": {
+       "type": "column",
+       "name": "c1"
+      },
+      "right": {
+       "type": "literal",
+       "value": "%"
+      }
+     }
+    }
+   }
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r1",
+    "c0": "A",
+    "c1": false,
+    "c2": false
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r8",
+    "c0": null,
+    "c1": false,
+    "c2": false
+   },
+   "row": {
+    "id": "t0-r8",
+    "c0": null,
+    "c1": false,
+    "c2": false
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t1",
+   "row": {
+    "id": "t1-r5",
+    "c0": true,
+    "c1": null,
+    "c2": true,
+    "c3": true,
+    "fk": "t0-r20"
+   }
+  }
+ ],
+ "enableNotExists": true
+}

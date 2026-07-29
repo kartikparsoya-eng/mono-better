@@ -1,0 +1,39 @@
+{
+ "advance": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": "🦀rust",
+    "c2": 1000000,
+    "c3": "true",
+    "fk": "t0-r18",
+    "id": "t2-p702"
+   },
+   "rowKey": {
+    "id": "t2-p702"
+   },
+   "table": "t2"
+  }
+ ],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": true,
+    "c1": "🦀rust",
+    "c2": 1000000,
+    "c3": "true",
+    "fk": "t0-r18",
+    "id": "t2-p702"
+   },
+   "rowKey": {
+    "id": "t2-p702"
+   },
+   "table": "t2"
+  }
+ ],
+ "hydrate": []
+}

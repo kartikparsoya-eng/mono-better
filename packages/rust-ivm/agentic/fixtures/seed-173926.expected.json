@@ -1,0 +1,1 @@
+{"finalView":[{"relationships":{},"row":{"c0":null,"c1":null,"c2":-3.75,"fk":"t0-r18","id":"t1-r12"}}],"hydrate":[{"relationships":{},"row":{"c0":null,"c1":null,"c2":-10,"fk":"t0-r18","id":"t1-r12"}}],"pushChanges":[[],[],[],[{"oldRow":{"c0":null,"c1":null,"c2":-10,"fk":"t0-r18","id":"t1-r12"},"row":{"c0":null,"c1":null,"c2":-3.75,"fk":"t0-r18","id":"t1-r12"},"type":"edit"}]]}

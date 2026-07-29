@@ -1,0 +1,78 @@
+{
+  "name": "exists.fetch.not-exists-one-parent-with-child",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "i1"
+        }
+      ]
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "c1",
+          "issueID": "i1"
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "where": {
+      "type": "correlatedSubquery",
+      "related": {
+        "correlation": {
+          "parentField": [
+            "id"
+          ],
+          "childField": [
+            "issueID"
+          ]
+        },
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      },
+      "op": "NOT EXISTS"
+    }
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "comments": {
+        "singular": false,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": [],
+  "enableNotExists": true
+}

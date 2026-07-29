@@ -1,0 +1,1 @@
+{"finalView":[{"relationships":{},"row":{"a":1,"b":"foo"}},{"relationships":{},"row":{"a":5,"b":"foo"}}],"hydrate":[{"relationships":{},"row":{"a":1,"b":"foo"}},{"relationships":{},"row":{"a":3,"b":"foo"}}],"pushChanges":[[],[{"node":{"relationships":{},"row":{"a":5,"b":"foo"}},"type":"add"}],[{"node":{"relationships":{},"row":{"a":3,"b":"foo"}},"type":"remove"}],[]]}

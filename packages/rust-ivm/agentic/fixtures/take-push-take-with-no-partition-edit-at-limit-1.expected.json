@@ -1,0 +1,1 @@
+{"finalView":[{"relationships":{},"row":{"created":50,"id":"i1","text":"a2"}}],"hydrate":[{"relationships":{},"row":{"created":100,"id":"i1","text":"a"}}],"pushChanges":[[{"oldRow":{"created":100,"id":"i1","text":"a"},"row":{"created":50,"id":"i1","text":"a2"},"type":"edit"}]]}

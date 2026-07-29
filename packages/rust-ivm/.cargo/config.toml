@@ -1,0 +1,2 @@
+# Build the napi addon when targeting the napi workspace
+# napi-rs expects the output to be a .node file; on macOS it's a .dylib

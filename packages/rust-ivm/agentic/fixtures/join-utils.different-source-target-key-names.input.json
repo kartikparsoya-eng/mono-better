@@ -1,0 +1,33 @@
+{
+  "name": "join-utils.different-source-target-key-names",
+  "sourceKind": "memory",
+  "tables": {
+    "parent": {
+      "columns": {"pk": "number", "userId": "number", "orgId": "number"},
+      "primaryKey": ["pk"],
+      "rows": [
+        {"pk": 1, "userId": 5, "orgId": 10}
+      ]
+    },
+    "child": {
+      "columns": {"cid": "number", "id": "number", "org": "number"},
+      "primaryKey": ["cid"],
+      "rows": [
+        {"cid": 1, "id": 5, "org": 10},
+        {"cid": 2, "id": 5, "org": 20},
+        {"cid": 3, "id": 6, "org": 10}
+      ]
+    }
+  },
+  "ast": {
+    "table": "parent",
+    "related": [
+      {
+        "correlation": {"parentField": ["userId", "orgId"], "childField": ["id", "org"]},
+        "subquery": {"table": "child", "alias": "items"}
+      }
+    ]
+  },
+  "format": {"singular": false, "relationships": {"items": {"singular": false, "relationships": {}}}},
+  "pushes": []
+}

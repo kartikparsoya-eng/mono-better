@@ -1,0 +1,110 @@
+{
+ "name": "fuzz.seed-217303",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "boolean",
+    "c2": "boolean|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": -1,
+     "c1": false,
+     "c2": true
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "and",
+   "conditions": [
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": ">=",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": true
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         false,
+         false
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "!=",
+       "left": {
+        "type": "column",
+        "name": "c2"
+       },
+       "right": {
+        "type": "literal",
+        "value": false
+       }
+      },
+      {
+       "type": "simple",
+       "op": "=",
+       "left": {
+        "type": "column",
+        "name": "c2"
+       },
+       "right": {
+        "type": "literal",
+        "value": true
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [],
+ "enableNotExists": true
+}

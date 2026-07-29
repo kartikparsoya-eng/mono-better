@@ -1,0 +1,22 @@
+{
+ "name": "skip.multi.column.sort",
+ "sourceKind": "memory",
+ "tables": {
+  "t": {
+   "columns": {"id": "string", "n": "number", "s": "string"},
+   "primaryKey": ["id"],
+   "rows": [
+    {"id": "a", "n": 1, "s": "x"},
+    {"id": "b", "n": 1, "s": "y"},
+    {"id": "c", "n": 2, "s": "x"}
+   ]
+  }
+ },
+ "ast": {
+  "table": "t",
+  "orderBy": [["n", "asc"], ["s", "asc"], ["id", "asc"]],
+  "start": {"row": {"id": "b", "n": 1, "s": "y"}, "exclusive": false}
+ },
+ "format": {"singular": false, "relationships": {}},
+ "pushes": []
+}

@@ -1,0 +1,172 @@
+{
+ "name": "fuzz.seed-67626",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number|null",
+    "c1": "string|null",
+    "c2": "number|null",
+    "c3": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": 10,
+     "c1": null,
+     "c2": -1000000,
+     "c3": 1000000
+    },
+    {
+     "id": "t0-r1",
+     "c0": 0.30000000000000004,
+     "c1": "🦀rust",
+     "c2": 0,
+     "c3": 2.5
+    },
+    {
+     "id": "t0-r2",
+     "c0": -3.75,
+     "c1": "a b",
+     "c2": -3.75,
+     "c3": -1000000
+    },
+    {
+     "id": "t0-r3",
+     "c0": null,
+     "c1": "héllo",
+     "c2": null,
+     "c3": -10
+    },
+    {
+     "id": "t0-r4",
+     "c0": null,
+     "c1": "0",
+     "c2": -1,
+     "c3": 10
+    },
+    {
+     "id": "t0-r5",
+     "c0": null,
+     "c1": "a b",
+     "c2": null,
+     "c3": 10
+    },
+    {
+     "id": "t0-r6",
+     "c0": 10,
+     "c1": "a b",
+     "c2": 0.1,
+     "c3": 123456789
+    },
+    {
+     "id": "t0-r7",
+     "c0": null,
+     "c1": "A",
+     "c2": 1000000,
+     "c3": 1
+    },
+    {
+     "id": "t0-r8",
+     "c0": 2,
+     "c1": "ZZZ",
+     "c2": 1000000,
+     "c3": 10
+    },
+    {
+     "id": "t0-r9",
+     "c0": 1,
+     "c1": "b",
+     "c2": 1000000,
+     "c3": 10
+    },
+    {
+     "id": "t0-r10",
+     "c0": 1000000,
+     "c1": null,
+     "c2": null,
+     "c3": 1000000
+    },
+    {
+     "id": "t0-r11",
+     "c0": -3.75,
+     "c1": "a",
+     "c2": null,
+     "c3": -10
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c3",
+    "desc"
+   ],
+   [
+    "c2",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "simple",
+   "op": "IN",
+   "left": {
+    "type": "column",
+    "name": "c3"
+   },
+   "right": {
+    "type": "literal",
+    "value": [
+     -10,
+     123456789
+    ]
+   }
+  },
+  "limit": 7,
+  "start": {
+   "row": {
+    "id": "t0-r11",
+    "c0": -3.75,
+    "c1": "a",
+    "c2": null,
+    "c3": -10
+   },
+   "exclusive": true
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r8",
+    "c0": 2,
+    "c1": "ZZZ",
+    "c2": 1000000,
+    "c3": 10
+   },
+   "row": {
+    "id": "t0-r8",
+    "c0": null,
+    "c1": "ZZZ",
+    "c2": 1000000,
+    "c3": 10
+   }
+  }
+ ],
+ "enableNotExists": true
+}

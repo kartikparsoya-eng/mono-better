@@ -1,0 +1,179 @@
+{
+ "name": "fuzz.seed-142627",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "boolean|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": null,
+     "c1": null
+    },
+    {
+     "id": "t0-r1",
+     "c0": true,
+     "c1": false
+    },
+    {
+     "id": "t0-r2",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r3",
+     "c0": null,
+     "c1": true
+    },
+    {
+     "id": "t0-r4",
+     "c0": null,
+     "c1": false
+    },
+    {
+     "id": "t0-r5",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r6",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r7",
+     "c0": true,
+     "c1": true
+    },
+    {
+     "id": "t0-r8",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r9",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r10",
+     "c0": true,
+     "c1": true
+    },
+    {
+     "id": "t0-r11",
+     "c0": null,
+     "c1": false
+    },
+    {
+     "id": "t0-r12",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r13",
+     "c0": true,
+     "c1": false
+    },
+    {
+     "id": "t0-r14",
+     "c0": false,
+     "c1": true
+    },
+    {
+     "id": "t0-r15",
+     "c0": true,
+     "c1": false
+    },
+    {
+     "id": "t0-r16",
+     "c0": true,
+     "c1": true
+    },
+    {
+     "id": "t0-r17",
+     "c0": false,
+     "c1": null
+    },
+    {
+     "id": "t0-r18",
+     "c0": true,
+     "c1": true
+    },
+    {
+     "id": "t0-r19",
+     "c0": true,
+     "c1": null
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 3,
+  "start": {
+   "row": {
+    "id": "t0-r9",
+    "c0": false,
+    "c1": true
+   },
+   "exclusive": false
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": false,
+    "c1": false
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r5",
+    "c0": false,
+    "c1": true
+   },
+   "row": {
+    "id": "t0-r5",
+    "c0": false,
+    "c1": true
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r16",
+    "c0": true,
+    "c1": true
+   },
+   "row": {
+    "id": "t0-r16",
+    "c0": false,
+    "c1": true
+   }
+  }
+ ]
+}

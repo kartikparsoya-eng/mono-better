@@ -1,0 +1,63 @@
+{
+ "advance": [],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": -1e+100,
+    "c1": "{}",
+    "fk": "t0-r25",
+    "id": "t1-r22"
+   },
+   "rowKey": {
+    "id": "t1-r22"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": -9007199254740991,
+    "c1": null,
+    "fk": "t0-r17",
+    "id": "t1-r21"
+   },
+   "rowKey": {
+    "id": "t1-r21"
+   },
+   "table": "t1"
+  }
+ ],
+ "hydrate": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": -1e+100,
+    "c1": "{}",
+    "fk": "t0-r25",
+    "id": "t1-r22"
+   },
+   "rowKey": {
+    "id": "t1-r22"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": -9007199254740991,
+    "c1": null,
+    "fk": "t0-r17",
+    "id": "t1-r21"
+   },
+   "rowKey": {
+    "id": "t1-r21"
+   },
+   "table": "t1"
+  }
+ ]
+}

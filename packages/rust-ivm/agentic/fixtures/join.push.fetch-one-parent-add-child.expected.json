@@ -1,0 +1,1 @@
+{"finalView":[{"relationships":{"comments":[{"relationships":{},"row":{"id":"c1","issueID":"i1"}}]},"row":{"id":"i1"}}],"hydrate":[{"relationships":{"comments":[]},"row":{"id":"i1"}}],"pushChanges":[[{"child":{"change":{"node":{"relationships":{},"row":{"id":"c1","issueID":"i1"}},"type":"add"},"relationshipName":"comments"},"row":{"id":"i1"},"type":"child"}]]}

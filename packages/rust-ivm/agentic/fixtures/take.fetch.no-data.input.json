@@ -1,0 +1,18 @@
+{
+  "name": "take.fetch.no-data",
+  "sourceKind": "memory",
+  "tables": {
+    "table": {
+      "columns": {"id": "string", "created": "number"},
+      "primaryKey": ["id"],
+      "rows": []
+    }
+  },
+  "ast": {
+    "table": "table",
+    "orderBy": [["created", "asc"], ["id", "asc"]],
+    "limit": 5
+  },
+  "format": {"singular": false, "relationships": {}},
+  "pushes": []
+}

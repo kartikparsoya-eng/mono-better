@@ -1,0 +1,799 @@
+{
+ "name": "fuzz.seed-1900905",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "boolean",
+    "c2": "string",
+    "c3": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "%",
+     "c1": false,
+     "c2": "日本語",
+     "c3": "ﬀ"
+    },
+    {
+     "id": "t0-r1",
+     "c0": "héllo",
+     "c1": true,
+     "c2": "[]",
+     "c3": "b"
+    },
+    {
+     "id": "t0-r2",
+     "c0": "café",
+     "c1": true,
+     "c2": "_",
+     "c3": "a"
+    },
+    {
+     "id": "t0-r3",
+     "c0": "\t\n",
+     "c1": true,
+     "c2": "'apos'",
+     "c3": "abc"
+    },
+    {
+     "id": "t0-r4",
+     "c0": "🦀rust",
+     "c1": true,
+     "c2": "\"quoted\"",
+     "c3": "日本語"
+    },
+    {
+     "id": "t0-r5",
+     "c0": "_",
+     "c1": false,
+     "c2": "café",
+     "c3": null
+    },
+    {
+     "id": "t0-r6",
+     "c0": "'apos'",
+     "c1": false,
+     "c2": "false",
+     "c3": "a b"
+    },
+    {
+     "id": "t0-r7",
+     "c0": "false",
+     "c1": true,
+     "c2": "null",
+     "c3": "null"
+    },
+    {
+     "id": "t0-r8",
+     "c0": "b",
+     "c1": false,
+     "c2": "",
+     "c3": "abc"
+    },
+    {
+     "id": "t0-r9",
+     "c0": "ﬀ",
+     "c1": true,
+     "c2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c3": "héllo"
+    },
+    {
+     "id": "t0-r10",
+     "c0": "日本語",
+     "c1": false,
+     "c2": "\"quoted\"",
+     "c3": "ﬀ"
+    },
+    {
+     "id": "t0-r11",
+     "c0": "false",
+     "c1": true,
+     "c2": "%",
+     "c3": null
+    },
+    {
+     "id": "t0-r12",
+     "c0": "b",
+     "c1": true,
+     "c2": "",
+     "c3": "ZZZ"
+    },
+    {
+     "id": "t0-r13",
+     "c0": "%",
+     "c1": false,
+     "c2": "true",
+     "c3": "a b"
+    },
+    {
+     "id": "t0-r14",
+     "c0": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c1": false,
+     "c2": "café",
+     "c3": null
+    },
+    {
+     "id": "t0-r15",
+     "c0": "a",
+     "c1": true,
+     "c2": "a b",
+     "c3": "null"
+    },
+    {
+     "id": "t0-r16",
+     "c0": "a",
+     "c1": false,
+     "c2": "b",
+     "c3": "A"
+    },
+    {
+     "id": "t0-r17",
+     "c0": "b",
+     "c1": true,
+     "c2": "b",
+     "c3": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+     "id": "t0-r18",
+     "c0": "café",
+     "c1": true,
+     "c2": "{}",
+     "c3": "café"
+    },
+    {
+     "id": "t0-r19",
+     "c0": "",
+     "c1": false,
+     "c2": "false",
+     "c3": null
+    },
+    {
+     "id": "t0-r20",
+     "c0": "🎉🎊",
+     "c1": false,
+     "c2": "日本語",
+     "c3": "{}"
+    },
+    {
+     "id": "t0-r21",
+     "c0": "null",
+     "c1": true,
+     "c2": "_",
+     "c3": null
+    },
+    {
+     "id": "t0-r22",
+     "c0": "A",
+     "c1": true,
+     "c2": "",
+     "c3": "abc"
+    },
+    {
+     "id": "t0-r23",
+     "c0": "🎉🎊",
+     "c1": false,
+     "c2": "ﬀ",
+     "c3": "café"
+    },
+    {
+     "id": "t0-r24",
+     "c0": "'apos'",
+     "c1": false,
+     "c2": "🎉🎊",
+     "c3": "false"
+    },
+    {
+     "id": "t0-r25",
+     "c0": "true",
+     "c1": false,
+     "c2": "b",
+     "c3": "héllo"
+    },
+    {
+     "id": "t0-r26",
+     "c0": "{}",
+     "c1": false,
+     "c2": "ZZZ",
+     "c3": "🦀rust"
+    },
+    {
+     "id": "t0-r27",
+     "c0": "ZZZ",
+     "c1": false,
+     "c2": "🦀rust",
+     "c3": "🦀rust"
+    },
+    {
+     "id": "t0-r28",
+     "c0": "false",
+     "c1": false,
+     "c2": "日本語",
+     "c3": "a"
+    },
+    {
+     "id": "t0-r29",
+     "c0": "0",
+     "c1": true,
+     "c2": "🎉🎊",
+     "c3": null
+    },
+    {
+     "id": "t0-r30",
+     "c0": "A",
+     "c1": false,
+     "c2": "a b",
+     "c3": ""
+    },
+    {
+     "id": "t0-r31",
+     "c0": "'apos'",
+     "c1": true,
+     "c2": "héllo",
+     "c3": "'apos'"
+    },
+    {
+     "id": "t0-r32",
+     "c0": "0",
+     "c1": false,
+     "c2": "café",
+     "c3": null
+    },
+    {
+     "id": "t0-r33",
+     "c0": "null",
+     "c1": true,
+     "c2": "🎉🎊",
+     "c3": ""
+    },
+    {
+     "id": "t0-r34",
+     "c0": "a b",
+     "c1": true,
+     "c2": "",
+     "c3": null
+    },
+    {
+     "id": "t0-r35",
+     "c0": "café",
+     "c1": true,
+     "c2": "a b",
+     "c3": "0"
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number|null",
+    "c1": "string|null",
+    "c2": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": -9007199254740991,
+     "c1": null,
+     "c2": 9007199254740991,
+     "fk": "t0-r55"
+    },
+    {
+     "id": "t1-r1",
+     "c0": null,
+     "c1": "\"quoted\"",
+     "c2": 9007199254740991,
+     "fk": "t0-r40"
+    },
+    {
+     "id": "t1-r2",
+     "c0": 2.5,
+     "c1": "héllo",
+     "c2": -3.75,
+     "fk": "t0-r40"
+    },
+    {
+     "id": "t1-r3",
+     "c0": -1e+100,
+     "c1": "🦀rust",
+     "c2": 0.5,
+     "fk": "t0-r32"
+    },
+    {
+     "id": "t1-r4",
+     "c0": 10000000000,
+     "c1": "🦀rust",
+     "c2": 1e-10,
+     "fk": "t0-r4"
+    },
+    {
+     "id": "t1-r5",
+     "c0": -10,
+     "c1": "%",
+     "c2": 10,
+     "fk": "t0-r13"
+    },
+    {
+     "id": "t1-r6",
+     "c0": -9007199254740991,
+     "c1": "_",
+     "c2": 1e-10,
+     "fk": "t0-r24"
+    },
+    {
+     "id": "t1-r7",
+     "c0": null,
+     "c1": null,
+     "c2": 1000000,
+     "fk": "t0-r58"
+    },
+    {
+     "id": "t1-r8",
+     "c0": null,
+     "c1": "café",
+     "c2": 0,
+     "fk": "t0-r16"
+    },
+    {
+     "id": "t1-r9",
+     "c0": 1000000,
+     "c1": "[]",
+     "c2": 0,
+     "fk": "t0-r5"
+    },
+    {
+     "id": "t1-r10",
+     "c0": 3.14159265358979,
+     "c1": "0",
+     "c2": 0.5,
+     "fk": "t0-r54"
+    },
+    {
+     "id": "t1-r11",
+     "c0": null,
+     "c1": null,
+     "c2": 1,
+     "fk": "t0-r32"
+    },
+    {
+     "id": "t1-r12",
+     "c0": 1e+100,
+     "c1": "ﬀ",
+     "c2": 10000000000,
+     "fk": "t0-r18"
+    },
+    {
+     "id": "t1-r13",
+     "c0": 9007199254740991,
+     "c1": "null",
+     "c2": 10,
+     "fk": "t0-r53"
+    },
+    {
+     "id": "t1-r14",
+     "c0": -9007199254740991,
+     "c1": "null",
+     "c2": -10,
+     "fk": "t0-r54"
+    },
+    {
+     "id": "t1-r15",
+     "c0": -0.5,
+     "c1": null,
+     "c2": -1,
+     "fk": "t0-r52"
+    },
+    {
+     "id": "t1-r16",
+     "c0": 1,
+     "c1": "null",
+     "c2": 0.5,
+     "fk": "t0-r55"
+    },
+    {
+     "id": "t1-r17",
+     "c0": 10,
+     "c1": "ZZZ",
+     "c2": -0.5,
+     "fk": "t0-r52"
+    },
+    {
+     "id": "t1-r18",
+     "c0": null,
+     "c1": null,
+     "c2": 0.30000000000000004,
+     "fk": "t0-r46"
+    },
+    {
+     "id": "t1-r19",
+     "c0": -0.5,
+     "c1": null,
+     "c2": -1000000,
+     "fk": "t0-r12"
+    },
+    {
+     "id": "t1-r20",
+     "c0": 2,
+     "c1": "A",
+     "c2": 2.5,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t1-r21",
+     "c0": 1,
+     "c1": "A",
+     "c2": 0,
+     "fk": "t0-r44"
+    },
+    {
+     "id": "t1-r22",
+     "c0": 1e+100,
+     "c1": "[]",
+     "c2": 10000000000,
+     "fk": "t0-r11"
+    },
+    {
+     "id": "t1-r23",
+     "c0": -0.5,
+     "c1": null,
+     "c2": -1000000,
+     "fk": "t0-r13"
+    },
+    {
+     "id": "t1-r24",
+     "c0": -1000000,
+     "c1": "'apos'",
+     "c2": 10000000000,
+     "fk": "t0-r42"
+    },
+    {
+     "id": "t1-r25",
+     "c0": -1e+100,
+     "c1": "ZZZ",
+     "c2": 0.30000000000000004,
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t1-r26",
+     "c0": -1e+100,
+     "c1": "ZZZ",
+     "c2": -0.5,
+     "fk": "t0-r53"
+    },
+    {
+     "id": "t1-r27",
+     "c0": -1,
+     "c1": "abc",
+     "c2": 3.14159265358979,
+     "fk": "t0-r20"
+    },
+    {
+     "id": "t1-r28",
+     "c0": -1000000,
+     "c1": "🎉🎊",
+     "c2": 0.1,
+     "fk": "t0-r11"
+    },
+    {
+     "id": "t1-r29",
+     "c0": 123456789,
+     "c1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c2": -3.75,
+     "fk": "t0-r44"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "id",
+    "desc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "simple",
+     "op": "NOT ILIKE",
+     "left": {
+      "type": "column",
+      "name": "c3"
+     },
+     "right": {
+      "type": "literal",
+      "value": "a%"
+     }
+    },
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ]
+        }
+       },
+       "op": "EXISTS",
+       "flip": true
+      },
+      {
+       "type": "simple",
+       "op": "!=",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": true
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r4",
+    "c0": "🦀rust",
+    "c1": true,
+    "c2": "\"quoted\"",
+    "c3": "日本語"
+   },
+   "row": {
+    "id": "t0-r4",
+    "c0": "🦀rust",
+    "c1": true,
+    "c2": "A",
+    "c3": "日本語"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r23",
+    "c0": "🎉🎊",
+    "c1": false,
+    "c2": "ﬀ",
+    "c3": "café"
+   },
+   "row": {
+    "id": "t0-r23",
+    "c0": "🎉🎊",
+    "c1": false,
+    "c2": "ﬀ",
+    "c3": "null"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r18",
+    "c0": "café",
+    "c1": true,
+    "c2": "{}",
+    "c3": "café"
+   },
+   "row": {
+    "id": "t0-r18",
+    "c0": "café",
+    "c1": true,
+    "c2": "{}",
+    "c3": "café"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p857",
+    "c0": "ﬀ",
+    "c1": false,
+    "c2": "\t\n",
+    "c3": null
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r19",
+    "c0": -0.5,
+    "c1": null,
+    "c2": -1000000,
+    "fk": "t0-r12"
+   },
+   "row": {
+    "id": "t1-r19",
+    "c0": -0.5,
+    "c1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "c2": -1000000,
+    "fk": "t0-r12"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p858",
+    "c0": "🎉🎊",
+    "c1": true,
+    "c2": "日本語",
+    "c3": "ZZZ"
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t1",
+   "row": {
+    "id": "t1-r24",
+    "c0": -1000000,
+    "c1": "'apos'",
+    "c2": 10000000000,
+    "fk": "t0-r42"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r6",
+    "c0": "'apos'",
+    "c1": false,
+    "c2": "false",
+    "c3": "a b"
+   },
+   "row": {
+    "id": "t0-r6",
+    "c0": "'apos'",
+    "c1": false,
+    "c2": "[]",
+    "c3": "a b"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p859",
+    "c0": null,
+    "c1": "",
+    "c2": 0,
+    "fk": "t0-r15"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r1",
+    "c0": "héllo",
+    "c1": true,
+    "c2": "[]",
+    "c3": "b"
+   },
+   "row": {
+    "id": "t0-r1",
+    "c0": "héllo",
+    "c1": true,
+    "c2": "[]",
+    "c3": null
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r1",
+    "c0": null,
+    "c1": "\"quoted\"",
+    "c2": 9007199254740991,
+    "fk": "t0-r40"
+   },
+   "row": {
+    "id": "t1-r1",
+    "c0": null,
+    "c1": "",
+    "c2": 9007199254740991,
+    "fk": "t0-r40"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p860",
+    "c0": 9007199254740991,
+    "c1": null,
+    "c2": 2,
+    "fk": "t0-r2"
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r19",
+    "c0": "",
+    "c1": false,
+    "c2": "false",
+    "c3": null
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p861",
+    "c0": -1,
+    "c1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "c2": -9007199254740991,
+    "fk": "t0-r53"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r35",
+    "c0": "café",
+    "c1": true,
+    "c2": "a b",
+    "c3": "0"
+   },
+   "row": {
+    "id": "t0-r35",
+    "c0": "café",
+    "c1": false,
+    "c2": "a b",
+    "c3": "0"
+   }
+  }
+ ]
+}

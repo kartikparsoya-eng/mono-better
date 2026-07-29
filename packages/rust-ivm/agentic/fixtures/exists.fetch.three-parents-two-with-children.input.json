@@ -1,0 +1,107 @@
+{
+  "name": "exists.fetch.three-parents-two-with-children",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "i1"
+        },
+        {
+          "id": "i2"
+        },
+        {
+          "id": "i3"
+        }
+      ]
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "c1",
+          "issueID": "i1"
+        },
+        {
+          "id": "c2",
+          "issueID": "i1"
+        },
+        {
+          "id": "c3",
+          "issueID": "i3"
+        },
+        {
+          "id": "c4",
+          "issueID": "i3"
+        },
+        {
+          "id": "c5",
+          "issueID": "i3"
+        },
+        {
+          "id": "c6",
+          "issueID": "i4"
+        },
+        {
+          "id": "c7",
+          "issueID": "i4"
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "where": {
+      "type": "correlatedSubquery",
+      "related": {
+        "correlation": {
+          "parentField": [
+            "id"
+          ],
+          "childField": [
+            "issueID"
+          ]
+        },
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      },
+      "op": "EXISTS"
+    }
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "comments": {
+        "singular": false,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": []
+}

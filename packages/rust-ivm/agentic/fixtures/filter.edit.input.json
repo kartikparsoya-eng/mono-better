@@ -1,0 +1,141 @@
+{
+  "name": "filter.edit",
+  "sourceKind": "memory",
+  "tables": {
+    "table": {
+      "columns": {
+        "a": "number",
+        "x": "number"
+      },
+      "primaryKey": [
+        "a"
+      ],
+      "rows": [
+        {
+          "a": 1,
+          "x": 1
+        },
+        {
+          "a": 2,
+          "x": 2
+        },
+        {
+          "a": 3,
+          "x": 3
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "table",
+    "orderBy": [
+      [
+        "a",
+        "asc"
+      ]
+    ],
+    "where": {
+      "type": "or",
+      "conditions": [
+        {
+          "type": "simple",
+          "op": "=",
+          "left": {
+            "type": "column",
+            "name": "x"
+          },
+          "right": {
+            "type": "literal",
+            "value": 2
+          }
+        },
+        {
+          "type": "simple",
+          "op": "=",
+          "left": {
+            "type": "column",
+            "name": "x"
+          },
+          "right": {
+            "type": "literal",
+            "value": 4
+          }
+        },
+        {
+          "type": "simple",
+          "op": "=",
+          "left": {
+            "type": "column",
+            "name": "x"
+          },
+          "right": {
+            "type": "literal",
+            "value": 6
+          }
+        }
+      ]
+    }
+  },
+  "format": {
+    "singular": false,
+    "relationships": {}
+  },
+  "pushes": [
+    {
+      "type": "add",
+      "table": "table",
+      "row": {
+        "a": 4,
+        "x": 4
+      }
+    },
+    {
+      "type": "edit",
+      "table": "table",
+      "row": {
+        "a": 3,
+        "x": 6
+      },
+      "oldRow": {
+        "a": 3,
+        "x": 3
+      }
+    },
+    {
+      "type": "edit",
+      "table": "table",
+      "row": {
+        "a": 3,
+        "x": 5
+      },
+      "oldRow": {
+        "a": 3,
+        "x": 6
+      }
+    },
+    {
+      "type": "edit",
+      "table": "table",
+      "row": {
+        "a": 3,
+        "x": 7
+      },
+      "oldRow": {
+        "a": 3,
+        "x": 5
+      }
+    },
+    {
+      "type": "edit",
+      "table": "table",
+      "row": {
+        "a": 2,
+        "x": 4
+      },
+      "oldRow": {
+        "a": 2,
+        "x": 2
+      }
+    }
+  ]
+}

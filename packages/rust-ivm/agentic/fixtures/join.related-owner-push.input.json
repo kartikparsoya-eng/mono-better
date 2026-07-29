@@ -1,0 +1,38 @@
+{
+  "name": "join.related-owner-push",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {"id": "string", "ownerId": "string", "n": "number"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "i1", "ownerId": "u1", "n": 1},
+        {"id": "i2", "ownerId": "u1", "n": 2},
+        {"id": "i3", "ownerId": "u2", "n": 3}
+      ]
+    },
+    "user": {
+      "columns": {"id": "string", "name": "string"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "u1", "name": "Alice"},
+        {"id": "u2", "name": "Bob"}
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "related": [
+      {
+        "correlation": {"parentField": ["ownerId"], "childField": ["id"]},
+        "subquery": {"table": "user", "alias": "owner"}
+      }
+    ]
+  },
+  "format": {"singular": false, "relationships": {"owner": {"singular": true, "relationships": {}}}},
+  "pushes": [
+    {"type": "add", "table": "issue", "row": {"id": "i4", "ownerId": "u2", "n": 4}},
+    {"type": "edit", "table": "issue", "oldRow": {"id": "i1", "ownerId": "u1", "n": 1}, "row": {"id": "i1", "ownerId": "u2", "n": 1}},
+    {"type": "remove", "table": "issue", "row": {"id": "i3", "ownerId": "u2", "n": 3}}
+  ]
+}

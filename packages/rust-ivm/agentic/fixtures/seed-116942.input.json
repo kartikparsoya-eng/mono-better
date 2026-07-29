@@ -1,0 +1,126 @@
+{
+ "name": "fuzz.seed-116942",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "boolean|null",
+    "c2": "string",
+    "c3": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r4",
+     "c0": "abc",
+     "c1": true,
+     "c2": "a b",
+     "c3": "abc"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "c0",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "and",
+   "conditions": [
+    {
+     "type": "simple",
+     "op": "LIKE",
+     "left": {
+      "type": "column",
+      "name": "c2"
+     },
+     "right": {
+      "type": "literal",
+      "value": "%b%"
+     }
+    },
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "ILIKE",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": ""
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c3"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         "a",
+         "",
+         "ZZZ"
+        ]
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         true,
+         true
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "type": "simple",
+     "op": "!=",
+     "left": {
+      "type": "column",
+      "name": "id"
+     },
+     "right": {
+      "type": "literal",
+      "value": "🦀rust"
+     }
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}

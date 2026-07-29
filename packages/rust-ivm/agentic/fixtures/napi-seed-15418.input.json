@@ -1,0 +1,184 @@
+{
+ "name": "fuzz.seed-15418",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "b",
+     "c1": true
+    },
+    {
+     "id": "t0-r1",
+     "c0": "_",
+     "c1": true
+    },
+    {
+     "id": "t0-r2",
+     "c0": "'apos'",
+     "c1": false
+    },
+    {
+     "id": "t0-r3",
+     "c0": "café",
+     "c1": true
+    },
+    {
+     "id": "t0-r4",
+     "c0": null,
+     "c1": true
+    },
+    {
+     "id": "t0-r5",
+     "c0": "A",
+     "c1": false
+    },
+    {
+     "id": "t0-r6",
+     "c0": "héllo",
+     "c1": false
+    },
+    {
+     "id": "t0-r7",
+     "c0": null,
+     "c1": false
+    },
+    {
+     "id": "t0-r8",
+     "c0": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c1": false
+    },
+    {
+     "id": "t0-r9",
+     "c0": "\"quoted\"",
+     "c1": true
+    },
+    {
+     "id": "t0-r10",
+     "c0": "0",
+     "c1": false
+    },
+    {
+     "id": "t0-r11",
+     "c0": "true",
+     "c1": true
+    },
+    {
+     "id": "t0-r12",
+     "c0": null,
+     "c1": true
+    },
+    {
+     "id": "t0-r13",
+     "c0": null,
+     "c1": true
+    },
+    {
+     "id": "t0-r14",
+     "c0": "🦀rust",
+     "c1": true
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "simple",
+     "op": "<",
+     "left": {
+      "type": "column",
+      "name": "c0"
+     },
+     "right": {
+      "type": "literal",
+      "value": "false"
+     }
+    },
+    {
+     "type": "simple",
+     "op": ">",
+     "left": {
+      "type": "column",
+      "name": "c1"
+     },
+     "right": {
+      "type": "literal",
+      "value": true
+     }
+    },
+    {
+     "type": "simple",
+     "op": "<=",
+     "left": {
+      "type": "column",
+      "name": "c0"
+     },
+     "right": {
+      "type": "literal",
+      "value": "🎉🎊"
+     }
+    }
+   ]
+  },
+  "limit": 5,
+  "start": {
+   "row": {
+    "id": "t0-r13",
+    "c0": null,
+    "c1": true
+   },
+   "exclusive": true
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r14",
+    "c0": "🦀rust",
+    "c1": true
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r0",
+    "c0": "b",
+    "c1": true
+   }
+  }
+ ]
+}

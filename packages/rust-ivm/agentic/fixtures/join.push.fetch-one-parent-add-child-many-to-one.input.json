@@ -1,0 +1,80 @@
+{
+  "name": "join.push.fetch-one-parent-add-child-many-to-one",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string",
+        "ownerID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "i1",
+          "ownerID": "u1"
+        }
+      ]
+    },
+    "user": {
+      "columns": {
+        "id": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": []
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "related": [
+      {
+        "system": "client",
+        "correlation": {
+          "parentField": [
+            "ownerID"
+          ],
+          "childField": [
+            "id"
+          ]
+        },
+        "subquery": {
+          "table": "user",
+          "alias": "owner",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "owner": {
+        "singular": true,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": [
+    {
+      "type": "add",
+      "table": "user",
+      "row": {
+        "id": "u1"
+      }
+    }
+  ]
+}

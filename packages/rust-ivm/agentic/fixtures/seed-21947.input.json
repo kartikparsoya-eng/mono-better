@@ -1,0 +1,566 @@
+{
+ "name": "fuzz.seed-21947",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string|null",
+    "c2": "number|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": 10,
+     "c1": "b",
+     "c2": 10
+    },
+    {
+     "id": "t0-r1",
+     "c0": -10,
+     "c1": "ZZZ",
+     "c2": null
+    },
+    {
+     "id": "t0-r2",
+     "c0": 0,
+     "c1": "a b",
+     "c2": 0.1
+    },
+    {
+     "id": "t0-r3",
+     "c0": -1,
+     "c1": "%",
+     "c2": 2.5
+    },
+    {
+     "id": "t0-r4",
+     "c0": 2.5,
+     "c1": null,
+     "c2": 123456789
+    },
+    {
+     "id": "t0-r5",
+     "c0": 1000000,
+     "c1": "null",
+     "c2": 0
+    },
+    {
+     "id": "t0-r6",
+     "c0": 0.30000000000000004,
+     "c1": "null",
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r7",
+     "c0": 0,
+     "c1": "a b",
+     "c2": null
+    },
+    {
+     "id": "t0-r8",
+     "c0": 1000000,
+     "c1": "A",
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r9",
+     "c0": 123456789,
+     "c1": "a b",
+     "c2": null
+    },
+    {
+     "id": "t0-r10",
+     "c0": 0.30000000000000004,
+     "c1": "",
+     "c2": 10
+    },
+    {
+     "id": "t0-r11",
+     "c0": 0.1,
+     "c1": "ﬀ",
+     "c2": 2.5
+    },
+    {
+     "id": "t0-r12",
+     "c0": 0.30000000000000004,
+     "c1": "0",
+     "c2": null
+    },
+    {
+     "id": "t0-r13",
+     "c0": -1000000,
+     "c1": "héllo",
+     "c2": null
+    },
+    {
+     "id": "t0-r14",
+     "c0": 1,
+     "c1": "abc",
+     "c2": 1
+    },
+    {
+     "id": "t0-r15",
+     "c0": -1,
+     "c1": "",
+     "c2": 1000000
+    },
+    {
+     "id": "t0-r16",
+     "c0": -3.75,
+     "c1": null,
+     "c2": -1
+    },
+    {
+     "id": "t0-r17",
+     "c0": 1,
+     "c1": "b",
+     "c2": 2
+    },
+    {
+     "id": "t0-r18",
+     "c0": 1000000,
+     "c1": "A",
+     "c2": 1
+    },
+    {
+     "id": "t0-r19",
+     "c0": 2.5,
+     "c1": null,
+     "c2": 1
+    },
+    {
+     "id": "t0-r20",
+     "c0": 2.5,
+     "c1": "%",
+     "c2": null
+    },
+    {
+     "id": "t0-r21",
+     "c0": 1,
+     "c1": "_",
+     "c2": -10
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "number|null",
+    "c2": "string",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": 1000000,
+     "c1": null,
+     "c2": "null",
+     "fk": "t0-r44"
+    },
+    {
+     "id": "t1-r1",
+     "c0": -1,
+     "c1": -1,
+     "c2": "a b",
+     "fk": "t0-r14"
+    },
+    {
+     "id": "t1-r2",
+     "c0": -10,
+     "c1": 123456789,
+     "c2": "null",
+     "fk": "t0-r50"
+    },
+    {
+     "id": "t1-r3",
+     "c0": 2,
+     "c1": 0.1,
+     "c2": "héllo",
+     "fk": "t0-r44"
+    },
+    {
+     "id": "t1-r4",
+     "c0": 2.5,
+     "c1": null,
+     "c2": "null",
+     "fk": "t0-r16"
+    },
+    {
+     "id": "t1-r5",
+     "c0": 2.5,
+     "c1": null,
+     "c2": "A",
+     "fk": "t0-r40"
+    },
+    {
+     "id": "t1-r6",
+     "c0": 0,
+     "c1": 0,
+     "c2": "abc",
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t1-r7",
+     "c0": 0,
+     "c1": null,
+     "c2": "A",
+     "fk": "t0-r5"
+    },
+    {
+     "id": "t1-r8",
+     "c0": 1,
+     "c1": 2.5,
+     "c2": "a b",
+     "fk": "t0-r35"
+    },
+    {
+     "id": "t1-r9",
+     "c0": 0,
+     "c1": -1,
+     "c2": "a b",
+     "fk": "t0-r17"
+    },
+    {
+     "id": "t1-r10",
+     "c0": 0,
+     "c1": null,
+     "c2": "%",
+     "fk": "t0-r5"
+    },
+    {
+     "id": "t1-r11",
+     "c0": 0,
+     "c1": 10,
+     "c2": "ZZZ",
+     "fk": "t0-r58"
+    },
+    {
+     "id": "t1-r12",
+     "c0": 2.5,
+     "c1": null,
+     "c2": "b",
+     "fk": "t0-r27"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c2",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c2"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         123456789,
+         -10,
+         0.1
+        ]
+       }
+      },
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ],
+         "where": {
+          "type": "simple",
+          "op": "=",
+          "left": {
+           "type": "column",
+           "name": "c1"
+          },
+          "right": {
+           "type": "literal",
+           "value": 123456789
+          }
+         }
+        }
+       },
+       "op": "NOT EXISTS"
+      }
+     ]
+    },
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ],
+         "where": {
+          "type": "simple",
+          "op": "<=",
+          "left": {
+           "type": "column",
+           "name": "id"
+          },
+          "right": {
+           "type": "literal",
+           "value": "héllo"
+          }
+         }
+        }
+       },
+       "op": "EXISTS"
+      },
+      {
+       "type": "simple",
+       "op": ">=",
+       "left": {
+        "type": "column",
+        "name": "id"
+       },
+       "right": {
+        "type": "literal",
+        "value": "ZZZ"
+       }
+      }
+     ]
+    },
+    {
+     "type": "simple",
+     "op": "IN",
+     "left": {
+      "type": "column",
+      "name": "id"
+     },
+     "right": {
+      "type": "literal",
+      "value": [
+       "A",
+       "t0-r13"
+      ]
+     }
+    }
+   ]
+  },
+  "start": {
+   "row": {
+    "id": "t0-r10",
+    "c0": 0.30000000000000004,
+    "c1": "",
+    "c2": 10
+   },
+   "exclusive": false
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t1",
+   "row": {
+    "id": "t1-r11",
+    "c0": 0,
+    "c1": 10,
+    "c2": "ZZZ",
+    "fk": "t0-r58"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1000",
+    "c0": -10,
+    "c1": 10,
+    "c2": "a",
+    "fk": "t0-r37"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1001",
+    "c0": 10,
+    "c1": -1000000,
+    "c2": "abc",
+    "fk": "t0-r22"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1002",
+    "c0": 2.5,
+    "c1": 2,
+    "c2": "héllo",
+    "fk": "t0-r20"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-p1002",
+    "c0": 2.5,
+    "c1": 2,
+    "c2": "héllo",
+    "fk": "t0-r20"
+   },
+   "row": {
+    "id": "t1-p1002",
+    "c0": 10,
+    "c1": 2,
+    "c2": "héllo",
+    "fk": "t0-r20"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r0",
+    "c0": 10,
+    "c1": "b",
+    "c2": 10
+   },
+   "row": {
+    "id": "t0-r0",
+    "c0": 10,
+    "c1": "b",
+    "c2": 0.30000000000000004
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r2",
+    "c0": -10,
+    "c1": 123456789,
+    "c2": "null",
+    "fk": "t0-r50"
+   },
+   "row": {
+    "id": "t1-r2",
+    "c0": 1,
+    "c1": 123456789,
+    "c2": "null",
+    "fk": "t0-r50"
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1002",
+    "c0": 10,
+    "c1": 2,
+    "c2": "héllo",
+    "fk": "t0-r20"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1003",
+    "c0": 2,
+    "c1": null,
+    "c2": null
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r5",
+    "c0": 2.5,
+    "c1": null,
+    "c2": "A",
+    "fk": "t0-r40"
+   },
+   "row": {
+    "id": "t1-r5",
+    "c0": -10,
+    "c1": null,
+    "c2": "A",
+    "fk": "t0-r40"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r7",
+    "c0": 0,
+    "c1": "a b",
+    "c2": null
+   },
+   "row": {
+    "id": "t0-r7",
+    "c0": 0,
+    "c1": "a b",
+    "c2": null
+   }
+  }
+ ],
+ "enableNotExists": true
+}

@@ -1,0 +1,31 @@
+{
+  "name": "join-utils.null-in-second-position-returns-undefined",
+  "sourceKind": "memory",
+  "tables": {
+    "parent": {
+      "columns": {"pk": "number", "a": "number", "b": "number|null"},
+      "primaryKey": ["pk"],
+      "rows": [
+        {"pk": 1, "a": 1, "b": null}
+      ]
+    },
+    "child": {
+      "columns": {"cid": "number", "x": "number", "y": "number"},
+      "primaryKey": ["cid"],
+      "rows": [
+        {"cid": 1, "x": 1, "y": 1}
+      ]
+    }
+  },
+  "ast": {
+    "table": "parent",
+    "related": [
+      {
+        "correlation": {"parentField": ["a", "b"], "childField": ["x", "y"]},
+        "subquery": {"table": "child", "alias": "items"}
+      }
+    ]
+  },
+  "format": {"singular": false, "relationships": {"items": {"singular": false, "relationships": {}}}},
+  "pushes": []
+}

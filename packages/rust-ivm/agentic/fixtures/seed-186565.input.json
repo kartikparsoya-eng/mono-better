@@ -1,0 +1,307 @@
+{
+ "name": "fuzz.seed-186565",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "0",
+     "c1": "héllo"
+    },
+    {
+     "id": "t0-r1",
+     "c0": "null",
+     "c1": "0"
+    },
+    {
+     "id": "t0-r2",
+     "c0": "ZZZ",
+     "c1": "%"
+    },
+    {
+     "id": "t0-r3",
+     "c0": "a b",
+     "c1": null
+    },
+    {
+     "id": "t0-r4",
+     "c0": "",
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r5",
+     "c0": "a b",
+     "c1": "a"
+    },
+    {
+     "id": "t0-r6",
+     "c0": "%",
+     "c1": "b"
+    },
+    {
+     "id": "t0-r7",
+     "c0": "%",
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r8",
+     "c0": "ZZZ",
+     "c1": null
+    },
+    {
+     "id": "t0-r9",
+     "c0": "abc",
+     "c1": "%"
+    },
+    {
+     "id": "t0-r10",
+     "c0": "%",
+     "c1": "%"
+    },
+    {
+     "id": "t0-r11",
+     "c0": "%",
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r12",
+     "c0": "null",
+     "c1": "héllo"
+    },
+    {
+     "id": "t0-r13",
+     "c0": "%",
+     "c1": null
+    },
+    {
+     "id": "t0-r14",
+     "c0": "a",
+     "c1": "b"
+    },
+    {
+     "id": "t0-r15",
+     "c0": "abc",
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r16",
+     "c0": "héllo",
+     "c1": "A"
+    },
+    {
+     "id": "t0-r17",
+     "c0": "a b",
+     "c1": null
+    },
+    {
+     "id": "t0-r18",
+     "c0": "héllo",
+     "c1": null
+    },
+    {
+     "id": "t0-r19",
+     "c0": "abc",
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r20",
+     "c0": "ﬀ",
+     "c1": null
+    },
+    {
+     "id": "t0-r21",
+     "c0": "ﬀ",
+     "c1": null
+    },
+    {
+     "id": "t0-r22",
+     "c0": "0",
+     "c1": "null"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "simple",
+   "op": "<=",
+   "left": {
+    "type": "column",
+    "name": "id"
+   },
+   "right": {
+    "type": "literal",
+    "value": "t0-r1"
+   }
+  },
+  "limit": 6
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r10",
+    "c0": "%",
+    "c1": "%"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r22",
+    "c0": "0",
+    "c1": "null"
+   },
+   "row": {
+    "id": "t0-r22",
+    "c0": "0",
+    "c1": "%"
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r8",
+    "c0": "ZZZ",
+    "c1": null
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r20",
+    "c0": "ﬀ",
+    "c1": null
+   },
+   "row": {
+    "id": "t0-r20",
+    "c0": "ﬀ",
+    "c1": "b"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": "a",
+    "c1": null
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r9",
+    "c0": "abc",
+    "c1": "%"
+   },
+   "row": {
+    "id": "t0-r9",
+    "c0": "abc",
+    "c1": "%"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r6",
+    "c0": "%",
+    "c1": "b"
+   },
+   "row": {
+    "id": "t0-r6",
+    "c0": "abc",
+    "c1": "b"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r5",
+    "c0": "a b",
+    "c1": "a"
+   },
+   "row": {
+    "id": "t0-r5",
+    "c0": "A",
+    "c1": "a"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1001",
+    "c0": "🦀rust",
+    "c1": "héllo"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1002",
+    "c0": "ﬀ",
+    "c1": "0"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1003",
+    "c0": "🦀rust",
+    "c1": "0"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1004",
+    "c0": "A",
+    "c1": null
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1005",
+    "c0": "b",
+    "c1": "0"
+   }
+  }
+ ]
+}

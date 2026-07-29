@@ -1,0 +1,159 @@
+{
+ "name": "fuzz.seed-213208",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "string",
+    "c2": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number|null",
+    "c1": "number|null",
+    "c2": "string|null",
+    "c3": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t2-r0",
+     "c0": -1,
+     "c1": 123456789,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t2-r1",
+     "c0": 123456789,
+     "c1": -10,
+     "fk": "t0-r38"
+    },
+    {
+     "id": "t2-r2",
+     "c0": -1,
+     "c1": -10,
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t2-r30",
+     "c0": 1,
+     "c1": 1000000,
+     "fk": "t0-r45"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t2",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "and",
+   "conditions": [
+    {
+     "type": "simple",
+     "op": ">",
+     "left": {
+      "type": "column",
+      "name": "c0"
+     },
+     "right": {
+      "type": "literal",
+      "value": -1000000
+     }
+    },
+    {
+     "type": "simple",
+     "op": "IN",
+     "left": {
+      "type": "column",
+      "name": "id"
+     },
+     "right": {
+      "type": "literal",
+      "value": [
+       "t2-r8",
+       "t2-r6",
+       "A",
+       "t2-r30"
+      ]
+     }
+    },
+    {
+     "type": "and",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "!=",
+       "left": {
+        "type": "column",
+        "name": "id"
+       },
+       "right": {
+        "type": "literal",
+        "value": "abc"
+       }
+      },
+      {
+       "type": "simple",
+       "op": "!=",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": 123456789
+       }
+      },
+      {
+       "type": "simple",
+       "op": ">=",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": 2.5
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [],
+ "enableNotExists": true
+}

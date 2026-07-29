@@ -1,0 +1,124 @@
+{
+ "name": "fuzz.seed-249107",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "ﬀ",
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r1",
+     "c0": null,
+     "c1": "A"
+    },
+    {
+     "id": "t0-r2",
+     "c0": null,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r3",
+     "c0": null,
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r4",
+     "c0": "null",
+     "c1": "abc"
+    },
+    {
+     "id": "t0-r5",
+     "c0": "",
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r6",
+     "c0": "a b",
+     "c1": ""
+    },
+    {
+     "id": "t0-r7",
+     "c0": null,
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r8",
+     "c0": "ﬀ",
+     "c1": "héllo"
+    },
+    {
+     "id": "t0-r9",
+     "c0": "",
+     "c1": "a b"
+    },
+    {
+     "id": "t0-r10",
+     "c0": "ﬀ",
+     "c1": "abc"
+    },
+    {
+     "id": "t0-r11",
+     "c0": "abc",
+     "c1": "null"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 5,
+  "start": {
+   "row": {
+    "id": "t0-r4",
+    "c0": "null",
+    "c1": "abc"
+   },
+   "exclusive": true
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": "%",
+    "c1": ""
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1001",
+    "c0": "a",
+    "c1": "0"
+   }
+  }
+ ]
+}

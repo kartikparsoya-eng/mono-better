@@ -1,0 +1,462 @@
+{
+ "name": "fuzz.seed-45589",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string|null",
+    "c2": "number",
+    "c3": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "boolean|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r1",
+     "c0": "null",
+     "c1": false,
+     "fk": "t0-r38"
+    },
+    {
+     "id": "t1-r2",
+     "c0": "%",
+     "c1": false,
+     "fk": "t0-r52"
+    },
+    {
+     "id": "t1-r3",
+     "c0": "true",
+     "c1": false,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t1-r4",
+     "c0": "",
+     "c1": false,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t1-r5",
+     "c0": "0",
+     "c1": false,
+     "fk": "t0-r46"
+    },
+    {
+     "id": "t1-r6",
+     "c0": "日本語",
+     "c1": false,
+     "fk": "t0-r4"
+    },
+    {
+     "id": "t1-r7",
+     "c0": "'apos'",
+     "c1": false,
+     "fk": "t0-r5"
+    },
+    {
+     "id": "t1-r8",
+     "c0": "A",
+     "c1": true,
+     "fk": "t0-r42"
+    },
+    {
+     "id": "t1-r9",
+     "c0": null,
+     "c1": false,
+     "fk": "t0-r16"
+    },
+    {
+     "id": "t1-r10",
+     "c0": "[]",
+     "c1": false,
+     "fk": "t0-r33"
+    }
+   ]
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "number|null",
+    "c2": "string|null",
+    "c3": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t2-r0",
+     "c0": 0,
+     "c1": -1000000,
+     "c2": "abc",
+     "c3": true,
+     "fk": "t0-r21"
+    },
+    {
+     "id": "t2-r1",
+     "c0": 0.1,
+     "c1": 0,
+     "c2": "ﬀ",
+     "c3": false,
+     "fk": "t0-r25"
+    },
+    {
+     "id": "t2-r2",
+     "c0": -0.5,
+     "c1": 2.5,
+     "c2": "日本語",
+     "c3": true,
+     "fk": "t0-r51"
+    },
+    {
+     "id": "t2-r3",
+     "c0": -9007199254740991,
+     "c1": 2,
+     "c2": "🦀rust",
+     "c3": false,
+     "fk": "t0-r35"
+    },
+    {
+     "id": "t2-r4",
+     "c0": 1,
+     "c1": 1e-10,
+     "c2": "\"quoted\"",
+     "c3": false,
+     "fk": "t0-r52"
+    },
+    {
+     "id": "t2-r5",
+     "c0": 2,
+     "c1": 0.5,
+     "c2": "日本語",
+     "c3": false,
+     "fk": "t0-r31"
+    },
+    {
+     "id": "t2-r6",
+     "c0": -1e+100,
+     "c1": -9007199254740991,
+     "c2": null,
+     "c3": false,
+     "fk": "t0-r29"
+    },
+    {
+     "id": "t2-r7",
+     "c0": 1e-10,
+     "c1": 1e+100,
+     "c2": "null",
+     "c3": true,
+     "fk": "t0-r1"
+    },
+    {
+     "id": "t2-r8",
+     "c0": 1e+100,
+     "c1": -3.75,
+     "c2": "héllo",
+     "c3": true,
+     "fk": "t0-r8"
+    },
+    {
+     "id": "t2-r9",
+     "c0": 10000000000,
+     "c1": 10,
+     "c2": "ZZZ",
+     "c3": false,
+     "fk": "t0-r16"
+    },
+    {
+     "id": "t2-r10",
+     "c0": 0.30000000000000004,
+     "c1": null,
+     "c2": "héllo",
+     "c3": false,
+     "fk": "t0-r27"
+    },
+    {
+     "id": "t2-r11",
+     "c0": -10,
+     "c1": 1000000,
+     "c2": "\t\n",
+     "c3": true,
+     "fk": "t0-r53"
+    },
+    {
+     "id": "t2-r12",
+     "c0": 1e-10,
+     "c1": 0.1,
+     "c2": null,
+     "c3": false,
+     "fk": "t0-r26"
+    },
+    {
+     "id": "t2-r13",
+     "c0": 9007199254740991,
+     "c1": 2.5,
+     "c2": "",
+     "c3": false,
+     "fk": "t0-r10"
+    },
+    {
+     "id": "t2-r14",
+     "c0": 10,
+     "c1": -0.5,
+     "c2": null,
+     "c3": true,
+     "fk": "t0-r25"
+    },
+    {
+     "id": "t2-r15",
+     "c0": 0.5,
+     "c1": 2,
+     "c2": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c3": false,
+     "fk": "t0-r56"
+    },
+    {
+     "id": "t2-r16",
+     "c0": -10,
+     "c1": 0.1,
+     "c2": "abc",
+     "c3": false,
+     "fk": "t0-r26"
+    },
+    {
+     "id": "t2-r17",
+     "c0": 0.30000000000000004,
+     "c1": 0.1,
+     "c2": null,
+     "c3": false,
+     "fk": "t0-r54"
+    },
+    {
+     "id": "t2-r18",
+     "c0": 1000000,
+     "c1": null,
+     "c2": "🦀rust",
+     "c3": false,
+     "fk": "t0-r15"
+    },
+    {
+     "id": "t2-r19",
+     "c0": -3.75,
+     "c1": 1e+100,
+     "c2": "null",
+     "c3": true,
+     "fk": "t0-r26"
+    },
+    {
+     "id": "t2-r20",
+     "c0": -9007199254740991,
+     "c1": null,
+     "c2": null,
+     "c3": false,
+     "fk": "t0-r33"
+    },
+    {
+     "id": "t2-r21",
+     "c0": 1e+100,
+     "c1": null,
+     "c2": null,
+     "c3": true,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t2-r22",
+     "c0": 10000000000,
+     "c1": 123456789,
+     "c2": null,
+     "c3": true,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t2-r23",
+     "c0": 3.14159265358979,
+     "c1": 1e+100,
+     "c2": "a",
+     "c3": false,
+     "fk": "t0-r46"
+    },
+    {
+     "id": "t2-r24",
+     "c0": 1000000,
+     "c1": -1e+100,
+     "c2": "🦀rust",
+     "c3": true,
+     "fk": "t0-r37"
+    },
+    {
+     "id": "t2-r25",
+     "c0": 2,
+     "c1": null,
+     "c2": "🎉🎊",
+     "c3": true,
+     "fk": "t0-r8"
+    },
+    {
+     "id": "t2-r26",
+     "c0": 10000000000,
+     "c1": 0.30000000000000004,
+     "c2": null,
+     "c3": true,
+     "fk": "t0-r27"
+    },
+    {
+     "id": "t2-r27",
+     "c0": 0.5,
+     "c1": 0.30000000000000004,
+     "c2": "_",
+     "c3": false,
+     "fk": "t0-r17"
+    },
+    {
+     "id": "t2-r28",
+     "c0": 0,
+     "c1": null,
+     "c2": "日本語",
+     "c3": true,
+     "fk": "t0-r16"
+    },
+    {
+     "id": "t2-r29",
+     "c0": -9007199254740991,
+     "c1": 1e+100,
+     "c2": "%",
+     "c3": false,
+     "fk": "t0-r43"
+    },
+    {
+     "id": "t2-r30",
+     "c0": 0.30000000000000004,
+     "c1": null,
+     "c2": "🎉🎊",
+     "c3": true,
+     "fk": "t0-r1"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "c2",
+    "desc"
+   ],
+   [
+    "c3",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 12,
+  "related": [
+   {
+    "correlation": {
+     "parentField": [
+      "id"
+     ],
+     "childField": [
+      "fk"
+     ]
+    },
+    "subquery": {
+     "table": "t1",
+     "alias": "rel0",
+     "orderBy": [
+      [
+       "id",
+       "asc"
+      ]
+     ],
+     "limit": 3
+    }
+   }
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t2",
+   "row": {
+    "id": "t2-p102",
+    "c0": 123456789,
+    "c1": -3.75,
+    "c2": null,
+    "c3": true,
+    "fk": "t0-r6"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p103",
+    "c0": null,
+    "c1": true,
+    "fk": "t0-r31"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p104",
+    "c0": 1,
+    "c1": null,
+    "c2": 9007199254740991,
+    "c3": 1e-10
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-p104",
+    "c0": 1,
+    "c1": null,
+    "c2": 9007199254740991,
+    "c3": 1e-10
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p105",
+    "c0": 1e-10,
+    "c1": null,
+    "c2": -9007199254740991,
+    "c3": -1
+   }
+  }
+ ],
+ "enableNotExists": true
+}

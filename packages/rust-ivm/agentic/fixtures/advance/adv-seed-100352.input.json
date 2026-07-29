@@ -1,0 +1,136 @@
+{
+ "name": "fuzz.seed-100352",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "boolean|null",
+    "c2": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "id2": "string",
+    "c0": "string",
+    "c1": "number",
+    "c2": "boolean|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id",
+    "id2"
+   ],
+   "rows": [
+    {
+     "id": "t2-r0",
+     "id2": "v0",
+     "c0": "%",
+     "c1": -9007199254740991,
+     "c2": null,
+     "fk": "t0-r58"
+    },
+    {
+     "id": "t2-r1",
+     "id2": "v1",
+     "c0": "日本語",
+     "c1": 0,
+     "c2": false,
+     "fk": "t0-r28"
+    },
+    {
+     "id": "t2-r2",
+     "id2": "v2",
+     "c0": "a",
+     "c1": 0,
+     "c2": false,
+     "fk": "t0-r18"
+    },
+    {
+     "id": "t2-r3",
+     "id2": "v0",
+     "c0": "a",
+     "c1": -1000000,
+     "c2": true,
+     "fk": "t0-r39"
+    },
+    {
+     "id": "t2-r4",
+     "id2": "v1",
+     "c0": "🦀rust",
+     "c1": 0,
+     "c2": false,
+     "fk": "t0-r19"
+    },
+    {
+     "id": "t2-r5",
+     "id2": "v2",
+     "c0": "a b",
+     "c1": 10000000000,
+     "c2": null,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t2-r6",
+     "id2": "v0",
+     "c0": "a",
+     "c1": 1e+100,
+     "c2": null,
+     "fk": "t0-r60"
+    },
+    {
+     "id": "t2-r7",
+     "id2": "v1",
+     "c0": "ZZZ",
+     "c1": 10000000000,
+     "c2": false,
+     "fk": "t0-r40"
+    },
+    {
+     "id": "t2-r8",
+     "id2": "v2",
+     "c0": "A",
+     "c1": 0,
+     "c2": true,
+     "fk": "t0-r34"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t2",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}

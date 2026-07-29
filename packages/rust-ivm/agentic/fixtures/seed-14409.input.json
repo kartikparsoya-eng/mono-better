@@ -1,0 +1,163 @@
+{
+ "name": "fuzz.seed-14409",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "boolean",
+    "c2": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": false,
+     "c1": false,
+     "c2": -1
+    },
+    {
+     "id": "t0-r1",
+     "c0": null,
+     "c1": false,
+     "c2": 2
+    },
+    {
+     "id": "t0-r2",
+     "c0": true,
+     "c1": true,
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r3",
+     "c0": true,
+     "c1": true,
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r4",
+     "c0": false,
+     "c1": false,
+     "c2": 0.1
+    },
+    {
+     "id": "t0-r5",
+     "c0": true,
+     "c1": false,
+     "c2": 0
+    },
+    {
+     "id": "t0-r6",
+     "c0": null,
+     "c1": true,
+     "c2": 2
+    },
+    {
+     "id": "t0-r7",
+     "c0": null,
+     "c1": true,
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r8",
+     "c0": false,
+     "c1": false,
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r9",
+     "c0": null,
+     "c1": false,
+     "c2": 0
+    },
+    {
+     "id": "t0-r10",
+     "c0": true,
+     "c1": true,
+     "c2": 1000000
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "id",
+    "desc"
+   ]
+  ],
+  "limit": 8
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r10",
+    "c0": true,
+    "c1": true,
+    "c2": 1000000
+   },
+   "row": {
+    "id": "t0-r10",
+    "c0": true,
+    "c1": true,
+    "c2": 1000000
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r2",
+    "c0": true,
+    "c1": true,
+    "c2": -3.75
+   },
+   "row": {
+    "id": "t0-r2",
+    "c0": true,
+    "c1": true,
+    "c2": -3.75
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r4",
+    "c0": false,
+    "c1": false,
+    "c2": 0.1
+   },
+   "row": {
+    "id": "t0-r4",
+    "c0": false,
+    "c1": false,
+    "c2": 1
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": null,
+    "c1": false,
+    "c2": -1000000
+   }
+  }
+ ]
+}

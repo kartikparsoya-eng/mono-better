@@ -1,0 +1,1 @@
+{"finalView":[{"relationships":{"from_comments":[{"relationships":{},"row":{"id":"i1"}}]},"row":{"id":"c1","issueID":"i1"}}],"hydrate":[{"relationships":{"from_comments":[{"relationships":{},"row":{"id":"i1"}}]},"row":{"id":"c1","issueID":"i1"}}],"pushChanges":[]}

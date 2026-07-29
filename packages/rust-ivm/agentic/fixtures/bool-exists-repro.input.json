@@ -1,0 +1,51 @@
+{
+  "name": "bool-exists-repro",
+  "sourceKind": "memory",
+  "format": { "singular": false, "relationships": {} },
+  "tables": {
+    "t0": {
+      "columns": { "id": "string", "name": "string" },
+      "primaryKey": ["id"],
+      "rows": [
+        { "id": "t0-a", "name": "chan a" },
+        { "id": "t0-b", "name": "chan b" },
+        { "id": "t0-c", "name": "chan c" },
+        { "id": "t0-d", "name": "chan d" }
+      ]
+    },
+    "t1": {
+      "columns": { "id": "string", "fk": "string", "isClosed": "boolean", "isDeleted": "boolean" },
+      "primaryKey": ["id"],
+      "rows": [
+        { "id": "t1-1", "fk": "t0-a", "isClosed": false, "isDeleted": false },
+        { "id": "t1-2", "fk": "t0-b", "isClosed": true,  "isDeleted": false },
+        { "id": "t1-3", "fk": "t0-c", "isClosed": false, "isDeleted": true },
+        { "id": "t1-4", "fk": "t0-d", "isClosed": false, "isDeleted": false }
+      ]
+    }
+  },
+  "ast": {
+    "table": "t0",
+    "orderBy": [["id", "asc"]],
+    "where": {
+      "type": "correlatedSubquery",
+      "op": "EXISTS",
+      "related": {
+        "correlation": { "parentField": ["id"], "childField": ["fk"] },
+        "subquery": {
+          "table": "t1",
+          "alias": "zsubq_t1",
+          "orderBy": [["id", "asc"]],
+          "where": {
+            "type": "and",
+            "conditions": [
+              { "type": "simple", "op": "=", "left": { "type": "column", "name": "isClosed" }, "right": { "type": "literal", "value": false } },
+              { "type": "simple", "op": "=", "left": { "type": "column", "name": "isDeleted" }, "right": { "type": "literal", "value": false } }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "pushes": []
+}

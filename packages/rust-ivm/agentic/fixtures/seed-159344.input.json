@@ -1,0 +1,581 @@
+{
+ "name": "fuzz.seed-159344",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": null,
+     "c1": ""
+    },
+    {
+     "id": "t0-r1",
+     "c0": "_",
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r2",
+     "c0": "0",
+     "c1": "A"
+    },
+    {
+     "id": "t0-r3",
+     "c0": "héllo",
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r4",
+     "c0": null,
+     "c1": "ZZZ"
+    },
+    {
+     "id": "t0-r5",
+     "c0": "A",
+     "c1": "abc"
+    },
+    {
+     "id": "t0-r6",
+     "c0": "b",
+     "c1": null
+    },
+    {
+     "id": "t0-r7",
+     "c0": "ﬀ",
+     "c1": null
+    },
+    {
+     "id": "t0-r8",
+     "c0": "A",
+     "c1": "%"
+    },
+    {
+     "id": "t0-r9",
+     "c0": "héllo",
+     "c1": "b"
+    },
+    {
+     "id": "t0-r10",
+     "c0": "",
+     "c1": "null"
+    },
+    {
+     "id": "t0-r11",
+     "c0": "0",
+     "c1": "0"
+    },
+    {
+     "id": "t0-r12",
+     "c0": null,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r13",
+     "c0": "ﬀ",
+     "c1": null
+    },
+    {
+     "id": "t0-r14",
+     "c0": "b",
+     "c1": "%"
+    },
+    {
+     "id": "t0-r15",
+     "c0": null,
+     "c1": "A"
+    },
+    {
+     "id": "t0-r16",
+     "c0": "héllo",
+     "c1": "_"
+    },
+    {
+     "id": "t0-r17",
+     "c0": null,
+     "c1": "héllo"
+    },
+    {
+     "id": "t0-r18",
+     "c0": "a",
+     "c1": null
+    },
+    {
+     "id": "t0-r19",
+     "c0": "ZZZ",
+     "c1": null
+    },
+    {
+     "id": "t0-r20",
+     "c0": null,
+     "c1": "null"
+    },
+    {
+     "id": "t0-r21",
+     "c0": "",
+     "c1": "%"
+    },
+    {
+     "id": "t0-r22",
+     "c0": "",
+     "c1": "_"
+    },
+    {
+     "id": "t0-r23",
+     "c0": "a b",
+     "c1": null
+    },
+    {
+     "id": "t0-r24",
+     "c0": null,
+     "c1": "ZZZ"
+    },
+    {
+     "id": "t0-r25",
+     "c0": "A",
+     "c1": "abc"
+    },
+    {
+     "id": "t0-r26",
+     "c0": "ﬀ",
+     "c1": null
+    },
+    {
+     "id": "t0-r27",
+     "c0": "ZZZ",
+     "c1": ""
+    },
+    {
+     "id": "t0-r28",
+     "c0": "",
+     "c1": "a b"
+    },
+    {
+     "id": "t0-r29",
+     "c0": "héllo",
+     "c1": null
+    },
+    {
+     "id": "t0-r30",
+     "c0": "%",
+     "c1": "b"
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "boolean|null",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": false,
+     "c1": false,
+     "fk": "t0-r13"
+    },
+    {
+     "id": "t1-r1",
+     "c0": true,
+     "c1": null,
+     "fk": "t0-r58"
+    },
+    {
+     "id": "t1-r2",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r2"
+    },
+    {
+     "id": "t1-r3",
+     "c0": true,
+     "c1": false,
+     "fk": "t0-r17"
+    },
+    {
+     "id": "t1-r4",
+     "c0": true,
+     "c1": false,
+     "fk": "t0-r39"
+    },
+    {
+     "id": "t1-r5",
+     "c0": true,
+     "c1": false,
+     "fk": "t0-r3"
+    },
+    {
+     "id": "t1-r6",
+     "c0": true,
+     "c1": true,
+     "fk": "t0-r12"
+    },
+    {
+     "id": "t1-r7",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r50"
+    },
+    {
+     "id": "t1-r8",
+     "c0": false,
+     "c1": null,
+     "fk": "t0-r28"
+    },
+    {
+     "id": "t1-r9",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r6"
+    },
+    {
+     "id": "t1-r10",
+     "c0": true,
+     "c1": false,
+     "fk": "t0-r29"
+    },
+    {
+     "id": "t1-r11",
+     "c0": true,
+     "c1": true,
+     "fk": "t0-r56"
+    },
+    {
+     "id": "t1-r12",
+     "c0": false,
+     "c1": null,
+     "fk": "t0-r52"
+    }
+   ]
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "number",
+    "c2": "string",
+    "c3": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t2-r0",
+     "c0": "héllo",
+     "c1": -1,
+     "c2": "ZZZ",
+     "c3": true,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t2-r1",
+     "c0": null,
+     "c1": 10,
+     "c2": "a",
+     "c3": false,
+     "fk": "t0-r5"
+    },
+    {
+     "id": "t2-r2",
+     "c0": "ZZZ",
+     "c1": -1,
+     "c2": "abc",
+     "c3": true,
+     "fk": "t0-r56"
+    },
+    {
+     "id": "t2-r3",
+     "c0": "%",
+     "c1": -1,
+     "c2": "null",
+     "c3": true,
+     "fk": "t0-r32"
+    },
+    {
+     "id": "t2-r4",
+     "c0": "🦀rust",
+     "c1": -3.75,
+     "c2": "héllo",
+     "c3": true,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t2-r5",
+     "c0": "héllo",
+     "c1": -3.75,
+     "c2": "b",
+     "c3": false,
+     "fk": "t0-r0"
+    },
+    {
+     "id": "t2-r6",
+     "c0": "b",
+     "c1": 1,
+     "c2": "🦀rust",
+     "c3": true,
+     "fk": "t0-r19"
+    },
+    {
+     "id": "t2-r7",
+     "c0": "🦀rust",
+     "c1": 0.30000000000000004,
+     "c2": "%",
+     "c3": true,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t2-r8",
+     "c0": "ﬀ",
+     "c1": 2,
+     "c2": "abc",
+     "c3": true,
+     "fk": "t0-r26"
+    },
+    {
+     "id": "t2-r9",
+     "c0": "a b",
+     "c1": -1,
+     "c2": "a",
+     "c3": false,
+     "fk": "t0-r0"
+    },
+    {
+     "id": "t2-r10",
+     "c0": "héllo",
+     "c1": -3.75,
+     "c2": "a",
+     "c3": true,
+     "fk": "t0-r49"
+    },
+    {
+     "id": "t2-r11",
+     "c0": null,
+     "c1": 0.1,
+     "c2": "b",
+     "c3": false,
+     "fk": "t0-r39"
+    },
+    {
+     "id": "t2-r12",
+     "c0": "null",
+     "c1": 0.30000000000000004,
+     "c2": "héllo",
+     "c3": false,
+     "fk": "t0-r22"
+    },
+    {
+     "id": "t2-r13",
+     "c0": "null",
+     "c1": 2,
+     "c2": "0",
+     "c3": false,
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t2-r14",
+     "c0": null,
+     "c1": 10,
+     "c2": "héllo",
+     "c3": true,
+     "fk": "t0-r23"
+    },
+    {
+     "id": "t2-r15",
+     "c0": "A",
+     "c1": -1,
+     "c2": "a",
+     "c3": false,
+     "fk": "t0-r36"
+    },
+    {
+     "id": "t2-r16",
+     "c0": null,
+     "c1": 1000000,
+     "c2": "",
+     "c3": false,
+     "fk": "t0-r6"
+    },
+    {
+     "id": "t2-r17",
+     "c0": "🦀rust",
+     "c1": -1,
+     "c2": "",
+     "c3": false,
+     "fk": "t0-r44"
+    },
+    {
+     "id": "t2-r18",
+     "c0": "a",
+     "c1": 0,
+     "c2": "A",
+     "c3": false,
+     "fk": "t0-r17"
+    },
+    {
+     "id": "t2-r19",
+     "c0": "null",
+     "c1": 2.5,
+     "c2": "a b",
+     "c3": false,
+     "fk": "t0-r31"
+    },
+    {
+     "id": "t2-r20",
+     "c0": "🦀rust",
+     "c1": -10,
+     "c2": "héllo",
+     "c3": false,
+     "fk": "t0-r56"
+    },
+    {
+     "id": "t2-r21",
+     "c0": null,
+     "c1": 0.30000000000000004,
+     "c2": "A",
+     "c3": false,
+     "fk": "t0-r44"
+    },
+    {
+     "id": "t2-r22",
+     "c0": null,
+     "c1": -3.75,
+     "c2": "_",
+     "c3": true,
+     "fk": "t0-r20"
+    },
+    {
+     "id": "t2-r23",
+     "c0": "0",
+     "c1": 2.5,
+     "c2": "",
+     "c3": true,
+     "fk": "t0-r12"
+    },
+    {
+     "id": "t2-r24",
+     "c0": "0",
+     "c1": 0.1,
+     "c2": "ZZZ",
+     "c3": false,
+     "fk": "t0-r11"
+    },
+    {
+     "id": "t2-r25",
+     "c0": "A",
+     "c1": 2,
+     "c2": "ﬀ",
+     "c3": false,
+     "fk": "t0-r19"
+    },
+    {
+     "id": "t2-r26",
+     "c0": "%",
+     "c1": 2.5,
+     "c2": "_",
+     "c3": false,
+     "fk": "t0-r27"
+    },
+    {
+     "id": "t2-r27",
+     "c0": "a b",
+     "c1": -3.75,
+     "c2": "%",
+     "c3": true,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t2-r28",
+     "c0": null,
+     "c1": -10,
+     "c2": "%",
+     "c3": true,
+     "fk": "t0-r50"
+    },
+    {
+     "id": "t2-r29",
+     "c0": "abc",
+     "c1": -10,
+     "c2": "abc",
+     "c3": true,
+     "fk": "t0-r41"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 1,
+  "related": [
+   {
+    "correlation": {
+     "parentField": [
+      "id"
+     ],
+     "childField": [
+      "fk"
+     ]
+    },
+    "subquery": {
+     "table": "t2",
+     "alias": "rel",
+     "orderBy": [
+      [
+       "id",
+       "asc"
+      ]
+     ]
+    }
+   }
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t2",
+   "oldRow": {
+    "id": "t2-r9",
+    "c0": "a b",
+    "c1": -1,
+    "c2": "a",
+    "c3": false,
+    "fk": "t0-r0"
+   },
+   "row": {
+    "id": "t2-r9",
+    "c0": "a b",
+    "c1": -1,
+    "c2": "🦀rust",
+    "c3": false,
+    "fk": "t0-r0"
+   }
+  }
+ ]
+}

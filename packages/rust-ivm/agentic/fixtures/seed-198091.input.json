@@ -1,0 +1,162 @@
+{
+ "name": "fuzz.seed-198091",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "string",
+    "c2": "boolean",
+    "c3": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "🦀rust",
+     "c1": "ﬀ",
+     "c2": true,
+     "c3": false
+    },
+    {
+     "id": "t0-r1",
+     "c0": "b",
+     "c1": "ZZZ",
+     "c2": true,
+     "c3": true
+    },
+    {
+     "id": "t0-r2",
+     "c0": "🦀rust",
+     "c1": "0",
+     "c2": false,
+     "c3": true
+    },
+    {
+     "id": "t0-r3",
+     "c0": "A",
+     "c1": "ﬀ",
+     "c2": true,
+     "c3": false
+    },
+    {
+     "id": "t0-r4",
+     "c0": "a b",
+     "c1": "0",
+     "c2": true,
+     "c3": true
+    },
+    {
+     "id": "t0-r5",
+     "c0": "a b",
+     "c1": "ﬀ",
+     "c2": false,
+     "c3": true
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 5
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r3",
+    "c0": "A",
+    "c1": "ﬀ",
+    "c2": true,
+    "c3": false
+   },
+   "row": {
+    "id": "t0-r3",
+    "c0": "A",
+    "c1": "",
+    "c2": true,
+    "c3": false
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r4",
+    "c0": "a b",
+    "c1": "0",
+    "c2": true,
+    "c3": true
+   },
+   "row": {
+    "id": "t0-r4",
+    "c0": "a b",
+    "c1": "",
+    "c2": true,
+    "c3": true
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r0",
+    "c0": "🦀rust",
+    "c1": "ﬀ",
+    "c2": true,
+    "c3": false
+   },
+   "row": {
+    "id": "t0-r0",
+    "c0": "🦀rust",
+    "c1": "ﬀ",
+    "c2": true,
+    "c3": true
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r3",
+    "c0": "A",
+    "c1": "",
+    "c2": true,
+    "c3": false
+   },
+   "row": {
+    "id": "t0-r3",
+    "c0": "A",
+    "c1": "",
+    "c2": true,
+    "c3": true
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1000",
+    "c0": "",
+    "c1": "a b",
+    "c2": false,
+    "c3": true
+   }
+  }
+ ],
+ "enableNotExists": true
+}

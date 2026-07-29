@@ -1,0 +1,412 @@
+{
+ "name": "fuzz.seed-246754",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean|null",
+    "c1": "boolean|null",
+    "c2": "number"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": false,
+     "c1": false,
+     "c2": 2
+    },
+    {
+     "id": "t0-r1",
+     "c0": null,
+     "c1": false,
+     "c2": -10
+    },
+    {
+     "id": "t0-r2",
+     "c0": true,
+     "c1": null,
+     "c2": 2
+    },
+    {
+     "id": "t0-r3",
+     "c0": true,
+     "c1": null,
+     "c2": 0.30000000000000004
+    },
+    {
+     "id": "t0-r4",
+     "c0": true,
+     "c1": false,
+     "c2": -1
+    },
+    {
+     "id": "t0-r5",
+     "c0": false,
+     "c1": false,
+     "c2": -1
+    },
+    {
+     "id": "t0-r6",
+     "c0": true,
+     "c1": false,
+     "c2": 1000000
+    },
+    {
+     "id": "t0-r7",
+     "c0": true,
+     "c1": null,
+     "c2": -10
+    },
+    {
+     "id": "t0-r8",
+     "c0": null,
+     "c1": false,
+     "c2": 123456789
+    },
+    {
+     "id": "t0-r9",
+     "c0": true,
+     "c1": true,
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r10",
+     "c0": true,
+     "c1": null,
+     "c2": 10
+    },
+    {
+     "id": "t0-r11",
+     "c0": true,
+     "c1": false,
+     "c2": -1000000
+    },
+    {
+     "id": "t0-r12",
+     "c0": false,
+     "c1": true,
+     "c2": -3.75
+    },
+    {
+     "id": "t0-r13",
+     "c0": true,
+     "c1": null,
+     "c2": 2
+    },
+    {
+     "id": "t0-r14",
+     "c0": false,
+     "c1": false,
+     "c2": 2.5
+    },
+    {
+     "id": "t0-r15",
+     "c0": true,
+     "c1": null,
+     "c2": -1
+    },
+    {
+     "id": "t0-r16",
+     "c0": true,
+     "c1": true,
+     "c2": 0
+    },
+    {
+     "id": "t0-r17",
+     "c0": false,
+     "c1": true,
+     "c2": -1000000
+    },
+    {
+     "id": "t0-r18",
+     "c0": null,
+     "c1": true,
+     "c2": 123456789
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "number|null",
+    "c2": "boolean",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": 2.5,
+     "c1": 0.30000000000000004,
+     "c2": true,
+     "fk": "t0-r42"
+    },
+    {
+     "id": "t1-r1",
+     "c0": 1000000,
+     "c1": null,
+     "c2": false,
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t1-r2",
+     "c0": 0.30000000000000004,
+     "c1": 0.30000000000000004,
+     "c2": false,
+     "fk": "t0-r0"
+    },
+    {
+     "id": "t1-r3",
+     "c0": 1,
+     "c1": 0,
+     "c2": true,
+     "fk": "t0-r8"
+    },
+    {
+     "id": "t1-r4",
+     "c0": -3.75,
+     "c1": 0.1,
+     "c2": true,
+     "fk": "t0-r44"
+    },
+    {
+     "id": "t1-r5",
+     "c0": 10,
+     "c1": -10,
+     "c2": true,
+     "fk": "t0-r28"
+    },
+    {
+     "id": "t1-r6",
+     "c0": 0,
+     "c1": -1000000,
+     "c2": true,
+     "fk": "t0-r60"
+    },
+    {
+     "id": "t1-r7",
+     "c0": 2.5,
+     "c1": 1000000,
+     "c2": true,
+     "fk": "t0-r7"
+    },
+    {
+     "id": "t1-r8",
+     "c0": 0,
+     "c1": 0.30000000000000004,
+     "c2": false,
+     "fk": "t0-r11"
+    },
+    {
+     "id": "t1-r9",
+     "c0": 0.1,
+     "c1": -10,
+     "c2": true,
+     "fk": "t0-r50"
+    },
+    {
+     "id": "t1-r10",
+     "c0": 10,
+     "c1": 1000000,
+     "c2": false,
+     "fk": "t0-r27"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "ILIKE",
+       "left": {
+        "type": "column",
+        "name": "id"
+       },
+       "right": {
+        "type": "literal",
+        "value": "A%"
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         true,
+         true,
+         true
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "type": "correlatedSubquery",
+     "related": {
+      "correlation": {
+       "parentField": [
+        "id"
+       ],
+       "childField": [
+        "fk"
+       ]
+      },
+      "subquery": {
+       "table": "t1",
+       "alias": "zsubq_t1",
+       "orderBy": [
+        [
+         "id",
+         "asc"
+        ]
+       ],
+       "where": {
+        "type": "simple",
+        "op": "IN",
+        "left": {
+         "type": "column",
+         "name": "id"
+        },
+        "right": {
+         "type": "literal",
+         "value": [
+          "t1-r9",
+          "t1-r0",
+          "t1-r2"
+         ]
+        }
+       }
+      }
+     },
+     "op": "EXISTS"
+    },
+    {
+     "type": "and",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ]
+        }
+       },
+       "op": "EXISTS"
+      },
+      {
+       "type": "simple",
+       "op": "<=",
+       "left": {
+        "type": "column",
+        "name": "c2"
+       },
+       "right": {
+        "type": "literal",
+        "value": -3.75
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "limit": 5,
+  "start": {
+   "row": {
+    "id": "t0-r4",
+    "c0": true,
+    "c1": false,
+    "c2": -1
+   },
+   "exclusive": false
+  },
+  "related": [
+   {
+    "correlation": {
+     "parentField": [
+      "id"
+     ],
+     "childField": [
+      "fk"
+     ]
+    },
+    "subquery": {
+     "table": "t1",
+     "alias": "rel",
+     "orderBy": [
+      [
+       "id",
+       "asc"
+      ]
+     ],
+     "limit": 3
+    }
+   }
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r12",
+    "c0": false,
+    "c1": true,
+    "c2": -3.75
+   },
+   "row": {
+    "id": "t0-r12",
+    "c0": true,
+    "c1": true,
+    "c2": -3.75
+   }
+  }
+ ],
+ "enableNotExists": true
+}

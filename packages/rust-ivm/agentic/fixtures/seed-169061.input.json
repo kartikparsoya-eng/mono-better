@@ -1,0 +1,162 @@
+{
+ "name": "fuzz.seed-169061",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "ZZZ",
+     "c1": true
+    },
+    {
+     "id": "t0-r1",
+     "c0": "b",
+     "c1": true
+    },
+    {
+     "id": "t0-r8",
+     "c0": "a",
+     "c1": true
+    },
+    {
+     "id": "t0-r9",
+     "c0": "b",
+     "c1": true
+    },
+    {
+     "id": "t0-r10",
+     "c0": "abc",
+     "c1": true
+    },
+    {
+     "id": "t0-r22",
+     "c0": "_",
+     "c1": true
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "string|null",
+    "c2": "string",
+    "c3": "string",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": "héllo",
+     "c1": "ﬀ",
+     "c2": "abc",
+     "c3": "ﬀ",
+     "fk": "t0-r50"
+    },
+    {
+     "id": "t1-r1",
+     "c0": "🦀rust",
+     "c1": null,
+     "c2": "null",
+     "c3": "b",
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t1-r2",
+     "c0": "a",
+     "c1": "",
+     "c2": "héllo",
+     "c3": "ZZZ",
+     "fk": "t0-r0"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "simple",
+     "op": ">",
+     "left": {
+      "type": "column",
+      "name": "c1"
+     },
+     "right": {
+      "type": "literal",
+      "value": false
+     }
+    },
+    {
+     "type": "simple",
+     "op": "<=",
+     "left": {
+      "type": "column",
+      "name": "c0"
+     },
+     "right": {
+      "type": "literal",
+      "value": ""
+     }
+    },
+    {
+     "type": "simple",
+     "op": "ILIKE",
+     "left": {
+      "type": "column",
+      "name": "id"
+     },
+     "right": {
+      "type": "literal",
+      "value": "h_llo"
+     }
+    }
+   ]
+  },
+  "limit": 5
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r22",
+    "c0": "_",
+    "c1": true
+   },
+   "row": {
+    "id": "t0-r22",
+    "c0": "_",
+    "c1": false
+   }
+  }
+ ]
+}

@@ -1,0 +1,540 @@
+{
+ "name": "fuzz.seed-9761",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": 2.5,
+     "c1": "a"
+    },
+    {
+     "id": "t0-r1",
+     "c0": 0.1,
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r2",
+     "c0": 1,
+     "c1": null
+    },
+    {
+     "id": "t0-r3",
+     "c0": -1000000,
+     "c1": null
+    },
+    {
+     "id": "t0-r4",
+     "c0": 0.30000000000000004,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r5",
+     "c0": -3.75,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r6",
+     "c0": 2.5,
+     "c1": "null"
+    },
+    {
+     "id": "t0-r7",
+     "c0": 0,
+     "c1": ""
+    },
+    {
+     "id": "t0-r8",
+     "c0": 1000000,
+     "c1": "null"
+    },
+    {
+     "id": "t0-r9",
+     "c0": 10,
+     "c1": "b"
+    },
+    {
+     "id": "t0-r10",
+     "c0": 0,
+     "c1": "0"
+    },
+    {
+     "id": "t0-r11",
+     "c0": -1000000,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r12",
+     "c0": 2.5,
+     "c1": "ﬀ"
+    },
+    {
+     "id": "t0-r13",
+     "c0": -1,
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r14",
+     "c0": 1,
+     "c1": ""
+    },
+    {
+     "id": "t0-r15",
+     "c0": 10,
+     "c1": null
+    },
+    {
+     "id": "t0-r16",
+     "c0": 1,
+     "c1": "a b"
+    },
+    {
+     "id": "t0-r17",
+     "c0": 2,
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r18",
+     "c0": 10,
+     "c1": "0"
+    },
+    {
+     "id": "t0-r19",
+     "c0": 2.5,
+     "c1": "a"
+    },
+    {
+     "id": "t0-r20",
+     "c0": 1,
+     "c1": "ZZZ"
+    },
+    {
+     "id": "t0-r21",
+     "c0": -3.75,
+     "c1": null
+    },
+    {
+     "id": "t0-r22",
+     "c0": -1,
+     "c1": "A"
+    },
+    {
+     "id": "t0-r23",
+     "c0": -1000000,
+     "c1": "🦀rust"
+    },
+    {
+     "id": "t0-r24",
+     "c0": 2,
+     "c1": "%"
+    },
+    {
+     "id": "t0-r25",
+     "c0": -1000000,
+     "c1": "ZZZ"
+    },
+    {
+     "id": "t0-r26",
+     "c0": 123456789,
+     "c1": "héllo"
+    },
+    {
+     "id": "t0-r27",
+     "c0": 2,
+     "c1": "🦀rust"
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": true,
+     "c1": 1000000,
+     "fk": "t0-r52"
+    },
+    {
+     "id": "t1-r1",
+     "c0": false,
+     "c1": 2,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t1-r2",
+     "c0": true,
+     "c1": 123456789,
+     "fk": "t0-r19"
+    },
+    {
+     "id": "t1-r3",
+     "c0": false,
+     "c1": 2,
+     "fk": "t0-r11"
+    },
+    {
+     "id": "t1-r4",
+     "c0": false,
+     "c1": -1,
+     "fk": "t0-r43"
+    },
+    {
+     "id": "t1-r5",
+     "c0": true,
+     "c1": 1,
+     "fk": "t0-r51"
+    },
+    {
+     "id": "t1-r6",
+     "c0": false,
+     "c1": -10,
+     "fk": "t0-r2"
+    },
+    {
+     "id": "t1-r7",
+     "c0": true,
+     "c1": -10,
+     "fk": "t0-r14"
+    },
+    {
+     "id": "t1-r8",
+     "c0": false,
+     "c1": 0.1,
+     "fk": "t0-r57"
+    },
+    {
+     "id": "t1-r9",
+     "c0": false,
+     "c1": -10,
+     "fk": "t0-r20"
+    },
+    {
+     "id": "t1-r10",
+     "c0": false,
+     "c1": 10,
+     "fk": "t0-r32"
+    },
+    {
+     "id": "t1-r11",
+     "c0": false,
+     "c1": 1000000,
+     "fk": "t0-r18"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c0",
+    "asc"
+   ],
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "id",
+    "desc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ],
+         "where": {
+          "type": "simple",
+          "op": "=",
+          "left": {
+           "type": "column",
+           "name": "c1"
+          },
+          "right": {
+           "type": "literal",
+           "value": 0
+          }
+         }
+        }
+       },
+       "op": "EXISTS"
+      },
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ],
+         "where": {
+          "type": "simple",
+          "op": "=",
+          "left": {
+           "type": "column",
+           "name": "c0"
+          },
+          "right": {
+           "type": "literal",
+           "value": true
+          }
+         }
+        }
+       },
+       "op": "EXISTS"
+      }
+     ]
+    },
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ]
+        }
+       },
+       "op": "EXISTS"
+      },
+      {
+       "type": "simple",
+       "op": "!=",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": "b"
+       }
+      },
+      {
+       "type": "simple",
+       "op": ">=",
+       "left": {
+        "type": "column",
+        "name": "c1"
+       },
+       "right": {
+        "type": "literal",
+        "value": "0"
+       }
+      }
+     ]
+    },
+    {
+     "type": "and",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         0.30000000000000004
+        ]
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         2,
+         -1000000
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  },
+  "limit": 5,
+  "start": {
+   "row": {
+    "id": "t0-r2",
+    "c0": 1,
+    "c1": null
+   },
+   "exclusive": true
+  },
+  "related": [
+   {
+    "correlation": {
+     "parentField": [
+      "id"
+     ],
+     "childField": [
+      "fk"
+     ]
+    },
+    "subquery": {
+     "table": "t1",
+     "alias": "rel",
+     "orderBy": [
+      [
+       "id",
+       "asc"
+      ]
+     ]
+    }
+   }
+  ]
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "remove",
+   "table": "t1",
+   "row": {
+    "id": "t1-r3",
+    "c0": false,
+    "c1": 2,
+    "fk": "t0-r11"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1000",
+    "c0": true,
+    "c1": 2,
+    "fk": "t0-r10"
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t0",
+   "row": {
+    "id": "t0-r2",
+    "c0": 1,
+    "c1": null
+   }
+  },
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p1001",
+    "c0": 2,
+    "c1": "%"
+   }
+  },
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1002",
+    "c0": true,
+    "c1": -1000000,
+    "fk": "t0-r27"
+   }
+  },
+  {
+   "type": "remove",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1002",
+    "c0": true,
+    "c1": -1000000,
+    "fk": "t0-r27"
+   }
+  },
+  {
+   "type": "edit",
+   "table": "t1",
+   "oldRow": {
+    "id": "t1-r2",
+    "c0": true,
+    "c1": 123456789,
+    "fk": "t0-r19"
+   },
+   "row": {
+    "id": "t1-r2",
+    "c0": true,
+    "c1": 123456789,
+    "fk": "t0-r11"
+   }
+  }
+ ]
+}

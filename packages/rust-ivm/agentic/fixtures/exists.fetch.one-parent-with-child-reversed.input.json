@@ -1,0 +1,77 @@
+{
+  "name": "exists.fetch.one-parent-with-child-reversed",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "i1"
+        }
+      ]
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "c1",
+          "issueID": "i1"
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "comment",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "where": {
+      "type": "correlatedSubquery",
+      "related": {
+        "correlation": {
+          "parentField": [
+            "issueID"
+          ],
+          "childField": [
+            "id"
+          ]
+        },
+        "subquery": {
+          "table": "issue",
+          "alias": "from_comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      },
+      "op": "EXISTS"
+    }
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "from_comments": {
+        "singular": false,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": []
+}

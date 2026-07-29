@@ -1,0 +1,85 @@
+{
+ "name": "fuzz.seed-160102",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string|null",
+    "c2": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "boolean",
+    "c2": "string",
+    "c3": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": "a",
+     "c1": false,
+     "c2": "a",
+     "c3": 0,
+     "fk": "t0-r48"
+    },
+    {
+     "id": "t1-r1",
+     "c0": "0",
+     "c1": true,
+     "c2": "a",
+     "c3": 2.5,
+     "fk": "t0-r11"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t1",
+  "orderBy": [
+   [
+    "c1",
+    "asc"
+   ],
+   [
+    "c3",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 2
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1000",
+    "c0": "%",
+    "c1": true,
+    "c2": "_",
+    "c3": 1000000,
+    "fk": "t0-r45"
+   }
+  }
+ ]
+}

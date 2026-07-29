@@ -1,0 +1,133 @@
+{
+ "name": "fuzz.seed-1899639",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "string",
+    "c2": "boolean"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": "b",
+     "c1": "null",
+     "c2": true
+    },
+    {
+     "id": "t0-r1",
+     "c0": "'apos'",
+     "c1": "ZZZ",
+     "c2": false
+    },
+    {
+     "id": "t0-r2",
+     "c0": "日本語",
+     "c1": "🎉🎊",
+     "c2": true
+    },
+    {
+     "id": "t0-r3",
+     "c0": null,
+     "c1": "café",
+     "c2": true
+    },
+    {
+     "id": "t0-r4",
+     "c0": "_",
+     "c1": "日本語",
+     "c2": true
+    },
+    {
+     "id": "t0-r5",
+     "c0": "ﬀ",
+     "c1": "A",
+     "c2": true
+    },
+    {
+     "id": "t0-r6",
+     "c0": null,
+     "c1": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "c2": false
+    },
+    {
+     "id": "t0-r7",
+     "c0": null,
+     "c1": "b",
+     "c2": true
+    },
+    {
+     "id": "t0-r8",
+     "c0": "café",
+     "c1": "ﬀ",
+     "c2": true
+    },
+    {
+     "id": "t0-r9",
+     "c0": "日本語",
+     "c1": "日本語",
+     "c2": true
+    },
+    {
+     "id": "t0-r10",
+     "c0": "🎉🎊",
+     "c1": "abc",
+     "c2": true
+    },
+    {
+     "id": "t0-r11",
+     "c0": "{}",
+     "c1": "false",
+     "c2": true
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "simple",
+   "op": "IN",
+   "left": {
+    "type": "column",
+    "name": "c0"
+   },
+   "right": {
+    "type": "literal",
+    "value": [
+     "b",
+     "a b",
+     "abc",
+     "0"
+    ]
+   }
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t0",
+   "row": {
+    "id": "t0-p134",
+    "c0": "null",
+    "c1": "\"quoted\"",
+    "c2": true
+   }
+  }
+ ]
+}

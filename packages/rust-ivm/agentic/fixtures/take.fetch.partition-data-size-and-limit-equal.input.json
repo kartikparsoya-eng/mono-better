@@ -1,0 +1,42 @@
+{
+  "name": "take.fetch.partition-data-size-and-limit-equal",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {"id": "string"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "i1"},
+        {"id": "i2"}
+      ]
+    },
+    "comment": {
+      "columns": {"id": "string", "issueID": "string", "created": "number"},
+      "primaryKey": ["id"],
+      "rows": [
+        {"id": "c1", "issueID": "i1", "created": 100},
+        {"id": "c2", "issueID": "i1", "created": 200},
+        {"id": "c3", "issueID": "i1", "created": 300},
+        {"id": "c4", "issueID": "i2", "created": 400},
+        {"id": "c5", "issueID": "i2", "created": 500},
+        {"id": "c6", "issueID": "i2", "created": 600}
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "related": [
+      {
+        "correlation": {"parentField": ["id"], "childField": ["issueID"]},
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [["created", "asc"], ["id", "asc"]],
+          "limit": 3
+        }
+      }
+    ]
+  },
+  "format": {"singular": false, "relationships": {"comments": {"singular": false, "relationships": {}}}},
+  "pushes": []
+}

@@ -1,0 +1,143 @@
+{
+ "name": "fuzz.seed-88586",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "boolean",
+    "c2": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string|null",
+    "c1": "number|null",
+    "c2": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t1-r0",
+     "c0": "%",
+     "c1": 0.1,
+     "c2": 2.5,
+     "fk": "t0-r58"
+    },
+    {
+     "id": "t1-r1",
+     "c0": null,
+     "c1": -1000000,
+     "c2": 1000000,
+     "fk": "t0-r53"
+    },
+    {
+     "id": "t1-r2",
+     "c0": null,
+     "c1": 2.5,
+     "c2": 1000000,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t1-r3",
+     "c0": null,
+     "c1": 0.1,
+     "c2": 1000000,
+     "fk": "t0-r16"
+    },
+    {
+     "id": "t1-r4",
+     "c0": "null",
+     "c1": 1000000,
+     "c2": -1,
+     "fk": "t0-r26"
+    },
+    {
+     "id": "t1-r5",
+     "c0": "ﬀ",
+     "c1": null,
+     "c2": 0,
+     "fk": "t0-r59"
+    },
+    {
+     "id": "t1-r6",
+     "c0": "abc",
+     "c1": 123456789,
+     "c2": 123456789,
+     "fk": "t0-r34"
+    },
+    {
+     "id": "t1-r7",
+     "c0": "A",
+     "c1": -10,
+     "c2": 0.1,
+     "fk": "t0-r38"
+    },
+    {
+     "id": "t1-r8",
+     "c0": null,
+     "c1": 123456789,
+     "c2": 0,
+     "fk": "t0-r20"
+    },
+    {
+     "id": "t1-r9",
+     "c0": "abc",
+     "c1": -3.75,
+     "c2": -10,
+     "fk": "t0-r31"
+    },
+    {
+     "id": "t1-r10",
+     "c0": "a b",
+     "c1": null,
+     "c2": -10,
+     "fk": "t0-r35"
+    },
+    {
+     "id": "t1-r11",
+     "c0": "ﬀ",
+     "c1": 0.1,
+     "c2": -1000000,
+     "fk": "t0-r44"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t1",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "limit": 12
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "add",
+   "table": "t1",
+   "row": {
+    "id": "t1-p1000",
+    "c0": "null",
+    "c1": -1000000,
+    "c2": 1000000,
+    "fk": "t0-r12"
+   }
+  }
+ ]
+}

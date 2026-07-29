@@ -1,0 +1,35 @@
+{
+ "advance": [],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "a",
+    "c2": "日本語",
+    "id": "t0-r24"
+   },
+   "rowKey": {
+    "id": "t0-r24"
+   },
+   "table": "t0"
+  }
+ ],
+ "hydrate": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "a",
+    "c2": "日本語",
+    "id": "t0-r24"
+   },
+   "rowKey": {
+    "id": "t0-r24"
+   },
+   "table": "t0"
+  }
+ ]
+}

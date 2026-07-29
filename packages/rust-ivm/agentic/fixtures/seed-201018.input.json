@@ -1,0 +1,177 @@
+{
+ "name": "fuzz.seed-201018",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "string",
+    "c2": "string|null"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": true,
+     "c1": "A",
+     "c2": "🦀rust"
+    },
+    {
+     "id": "t0-r1",
+     "c0": false,
+     "c1": "_",
+     "c2": "_"
+    },
+    {
+     "id": "t0-r2",
+     "c0": true,
+     "c1": "%",
+     "c2": "héllo"
+    },
+    {
+     "id": "t0-r3",
+     "c0": true,
+     "c1": "ﬀ",
+     "c2": "null"
+    },
+    {
+     "id": "t0-r4",
+     "c0": false,
+     "c1": "A",
+     "c2": "_"
+    },
+    {
+     "id": "t0-r5",
+     "c0": true,
+     "c1": "abc",
+     "c2": null
+    },
+    {
+     "id": "t0-r6",
+     "c0": true,
+     "c1": "null",
+     "c2": "🦀rust"
+    },
+    {
+     "id": "t0-r7",
+     "c0": true,
+     "c1": "",
+     "c2": "héllo"
+    },
+    {
+     "id": "t0-r8",
+     "c0": true,
+     "c1": "abc",
+     "c2": "_"
+    }
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "IS",
+       "left": {
+        "type": "column",
+        "name": "id"
+       },
+       "right": {
+        "type": "literal",
+        "value": null
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         true,
+         true,
+         false,
+         false
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "type": "simple",
+     "op": "!=",
+     "left": {
+      "type": "column",
+      "name": "c2"
+     },
+     "right": {
+      "type": "literal",
+      "value": "_"
+     }
+    },
+    {
+     "type": "simple",
+     "op": "!=",
+     "left": {
+      "type": "column",
+      "name": "c0"
+     },
+     "right": {
+      "type": "literal",
+      "value": true
+     }
+    }
+   ]
+  },
+  "limit": 10,
+  "start": {
+   "row": {
+    "id": "t0-r3",
+    "c0": true,
+    "c1": "ﬀ",
+    "c2": "null"
+   },
+   "exclusive": false
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": [
+  {
+   "type": "edit",
+   "table": "t0",
+   "oldRow": {
+    "id": "t0-r8",
+    "c0": true,
+    "c1": "abc",
+    "c2": "_"
+   },
+   "row": {
+    "id": "t0-r8",
+    "c0": true,
+    "c1": "abc",
+    "c2": "ﬀ"
+   }
+  }
+ ]
+}

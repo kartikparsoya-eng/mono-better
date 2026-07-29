@@ -1,0 +1,88 @@
+{
+  "name": "filter.basics",
+  "sourceKind": "memory",
+  "tables": {
+    "table": {
+      "columns": {
+        "a": "number",
+        "b": "string"
+      },
+      "primaryKey": [
+        "a"
+      ],
+      "rows": [
+        {
+          "a": 3,
+          "b": "foo"
+        },
+        {
+          "a": 2,
+          "b": "bar"
+        },
+        {
+          "a": 1,
+          "b": "foo"
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "table",
+    "orderBy": [
+      [
+        "a",
+        "asc"
+      ]
+    ],
+    "where": {
+      "type": "simple",
+      "op": "=",
+      "left": {
+        "type": "column",
+        "name": "b"
+      },
+      "right": {
+        "type": "literal",
+        "value": "foo"
+      }
+    }
+  },
+  "format": {
+    "singular": false,
+    "relationships": {}
+  },
+  "pushes": [
+    {
+      "type": "add",
+      "table": "table",
+      "row": {
+        "a": 4,
+        "b": "bar"
+      }
+    },
+    {
+      "type": "add",
+      "table": "table",
+      "row": {
+        "a": 5,
+        "b": "foo"
+      }
+    },
+    {
+      "type": "remove",
+      "table": "table",
+      "row": {
+        "a": 3,
+        "b": "foo"
+      }
+    },
+    {
+      "type": "remove",
+      "table": "table",
+      "row": {
+        "a": 2,
+        "b": "bar"
+      }
+    }
+  ]
+}

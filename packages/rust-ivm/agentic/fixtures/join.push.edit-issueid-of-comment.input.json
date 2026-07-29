@@ -1,0 +1,104 @@
+{
+  "name": "join.push.edit-issueid-of-comment",
+  "sourceKind": "memory",
+  "tables": {
+    "issue": {
+      "columns": {
+        "id": "string",
+        "text": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "i1",
+          "text": "issue 1"
+        },
+        {
+          "id": "i2",
+          "text": "issue 2"
+        }
+      ]
+    },
+    "comment": {
+      "columns": {
+        "id": "string",
+        "issueID": "string",
+        "text": "string"
+      },
+      "primaryKey": [
+        "id"
+      ],
+      "rows": [
+        {
+          "id": "c1",
+          "issueID": "i1",
+          "text": "comment 1"
+        },
+        {
+          "id": "c2",
+          "issueID": "i1",
+          "text": "comment 2"
+        }
+      ]
+    }
+  },
+  "ast": {
+    "table": "issue",
+    "orderBy": [
+      [
+        "id",
+        "asc"
+      ]
+    ],
+    "related": [
+      {
+        "system": "client",
+        "correlation": {
+          "parentField": [
+            "id"
+          ],
+          "childField": [
+            "issueID"
+          ]
+        },
+        "subquery": {
+          "table": "comment",
+          "alias": "comments",
+          "orderBy": [
+            [
+              "id",
+              "asc"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  "format": {
+    "singular": false,
+    "relationships": {
+      "comments": {
+        "singular": false,
+        "relationships": {}
+      }
+    }
+  },
+  "pushes": [
+    {
+      "type": "edit",
+      "table": "comment",
+      "row": {
+        "id": "c1",
+        "issueID": "i2",
+        "text": "comment 1.2"
+      },
+      "oldRow": {
+        "id": "c1",
+        "issueID": "i1",
+        "text": "comment 1"
+      }
+    }
+  ]
+}
