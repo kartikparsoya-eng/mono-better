@@ -9,11 +9,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { setInterval, clearInterval } from 'node:timers';
 
+// Active fuzzer job names in the mono-v1.7/packages/rust-ivm workspace.
 const FUZZERS = [
-  { name: 'fuzz-serial', script: 'agentic/fuzz/fuzz-loop.mjs' },
-  { name: 'fuzz-napi', script: 'agentic/fuzz/fuzz-napi-loop.mjs' },
-  { name: 'fuzz-adv', script: 'agentic/fuzz/fuzz-adv-loop.mjs' },
-  { name: 'fuzz-par-equiv', script: 'agentic/fuzz/fuzz-parallel-equiv-loop.mjs' },
+  { name: 'm-fuzz-serial', script: 'agentic/fuzz/fuzz-loop.mjs' },
+  { name: 'm-fuzz-napi', script: 'agentic/fuzz/fuzz-napi-loop.mjs' },
+  { name: 'm-fuzz-adv', script: 'agentic/fuzz/fuzz-adv-loop.mjs' },
+  { name: 'm-fuzz-par-equiv', script: 'agentic/fuzz/fuzz-parallel-equiv-loop.mjs' },
 ];
 
 const LOG_DIR = '/Users/kartik.parsoya/.xyne/agent/background/global';
