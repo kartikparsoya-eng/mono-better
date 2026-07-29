@@ -12,13 +12,21 @@
 // Expected outputs are produced ONLY here — never hand-written. The Rust engine
 // replays the same fixture and must match byte-for-byte (after canonicalization).
 
-import {readFileSync, writeFileSync, mkdirSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdirSync, existsSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// mono-v1.7 is at ../../mono-v1.7 relative to rust-ivm/agentic/oracle/
-const MONO = resolve(__dirname, '..', '..', '..', 'mono-v1.7');
+// mono root: pwd-based fallback, then walk up for a dir with packages/zql
+function findMono(fromDir) {
+  let dir = fromDir;
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(`${dir}/packages/zql/src`)) return dir;
+    dir = dirname(dir);
+  }
+  return resolve(fromDir, '..', '..', '..', 'mono-v1.7');
+}
+const MONO = findMono(__dirname);
 const ZQL = `${MONO}/packages/zql/src`;
 const ZQLITE = `${MONO}/packages/zqlite/src`;
 const SHARED = `${MONO}/packages/shared/src`;

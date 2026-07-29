@@ -389,18 +389,21 @@ function canon(v) {
 function netAdvanceFromViews(hydrate, finalView) {
   const rowKeyStr = rc => JSON.stringify({q: rc.queryId, t: rc.table, k: canon(rc.rowKey)});
 
+  // The IVM view output is a multiset: a row with children may appear once per
+  // child match. Advance semantics are net changes per row key, so collapse the
+  // multiset to the last occurrence before diffing (matches the TS oracle).
   const hydrateMap = new Map();
   for (const rc of hydrate) {
-    hydrateMap.set(rowKeyStr(rc), rc.row);
+    hydrateMap.set(rowKeyStr(rc), rc);
   }
 
   const finalMap = new Map();
   for (const rc of finalView) {
-    finalMap.set(rowKeyStr(rc), rc.row);
+    finalMap.set(rowKeyStr(rc), rc);
   }
 
   const changes = [];
-  for (const rc of hydrate) {
+  for (const rc of hydrateMap.values()) {
     if (!finalMap.has(rowKeyStr(rc))) {
       changes.push({
         changeType: 1,
@@ -412,9 +415,9 @@ function netAdvanceFromViews(hydrate, finalView) {
       });
     }
   }
-  for (const rc of finalView) {
-    const oldRow = hydrateMap.get(rowKeyStr(rc));
-    if (oldRow === undefined) {
+  for (const rc of finalMap.values()) {
+    const oldRc = hydrateMap.get(rowKeyStr(rc));
+    if (oldRc === undefined) {
       changes.push({
         changeType: 0,
         queryId: rc.queryId,
@@ -423,7 +426,7 @@ function netAdvanceFromViews(hydrate, finalView) {
         row: rc.row,
         isHidden: rc.isHidden,
       });
-    } else if (JSON.stringify(canon(oldRow)) !== JSON.stringify(canon(rc.row))) {
+    } else if (JSON.stringify(canon(oldRc.row)) !== JSON.stringify(canon(rc.row))) {
       changes.push({
         changeType: 2,
         queryId: rc.queryId,

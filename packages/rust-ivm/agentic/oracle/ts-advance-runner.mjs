@@ -9,12 +9,20 @@
 // Usage: node --experimental-strip-types agentic/oracle/ts-advance-runner.mjs \
 //              <input.json> [--out <expected.json>]
 
-import {readFileSync, writeFileSync, mkdirSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdirSync, existsSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MONO = resolve(__dirname, '..', '..', '..', 'mono-v1.7');
+function findMono(fromDir) {
+  let dir = fromDir;
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(`${dir}/packages/zql/src`)) return dir;
+    dir = dirname(dir);
+  }
+  return resolve(fromDir, '..', '..', '..', 'mono-v1.7');
+}
+const MONO = findMono(__dirname);
 const ZQL = `${MONO}/packages/zql/src`;
 const ZQLITE = `${MONO}/packages/zqlite/src`;
 const SHARED = `${MONO}/packages/shared/src`;
@@ -144,13 +152,6 @@ function buildRelInfo(fixture) {
   }
   walkAst(ast, true);
 
-  for (let i = 0; i < 10; i++) {
-    for (const [alias, info] of relToTable) {
-      relToTable.set(`${alias}_${i}`, info);
-    }
-    for (const a of hiddenAliases) hiddenAliases.add(`${a}_${i}`);
-  }
-
   const hiddenOnlyTables = new Set([...hiddenTables].filter(t => !visibleTables.has(t)));
   return {relToTable, hiddenAliases, hiddenOnlyTables};
 }
@@ -158,6 +159,10 @@ function buildRelInfo(fixture) {
 // ---------------------------------------------------------------------------
 // Flatten CaughtNode / CaughtChange trees → RowChange list
 // ---------------------------------------------------------------------------
+
+function baseAlias(name) {
+  return name.replace(/_\d+$/, '');
+}
 
 function flattenNode(node, table, pk, rels, changeType, out) {
   if (!node || !node.row) return;
@@ -170,8 +175,8 @@ function flattenNode(node, table, pk, rels, changeType, out) {
   });
   if (node.relationships) {
     for (const [relName, children] of Object.entries(node.relationships)) {
-      if (rels.hiddenAliases.has(relName)) continue;
-      const childInfo = rels.relToTable.get(relName);
+      if (rels.hiddenAliases.has(relName) || rels.hiddenAliases.has(baseAlias(relName))) continue;
+      const childInfo = rels.relToTable.get(relName) || rels.relToTable.get(baseAlias(relName));
       if (!childInfo) continue;
       for (const child of children) {
         flattenNode(child, childInfo.table, childInfo.pk, rels, changeType, out);

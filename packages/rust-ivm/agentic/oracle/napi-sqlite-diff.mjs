@@ -36,6 +36,10 @@ const ADD = 0, REMOVE = 1, EDIT = 2, CHILD = 3;
  * @param {number} changeType - ADD/REMOVE/EDIT
  * @param {object[]} out - accumulator
  */
+function baseAlias(name) {
+  return name.replace(/_\d+$/, '');
+}
+
 function flattenNode(node, table, pk, rels, changeType, out) {
   if (!node || !node.row) return;
 
@@ -56,8 +60,8 @@ function flattenNode(node, table, pk, rels, changeType, out) {
   // are client-invisible and source-order-dependent (see buildRelToTable).
   if (node.relationships) {
     for (const [relName, children] of Object.entries(node.relationships)) {
-      if (rels.hiddenAliases.has(relName)) continue;
-      const childInfo = rels.relToTable.get(relName);
+      if (rels.hiddenAliases.has(relName) || rels.hiddenAliases.has(baseAlias(relName))) continue;
+      const childInfo = rels.relToTable.get(relName) || rels.relToTable.get(baseAlias(relName));
       if (!childInfo) continue;
       for (const child of children) {
         flattenNode(child, childInfo.table, childInfo.pk, rels, changeType, out);
@@ -124,20 +128,6 @@ function buildRelToTable(fixture) {
     })(node.where);
   }
   walkAst(ast, true);
-
-  // Also add uniquified variants (zsubq_t1 → zsubq_t1_0, zsubq_t1_1, ...)
-  // The builder's uniquify_correlated_subquery_aliases appends _N suffixes
-  // to aliases in AND/OR conditions. We can't predict N, so add _0.._9.
-  const extras = new Map();
-  for (const [alias, info] of relToTable) {
-    for (let i = 0; i < 10; i++) {
-      extras.set(`${alias}_${i}`, info);
-    }
-  }
-  for (const [k, v] of extras) relToTable.set(k, v);
-  for (const a of [...hiddenAliases]) {
-    for (let i = 0; i < 10; i++) hiddenAliases.add(`${a}_${i}`);
-  }
 
   // Tables reachable ONLY through a hidden EXISTS alias (never as root/related).
   const hiddenOnlyTables = new Set(
