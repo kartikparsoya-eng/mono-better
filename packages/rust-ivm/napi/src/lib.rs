@@ -594,9 +594,37 @@ impl RustIvmEngine {
         })
     }
 
+    /// Initialize ONLY the snapshotter (replica.db connection) so that
+    /// `read_query` works before `init` is called. This solves the
+    /// chicken-and-egg: the driver needs to read schema from replica.db
+    /// (via read_query) to build table specs for `init`, but `init` is
+    /// what normally creates the snapshotter.
+    ///
+    /// Call this FIRST, then `computeZqlSpecs` via `read_query`, then `init`.
+    /// `init` will skip snapshotter creation if this already did it.
+    #[napi]
+    pub fn init_snapshotter(
+        &self,
+        db_path: String,
+        app_id: String,
+    ) -> Result<()> {
+        self.handle.call(move |state| -> std::result::Result<(), String> {
+            if state.snapshotter.is_some() {
+                return Ok(()); // already initialized
+            }
+            let mut snap = Snapshotter::new(&db_path, &app_id, None);
+            snap.init().map_err(|e| format!("snapshotter init: {}", e))?;
+            eprintln!("[rust-ivm] snapshotter pre-initialized at version {}", snap.current_version().unwrap_or("?"));
+            state.snapshotter = Some(snap);
+            Ok(())
+        })?.map_err(NapiError::from_reason)
+    }
+
     /// Initialize the engine with table schemas and optional SQLite db_path.
     /// When db_path is provided, creates TableSource instances backed by SQLite.
     /// When no db_path, creates MemorySource instances (test/dev mode).
+    /// If `init_snapshotter` was called first, the existing snapshotter is
+    /// reused (its interrupt handle is still registered below).
     #[napi]
     pub fn init(
         &self,
@@ -611,11 +639,19 @@ impl RustIvmEngine {
         if let Some(ref mut eng) = state.engine {
             eng.destroy();
         }
+        // Preserve the snapshotter if init_snapshotter was called first.
+        let preserved_snap = state.snapshotter.take();
         *state = EngineState::default();
+        state.snapshotter = preserved_snap;
         // N1: clear the interrupt-handle registry on (re)init — the old
         // connections are gone (cleared by EngineState::default above). New
         // connections push fresh handles below.
-        interrupt_handles.lock().unwrap().clear();
+        // But preserve the snapshotter's interrupt handle if it was pre-initialized.
+        let preserved_handles: Vec<_> = interrupt_handles.lock().unwrap().drain(..).collect();
+        // Re-add handles that belong to the preserved snapshotter (if any).
+        // The snapshotter's handle was already taken by init_snapshotter, so
+        // we just clear here; init() will re-register it below.
+        let _ = preserved_handles;
 
         let mut primary_keys = HashMap::new();
 
@@ -707,29 +743,32 @@ impl RustIvmEngine {
         state.primary_keys = primary_keys;
 
         if let Some(ref path) = db_path {
-            let mut snap = Snapshotter::new(path, &app_id, None);
-            match snap.init() {
-                Ok(()) => {
-                    eprintln!("[rust-ivm] snapshotter initialized at version {}", snap.current_version().unwrap_or("?"));
-                    // Point every TableSource at the snapshotter's CURR (pinned
-                    // at head) connection, so all reads share the snapshot the
-                    // engine advances over — instead of each source floating on
-                    // its own head-latest connection (the source-drift cause).
-                    if let Ok(curr) = snap.current_conn() {
-                        for source in state.sources.values() {
-                            source.borrow_mut().set_snapshot_db(curr.clone());
-                        }
+            if state.snapshotter.is_none() {
+                let mut snap = Snapshotter::new(path, &app_id, None);
+                match snap.init() {
+                    Ok(()) => {
+                        eprintln!("[rust-ivm] snapshotter initialized at version {}", snap.current_version().unwrap_or("?"));
+                        state.snapshotter = Some(snap);
                     }
-                    // N1: register the snapshot connection's interrupt handle
-                    // with the EngineHandle so cancel()/watchdog can hard-abort
-                    // a slow snapshot read mid-flight.
+                    Err(e) => {
+                        eprintln!("[rust-ivm] snapshotter init failed (non-fatal): {}", e);
+                    }
+                }
+            }
+            // Point every TableSource at the snapshotter's CURR (pinned
+            // at head) connection, so all reads share the snapshot the
+            // engine advances over.
+            if let Some(ref snap) = state.snapshotter {
+                if let Ok(curr) = snap.current_conn() {
+                    for source in state.sources.values() {
+                        source.borrow_mut().set_snapshot_db(curr.clone());
+                    }
+                }
+                // N1: register the snapshot connection's interrupt handle.
+                if let Some(ref mut snap) = state.snapshotter {
                     if let Some(h) = snap.take_current_interrupt_handle() {
                         interrupt_handles.lock().unwrap().push(h);
                     }
-                    state.snapshotter = Some(snap);
-                }
-                Err(e) => {
-                    eprintln!("[rust-ivm] snapshotter init failed (non-fatal): {}", e);
                 }
             }
             eprintln!("[rust-ivm] sources initialized (db_path={})", path);

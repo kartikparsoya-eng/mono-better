@@ -388,6 +388,14 @@ export class RustIVMDriver {
   }
 
   #initAndResetCommon(clientSchema: ClientSchema) {
+    // Initialize the Rust snapshotter FIRST so read_query works for
+    // computeZqlSpecs and getSubscriptionState below. This solves the
+    // chicken-and-egg: init() needs table specs from the schema, but
+    // reading the schema needs the snapshotter.
+    if (this.#replicaFile) {
+      this.#engine.initSnapshotter(this.#replicaFile, this.#shardID.appID);
+    }
+
     const runner = this.#runner();
     const fullTables = new Map<string, unknown>();
     computeZqlSpecs(
