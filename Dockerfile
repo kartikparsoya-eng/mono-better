@@ -112,6 +112,8 @@ RUN pnpm add -w tsx@4
 
 # Required/sane defaults — DO NOT ask Shivral to remember these.
 ENV USE_RUST_IVM=true
+ENV RUST_IVM_PARALLEL_HYDRATE=1
+ENV RUST_IVM_HYDRATE_LANES=2
 ENV UV_THREADPOOL_SIZE=16
 ENV ZERO_IN_CONTAINER=1
 ENV ZERO_LOG_FORMAT=json
