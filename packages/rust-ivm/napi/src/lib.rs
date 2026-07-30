@@ -1435,7 +1435,7 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::F64(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap_or_else(|| 0.into())),
         Value::Str(s) => serde_json::Value::String(s.to_string()),
-        Value::Json(j) => serde_json::Value::String(j.to_string()),
+        Value::Json(j) => serde_json::from_str(j).unwrap_or(serde_json::Value::String(j.to_string())),
     }
 }
 
