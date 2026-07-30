@@ -142,12 +142,12 @@ fn hydrate_cp_ids(path: &str, pool_lanes: usize, ast: Ast) -> Vec<String> {
             ast,
         }],
         |rc: &RowChange| {
-            if rc.table == "channel_participants" && !rc.is_hidden {
-                if let Some(row) = rc.row.as_ref() {
-                    if let Some(rust_ivm::ivm::data::Value::Str(v)) = row.get("id") {
-                        ids.push(v.to_string());
-                    }
-                }
+            if rc.table == "channel_participants"
+                && !rc.is_hidden
+                && let Some(row) = rc.row.as_ref()
+                && let Some(rust_ivm::ivm::data::Value::Str(v)) = row.get("id")
+            {
+                ids.push(v.to_string());
             }
         },
     );
