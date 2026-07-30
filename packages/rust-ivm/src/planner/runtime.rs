@@ -1,0 +1,103 @@
+//! Runtime planner entry (DESIGN: `#planAstForRust`, steps 3-4).
+//!
+//! `plan_ast_flips` runs the ported plan graph against a cost model backed by
+//! the actor's pinned snapshot connection, and returns the ordered `flip`
+//! decisions the TS driver applies to its own AST (no AST re-serialization).
+//!
+//! ## Cost model
+//! `create_snapshot_cost_model` is the row-count + constraint-aware model:
+//!   - unconstrained read  → the table's row count (an unindexed full scan),
+//!   - constrained read    → ~1 row (an indexed key seek),
+//!   - fanout              → 1.0 / `none` confidence.
+//! This is the SAME shape the differential oracle (`planner_oracle_test`) proves
+//! matches TS `planQuery`'s flip decisions — here fed REAL table sizes from the
+//! replica. (A scanstatus-exact model — TS `createSQLiteCostModel` — is a future
+//! refinement for byte-exact cost parity; it needs `SQLITE_ENABLE_STMT_SCANSTATUS`
+//! in the build and is image-only-testable. The plan graph is identical either
+//! way; only the numbers fed in differ.)
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
+
+use crate::builder::ast::{Ast, Condition};
+use crate::ivm::data::Value;
+use crate::planner::{plan_query, Confidence, ConnectionCostModel, CostModelCost, FanoutEst};
+
+/// A cost model backed by a live SQLite connection (the pinned snapshot). Table
+/// row counts are read once and memoised for the duration of one plan.
+pub fn create_snapshot_cost_model(conn: Rc<RefCell<rusqlite::Connection>>) -> ConnectionCostModel {
+    let counts: Rc<RefCell<HashMap<String, f64>>> = Rc::new(RefCell::new(HashMap::new()));
+    Rc::new(
+        move |table: &str,
+              _sort: &[(String, String)],
+              _filters: Option<&Condition>,
+              constraint: Option<&BTreeMap<String, Option<Value>>>| {
+            let rows = if constraint.is_some() {
+                // Indexed key seek — a handful of rows; model as ~1.
+                1.0
+            } else {
+                let mut cache = counts.borrow_mut();
+                *cache.entry(table.to_string()).or_insert_with(|| {
+                    row_count(&conn.borrow(), table).unwrap_or(1000.0)
+                })
+            };
+            CostModelCost {
+                startup_cost: 1.0,
+                rows,
+                fanout: Rc::new(|_cols: &[String]| FanoutEst {
+                    fanout: 1.0,
+                    confidence: Confidence::None,
+                }),
+            }
+        },
+    )
+}
+
+fn row_count(conn: &rusqlite::Connection, table: &str) -> Option<f64> {
+    let sql = format!("SELECT COUNT(*) FROM \"{}\"", table.replace('"', "\"\""));
+    conn.query_row(&sql, [], |r| r.get::<_, i64>(0)).ok().map(|n| n as f64)
+}
+
+/// Plan `ast_json` (TS-shape) with `cost_model` and return the ordered `flip`
+/// decisions (canonical traversal — see [`flip_order`]). The TS driver walks its
+/// own AST in the same order and sets `flip` per position.
+pub fn plan_ast_flips(
+    ast_json: &serde_json::Value,
+    cost_model: ConnectionCostModel,
+) -> Vec<Option<bool>> {
+    let ast = crate::replay::json_to_ast(ast_json);
+    let planned = plan_query(&ast, cost_model);
+    flip_order(&planned)
+}
+
+/// Ordered `flip` extraction: WHERE conditions pre-order (recursing into each
+/// correlated subquery's own where), then the `related` subqueries in order.
+/// The TS driver's `applyFlips` MUST use this exact order.
+pub fn flip_order(ast: &Ast) -> Vec<Option<bool>> {
+    let mut flips = Vec::new();
+    if let Some(ref where_clause) = ast.where_clause {
+        flip_order_condition(where_clause, &mut flips);
+    }
+    for csq in &ast.related {
+        flips.append(&mut flip_order(&csq.subquery));
+    }
+    flips
+}
+
+fn flip_order_condition(condition: &Condition, flips: &mut Vec<Option<bool>>) {
+    match condition {
+        Condition::Simple(_) => {}
+        Condition::CorrelatedSubquery(csq) => {
+            flips.push(csq.flip);
+            if let Some(ref sub_where) = csq.related.subquery.where_clause {
+                flip_order_condition(sub_where, flips);
+            }
+        }
+        Condition::And(conds) | Condition::Or(conds) => {
+            for c in conds {
+                flip_order_condition(c, flips);
+            }
+        }
+    }
+}

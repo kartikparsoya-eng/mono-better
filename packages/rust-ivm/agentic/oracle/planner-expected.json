@@ -1,0 +1,53 @@
+[
+  {
+    "name": "single_exists_flip_when_child_smaller",
+    "flips": [
+      true
+    ]
+  },
+  {
+    "name": "single_exists_no_flip_when_child_larger",
+    "flips": [
+      false
+    ]
+  },
+  {
+    "name": "not_exists_never_flips",
+    "flips": [
+      false
+    ]
+  },
+  {
+    "name": "explicit_flip_true_preserved",
+    "flips": [
+      true
+    ]
+  },
+  {
+    "name": "explicit_flip_false_preserved",
+    "flips": [
+      false
+    ]
+  },
+  {
+    "name": "multiple_exists_mixed_sizes",
+    "flips": [
+      true,
+      false
+    ]
+  },
+  {
+    "name": "nested_exists_flip",
+    "flips": [
+      true,
+      true
+    ]
+  },
+  {
+    "name": "or_with_two_csq",
+    "flips": [
+      true,
+      true
+    ]
+  }
+]

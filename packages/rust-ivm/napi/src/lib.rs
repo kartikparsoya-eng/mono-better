@@ -341,8 +341,10 @@ enum TsCondition {
     CorrelatedSubquery {
         related: TsCorrelatedSubquery,
         op: String,
+        // Tri-state (matches TS `flip?: boolean`): None = planner decides,
+        // Some(true) = force flip, Some(false) = force no-flip.
         #[serde(default)]
-        flip: bool,
+        flip: Option<bool>,
         #[serde(default)]
         scalar: bool,
     },
@@ -445,6 +447,7 @@ fn convert_condition(c: TsCondition) -> rust_ivm::builder::ast::Condition {
                 op,
                 flip,
                 scalar,
+                plan_id: None,
             })
         }
     }
@@ -894,6 +897,37 @@ impl RustIvmEngine {
             state.all_table_names.clear();
             state.poisoned = false;
         })
+    }
+
+    /// Query planner (`#planAstForRust`): plan `ast_json` (TS-shape) with a cost
+    /// model backed by the pinned snapshot connection, and return the ordered
+    /// `flip` decisions as a JSON array (`true`/`false`/`null`). The TS driver
+    /// walks its own AST in the same order (WHERE pre-order then `related`) and
+    /// sets `flip` per position. Reaching parity with zero 1.7's default-on
+    /// planner (which is disabled on the Rust single-owner path); ships behind
+    /// the driver's `enablePlanner` flag. Returns `[]` if no snapshot yet.
+    #[napi]
+    pub fn plan_ast(&self, ast_json: String) -> Result<String> {
+        self.handle
+            .call(move |state| -> std::result::Result<String, String> {
+                let ast_value: serde_json::Value = serde_json::from_str(&ast_json)
+                    .map_err(|e| format!("plan_ast parse: {}", e))?;
+                let conn = match state.snapshotter.as_ref().and_then(|s| s.current_conn().ok()) {
+                    Some(c) => c,
+                    None => return Ok("[]".to_string()),
+                };
+                let model = rust_ivm::planner::create_snapshot_cost_model(conn);
+                let flips = rust_ivm::planner::plan_ast_flips(&ast_value, model);
+                let arr: Vec<serde_json::Value> = flips
+                    .iter()
+                    .map(|f| match f {
+                        Some(b) => serde_json::Value::Bool(*b),
+                        None => serde_json::Value::Null,
+                    })
+                    .collect();
+                serde_json::to_string(&arr).map_err(|e| format!("plan_ast serialize: {}", e))
+            })?
+            .map_err(NapiError::from_reason)
     }
 
     /// Run a read-only SQL query against the snapshotter's current connection

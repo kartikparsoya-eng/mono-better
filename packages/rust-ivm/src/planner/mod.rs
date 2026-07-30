@@ -18,7 +18,9 @@ pub mod fan_in;
 pub mod terminus;
 pub mod graph;
 pub mod builder;
+pub mod runtime;
 
+pub use runtime::{create_snapshot_cost_model, flip_order, plan_ast_flips};
 pub use builder::{build_plan_graph, plan_query, apply_plans_to_ast, Plans};
 pub use connection::{ConnectionCostModel, CostModelCost};
 pub use node::{FanoutCostModel, FanoutEst, Confidence};

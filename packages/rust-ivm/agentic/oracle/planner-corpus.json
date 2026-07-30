@@ -1,0 +1,161 @@
+[
+  {
+    "name": "single_exists_flip_when_child_smaller",
+    "tableCosts": {"parent": 1000, "child": 10},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "correlatedSubquery",
+        "op": "EXISTS",
+        "related": {
+          "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+          "subquery": {"table": "child", "alias": "child"}
+        }
+      }
+    }
+  },
+  {
+    "name": "single_exists_no_flip_when_child_larger",
+    "tableCosts": {"parent": 100, "child": 1000},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "correlatedSubquery",
+        "op": "EXISTS",
+        "related": {
+          "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+          "subquery": {"table": "child", "alias": "child"}
+        }
+      }
+    }
+  },
+  {
+    "name": "not_exists_never_flips",
+    "tableCosts": {"parent": 1000, "child": 10},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "correlatedSubquery",
+        "op": "NOT EXISTS",
+        "related": {
+          "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+          "subquery": {"table": "child", "alias": "child"}
+        }
+      }
+    }
+  },
+  {
+    "name": "explicit_flip_true_preserved",
+    "tableCosts": {"parent": 100, "child": 1000},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "correlatedSubquery",
+        "op": "EXISTS",
+        "flip": true,
+        "related": {
+          "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+          "subquery": {"table": "child", "alias": "child"}
+        }
+      }
+    }
+  },
+  {
+    "name": "explicit_flip_false_preserved",
+    "tableCosts": {"parent": 1000, "child": 10},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "correlatedSubquery",
+        "op": "EXISTS",
+        "flip": false,
+        "related": {
+          "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+          "subquery": {"table": "child", "alias": "child"}
+        }
+      }
+    }
+  },
+  {
+    "name": "multiple_exists_mixed_sizes",
+    "tableCosts": {"parent": 1000, "small": 5, "big": 5000},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "and",
+        "conditions": [
+          {
+            "type": "correlatedSubquery",
+            "op": "EXISTS",
+            "related": {
+              "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+              "subquery": {"table": "small", "alias": "small"}
+            }
+          },
+          {
+            "type": "correlatedSubquery",
+            "op": "EXISTS",
+            "related": {
+              "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+              "subquery": {"table": "big", "alias": "big"}
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "nested_exists_flip",
+    "tableCosts": {"parent": 1000, "child": 500, "grandchild": 3},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "correlatedSubquery",
+        "op": "EXISTS",
+        "related": {
+          "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+          "subquery": {
+            "table": "child",
+            "alias": "child",
+            "where": {
+              "type": "correlatedSubquery",
+              "op": "EXISTS",
+              "related": {
+                "correlation": {"parentField": ["id"], "childField": ["child_id"]},
+                "subquery": {"table": "grandchild", "alias": "grandchild"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "or_with_two_csq",
+    "tableCosts": {"parent": 1000, "a": 8, "b": 12},
+    "ast": {
+      "table": "parent",
+      "where": {
+        "type": "or",
+        "conditions": [
+          {
+            "type": "correlatedSubquery",
+            "op": "EXISTS",
+            "related": {
+              "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+              "subquery": {"table": "a", "alias": "a"}
+            }
+          },
+          {
+            "type": "correlatedSubquery",
+            "op": "EXISTS",
+            "related": {
+              "correlation": {"parentField": ["id"], "childField": ["parent_id"]},
+              "subquery": {"table": "b", "alias": "b"}
+            }
+          }
+        ]
+      }
+    }
+  }
+]

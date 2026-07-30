@@ -283,6 +283,7 @@ export class RustIVMDriver {
   readonly #storage: ClientGroupStorage;
   readonly #config: ZeroConfig | undefined;
   readonly #replicaFile: string;
+  readonly #planEnabled: boolean = false;
   readonly #tableSpecs = new Map<string, LiteAndZqlSpec>();
   readonly #allTableNames = new Set<string>();
   readonly #primaryKeys = new Map<string, PrimaryKey>();
@@ -317,7 +318,12 @@ export class RustIVMDriver {
     this.#storage = storage;
     this.#config = config;
     this.#replicaFile = replicaFile ?? '';
-    void enablePlanner; // cost model disabled for single-owner
+    // Query planner (#planAstForRust): runs the Rust-ported plan graph over a
+    // cost model backed by the Rust-owned snapshot connection, annotating
+    // `flip` on OR-with-CSQ conditions (parity with zero 1.7's default-on
+    // planner). Ships DARK: requires config.enableQueryPlanner AND an explicit
+    // env opt-in until validated in ART.
+    this.#planEnabled = enablePlanner === true && process.env.RUST_IVM_PLANNER === '1';
   }
 
   // Single-owner design: the Rust engine exclusively owns replica.db's
@@ -519,11 +525,30 @@ export class RustIVMDriver {
   }
 
   #planAst(ast: AST): AST {
-    return completeOrdering(
+    const ordered = completeOrdering(
       ast,
       tableName =>
         must(this.#primaryKeys.get(tableName), `no primary key for table '${tableName}'`),
     );
+    if (!this.#planEnabled) {
+      return ordered;
+    }
+    // Ask the Rust engine for the flip decisions (cost model on the snapshot
+    // connection), then apply them to our AST in the SAME canonical order the
+    // Rust side used (WHERE pre-order, recursing into each subquery's where,
+    // then `related`). Never fail hydration on a planner hiccup — fall back to
+    // the un-flipped ordering.
+    try {
+      const flips: (boolean | null)[] = JSON.parse(
+        this.#engine.planAst(JSON.stringify(ordered)),
+      );
+      const i = {n: 0};
+      const flipped = applyFlips(ordered, flips, i);
+      return i.n === flips.length ? flipped : ordered;
+    } catch (e) {
+      this.#lc.warn?.('rust planner failed; using unplanned AST', e);
+      return ordered;
+    }
   }
 
   async *#addQueryImpl(
@@ -823,5 +848,53 @@ export class RustIVMDriver {
     if (aborted) {
       this.#lc.warn?.(`advanceToHead: aborted after ${count} changes (budget exceeded)`);
     }
+  }
+}
+
+// -- Rust planner flip application -----------------------------------------
+// Applies the Rust planner's ordered `flip` decisions to an AST, walking in the
+// SAME order the Rust side emits them (see planner::flip_order): WHERE
+// conditions pre-order (recursing into each correlated subquery's own where),
+// then `related` subqueries. `i.n` is a shared cursor into the flip list.
+
+type PlanCond = NonNullable<AST['where']>;
+
+function applyFlips(ast: AST, flips: (boolean | null)[], i: {n: number}): AST {
+  const where = ast.where ? applyFlipsCond(ast.where, flips, i) : ast.where;
+  const related = ast.related?.map(csq => ({
+    ...csq,
+    subquery: applyFlips(csq.subquery, flips, i),
+  }));
+  return {...ast, where, related};
+}
+
+function applyFlipsCond(
+  cond: PlanCond,
+  flips: (boolean | null)[],
+  i: {n: number},
+): PlanCond {
+  switch (cond.type) {
+    case 'simple':
+      return cond;
+    case 'correlatedSubquery': {
+      const flip = flips[i.n++];
+      const subWhere = cond.related.subquery.where;
+      const subquery = subWhere
+        ? {...cond.related.subquery, where: applyFlipsCond(subWhere, flips, i)}
+        : cond.related.subquery;
+      return {
+        ...cond,
+        flip: flip === null ? undefined : flip,
+        related: {...cond.related, subquery},
+      };
+    }
+    case 'and':
+    case 'or':
+      return {
+        ...cond,
+        conditions: cond.conditions.map(c => applyFlipsCond(c, flips, i)),
+      };
+    default:
+      return cond;
   }
 }
