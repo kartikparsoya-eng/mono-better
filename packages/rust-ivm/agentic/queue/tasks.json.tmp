@@ -13427,6 +13427,86 @@
    "type": "fix-divergence",
    "source": "agentic/fixtures/regressions/napi-seed-54484.input.json",
    "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 54484, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-54484.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-57847",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-57847.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 57847, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-57847.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-58690",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-58690.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 58690, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-58690.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-59282",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-59282.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 59282, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-59282.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-59285",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-59285.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 59285, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-59285.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-60762",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-60762.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 60762, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-60762.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-61070",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-61070.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 61070, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-61070.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-61305",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-61305.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 61305, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-61305.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-61615",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-61615.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 61615, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-61615.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-62183",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-62183.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 62183, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-62183.input.json vs .expected.json. First diff: "
+  },
+  {
+   "state": "pending",
+   "attempts": 0,
+   "id": "napi-divergence-seed-62627",
+   "type": "fix-divergence",
+   "source": "agentic/fixtures/regressions/napi-seed-62627.input.json",
+   "instructions": "NAPI/TableSource differential fuzzer found a divergence (seed 62627, kind diverged). This is at the napi boundary, NOT the core engine. Repro: agentic/fixtures/regressions/napi-seed-62627.input.json vs .expected.json. First diff: "
   }
  ]
 }
