@@ -51,12 +51,18 @@ fn s(v: &str) -> rust_ivm::ivm::data::Value {
 fn simple(col: &str, op: &str, val: rust_ivm::ivm::data::Value) -> Condition {
     Condition::Simple(SimpleCondition {
         op: op.to_string(),
-        left: ValuePosition::Column { name: col.to_string() },
+        left: ValuePosition::Column {
+            name: col.to_string(),
+        },
         right: ValuePosition::Literal { value: val },
     })
 }
 
-fn participants_rel(alias: &str, where_clause: Option<Condition>, limit: Option<usize>) -> RelatedSubquery {
+fn participants_rel(
+    alias: &str,
+    where_clause: Option<Condition>,
+    limit: Option<usize>,
+) -> RelatedSubquery {
     RelatedSubquery {
         subquery: Box::new(Ast {
             table: "channel_participants".to_string(),
@@ -89,21 +95,37 @@ fn hydrate_cp_ids(path: &str, pool_lanes: usize, ast: Ast) -> Vec<String> {
 
     let ch_cols: HashMap<String, ColumnType> = [
         ("id".to_string(), ColumnType::String { optional: false }),
-        ("visibility".to_string(), ColumnType::String { optional: false }),
+        (
+            "visibility".to_string(),
+            ColumnType::String { optional: false },
+        ),
     ]
     .into_iter()
     .collect();
     let cp_cols: HashMap<String, ColumnType> = [
         ("id".to_string(), ColumnType::String { optional: false }),
-        ("channelId".to_string(), ColumnType::String { optional: false }),
+        (
+            "channelId".to_string(),
+            ColumnType::String { optional: false },
+        ),
         ("userId".to_string(), ColumnType::String { optional: false }),
         ("role".to_string(), ColumnType::String { optional: false }),
     ]
     .into_iter()
     .collect();
 
-    let mut ch_src = TableSource::new(curr_conn.clone(), "channels", ch_cols, vec!["id".to_string()]);
-    let mut cp_src = TableSource::new(curr_conn.clone(), "channel_participants", cp_cols, vec!["id".to_string()]);
+    let mut ch_src = TableSource::new(
+        curr_conn.clone(),
+        "channels",
+        ch_cols,
+        vec!["id".to_string()],
+    );
+    let mut cp_src = TableSource::new(
+        curr_conn.clone(),
+        "channel_participants",
+        cp_cols,
+        vec!["id".to_string()],
+    );
     if pool_lanes > 0 {
         ch_src.set_read_pool(snap.read_pool());
         cp_src.set_read_pool(snap.read_pool());
@@ -114,15 +136,21 @@ fn hydrate_cp_ids(path: &str, pool_lanes: usize, ast: Ast) -> Vec<String> {
     eng.register_source(Rc::new(RefCell::new(cp_src)));
 
     let mut ids: Vec<String> = Vec::new();
-    eng.add_queries_streaming(&[QuerySpec { query_id: "q".into(), ast }], |rc: &RowChange| {
-        if rc.table == "channel_participants" && !rc.is_hidden {
-            if let Some(row) = rc.row.as_ref() {
-                if let Some(rust_ivm::ivm::data::Value::Str(v)) = row.get("id") {
-                    ids.push(v.to_string());
+    eng.add_queries_streaming(
+        &[QuerySpec {
+            query_id: "q".into(),
+            ast,
+        }],
+        |rc: &RowChange| {
+            if rc.table == "channel_participants" && !rc.is_hidden {
+                if let Some(row) = rc.row.as_ref() {
+                    if let Some(rust_ivm::ivm::data::Value::Str(v)) = row.get("id") {
+                        ids.push(v.to_string());
+                    }
                 }
             }
-        }
-    });
+        },
+    );
     ids
 }
 
@@ -142,7 +170,10 @@ fn check(label: &str, path: &str, make_ast: impl Fn() -> Ast) {
     parallel.sort();
     eprintln!("[{label}] serial={serial:?} parallel={parallel:?}");
     assert_eq!(serial, parallel, "[{label}] parallel must match serial");
-    assert!(serial.contains(&"cp0".to_string()), "[{label}] cp0 (position-0/me) MUST be present, got {serial:?}");
+    assert!(
+        serial.contains(&"cp0".to_string()),
+        "[{label}] cp0 (position-0/me) MUST be present, got {serial:?}"
+    );
 }
 
 // B: channels.related('participants')  -> expect all 4 incl cp0
@@ -151,7 +182,10 @@ fn repro_sql_b_related_only() {
     let path = "/tmp/rust-ivm-repro-cp-b.db";
     create_replica(path);
     check("B related", path, || {
-        channels_related_ast(participants_rel("participants", None, None), Some(simple("id", "=", s("ch1"))))
+        channels_related_ast(
+            participants_rel("participants", None, None),
+            Some(simple("id", "=", s("ch1"))),
+        )
     });
 }
 
@@ -162,7 +196,11 @@ fn repro_sql_d_my_membership_one() {
     create_replica(path);
     check("D my-membership .one()", path, || {
         channels_related_ast(
-            participants_rel("participants", Some(simple("userId", "=", s("me"))), Some(1usize)),
+            participants_rel(
+                "participants",
+                Some(simple("userId", "=", s("me"))),
+                Some(1usize),
+            ),
             Some(simple("id", "=", s("ch1"))),
         )
     });
@@ -175,7 +213,11 @@ fn repro_sql_c_exists_plus_related() {
     create_replica(path);
     check("C exists+related", path, || {
         let exists = Condition::CorrelatedSubquery(CorrelatedSubqueryCondition {
-            related: participants_rel("zsubq_participants", Some(simple("userId", "=", s("me"))), None),
+            related: participants_rel(
+                "zsubq_participants",
+                Some(simple("userId", "=", s("me"))),
+                None,
+            ),
             op: "EXISTS".to_string(),
             flip: Some(false),
             scalar: false,
