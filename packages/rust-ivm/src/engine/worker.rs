@@ -228,7 +228,7 @@ impl<T: Send + 'static, E: Send + 'static> ParallelJob<T, E> {
             // remaining channels to unblock workers, and return the error
             // after the scope joins.
             let mut first_err: Option<ParallelError<E>> = None;
-                    #[allow(clippy::needless_range_loop)]
+            #[allow(clippy::needless_range_loop)]
             'emit: for idx in 0..n {
                 if scope_for_actor.aborted() {
                     break 'emit;
@@ -266,9 +266,10 @@ impl<T: Send + 'static, E: Send + 'static> ParallelJob<T, E> {
             }
             // Capture the error before `err_rx` drops at scope end.
             if first_err.is_none()
-                && let Ok(e) = err_rx.try_recv() {
-                    first_err = Some(e);
-                }
+                && let Ok(e) = err_rx.try_recv()
+            {
+                first_err = Some(e);
+            }
             first_err
         });
 

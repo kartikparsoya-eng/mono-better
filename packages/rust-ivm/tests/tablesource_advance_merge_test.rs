@@ -19,9 +19,9 @@ use rust_ivm::ivm::change::{
     make_source_change_add, make_source_change_edit, make_source_change_remove,
 };
 use rust_ivm::ivm::data::Value;
+use rust_ivm::ivm::operator::Input;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
-use rust_ivm::ivm::operator::Input;
 use rust_ivm::ivm::stream::StreamItem;
 
 fn clean_db(path: &str) {

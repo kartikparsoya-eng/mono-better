@@ -12,9 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::builder::ast::{
-    Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery,
-};
+use crate::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use crate::builder::filter::{create_predicate, create_simple_predicate, transform_filters};
 use crate::ivm::cap::Cap;
 use crate::ivm::data::{Row, SortOrder};
@@ -77,9 +75,10 @@ fn build_pipeline_internal(
 
     // Validate NOT EXISTS if not enabled
     if !delegate.enable_not_exists()
-        && let Some(ref where_clause) = ast.where_clause {
-            assert_no_not_exists(where_clause);
-        }
+        && let Some(ref where_clause) = ast.where_clause
+    {
+        assert_no_not_exists(where_clause);
+    }
 
     // Uniquify correlated subquery aliases: each CSQ gets alias + "_" + counter.
     // Port of TS uniquifyCorrelatedSubqueryConditionAliases (builder.ts:763).

@@ -211,22 +211,23 @@ impl Streamer {
             // Use rel_order for deterministic iteration order.
             for rel_name in &node.rel_order {
                 if let Some(rel_fn) = node.relationships.get(rel_name)
-                    && let Some(child_schema) = schema.relationships.get(rel_name) {
-                        let stream = rel_fn();
-                        let child_hidden = hidden || is_exists_condition_rel(rel_name);
-                        // Stream children one at a time rather than collecting
-                        // the whole relationship first (TS streamNodes yields
-                        // per row). Depth-first order is unchanged.
-                        for child in crate::ivm::stream::skip_yields(stream) {
-                            self.stream_nodes(
-                                query_id,
-                                child_schema,
-                                op,
-                                std::iter::once(&child),
-                                child_hidden,
-                            );
-                        }
+                    && let Some(child_schema) = schema.relationships.get(rel_name)
+                {
+                    let stream = rel_fn();
+                    let child_hidden = hidden || is_exists_condition_rel(rel_name);
+                    // Stream children one at a time rather than collecting
+                    // the whole relationship first (TS streamNodes yields
+                    // per row). Depth-first order is unchanged.
+                    for child in crate::ivm::stream::skip_yields(stream) {
+                        self.stream_nodes(
+                            query_id,
+                            child_schema,
+                            op,
+                            std::iter::once(&child),
+                            child_hidden,
+                        );
                     }
+                }
             }
         }
     }
@@ -395,15 +396,16 @@ impl<S: StreamSink> Chunker<S> {
     /// Mark a query as done (flush remaining + emit Final).
     pub fn flush_query(&mut self, query_id: &str) {
         if let Some(ref cur) = self.current_query_id
-            && cur == query_id {
-                self.flush();
-                self.sink.send(StreamFrame::Final {
-                    chunk_index: self.chunk_index,
-                    query_id: query_id.to_string(),
-                });
-                self.chunk_index += 1;
-                self.current_query_id = None;
-            }
+            && cur == query_id
+        {
+            self.flush();
+            self.sink.send(StreamFrame::Final {
+                chunk_index: self.chunk_index,
+                query_id: query_id.to_string(),
+            });
+            self.chunk_index += 1;
+            self.current_query_id = None;
+        }
     }
 
     /// Emit the terminal Done frame.

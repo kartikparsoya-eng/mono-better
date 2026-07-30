@@ -14,9 +14,10 @@ fn translate_constraints_for_flipped_join(
     let mut translated = PlannerConstraint::new();
     for (key, value) in incoming {
         if let Some(index) = parent_keys.iter().position(|k| *k == key)
-            && let Some(child_key) = child_keys.get(index) {
-                translated.insert(child_key.to_string(), value.clone());
-            }
+            && let Some(child_key) = child_keys.get(index)
+        {
+            translated.insert(child_key.to_string(), value.clone());
+        }
     }
     if translated.is_empty() {
         None

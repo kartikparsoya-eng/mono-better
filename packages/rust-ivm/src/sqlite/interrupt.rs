@@ -254,9 +254,8 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
             }
             // Sleep to the nearest pending action (warn or abort) across all
             // entries — the monitor wakes early on register/unregister/shutdown.
-            
-            s
-                .entries
+
+            s.entries
                 .iter()
                 .filter_map(|e| {
                     if !warned.contains(&e.id) && now < e.warn_at {

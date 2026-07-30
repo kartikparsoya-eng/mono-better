@@ -18,7 +18,6 @@ pub struct Ast {
     pub start: Option<Bound>,
 }
 
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct OrderPart {
     pub column: String,

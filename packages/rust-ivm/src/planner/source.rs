@@ -1,6 +1,5 @@
 //! Planner source — port of `planner-source.ts`.
 
-
 use crate::builder::ast::Condition;
 use crate::planner::connection::{ConnectionCostModel, PlannerConnection};
 use crate::planner::constraint::PlannerConstraint;

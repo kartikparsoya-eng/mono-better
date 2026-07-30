@@ -20,9 +20,7 @@ use crate::ivm::operator::{
     Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
 };
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{
-    NodeStream, StreamItem, first as stream_first, from_vec, skip_yields,
-};
+use crate::ivm::stream::{NodeStream, StreamItem, first as stream_first, from_vec, skip_yields};
 
 const MAX_BOUND_KEY: &str = "maxBound";
 
@@ -196,7 +194,8 @@ impl Take {
                 let mut key = String::new();
                 for col in pk {
                     let v = c
-                        .get(col).cloned()
+                        .get(col)
+                        .cloned()
                         .or_else(|| row.get(col).cloned())
                         .unwrap_or(Value::Null);
                     key.push_str(&format!("{}={:?};", col, v));
@@ -260,9 +259,9 @@ impl Take {
                 .borrow()
                 .get(MAX_BOUND_KEY)
                 .and_then(|s| s.bound.clone());
-            let should_update = current_max.as_ref().is_none_or(|m| {
-                (self.compare_rows())(b, m) == CmpOrdering::Greater
-            });
+            let should_update = current_max
+                .as_ref()
+                .is_none_or(|m| (self.compare_rows())(b, m) == CmpOrdering::Greater);
             if should_update {
                 self.storage.borrow_mut().set(
                     MAX_BOUND_KEY.to_string(),
@@ -318,72 +317,71 @@ impl Take {
                 return None;
             }
             match stream.next() {
-                    Some(StreamItem::Yield) => Some(StreamItem::Yield),
-                    Some(StreamItem::Data(node)) => {
-                        *bound_c.borrow_mut() = Some(node.row.clone());
-                        let c = count_c.get() + 1;
-                        count_c.set(c);
-                        if c >= limit {
-                            let b = bound_c.borrow().clone();
-                            storage_c.borrow_mut().set(
-                                take_state_key_c.clone(),
-                                TakeState {
-                                    size: c,
-                                    bound: b.clone(),
-                                },
-                            );
-                            // Update max bound
-                            let current_max = storage_c
-                                .borrow()
-                                .get(MAX_BOUND_KEY)
-                                .and_then(|s| s.bound.clone());
-                            if let Some(ref bval) = b
-                                && current_max
-                                    .as_ref()
-                                    .is_none_or(|m| compare(bval, m) == CmpOrdering::Greater)
-                                {
-                                    storage_c.borrow_mut().set(
-                                        MAX_BOUND_KEY.to_string(),
-                                        TakeState {
-                                            size: 0,
-                                            bound: Some(bval.clone()),
-                                        },
-                                    );
-                                }
-                            persisted_c.set(true);
-                        }
-                        Some(StreamItem::Data(node))
-                    }
-                    None => {
+                Some(StreamItem::Yield) => Some(StreamItem::Yield),
+                Some(StreamItem::Data(node)) => {
+                    *bound_c.borrow_mut() = Some(node.row.clone());
+                    let c = count_c.get() + 1;
+                    count_c.set(c);
+                    if c >= limit {
                         let b = bound_c.borrow().clone();
-                        let size = count_c.get();
                         storage_c.borrow_mut().set(
                             take_state_key_c.clone(),
                             TakeState {
-                                size,
+                                size: c,
                                 bound: b.clone(),
                             },
                         );
                         // Update max bound
-                        if let Some(ref bval) = b {
-                            let current_max = storage_c
-                                .borrow()
-                                .get(MAX_BOUND_KEY)
-                                .and_then(|s| s.bound.clone());
-                            if current_max
+                        let current_max = storage_c
+                            .borrow()
+                            .get(MAX_BOUND_KEY)
+                            .and_then(|s| s.bound.clone());
+                        if let Some(ref bval) = b
+                            && current_max
                                 .as_ref()
                                 .is_none_or(|m| compare(bval, m) == CmpOrdering::Greater)
-                            {
-                                storage_c.borrow_mut().set(
-                                    MAX_BOUND_KEY.to_string(),
-                                    TakeState { size: 0, bound: b },
-                                );
-                            }
+                        {
+                            storage_c.borrow_mut().set(
+                                MAX_BOUND_KEY.to_string(),
+                                TakeState {
+                                    size: 0,
+                                    bound: Some(bval.clone()),
+                                },
+                            );
                         }
                         persisted_c.set(true);
-                        None
                     }
+                    Some(StreamItem::Data(node))
                 }
+                None => {
+                    let b = bound_c.borrow().clone();
+                    let size = count_c.get();
+                    storage_c.borrow_mut().set(
+                        take_state_key_c.clone(),
+                        TakeState {
+                            size,
+                            bound: b.clone(),
+                        },
+                    );
+                    // Update max bound
+                    if let Some(ref bval) = b {
+                        let current_max = storage_c
+                            .borrow()
+                            .get(MAX_BOUND_KEY)
+                            .and_then(|s| s.bound.clone());
+                        if current_max
+                            .as_ref()
+                            .is_none_or(|m| compare(bval, m) == CmpOrdering::Greater)
+                        {
+                            storage_c
+                                .borrow_mut()
+                                .set(MAX_BOUND_KEY.to_string(), TakeState { size: 0, bound: b });
+                        }
+                    }
+                    persisted_c.set(true);
+                    None
+                }
+            }
         }))
     }
 
@@ -906,9 +904,10 @@ impl Input for Take {
                             return None;
                         }
                         if let Some(ref h) = hidden
-                            && compare(&n.row, h) == CmpOrdering::Equal {
+                            && compare(&n.row, h) == CmpOrdering::Equal
+                        {
                             return None;
-                            }
+                        }
                         Some(crate::ivm::stream::StreamItem::Data(n))
                     }
                     crate::ivm::stream::StreamItem::Yield => {

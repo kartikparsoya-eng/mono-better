@@ -305,10 +305,9 @@ impl Output for ExistsOutput {
                             // Size > 1: filter result unchanged, forward if passing.
                             let passes = if not { size == 0 } else { size > 0 };
                             drop(exists);
-                            if passes
-                                && let Some(output) = output {
-                                    output.borrow_mut().push(change, pusher);
-                                }
+                            if passes && let Some(output) = output {
+                                output.borrow_mut().push(change, pusher);
+                            }
                         }
                     }
                     ChangeType::Remove => {
@@ -344,10 +343,9 @@ impl Output for ExistsOutput {
                             // Size > 0: filter result unchanged, forward if passing.
                             let passes = if not { size == 0 } else { size > 0 };
                             drop(exists);
-                            if passes
-                                && let Some(output) = output {
-                                    output.borrow_mut().push(change, pusher);
-                                }
+                            if passes && let Some(output) = output {
+                                output.borrow_mut().push(change, pusher);
+                            }
                         }
                     }
                     _ => {
@@ -355,10 +353,9 @@ impl Output for ExistsOutput {
                         let size = exists.fetch_size(&node);
                         let passes = if not { size == 0 } else { size > 0 };
                         drop(exists);
-                        if passes
-                            && let Some(output) = output {
-                                output.borrow_mut().push(change, pusher);
-                            }
+                        if passes && let Some(output) = output {
+                            output.borrow_mut().push(change, pusher);
+                        }
                     }
                 }
             }

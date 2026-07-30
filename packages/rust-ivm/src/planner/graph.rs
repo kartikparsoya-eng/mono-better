@@ -273,11 +273,10 @@ fn check_and_convert_fofi(graph: &mut PlannerGraph) {
             .join_indices
             .iter()
             .any(|&j_idx| graph.joins[j_idx].borrow().join_type() == JoinType::Flipped);
-        if has_flipped
-            && let Some(fi_idx) = info.fi_index {
-                graph.fan_outs[*fo_idx].borrow_mut().convert_to_ufo();
-                graph.fan_ins[fi_idx].borrow_mut().convert_to_ufi();
-            }
+        if has_flipped && let Some(fi_idx) = info.fi_index {
+            graph.fan_outs[*fo_idx].borrow_mut().convert_to_ufo();
+            graph.fan_ins[fi_idx].borrow_mut().convert_to_ufi();
+        }
     }
 }
 

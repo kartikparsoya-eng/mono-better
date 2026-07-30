@@ -2,10 +2,9 @@
 
 use std::collections::HashMap;
 
-
 use rust_ivm::builder::ast::Condition;
 use rust_ivm::builder::expression::{
-    false_val, true_val, and, cmp_eq, negate_operator, not, or, simplify_condition,
+    and, cmp_eq, false_val, negate_operator, not, or, simplify_condition, true_val,
 };
 use rust_ivm::builder::query::{Cardinality, ExistsOptions, Query, RelationshipSpec};
 use rust_ivm::builder::ttl::{DEFAULT_TTL_MS, MAX_TTL_MS, clamp_ttl, compare_ttl, parse_ttl};

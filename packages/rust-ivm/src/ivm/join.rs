@@ -321,10 +321,9 @@ impl Input for Join {
         // overlay is None during hydrate). Any miss → the exact lazy path.
         let can_batch = self.inprogress_child_change.borrow().is_none()
             && self.child.borrow().supports_parallel_leaf();
-        if can_batch
-            && let Some(stream) = self.fetch_batched_leaf(req) {
-                return stream;
-            }
+        if can_batch && let Some(stream) = self.fetch_batched_leaf(req) {
+            return stream;
+        }
         self.fetch_lazy(req)
     }
 }

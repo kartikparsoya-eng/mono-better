@@ -23,9 +23,7 @@ use crate::ivm::change::{
 use crate::ivm::constraint::{Constraint, constraint_matches_primary_key, constraint_matches_row};
 use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
 use crate::ivm::filter_push::filter_push;
-use crate::ivm::operator::{
-    Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::{SourceSchema, System};
 use crate::ivm::stream::{NodeStream, StreamItem, empty_stream, from_vec};
 
@@ -767,9 +765,10 @@ impl Input for SourceInput {
                     Err(_) => continue,
                 };
                 if let Some(pred) = &conn.filter_predicate
-                    && !pred(&row) {
-                        continue;
-                    }
+                    && !pred(&row)
+                {
+                    continue;
+                }
                 rows.push(row);
             }
 
@@ -792,9 +791,10 @@ impl Input for SourceInput {
                 // SQLite query + fetch applied (its value may have changed).
                 let passes = |r: &Row| -> bool {
                     if let Some(c) = &req.constraint
-                        && !constraint_matches_row(c, r) {
-                            return false;
-                        }
+                        && !constraint_matches_row(c, r)
+                    {
+                        return false;
+                    }
                     if !req.multi_constraints.is_empty()
                         && !crate::ivm::constraint::row_matches_multi_constraints(
                             &req.multi_constraints,
@@ -804,9 +804,10 @@ impl Input for SourceInput {
                         return false;
                     }
                     if let Some(pred) = &conn.filter_predicate
-                        && !pred(r) {
-                            return false;
-                        }
+                        && !pred(r)
+                    {
+                        return false;
+                    }
                     if let Some(start) = &req.start {
                         let cmp = &conn.compare_rows;
                         let sr = &start.row;
@@ -868,9 +869,10 @@ impl Input for SourceInput {
             data.iter()
                 .filter(|r| {
                     if let Some(constraint) = &req.constraint
-                        && !constraint_matches_row(constraint, r) {
-                            return false;
-                        }
+                        && !constraint_matches_row(constraint, r)
+                    {
+                        return false;
+                    }
                     if !req.multi_constraints.is_empty()
                         && !crate::ivm::constraint::row_matches_multi_constraints(
                             &req.multi_constraints,
@@ -880,9 +882,10 @@ impl Input for SourceInput {
                         return false;
                     }
                     if let Some(predicate) = &conn.filter_predicate
-                        && !predicate(r) {
-                            return false;
-                        }
+                        && !predicate(r)
+                    {
+                        return false;
+                    }
                     true
                 })
                 .cloned()
@@ -1009,14 +1012,13 @@ pub(crate) fn compute_index_compare(
         .map(|c| constraint_matches_primary_key(c, primary_key))
         .unwrap_or(false);
     let append_requested = primary_key.len() > 1 || effective_pk_constraint.is_none() || !pk_match;
-    if append_requested
-        && let Some(s) = conn_sort {
-            for p in s.iter() {
-                if index_sort.iter().all(|existing| existing[0] != p[0]) {
-                    index_sort.push(p.clone());
-                }
+    if append_requested && let Some(s) = conn_sort {
+        for p in s.iter() {
+            if index_sort.iter().all(|existing| existing[0] != p[0]) {
+                index_sort.push(p.clone());
             }
         }
+    }
     make_comparator(Arc::new(index_sort), false)
 }
 
@@ -1078,20 +1080,23 @@ fn apply_source_overlay_impl(
             let index_compare_for_filter = index_compare.clone();
             let filter_fn = move |r: &Row| -> bool {
                 if let Some(c) = &req.constraint
-                    && !constraint_matches_row(c, r) {
-                        return false;
-                    }
+                    && !constraint_matches_row(c, r)
+                {
+                    return false;
+                }
                 if !req.multi_constraints.is_empty()
                     && !crate::ivm::constraint::row_matches_multi_constraints(
                         &req.multi_constraints,
                         r,
-                    ) {
-                        return false;
-                    }
+                    )
+                {
+                    return false;
+                }
                 if let Some(pred) = &filter_predicate
-                    && !pred(r) {
-                        return false;
-                    }
+                    && !pred(r)
+                {
+                    return false;
+                }
                 // Match TS `overlaysForStartAt` (memory-source.ts): drop an
                 // overlay row only if it sorts STRICTLY before `start` in
                 // INDEX order (compare < 0). Basis (At/After) is NOT
@@ -1131,30 +1136,32 @@ fn apply_source_overlay_impl(
                     let mut out: Vec<Row> = Vec::new();
 
                     if !ay.get()
-                        && let Some(ref add) = add_row2 {
-                            let ord = if reverse {
-                                compare2(&row, add)
-                            } else {
-                                compare2(add, &row)
-                            };
-                            if ord == CmpOrdering::Less {
-                                out.push(add.clone());
-                                ay.set(true);
-                            }
+                        && let Some(ref add) = add_row2
+                    {
+                        let ord = if reverse {
+                            compare2(&row, add)
+                        } else {
+                            compare2(add, &row)
+                        };
+                        if ord == CmpOrdering::Less {
+                            out.push(add.clone());
+                            ay.set(true);
                         }
+                    }
                     if !rs.get()
-                        && let Some(ref rm) = remove_row2 {
-                            let ord = if reverse {
-                                compare2(&row, rm)
-                            } else {
-                                compare2(rm, &row)
-                            };
-                            if ord == CmpOrdering::Equal {
-                                rs.set(true);
-                                // skip this row
-                                return out;
-                            }
+                        && let Some(ref rm) = remove_row2
+                    {
+                        let ord = if reverse {
+                            compare2(&row, rm)
+                        } else {
+                            compare2(rm, &row)
+                        };
+                        if ord == CmpOrdering::Equal {
+                            rs.set(true);
+                            // skip this row
+                            return out;
                         }
+                    }
                     out.push(row);
                     out
                 })

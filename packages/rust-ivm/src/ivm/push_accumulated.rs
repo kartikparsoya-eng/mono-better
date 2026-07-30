@@ -12,8 +12,7 @@
 use std::collections::HashMap;
 
 use crate::ivm::change::{
-    Change, ChangeType, make_add_change, make_child_change, make_edit_change,
-    make_remove_change,
+    Change, ChangeType, make_add_change, make_child_change, make_edit_change, make_remove_change,
 };
 use crate::ivm::operator::{InputBase, OutputHandle};
 use crate::ivm::schema::SourceSchema;

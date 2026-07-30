@@ -15,8 +15,7 @@ use crate::ivm::stream::RelStream;
 /// `null` → `Null`, `true`/`false` → `Bool`, `42` → `F64`, `"hello"` → `Str`,
 /// `{...}`/`[...]` → `Json`. This matches the TS wire format and the
 /// `json_to_value` mapping in `napi/src/lib.rs`.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub enum Value {
     #[default]
     Null,
@@ -87,7 +86,6 @@ impl Value {
         matches!(self, Value::Null)
     }
 }
-
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {

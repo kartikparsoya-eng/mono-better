@@ -234,7 +234,8 @@ pub fn json_to_ast(v: &JsonValue) -> Ast {
                 let empty_arr = vec![];
                 let arr = p.as_array().unwrap_or(&empty_arr);
                 OrderPart {
-                    column: arr.first()
+                    column: arr
+                        .first()
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string(),
@@ -680,9 +681,10 @@ fn strip_empty_companion_rows(v: &JsonValue) -> JsonValue {
             for (k, val) in o {
                 if k == "companionRows"
                     && let JsonValue::Array(a) = val
-                        && a.is_empty() {
-                            continue;
-                        }
+                    && a.is_empty()
+                {
+                    continue;
+                }
                 out.insert(k.clone(), val.clone());
             }
             JsonValue::Object(out)

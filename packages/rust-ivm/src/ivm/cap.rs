@@ -225,42 +225,42 @@ impl Cap {
                 return None;
             }
             match stream.next() {
-                    Some(StreamItem::Yield) => Some(StreamItem::Yield),
-                    Some(StreamItem::Data(node)) => {
-                        let pk_parts: Vec<String> = primary_key_c
-                            .iter()
-                            .map(|k| {
-                                crate::ivm::cap::value_to_string(
-                                    &node.row.get(k).cloned().unwrap_or(Value::Null),
-                                )
-                            })
-                            .collect();
-                        pks_c.borrow_mut().push(format!("[{}]", pk_parts.join(",")));
-                        let c = count_c.get() + 1;
-                        count_c.set(c);
-                        if c >= limit {
-                            let pks_vec = pks_c.borrow().clone();
-                            storage_c.borrow_mut().set(
-                                state_key_c.clone(),
-                                CapState {
-                                    size: c,
-                                    pks: pks_vec,
-                                },
-                            );
-                            persisted_c.set(true);
-                        }
-                        Some(StreamItem::Data(node))
-                    }
-                    None => {
+                Some(StreamItem::Yield) => Some(StreamItem::Yield),
+                Some(StreamItem::Data(node)) => {
+                    let pk_parts: Vec<String> = primary_key_c
+                        .iter()
+                        .map(|k| {
+                            crate::ivm::cap::value_to_string(
+                                &node.row.get(k).cloned().unwrap_or(Value::Null),
+                            )
+                        })
+                        .collect();
+                    pks_c.borrow_mut().push(format!("[{}]", pk_parts.join(",")));
+                    let c = count_c.get() + 1;
+                    count_c.set(c);
+                    if c >= limit {
                         let pks_vec = pks_c.borrow().clone();
-                        let size = pks_vec.len();
-                        storage_c
-                            .borrow_mut()
-                            .set(state_key_c.clone(), CapState { size, pks: pks_vec });
+                        storage_c.borrow_mut().set(
+                            state_key_c.clone(),
+                            CapState {
+                                size: c,
+                                pks: pks_vec,
+                            },
+                        );
                         persisted_c.set(true);
-                        None
                     }
+                    Some(StreamItem::Data(node))
                 }
+                None => {
+                    let pks_vec = pks_c.borrow().clone();
+                    let size = pks_vec.len();
+                    storage_c
+                        .borrow_mut()
+                        .set(state_key_c.clone(), CapState { size, pks: pks_vec });
+                    persisted_c.set(true);
+                    None
+                }
+            }
         }))
     }
 }
@@ -289,12 +289,13 @@ impl Input for Cap {
         // built from the correlation's childField — which is Cap's partition
         // key. So either partitionKey is undefined, or constraint matches.
         if let Some(pk) = &self.partition_key
-            && let Some(constraint) = &req.constraint {
-                assert!(
-                    crate::ivm::take::constraint_matches_partition_key(constraint, pk),
-                    "Cap fetch: constraint must match partition key when partitioned"
-                );
-            }
+            && let Some(constraint) = &req.constraint
+        {
+            assert!(
+                crate::ivm::take::constraint_matches_partition_key(constraint, pk),
+                "Cap fetch: constraint must match partition key when partitioned"
+            );
+        }
 
         let state_key = self.get_state_key(None, req.constraint.as_ref());
 

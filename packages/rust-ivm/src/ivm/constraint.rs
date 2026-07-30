@@ -27,9 +27,10 @@ pub fn constraint_matches_row(constraint: &Constraint, row: &crate::ivm::data::R
 pub fn constraints_are_compatible(left: &Constraint, right: &Constraint) -> bool {
     for (key, value) in left {
         if let Some(right_val) = right.get(key)
-            && !values_equal(value, right_val) {
-                return false;
-            }
+            && !values_equal(value, right_val)
+        {
+            return false;
+        }
     }
     true
 }
@@ -135,9 +136,10 @@ pub fn primary_key_constraint_from_filters(
     for sub in &conditions {
         if sub.op == "="
             && let Some((name, value)) = extract_column(sub)
-                && primary.contains(&name) {
-                    ret.insert(name, value);
-                }
+            && primary.contains(&name)
+        {
+            ret.insert(name, value);
+        }
     }
 
     if ret.len() != primary.len() {

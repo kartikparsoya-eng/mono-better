@@ -27,9 +27,7 @@ use crate::ivm::change::{
 };
 use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
 use crate::ivm::filter_push::filter_push;
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, OutputHandle, Shared};
 use crate::ivm::schema::{ColumnType, SourceSchema, System};
 use crate::ivm::source::Source;
 use crate::ivm::stream::NodeStream;

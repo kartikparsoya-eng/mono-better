@@ -7,9 +7,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::builder::ast::{
-    Ast, Bound, Condition, OrderPart, SimpleCondition, ValuePosition,
-};
+use rust_ivm::builder::ast::{Ast, Bound, Condition, OrderPart, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::change::make_source_change_edit;
 use rust_ivm::ivm::data::{Row, Value};

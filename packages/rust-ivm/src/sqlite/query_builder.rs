@@ -99,11 +99,12 @@ pub fn build_select_query(
 
     // Start (pagination)
     if let Some(start) = &req.start
-        && let Some(order) = order {
-            let (start_sql, start_params) = gather_start_constraints(start, reverse, order);
-            where_clauses.push(start_sql);
-            params.extend(start_params);
-        }
+        && let Some(order) = order
+    {
+        let (start_sql, start_params) = gather_start_constraints(start, reverse, order);
+        where_clauses.push(start_sql);
+        params.extend(start_params);
+    }
 
     // Filters (WHERE clause from the AST, with CSQ conditions stripped)
     if let Some(filters) = filters {
@@ -121,20 +122,21 @@ pub fn build_select_query(
 
     // ORDER BY
     if let Some(order) = order
-        && !order.is_empty() {
-            sql.push_str(" ORDER BY ");
-            for (i, ord) in order.iter().enumerate() {
-                if i > 0 {
-                    sql.push_str(", ");
-                }
-                let dir = if reverse {
-                    if ord.1 == "asc" { "desc" } else { "asc" }
-                } else {
-                    ord.1.as_str()
-                };
-                sql.push_str(&format!("{} {}", quote_ident(&ord.0), dir));
+        && !order.is_empty()
+    {
+        sql.push_str(" ORDER BY ");
+        for (i, ord) in order.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
             }
+            let dir = if reverse {
+                if ord.1 == "asc" { "desc" } else { "asc" }
+            } else {
+                ord.1.as_str()
+            };
+            sql.push_str(&format!("{} {}", quote_ident(&ord.0), dir));
         }
+    }
 
     // NOTE: Do NOT push LIMIT to SQL. The Cap/Take limit applies AFTER
     // all filters (including EXISTS subqueries). Pushing LIMIT to SQL
@@ -241,7 +243,11 @@ fn gather_start_constraints(
                     //   - operator '<' means "before NULL": nothing qualifies.
                     let operator = if i_dir == "asc" {
                         if reverse { "<" } else { ">" }
-                    } else if reverse { ">" } else { "<" };
+                    } else if reverse {
+                        ">"
+                    } else {
+                        "<"
+                    };
                     if operator == ">" {
                         group.push(format!("{} IS NOT NULL", quote_ident(i_field)));
                     } else {
@@ -250,7 +256,11 @@ fn gather_start_constraints(
                 } else {
                     let operator = if i_dir == "asc" {
                         if reverse { "<" } else { ">" }
-                    } else if reverse { ">" } else { "<" };
+                    } else if reverse {
+                        ">"
+                    } else {
+                        "<"
+                    };
                     // The IVM comparator treats Null as less than any non-null
                     // value (TS compareValues). When the range operator is '<',
                     // rows with NULL in this column must be included because
@@ -464,7 +474,9 @@ impl rusqlite::ToSql for SqlParam {
             SqlParam::Int(n) => n.to_sql(),
             SqlParam::F64(n) => n.to_sql(),
             SqlParam::Text(s) => s.to_sql(),
-            SqlParam::Bool(b) => Ok(rusqlite::types::ToSqlOutput::Owned(rusqlite::types::Value::Integer(if *b { 1 } else { 0 }))),
+            SqlParam::Bool(b) => Ok(rusqlite::types::ToSqlOutput::Owned(
+                rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
+            )),
         }
     }
 }

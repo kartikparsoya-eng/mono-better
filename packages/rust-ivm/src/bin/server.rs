@@ -248,7 +248,8 @@ fn json_to_ast(v: &JsonValue) -> Ast {
                 let empty_arr = vec![];
                 let arr = p.as_array().unwrap_or(&empty_arr);
                 OrderPart {
-                    column: arr.first()
+                    column: arr
+                        .first()
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string(),

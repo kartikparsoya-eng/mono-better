@@ -22,7 +22,6 @@ pub fn new_static_query(
     table: &str,
     relationships: HashMap<String, HashMap<String, RelationshipSpec>>,
 ) -> Query {
-    
     // Static queries use the permissions system.
     // This is set via the system field in the builder.
     Query::new(table, relationships)

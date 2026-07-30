@@ -18,9 +18,7 @@ use std::time::Instant;
 use crate::builder::ast::Ast;
 use crate::builder::builder::{BuilderDelegate, build_pipeline};
 use crate::builder::complete_ordering::complete_ordering;
-use crate::ivm::change::{
-    Change, SourceChange,
-};
+use crate::ivm::change::{Change, SourceChange};
 use crate::ivm::data::{Row, Value};
 use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared, Storage};
 use crate::ivm::schema::SourceSchema;

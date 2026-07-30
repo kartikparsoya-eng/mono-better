@@ -696,8 +696,7 @@ fn apply_edit_plural(
         if found {
             // Merge with existing at new pos
             let existing_entry = &new_view[adjusted_pos];
-            let mut edited =
-                apply_edit(existing_entry, node, old_node, schema, with_ids, mutate);
+            let mut edited = apply_edit(existing_entry, node, old_node, schema, with_ids, mutate);
             edited.ref_count = existing_entry.ref_count + 1;
             new_view[adjusted_pos] = Rc::new(edited);
         } else {

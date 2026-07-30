@@ -274,9 +274,9 @@ fn collect_constraints(condition: &Condition, constraints: &mut HashMap<String, 
             if simple.op == "="
                 && let (ValuePosition::Column { name }, ValuePosition::Literal { value }) =
                     (&simple.left, &simple.right)
-                {
-                    constraints.insert(name.clone(), value.clone());
-                }
+            {
+                constraints.insert(name.clone(), value.clone());
+            }
         }
         Condition::And(conditions) => {
             for c in conditions {

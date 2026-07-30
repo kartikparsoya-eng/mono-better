@@ -30,15 +30,16 @@ pub fn explain_queries(
             let conn = db.conn();
             let conn = conn.borrow();
             if let Ok(mut stmt) = conn.prepare(&sql)
-                && let Ok(mut rows) = stmt.query([]) {
-                    let mut plan: Vec<String> = Vec::new();
-                    while let Ok(Some(row)) = rows.next() {
-                        if let Ok(detail) = row.get::<_, String>(2) {
-                            plan.push(detail);
-                        }
+                && let Ok(mut rows) = stmt.query([])
+            {
+                let mut plan: Vec<String> = Vec::new();
+                while let Ok(Some(row)) = rows.next() {
+                    if let Ok(detail) = row.get::<_, String>(2) {
+                        plan.push(detail);
                     }
-                    plans.insert(query.clone(), plan);
                 }
+                plans.insert(query.clone(), plan);
+            }
         }
     }
 

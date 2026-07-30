@@ -282,9 +282,10 @@ pub fn apply_plans_to_ast(ast: &Ast, plans: &Plans) -> Ast {
             .map(|csq| {
                 let mut csq = csq.clone();
                 if let Some(ref alias) = csq.subquery.alias
-                    && let Some(sub_plan) = plans.sub_plans.get(alias) {
-                        csq.subquery = Box::new(apply_plans_to_ast(&csq.subquery, sub_plan));
-                    }
+                    && let Some(sub_plan) = plans.sub_plans.get(alias)
+                {
+                    csq.subquery = Box::new(apply_plans_to_ast(&csq.subquery, sub_plan));
+                }
                 csq
             })
             .collect();

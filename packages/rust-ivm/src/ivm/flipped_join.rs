@@ -153,9 +153,10 @@ impl FlippedJoin {
             }
             let c = constraint.unwrap();
             if let Some(prc) = &parent_req_constraint
-                && !constraints_are_compatible(&c, prc) {
-                    continue;
-                }
+                && !constraints_are_compatible(&c, prc)
+            {
+                continue;
+            }
             let key = canonical_key_row(&c, &parent_key);
             match child_indexes_by_key.get(&key) {
                 Some(existing) => {
@@ -512,13 +513,14 @@ impl Input for FlippedJoin {
         let inprogress = self.inprogress_child_change.borrow().clone();
         let mut child_nodes = child_nodes;
         if let Some(ref change) = inprogress
-            && change.change_type() == ChangeType::Remove {
-                let removed = change.node().clone();
-                let compare = self.child.borrow().get_schema().compare_rows.clone();
-                let insert_pos = child_nodes
-                    .partition_point(|n| compare(&removed.row, &n.row) == CmpOrdering::Less);
-                child_nodes.insert(insert_pos, removed);
-            }
+            && change.change_type() == ChangeType::Remove
+        {
+            let removed = change.node().clone();
+            let compare = self.child.borrow().get_schema().compare_rows.clone();
+            let insert_pos =
+                child_nodes.partition_point(|n| compare(&removed.row, &n.row) == CmpOrdering::Less);
+            child_nodes.insert(insert_pos, removed);
+        }
 
         self.fetch_batched(req, child_nodes)
     }

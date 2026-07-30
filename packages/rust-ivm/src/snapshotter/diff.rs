@@ -260,20 +260,21 @@ fn check_valid(
         }
     }
     if op == SET_OP
-        && let Some(next) = next_raw {
-            let ver = next
-                .get(ZERO_VERSION_COLUMN_NAME)
-                .map(|v| match v {
-                    rusqlite::types::Value::Text(s) => s.as_str(),
-                    _ => "",
-                })
-                .unwrap_or("");
-            if ver != state_version {
-                return Err(InvalidDiffError {
-                    msg: "Diff is no longer valid. curr db has advanced.".to_string(),
-                });
-            }
+        && let Some(next) = next_raw
+    {
+        let ver = next
+            .get(ZERO_VERSION_COLUMN_NAME)
+            .map(|v| match v {
+                rusqlite::types::Value::Text(s) => s.as_str(),
+                _ => "",
+            })
+            .unwrap_or("");
+        if ver != state_version {
+            return Err(InvalidDiffError {
+                msg: "Diff is no longer valid. curr db has advanced.".to_string(),
+            });
         }
+    }
     Ok(())
 }
 
@@ -356,7 +357,6 @@ where
 
         // nextValue: the new contents for a set, None for a delete.
         let next_raw = if e.op == SET_OP {
-            
             get_row(&curr_conn.borrow(), spec, &row_key)?
         } else {
             None
@@ -396,22 +396,23 @@ where
 
         // Permissions change → abort & rehydrate.
         if e.table == permissions_table
-            && let Some(ref next) = next_raw {
-                for pv in &prev_values {
-                    let old_perms = pv.get("permissions");
-                    let new_perms = next.get("permissions");
-                    if old_perms != new_perms {
-                        return Err(DiffError::Reset(ResetPipelinesSignal {
-                            reason: REASON_PERMISSIONS_CHANGE,
-                            msg: format!(
-                                "Permissions have changed {:?} => {:?}",
-                                pv.get("hash"),
-                                next.get("hash")
-                            ),
-                        }));
-                    }
+            && let Some(ref next) = next_raw
+        {
+            for pv in &prev_values {
+                let old_perms = pv.get("permissions");
+                let new_perms = next.get("permissions");
+                if old_perms != new_perms {
+                    return Err(DiffError::Reset(ResetPipelinesSignal {
+                        reason: REASON_PERMISSIONS_CHANGE,
+                        msg: format!(
+                            "Permissions have changed {:?} => {:?}",
+                            pv.get("hash"),
+                            next.get("hash")
+                        ),
+                    }));
                 }
             }
+        }
 
         let change = SnapshotChange {
             table: e.table.clone(),
