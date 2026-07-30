@@ -65,7 +65,9 @@ fn s(v: &str) -> rust_ivm::ivm::data::Value {
 fn simple(col: &str, op: &str, val: rust_ivm::ivm::data::Value) -> Condition {
     Condition::Simple(SimpleCondition {
         op: op.to_string(),
-        left: ValuePosition::Column { name: col.to_string() },
+        left: ValuePosition::Column {
+            name: col.to_string(),
+        },
         right: ValuePosition::Literal { value: val },
     })
 }
@@ -85,7 +87,7 @@ fn nested_scalar_exists_ast() -> Ast {
                 ..Default::default()
             }),
             relationship_name: "zsubq_participants".to_string(),
-            parent_key: vec!["id".to_string()],       // channels.id
+            parent_key: vec!["id".to_string()], // channels.id
             child_key: vec!["channelId".to_string()], // channel_participants.channelId
             hidden: false,
             system: None,
@@ -107,7 +109,7 @@ fn nested_scalar_exists_ast() -> Ast {
             }),
             relationship_name: "zsubq_channel".to_string(),
             parent_key: vec!["channelId".to_string()], // conversations.channelId
-            child_key: vec!["id".to_string()],          // channels.id
+            child_key: vec!["id".to_string()],         // channels.id
             hidden: false,
             system: None,
         },
@@ -128,7 +130,10 @@ fn nested_scalar_exists_ast() -> Ast {
 fn hydrate(path: &str, unique_keys_for_cp: Vec<Vec<String>>) -> (Vec<String>, usize) {
     let pks: HashMap<String, Vec<String>> = [
         ("channels".to_string(), vec!["id".to_string()]),
-        ("conversations".to_string(), vec!["conversationId".to_string()]),
+        (
+            "conversations".to_string(),
+            vec!["conversationId".to_string()],
+        ),
         ("channel_participants".to_string(), vec!["id".to_string()]),
     ]
     .into_iter()
@@ -145,9 +150,24 @@ fn hydrate(path: &str, unique_keys_for_cp: Vec<Vec<String>>) -> (Vec<String>, us
             .collect()
     };
 
-    let ch = TableSource::new(curr.clone(), "channels", col(&["id", "visibility"]), vec!["id".to_string()]);
-    let cv = TableSource::new(curr.clone(), "conversations", col(&["conversationId", "channelId", "createdAt"]), vec!["conversationId".to_string()]);
-    let cp = TableSource::new(curr.clone(), "channel_participants", col(&["id", "channelId", "userId", "role"]), vec!["id".to_string()]);
+    let ch = TableSource::new(
+        curr.clone(),
+        "channels",
+        col(&["id", "visibility"]),
+        vec!["id".to_string()],
+    );
+    let cv = TableSource::new(
+        curr.clone(),
+        "conversations",
+        col(&["conversationId", "channelId", "createdAt"]),
+        vec!["conversationId".to_string()],
+    );
+    let cp = TableSource::new(
+        curr.clone(),
+        "channel_participants",
+        col(&["id", "channelId", "userId", "role"]),
+        vec!["id".to_string()],
+    );
 
     let mut eng = Engine::new(pks);
     eng.register_source(Rc::new(RefCell::new(ch)));
@@ -160,17 +180,23 @@ fn hydrate(path: &str, unique_keys_for_cp: Vec<Vec<String>>) -> (Vec<String>, us
 
     let mut visible: Vec<String> = Vec::new();
     let mut hidden = 0usize;
-    eng.add_queries_streaming(&[QuerySpec { query_id: "q".into(), ast: nested_scalar_exists_ast() }], |rc: &RowChange| {
-        if rc.table == "channel_participants" {
-            if rc.is_hidden {
-                hidden += 1;
-            } else if let Some(row) = rc.row.as_ref() {
-                if let Some(rust_ivm::ivm::data::Value::Str(v)) = row.get("id") {
+    eng.add_queries_streaming(
+        &[QuerySpec {
+            query_id: "q".into(),
+            ast: nested_scalar_exists_ast(),
+        }],
+        |rc: &RowChange| {
+            if rc.table == "channel_participants" {
+                if rc.is_hidden {
+                    hidden += 1;
+                } else if let Some(row) = rc.row.as_ref()
+                    && let Some(rust_ivm::ivm::data::Value::Str(v)) = row.get("id")
+                {
                     visible.push(v.to_string());
                 }
             }
-        }
-    });
+        },
+    );
     visible.sort();
     (visible, hidden)
 }
@@ -198,8 +224,15 @@ fn scalar_resolves_with_unique_key_emits_cp0_visible_once() {
     create_replica(path);
     let (visible, _hidden) = hydrate(
         path,
-        vec![vec!["id".to_string()], vec!["channelId".to_string(), "userId".to_string()]],
+        vec![
+            vec!["id".to_string()],
+            vec!["channelId".to_string(), "userId".to_string()],
+        ],
     );
     eprintln!("[with-UK] visible={visible:?}");
-    assert_eq!(visible, vec!["cp0".to_string()], "with unique key: cp0 must be visible exactly once");
+    assert_eq!(
+        visible,
+        vec!["cp0".to_string()],
+        "with unique key: cp0 must be visible exactly once"
+    );
 }
