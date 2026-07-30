@@ -16,11 +16,9 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::builder::ast::{
-    Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery,
-};
+use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{make_source_change_add, ChangeType};
+use rust_ivm::ivm::change::{ChangeType, make_source_change_add};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
@@ -75,7 +73,7 @@ fn exists_membership_ast() -> Ast {
             op: "EXISTS".to_string(),
             flip: Some(false),
             scalar: false,
-                plan_id: None,
+            plan_id: None,
         })),
         related: vec![],
         limit: None,
@@ -127,7 +125,7 @@ fn exists_with_related_ast() -> Ast {
             op: "EXISTS".to_string(),
             flip: Some(false),
             scalar: false,
-                plan_id: None,
+            plan_id: None,
         })),
         related: vec![RelatedSubquery {
             subquery: Box::new(messages_sub),
@@ -191,15 +189,24 @@ fn exists_flip_parent_then_child_same_advance() {
     let mut engine = setup();
     // Order A (parent first): add the convo, then the membership — in one advance.
     let changes = engine.advance(&[
-        ("convos".to_string(), make_source_change_add(row(&[("id", "c1"), ("chan", "A")]))),
-        ("members".to_string(), make_source_change_add(row(&[("id", "m1"), ("chan", "A")]))),
+        (
+            "convos".to_string(),
+            make_source_change_add(row(&[("id", "c1"), ("chan", "A")])),
+        ),
+        (
+            "members".to_string(),
+            make_source_change_add(row(&[("id", "m1"), ("chan", "A")])),
+        ),
     ]);
     assert_eq!(
         convo_ids(&changes),
         vec!["c1".to_string()],
         "convo c1 must be emitted once the membership makes EXISTS true \
          (parent-first order); got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type, c.row.is_some())).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type, c.row.is_some()))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -227,21 +234,36 @@ fn exists_flip_emits_parent_with_related_message_same_advance() {
     // hydrate would. This is the G15 divergence: convo + message only_mirror.
     let mut engine = setup_with_related();
     let changes = engine.advance(&[
-        ("convos".to_string(), make_source_change_add(row(&[("id", "c1"), ("chan", "A")]))),
-        ("messages".to_string(), make_source_change_add(row(&[("id", "msg1"), ("convo", "c1")]))),
-        ("members".to_string(), make_source_change_add(row(&[("id", "m1"), ("chan", "A")]))),
+        (
+            "convos".to_string(),
+            make_source_change_add(row(&[("id", "c1"), ("chan", "A")])),
+        ),
+        (
+            "messages".to_string(),
+            make_source_change_add(row(&[("id", "msg1"), ("convo", "c1")])),
+        ),
+        (
+            "members".to_string(),
+            make_source_change_add(row(&[("id", "m1"), ("chan", "A")])),
+        ),
     ]);
     assert_eq!(
         convo_ids(&changes),
         vec!["c1".to_string()],
         "convo c1 must be emitted (EXISTS flipped by membership); got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type)).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type))
+            .collect::<Vec<_>>(),
     );
     assert_eq!(
         msg_ids(&changes),
         vec!["msg1".to_string()],
         "the convo's related message msg1 must be emitted with the flipped parent; got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type)).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -250,13 +272,22 @@ fn exists_flip_child_then_parent_same_advance() {
     let mut engine = setup();
     // Order B (child first): add the membership, then the convo — in one advance.
     let changes = engine.advance(&[
-        ("members".to_string(), make_source_change_add(row(&[("id", "m1"), ("chan", "A")]))),
-        ("convos".to_string(), make_source_change_add(row(&[("id", "c1"), ("chan", "A")]))),
+        (
+            "members".to_string(),
+            make_source_change_add(row(&[("id", "m1"), ("chan", "A")])),
+        ),
+        (
+            "convos".to_string(),
+            make_source_change_add(row(&[("id", "c1"), ("chan", "A")])),
+        ),
     ]);
     assert_eq!(
         convo_ids(&changes),
         vec!["c1".to_string()],
         "convo c1 must be emitted (child-first order); got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type, c.row.is_some())).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type, c.row.is_some()))
+            .collect::<Vec<_>>(),
     );
 }

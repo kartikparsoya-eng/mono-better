@@ -3,20 +3,22 @@
 //! A QueryDelegate implementation backed by SQLite TableSource.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::builder::query_delegate::{CommitListener, QueryDelegate, RunOptions, MaterializeOptions, PreloadOptions};
-use crate::builder::named::CustomQueryID;
 use crate::builder::ast::Ast;
 use crate::builder::metrics_delegate::{Metric, MetricsDelegate};
-use crate::ivm::operator::{Input, InputBase, Shared, Storage};
+use crate::builder::named::CustomQueryID;
+use crate::builder::query::Query;
+use crate::builder::query_delegate::{
+    CommitListener, MaterializeOptions, PreloadOptions, QueryDelegate, RunOptions,
+};
+use crate::ivm::array_view::ArrayView;
+use crate::ivm::operator::{Shared, Storage};
+use crate::ivm::schema::ColumnType;
 use crate::ivm::source::Source;
 use crate::sqlite::table_source::TableSource;
-use crate::ivm::schema::ColumnType;
-use crate::builder::query::Query;
-use crate::ivm::array_view::ArrayView;
 
 /// ZQLite QueryDelegate implementation.
 /// Port of TS `QueryDelegateImpl` (query-delegate.ts:7).
@@ -56,7 +58,11 @@ impl crate::builder::builder::BuilderDelegate for ZqliteQueryDelegate {
         if !self.table_names.iter().any(|t| t == table_name) {
             return None;
         }
-        let pk = self.primary_keys.get(table_name).cloned().unwrap_or_default();
+        let pk = self
+            .primary_keys
+            .get(table_name)
+            .cloned()
+            .unwrap_or_default();
         let conn = self.db.borrow().conn();
         // Build column schema from the database. For now, default to String type
         // — the actual types are resolved at fetch time via rusqlite's Value enum.
@@ -77,11 +83,22 @@ impl MetricsDelegate for ZqliteQueryDelegate {
 }
 
 impl QueryDelegate for ZqliteQueryDelegate {
-    fn add_server_query(&mut self, _ast: &Ast, _ttl: &str, _got_callback: Option<Arc<dyn Fn(bool)>>) -> Box<dyn FnOnce()> {
+    fn add_server_query(
+        &mut self,
+        _ast: &Ast,
+        _ttl: &str,
+        _got_callback: Option<Arc<dyn Fn(bool)>>,
+    ) -> Box<dyn FnOnce()> {
         Box::new(|| {})
     }
 
-    fn add_custom_query(&mut self, _ast: &Ast, _custom_query_id: &CustomQueryID, _ttl: &str, _got_callback: Option<Arc<dyn Fn(bool)>>) -> Box<dyn FnOnce()> {
+    fn add_custom_query(
+        &mut self,
+        _ast: &Ast,
+        _custom_query_id: &CustomQueryID,
+        _ttl: &str,
+        _got_callback: Option<Arc<dyn Fn(bool)>>,
+    ) -> Box<dyn FnOnce()> {
         Box::new(|| {})
     }
 
@@ -109,19 +126,33 @@ impl QueryDelegate for ZqliteQueryDelegate {
     }
 
     fn create_storage(&mut self) -> Shared<dyn Storage> {
-        Rc::new(RefCell::new(crate::ivm::memory_storage::MemoryStorage::new()))
+        Rc::new(RefCell::new(
+            crate::ivm::memory_storage::MemoryStorage::new(),
+        ))
     }
 
-    fn materialize(&mut self, _query: &Query, _options: Option<MaterializeOptions>) -> Rc<RefCell<ArrayView>> {
+    fn materialize(
+        &mut self,
+        _query: &Query,
+        _options: Option<MaterializeOptions>,
+    ) -> Rc<RefCell<ArrayView>> {
         // Full implementation would build the pipeline and create an ArrayView.
         unimplemented!("materialize requires pipeline construction")
     }
 
-    fn run(&mut self, _query: &Query, _options: Option<RunOptions>) -> Vec<crate::ivm::data::Value> {
+    fn run(
+        &mut self,
+        _query: &Query,
+        _options: Option<RunOptions>,
+    ) -> Vec<crate::ivm::data::Value> {
         unimplemented!("run requires materialize")
     }
 
-    fn preload(&mut self, _query: &Query, _options: Option<PreloadOptions>) -> (Box<dyn FnOnce()>, bool) {
+    fn preload(
+        &mut self,
+        _query: &Query,
+        _options: Option<PreloadOptions>,
+    ) -> (Box<dyn FnOnce()>, bool) {
         (Box::new(|| {}), true)
     }
 }

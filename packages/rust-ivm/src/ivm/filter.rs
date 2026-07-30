@@ -5,13 +5,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ivm::change::Change;
-use crate::ivm::data::{Node, Row};
+use crate::ivm::data::Row;
 use crate::ivm::filter_push::filter_push;
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::from_vec;
 
 /// Port of TS `Filter` — stateless predicate filter.
 pub struct Filter {
@@ -31,9 +28,11 @@ impl Filter {
         // Wire the source's output to this filter, matching TS where the
         // FilterStart constructor calls `input.setOutput(this)`.
         let filter_clone = filter.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(FilterOutputAdapter {
-            filter: filter_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(FilterOutputAdapter {
+                filter: filter_clone,
+            })));
 
         filter
     }
@@ -61,7 +60,9 @@ impl Input for Filter {
         let stream = self.input.borrow().fetch(req);
         let predicate = self.predicate.clone();
         Box::new(stream.filter_map(move |item| match item {
-            crate::ivm::stream::StreamItem::Data(n) if predicate(&n.row) => Some(crate::ivm::stream::StreamItem::Data(n)),
+            crate::ivm::stream::StreamItem::Data(n) if predicate(&n.row) => {
+                Some(crate::ivm::stream::StreamItem::Data(n))
+            }
             crate::ivm::stream::StreamItem::Yield => Some(crate::ivm::stream::StreamItem::Yield),
             _ => None,
         }))

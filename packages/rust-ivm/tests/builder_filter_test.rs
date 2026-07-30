@@ -8,7 +8,7 @@ use std::sync::Arc;
 use rust_ivm::builder::ast::{Condition, SimpleCondition, ValuePosition};
 use rust_ivm::builder::filter::create_predicate;
 use rust_ivm::builder::like::get_like_predicate;
-use rust_ivm::ivm::data::{Value, Row};
+use rust_ivm::ivm::data::{Row, Value};
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
     let map: FxHashMap<String, Value> = pairs
@@ -21,7 +21,9 @@ fn make_row(pairs: &[(&str, Value)]) -> Row {
 fn col_eq(col: &str, val: Value) -> Condition {
     Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: col.to_string() },
+        left: ValuePosition::Column {
+            name: col.to_string(),
+        },
         right: ValuePosition::Literal { value: val },
     })
 }
@@ -29,7 +31,9 @@ fn col_eq(col: &str, val: Value) -> Condition {
 fn col_op(col: &str, op: &str, val: Value) -> Condition {
     Condition::Simple(SimpleCondition {
         op: op.to_string(),
-        left: ValuePosition::Column { name: col.to_string() },
+        left: ValuePosition::Column {
+            name: col.to_string(),
+        },
         right: ValuePosition::Literal { value: val },
     })
 }
@@ -40,7 +44,18 @@ fn col_op(col: &str, op: &str, val: Value) -> Condition {
 
 #[test]
 fn test_null_is_false_for_basic_operators() {
-    let operators = ["=", "!=", "<", "<=", ">", ">=", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE"];
+    let operators = [
+        "=",
+        "!=",
+        "<",
+        "<=",
+        ">",
+        ">=",
+        "LIKE",
+        "NOT LIKE",
+        "ILIKE",
+        "NOT ILIKE",
+    ];
     for op in &operators {
         let condition = col_op("foo", op, Value::Str("bar".into()));
         let predicate = create_predicate(&condition);
@@ -60,7 +75,9 @@ fn test_null_is_false_for_basic_operators() {
 fn test_is_null() {
     let condition = Condition::Simple(SimpleCondition {
         op: "IS".to_string(),
-        left: ValuePosition::Column { name: "foo".to_string() },
+        left: ValuePosition::Column {
+            name: "foo".to_string(),
+        },
         right: ValuePosition::Literal { value: Value::Null },
     });
     let predicate = create_predicate(&condition);
@@ -75,7 +92,9 @@ fn test_is_null() {
 fn test_is_not_null() {
     let condition = Condition::Simple(SimpleCondition {
         op: "IS NOT".to_string(),
-        left: ValuePosition::Column { name: "foo".to_string() },
+        left: ValuePosition::Column {
+            name: "foo".to_string(),
+        },
         right: ValuePosition::Literal { value: Value::Null },
     });
     let predicate = create_predicate(&condition);
@@ -140,7 +159,10 @@ fn test_greater_than_or_equal() {
 fn test_equal_strings() {
     let predicate = create_predicate(&col_eq("foo", Value::Str("hello".into())));
     assert!(predicate(&make_row(&[("foo", Value::Str("hello".into()))])));
-    assert!(!predicate(&make_row(&[("foo", Value::Str("world".into()))])));
+    assert!(!predicate(&make_row(&[(
+        "foo",
+        Value::Str("world".into())
+    )])));
 }
 
 #[test]
@@ -154,7 +176,9 @@ fn test_equal_bools() {
 fn test_null_rhs_always_false() {
     let condition = Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: "foo".to_string() },
+        left: ValuePosition::Column {
+            name: "foo".to_string(),
+        },
         right: ValuePosition::Literal { value: Value::Null },
     });
     let predicate = create_predicate(&condition);
@@ -190,7 +214,10 @@ fn test_like_with_wildcard() {
     let condition = col_op("foo", "LIKE", Value::Str("foo%".into()));
     let predicate = create_predicate(&condition);
     assert!(predicate(&make_row(&[("foo", Value::Str("foo".into()))])));
-    assert!(predicate(&make_row(&[("foo", Value::Str("foobar".into()))])));
+    assert!(predicate(&make_row(&[(
+        "foo",
+        Value::Str("foobar".into())
+    )])));
     assert!(!predicate(&make_row(&[("foo", Value::Str("bar".into()))])));
 }
 
@@ -204,10 +231,22 @@ fn test_and() {
         col_eq("a", Value::F64(4.0)),
         col_eq("b", Value::Bool(false)),
     ]));
-    assert!(!predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(true))])));
-    assert!(!predicate(&make_row(&[("a", Value::F64(3.0)), ("b", Value::Bool(false))])));
-    assert!(!predicate(&make_row(&[("a", Value::F64(3.0)), ("b", Value::Bool(true))])));
-    assert!(predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(false))])));
+    assert!(!predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(true))
+    ])));
+    assert!(!predicate(&make_row(&[
+        ("a", Value::F64(3.0)),
+        ("b", Value::Bool(false))
+    ])));
+    assert!(!predicate(&make_row(&[
+        ("a", Value::F64(3.0)),
+        ("b", Value::Bool(true))
+    ])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(false))
+    ])));
 }
 
 #[test]
@@ -216,22 +255,40 @@ fn test_or() {
         col_eq("a", Value::F64(4.0)),
         col_eq("b", Value::Bool(false)),
     ]));
-    assert!(predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(true))])));
-    assert!(predicate(&make_row(&[("a", Value::F64(3.0)), ("b", Value::Bool(false))])));
-    assert!(!predicate(&make_row(&[("a", Value::F64(3.0)), ("b", Value::Bool(true))])));
-    assert!(predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(false))])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(true))
+    ])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(3.0)),
+        ("b", Value::Bool(false))
+    ])));
+    assert!(!predicate(&make_row(&[
+        ("a", Value::F64(3.0)),
+        ("b", Value::Bool(true))
+    ])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(false))
+    ])));
 }
 
 #[test]
 fn test_empty_and_is_true() {
     let predicate = create_predicate(&Condition::And(vec![]));
-    assert!(predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(true))])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(true))
+    ])));
 }
 
 #[test]
 fn test_empty_or_is_false() {
     let predicate = create_predicate(&Condition::Or(vec![]));
-    assert!(!predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(true))])));
+    assert!(!predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(true))
+    ])));
 }
 
 #[test]
@@ -243,11 +300,26 @@ fn test_nested_or_with_and() {
             col_eq("b", Value::Bool(false)),
         ]),
     ]));
-    assert!(predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(true))])));
-    assert!(predicate(&make_row(&[("a", Value::F64(4.0)), ("b", Value::Bool(false))])));
-    assert!(predicate(&make_row(&[("a", Value::F64(3.0)), ("b", Value::Bool(false))])));
-    assert!(!predicate(&make_row(&[("a", Value::F64(3.0)), ("b", Value::Bool(true))])));
-    assert!(!predicate(&make_row(&[("a", Value::F64(5.0)), ("b", Value::Bool(false))])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(true))
+    ])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(4.0)),
+        ("b", Value::Bool(false))
+    ])));
+    assert!(predicate(&make_row(&[
+        ("a", Value::F64(3.0)),
+        ("b", Value::Bool(false))
+    ])));
+    assert!(!predicate(&make_row(&[
+        ("a", Value::F64(3.0)),
+        ("b", Value::Bool(true))
+    ])));
+    assert!(!predicate(&make_row(&[
+        ("a", Value::F64(5.0)),
+        ("b", Value::Bool(false))
+    ])));
 }
 
 // ---------------------------------------------------------------------------

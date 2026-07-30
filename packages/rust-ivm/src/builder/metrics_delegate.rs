@@ -29,7 +29,9 @@ impl Metric {
     pub fn is_client_metric(&self) -> bool {
         matches!(
             self,
-            Metric::QueryMaterializationClient | Metric::QueryMaterializationEndToEnd | Metric::QueryUpdateClient
+            Metric::QueryMaterializationClient
+                | Metric::QueryMaterializationEndToEnd
+                | Metric::QueryUpdateClient
         )
     }
 

@@ -2,7 +2,6 @@
 //!
 //! The client-facing view interface: data, listeners, TTL, lifecycle.
 
-use crate::builder::ttl;
 use crate::ivm::view::View;
 
 /// Result type for a view: unknown (loading), complete (data ready), or error.

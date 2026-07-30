@@ -3,13 +3,13 @@
 //! are translated to child constraints via multiConstraints.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::data::{Node, Row, Value};
+use rust_ivm::ivm::data::{Node, Value};
 use rust_ivm::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
 use rust_ivm::ivm::operator::{FetchRequest, Input};
 use rust_ivm::ivm::schema::{ColumnType, System};
@@ -19,7 +19,11 @@ fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))
 }
 
-fn make_source(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Rc<RefCell<MemorySource>> {
+fn make_source(
+    name: &str,
+    pk: &[&str],
+    columns: &[(&str, ColumnType)],
+) -> Rc<RefCell<MemorySource>> {
     let cols: HashMap<String, ColumnType> = columns
         .iter()
         .map(|(n, t)| (n.to_string(), t.clone()))
@@ -46,8 +50,11 @@ fn get_rel_children(node: &Node, rel_name: &str) -> Vec<Node> {
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 struct ChainedSetup {
+    #[allow(dead_code)]
     issues: Rc<RefCell<MemorySource>>,
+    #[allow(dead_code)]
     issue_labels: Rc<RefCell<MemorySource>>,
     labels: Rc<RefCell<MemorySource>>,
     outer_join: Rc<RefCell<FlippedJoin>>,
@@ -59,15 +66,27 @@ fn setup_chained(
     issue_label_data: &[Vec<(&str, Value)>],
     label_data: &[Vec<(&str, Value)>],
 ) -> ChainedSetup {
-    let issues = make_source("issue", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let issue_labels = make_source("issueLabel", &["issueID", "labelID"], &[
-        ("issueID", ColumnType::String { optional: false }),
-        ("labelID", ColumnType::String { optional: false }),
-    ]);
-    let labels = make_source("label", &["id"], &[
-        ("id", ColumnType::String { optional: false }),
-        ("name", ColumnType::String { optional: false }),
-    ]);
+    let issues = make_source(
+        "issue",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let issue_labels = make_source(
+        "issueLabel",
+        &["issueID", "labelID"],
+        &[
+            ("issueID", ColumnType::String { optional: false }),
+            ("labelID", ColumnType::String { optional: false }),
+        ],
+    );
+    let labels = make_source(
+        "label",
+        &["id"],
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("name", ColumnType::String { optional: false }),
+        ],
+    );
 
     for row in issue_data {
         add_row(&issues, row);
@@ -129,7 +148,10 @@ fn test_chained_fetch_basic() {
         ],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.outer_join.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.outer_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
     assert_eq!(nodes.len(), 2, "Both issues should have issueLabels");
 
     let issue_labels_0 = get_rel_children(&nodes[0], "issueLabels");
@@ -144,8 +166,15 @@ fn test_chained_fetch_no_labels() {
         &[],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.outer_join.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 0, "No labels means inner join excludes issueLabel");
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.outer_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
+    assert_eq!(
+        nodes.len(),
+        0,
+        "No labels means inner join excludes issueLabel"
+    );
 }
 
 #[test]
@@ -156,8 +185,15 @@ fn test_chained_fetch_no_issue_labels() {
         &[vec![("id", str_val("l1")), ("name", str_val("label1"))]],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.outer_join.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 0, "No issueLabels means inner join excludes issue");
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.outer_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
+    assert_eq!(
+        nodes.len(),
+        0,
+        "No issueLabels means inner join excludes issue"
+    );
 }
 
 #[test]
@@ -174,7 +210,10 @@ fn test_chained_fetch_multiple_labels_per_issue() {
         ],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.outer_join.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.outer_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
     assert_eq!(nodes.len(), 1, "One issue with two labels");
 
     let issue_labels = get_rel_children(&nodes[0], "issueLabels");
@@ -202,15 +241,23 @@ fn test_chained_fetch_with_constraint() {
         ..Default::default()
     };
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.outer_join.borrow().fetch(&req)).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.outer_join.borrow().fetch(&req)).collect();
     assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0].row.get("id").cloned().unwrap_or(Value::Null), str_val("i2"));
+    assert_eq!(
+        nodes[0].row.get("id").cloned().unwrap_or(Value::Null),
+        str_val("i2")
+    );
 }
 
 #[test]
 fn test_chained_fetch_inner_join_semantics() {
     let setup = setup_chained(
-        &[vec![("id", str_val("i1"))], vec![("id", str_val("i2"))], vec![("id", str_val("i3"))]],
+        &[
+            vec![("id", str_val("i1"))],
+            vec![("id", str_val("i2"))],
+            vec![("id", str_val("i3"))],
+        ],
         &[
             vec![("issueID", str_val("i1")), ("labelID", str_val("l1"))],
             vec![("issueID", str_val("i3")), ("labelID", str_val("l2"))],
@@ -221,9 +268,17 @@ fn test_chained_fetch_inner_join_semantics() {
         ],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.outer_join.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 2, "Only issues with matching labels (i1, i3) should appear");
-    let ids: Vec<Value> = nodes.iter()
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.outer_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
+    assert_eq!(
+        nodes.len(),
+        2,
+        "Only issues with matching labels (i1, i3) should appear"
+    );
+    let ids: Vec<Value> = nodes
+        .iter()
         .map(|n| n.row.get("id").cloned().unwrap_or(Value::Null))
         .collect();
     assert!(ids.contains(&str_val("i1")));
@@ -233,21 +288,47 @@ fn test_chained_fetch_inner_join_semantics() {
 
 #[test]
 fn test_chained_fetch_compound_key() {
-    let issues = make_source("issue", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let junction = make_source("junction", &["a", "b"], &[
-        ("issueID", ColumnType::String { optional: false }),
-        ("a", ColumnType::String { optional: false }),
-        ("b", ColumnType::String { optional: false }),
-    ]);
-    let targets = make_source("target", &["a", "b"], &[
-        ("a", ColumnType::String { optional: false }),
-        ("b", ColumnType::String { optional: false }),
-        ("name", ColumnType::String { optional: false }),
-    ]);
+    let issues = make_source(
+        "issue",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let junction = make_source(
+        "junction",
+        &["a", "b"],
+        &[
+            ("issueID", ColumnType::String { optional: false }),
+            ("a", ColumnType::String { optional: false }),
+            ("b", ColumnType::String { optional: false }),
+        ],
+    );
+    let targets = make_source(
+        "target",
+        &["a", "b"],
+        &[
+            ("a", ColumnType::String { optional: false }),
+            ("b", ColumnType::String { optional: false }),
+            ("name", ColumnType::String { optional: false }),
+        ],
+    );
 
     add_row(&issues, &[("id", str_val("i1"))]);
-    add_row(&junction, &[("issueID", str_val("i1")), ("a", str_val("x")), ("b", str_val("1"))]);
-    add_row(&targets, &[("a", str_val("x")), ("b", str_val("1")), ("name", str_val("target1"))]);
+    add_row(
+        &junction,
+        &[
+            ("issueID", str_val("i1")),
+            ("a", str_val("x")),
+            ("b", str_val("1")),
+        ],
+    );
+    add_row(
+        &targets,
+        &[
+            ("a", str_val("x")),
+            ("b", str_val("1")),
+            ("name", str_val("target1")),
+        ],
+    );
 
     let j_input_parent = junction.borrow_mut().connect(None, None, None, None);
     let t_input = targets.borrow_mut().connect(None, None, None, None);
@@ -273,6 +354,12 @@ fn test_chained_fetch_compound_key() {
         system: System::Client,
     });
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(outer.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 1, "Issue with compound-key junction should match");
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(outer.borrow().fetch(&FetchRequest::default()))
+            .collect();
+    assert_eq!(
+        nodes.len(),
+        1,
+        "Issue with compound-key junction should match"
+    );
 }

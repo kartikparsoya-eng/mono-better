@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 
-use crate::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, SimpleCondition, ValuePosition};
+use crate::builder::ast::{
+    Ast, Condition, CorrelatedSubqueryCondition, SimpleCondition, ValuePosition,
+};
 use crate::ivm::data::Value;
 
 /// Table spec with unique keys for scalar subquery resolution.
@@ -161,8 +163,12 @@ fn resolve_scalar_subquery(
     let child_field = &condition.related.child_key[0];
 
     // Recursively resolve any scalar subqueries nested in the subquery's own WHERE.
-    let subquery =
-        resolve_ast_recursive(&condition.related.subquery, table_specs, execute, companions);
+    let subquery = resolve_ast_recursive(
+        &condition.related.subquery,
+        table_specs,
+        execute,
+        companions,
+    );
 
     if !is_simple_subquery(&subquery, table_specs) {
         // Return with the (possibly partially-resolved) subquery.
@@ -199,15 +205,25 @@ fn resolve_scalar_subquery(
             // `x = NULL` and `x != NULL` are false in SQL → ALWAYS_FALSE.
             Condition::Simple(SimpleCondition {
                 op: "=".to_string(),
-                left: ValuePosition::Literal { value: Value::F64(1.0) },
-                right: ValuePosition::Literal { value: Value::F64(0.0) },
+                left: ValuePosition::Literal {
+                    value: Value::F64(1.0),
+                },
+                right: ValuePosition::Literal {
+                    value: Value::F64(0.0),
+                },
             })
         }
         Some(v) => {
-            let op = if condition.op == "EXISTS" { "=" } else { "IS NOT" };
+            let op = if condition.op == "EXISTS" {
+                "="
+            } else {
+                "IS NOT"
+            };
             Condition::Simple(SimpleCondition {
                 op: op.to_string(),
-                left: ValuePosition::Column { name: parent_field.clone() },
+                left: ValuePosition::Column {
+                    name: parent_field.clone(),
+                },
                 right: ValuePosition::Literal { value: v.clone() },
             })
         }
@@ -255,15 +271,12 @@ pub fn extract_literal_equality_constraints(condition: &Condition) -> HashMap<St
 fn collect_constraints(condition: &Condition, constraints: &mut HashMap<String, Value>) {
     match condition {
         Condition::Simple(simple) => {
-            if simple.op == "=" {
-                if let (
-                    ValuePosition::Column { name },
-                    ValuePosition::Literal { value },
-                ) = (&simple.left, &simple.right)
+            if simple.op == "="
+                && let (ValuePosition::Column { name }, ValuePosition::Literal { value }) =
+                    (&simple.left, &simple.right)
                 {
                     constraints.insert(name.clone(), value.clone());
                 }
-            }
         }
         Condition::And(conditions) => {
             for c in conditions {

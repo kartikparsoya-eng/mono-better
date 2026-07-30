@@ -4,13 +4,10 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::ivm::change::Change;
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::NodeStream;
 
@@ -54,9 +51,9 @@ impl MeasurePushOperator {
         }));
 
         let mpo_clone = mpo.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(MeasureOutput {
-            mpo: mpo_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(MeasureOutput { mpo: mpo_clone })));
 
         mpo
     }
@@ -103,6 +100,7 @@ impl Output for MeasureOutput {
         }
 
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        mpo.metrics.add_metric(&mpo.metric_name, elapsed_ms, &mpo.query_id);
+        mpo.metrics
+            .add_metric(&mpo.metric_name, elapsed_ms, &mpo.query_id);
     }
 }

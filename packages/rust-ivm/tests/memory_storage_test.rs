@@ -2,9 +2,9 @@
 //!
 //! Tests: basics, default, other types, scan.
 
+use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::memory_storage::MemoryStorage;
 use rust_ivm::ivm::operator::Storage;
-use rust_ivm::ivm::data::Value;
 
 // ---------------------------------------------------------------------------
 // basics

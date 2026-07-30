@@ -2,14 +2,14 @@
 //! Tests multiple FlippedJoins on the same parent source (sibling relationships).
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{make_source_change_add, make_source_change_remove};
-use rust_ivm::ivm::data::{Node, Row, Value};
+use rust_ivm::ivm::change::make_source_change_add;
+use rust_ivm::ivm::data::{Node, Value};
 use rust_ivm::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
 use rust_ivm::ivm::operator::{FetchRequest, Input, OutputHandle};
 use rust_ivm::ivm::schema::{ColumnType, System};
@@ -19,7 +19,11 @@ fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))
 }
 
-fn make_source(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Rc<RefCell<MemorySource>> {
+fn make_source(
+    name: &str,
+    pk: &[&str],
+    columns: &[(&str, ColumnType)],
+) -> Rc<RefCell<MemorySource>> {
     let cols: HashMap<String, ColumnType> = columns
         .iter()
         .map(|(n, t)| (n.to_string(), t.clone()))
@@ -60,17 +64,27 @@ fn setup_siblings(
     comment_data: &[Vec<(&str, Value)>],
     owner_data: &[Vec<(&str, Value)>],
 ) -> SiblingSetup {
-    let issues = make_source("issues", &["id"], &[
-        ("id", ColumnType::String { optional: false }),
-        ("ownerId", ColumnType::String { optional: false }),
-    ]);
-    let comments = make_source("comments", &["id"], &[
-        ("id", ColumnType::String { optional: false }),
-        ("issueId", ColumnType::String { optional: false }),
-    ]);
-    let owners = make_source("owners", &["id"], &[
-        ("id", ColumnType::String { optional: false }),
-    ]);
+    let issues = make_source(
+        "issues",
+        &["id"],
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("ownerId", ColumnType::String { optional: false }),
+        ],
+    );
+    let comments = make_source(
+        "comments",
+        &["id"],
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("issueId", ColumnType::String { optional: false }),
+        ],
+    );
+    let owners = make_source(
+        "owners",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
     for row in issue_data {
         add_row(&issues, row);
@@ -109,9 +123,13 @@ fn setup_siblings(
     });
 
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
-    comments_join.borrow_mut().set_output(collector.clone() as OutputHandle);
+    comments_join
+        .borrow_mut()
+        .set_output(collector.clone() as OutputHandle);
     let owners_collector = Rc::new(RefCell::new(CollectOutput::new()));
-    owners_join.borrow_mut().set_output(owners_collector.clone() as OutputHandle);
+    owners_join
+        .borrow_mut()
+        .set_output(owners_collector.clone() as OutputHandle);
 
     SiblingSetup {
         issues,
@@ -134,13 +152,13 @@ fn test_sibling_fetch_both_relationships() {
             vec![("id", str_val("c1")), ("issueId", str_val("i1"))],
             vec![("id", str_val("c2")), ("issueId", str_val("i2"))],
         ],
-        &[
-            vec![("id", str_val("o1"))],
-            vec![("id", str_val("o2"))],
-        ],
+        &[vec![("id", str_val("o1"))], vec![("id", str_val("o2"))]],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.comments_join.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.comments_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
     assert_eq!(nodes.len(), 2, "Both issues should have comments");
 
     for node in &nodes {
@@ -152,99 +170,85 @@ fn test_sibling_fetch_both_relationships() {
 #[test]
 fn test_sibling_fetch_owners() {
     let setup = setup_siblings(
-        &[
-            vec![("id", str_val("i1")), ("ownerId", str_val("o1"))],
-        ],
-        &[
-            vec![("id", str_val("c1")), ("issueId", str_val("i1"))],
-        ],
-        &[
-            vec![("id", str_val("o1"))],
-        ],
+        &[vec![("id", str_val("i1")), ("ownerId", str_val("o1"))]],
+        &[vec![("id", str_val("c1")), ("issueId", str_val("i1"))]],
+        &[vec![("id", str_val("o1"))]],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.owners_join.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.owners_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
     assert_eq!(nodes.len(), 1, "One issue should have an owner");
 
     let owners = get_rel_children(&nodes[0], "owners");
     assert_eq!(owners.len(), 1);
-    assert_eq!(owners[0].row.get("id").cloned().unwrap_or(Value::Null), str_val("o1"));
+    assert_eq!(
+        owners[0].row.get("id").cloned().unwrap_or(Value::Null),
+        str_val("o1")
+    );
 }
 
 #[test]
 fn test_sibling_push_new_issue_existing_owner() {
     let setup = setup_siblings(
-        &[
-            vec![("id", str_val("i1")), ("ownerId", str_val("o1"))],
-        ],
-        &[
-            vec![("id", str_val("c1")), ("issueId", str_val("i1"))],
-        ],
-        &[
-            vec![("id", str_val("o1"))],
-        ],
+        &[vec![("id", str_val("i1")), ("ownerId", str_val("o1"))]],
+        &[vec![("id", str_val("c1")), ("issueId", str_val("i1"))]],
+        &[vec![("id", str_val("o1"))]],
     );
 
-    let change = make_source_change_add(
-        Arc::new(FxHashMap::from_iter([
-            ("id".to_string(), str_val("i2")),
-            ("ownerId".to_string(), str_val("o1")),
-        ])),
-    );
+    let change = make_source_change_add(Arc::new(FxHashMap::from_iter([
+        ("id".to_string(), str_val("i2")),
+        ("ownerId".to_string(), str_val("o1")),
+    ])));
     setup.issues.borrow_mut().push(change);
 
     let changes = setup.collector.borrow().changes.clone();
-    assert!(changes.is_empty(), "New issue with no comments produces no output (inner join)");
+    assert!(
+        changes.is_empty(),
+        "New issue with no comments produces no output (inner join)"
+    );
 }
 
 #[test]
 fn test_sibling_push_new_comment() {
     let setup = setup_siblings(
-        &[
-            vec![("id", str_val("i1")), ("ownerId", str_val("o1"))],
-        ],
-        &[
-            vec![("id", str_val("c1")), ("issueId", str_val("i1"))],
-        ],
-        &[
-            vec![("id", str_val("o1"))],
-        ],
+        &[vec![("id", str_val("i1")), ("ownerId", str_val("o1"))]],
+        &[vec![("id", str_val("c1")), ("issueId", str_val("i1"))]],
+        &[vec![("id", str_val("o1"))]],
     );
 
-    let change = make_source_change_add(
-        Arc::new(FxHashMap::from_iter([
-            ("id".to_string(), str_val("c2")),
-            ("issueId".to_string(), str_val("i1")),
-        ])),
-    );
+    let change = make_source_change_add(Arc::new(FxHashMap::from_iter([
+        ("id".to_string(), str_val("c2")),
+        ("issueId".to_string(), str_val("i1")),
+    ])));
     setup.comments.borrow_mut().push(change);
 
     let changes = setup.collector.borrow().changes.clone();
-    assert!(!changes.is_empty(), "Pushing a new comment should produce changes");
+    assert!(
+        !changes.is_empty(),
+        "Pushing a new comment should produce changes"
+    );
 }
 
 #[test]
 fn test_sibling_push_new_owner() {
     let setup = setup_siblings(
-        &[
-            vec![("id", str_val("i1")), ("ownerId", str_val("o1"))],
-        ],
-        &[
-            vec![("id", str_val("c1")), ("issueId", str_val("i1"))],
-        ],
-        &[
-            vec![("id", str_val("o1"))],
-        ],
+        &[vec![("id", str_val("i1")), ("ownerId", str_val("o1"))]],
+        &[vec![("id", str_val("c1")), ("issueId", str_val("i1"))]],
+        &[vec![("id", str_val("o1"))]],
     );
 
-    let change = make_source_change_add(
-        Arc::new(FxHashMap::from_iter([
-            ("id".to_string(), str_val("o2")),
-        ])),
-    );
+    let change = make_source_change_add(Arc::new(FxHashMap::from_iter([(
+        "id".to_string(),
+        str_val("o2"),
+    )])));
     setup.owners.borrow_mut().push(change);
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.owners_join.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.owners_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
     assert_eq!(nodes.len(), 1);
 
     let owners = get_rel_children(&nodes[0], "owners");
@@ -262,22 +266,28 @@ fn test_sibling_two_owners_same_issue() {
             vec![("id", str_val("c1")), ("issueId", str_val("i1"))],
             vec![("id", str_val("c2")), ("issueId", str_val("i2"))],
         ],
-        &[
-            vec![("id", str_val("o1"))],
-            vec![("id", str_val("o2"))],
-        ],
+        &[vec![("id", str_val("o1"))], vec![("id", str_val("o2"))]],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.owners_join.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.owners_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
     assert_eq!(nodes.len(), 2);
 
     let owners0 = get_rel_children(&nodes[0], "owners");
     assert_eq!(owners0.len(), 1);
-    assert_eq!(owners0[0].row.get("id").cloned().unwrap_or(Value::Null), str_val("o1"));
+    assert_eq!(
+        owners0[0].row.get("id").cloned().unwrap_or(Value::Null),
+        str_val("o1")
+    );
 
     let owners1 = get_rel_children(&nodes[1], "owners");
     assert_eq!(owners1.len(), 1);
-    assert_eq!(owners1[0].row.get("id").cloned().unwrap_or(Value::Null), str_val("o2"));
+    assert_eq!(
+        owners1[0].row.get("id").cloned().unwrap_or(Value::Null),
+        str_val("o2")
+    );
 }
 
 #[test]
@@ -291,12 +301,20 @@ fn test_sibling_inner_join_no_owner() {
             vec![("id", str_val("c1")), ("issueId", str_val("i1"))],
             vec![("id", str_val("c2")), ("issueId", str_val("i2"))],
         ],
-        &[
-            vec![("id", str_val("o1"))],
-        ],
+        &[vec![("id", str_val("o1"))]],
     );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.owners_join.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 1, "Only issue i1 has a matching owner (inner join)");
-    assert_eq!(nodes[0].row.get("id").cloned().unwrap_or(Value::Null), str_val("i1"));
+    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(
+        setup.owners_join.borrow().fetch(&FetchRequest::default()),
+    )
+    .collect();
+    assert_eq!(
+        nodes.len(),
+        1,
+        "Only issue i1 has a matching owner (inner join)"
+    );
+    assert_eq!(
+        nodes[0].row.get("id").cloned().unwrap_or(Value::Null),
+        str_val("i1")
+    );
 }

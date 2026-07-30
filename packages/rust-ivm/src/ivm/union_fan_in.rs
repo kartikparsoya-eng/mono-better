@@ -5,20 +5,17 @@
 //! Also implements merge_fetches for sorted merge of multiple fetch streams.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::ivm::change::{Change, ChangeType};
-use crate::ivm::constraint::{constraint_matches_row, Constraint};
+use crate::ivm::constraint::Constraint;
 use crate::ivm::data::Node;
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::push_accumulated::push_accumulated_changes;
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{from_vec, NodeStream};
+use crate::ivm::stream::{NodeStream, from_vec};
 
 /// The UnionFanIn operator — port of TS `UnionFanIn` (union-fan-in.ts:24).
 ///
@@ -42,8 +39,7 @@ pub struct UnionFanIn {
 
 impl UnionFanIn {
     pub fn new(schema: SourceSchema) -> Shared<UnionFanIn> {
-        let fan_out_relationships: HashSet<String> =
-            schema.relationships.keys().cloned().collect();
+        let fan_out_relationships: HashSet<String> = schema.relationships.keys().cloned().collect();
         Rc::new(RefCell::new(UnionFanIn {
             inputs: Vec::new(),
             schema,
@@ -95,7 +91,9 @@ impl UnionFanIn {
                 "Relationship {} exists in multiple upstream inputs to union fan-in",
                 rel_name,
             );
-            self.schema.relationships.insert(rel_name.clone(), rel_schema.clone());
+            self.schema
+                .relationships
+                .insert(rel_name.clone(), rel_schema.clone());
             self.schema.relationship_order.push(rel_name.clone());
             self.branch_relationships.insert(rel_name.clone());
         }
@@ -141,7 +139,7 @@ impl UnionFanIn {
             // push_accumulated_changes routes to push_internal_change (not the
             // accumulate path) — no re-entrant borrow_mut on accumulated_pushes.
             push_accumulated_changes(
-                &mut *self.accumulated_pushes.borrow_mut(),
+                &mut self.accumulated_pushes.borrow_mut(),
                 &output,
                 pusher,
                 fan_out_change_type,
@@ -172,9 +170,7 @@ impl UnionFanIn {
                 for input in &self.inputs {
                     let constraint: Constraint = pk
                         .iter()
-                        .map(|k| {
-                            (k.clone(), node.row.get(k).cloned().unwrap_or(Value::Null))
-                        })
+                        .map(|k| (k.clone(), node.row.get(k).cloned().unwrap_or(Value::Null)))
                         .collect();
 
                     let req = FetchRequest {
@@ -246,7 +242,7 @@ impl Input for UnionFanIn {
         }
 
         let merged = crate::ivm::source::merge_sorted_streams(streams, compare);
-        
+
         let compare_dedup: Rc<dyn Fn(&Node, &Node) -> CmpOrdering> = if reverse2 {
             Rc::new(move |l: &Node, r: &Node| compare_rows2(&r.row, &l.row))
         } else {
@@ -259,9 +255,16 @@ impl Input for UnionFanIn {
                 StreamItem::Data(n) => n,
                 StreamItem::Yield => return Some(StreamItem::Yield),
             };
-            let is_dup = last.as_ref().map(|l| compare_dedup(l, &node) == CmpOrdering::Equal).unwrap_or(false);
+            let is_dup = last
+                .as_ref()
+                .map(|l| compare_dedup(l, &node) == CmpOrdering::Equal)
+                .unwrap_or(false);
             last = Some(node.clone());
-            if !is_dup { Some(StreamItem::Data(node)) } else { None }
+            if !is_dup {
+                Some(StreamItem::Data(node))
+            } else {
+                None
+            }
         }))
     }
 }
@@ -349,7 +352,5 @@ pub fn merge_fetches(
 
     result
 }
-
-
 
 use crate::ivm::data::Value;

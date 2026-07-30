@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::builder::named::CustomQueryID;
 use crate::builder::query::Query;
-use crate::builder::validate_input::{validate_input, InputValidationError, Validator};
+use crate::builder::validate_input::{InputValidationError, validate_input};
 use crate::ivm::data::Value;
 
 /// A query function: produces a Query from a validated input value.
@@ -37,7 +37,8 @@ impl QueryRequest {
     }
 
     pub fn run(&self) -> Result<Query, InputValidationError> {
-        let validator: Option<&dyn Fn(&Value) -> Result<Value, Vec<String>>> = self.custom_query.validator.as_deref();
+        let validator: Option<&dyn Fn(&Value) -> Result<Value, Vec<String>>> =
+            self.custom_query.validator.as_deref();
         let validated = validate_input(
             &self.custom_query.query_name,
             &self.args,

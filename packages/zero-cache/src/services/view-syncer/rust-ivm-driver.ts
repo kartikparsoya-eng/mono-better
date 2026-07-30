@@ -126,6 +126,9 @@ function napiToRowChange(c: NapiRowChange): RowChange {
   };
 }
 
+function quoteIdent(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
 function buildPrimaryKeys(
   clientSchema: ClientSchema,
   primaryKeys: Map<string, PrimaryKey> = new Map<string, PrimaryKey>(),
@@ -510,8 +513,17 @@ export class RustIVMDriver {
     return this.#rowSetSignatures.get(queryID);
   }
 
-  getRow(_table: string, _pk: RowKey): Row | undefined {
-    return undefined;
+  getRow(table: string, pk: RowKey): Row | undefined {
+    const primaryKey = this.#primaryKeys.get(table);
+    if (!primaryKey) {
+      return undefined;
+    }
+    const cols = Object.keys(pk);
+    const where = cols.map(c => `${quoteIdent(c)} = ?`).join(' AND ');
+    const sql = `SELECT * FROM ${quoteIdent(table)} WHERE ${where}`;
+    const params = cols.map(c => pk[c]);
+    const row = (this.#runner() as any).get(sql, ...params);
+    return row as Row | undefined;
   }
 
   addQuery(

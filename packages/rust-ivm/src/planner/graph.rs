@@ -1,7 +1,7 @@
 //! Planner graph — port of `planner-graph.ts`.
 
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::planner::connection::{ConnectionCostModel, PlannerConnection};
@@ -33,6 +33,12 @@ pub struct PlannerGraph {
     pub connections: Vec<Rc<RefCell<PlannerConnection>>>,
 }
 
+impl Default for PlannerGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PlannerGraph {
     pub fn new() -> Self {
         PlannerGraph {
@@ -50,7 +56,8 @@ impl PlannerGraph {
     }
 
     pub fn add_source(&mut self, name: &str, model: ConnectionCostModel) {
-        self.sources.insert(name.to_string(), PlannerSource::new(name, model));
+        self.sources
+            .insert(name.to_string(), PlannerSource::new(name, model));
     }
 
     pub fn connect_source(
@@ -72,10 +79,18 @@ impl PlannerGraph {
     }
 
     pub fn reset_planning_state(&mut self) {
-        for j in &self.joins { j.borrow_mut().reset(); }
-        for fo in &self.fan_outs { fo.borrow_mut().reset(); }
-        for fi in &self.fan_ins { fi.borrow_mut().reset(); }
-        for c in &self.connections { c.borrow_mut().reset(); }
+        for j in &self.joins {
+            j.borrow_mut().reset();
+        }
+        for fo in &self.fan_outs {
+            fo.borrow_mut().reset();
+        }
+        for fi in &self.fan_ins {
+            fi.borrow_mut().reset();
+        }
+        for c in &self.connections {
+            c.borrow_mut().reset();
+        }
     }
 
     pub fn propagate_constraints(&self) {
@@ -93,16 +108,29 @@ impl PlannerGraph {
         PlanState {
             connections: self.connections.iter().map(|c| c.borrow().limit).collect(),
             joins: self.joins.iter().map(|j| j.borrow().join_type()).collect(),
-            fan_outs: self.fan_outs.iter().map(|fo| fo.borrow().node_type()).collect(),
-            fan_ins: self.fan_ins.iter().map(|fi| fi.borrow().node_type()).collect(),
-            connection_constraints: self.connections.iter().map(|c| c.borrow().capture_constraints()).collect(),
+            fan_outs: self
+                .fan_outs
+                .iter()
+                .map(|fo| fo.borrow().node_type())
+                .collect(),
+            fan_ins: self
+                .fan_ins
+                .iter()
+                .map(|fi| fi.borrow().node_type())
+                .collect(),
+            connection_constraints: self
+                .connections
+                .iter()
+                .map(|c| c.borrow().capture_constraints())
+                .collect(),
         }
     }
 
     pub fn restore_snapshot(&mut self, state: &PlanState) {
         for (i, c) in self.connections.iter_mut().enumerate() {
             c.borrow_mut().limit = state.connections[i];
-            c.borrow_mut().restore_constraints(state.connection_constraints[i].clone());
+            c.borrow_mut()
+                .restore_constraints(state.connection_constraints[i].clone());
         }
         for (i, j) in self.joins.iter_mut().enumerate() {
             j.borrow_mut().reset();
@@ -123,7 +151,9 @@ impl PlannerGraph {
     }
 
     pub fn plan(&mut self) {
-        let flippable_indices: Vec<usize> = self.joins.iter()
+        let flippable_indices: Vec<usize> = self
+            .joins
+            .iter()
             .enumerate()
             .filter(|(_, j)| j.borrow().is_flippable())
             .map(|(i, _)| i)
@@ -197,7 +227,9 @@ fn find_fi_and_joins(graph: &PlannerGraph, fo: &PlannerFanOut) -> FofiInfo {
             PlannerNode::Connection(c) => Rc::as_ptr(c) as *const (),
             PlannerNode::Terminus(t) => Rc::as_ptr(t) as *const (),
         };
-        if visited_rcs.contains(&ptr) { continue; }
+        if visited_rcs.contains(&ptr) {
+            continue;
+        }
         visited_rcs.push(ptr);
 
         match &node {
@@ -228,20 +260,24 @@ fn find_fi_and_joins(graph: &PlannerGraph, fo: &PlannerFanOut) -> FofiInfo {
         }
     }
 
-    FofiInfo { fi_index, join_indices }
+    FofiInfo {
+        fi_index,
+        join_indices,
+    }
 }
 
 fn check_and_convert_fofi(graph: &mut PlannerGraph) {
     let cache = build_fofi_cache(graph);
     for (fo_idx, info) in &cache {
-        let has_flipped = info.join_indices.iter()
+        let has_flipped = info
+            .join_indices
+            .iter()
             .any(|&j_idx| graph.joins[j_idx].borrow().join_type() == JoinType::Flipped);
-        if has_flipped {
-            if let Some(fi_idx) = info.fi_index {
+        if has_flipped
+            && let Some(fi_idx) = info.fi_index {
                 graph.fan_outs[*fo_idx].borrow_mut().convert_to_ufo();
                 graph.fan_ins[fi_idx].borrow_mut().convert_to_ufi();
             }
-        }
     }
 }
 

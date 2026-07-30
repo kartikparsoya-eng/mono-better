@@ -42,7 +42,9 @@ impl ClientGroupStorage {
     /// Create a new Storage instance for a single operator.
     pub fn create_storage(&self) -> Rc<RefCell<DatabaseStorage>> {
         let op_id = {
-            let next = self.next_op_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let next = self
+                .next_op_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             next + 1
         };
         Rc::new(RefCell::new(DatabaseStorage {
@@ -94,13 +96,18 @@ impl Storage for DatabaseStorage {
                    ON CONFLICT(clientGroupID, op, key) DO UPDATE SET val = excluded.val";
         let json = value_to_json_string(&value);
         let conn = self.db.borrow().conn();
-        let _ = conn.borrow().execute(sql, rusqlite::params![&self.cg_id, self.op_id as i64, key, json]);
+        let _ = conn.borrow().execute(
+            sql,
+            rusqlite::params![&self.cg_id, self.op_id as i64, key, json],
+        );
     }
 
     fn del(&mut self, key: &str) {
         let sql = "DELETE FROM storage WHERE clientGroupID = ? AND op = ? AND key = ?";
         let conn = self.db.borrow().conn();
-        let _ = conn.borrow().execute(sql, rusqlite::params![&self.cg_id, self.op_id as i64, key]);
+        let _ = conn
+            .borrow()
+            .execute(sql, rusqlite::params![&self.cg_id, self.op_id as i64, key]);
     }
 
     fn scan(&self, prefix: Option<&str>) -> Vec<(String, Value)> {
@@ -138,8 +145,10 @@ impl Storage for DatabaseStorage {
 /// Create a DatabaseStorage instance.
 pub fn create_database_storage(path: &str) -> Result<Database, String> {
     let db = Database::new(path).map_err(|e| e.0)?;
-    db.exec("PRAGMA journal_mode = OFF").map_err(|e| e.to_string())?;
-    db.exec("PRAGMA synchronous = OFF").map_err(|e| e.to_string())?;
+    db.exec("PRAGMA journal_mode = OFF")
+        .map_err(|e| e.to_string())?;
+    db.exec("PRAGMA synchronous = OFF")
+        .map_err(|e| e.to_string())?;
     db.exec(CREATE_STORAGE_TABLE).map_err(|e| e.to_string())?;
     Ok(db)
 }

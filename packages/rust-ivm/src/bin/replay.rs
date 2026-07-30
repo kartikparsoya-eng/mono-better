@@ -11,5 +11,8 @@ fn main() {
         std::process::exit(2);
     }
     let out = canonicalize(&run_fixture_file(&args[1]));
-    println!("{}", serde_json::to_string_pretty(&out).expect("serialize output"));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&out).expect("serialize output")
+    );
 }

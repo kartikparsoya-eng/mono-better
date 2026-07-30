@@ -3,9 +3,8 @@
 //! Configuration for ZQLiteZero.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::sqlite::db::Database;
 

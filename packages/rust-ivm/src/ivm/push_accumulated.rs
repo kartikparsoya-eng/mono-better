@@ -12,11 +12,10 @@
 use std::collections::HashMap;
 
 use crate::ivm::change::{
-    make_add_change, make_child_change, make_edit_change, make_remove_change, Change, ChangeType,
-    ChildData,
+    Change, ChangeType, make_add_change, make_child_change, make_edit_change,
+    make_remove_change,
 };
-use crate::ivm::data::Node;
-use crate::ivm::operator::{InputBase, Output, OutputHandle};
+use crate::ivm::operator::{InputBase, OutputHandle};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::empty_rel;
 
@@ -46,7 +45,16 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 }
                 make_remove_change(node)
             }
-            (Change::Edit { node: ln, old_node: lo }, Change::Edit { node: rn, old_node: ro }) => {
+            (
+                Change::Edit {
+                    node: ln,
+                    old_node: lo,
+                },
+                Change::Edit {
+                    node: rn,
+                    old_node: ro,
+                },
+            ) => {
                 let mut new_node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !new_node.relationships.contains_key(name) {
@@ -61,7 +69,16 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 }
                 make_edit_change(new_node, old_node)
             }
-            (Change::Child { node: ln, child: lc }, Change::Child { node: rn, child: _rc }) => {
+            (
+                Change::Child {
+                    node: ln,
+                    child: lc,
+                },
+                Change::Child {
+                    node: rn,
+                    child: _rc,
+                },
+            ) => {
                 let mut node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !node.relationships.contains_key(name) {
@@ -75,7 +92,13 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
     } else {
         // left is always edit here
         match (left, right) {
-            (Change::Edit { node: ln, old_node: lo }, Change::Add(rn)) => {
+            (
+                Change::Edit {
+                    node: ln,
+                    old_node: lo,
+                },
+                Change::Add(rn),
+            ) => {
                 let mut new_node = ln.clone();
                 for (name, rel) in &rn.relationships {
                     if !new_node.relationships.contains_key(name) {
@@ -84,7 +107,13 @@ pub fn merge_relationships(left: &Change, right: &Change) -> Change {
                 }
                 make_edit_change(new_node, lo.clone())
             }
-            (Change::Edit { node: ln, old_node: lo }, Change::Remove(rn)) => {
+            (
+                Change::Edit {
+                    node: ln,
+                    old_node: lo,
+                },
+                Change::Remove(rn),
+            ) => {
                 let mut old_node = lo.clone();
                 for (name, rel) in &rn.relationships {
                     if !old_node.relationships.contains_key(name) {
@@ -184,13 +213,17 @@ pub fn push_accumulated_changes(
             assert_eq!(types.len(), 1);
             assert_eq!(types[0], ChangeType::Remove);
             let change = candidates.remove(&ChangeType::Remove).unwrap();
-            output.borrow_mut().push(add_empty_relationships(schema, &change), pusher);
+            output
+                .borrow_mut()
+                .push(add_empty_relationships(schema, &change), pusher);
         }
         ChangeType::Add => {
             assert_eq!(types.len(), 1);
             assert_eq!(types[0], ChangeType::Add);
             let change = candidates.remove(&ChangeType::Add).unwrap();
-            output.borrow_mut().push(add_empty_relationships(schema, &change), pusher);
+            output
+                .borrow_mut()
+                .push(add_empty_relationships(schema, &change), pusher);
         }
         ChangeType::Edit => {
             for t in &types {
@@ -210,18 +243,26 @@ pub fn push_accumulated_changes(
                 if let Some(rc) = &remove_change {
                     ec = merge_relationships(&ec, rc);
                 }
-                output.borrow_mut().push(add_empty_relationships(schema, &ec), pusher);
+                output
+                    .borrow_mut()
+                    .push(add_empty_relationships(schema, &ec), pusher);
                 return;
             }
 
             if let (Some(ac), Some(rc)) = (&add_change, &remove_change) {
                 let edit = make_edit_change(ac.node().clone(), rc.node().clone());
-                output.borrow_mut().push(add_empty_relationships(schema, &edit), pusher);
+                output
+                    .borrow_mut()
+                    .push(add_empty_relationships(schema, &edit), pusher);
                 return;
             }
 
-            let change = add_change.or(remove_change).expect("expected at least one change");
-            output.borrow_mut().push(add_empty_relationships(schema, &change), pusher);
+            let change = add_change
+                .or(remove_change)
+                .expect("expected at least one change");
+            output
+                .borrow_mut()
+                .push(add_empty_relationships(schema, &change), pusher);
         }
         ChangeType::Child => {
             for t in &types {
@@ -245,8 +286,12 @@ pub fn push_accumulated_changes(
                 "Fan-in:child expected either add or remove, not both"
             );
 
-            let change = add_change.or(remove_change).expect("expected at least one change");
-            output.borrow_mut().push(add_empty_relationships(schema, &change), pusher);
+            let change = add_change
+                .or(remove_change)
+                .expect("expected at least one change");
+            output
+                .borrow_mut()
+                .push(add_empty_relationships(schema, &change), pusher);
         }
     }
 }

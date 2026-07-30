@@ -64,8 +64,12 @@ fn scalar_exists_ast(user_id: &str, scalar: bool) -> Ast {
         alias: Some("users".to_string()),
         where_clause: Some(Condition::Simple(SimpleCondition {
             op: "=".to_string(),
-            left: ValuePosition::Column { name: "id".to_string() },
-            right: ValuePosition::Literal { value: Value::Str(user_id.into()) },
+            left: ValuePosition::Column {
+                name: "id".to_string(),
+            },
+            right: ValuePosition::Literal {
+                value: Value::Str(user_id.into()),
+            },
         })),
         related: vec![],
         limit: None,
@@ -144,7 +148,12 @@ fn scalar_resolves_to_literal_and_emits_companion() {
 
     // The matched subquery row ships as a companion.
     let users = tables.get("users").expect("companion user row present");
-    assert_eq!(users.len(), 1, "expected one companion user, got {:?}", users);
+    assert_eq!(
+        users.len(),
+        1,
+        "expected one companion user, got {:?}",
+        users
+    );
     assert_eq!(str_field(&users[0].row, "id").as_deref(), Some("u1"));
     for c in changes {
         assert_eq!(c.query_id, "q", "row tagged with wrong query id");
@@ -188,11 +197,11 @@ fn scalar_no_match_is_always_false() {
     }]);
     let tables = by_table(&results[0].changes);
     assert!(
-        tables.get("issues").map_or(true, |r| r.is_empty()),
+        tables.get("issues").is_none_or(|r| r.is_empty()),
         "no issue should match an unresolved scalar subquery",
     );
     assert!(
-        tables.get("users").map_or(true, |r| r.is_empty()),
+        tables.get("users").is_none_or(|r| r.is_empty()),
         "no companion row when nothing matched",
     );
 }

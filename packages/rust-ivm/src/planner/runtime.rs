@@ -9,6 +9,7 @@
 //!   - unconstrained read  → the table's row count (an unindexed full scan),
 //!   - constrained read    → ~1 row (an indexed key seek),
 //!   - fanout              → 1.0 / `none` confidence.
+//!
 //! This is the SAME shape the differential oracle (`planner_oracle_test`) proves
 //! matches TS `planQuery`'s flip decisions — here fed REAL table sizes from the
 //! replica. (A scanstatus-exact model — TS `createSQLiteCostModel` — is a future
@@ -22,7 +23,7 @@ use std::rc::Rc;
 
 use crate::builder::ast::{Ast, Condition};
 use crate::ivm::data::Value;
-use crate::planner::{plan_query, Confidence, ConnectionCostModel, CostModelCost, FanoutEst};
+use crate::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, plan_query};
 
 /// A cost model backed by a live SQLite connection (the pinned snapshot). Table
 /// row counts are read once and memoised for the duration of one plan.
@@ -38,9 +39,9 @@ pub fn create_snapshot_cost_model(conn: Rc<RefCell<rusqlite::Connection>>) -> Co
                 1.0
             } else {
                 let mut cache = counts.borrow_mut();
-                *cache.entry(table.to_string()).or_insert_with(|| {
-                    row_count(&conn.borrow(), table).unwrap_or(1000.0)
-                })
+                *cache
+                    .entry(table.to_string())
+                    .or_insert_with(|| row_count(&conn.borrow(), table).unwrap_or(1000.0))
             };
             CostModelCost {
                 startup_cost: 1.0,
@@ -56,7 +57,9 @@ pub fn create_snapshot_cost_model(conn: Rc<RefCell<rusqlite::Connection>>) -> Co
 
 fn row_count(conn: &rusqlite::Connection, table: &str) -> Option<f64> {
     let sql = format!("SELECT COUNT(*) FROM \"{}\"", table.replace('"', "\"\""));
-    conn.query_row(&sql, [], |r| r.get::<_, i64>(0)).ok().map(|n| n as f64)
+    conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
+        .ok()
+        .map(|n| n as f64)
 }
 
 /// Plan `ast_json` (TS-shape) with `cost_model` and return the ordered `flip`

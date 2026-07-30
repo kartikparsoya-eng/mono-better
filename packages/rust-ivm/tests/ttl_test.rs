@@ -2,9 +2,7 @@
 //!
 //! Tests: parseTTL, compareTTL, normalizeTTL, clampTTL.
 
-use rust_ivm::builder::ttl::{
-    clamp_ttl, compare_ttl, parse_ttl, MAX_TTL_MS,
-};
+use rust_ivm::builder::ttl::{MAX_TTL_MS, clamp_ttl, compare_ttl, parse_ttl};
 
 // ---------------------------------------------------------------------------
 // parseTTL
@@ -62,12 +60,18 @@ fn test_parse_ttl_fractional_hours() {
 
 #[test]
 fn test_parse_ttl_fractional_days() {
-    assert_eq!(parse_ttl("1.5d"), (1.5 * 24.0 * 60.0 * 60.0 * 1000.0) as i64);
+    assert_eq!(
+        parse_ttl("1.5d"),
+        (1.5 * 24.0 * 60.0 * 60.0 * 1000.0) as i64
+    );
 }
 
 #[test]
 fn test_parse_ttl_fractional_years() {
-    assert_eq!(parse_ttl("1.5y"), (1.5 * 365.0 * 24.0 * 60.0 * 60.0 * 1000.0) as i64);
+    assert_eq!(
+        parse_ttl("1.5y"),
+        (1.5 * 365.0 * 24.0 * 60.0 * 60.0 * 1000.0) as i64
+    );
 }
 
 // ---------------------------------------------------------------------------

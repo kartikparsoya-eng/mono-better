@@ -5,17 +5,14 @@
 //! against a full sort key ([createdAt, id]).
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::cmp::Ordering as CmpOrdering;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::ivm::change::{Change, ChangeType};
-use crate::ivm::data::{make_partial_bound_comparator, Node, Row, Value};
-use crate::ivm::operator::{
-    Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::data::{Row, make_partial_bound_comparator};
+use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{from_vec, NodeStream};
+use crate::ivm::stream::NodeStream;
 
 /// The Skip operator — port of TS `Skip` (skip.ts).
 pub struct Skip {
@@ -46,9 +43,9 @@ impl Skip {
         }));
 
         let skip_clone = skip.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(SkipOutput {
-            skip: skip_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(SkipOutput { skip: skip_clone })));
 
         skip
     }
@@ -147,14 +144,18 @@ impl Input for Skip {
         // Post-hoc filter by the Skip's own bound — redundant when the upstream
         // honors `req.start` (the source does), but kept for operators that do
         // not, and to mirror TS's reverse-path `#shouldBePresent` re-check.
-        Box::new(crate::ivm::stream::skip_yields(stream).filter(move |n| {
-            let cmp = compare(&n.row, &start_row);
-            if exclusive {
-                cmp == CmpOrdering::Greater
-            } else {
-                cmp != CmpOrdering::Less
-            }
-        }).map(crate::ivm::stream::StreamItem::Data))
+        Box::new(
+            crate::ivm::stream::skip_yields(stream)
+                .filter(move |n| {
+                    let cmp = compare(&n.row, &start_row);
+                    if exclusive {
+                        cmp == CmpOrdering::Greater
+                    } else {
+                        cmp != CmpOrdering::Less
+                    }
+                })
+                .map(crate::ivm::stream::StreamItem::Data),
+        )
     }
 }
 
@@ -183,15 +184,13 @@ impl Output for SkipOutput {
                 if old_was_present && new_is_present {
                     output.borrow_mut().push(change, pusher);
                 } else if old_was_present && !new_is_present {
-                    output.borrow_mut().push(
-                        crate::ivm::change::make_remove_change(old_node),
-                        pusher,
-                    );
+                    output
+                        .borrow_mut()
+                        .push(crate::ivm::change::make_remove_change(old_node), pusher);
                 } else if !old_was_present && new_is_present {
-                    output.borrow_mut().push(
-                        crate::ivm::change::make_add_change(node),
-                        pusher,
-                    );
+                    output
+                        .borrow_mut()
+                        .push(crate::ivm::change::make_add_change(node), pusher);
                 }
             }
             ChangeType::Add | ChangeType::Remove | ChangeType::Child => {

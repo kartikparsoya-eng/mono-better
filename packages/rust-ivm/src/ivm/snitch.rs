@@ -2,15 +2,12 @@
 //!
 //! An Operator that records all messages it receives. Useful for debugging.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use crate::ivm::change::{Change, ChangeType};
+use crate::ivm::change::Change;
 use crate::ivm::data::{Node, Row};
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::NodeStream;
 
@@ -34,9 +31,19 @@ pub enum ChangeRecord {
 /// A snitch log message.
 #[derive(Clone, Debug)]
 pub enum SnitchMessage {
-    Fetch { name: String, req: FetchRequest },
-    FetchCount { name: String, req: FetchRequest, count: usize },
-    Push { name: String, change: ChangeRecord },
+    Fetch {
+        name: String,
+        req: FetchRequest,
+    },
+    FetchCount {
+        name: String,
+        req: FetchRequest,
+        count: usize,
+    },
+    Push {
+        name: String,
+        change: ChangeRecord,
+    },
 }
 
 /// Snitch — records all messages for debugging.
@@ -68,9 +75,11 @@ impl Snitch {
         }));
 
         let snitch_clone = snitch.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(SnitchOutput {
-            snitch: snitch_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(SnitchOutput {
+                snitch: snitch_clone,
+            })));
 
         snitch
     }
@@ -105,7 +114,7 @@ impl Input for Snitch {
     fn fetch(&self, req: &FetchRequest) -> NodeStream {
         // Log fetch
         {
-            let mut s = self.clone_ref();
+            let s = self.clone_ref();
             s.log_message(SnitchMessage::Fetch {
                 name: self.name.clone(),
                 req: req.clone(),
@@ -120,7 +129,7 @@ impl Input for Snitch {
 
         // Log fetch count
         {
-            let mut s = self.clone_ref();
+            let s = self.clone_ref();
             s.log_message(SnitchMessage::FetchCount {
                 name: self.name.clone(),
                 req: req.clone(),
@@ -177,8 +186,12 @@ impl Output for SnitchOutput {
 /// Convert a Change to a ChangeRecord for logging.
 pub fn to_change_record(change: &Change) -> ChangeRecord {
     match change {
-        Change::Add(node) => ChangeRecord::Add { row: node.row.clone() },
-        Change::Remove(node) => ChangeRecord::Remove { row: node.row.clone() },
+        Change::Add(node) => ChangeRecord::Add {
+            row: node.row.clone(),
+        },
+        Change::Remove(node) => ChangeRecord::Remove {
+            row: node.row.clone(),
+        },
         Change::Edit { node, old_node } => ChangeRecord::Edit {
             row: node.row.clone(),
             old_row: old_node.row.clone(),

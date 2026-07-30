@@ -3,13 +3,15 @@
 //! Tests incremental changes (add/remove/edit) through FlippedJoin.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{make_source_change_add, make_source_change_remove, make_source_change_edit};
+use rust_ivm::ivm::change::{
+    make_source_change_add, make_source_change_edit, make_source_change_remove,
+};
 use rust_ivm::ivm::data::{Node, Row, Value};
 use rust_ivm::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
 use rust_ivm::ivm::operator::{FetchRequest, Input, OutputHandle};
@@ -24,7 +26,11 @@ fn make_row(pairs: &[(&str, Value)]) -> Row {
     Arc::new(map)
 }
 
-fn make_source(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Rc<RefCell<MemorySource>> {
+fn make_source(
+    name: &str,
+    pk: &[&str],
+    columns: &[(&str, ColumnType)],
+) -> Rc<RefCell<MemorySource>> {
     let cols: HashMap<String, ColumnType> = columns
         .iter()
         .map(|(n, t)| (n.to_string(), t.clone()))
@@ -66,8 +72,19 @@ fn setup_flipped_join(
     parent_data: &[Vec<(&str, Value)>],
     child_data: &[Vec<(&str, Value)>],
 ) -> PushSetup {
-    let parent = make_source("issues", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let child = make_source("comments", &["id"], &[("id", ColumnType::String { optional: false }), ("issueID", ColumnType::String { optional: false })]);
+    let parent = make_source(
+        "issues",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let child = make_source(
+        "comments",
+        &["id"],
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("issueID", ColumnType::String { optional: false }),
+        ],
+    );
 
     for row_data in parent_data {
         add_row(&parent, row_data);
@@ -90,9 +107,15 @@ fn setup_flipped_join(
     });
 
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
-    fj.borrow_mut().set_output(collector.clone() as OutputHandle);
+    fj.borrow_mut()
+        .set_output(collector.clone() as OutputHandle);
 
-    PushSetup { parent, child, fj, collector }
+    PushSetup {
+        parent,
+        child,
+        fj,
+        collector,
+    }
 }
 
 fn collected_changes(collector: &Rc<RefCell<CollectOutput>>) -> Vec<rust_ivm::ivm::change::Change> {
@@ -101,20 +124,23 @@ fn collected_changes(collector: &Rc<RefCell<CollectOutput>>) -> Vec<rust_ivm::iv
 
 #[test]
 fn test_push_add_child_to_existing_parent() {
-    let setup = setup_flipped_join(
-        &[vec![("id", str_val("i1"))]],
-        &[],
-    );
+    let setup = setup_flipped_join(&[vec![("id", str_val("i1"))]], &[]);
 
-    setup.child.borrow_mut().push(make_source_change_add(
-        make_row(&[("id", str_val("c1")), ("issueID", str_val("i1"))]),
-    ));
+    setup
+        .child
+        .borrow_mut()
+        .push(make_source_change_add(make_row(&[
+            ("id", str_val("c1")),
+            ("issueID", str_val("i1")),
+        ])));
 
     let changes = collected_changes(&setup.collector);
     assert_eq!(changes.len(), 1, "Should produce one change");
     assert!(matches!(changes[0], rust_ivm::ivm::change::Change::Add(_)));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
     assert_eq!(nodes.len(), 1, "Parent should now have a child");
 }
 
@@ -125,16 +151,29 @@ fn test_push_remove_child_from_parent() {
         &[vec![("id", str_val("c1")), ("issueID", str_val("i1"))]],
     );
 
-    setup.child.borrow_mut().push(make_source_change_remove(
-        make_row(&[("id", str_val("c1")), ("issueID", str_val("i1"))]),
-    ));
+    setup
+        .child
+        .borrow_mut()
+        .push(make_source_change_remove(make_row(&[
+            ("id", str_val("c1")),
+            ("issueID", str_val("i1")),
+        ])));
 
     let changes = collected_changes(&setup.collector);
     assert_eq!(changes.len(), 1, "Should produce one change");
-    assert!(matches!(changes[0], rust_ivm::ivm::change::Change::Remove(_)));
+    assert!(matches!(
+        changes[0],
+        rust_ivm::ivm::change::Change::Remove(_)
+    ));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 0, "Parent with no children should not appear (inner join)");
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
+    assert_eq!(
+        nodes.len(),
+        0,
+        "Parent with no children should not appear (inner join)"
+    );
 }
 
 #[test]
@@ -144,16 +183,23 @@ fn test_push_add_parent_with_matching_child() {
         &[vec![("id", str_val("c1")), ("issueID", str_val("i1"))]],
     );
 
-    setup.parent.borrow_mut().push(make_source_change_add(
-        make_row(&[("id", str_val("i1"))]),
-    ));
+    setup
+        .parent
+        .borrow_mut()
+        .push(make_source_change_add(make_row(&[("id", str_val("i1"))])));
 
     let changes = collected_changes(&setup.collector);
     assert_eq!(changes.len(), 1, "Should produce one change for parent add");
     assert!(matches!(changes[0], rust_ivm::ivm::change::Change::Add(_)));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 1, "New parent with matching child should appear");
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
+    assert_eq!(
+        nodes.len(),
+        1,
+        "New parent with matching child should appear"
+    );
 }
 
 #[test]
@@ -163,15 +209,26 @@ fn test_push_add_parent_no_matching_child() {
         &[vec![("id", str_val("c1")), ("issueID", str_val("i2"))]],
     );
 
-    setup.parent.borrow_mut().push(make_source_change_add(
-        make_row(&[("id", str_val("i1"))]),
-    ));
+    setup
+        .parent
+        .borrow_mut()
+        .push(make_source_change_add(make_row(&[("id", str_val("i1"))])));
 
     let changes = collected_changes(&setup.collector);
-    assert_eq!(changes.len(), 0, "No changes when parent has no matching child (inner join)");
+    assert_eq!(
+        changes.len(),
+        0,
+        "No changes when parent has no matching child (inner join)"
+    );
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 0, "Parent without matching child should not appear");
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
+    assert_eq!(
+        nodes.len(),
+        0,
+        "Parent without matching child should not appear"
+    );
 }
 
 #[test]
@@ -181,15 +238,28 @@ fn test_push_remove_parent() {
         &[vec![("id", str_val("c1")), ("issueID", str_val("i1"))]],
     );
 
-    setup.parent.borrow_mut().push(make_source_change_remove(
-        make_row(&[("id", str_val("i1"))]),
-    ));
+    setup
+        .parent
+        .borrow_mut()
+        .push(make_source_change_remove(make_row(&[(
+            "id",
+            str_val("i1"),
+        )])));
 
     let changes = collected_changes(&setup.collector);
-    assert_eq!(changes.len(), 1, "Should produce one change for parent remove");
-    assert!(matches!(changes[0], rust_ivm::ivm::change::Change::Remove(_)));
+    assert_eq!(
+        changes.len(),
+        1,
+        "Should produce one change for parent remove"
+    );
+    assert!(matches!(
+        changes[0],
+        rust_ivm::ivm::change::Change::Remove(_)
+    ));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
     assert_eq!(nodes.len(), 0, "Removed parent should not appear");
 }
 
@@ -205,7 +275,9 @@ fn test_push_edit_child_same_join_key() {
         make_row(&[("id", str_val("c1")), ("issueID", str_val("i1"))]),
     ));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
     assert_eq!(nodes.len(), 1, "Parent should still have the edited child");
 }
 
@@ -216,11 +288,17 @@ fn test_push_add_child_to_parent_with_existing_child() {
         &[vec![("id", str_val("c1")), ("issueID", str_val("i1"))]],
     );
 
-    setup.child.borrow_mut().push(make_source_change_add(
-        make_row(&[("id", str_val("c2")), ("issueID", str_val("i1"))]),
-    ));
+    setup
+        .child
+        .borrow_mut()
+        .push(make_source_change_add(make_row(&[
+            ("id", str_val("c2")),
+            ("issueID", str_val("i1")),
+        ])));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
     assert_eq!(nodes.len(), 1, "Should still have one parent");
 
     let children = get_rel_children(&nodes[0], "comments");
@@ -229,22 +307,33 @@ fn test_push_add_child_to_parent_with_existing_child() {
 
 #[test]
 fn test_push_multiple_children_same_parent() {
-    let setup = setup_flipped_join(
-        &[vec![("id", str_val("i1"))]],
-        &[],
-    );
+    let setup = setup_flipped_join(&[vec![("id", str_val("i1"))]], &[]);
 
-    setup.child.borrow_mut().push(make_source_change_add(
-        make_row(&[("id", str_val("c1")), ("issueID", str_val("i1"))]),
-    ));
-    setup.child.borrow_mut().push(make_source_change_add(
-        make_row(&[("id", str_val("c2")), ("issueID", str_val("i1"))]),
-    ));
-    setup.child.borrow_mut().push(make_source_change_add(
-        make_row(&[("id", str_val("c3")), ("issueID", str_val("i1"))]),
-    ));
+    setup
+        .child
+        .borrow_mut()
+        .push(make_source_change_add(make_row(&[
+            ("id", str_val("c1")),
+            ("issueID", str_val("i1")),
+        ])));
+    setup
+        .child
+        .borrow_mut()
+        .push(make_source_change_add(make_row(&[
+            ("id", str_val("c2")),
+            ("issueID", str_val("i1")),
+        ])));
+    setup
+        .child
+        .borrow_mut()
+        .push(make_source_change_add(make_row(&[
+            ("id", str_val("c3")),
+            ("issueID", str_val("i1")),
+        ])));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
     assert_eq!(nodes.len(), 1);
 
     let children = get_rel_children(&nodes[0], "comments");
@@ -261,14 +350,27 @@ fn test_push_remove_one_of_two_children() {
         ],
     );
 
-    setup.child.borrow_mut().push(make_source_change_remove(
-        make_row(&[("id", str_val("c1")), ("issueID", str_val("i1"))]),
-    ));
+    setup
+        .child
+        .borrow_mut()
+        .push(make_source_change_remove(make_row(&[
+            ("id", str_val("c1")),
+            ("issueID", str_val("i1")),
+        ])));
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default())).collect();
-    assert_eq!(nodes.len(), 1, "Parent should still appear with remaining child");
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(setup.fj.borrow().fetch(&FetchRequest::default()))
+            .collect();
+    assert_eq!(
+        nodes.len(),
+        1,
+        "Parent should still appear with remaining child"
+    );
 
     let children = get_rel_children(&nodes[0], "comments");
     assert_eq!(children.len(), 1, "Should have 1 child after removing one");
-    assert_eq!(children[0].row.get("id").cloned().unwrap_or(Value::Null), str_val("c2"));
+    assert_eq!(
+        children[0].row.get("id").cloned().unwrap_or(Value::Null),
+        str_val("c2")
+    );
 }

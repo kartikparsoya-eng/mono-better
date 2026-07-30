@@ -19,7 +19,6 @@ use std::rc::Rc;
 
 use std::sync::{Arc, Mutex};
 
-use crate::snapshotter::diff::Diff;
 use crate::snapshotter::read_pool::FramePinnedPool;
 use crate::snapshotter::spec::LiteAndZqlSpec;
 
@@ -108,7 +107,10 @@ impl Snapshotter {
             return;
         }
         if let Err(e) = self.read_pool.pin_frame(version, self.pool_pin_count) {
-            eprintln!("[rust-ivm] read pool co-pin at {} failed (serial hydrate): {}", version, e);
+            eprintln!(
+                "[rust-ivm] read pool co-pin at {} failed (serial hydrate): {}",
+                version, e
+            );
         }
     }
 
@@ -170,7 +172,7 @@ impl Snapshotter {
         // (warm) hydrates run serially until the next cold re-pin.
         self.read_pool.unpin_frame();
         // Prepare the head pin WITHOUT touching prev/curr (leapfrog core).
-        let mut next = if let Some(mut prev_snap) = self.prev.take() {
+        let next = if let Some(mut prev_snap) = self.prev.take() {
             // Reuse the prev connection: rollback + re-pin at head.
             prev_snap.reset_to_head()?;
             prev_snap
@@ -272,7 +274,6 @@ impl Snapshotter {
         self.curr.take();
         self.prev.take();
     }
-
 }
 
 /// A single pinned frame plus its stateVersion.

@@ -6,6 +6,7 @@ use crate::ivm::data::{Row, Value};
 /// A query AST node — simplified port of TS `AST`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Ast {
     pub schema: Option<String>,
     pub table: String,
@@ -17,20 +18,6 @@ pub struct Ast {
     pub start: Option<Bound>,
 }
 
-impl Default for Ast {
-    fn default() -> Self {
-        Ast {
-            schema: None,
-            table: String::new(),
-            alias: None,
-            where_clause: None,
-            related: Vec::new(),
-            limit: None,
-            order_by: None,
-            start: None,
-        }
-    }
-}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct OrderPart {

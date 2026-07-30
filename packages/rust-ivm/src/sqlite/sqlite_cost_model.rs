@@ -5,11 +5,10 @@
 //! SQLite query planner's analysis.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
-use crate::builder::ast::{Ast, Condition};
+use crate::builder::ast::Condition;
 use crate::sqlite::db::Database;
 use crate::sqlite::sqlite_stat_fanout::SQLiteStatFanout;
 
@@ -25,9 +24,9 @@ pub struct CostModelCost {
 /// Port of TS `ConnectionCostModel` (planner-connection.ts).
 pub type ConnectionCostModel = Box<
     dyn Fn(
-        &str,                                  // table_name
-        &[(String, String)],                   // sort (ordering)
-        Option<&Condition>,                    // filters
+        &str,                                              // table_name
+        &[(String, String)],                               // sort (ordering)
+        Option<&Condition>,                                // filters
         Option<&HashMap<String, crate::ivm::data::Value>>, // constraint
     ) -> CostModelCost,
 >;
@@ -40,7 +39,7 @@ pub fn create_sqlite_cost_model(
 ) -> ConnectionCostModel {
     let fanout_estimator = SQLiteStatFanout::new(db.clone());
 
-    Box::new(move |table_name, sort, filters, constraint| {
+    Box::new(move |table_name, sort, filters, _constraint| {
         // Estimate cost based on SQLite statistics.
         // For a simple estimate: cost = rows * fanout factor.
         let fanout = if sort.is_empty() {
@@ -73,7 +72,7 @@ pub fn create_sqlite_cost_model(
 pub fn remove_correlated_subqueries(condition: &Condition) -> Condition {
     match condition {
         Condition::Simple(_) => condition.clone(),
-        Condition::CorrelatedSubquery(_) => crate::builder::expression::TRUE(),
+        Condition::CorrelatedSubquery(_) => crate::builder::expression::true_val(),
         Condition::And(conditions) => {
             let filtered: Vec<Condition> = conditions
                 .iter()
@@ -81,7 +80,7 @@ pub fn remove_correlated_subqueries(condition: &Condition) -> Condition {
                 .map(remove_correlated_subqueries)
                 .collect();
             if filtered.is_empty() {
-                crate::builder::expression::TRUE()
+                crate::builder::expression::true_val()
             } else {
                 Condition::And(filtered)
             }
@@ -93,7 +92,7 @@ pub fn remove_correlated_subqueries(condition: &Condition) -> Condition {
                 .map(remove_correlated_subqueries)
                 .collect();
             if filtered.is_empty() {
-                crate::builder::expression::TRUE()
+                crate::builder::expression::true_val()
             } else {
                 Condition::Or(filtered)
             }

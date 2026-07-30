@@ -13,7 +13,7 @@ use crate::builder::ast::{
 use crate::builder::expression::{cmp_eq, simplify_condition};
 use crate::ivm::data::{Row, Value};
 use crate::ivm::schema::System;
-use crate::ivm::view::{default_format, Format};
+use crate::ivm::view::{Format, default_format};
 
 /// A query builder that accumulates AST state through fluent method calls.
 /// Port of TS `QueryImpl` (query-impl.ts:92).
@@ -52,7 +52,10 @@ pub struct ExistsOptions {
 
 impl Query {
     /// Create a new query on the given table.
-    pub fn new(table: &str, relationships: HashMap<String, HashMap<String, RelationshipSpec>>) -> Self {
+    pub fn new(
+        table: &str,
+        relationships: HashMap<String, HashMap<String, RelationshipSpec>>,
+    ) -> Self {
         Query {
             table: table.to_string(),
             ast: Ast {
@@ -105,7 +108,9 @@ impl Query {
     pub fn where_op(mut self, field: &str, op: &str, value: Value) -> Self {
         let cond = Condition::Simple(SimpleCondition {
             op: op.to_string(),
-            left: ValuePosition::Column { name: field.to_string() },
+            left: ValuePosition::Column {
+                name: field.to_string(),
+            },
             right: ValuePosition::Literal { value },
         });
         let combined = match &self.ast.where_clause {
@@ -170,12 +175,19 @@ impl Query {
         };
 
         self.ast.related.push(related);
-        self.format.relationships.insert(relationship.to_string(), sub_query.format);
+        self.format
+            .relationships
+            .insert(relationship.to_string(), sub_query.format);
         self
     }
 
     /// Add WHERE EXISTS for a relationship.
-    pub fn where_exists(mut self, relationship: &str, cb: Option<Box<dyn Fn(Query) -> Query>>, options: ExistsOptions) -> Self {
+    pub fn where_exists(
+        mut self,
+        relationship: &str,
+        cb: Option<Box<dyn Fn(Query) -> Query>>,
+        options: ExistsOptions,
+    ) -> Self {
         let rel = self
             .relationships
             .get(&self.table)
@@ -234,7 +246,7 @@ impl Query {
 
     /// Set limit.
     pub fn limit(mut self, limit: usize) -> Self {
-        assert!(limit >= 0, "Limit must be non-negative");
+        assert!(limit > 0, "Limit must be positive");
         self.ast.limit = Some(limit);
         self
     }
@@ -253,7 +265,10 @@ impl Query {
 
     /// Set start position (pagination).
     pub fn start(mut self, row: Row, inclusive: bool) -> Self {
-        self.ast.start = Some(Bound { row, exclusive: !inclusive });
+        self.ast.start = Some(Bound {
+            row,
+            exclusive: !inclusive,
+        });
         self
     }
 }

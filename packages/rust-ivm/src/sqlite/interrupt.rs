@@ -108,6 +108,12 @@ impl Drop for JobWatchdog {
     }
 }
 
+impl Default for JobWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JobWatchdog {
     /// Create a new watchdog and start its monitor thread.
     pub fn new() -> Self {
@@ -199,7 +205,7 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
     loop {
         let now = Instant::now();
         let sleep_until = {
-            let mut s = lock.lock().unwrap();
+            let s = lock.lock().unwrap();
             if s.shutdown {
                 return;
             }
@@ -248,7 +254,8 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
             }
             // Sleep to the nearest pending action (warn or abort) across all
             // entries — the monitor wakes early on register/unregister/shutdown.
-            let nearest = s
+            
+            s
                 .entries
                 .iter()
                 .filter_map(|e| {
@@ -260,8 +267,7 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
                         None
                     }
                 })
-                .min();
-            nearest
+                .min()
         };
         match sleep_until {
             // No pending entries → sleep until woken (registration/shutdown).

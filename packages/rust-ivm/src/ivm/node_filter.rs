@@ -3,13 +3,11 @@ use std::rc::Rc;
 
 use crate::builder::ast::Condition;
 use crate::builder::filter::create_simple_predicate;
-use crate::ivm::change::{make_add_change, make_remove_change, Change, ChangeType};
+use crate::ivm::change::{Change, ChangeType, make_add_change, make_remove_change};
 use crate::ivm::data::Node;
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{rel_from_vec, NodeStream, StreamItem};
+use crate::ivm::stream::{NodeStream, StreamItem};
 
 /// Filters nodes by an OR of conditions that may include EXISTS correlated
 /// subqueries (checked against `node.relationships`). Replaces the
@@ -34,9 +32,11 @@ impl NodeFilter {
             output: Rc::new(RefCell::new(None)),
         }));
         let filter_clone = filter.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(NodeFilterOutput {
-            filter: filter_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(NodeFilterOutput {
+                filter: filter_clone,
+            })));
         filter
     }
 }
@@ -101,12 +101,12 @@ impl Output for NodeFilterOutput {
                 let after = eval_or(&conds, node);
                 match (before, after) {
                     (true, true) => output.borrow_mut().push(change, pusher),
-                    (false, true) => {
-                        output.borrow_mut().push(make_add_change(node.clone()), pusher)
-                    }
-                    (true, false) => {
-                        output.borrow_mut().push(make_remove_change(old_node.clone()), pusher)
-                    }
+                    (false, true) => output
+                        .borrow_mut()
+                        .push(make_add_change(node.clone()), pusher),
+                    (true, false) => output
+                        .borrow_mut()
+                        .push(make_remove_change(old_node.clone()), pusher),
                     (false, false) => {}
                 }
             }
@@ -127,9 +127,9 @@ impl Output for NodeFilterOutput {
                     // Row stays in the result: forward the child change.
                     (true, true) => output.borrow_mut().push(change, pusher),
                     // Row enters the result (e.g. EXISTS 0->1): emit ADD.
-                    (false, true) => {
-                        output.borrow_mut().push(make_add_change(node.clone()), pusher)
-                    }
+                    (false, true) => output
+                        .borrow_mut()
+                        .push(make_add_change(node.clone()), pusher),
                     // Row leaves the result: emit REMOVE, overriding the flipping
                     // relationship to its PRE-change (before) state. The child
                     // change that caused the flip is not itself pushed to output,
@@ -151,7 +151,9 @@ impl Output for NodeFilterOutput {
                         let removed_node = node
                             .clone()
                             .set_relationship(rel, crate::ivm::stream::rel_from_vec(before_rel));
-                        output.borrow_mut().push(make_remove_change(removed_node), pusher)
+                        output
+                            .borrow_mut()
+                            .push(make_remove_change(removed_node), pusher)
                     }
                     (false, false) => {}
                 }
@@ -207,7 +209,9 @@ fn eval_or_with_size(conds: &[Condition], node: &Node, rel: &str, size: usize) -
 
 fn eval_or(conds: &[Condition], node: &Node) -> bool {
     // No override: "" never matches a real relationship name.
-    conds.iter().any(|c| condition_passes_with_size(c, node, "", 0))
+    conds
+        .iter()
+        .any(|c| condition_passes_with_size(c, node, "", 0))
 }
 
 pub fn condition_passes_node(cond: &Condition, node: &Node) -> bool {

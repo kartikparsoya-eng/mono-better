@@ -199,11 +199,7 @@ impl FramePinnedPool {
     /// processes a slice of the tasks on it; connections are returned **still
     /// pinned** (no rollback) so the frame survives across reads within a
     /// hydrate.
-    pub fn parallel_read<T, F>(
-        &self,
-        target_version: &str,
-        tasks: Vec<F>,
-    ) -> Result<Vec<T>, String>
+    pub fn parallel_read<T, F>(&self, target_version: &str, tasks: Vec<F>) -> Result<Vec<T>, String>
     where
         T: Send,
         F: FnOnce(&Connection) -> Result<T, String> + Send,
@@ -265,9 +261,10 @@ impl FramePinnedPool {
                             // connection and leave `borrowed` corrupted. First
                             // panic wins → the batch aborts → serial fallback (the
                             // serial path re-hits the same panic → clean reset).
-                            let outcome = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| task(&conn)),
-                            );
+                            let outcome =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    task(&conn)
+                                }));
                             match outcome {
                                 Ok(Ok(v)) => *results[idx].lock().unwrap() = Some(v),
                                 Ok(Err(msg)) => {
@@ -335,7 +332,9 @@ impl Drop for FramePinnedPool {
 fn open_readonly(db_file: &str) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
         db_file,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
     )
 }
 
@@ -353,9 +352,14 @@ fn open_and_pin(
     if let Some(cache_kib) = page_cache_size_kib {
         let _ = conn.pragma_update(None, "cache_size", -(cache_kib));
     }
-    conn.execute_batch("BEGIN").map_err(|e| format!("read pool BEGIN: {}", e))?;
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("read pool BEGIN: {}", e))?;
     let version: String = conn
-        .query_row("SELECT stateVersion FROM \"_zero.replicationState\"", [], |r| r.get(0))
+        .query_row(
+            "SELECT stateVersion FROM \"_zero.replicationState\"",
+            [],
+            |r| r.get(0),
+        )
         .map_err(|e| format!("read pool replicationState: {}", e))?;
     if version != target_version {
         let _ = conn.execute_batch("ROLLBACK");
@@ -404,7 +408,9 @@ mod tests {
             // WAL so a reader's BEGIN snapshot doesn't block a concurrent writer
             // (mirrors the wal2 replica: readers pin an old frame while head
             // advances). Rollback-journal mode would deadlock set_version().
-            let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).unwrap();
+            let _: String = conn
+                .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+                .unwrap();
             conn.execute_batch(
                 "CREATE TABLE \"_zero.replicationState\" (stateVersion TEXT PRIMARY KEY);
                  INSERT INTO \"_zero.replicationState\" (stateVersion) VALUES ('v1');",
@@ -416,7 +422,11 @@ mod tests {
         /// Advance the replica's head version (simulates the replicator).
         fn set_version(&self, v: &str) {
             let conn = rusqlite::Connection::open(&self.path).unwrap();
-            conn.execute("UPDATE \"_zero.replicationState\" SET stateVersion = ?", [v]).unwrap();
+            conn.execute(
+                "UPDATE \"_zero.replicationState\" SET stateVersion = ?",
+                [v],
+            )
+            .unwrap();
             drop(conn);
         }
     }
@@ -439,7 +449,11 @@ mod tests {
             .map(|i| {
                 move |conn: &Connection| -> Result<usize, String> {
                     let v: String = conn
-                        .query_row("SELECT stateVersion FROM \"_zero.replicationState\"", [], |r| r.get(0))
+                        .query_row(
+                            "SELECT stateVersion FROM \"_zero.replicationState\"",
+                            [],
+                            |r| r.get(0),
+                        )
                         .map_err(|e| e.to_string())?;
                     assert_eq!(v, "v1", "every read observes the pinned frame");
                     Ok(i)
@@ -447,8 +461,16 @@ mod tests {
             })
             .collect();
         let out = pool.parallel_read("v1", tasks).unwrap();
-        assert_eq!(out, (0..20).collect::<Vec<_>>(), "results strictly in input order");
-        assert_eq!(pool.free_count(), 4, "all connections returned still pinned");
+        assert_eq!(
+            out,
+            (0..20).collect::<Vec<_>>(),
+            "results strictly in input order"
+        );
+        assert_eq!(
+            pool.free_count(),
+            4,
+            "all connections returned still pinned"
+        );
     }
 
     #[test]
@@ -465,7 +487,11 @@ mod tests {
                 .map(|i| {
                     move |conn: &Connection| -> Result<usize, String> {
                         let v: String = conn
-                            .query_row("SELECT stateVersion FROM \"_zero.replicationState\"", [], |r| r.get(0))
+                            .query_row(
+                                "SELECT stateVersion FROM \"_zero.replicationState\"",
+                                [],
+                                |r| r.get(0),
+                            )
                             .map_err(|e| e.to_string())?;
                         // Still sees v1 — the BEGIN read tx pins the old frame.
                         assert_eq!(v, "v1");
@@ -492,8 +518,9 @@ mod tests {
     fn parallel_read_unpinned_errs_for_serial_fallback() {
         let tf = Replica::new();
         let pool = FramePinnedPool::new(&tf.path, None, 2, None);
-        let tasks: Vec<Box<dyn FnOnce(&Connection) -> Result<usize, String> + Send>> =
-            (0..4usize).map(|i| Box::new(move |_c: &Connection| Ok(i)) as Box<_>).collect();
+        let tasks: Vec<Box<dyn FnOnce(&Connection) -> Result<usize, String> + Send>> = (0..4usize)
+            .map(|i| Box::new(move |_c: &Connection| Ok(i)) as Box<_>)
+            .collect();
         // Not pinned → Err → serial fallback.
         assert!(pool.parallel_read("v1", tasks).is_err());
     }
@@ -506,7 +533,11 @@ mod tests {
         let tasks: Vec<Box<dyn FnOnce(&Connection) -> Result<usize, String> + Send>> = (0..12usize)
             .map(|i| {
                 Box::new(move |_c: &Connection| -> Result<usize, String> {
-                    if i == 5 { Err("boom".to_string()) } else { Ok(i) }
+                    if i == 5 {
+                        Err("boom".to_string())
+                    } else {
+                        Ok(i)
+                    }
                 }) as Box<_>
             })
             .collect();
@@ -533,14 +564,24 @@ mod tests {
             })
             .collect();
         let res = pool.parallel_read("v1", tasks);
-        assert!(matches!(res, Err(ref m) if m.contains("worker panic")), "panic → Err, got {res:?}");
-        assert_eq!(pool.free_count(), 3, "connections returned after a worker panic");
+        assert!(
+            matches!(res, Err(ref m) if m.contains("worker panic")),
+            "panic → Err, got {res:?}"
+        );
+        assert_eq!(
+            pool.free_count(),
+            3,
+            "connections returned after a worker panic"
+        );
         // Pool still usable — `borrowed` was not corrupted (this would panic on a
         // bad counter via pin_frame's assert), and a fresh read succeeds.
         let ok_tasks: Vec<_> = (0..6usize)
             .map(|i| move |_c: &Connection| -> Result<usize, String> { Ok(i) })
             .collect();
-        assert_eq!(pool.parallel_read("v1", ok_tasks).unwrap(), (0..6).collect::<Vec<_>>());
+        assert_eq!(
+            pool.parallel_read("v1", ok_tasks).unwrap(),
+            (0..6).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -564,19 +605,33 @@ mod tests {
         // pool must never disturb it, only its own appended range.
         {
             let c = rusqlite::Connection::open(&tf.path).unwrap();
-            reg.lock().unwrap().push(crate::sqlite::install_interrupt(&c));
+            reg.lock()
+                .unwrap()
+                .push(crate::sqlite::install_interrupt(&c));
             std::mem::forget(c); // keep the handle valid for the test
         }
         let pool = FramePinnedPool::new(&tf.path, None, 3, Some(reg.clone()));
         pool.pin_frame("v1", 3).unwrap();
         // While pinned the pool's handles live in the shared registry, so the
         // existing cancel()/watchdog sweep reaches them (N1).
-        assert_eq!(reg.lock().unwrap().len(), 4, "1 pre-existing + 3 pooled handles");
+        assert_eq!(
+            reg.lock().unwrap().len(),
+            4,
+            "1 pre-existing + 3 pooled handles"
+        );
         // Unpin drains exactly the pool's 3 handles, leaving the pre-existing one.
         pool.unpin_frame();
-        assert_eq!(reg.lock().unwrap().len(), 1, "pool handles drained on unpin, actor's kept");
+        assert_eq!(
+            reg.lock().unwrap().len(),
+            1,
+            "pool handles drained on unpin, actor's kept"
+        );
         // Re-pin appends a fresh range (no accumulation across frames).
         pool.pin_frame("v1", 3).unwrap();
-        assert_eq!(reg.lock().unwrap().len(), 4, "re-pin appends exactly its own range again");
+        assert_eq!(
+            reg.lock().unwrap().len(),
+            4,
+            "re-pin appends exactly its own range again"
+        );
     }
 }

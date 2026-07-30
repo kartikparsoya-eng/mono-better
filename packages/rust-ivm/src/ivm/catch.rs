@@ -5,13 +5,10 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use crate::ivm::change::{Change, ChangeType};
+use crate::ivm::change::Change;
 use crate::ivm::data::{Node, Row};
-use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
-use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::NodeStream;
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, Shared};
 
 /// A caught node — eagerly expanded (relationships as arrays, not generators).
 #[derive(Clone, Debug)]
@@ -23,10 +20,20 @@ pub struct CaughtNode {
 /// A caught change — the expanded form of a Change for testing.
 #[derive(Clone, Debug)]
 pub enum CaughtChange {
-    Add { node: CaughtNode },
-    Remove { node: CaughtNode },
-    Edit { old_row: Row, row: Row },
-    Child { row: Row, child: Box<(String, CaughtChange)> },
+    Add {
+        node: CaughtNode,
+    },
+    Remove {
+        node: CaughtNode,
+    },
+    Edit {
+        old_row: Row,
+        row: Row,
+    },
+    Child {
+        row: Row,
+        child: Box<(String, CaughtChange)>,
+    },
 }
 
 /// Catch — collects all pushes for testing. Optionally fetches current state
@@ -48,16 +55,18 @@ impl Catch {
         }));
 
         let catch_clone = catch.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(CatchOutput {
-            catch: catch_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(CatchOutput { catch: catch_clone })));
 
         catch
     }
 
     pub fn fetch(&self, req: &FetchRequest) -> Vec<CaughtNode> {
         let input = self.input.borrow();
-        crate::ivm::stream::skip_yields(input.fetch(req)).map(|n| expand_node(&n)).collect()
+        crate::ivm::stream::skip_yields(input.fetch(req))
+            .map(|n| expand_node(&n))
+            .collect()
     }
 
     pub fn reset(&mut self) {
@@ -83,9 +92,17 @@ impl Output for CatchOutput {
 
         let fetch = if self.catch.borrow().fetch_on_push {
             // borrow() not borrow_mut() — fetch takes &self.
-            Some(crate::ivm::stream::skip_yields(
-                self.catch.borrow().input.borrow().fetch(&FetchRequest::default())
-            ).map(|n| expand_node(&n)).collect())
+            Some(
+                crate::ivm::stream::skip_yields(
+                    self.catch
+                        .borrow()
+                        .input
+                        .borrow()
+                        .fetch(&FetchRequest::default()),
+                )
+                .map(|n| expand_node(&n))
+                .collect(),
+            )
         } else {
             None
         };
@@ -101,8 +118,12 @@ impl Output for CatchOutput {
 /// Expand a Change into a CaughtChange.
 pub fn expand_change(change: &Change) -> CaughtChange {
     match change {
-        Change::Add(node) => CaughtChange::Add { node: expand_node(node) },
-        Change::Remove(node) => CaughtChange::Remove { node: expand_node(node) },
+        Change::Add(node) => CaughtChange::Add {
+            node: expand_node(node),
+        },
+        Change::Remove(node) => CaughtChange::Remove {
+            node: expand_node(node),
+        },
         Change::Edit { node, old_node } => CaughtChange::Edit {
             old_row: old_node.row.clone(),
             row: node.row.clone(),
@@ -123,7 +144,9 @@ pub fn expand_node(node: &Node) -> CaughtNode {
     for name in &node.rel_order {
         if let Some(rel_fn) = node.relationships.get(name) {
             let stream = rel_fn();
-            let children: Vec<CaughtNode> = crate::ivm::stream::skip_yields(stream).map(|n| expand_node(&n)).collect();
+            let children: Vec<CaughtNode> = crate::ivm::stream::skip_yields(stream)
+                .map(|n| expand_node(&n))
+                .collect();
             relationships.push((name.clone(), children));
         }
     }

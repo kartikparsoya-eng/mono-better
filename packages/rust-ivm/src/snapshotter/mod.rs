@@ -15,13 +15,14 @@
 //! append-only `_zero.changeLog2` table. Because the log is version-addressable,
 //! "changes in (prev, curr]" is deterministic regardless of who reads or when.
 
-pub mod snapshotter;
 pub mod diff;
-pub mod spec;
 pub mod read_pool;
+#[allow(clippy::module_inception)]
+pub mod snapshotter;
+pub mod spec;
 
-pub use snapshotter::*;
 pub use diff::*;
+pub use snapshotter::*;
 pub use spec::*;
 
 /// Change-log operation constants — port of `change-log.ts:43-46`.

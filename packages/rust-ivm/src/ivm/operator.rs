@@ -9,7 +9,6 @@
 //! Ownership: `set_output` takes `OutputHandle = Rc<RefCell<dyn Output>>`
 //! for shared ownership, mirroring Go's GC'd pointer semantics.
 
-use std::sync::Arc;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -30,8 +29,7 @@ pub struct FetchRequest {
     pub limit: Option<usize>,
 }
 
-#[derive(Clone)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Start {
     pub row: crate::ivm::data::Row,
     pub basis: Basis,
@@ -87,7 +85,7 @@ pub trait Storage {
     fn get(&self, key: &str) -> Option<crate::ivm::data::Value>;
     fn set(&mut self, key: String, value: crate::ivm::data::Value);
     fn del(&mut self, key: &str);
-    fn scan(&self, prefix: Option<&str>) -> Vec<(String, crate::ivm::data::Value)> {
+    fn scan(&self, _prefix: Option<&str>) -> Vec<(String, crate::ivm::data::Value)> {
         Vec::new()
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! Tests: take, first.
 
-use rust_ivm::ivm::stream::from_vec;
 use rust_ivm::ivm::data::Node;
+use rust_ivm::ivm::stream::from_vec;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -13,21 +13,25 @@ use std::sync::Arc;
 
 fn node_stream(vals: &[i64]) -> Box<dyn Iterator<Item = Node>> {
     // Note: from_vec returns NodeStream (StreamItem<Node>), need to strip yields
-    let nodes: Vec<Node> = vals.iter().map(|v| {
-        let mut m: FxHashMap<String, rust_ivm::ivm::data::Value> = FxHashMap::default();
-        m.insert("n".to_string(), rust_ivm::ivm::data::Value::F64(*v as f64));
-        Node::new(Arc::new(m))
-    }).collect();
+    let nodes: Vec<Node> = vals
+        .iter()
+        .map(|v| {
+            let mut m: FxHashMap<String, rust_ivm::ivm::data::Value> = FxHashMap::default();
+            m.insert("n".to_string(), rust_ivm::ivm::data::Value::F64(*v as f64));
+            Node::new(Arc::new(m))
+        })
+        .collect();
     Box::new(rust_ivm::ivm::stream::skip_yields(from_vec(nodes)))
 }
 
 fn take(stream: Box<dyn Iterator<Item = Node>>, limit: usize) -> Vec<i64> {
-    stream.take(limit).map(|n| {
-        match n.row.get("n") {
+    stream
+        .take(limit)
+        .map(|n| match n.row.get("n") {
             Some(rust_ivm::ivm::data::Value::F64(v)) => *v as i64,
             _ => 0,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 #[test]

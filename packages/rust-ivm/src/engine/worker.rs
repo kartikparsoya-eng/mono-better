@@ -136,21 +136,29 @@ impl<T: Send + 'static, E: Send + 'static> ParallelJob<T, E> {
             channels.push(tx);
             receivers.push(rx);
         }
-        let sender_slots: Vec<Arc<Mutex<Option<mpsc::SyncSender<T>>>>> =
-            channels.into_iter().map(|tx| Arc::new(Mutex::new(Some(tx)))).collect();
+        let sender_slots: Vec<Arc<Mutex<Option<mpsc::SyncSender<T>>>>> = channels
+            .into_iter()
+            .map(|tx| Arc::new(Mutex::new(Some(tx))))
+            .collect();
         let sender_slots = Arc::new(sender_slots);
 
         // Task slots (FnOnce is one-shot and !Sync); a worker takes the task
         // out of its slot, None-ifies it, runs it.
-        let slots: Vec<Arc<Mutex<Option<Box<dyn FnOnce(&WorkerScope, &dyn Fn(T)) -> Result<(), E> + Send>>>>> =
-            tasks.into_iter().map(|f| Arc::new(Mutex::new(Some(Box::new(f) as Box<_>)))).collect();
+        let slots: Vec<
+            Arc<Mutex<Option<Box<dyn FnOnce(&WorkerScope, &dyn Fn(T)) -> Result<(), E> + Send>>>>,
+        > = tasks
+            .into_iter()
+            .map(|f| Arc::new(Mutex::new(Some(Box::new(f) as Box<_>))))
+            .collect();
         let slots = Arc::new(slots);
         // Shared task index queue: workers pop the NEXT index (FIFO) so the
         // actor (which drains in index order) always has a worker producing
         // for the task it's currently draining. LIFO (Vec::pop) would grab
         // high-index tasks first → those workers block on full channels while
         // the actor waits on channel 0 → deadlock.
-        let queue = Arc::new(Mutex::new(std::collections::VecDeque::<usize>::from_iter(0..n)));
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::<usize>::from_iter(
+            0..n,
+        )));
         // Error channel (first-error-wins, L2). Unbounded is fine — at most one
         // error per worker before the scope aborts.
         let (err_tx, err_rx) = mpsc::channel::<ParallelError<E>>();
@@ -185,9 +193,9 @@ impl<T: Send + 'static, E: Send + 'static> ParallelJob<T, E> {
                         };
                         // Run under catch_unwind (L2: a panic must NOT unwind
                         // out of the worker thread and must set abort).
-                        let result = std::panic::catch_unwind(
-                            std::panic::AssertUnwindSafe(|| task(&scope, &sink)),
-                        );
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            task(&scope, &sink)
+                        }));
                         let task_outcome: Result<(), ParallelError<E>> = match result {
                             Ok(Ok(())) => Ok(()),
                             Ok(Err(e)) => {
@@ -220,6 +228,7 @@ impl<T: Send + 'static, E: Send + 'static> ParallelJob<T, E> {
             // remaining channels to unblock workers, and return the error
             // after the scope joins.
             let mut first_err: Option<ParallelError<E>> = None;
+                    #[allow(clippy::needless_range_loop)]
             'emit: for idx in 0..n {
                 if scope_for_actor.aborted() {
                     break 'emit;
@@ -256,11 +265,10 @@ impl<T: Send + 'static, E: Send + 'static> ParallelJob<T, E> {
                 }
             }
             // Capture the error before `err_rx` drops at scope end.
-            if first_err.is_none() {
-                if let Ok(e) = err_rx.try_recv() {
+            if first_err.is_none()
+                && let Ok(e) = err_rx.try_recv() {
                     first_err = Some(e);
                 }
-            }
             first_err
         });
 
@@ -291,13 +299,16 @@ mod tests {
         let job: ParallelJob<usize, String> = ParallelJob::new(4, 4);
         let tasks: Vec<_> = (0..6)
             .map(|t| {
-                Box::new(move |_scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
-                    // Push t*10, t*10+1, t*10+2 — one at a time.
-                    for k in 0..3 {
-                        sink(t * 10 + k);
-                    }
-                    Ok(())
-                }) as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
+                Box::new(
+                    move |_scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
+                        // Push t*10, t*10+1, t*10+2 — one at a time.
+                        for k in 0..3 {
+                            sink(t * 10 + k);
+                        }
+                        Ok(())
+                    },
+                )
+                    as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
             })
             .collect();
         let got = Arc::new(Mutex::new(Vec::new()));
@@ -307,7 +318,9 @@ mod tests {
         })
         .unwrap();
         // Dispatch order: task0 (0,1,2), task1 (10,11,12), task2 (20,21,22), ...
-        let expected: Vec<usize> = (0..6).flat_map(|t| (0..3).map(move |k| t * 10 + k)).collect();
+        let expected: Vec<usize> = (0..6)
+            .flat_map(|t| (0..3).map(move |k| t * 10 + k))
+            .collect();
         assert_eq!(&*got.lock().unwrap(), &expected);
     }
 
@@ -316,23 +329,29 @@ mod tests {
         let job: ParallelJob<usize, String> = ParallelJob::new(2, 2);
         let tasks: Vec<_> = (0..6)
             .map(|t| {
-                Box::new(move |scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
-                    for k in 0..5 {
-                        if scope.aborted() {
-                            return Ok(());
+                Box::new(
+                    move |scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
+                        for k in 0..5 {
+                            if scope.aborted() {
+                                return Ok(());
+                            }
+                            if t == 2 && k == 1 {
+                                return Err(format!("boom at task {} item {}", t, k));
+                            }
+                            sink(t * 10 + k);
+                            std::hint::spin_loop();
                         }
-                        if t == 2 && k == 1 {
-                            return Err(format!("boom at task {} item {}", t, k));
-                        }
-                        sink(t * 10 + k);
-                        std::hint::spin_loop();
-                    }
-                    Ok(())
-                }) as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
+                        Ok(())
+                    },
+                )
+                    as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
             })
             .collect();
         let res = job.run_streaming(tasks, CancellationToken::new(), |_| {});
-        assert!(matches!(res, Err(ParallelError::Task(_))), "first task error wins");
+        assert!(
+            matches!(res, Err(ParallelError::Task(_))),
+            "first task error wins"
+        );
     }
 
     #[test]
@@ -340,16 +359,22 @@ mod tests {
         let job: ParallelJob<usize, String> = ParallelJob::new(2, 2);
         let tasks: Vec<_> = (0..6)
             .map(|t| {
-                Box::new(move |_scope: &WorkerScope, _sink: &dyn Fn(usize)| -> Result<(), String> {
-                    if t == 1 {
-                        panic!("worker panic {}", t);
-                    }
-                    Ok(())
-                }) as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
+                Box::new(
+                    move |_scope: &WorkerScope, _sink: &dyn Fn(usize)| -> Result<(), String> {
+                        if t == 1 {
+                            panic!("worker panic {}", t);
+                        }
+                        Ok(())
+                    },
+                )
+                    as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
             })
             .collect();
         let res = job.run_streaming(tasks, CancellationToken::new(), |_| {});
-        assert!(matches!(res, Err(ParallelError::Panic(_))), "panic → ParallelError::Panic");
+        assert!(
+            matches!(res, Err(ParallelError::Panic(_))),
+            "panic → ParallelError::Panic"
+        );
     }
 
     #[test]
@@ -360,14 +385,17 @@ mod tests {
         let cancel_clone = cancel.clone();
         let tasks: Vec<_> = (0..4)
             .map(|t| {
-                Box::new(move |scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
-                    // Push one item, then spin until cancelled.
-                    sink(t);
-                    while !scope.aborted() {
-                        std::hint::spin_loop();
-                    }
-                    Ok(())
-                }) as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
+                Box::new(
+                    move |scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
+                        // Push one item, then spin until cancelled.
+                        sink(t);
+                        while !scope.aborted() {
+                            std::hint::spin_loop();
+                        }
+                        Ok(())
+                    },
+                )
+                    as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
             })
             .collect();
         thread::spawn(move || {
@@ -379,7 +407,8 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_secs(5),
-            "run must return promptly on cancel, took {:?}", elapsed
+            "run must return promptly on cancel, took {:?}",
+            elapsed
         );
     }
 
@@ -391,12 +420,15 @@ mod tests {
         let job: ParallelJob<usize, String> = ParallelJob::new(3, 2);
         let tasks: Vec<_> = (0..5)
             .map(|t| {
-                Box::new(move |_scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
-                    for k in 0..100 {
-                        sink(t * 1000 + k);
-                    }
-                    Ok(())
-                }) as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
+                Box::new(
+                    move |_scope: &WorkerScope, sink: &dyn Fn(usize)| -> Result<(), String> {
+                        for k in 0..100 {
+                            sink(t * 1000 + k);
+                        }
+                        Ok(())
+                    },
+                )
+                    as Box<dyn FnOnce(&WorkerScope, &dyn Fn(usize)) -> Result<(), String> + Send>
             })
             .collect();
         let count = Arc::new(AtomicUsize::new(0));

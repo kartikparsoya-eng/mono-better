@@ -10,27 +10,25 @@
 //! The relationship stream contains the matching children.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ivm::change::{
-    make_add_change, make_child_change, make_edit_change, make_remove_change, Change, ChangeType, ChildData,
+    Change, ChangeType, ChildData, make_add_change, make_child_change, make_edit_change,
+    make_remove_change,
 };
-use crate::ivm::constraint::{
-    constraints_are_compatible, Constraint, MultiConstraint,
-};
+use crate::ivm::constraint::{Constraint, MultiConstraint, constraints_are_compatible};
 use crate::ivm::data::{Node, Row, Value};
 use crate::ivm::join_utils::{
-    build_join_constraint, generate_with_overlay_no_yield, is_join_match, row_equals_for_compound_key,
+    build_join_constraint, generate_with_overlay_no_yield, is_join_match,
+    row_equals_for_compound_key,
 };
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::{SourceSchema, System};
-use crate::ivm::stream::{empty_stream, from_vec, NodeStream, RelStream, skip_yields, count_data};
-use crate::ivm::source::{merge_sorted_streams, NodeCompare};
+use crate::ivm::source::{NodeCompare, merge_sorted_streams};
+use crate::ivm::stream::{NodeStream, RelStream, count_data, empty_stream, from_vec, skip_yields};
 
 pub type CompoundKey = Vec<String>;
 
@@ -72,7 +70,6 @@ pub struct FlippedJoin {
     inprogress_child_change: Rc<RefCell<Option<Change>>>,
     inprogress_child_change_position: Rc<RefCell<Option<Row>>>,
 }
-
 
 /// RAII guard that clears in-progress overlay state on drop, even if a panic occurs.
 struct InprogressGuard {
@@ -119,23 +116,19 @@ impl FlippedJoin {
         }));
 
         let fj_clone = fj.clone();
-        args.parent.borrow().set_output(Rc::new(RefCell::new(ParentOutput {
-            fj: fj_clone,
-        })));
+        args.parent
+            .borrow()
+            .set_output(Rc::new(RefCell::new(ParentOutput { fj: fj_clone })));
 
         let fj_clone = fj.clone();
-        args.child.borrow().set_output(Rc::new(RefCell::new(ChildOutput {
-            fj: fj_clone,
-        })));
+        args.child
+            .borrow()
+            .set_output(Rc::new(RefCell::new(ChildOutput { fj: fj_clone })));
 
         fj
     }
 
-    fn fetch_batched(
-        &self,
-        req: &FetchRequest,
-        child_nodes: Vec<Node>,
-    ) -> NodeStream {
+    fn fetch_batched(&self, req: &FetchRequest, child_nodes: Vec<Node>) -> NodeStream {
         let parent_key = self.parent_key.clone();
         let child_key = self.child_key.clone();
         let parent_req_constraint = req.constraint.clone();
@@ -159,11 +152,10 @@ impl FlippedJoin {
                 continue;
             }
             let c = constraint.unwrap();
-            if let Some(prc) = &parent_req_constraint {
-                if !constraints_are_compatible(&c, prc) {
+            if let Some(prc) = &parent_req_constraint
+                && !constraints_are_compatible(&c, prc) {
                     continue;
                 }
-            }
             let key = canonical_key_row(&c, &parent_key);
             match child_indexes_by_key.get(&key) {
                 Some(existing) => {
@@ -198,20 +190,25 @@ impl FlippedJoin {
                 constraint: parent_req_constraint.clone(),
                 multi_constraints: mc,
                 start: req.start.clone(),
-                reverse, ..Default::default()};
+                reverse,
+                ..Default::default()
+            };
             parent.borrow().fetch(&parent_req)
         } else {
             let mut chunk_streams: Vec<NodeStream> = Vec::new();
             let mut i = 0;
             while i < computed_multi.len() {
-                let chunk: MultiConstraint = computed_multi[i..(i + chunk_size).min(computed_multi.len())].to_vec();
+                let chunk: MultiConstraint =
+                    computed_multi[i..(i + chunk_size).min(computed_multi.len())].to_vec();
                 let mut mc = incoming_multis.clone();
                 mc.push(chunk);
                 let parent_req = FetchRequest {
                     constraint: parent_req_constraint.clone(),
                     multi_constraints: mc,
                     start: req.start.clone(),
-                    reverse, ..Default::default()};
+                    reverse,
+                    ..Default::default()
+                };
                 chunk_streams.push(parent.borrow().fetch(&parent_req));
                 i += chunk_size;
             }
@@ -221,60 +218,75 @@ impl FlippedJoin {
         let child_indexes_by_key = child_indexes_by_key;
         let pk = parent_key.clone();
 
-        Box::new(skip_yields(parent_stream).flat_map(move |pn| {
-            let key = canonical_key(&pn.row, &pk);
-            let idxs = match child_indexes_by_key.get(&key) {
-                Some(idxs) => idxs,
-                None => return Vec::new(),
-            };
-            let related: Vec<Node> = idxs.iter().map(|&i| child_nodes[i].clone()).collect::<Vec<Node>>();
+        Box::new(
+            skip_yields(parent_stream)
+                .flat_map(move |pn| {
+                    let key = canonical_key(&pn.row, &pk);
+                    let idxs = match child_indexes_by_key.get(&key) {
+                        Some(idxs) => idxs,
+                        None => return Vec::new(),
+                    };
+                    let related: Vec<Node> = idxs
+                        .iter()
+                        .map(|&i| child_nodes[i].clone())
+                        .collect::<Vec<Node>>();
 
-            let mut overlaid = related;
+                    let mut overlaid = related;
 
-            let inp = inprogress.borrow().clone();
-            let inp_pos = inprogress_pos.borrow().clone();
-            if let (Some(change), Some(pos)) = (inp.as_ref(), inp_pos.as_ref()) {
-                let matches = is_join_match(
-                    &change.node().row,
-                    &child_key_for_overlay,
-                    &pn.row,
-                    &parent_key_for_overlay,
-                );
-                if matches {
-                    let has_been_pushed = (compare_rows_for_overlay)(&pn.row, pos) != CmpOrdering::Greater;
+                    let inp = inprogress.borrow().clone();
+                    let inp_pos = inprogress_pos.borrow().clone();
+                    if let (Some(change), Some(pos)) = (inp.as_ref(), inp_pos.as_ref()) {
+                        let matches = is_join_match(
+                            &change.node().row,
+                            &child_key_for_overlay,
+                            &pn.row,
+                            &parent_key_for_overlay,
+                        );
+                        if matches {
+                            let has_been_pushed =
+                                (compare_rows_for_overlay)(&pn.row, pos) != CmpOrdering::Greater;
 
-                    match change.change_type() {
-                        ChangeType::Remove => {
-                            if has_been_pushed {
-                                let change_row = change.node().row.clone();
-                                overlaid.retain(|n| {
-                                    !row_equals_for_compound_key(&n.row, &change_row, &child_key_for_overlay)
-                                });
-                            }
-                        }
-                        ChangeType::Add | ChangeType::Edit | ChangeType::Child => {
-                            if !has_been_pushed {
-                                let overlay_change = change.clone();
-                                let cs = child_schema.clone();
-                                overlaid = crate::ivm::stream::skip_yields(generate_with_overlay_no_yield(
-                                    from_vec(overlaid),
-                                    overlay_change,
-                                    &cs,
-                                )).collect::<Vec<Node>>();
+                            match change.change_type() {
+                                ChangeType::Remove => {
+                                    if has_been_pushed {
+                                        let change_row = change.node().row.clone();
+                                        overlaid.retain(|n| {
+                                            !row_equals_for_compound_key(
+                                                &n.row,
+                                                &change_row,
+                                                &child_key_for_overlay,
+                                            )
+                                        });
+                                    }
+                                }
+                                ChangeType::Add | ChangeType::Edit | ChangeType::Child => {
+                                    if !has_been_pushed {
+                                        let overlay_change = change.clone();
+                                        let cs = child_schema.clone();
+                                        overlaid = crate::ivm::stream::skip_yields(
+                                            generate_with_overlay_no_yield(
+                                                from_vec(overlaid),
+                                                overlay_change,
+                                                &cs,
+                                            ),
+                                        )
+                                        .collect::<Vec<Node>>();
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
 
-            if overlaid.is_empty() {
-                Vec::new()
-            } else {
-                let rel: RelStream = Rc::new(move || from_vec(overlaid.clone()));
-                let node = pn.set_relationship(&relationship_name, rel);
-                vec![node]
-            }
-        }).map(crate::ivm::stream::StreamItem::Data))
+                    if overlaid.is_empty() {
+                        Vec::new()
+                    } else {
+                        let rel: RelStream = Rc::new(move || from_vec(overlaid.clone()));
+                        let node = pn.set_relationship(&relationship_name, rel);
+                        vec![node]
+                    }
+                })
+                .map(crate::ivm::stream::StreamItem::Data),
+        )
     }
 
     fn push_child_change(&self, change: &Change, pusher: &dyn InputBase) {
@@ -296,7 +308,9 @@ impl FlippedJoin {
         if let Some(c) = constraint {
             let parent_input = self.parent.borrow();
             let parent_stream = skip_yields(parent_input.fetch(&FetchRequest {
-                constraint: Some(c), ..Default::default()}));
+                constraint: Some(c),
+                ..Default::default()
+            }));
 
             let output = self.output.borrow().clone();
             let output = output.expect("FlippedJoin output not set");
@@ -304,8 +318,7 @@ impl FlippedJoin {
             let mut exists = matches!(change.change_type(), ChangeType::Edit | ChangeType::Child);
 
             for parent_node in parent_stream {
-                *self.inprogress_child_change_position.borrow_mut() =
-                    Some(parent_node.row.clone());
+                *self.inprogress_child_change_position.borrow_mut() = Some(parent_node.row.clone());
 
                 let relationship_name = self.relationship_name.clone();
                 let child_clone = self.child.clone();
@@ -318,7 +331,9 @@ impl FlippedJoin {
                     let cons = build_join_constraint(&parent_row, &pk, &ck);
                     match cons {
                         Some(c) => child_clone.borrow().fetch(&FetchRequest {
-                            constraint: Some(c), ..Default::default()}),
+                            constraint: Some(c),
+                            ..Default::default()
+                        }),
                         None => empty_stream(),
                     }
                 });
@@ -333,14 +348,19 @@ impl FlippedJoin {
                     }
                 }
 
-                let new_node = parent_node.clone().set_relationship(&relationship_name, child_stream);
+                let new_node = parent_node
+                    .clone()
+                    .set_relationship(&relationship_name, child_stream);
 
                 if exists {
                     output.borrow_mut().push(
-                        make_child_change(new_node, ChildData {
-                            relationship_name,
-                            change: Box::new(change_clone.clone()),
-                        }),
+                        make_child_change(
+                            new_node,
+                            ChildData {
+                                relationship_name,
+                                change: Box::new(change_clone.clone()),
+                            },
+                        ),
                         pusher,
                     );
                 } else {
@@ -357,10 +377,13 @@ impl FlippedJoin {
                         }
                         _ => {
                             output.borrow_mut().push(
-                                make_child_change(node, ChildData {
-                                    relationship_name: relationship_name.clone(),
-                                    change: Box::new(change.clone()),
-                                }),
+                                make_child_change(
+                                    node,
+                                    ChildData {
+                                        relationship_name: relationship_name.clone(),
+                                        change: Box::new(change.clone()),
+                                    },
+                                ),
                                 pusher,
                             );
                         }
@@ -385,7 +408,9 @@ impl FlippedJoin {
         let constraint = build_join_constraint(&change.node().row, &pk, &ck);
         let has_child = if let Some(c) = constraint {
             let stream = child.borrow().fetch(&FetchRequest {
-                constraint: Some(c), ..Default::default()});
+                constraint: Some(c),
+                ..Default::default()
+            });
             count_data(stream) > 0
         } else {
             false
@@ -404,7 +429,9 @@ impl FlippedJoin {
                 let cons = build_join_constraint(&node_row, &pk2, &ck2);
                 match cons {
                     Some(c) => child_clone.borrow().fetch(&FetchRequest {
-                        constraint: Some(c), ..Default::default()}),
+                        constraint: Some(c),
+                        ..Default::default()
+                    }),
                     None => empty_stream(),
                 }
             });
@@ -413,16 +440,19 @@ impl FlippedJoin {
 
         match change {
             Change::Add(node) => {
-                output.borrow_mut().push(make_add_change(flip(node.clone())), pusher);
+                output
+                    .borrow_mut()
+                    .push(make_add_change(flip(node.clone())), pusher);
             }
             Change::Remove(node) => {
-                output.borrow_mut().push(make_remove_change(flip(node.clone())), pusher);
+                output
+                    .borrow_mut()
+                    .push(make_remove_change(flip(node.clone())), pusher);
             }
             Change::Child { node, child } => {
-                output.borrow_mut().push(
-                    make_child_change(flip(node.clone()), child.clone()),
-                    pusher,
-                );
+                output
+                    .borrow_mut()
+                    .push(make_child_change(flip(node.clone()), child.clone()), pusher);
             }
             Change::Edit { node, old_node } => {
                 assert!(
@@ -468,26 +498,27 @@ impl Input for FlippedJoin {
 
         let child_req = if has_child_constraint {
             FetchRequest {
-                constraint: Some(child_constraint), ..Default::default()}
+                constraint: Some(child_constraint),
+                ..Default::default()
+            }
         } else {
             FetchRequest::default()
         };
 
         let child_input = self.child.borrow();
-        let child_nodes: Vec<Node> = skip_yields(child_input.fetch(&child_req)).collect::<Vec<Node>>();
+        let child_nodes: Vec<Node> =
+            skip_yields(child_input.fetch(&child_req)).collect::<Vec<Node>>();
 
         let inprogress = self.inprogress_child_change.borrow().clone();
         let mut child_nodes = child_nodes;
-        if let Some(ref change) = inprogress {
-            if change.change_type() == ChangeType::Remove {
+        if let Some(ref change) = inprogress
+            && change.change_type() == ChangeType::Remove {
                 let removed = change.node().clone();
                 let compare = self.child.borrow().get_schema().compare_rows.clone();
-                let insert_pos = child_nodes.partition_point(|n| {
-                    compare(&removed.row, &n.row) == CmpOrdering::Less
-                });
+                let insert_pos = child_nodes
+                    .partition_point(|n| compare(&removed.row, &n.row) == CmpOrdering::Less);
                 child_nodes.insert(insert_pos, removed);
             }
-        }
 
         self.fetch_batched(req, child_nodes)
     }
@@ -520,7 +551,7 @@ impl Output for ChildOutput {
 }
 
 fn canonical_key_row(record: &Constraint, keys: &[String]) -> String {
-    let fake_row: Row = Arc::new(record.iter().map(|(k,v)| (k.clone(), v.clone())).collect());
+    let fake_row: Row = Arc::new(record.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
     canonical_key(&fake_row, keys)
 }
 
@@ -533,7 +564,9 @@ fn canonical_key(record: &Row, keys: &[String]) -> String {
             if i > 0 {
                 s.push('\0');
             }
-            s.push_str(&canonical_value(&record.get(key).cloned().unwrap_or(Value::Null)));
+            s.push_str(&canonical_value(
+                &record.get(key).cloned().unwrap_or(Value::Null),
+            ));
         }
         s
     }

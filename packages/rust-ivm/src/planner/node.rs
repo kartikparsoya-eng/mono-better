@@ -35,28 +35,53 @@ impl Default for CostEstimate {
             returned_rows: 0.0,
             selectivity: 0.0,
             limit: None,
-            fanout: Rc::new(|_cols: &[String]| FanoutEst { fanout: 1.0, confidence: Confidence::None }),
+            fanout: Rc::new(|_cols: &[String]| FanoutEst {
+                fanout: 1.0,
+                confidence: Confidence::None,
+            }),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Confidence { High, Med, None }
+pub enum Confidence {
+    High,
+    Med,
+    None,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeKind { Connection, Join, FanOut, FanIn, Terminus }
+pub enum NodeKind {
+    Connection,
+    Join,
+    FanOut,
+    FanIn,
+    Terminus,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JoinType { Semi, Flipped }
+pub enum JoinType {
+    Semi,
+    Flipped,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FanOutType { FO, UFO }
+pub enum FanOutType {
+    FO,
+    UFO,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FanInType { FI, UFI }
+pub enum FanInType {
+    FI,
+    UFI,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JoinOrConnection { Join, Connection }
+pub enum JoinOrConnection {
+    Join,
+    Connection,
+}
 
 /// A tagged reference into the plan graph. Cloning is cheap (Rc bump).
 #[derive(Clone)]
@@ -96,10 +121,22 @@ impl PlannerNode {
         from: Option<&PlannerNode>,
     ) {
         match self {
-            PlannerNode::Connection(c) => c.borrow_mut().propagate_constraints(branch_pattern, constraint, from),
-            PlannerNode::Join(j) => j.borrow_mut().propagate_constraints(branch_pattern, constraint, from),
-            PlannerNode::FanOut(fo) => fo.borrow().propagate_constraints(branch_pattern, constraint, from),
-            PlannerNode::FanIn(fi) => fi.borrow_mut().propagate_constraints(branch_pattern, constraint, from),
+            PlannerNode::Connection(c) => {
+                c.borrow_mut()
+                    .propagate_constraints(branch_pattern, constraint, from)
+            }
+            PlannerNode::Join(j) => {
+                j.borrow_mut()
+                    .propagate_constraints(branch_pattern, constraint, from)
+            }
+            PlannerNode::FanOut(fo) => {
+                fo.borrow()
+                    .propagate_constraints(branch_pattern, constraint, from)
+            }
+            PlannerNode::FanIn(fi) => {
+                fi.borrow_mut()
+                    .propagate_constraints(branch_pattern, constraint, from)
+            }
             PlannerNode::Terminus(_) => {}
         }
     }
@@ -110,10 +147,18 @@ impl PlannerNode {
         branch_pattern: &[usize],
     ) -> CostEstimate {
         match self {
-            PlannerNode::Connection(c) => c.borrow().estimate_cost(downstream_child_selectivity, branch_pattern),
-            PlannerNode::Join(j) => j.borrow().estimate_cost(downstream_child_selectivity, branch_pattern),
-            PlannerNode::FanOut(fo) => fo.borrow().estimate_cost(downstream_child_selectivity, branch_pattern),
-            PlannerNode::FanIn(fi) => fi.borrow().estimate_cost(downstream_child_selectivity, branch_pattern),
+            PlannerNode::Connection(c) => c
+                .borrow()
+                .estimate_cost(downstream_child_selectivity, branch_pattern),
+            PlannerNode::Join(j) => j
+                .borrow()
+                .estimate_cost(downstream_child_selectivity, branch_pattern),
+            PlannerNode::FanOut(fo) => fo
+                .borrow()
+                .estimate_cost(downstream_child_selectivity, branch_pattern),
+            PlannerNode::FanIn(fi) => fi
+                .borrow()
+                .estimate_cost(downstream_child_selectivity, branch_pattern),
             PlannerNode::Terminus(t) => t.borrow().estimate_cost(),
         }
     }

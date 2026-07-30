@@ -20,12 +20,12 @@ use crate::builder::ast::{
     Ast, Bound, Condition, CorrelatedSubqueryCondition, OrderPart, RelatedSubquery,
     SimpleCondition, ValuePosition,
 };
-use crate::builder::builder::{build_pipeline, complete_ordering_ast, BuilderDelegate};
+use crate::builder::builder::{BuilderDelegate, build_pipeline, complete_ordering_ast};
 use crate::ivm::catch::{Catch, CaughtChange, CaughtNode};
 use crate::ivm::change::{
-    make_source_change_add, make_source_change_edit, make_source_change_remove, SourceChange,
+    SourceChange, make_source_change_add, make_source_change_edit, make_source_change_remove,
 };
-use crate::ivm::data::{row as make_row, Row, Value};
+use crate::ivm::data::{Row, Value, row as make_row};
 use crate::ivm::operator::{FetchRequest, Shared};
 use crate::ivm::schema::ColumnType;
 use crate::ivm::source::{MemorySource, Source};
@@ -58,7 +58,9 @@ pub fn rust_value_to_json(v: &Value) -> JsonValue {
             }
         }
         Value::Str(s) => JsonValue::String(s.to_string()),
-        Value::Json(s) => serde_json::from_str(s).unwrap_or_else(|_| JsonValue::String(s.to_string())),
+        Value::Json(s) => {
+            serde_json::from_str(s).unwrap_or_else(|_| JsonValue::String(s.to_string()))
+        }
     }
 }
 
@@ -87,10 +89,15 @@ pub fn json_to_value_position(v: &JsonValue) -> ValuePosition {
     match kind {
         "column" => {
             let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            ValuePosition::Column { name: name.to_string() }
+            ValuePosition::Column {
+                name: name.to_string(),
+            }
         }
-        "literal" | _ => {
-            let val = v.get("value").map(json_to_rust_value).unwrap_or(Value::Null);
+        _ => {
+            let val = v
+                .get("value")
+                .map(json_to_rust_value)
+                .unwrap_or(Value::Null);
             ValuePosition::Literal { value: val }
         }
     }
@@ -98,7 +105,11 @@ pub fn json_to_value_position(v: &JsonValue) -> ValuePosition {
 
 pub fn json_to_simple_condition(v: &JsonValue) -> SimpleCondition {
     SimpleCondition {
-        op: v.get("op").and_then(|o| o.as_str()).unwrap_or("=").to_string(),
+        op: v
+            .get("op")
+            .and_then(|o| o.as_str())
+            .unwrap_or("=")
+            .to_string(),
         left: json_to_value_position(v.get("left").unwrap_or(&JsonValue::Null)),
         right: json_to_value_position(v.get("right").unwrap_or(&JsonValue::Null)),
     }
@@ -110,22 +121,40 @@ pub fn json_to_condition(v: &JsonValue) -> Condition {
         "simple" => Condition::Simple(json_to_simple_condition(v)),
         "and" => {
             let conds: Vec<Condition> = v
-                .get("conditions").and_then(|c| c.as_array()).unwrap_or(&vec![])
-                .iter().map(json_to_condition).collect();
+                .get("conditions")
+                .and_then(|c| c.as_array())
+                .unwrap_or(&vec![])
+                .iter()
+                .map(json_to_condition)
+                .collect();
             Condition::And(conds)
         }
         "or" => {
             let conds: Vec<Condition> = v
-                .get("conditions").and_then(|c| c.as_array()).unwrap_or(&vec![])
-                .iter().map(json_to_condition).collect();
+                .get("conditions")
+                .and_then(|c| c.as_array())
+                .unwrap_or(&vec![])
+                .iter()
+                .map(json_to_condition)
+                .collect();
             Condition::Or(conds)
         }
         "correlatedSubquery" => {
             let related = json_to_related_subquery(v.get("related").unwrap_or(&JsonValue::Null));
-            let op = v.get("op").and_then(|o| o.as_str()).unwrap_or("EXISTS").to_string();
+            let op = v
+                .get("op")
+                .and_then(|o| o.as_str())
+                .unwrap_or("EXISTS")
+                .to_string();
             let flip = v.get("flip").and_then(|f| f.as_bool());
             let scalar = v.get("scalar").and_then(|s| s.as_bool()).unwrap_or(false);
-            Condition::CorrelatedSubquery(CorrelatedSubqueryCondition { related, op, flip, scalar, plan_id: None })
+            Condition::CorrelatedSubquery(CorrelatedSubqueryCondition {
+                related,
+                op,
+                flip,
+                scalar,
+                plan_id: None,
+            })
         }
         _ => panic!("unknown condition type: {kind}"),
     }
@@ -134,15 +163,30 @@ pub fn json_to_condition(v: &JsonValue) -> Condition {
 pub fn json_to_related_subquery(v: &JsonValue) -> RelatedSubquery {
     let subquery = json_to_ast(v.get("subquery").unwrap_or(&JsonValue::Null));
     let relationship_name = v
-        .get("subquery").and_then(|sq| sq.get("alias")).and_then(|a| a.as_str())
+        .get("subquery")
+        .and_then(|sq| sq.get("alias"))
+        .and_then(|a| a.as_str())
         .or_else(|| v.get("alias").and_then(|a| a.as_str()))
-        .unwrap_or("").to_string();
+        .unwrap_or("")
+        .to_string();
     let (parent_key, child_key) = if let Some(corr) = v.get("correlation") {
-        let parent = corr.get("parentField").and_then(|p| p.as_array())
-            .map(|a| a.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect())
+        let parent = corr
+            .get("parentField")
+            .and_then(|p| p.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|s| s.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
             .unwrap_or_default();
-        let child = corr.get("childField").and_then(|c| c.as_array())
-            .map(|a| a.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect())
+        let child = corr
+            .get("childField")
+            .and_then(|c| c.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|s| s.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
             .unwrap_or_default();
         (parent, child)
     } else {
@@ -165,22 +209,43 @@ pub fn json_to_related_subquery(v: &JsonValue) -> RelatedSubquery {
 }
 
 pub fn json_to_ast(v: &JsonValue) -> Ast {
-    let table = v.get("table").and_then(|t| t.as_str()).unwrap_or("").to_string();
-    let alias = v.get("alias").and_then(|a| a.as_str()).map(|s| s.to_string());
+    let table = v
+        .get("table")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let alias = v
+        .get("alias")
+        .and_then(|a| a.as_str())
+        .map(|s| s.to_string());
     let where_clause = v.get("where").map(json_to_condition);
     let related: Vec<RelatedSubquery> = v
-        .get("related").and_then(|r| r.as_array()).unwrap_or(&vec![])
-        .iter().map(json_to_related_subquery).collect();
+        .get("related")
+        .and_then(|r| r.as_array())
+        .unwrap_or(&vec![])
+        .iter()
+        .map(json_to_related_subquery)
+        .collect();
     let limit = v.get("limit").and_then(|l| l.as_i64()).map(|l| l as usize);
     let order_by = v.get("orderBy").and_then(|o| o.as_array()).map(|parts| {
-        parts.iter().map(|p| {
-            let empty_arr = vec![];
-            let arr = p.as_array().unwrap_or(&empty_arr);
-            OrderPart {
-                column: arr.get(0).and_then(|c| c.as_str()).unwrap_or("").to_string(),
-                direction: arr.get(1).and_then(|d| d.as_str()).unwrap_or("asc").to_string(),
-            }
-        }).collect()
+        parts
+            .iter()
+            .map(|p| {
+                let empty_arr = vec![];
+                let arr = p.as_array().unwrap_or(&empty_arr);
+                OrderPart {
+                    column: arr.first()
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    direction: arr
+                        .get(1)
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("asc")
+                        .to_string(),
+                }
+            })
+            .collect()
     });
     let start = v.get("start").map(|s| {
         let row_json = s.get("row").unwrap_or(&JsonValue::Null);
@@ -192,18 +257,34 @@ pub fn json_to_ast(v: &JsonValue) -> Ast {
         }
         Bound {
             row: make_row(map),
-            exclusive: s.get("exclusive").and_then(|e| e.as_bool()).unwrap_or(false),
+            exclusive: s
+                .get("exclusive")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false),
         }
     });
-    Ast { schema: None, table, alias, where_clause, related, limit, order_by, start }
+    Ast {
+        schema: None,
+        table,
+        alias,
+        where_clause,
+        related,
+        limit,
+        order_by,
+        start,
+    }
 }
 
 // Fixture helpers: column-type string -> ColumnType, push -> SourceChange.
 
 pub fn parse_column_type(s: &str) -> ColumnType {
     let parts: Vec<&str> = s.split('|').collect();
-    let optional = parts.iter().any(|p| *p == "null");
-    let base = parts.iter().find(|p| **p != "null").copied().unwrap_or("string");
+    let optional = parts.contains(&"null");
+    let base = parts
+        .iter()
+        .find(|p| **p != "null")
+        .copied()
+        .unwrap_or("string");
     match base {
         "boolean" => ColumnType::Boolean { optional },
         "number" => ColumnType::Number { optional },
@@ -213,7 +294,11 @@ pub fn parse_column_type(s: &str) -> ColumnType {
 }
 
 pub fn push_to_source_change(push: &JsonValue) -> (String, SourceChange) {
-    let table = push.get("table").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let table = push
+        .get("table")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
     let row = match push.get("row").and_then(|r| r.as_object()) {
         Some(obj) => json_to_row(obj),
         None => make_row(FxHashMap::default()),
@@ -283,7 +368,10 @@ pub fn caught_change_to_json(change: &CaughtChange) -> JsonValue {
             obj.insert("type".into(), JsonValue::String("child".into()));
             obj.insert("row".into(), row_to_json(row));
             let mut child_obj = serde_json::Map::new();
-            child_obj.insert("relationshipName".into(), JsonValue::String(child.0.clone()));
+            child_obj.insert(
+                "relationshipName".into(),
+                JsonValue::String(child.0.clone()),
+            );
             child_obj.insert("change".into(), caught_change_to_json(&child.1));
             obj.insert("child".into(), JsonValue::Object(child_obj));
         }
@@ -296,7 +384,11 @@ pub fn caught_change_to_json(change: &CaughtChange) -> JsonValue {
 pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
     let mut sources: HashMap<String, Shared<dyn Source>> = HashMap::new();
     let mut pks: HashMap<String, Vec<String>> = HashMap::new();
-    let tables = fixture.get("tables").and_then(|t| t.as_object()).cloned().unwrap_or_default();
+    let tables = fixture
+        .get("tables")
+        .and_then(|t| t.as_object())
+        .cloned()
+        .unwrap_or_default();
     for (name, spec) in &tables {
         let mut columns: HashMap<String, ColumnType> = HashMap::new();
         if let Some(cols) = spec.get("columns").and_then(|c| c.as_object()) {
@@ -305,11 +397,18 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
                 columns.insert(col.clone(), parse_column_type(tstr));
             }
         }
-        let pk: Vec<String> = spec.get("primaryKey").and_then(|p| p.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        let pk: Vec<String> = spec
+            .get("primaryKey")
+            .and_then(|p| p.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let source: Shared<MemorySource> =
-            std::rc::Rc::new(std::cell::RefCell::new(MemorySource::new(name, columns, pk.clone())));
+        let source: Shared<MemorySource> = std::rc::Rc::new(std::cell::RefCell::new(
+            MemorySource::new(name, columns, pk.clone()),
+        ));
         if let Some(rows) = spec.get("rows").and_then(|r| r.as_array()) {
             for row_json in rows {
                 if let Some(obj) = row_json.as_object() {
@@ -326,7 +425,10 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
     }
 
     let ast = json_to_ast(fixture.get("ast").unwrap_or(&JsonValue::Null));
-    let enable_not_exists = fixture.get("enableNotExists").and_then(|b| b.as_bool()).unwrap_or(false);
+    let enable_not_exists = fixture
+        .get("enableNotExists")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
 
     // Resolve simple scalar subqueries (scalar-flagged EXISTS that pin a unique
     // key) exactly like the engine hydrate path (Engine::resolve_scalar_subqueries):
@@ -335,20 +437,32 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
     // scalar-match fixture falsely diverged from the oracle. Unique keys for a
     // fixture table are its primary key (matches the generator, which pins `id`).
     use crate::sqlite::resolve_scalar_subqueries::{
-        resolve_simple_scalar_subqueries, ScalarExecutor, TableSpecWithUniqueKeys,
+        ScalarExecutor, TableSpecWithUniqueKeys, resolve_simple_scalar_subqueries,
     };
     let table_specs: HashMap<String, TableSpecWithUniqueKeys> = pks
         .iter()
-        .map(|(t, pk)| (t.clone(), TableSpecWithUniqueKeys { unique_keys: vec![pk.clone()] }))
+        .map(|(t, pk)| {
+            (
+                t.clone(),
+                TableSpecWithUniqueKeys {
+                    unique_keys: vec![pk.clone()],
+                },
+            )
+        })
         .collect();
-    let companion_rows: std::cell::RefCell<Vec<(String, Row)>> = std::cell::RefCell::new(Vec::new());
+    let companion_rows: std::cell::RefCell<Vec<(String, Row)>> =
+        std::cell::RefCell::new(Vec::new());
     let resolved_ast = {
         let sources_ref = &sources;
         let pks_ref = &pks;
         let executor: ScalarExecutor = Box::new(|subquery_ast: &Ast, child_field: &str| {
-            let completed =
-                complete_ordering_ast(subquery_ast, &|t: &str| pks_ref.get(t).cloned().unwrap_or_default());
-            let mut delegate = FixtureDelegate { sources: sources_ref.clone(), enable_not_exists };
+            let completed = complete_ordering_ast(subquery_ast, &|t: &str| {
+                pks_ref.get(t).cloned().unwrap_or_default()
+            });
+            let mut delegate = FixtureDelegate {
+                sources: sources_ref.clone(),
+                enable_not_exists,
+            };
             let input = build_pipeline(&completed, &mut delegate);
             // The subquery is at-most-one-row; take the first node (mirrors TS).
             let mut first: Option<crate::ivm::data::Node> = None;
@@ -374,8 +488,12 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
         resolve_simple_scalar_subqueries(&ast, &table_specs, &executor).ast
     };
 
-    let completed = complete_ordering_ast(&resolved_ast, &|t| pks.get(t).cloned().unwrap_or_default());
-    let mut delegate = FixtureDelegate { sources: sources.clone(), enable_not_exists };
+    let completed =
+        complete_ordering_ast(&resolved_ast, &|t| pks.get(t).cloned().unwrap_or_default());
+    let mut delegate = FixtureDelegate {
+        sources: sources.clone(),
+        enable_not_exists,
+    };
     let pipeline = build_pipeline(&completed, &mut delegate);
 
     let catch = Catch::new(pipeline, false);
@@ -391,16 +509,23 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
 
     let hydrate_json = JsonValue::Array(hydrate.iter().map(caught_node_to_json).collect());
 
-    let pushes = fixture.get("pushes").and_then(|p| p.as_array()).cloned().unwrap_or_default();
+    let pushes = fixture
+        .get("pushes")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut push_changes: Vec<JsonValue> = Vec::new();
     for push in &pushes {
         let (table, sc) = push_to_source_change(push);
-        let src = sources.get(&table)
+        let src = sources
+            .get(&table)
             .unwrap_or_else(|| panic!("unknown source for push to table: {table}"));
         let before = catch.borrow().pushes.len();
         src.borrow_mut().push(sc);
         let changes_json: Vec<JsonValue> = catch.borrow().pushes[before..]
-            .iter().map(caught_change_to_json).collect();
+            .iter()
+            .map(caught_change_to_json)
+            .collect();
         push_changes.push(JsonValue::Array(changes_json));
     }
 
@@ -444,8 +569,8 @@ pub fn canonicalize(v: &JsonValue) -> JsonValue {
                 if f == 0.0 {
                     return JsonValue::Number(serde_json::Number::from(0i64));
                 }
-                if f.fract() == 0.0 && f.is_finite()
-                    && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                if f.fract() == 0.0 && f.is_finite() && f >= i64::MIN as f64 && f <= i64::MAX as f64
+                {
                     return JsonValue::Number(serde_json::Number::from(f as i64));
                 }
                 return JsonValue::Number(
@@ -476,13 +601,18 @@ fn json_deep_equal(a: &JsonValue, b: &JsonValue) -> bool {
         }
         (JsonValue::Object(x), JsonValue::Object(y)) => {
             x.len() == y.len()
-                && x.iter().all(|(k, v)| y.get(k).map(|w| json_deep_equal(v, w)).unwrap_or(false))
+                && x.iter()
+                    .all(|(k, v)| y.get(k).map(|w| json_deep_equal(v, w)).unwrap_or(false))
         }
         _ => a == b,
     }
 }
 
-pub fn diff_path(a: &JsonValue, b: &JsonValue, path: &str) -> Option<(String, JsonValue, JsonValue)> {
+pub fn diff_path(
+    a: &JsonValue,
+    b: &JsonValue,
+    path: &str,
+) -> Option<(String, JsonValue, JsonValue)> {
     if json_deep_equal(a, b) {
         return None;
     }
@@ -508,8 +638,12 @@ pub fn diff_path(a: &JsonValue, b: &JsonValue, path: &str) -> Option<(String, Js
             keys.dedup();
             for k in keys {
                 match (x.get(k), y.get(k)) {
-                    (None, Some(v)) => return Some((format!("{path}.{k}"), JsonValue::Null, v.clone())),
-                    (Some(v), None) => return Some((format!("{path}.{k}"), v.clone(), JsonValue::Null)),
+                    (None, Some(v)) => {
+                        return Some((format!("{path}.{k}"), JsonValue::Null, v.clone()));
+                    }
+                    (Some(v), None) => {
+                        return Some((format!("{path}.{k}"), v.clone(), JsonValue::Null));
+                    }
                     (Some(p), Some(q)) => {
                         if let Some(d) = diff_path(p, q, &format!("{path}.{k}")) {
                             return Some(d);
@@ -521,7 +655,11 @@ pub fn diff_path(a: &JsonValue, b: &JsonValue, path: &str) -> Option<(String, Js
             None
         }
         _ => Some((
-            if path.is_empty() { "<root>".to_string() } else { path.to_string() },
+            if path.is_empty() {
+                "<root>".to_string()
+            } else {
+                path.to_string()
+            },
             a.clone(),
             b.clone(),
         )),
@@ -540,13 +678,11 @@ fn strip_empty_companion_rows(v: &JsonValue) -> JsonValue {
         JsonValue::Object(o) => {
             let mut out = serde_json::Map::new();
             for (k, val) in o {
-                if k == "companionRows" {
-                    if let JsonValue::Array(a) = val {
-                        if a.is_empty() {
+                if k == "companionRows"
+                    && let JsonValue::Array(a) = val
+                        && a.is_empty() {
                             continue;
                         }
-                    }
-                }
                 out.insert(k.clone(), val.clone());
             }
             JsonValue::Object(out)

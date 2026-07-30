@@ -8,7 +8,6 @@
 //! lower(). Unicode case-folding tests are IVM-only since they require
 //! ICU which rusqlite's bundled SQLite may not include.
 
-use std::sync::Arc;
 use rusqlite::Connection;
 
 use rust_ivm::builder::like::get_like_predicate;
@@ -21,9 +20,8 @@ fn ivm_ilike(pattern: &str, input: &str) -> bool {
 
 fn zqlite_ilike(conn: &Connection, pattern: &str, input: &str) -> bool {
     let sql = "SELECT (lower(name) LIKE lower(?) ESCAPE '\\') AS m FROM (SELECT ? AS name)";
-    let result: rusqlite::Result<i64> = conn.query_row(sql, rusqlite::params![pattern, input], |row| {
-        row.get(0)
-    });
+    let result: rusqlite::Result<i64> =
+        conn.query_row(sql, rusqlite::params![pattern, input], |row| row.get(0));
     result.unwrap_or(0) != 0
 }
 
@@ -56,8 +54,8 @@ const IVM_ONLY_CASES: &[(&str, &str, bool)] = &[
     ("σιγμα", "ΣΙΓΜΑ", true),
     ("müller", "schmidt", false),
     ("å", "Ä", false),
-    ("m_ller", "müller", true),  // _ matches ü
-    ("%Ü%", "müller", true),     // wildcard + case-insensitive
+    ("m_ller", "müller", true),   // _ matches ü
+    ("%Ü%", "müller", true),      // wildcard + case-insensitive
     ("straße", "STRASSE", false), // ß vs SS: lower differs from fold
 ];
 

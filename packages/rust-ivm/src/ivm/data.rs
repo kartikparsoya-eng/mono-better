@@ -1,8 +1,8 @@
 //! Core data types — port of `zql/src/ivm/data.ts`.
 
-use std::rc::Rc;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -16,7 +16,9 @@ use crate::ivm::stream::RelStream;
 /// `{...}`/`[...]` → `Json`. This matches the TS wire format and the
 /// `json_to_value` mapping in `napi/src/lib.rs`.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub enum Value {
+    #[default]
     Null,
     Bool(bool),
     F64(f64),
@@ -31,7 +33,11 @@ impl serde::Serialize for Value {
             Value::Null => s.serialize_none(),
             Value::Bool(b) => s.serialize_bool(*b),
             Value::F64(n) => {
-                if n.fract() == 0.0 && n.is_finite() && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
+                if n.fract() == 0.0
+                    && n.is_finite()
+                    && *n >= i64::MIN as f64
+                    && *n <= i64::MAX as f64
+                {
                     s.serialize_i64(*n as i64)
                 } else {
                     s.serialize_f64(*n)
@@ -39,8 +45,8 @@ impl serde::Serialize for Value {
             }
             Value::Str(st) => s.serialize_str(st),
             Value::Json(st) => {
-                let val: serde_json::Value = serde_json::from_str(st)
-                    .unwrap_or(serde_json::Value::String(st.to_string()));
+                let val: serde_json::Value =
+                    serde_json::from_str(st).unwrap_or(serde_json::Value::String(st.to_string()));
                 val.serialize(s)
             }
         }
@@ -57,10 +63,10 @@ impl<'de> serde::Deserialize<'de> for Value {
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     const MAX_SAFE: i64 = 9_007_199_254_740_991;
-                    if i > MAX_SAFE || i < -MAX_SAFE {
-                        return Err(serde::de::Error::custom(
-                            format!("integer {i} is outside of supported bounds")
-                        ));
+                    if !(-MAX_SAFE..=MAX_SAFE).contains(&i) {
+                        return Err(serde::de::Error::custom(format!(
+                            "integer {i} is outside of supported bounds"
+                        )));
                     }
                     Value::F64(i as f64)
                 } else if let Some(f) = n.as_f64() {
@@ -82,11 +88,6 @@ impl Value {
     }
 }
 
-impl Default for Value {
-    fn default() -> Self {
-        Value::Null
-    }
-}
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
@@ -114,7 +115,10 @@ pub fn compare_values(a: &Value, b: &Value) -> CmpOrdering {
         (Value::Str(x), Value::Str(y)) => x.as_bytes().cmp(y.as_bytes()),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Json(x), Value::Json(y)) => x.as_bytes().cmp(y.as_bytes()),
-        _ => panic!("Cannot compare values of different types: {:?} and {:?}", a, b),
+        _ => panic!(
+            "Cannot compare values of different types: {:?} and {:?}",
+            a, b
+        ),
     }
 }
 

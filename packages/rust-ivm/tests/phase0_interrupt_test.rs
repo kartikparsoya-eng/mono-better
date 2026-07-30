@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rust_ivm::engine::CancellationToken;
-use rust_ivm::sqlite::{install_interrupt, JobWatchdog};
+use rust_ivm::sqlite::{JobWatchdog, install_interrupt};
 
 /// A slow SQLite query: `SELECT ... FROM generate_series` wrapped in a busy
 /// loop so it runs for several seconds if uninterrupted. Using an in-memory
@@ -52,9 +52,11 @@ fn install_interrupt_returns_send_sync_handle() {
     // The handle must be usable from another thread. We can't prove Send+Sync
     // at runtime, but we CAN prove the handle interrupts a running query.
     let query_conn = rusqlite::Connection::open_in_memory().unwrap();
-    let _ = query_conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+    let _ = query_conn.execute_batch(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
          WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x < 100000)
-         INSERT INTO t SELECT x, printf('row%d', x) FROM seq;");
+         INSERT INTO t SELECT x, printf('row%d', x) FROM seq;",
+    );
     let handle = install_interrupt(&query_conn);
     let done = Arc::new(Mutex::new(false));
     let done_clone = done.clone();
@@ -69,7 +71,10 @@ fn install_interrupt_returns_send_sync_handle() {
     let result = join.join().unwrap();
     // The query should have been interrupted (SQLITE_INTERRUPT) and returned
     // promptly — well under the time it would take uninterrupted.
-    assert!(*done.lock().unwrap(), "interrupted query should have returned");
+    assert!(
+        *done.lock().unwrap(),
+        "interrupted query should have returned"
+    );
     match result {
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.extended_code == rusqlite::ffi::SQLITE_INTERRUPT =>
@@ -108,9 +113,15 @@ fn watchdog_fires_at_abort_bound_flips_cancel_and_interrupts() {
     });
 
     let result = join.join().unwrap();
-    assert!(*done.lock().unwrap(), "query should have returned after interrupt");
+    assert!(
+        *done.lock().unwrap(),
+        "query should have returned after interrupt"
+    );
     // The cancel token should have been flipped by the watchdog at abort_at.
-    assert!(cancel_clone.is_cancelled(), "watchdog should have flipped the cancel token at abort bound");
+    assert!(
+        cancel_clone.is_cancelled(),
+        "watchdog should have flipped the cancel token at abort bound"
+    );
     match result {
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.extended_code == rusqlite::ffi::SQLITE_INTERRUPT =>
@@ -141,7 +152,10 @@ fn watchdog_unregisters_on_guard_drop() {
     // Wait past the original warn bound (and well past any abort window the
     // dropped guard would have left).
     std::thread::sleep(Duration::from_millis(300));
-    assert!(!cancel.is_cancelled(), "dropped guard must not fire the watchdog abort");
+    assert!(
+        !cancel.is_cancelled(),
+        "dropped guard must not fire the watchdog abort"
+    );
 }
 
 #[test]
@@ -171,7 +185,10 @@ fn cancel_mid_query_aborts_via_interrupt_handle() {
     }
 
     let result = join.join().unwrap();
-    assert!(*done.lock().unwrap(), "cancelled query should have returned");
+    assert!(
+        *done.lock().unwrap(),
+        "cancelled query should have returned"
+    );
     match result {
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.extended_code == rusqlite::ffi::SQLITE_INTERRUPT =>

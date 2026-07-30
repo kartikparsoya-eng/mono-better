@@ -6,16 +6,12 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use crate::ivm::change::{Change, ChangeType};
-use crate::ivm::data::Node;
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::push_accumulated::push_accumulated_changes;
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{from_vec, NodeStream};
+use crate::ivm::stream::{NodeStream, from_vec};
 
 /// Port of TS `FanIn` (fan-in.ts:24).
 pub struct FanIn {

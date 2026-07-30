@@ -19,13 +19,17 @@ use rust_ivm::ivm::change::{
     make_source_change_add, make_source_change_edit, make_source_change_remove,
 };
 use rust_ivm::ivm::data::Value;
-use rust_ivm::ivm::operator::Input;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::operator::Input;
 use rust_ivm::ivm::stream::StreamItem;
 
 fn clean_db(path: &str) {
-    for p in [path.to_string(), format!("{path}-wal"), format!("{path}-shm")] {
+    for p in [
+        path.to_string(),
+        format!("{path}-wal"),
+        format!("{path}-shm"),
+    ] {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -73,14 +77,15 @@ fn tablesource_advance_fetch_reflects_add_edit_remove() {
     clean_db(db_path);
     let conn = rusqlite::Connection::open(db_path).unwrap();
     conn.execute_batch("PRAGMA journal_mode=wal;").unwrap();
-    conn.execute_batch(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);",
-    )
-    .unwrap();
+    conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+        .unwrap();
     // PREV snapshot: Alice(1), Bob(2), Charlie(3).
     for (id, name) in [(1, "Alice"), (2, "Bob"), (3, "Charlie")] {
-        conn.execute("INSERT INTO users (id,name) VALUES (?,?)", rusqlite::params![id, name])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO users (id,name) VALUES (?,?)",
+            rusqlite::params![id, name],
+        )
+        .unwrap();
     }
     drop(conn);
 
@@ -95,20 +100,34 @@ fn tablesource_advance_fetch_reflects_add_edit_remove() {
     // Baseline: fetch reads PREV.
     assert_eq!(
         fetched(&input),
-        vec![(1, "Alice".into()), (2, "Bob".into()), (3, "Charlie".into())],
+        vec![
+            (1, "Alice".into()),
+            (2, "Bob".into()),
+            (3, "Charlie".into())
+        ],
     );
 
     // Same-advance changes (as during advance_to_head_stream): ADD Frank(6),
     // EDIT Alice(1)->Alicia, REMOVE Bob(2). SQLite (PREV) is untouched.
-    source.borrow_mut().push(make_source_change_add(row(6, "Frank")));
-    source.borrow_mut().push(make_source_change_edit(row(1, "Alicia"), row(1, "Alice")));
-    source.borrow_mut().push(make_source_change_remove(row(2, "Bob")));
+    source
+        .borrow_mut()
+        .push(make_source_change_add(row(6, "Frank")));
+    source
+        .borrow_mut()
+        .push(make_source_change_edit(row(1, "Alicia"), row(1, "Alice")));
+    source
+        .borrow_mut()
+        .push(make_source_change_remove(row(2, "Bob")));
 
     // A re-entrant fetch must now reflect the current state:
     //   - Frank added, Bob gone, Alice shows the NEW value "Alicia".
     assert_eq!(
         fetched(&input),
-        vec![(1, "Alicia".into()), (3, "Charlie".into()), (6, "Frank".into())],
+        vec![
+            (1, "Alicia".into()),
+            (3, "Charlie".into()),
+            (6, "Frank".into())
+        ],
         "TableSource fetch during advance must reflect same-advance add/edit/remove \
          (not the stale PREV snapshot)",
     );

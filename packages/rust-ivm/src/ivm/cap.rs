@@ -10,18 +10,16 @@
 //! the PK changed.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::ivm::change::{make_add_change, make_remove_change, Change, ChangeType};
-use crate::ivm::constraint::{constraint_matches_row, Constraint};
-use crate::ivm::data::{values_equal, Node, Row, Value};
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
-};
+use crate::ivm::change::{Change, ChangeType, make_add_change};
+use crate::ivm::constraint::Constraint;
+use crate::ivm::data::{Node, Row, Value};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{from_vec, NodeStream, StreamItem, take as stream_take};
+use crate::ivm::stream::{NodeStream, StreamItem, from_vec};
 
 /// Cap state — tracks count and PK set per partition.
 #[derive(Clone, Debug)]
@@ -104,7 +102,9 @@ impl Cap {
         limit: usize,
         partition_key: Option<Vec<String>>,
     ) -> Shared<Cap> {
-        assert!(limit >= 0, "Limit must be non-negative");
+        // limit is usize, always >= 0. TS asserts limit >= 0 but that's
+        // trivially true for unsigned types.
+        debug_assert!(limit < usize::MAX, "Limit must be reasonable");
         let schema = input.borrow().get_schema();
         let primary_key = schema.primary_key.clone();
 
@@ -119,14 +119,18 @@ impl Cap {
         }));
 
         let cap_clone = cap.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(CapOutput {
-            cap: cap_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(CapOutput { cap: cap_clone })));
 
         cap
     }
 
-    fn get_state_key(&self, row_or_constraint: Option<&Row>, constraint: Option<&Constraint>) -> String {
+    fn get_state_key(
+        &self,
+        row_or_constraint: Option<&Row>,
+        constraint: Option<&Constraint>,
+    ) -> String {
         match (&self.partition_key, row_or_constraint, constraint) {
             (Some(pk), Some(row), _) => {
                 let mut parts = Vec::new();
@@ -157,6 +161,7 @@ impl Cap {
         format!("[{}]", parts.join(","))
     }
 
+    #[allow(dead_code)]
     fn deserialize_pk_to_constraint(&self, pk_str: &str) -> Constraint {
         // Parse the serialized PK back into a constraint.
         // Format: [v1,v2,...] where each v is JSON-serialized.
@@ -175,7 +180,13 @@ impl Cap {
     fn initial_fetch(&self, req: &FetchRequest) -> NodeStream {
         if self.limit == 0 {
             let state_key = self.get_state_key(None, req.constraint.as_ref());
-            self.storage.borrow_mut().set(state_key, CapState { size: 0, pks: Vec::new() });
+            self.storage.borrow_mut().set(
+                state_key,
+                CapState {
+                    size: 0,
+                    pks: Vec::new(),
+                },
+            );
             return from_vec(Vec::new());
         }
         let mut stream = self.input.borrow().fetch(req);
@@ -213,33 +224,43 @@ impl Cap {
             if persisted_c.get() {
                 return None;
             }
-            loop {
-                match stream.next() {
-                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+            match stream.next() {
+                    Some(StreamItem::Yield) => Some(StreamItem::Yield),
                     Some(StreamItem::Data(node)) => {
                         let pk_parts: Vec<String> = primary_key_c
                             .iter()
-                            .map(|k| crate::ivm::cap::value_to_string(&node.row.get(k).cloned().unwrap_or(Value::Null)))
+                            .map(|k| {
+                                crate::ivm::cap::value_to_string(
+                                    &node.row.get(k).cloned().unwrap_or(Value::Null),
+                                )
+                            })
                             .collect();
                         pks_c.borrow_mut().push(format!("[{}]", pk_parts.join(",")));
                         let c = count_c.get() + 1;
                         count_c.set(c);
                         if c >= limit {
                             let pks_vec = pks_c.borrow().clone();
-                            storage_c.borrow_mut().set(state_key_c.clone(), CapState { size: c, pks: pks_vec });
+                            storage_c.borrow_mut().set(
+                                state_key_c.clone(),
+                                CapState {
+                                    size: c,
+                                    pks: pks_vec,
+                                },
+                            );
                             persisted_c.set(true);
                         }
-                        return Some(StreamItem::Data(node));
+                        Some(StreamItem::Data(node))
                     }
                     None => {
                         let pks_vec = pks_c.borrow().clone();
                         let size = pks_vec.len();
-                        storage_c.borrow_mut().set(state_key_c.clone(), CapState { size, pks: pks_vec });
+                        storage_c
+                            .borrow_mut()
+                            .set(state_key_c.clone(), CapState { size, pks: pks_vec });
                         persisted_c.set(true);
-                        return None;
+                        None
                     }
                 }
-            }
         }))
     }
 }
@@ -267,14 +288,13 @@ impl Input for Cap {
         // downstream consumer is a Join that always fetches with a constraint
         // built from the correlation's childField — which is Cap's partition
         // key. So either partitionKey is undefined, or constraint matches.
-        if let Some(pk) = &self.partition_key {
-            if let Some(constraint) = &req.constraint {
+        if let Some(pk) = &self.partition_key
+            && let Some(constraint) = &req.constraint {
                 assert!(
                     crate::ivm::take::constraint_matches_partition_key(constraint, pk),
                     "Cap fetch: constraint must match partition key when partitioned"
                 );
             }
-        }
 
         let state_key = self.get_state_key(None, req.constraint.as_ref());
 
@@ -344,9 +364,21 @@ impl Output for CapOutput {
                             let pks: Vec<String> = state
                                 .pks
                                 .iter()
-                                .map(|p| if p == &old_pk { new_pk.clone() } else { p.clone() })
+                                .map(|p| {
+                                    if p == &old_pk {
+                                        new_pk.clone()
+                                    } else {
+                                        p.clone()
+                                    }
+                                })
                                 .collect();
-                            cap.storage.borrow_mut().set(state_key, CapState { size: state.size, pks });
+                            cap.storage.borrow_mut().set(
+                                state_key,
+                                CapState {
+                                    size: state.size,
+                                    pks,
+                                },
+                            );
                         }
                         drop(cap);
                         if let Some(output) = output {
@@ -354,7 +386,6 @@ impl Output for CapOutput {
                         }
                     }
                 }
-                return;
             }
             ChangeType::Add | ChangeType::Remove => {
                 let node = change.node().clone();
@@ -374,7 +405,10 @@ impl Output for CapOutput {
                         pks.push(pk);
                         cap.storage.borrow_mut().set(
                             state_key,
-                            CapState { size: cap_state.size + 1, pks },
+                            CapState {
+                                size: cap_state.size + 1,
+                                pks,
+                            },
                         );
                         drop(cap);
                         if let Some(output) = output {
@@ -403,7 +437,10 @@ impl Output for CapOutput {
                     let constraint = cap.partition_key.as_ref().map(|pk_cols| {
                         let mut c = Constraint::default();
                         for col in pk_cols {
-                            c.insert(col.clone(), node.row.get(col).cloned().unwrap_or(Value::Null));
+                            c.insert(
+                                col.clone(),
+                                node.row.get(col).cloned().unwrap_or(Value::Null),
+                            );
                         }
                         c
                     });
@@ -413,7 +450,9 @@ impl Output for CapOutput {
                         constraint,
                         multi_constraints: Vec::new(),
                         start: None,
-                        reverse: false, ..Default::default()};
+                        reverse: false,
+                        ..Default::default()
+                    };
                     for n in crate::ivm::stream::skip_yields(cap.input.borrow().fetch(&fetch_req)) {
                         let node_pk = cap.serialize_pk(&n.row);
                         if !pk_set.contains(&node_pk) {
@@ -426,7 +465,10 @@ impl Output for CapOutput {
                         // Store state WITHOUT replacement during remove forward.
                         cap.storage.borrow_mut().set(
                             state_key.clone(),
-                            CapState { size: new_size, pks: pks.clone() },
+                            CapState {
+                                size: new_size,
+                                pks: pks.clone(),
+                            },
                         );
                         drop(cap);
                         if let Some(output) = &output {
@@ -437,7 +479,10 @@ impl Output for CapOutput {
                         pks.push(rep_pk);
                         self.cap.borrow_mut().storage.borrow_mut().set(
                             state_key,
-                            CapState { size: new_size + 1, pks },
+                            CapState {
+                                size: new_size + 1,
+                                pks,
+                            },
                         );
                         if let Some(output) = &output {
                             output.borrow_mut().push(make_add_change(rep), pusher);
@@ -445,14 +490,16 @@ impl Output for CapOutput {
                     } else {
                         cap.storage.borrow_mut().set(
                             state_key,
-                            CapState { size: new_size, pks },
+                            CapState {
+                                size: new_size,
+                                pks,
+                            },
                         );
                         drop(cap);
                         if let Some(output) = output {
                             output.borrow_mut().push(change, pusher);
                         }
                     }
-                    return;
                 }
             }
             ChangeType::Child => {
@@ -470,7 +517,6 @@ impl Output for CapOutput {
                         }
                     }
                 }
-                return;
             }
         }
     }
@@ -577,13 +623,25 @@ mod pk_serialization_tests {
     #[test]
     fn plain_string_pk_is_byte_identical_and_roundtrips() {
         // The common case (no special chars) must serialize exactly as before.
-        assert_eq!(value_to_string(&Value::Str(Arc::from("abc-123"))), "\"abc-123\"");
-        assert_eq!(roundtrip(Value::Str(Arc::from("abc-123"))), Value::Str(Arc::from("abc-123")));
+        assert_eq!(
+            value_to_string(&Value::Str(Arc::from("abc-123"))),
+            "\"abc-123\""
+        );
+        assert_eq!(
+            roundtrip(Value::Str(Arc::from("abc-123"))),
+            Value::Str(Arc::from("abc-123"))
+        );
     }
 
     #[test]
     fn string_pk_with_quote_and_backslash_roundtrips() {
-        for raw in ["a\"b", "a\\b", "he said \"hi\"", "c:\\path\\x", "trailing\\"] {
+        for raw in [
+            "a\"b",
+            "a\\b",
+            "he said \"hi\"",
+            "c:\\path\\x",
+            "trailing\\",
+        ] {
             let v = Value::Str(Arc::from(raw));
             assert_eq!(roundtrip(v.clone()), v, "round-trip failed for {raw:?}");
         }
@@ -597,7 +655,11 @@ mod pk_serialization_tests {
         let b = value_to_string(&Value::Str(Arc::from("z")));
         let joined = format!("{a},{b}");
         let elems = parse_json_array_elements(&joined);
-        assert_eq!(elems.len(), 2, "expected 2 elements from {joined:?}, got {elems:?}");
+        assert_eq!(
+            elems.len(),
+            2,
+            "expected 2 elements from {joined:?}, got {elems:?}"
+        );
         assert_eq!(parse_value(&elems[0]), Value::Str(Arc::from("x,\"y")));
         assert_eq!(parse_value(&elems[1]), Value::Str(Arc::from("z")));
     }

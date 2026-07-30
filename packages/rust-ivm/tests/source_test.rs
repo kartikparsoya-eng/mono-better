@@ -3,8 +3,8 @@
 //! multiConstraints (IN lists), push errors, per-output sorts, JSON type.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -13,9 +13,8 @@ use rust_ivm::ivm::change::{Change, SourceChange};
 use rust_ivm::ivm::constraint::{Constraint, MultiConstraint};
 use rust_ivm::ivm::data::{Node, Row, Value};
 use rust_ivm::ivm::operator::{Basis, FetchRequest, Input, InputBase, Output, Start};
-use rust_ivm::ivm::schema::{ColumnType, SourceSchema, System};
-use rust_ivm::ivm::source::{MemorySource, CollectOutput, SourceInput, SharedOverlay};
-use rust_ivm::ivm::stream::NodeStream;
+use rust_ivm::ivm::schema::ColumnType;
+use rust_ivm::ivm::source::{CollectOutput, MemorySource};
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
     let map: FxHashMap<String, Value> = pairs
@@ -25,7 +24,11 @@ fn make_row(pairs: &[(&str, Value)]) -> Row {
     Arc::new(map)
 }
 
-fn make_source(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Rc<RefCell<MemorySource>> {
+fn make_source(
+    name: &str,
+    pk: &[&str],
+    columns: &[(&str, ColumnType)],
+) -> Rc<RefCell<MemorySource>> {
     let cols: HashMap<String, ColumnType> = columns
         .iter()
         .map(|(n, t)| (n.to_string(), t.clone()))
@@ -62,13 +65,14 @@ fn bool_val(b: bool) -> Value {
 }
 
 fn sort_by(pk: &str) -> Option<rust_ivm::ivm::data::SortOrder> {
-    Some(Arc::new(vec!([pk.to_string(), "asc".to_string()])))
+    Some(Arc::new(vec![[pk.to_string(), "asc".to_string()]]))
 }
 
 fn fetch_all(input: &Rc<RefCell<dyn Input>>, req: &FetchRequest) -> Vec<Node> {
     rust_ivm::ivm::stream::skip_yields(input.borrow().fetch(req)).collect()
 }
 
+#[allow(dead_code)]
 fn row_id(n: &Node) -> Value {
     n.row.get("id").cloned().unwrap_or(Value::Null)
 }
@@ -79,7 +83,11 @@ fn row_id(n: &Node) -> Value {
 
 #[test]
 fn test_simple_fetch() {
-    let source = make_source("table", &["a"], &[("a", ColumnType::Number { optional: false })]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[("a", ColumnType::Number { optional: false })],
+    );
     let input = source.borrow_mut().connect(None, None, None, None);
 
     // Empty initially
@@ -87,13 +95,19 @@ fn test_simple_fetch() {
     assert!(nodes.is_empty());
 
     // Add rows
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(3.0))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(3.0))]),
+    });
     let nodes = fetch_all(&input, &FetchRequest::default());
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].row.get("a"), Some(&num(3.0)));
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(1.0))]) });
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(2.0))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(1.0))]),
+    });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(2.0))]),
+    });
     let nodes = fetch_all(&input, &FetchRequest::default());
     assert_eq!(nodes.len(), 3);
     // Sorted by primary key (a): 1, 2, 3
@@ -102,12 +116,18 @@ fn test_simple_fetch() {
     assert_eq!(nodes[2].row.get("a"), Some(&num(3.0)));
 
     // Remove
-    source.borrow_mut().push(SourceChange::Remove { row: make_row(&[("a", num(1.0))]) });
+    source.borrow_mut().push(SourceChange::Remove {
+        row: make_row(&[("a", num(1.0))]),
+    });
     let nodes = fetch_all(&input, &FetchRequest::default());
     assert_eq!(nodes.len(), 2);
 
-    source.borrow_mut().push(SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
-    source.borrow_mut().push(SourceChange::Remove { row: make_row(&[("a", num(3.0))]) });
+    source.borrow_mut().push(SourceChange::Remove {
+        row: make_row(&[("a", num(2.0))]),
+    });
+    source.borrow_mut().push(SourceChange::Remove {
+        row: make_row(&[("a", num(3.0))]),
+    });
     let nodes = fetch_all(&input, &FetchRequest::default());
     assert!(nodes.is_empty());
 }
@@ -118,29 +138,63 @@ fn test_simple_fetch() {
 
 #[test]
 fn test_constraint_null_semantics() {
-    let source = make_source("table", &["a"], &[
-        ("a", ColumnType::Number { optional: false }),
-        ("b", ColumnType::Boolean { optional: false }),
-        ("c", ColumnType::Number { optional: true }),
-        ("d", ColumnType::String { optional: true }),
-    ]);
-    add_row(&source, &[("a", num(3.0)), ("b", bool_val(true)), ("c", num(1.0)), ("d", Value::Null)]);
-    add_row(&source, &[("a", num(1.0)), ("b", bool_val(true)), ("c", num(2.0)), ("d", Value::Null)]);
-    add_row(&source, &[("a", num(2.0)), ("b", bool_val(false)), ("c", Value::Null), ("d", Value::Null)]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[
+            ("a", ColumnType::Number { optional: false }),
+            ("b", ColumnType::Boolean { optional: false }),
+            ("c", ColumnType::Number { optional: true }),
+            ("d", ColumnType::String { optional: true }),
+        ],
+    );
+    add_row(
+        &source,
+        &[
+            ("a", num(3.0)),
+            ("b", bool_val(true)),
+            ("c", num(1.0)),
+            ("d", Value::Null),
+        ],
+    );
+    add_row(
+        &source,
+        &[
+            ("a", num(1.0)),
+            ("b", bool_val(true)),
+            ("c", num(2.0)),
+            ("d", Value::Null),
+        ],
+    );
+    add_row(
+        &source,
+        &[
+            ("a", num(2.0)),
+            ("b", bool_val(false)),
+            ("c", Value::Null),
+            ("d", Value::Null),
+        ],
+    );
 
     let input = source.borrow_mut().connect(None, None, None, None);
 
     // Constraint b=true → rows with a=1, a=3
     let mut c = Constraint::default();
     c.insert("b".to_string(), bool_val(true));
-    let req = FetchRequest { constraint: Some(c), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(c),
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 2);
 
     // Constraint b=false → row with a=2
     let mut c = Constraint::default();
     c.insert("b".to_string(), bool_val(false));
-    let req = FetchRequest { constraint: Some(c), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(c),
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].row.get("a"), Some(&num(2.0)));
@@ -148,7 +202,10 @@ fn test_constraint_null_semantics() {
     // Constraint c=1 → row with a=3
     let mut c = Constraint::default();
     c.insert("c".to_string(), num(1.0));
-    let req = FetchRequest { constraint: Some(c), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(c),
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].row.get("a"), Some(&num(3.0)));
@@ -156,14 +213,20 @@ fn test_constraint_null_semantics() {
     // Constraint c=null → no rows (null !== null)
     let mut c = Constraint::default();
     c.insert("c".to_string(), Value::Null);
-    let req = FetchRequest { constraint: Some(c), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(c),
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 0);
 
     // Constraint c=0 → no rows
     let mut c = Constraint::default();
     c.insert("c".to_string(), num(0.0));
-    let req = FetchRequest { constraint: Some(c), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(c),
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 0);
 
@@ -171,7 +234,10 @@ fn test_constraint_null_semantics() {
     let mut c = Constraint::default();
     c.insert("b".to_string(), bool_val(true));
     c.insert("c".to_string(), num(1.0));
-    let req = FetchRequest { constraint: Some(c), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(c),
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].row.get("a"), Some(&num(3.0)));
@@ -180,7 +246,10 @@ fn test_constraint_null_semantics() {
     let mut c = Constraint::default();
     c.insert("b".to_string(), bool_val(true));
     c.insert("d".to_string(), Value::Null);
-    let req = FetchRequest { constraint: Some(c), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(c),
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 0);
 }
@@ -191,7 +260,11 @@ fn test_constraint_null_semantics() {
 
 #[test]
 fn test_fetch_start_reverse() {
-    let source = make_source("table", &["a"], &[("a", ColumnType::Number { optional: false })]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[("a", ColumnType::Number { optional: false })],
+    );
     add_row(&source, &[("a", num(2.0))]);
     add_row(&source, &[("a", num(3.0))]);
 
@@ -199,7 +272,10 @@ fn test_fetch_start_reverse() {
 
     // start at a=2, reverse → [2] (TS: btree reverse from 2, includes 2, goes backwards)
     let req = FetchRequest {
-        start: Some(Start { row: make_row(&[("a", num(2.0))]), basis: Basis::At }),
+        start: Some(Start {
+            row: make_row(&[("a", num(2.0))]),
+            basis: Basis::At,
+        }),
         reverse: true,
         ..Default::default()
     };
@@ -209,7 +285,10 @@ fn test_fetch_start_reverse() {
 
     // start after a=2, reverse → [] (TS: btree reverse after 2, nothing before 2)
     let req = FetchRequest {
-        start: Some(Start { row: make_row(&[("a", num(2.0))]), basis: Basis::After }),
+        start: Some(Start {
+            row: make_row(&[("a", num(2.0))]),
+            basis: Basis::After,
+        }),
         reverse: true,
         ..Default::default()
     };
@@ -222,17 +301,31 @@ fn test_fetch_start_reverse() {
 // ===========================================================================
 
 fn setup_parents() -> Rc<RefCell<MemorySource>> {
-    let source = make_source("parent", &["id"], &[
-        ("id", ColumnType::Number { optional: false }),
-        ("org", ColumnType::String { optional: false }),
-        ("active", ColumnType::Boolean { optional: false }),
-    ]);
+    let source = make_source(
+        "parent",
+        &["id"],
+        &[
+            ("id", ColumnType::Number { optional: false }),
+            ("org", ColumnType::String { optional: false }),
+            ("active", ColumnType::Boolean { optional: false }),
+        ],
+    );
     for i in 1..=5 {
-        add_row(&source, &[
-            ("id", num(i as f64)),
-            ("org", s_owned(if i % 2 == 0 { "o-even".to_string() } else { "o-odd".to_string() })),
-            ("active", bool_val(i != 2)),
-        ]);
+        add_row(
+            &source,
+            &[
+                ("id", num(i as f64)),
+                (
+                    "org",
+                    s_owned(if i % 2 == 0 {
+                        "o-even".to_string()
+                    } else {
+                        "o-odd".to_string()
+                    }),
+                ),
+                ("active", bool_val(i != 2)),
+            ],
+        );
     }
     source
 }
@@ -242,12 +335,18 @@ fn test_mc_single_key_in_list() {
     let source = setup_parents();
     let input = source.borrow_mut().connect(None, None, None, None);
 
-    let mut mc1 = Constraint::default(); mc1.insert("id".to_string(), num(4.0));
-    let mut mc2 = Constraint::default(); mc2.insert("id".to_string(), num(1.0));
-    let mut mc3 = Constraint::default(); mc3.insert("id".to_string(), num(3.0));
+    let mut mc1 = Constraint::default();
+    mc1.insert("id".to_string(), num(4.0));
+    let mut mc2 = Constraint::default();
+    mc2.insert("id".to_string(), num(1.0));
+    let mut mc3 = Constraint::default();
+    mc3.insert("id".to_string(), num(3.0));
     let mc: MultiConstraint = vec![mc1, mc2, mc3];
 
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     // Should return in sort order: 1, 3, 4
     assert_eq!(nodes.len(), 3);
@@ -261,11 +360,16 @@ fn test_mc_no_matches() {
     let source = setup_parents();
     let input = source.borrow_mut().connect(None, None, None, None);
 
-    let mut mc1 = Constraint::default(); mc1.insert("id".to_string(), num(99.0));
-    let mut mc2 = Constraint::default(); mc2.insert("id".to_string(), num(100.0));
+    let mut mc1 = Constraint::default();
+    mc1.insert("id".to_string(), num(99.0));
+    let mut mc2 = Constraint::default();
+    mc2.insert("id".to_string(), num(100.0));
     let mc: MultiConstraint = vec![mc1, mc2];
 
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert!(nodes.is_empty());
 }
@@ -275,7 +379,10 @@ fn test_mc_empty_array_noop() {
     let source = setup_parents();
     let input = source.borrow_mut().connect(None, None, None, None);
 
-    let req = FetchRequest { multi_constraints: vec![], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![],
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 5);
 }
@@ -301,7 +408,10 @@ fn test_mc_empty_entry_ignored() {
         },
     ];
 
-    let req = FetchRequest { multi_constraints: vec![mc1, mc2], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc1, mc2],
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[0].row.get("id"), Some(&num(2.0)));
@@ -314,18 +424,23 @@ fn test_mc_two_anded() {
     let input = source.borrow_mut().connect(None, None, None, None);
 
     // id IN (1,2,3,4) AND org IN ('o-even') → 2, 4
-    let mc1: MultiConstraint = (1..=4).map(|i| {
-        let mut c = Constraint::default();
-        c.insert("id".to_string(), num(i as f64));
-        c
-    }).collect();
+    let mc1: MultiConstraint = (1..=4)
+        .map(|i| {
+            let mut c = Constraint::default();
+            c.insert("id".to_string(), num(i as f64));
+            c
+        })
+        .collect();
     let mc2: MultiConstraint = {
         let mut c = Constraint::default();
         c.insert("org".to_string(), s("o-even"));
         vec![c]
     };
 
-    let req = FetchRequest { multi_constraints: vec![mc1, mc2], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc1, mc2],
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 2);
     assert_eq!(nodes[0].row.get("id"), Some(&num(2.0)));
@@ -340,11 +455,13 @@ fn test_mc_with_constraint_anded() {
     // active=true AND id IN (1,2,3,4,5) → 1,3,4,5 (excludes 2)
     let mut constraint = Constraint::default();
     constraint.insert("active".to_string(), bool_val(true));
-    let mc: MultiConstraint = (1..=5).map(|i| {
-        let mut c = Constraint::default();
-        c.insert("id".to_string(), num(i as f64));
-        c
-    }).collect();
+    let mc: MultiConstraint = (1..=5)
+        .map(|i| {
+            let mut c = Constraint::default();
+            c.insert("id".to_string(), num(i as f64));
+            c
+        })
+        .collect();
 
     let req = FetchRequest {
         constraint: Some(constraint),
@@ -353,9 +470,13 @@ fn test_mc_with_constraint_anded() {
     };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 4);
-    let ids: Vec<f64> = nodes.iter().map(|n| match n.row.get("id") {
-        Some(Value::F64(v)) => *v, _ => 0.0
-    }).collect();
+    let ids: Vec<f64> = nodes
+        .iter()
+        .map(|n| match n.row.get("id") {
+            Some(Value::F64(v)) => *v,
+            _ => 0.0,
+        })
+        .collect();
     assert_eq!(ids, vec![1.0, 3.0, 4.0, 5.0]);
 }
 
@@ -364,11 +485,14 @@ fn test_mc_with_reverse() {
     let source = setup_parents();
     let input = source.borrow_mut().connect(None, None, None, None);
 
-    let mc: MultiConstraint = vec![1, 3, 5].iter().map(|&i| {
-        let mut c = Constraint::default();
-        c.insert("id".to_string(), num(i as f64));
-        c
-    }).collect();
+    let mc: MultiConstraint = [1, 3, 5]
+        .iter()
+        .map(|&i| {
+            let mut c = Constraint::default();
+            c.insert("id".to_string(), num(i as f64));
+            c
+        })
+        .collect();
 
     let req = FetchRequest {
         multi_constraints: vec![mc],
@@ -388,15 +512,21 @@ fn test_mc_with_start_after() {
     let source = setup_parents();
     let input = source.borrow_mut().connect(None, None, None, None);
 
-    let mc: MultiConstraint = vec![1, 3, 5].iter().map(|&i| {
-        let mut c = Constraint::default();
-        c.insert("id".to_string(), num(i as f64));
-        c
-    }).collect();
+    let mc: MultiConstraint = [1, 3, 5]
+        .iter()
+        .map(|&i| {
+            let mut c = Constraint::default();
+            c.insert("id".to_string(), num(i as f64));
+            c
+        })
+        .collect();
 
     let req = FetchRequest {
         multi_constraints: vec![mc],
-        start: Some(Start { row: make_row(&[("id", num(1.0))]), basis: Basis::After }),
+        start: Some(Start {
+            row: make_row(&[("id", num(1.0))]),
+            basis: Basis::After,
+        }),
         ..Default::default()
     };
     let nodes = fetch_all(&input, &req);
@@ -416,22 +546,32 @@ fn test_mc_null_entries_never_match() {
         c
     }];
 
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
-    assert!(nodes.is_empty(), "NULL entries in IN list should never match");
+    assert!(
+        nodes.is_empty(),
+        "NULL entries in IN list should never match"
+    );
 }
 
 #[test]
 fn test_mc_compound_key() {
-    let source = make_source("items", &["a", "b"], &[
-        ("a", ColumnType::Number { optional: false }),
-        ("b", ColumnType::String { optional: false }),
-    ]);
+    let source = make_source(
+        "items",
+        &["a", "b"],
+        &[
+            ("a", ColumnType::Number { optional: false }),
+            ("b", ColumnType::String { optional: false }),
+        ],
+    );
     for i in 1..=4 {
-        add_row(&source, &[
-            ("a", num(i as f64)),
-            ("b", s_owned(format!("val{}", i))),
-        ]);
+        add_row(
+            &source,
+            &[("a", num(i as f64)), ("b", s_owned(format!("val{}", i)))],
+        );
     }
     let input = source.borrow_mut().connect(None, None, None, None);
 
@@ -450,7 +590,10 @@ fn test_mc_compound_key() {
         },
     ];
 
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let nodes = fetch_all(&input, &req);
     assert_eq!(nodes.len(), 2);
 }
@@ -469,23 +612,35 @@ fn test_mc_compound_key() {
 #[test]
 #[should_panic(expected = "source drift: Add duplicate row in table")]
 fn test_push_duplicate_add_panics() {
-    let source = make_source("table", &["a"], &[("a", ColumnType::Number { optional: false })]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[("a", ColumnType::Number { optional: false })],
+    );
     add_row(&source, &[("a", num(1.0))]);
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let _ = input; // keep alive
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(1.0))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(1.0))]),
+    });
 }
 
 #[test]
 #[should_panic(expected = "source drift: Remove missing row from table")]
 fn test_push_remove_missing_panics() {
-    let source = make_source("table", &["a"], &[("a", ColumnType::Number { optional: false })]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[("a", ColumnType::Number { optional: false })],
+    );
     let input = source.borrow_mut().connect(None, None, None, None);
     let _ = input;
 
-    source.borrow_mut().push(SourceChange::Remove { row: make_row(&[("a", num(99.0))]) });
+    source.borrow_mut().push(SourceChange::Remove {
+        row: make_row(&[("a", num(99.0))]),
+    });
 }
 
 // ===========================================================================
@@ -494,10 +649,14 @@ fn test_push_remove_missing_panics() {
 
 #[test]
 fn test_per_output_sorts() {
-    let source = make_source("table", &["id"], &[
-        ("id", ColumnType::Number { optional: false }),
-        ("name", ColumnType::String { optional: false }),
-    ]);
+    let source = make_source(
+        "table",
+        &["id"],
+        &[
+            ("id", ColumnType::Number { optional: false }),
+            ("name", ColumnType::String { optional: false }),
+        ],
+    );
     add_row(&source, &[("id", num(3.0)), ("name", s("Charlie"))]);
     add_row(&source, &[("id", num(1.0)), ("name", s("Alice"))]);
     add_row(&source, &[("id", num(2.0)), ("name", s("Bob"))]);
@@ -507,8 +666,11 @@ fn test_per_output_sorts() {
     let input1 = source.borrow_mut().connect(sort_id, None, None, None);
 
     // Connection 2: sort by name asc
-    let sort_name: rust_ivm::ivm::data::SortOrder = Arc::new(vec![["name".to_string(), "asc".to_string()]]);
-    let input2 = source.borrow_mut().connect(Some(sort_name), None, None, None);
+    let sort_name: rust_ivm::ivm::data::SortOrder =
+        Arc::new(vec![["name".to_string(), "asc".to_string()]]);
+    let input2 = source
+        .borrow_mut()
+        .connect(Some(sort_name), None, None, None);
 
     let nodes1 = fetch_all(&input1, &FetchRequest::default());
     assert_eq!(nodes1.len(), 3);
@@ -529,18 +691,28 @@ fn test_per_output_sorts() {
 
 #[test]
 fn test_json_type_support() {
-    let source = make_source("table", &["id"], &[
-        ("id", ColumnType::Number { optional: false }),
-        ("data", ColumnType::Json { optional: false }),
-    ]);
-    add_row(&source, &[
-        ("id", num(1.0)),
-        ("data", Value::Json(Arc::from(r#"{"key":"value"}"#))),
-    ]);
-    add_row(&source, &[
-        ("id", num(2.0)),
-        ("data", Value::Json(Arc::from(r#"[1,2,3]"#))),
-    ]);
+    let source = make_source(
+        "table",
+        &["id"],
+        &[
+            ("id", ColumnType::Number { optional: false }),
+            ("data", ColumnType::Json { optional: false }),
+        ],
+    );
+    add_row(
+        &source,
+        &[
+            ("id", num(1.0)),
+            ("data", Value::Json(Arc::from(r#"{"key":"value"}"#))),
+        ],
+    );
+    add_row(
+        &source,
+        &[
+            ("id", num(2.0)),
+            ("data", Value::Json(Arc::from(r#"[1,2,3]"#))),
+        ],
+    );
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let nodes = fetch_all(&input, &FetchRequest::default());
@@ -561,7 +733,11 @@ fn test_json_type_support() {
 
 #[test]
 fn test_push_with_collect_output() {
-    let source = make_source("table", &["a"], &[("a", ColumnType::Number { optional: false })]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[("a", ColumnType::Number { optional: false })],
+    );
     add_row(&source, &[("a", num(1.0))]);
 
     let input = source.borrow_mut().connect(None, None, None, None);
@@ -569,7 +745,9 @@ fn test_push_with_collect_output() {
     input.borrow_mut().set_output(Rc::clone(&output) as _);
 
     // Push add → output receives Add change
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(2.0))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(2.0))]),
+    });
     assert_eq!(output.borrow().changes.len(), 1);
     match &output.borrow().changes[0] {
         rust_ivm::ivm::change::Change::Add(n) => assert_eq!(n.row.get("a"), Some(&num(2.0))),
@@ -577,7 +755,9 @@ fn test_push_with_collect_output() {
     }
 
     // Push remove → output receives Remove change
-    source.borrow_mut().push(SourceChange::Remove { row: make_row(&[("a", num(1.0))]) });
+    source.borrow_mut().push(SourceChange::Remove {
+        row: make_row(&[("a", num(1.0))]),
+    });
     assert_eq!(output.borrow().changes.len(), 2);
     match &output.borrow().changes[1] {
         rust_ivm::ivm::change::Change::Remove(n) => assert_eq!(n.row.get("a"), Some(&num(1.0))),
@@ -597,26 +777,39 @@ struct OverlaySpy {
 
 impl OverlaySpy {
     fn new(input: Rc<RefCell<dyn Input>>, fetch_req: FetchRequest) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(OverlaySpy { input, fetch_req, fetches: Vec::new() }))
+        Rc::new(RefCell::new(OverlaySpy {
+            input,
+            fetch_req,
+            fetches: Vec::new(),
+        }))
     }
 }
 
 impl Output for OverlaySpy {
     fn push(&mut self, _change: Change, _pusher: &dyn InputBase) {
-        let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(self.input.borrow().fetch(&self.fetch_req)).collect();
+        let nodes: Vec<Node> =
+            rust_ivm::ivm::stream::skip_yields(self.input.borrow().fetch(&self.fetch_req))
+                .collect();
         self.fetches.push(nodes);
     }
 }
 
 fn make_source_ab() -> Rc<RefCell<MemorySource>> {
-    make_source("table", &["a"], &[
-        ("a", ColumnType::Number { optional: false }),
-        ("b", ColumnType::Boolean { optional: false }),
-    ])
+    make_source(
+        "table",
+        &["a"],
+        &[
+            ("a", ColumnType::Number { optional: false }),
+            ("b", ColumnType::Boolean { optional: false }),
+        ],
+    )
 }
 
 fn fetch_vals(nodes: &[Node], col: &str) -> Vec<Value> {
-    nodes.iter().map(|n| n.row.get(col).cloned().unwrap_or(Value::Null)).collect()
+    nodes
+        .iter()
+        .map(|n| n.row.get(col).cloned().unwrap_or(Value::Null))
+        .collect()
 }
 
 // ===========================================================================
@@ -632,11 +825,16 @@ fn test_overlay_vs_constraint_c1() {
     let input = source.borrow_mut().connect(None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(true));
-    let req = FetchRequest { constraint: Some(constraint), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(constraint),
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(1.0)), ("b", bool_val(true))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(1.0)), ("b", bool_val(true))]),
+    });
 
     assert_eq!(spy.borrow().fetches.len(), 1);
     let vals = fetch_vals(&spy.borrow().fetches[0], "a");
@@ -652,11 +850,16 @@ fn test_overlay_vs_constraint_c2() {
     let input = source.borrow_mut().connect(None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(true));
-    let req = FetchRequest { constraint: Some(constraint), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(constraint),
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(1.0)), ("b", bool_val(false))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(1.0)), ("b", bool_val(false))]),
+    });
 
     assert_eq!(spy.borrow().fetches.len(), 1);
     let vals = fetch_vals(&spy.borrow().fetches[0], "a");
@@ -673,7 +876,10 @@ fn test_overlay_vs_constraint_c3() {
     let input = source.borrow_mut().connect(None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(true));
-    let req = FetchRequest { constraint: Some(constraint), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(constraint),
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
@@ -697,7 +903,10 @@ fn test_overlay_vs_constraint_c4() {
     let input = source.borrow_mut().connect(None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
-    let req = FetchRequest { constraint: Some(constraint), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(constraint),
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
@@ -722,7 +931,10 @@ fn test_overlay_vs_constraint_c5() {
     let mut constraint = Constraint::default();
     constraint.insert("a".to_string(), num(4.0));
     constraint.insert("b".to_string(), bool_val(false));
-    let req = FetchRequest { constraint: Some(constraint), ..Default::default() };
+    let req = FetchRequest {
+        constraint: Some(constraint),
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
@@ -748,15 +960,32 @@ fn test_overlay_vs_mc_add_matching() {
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let mc: MultiConstraint = vec![
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(1.0)); c },
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(2.0)); c },
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(3.0)); c },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(1.0));
+            c
+        },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(2.0));
+            c
+        },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(3.0));
+            c
+        },
     ];
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(2.0)), ("b", bool_val(true))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(2.0)), ("b", bool_val(true))]),
+    });
 
     assert_eq!(spy.borrow().fetches.len(), 1);
     let vals = fetch_vals(&spy.borrow().fetches[0], "a");
@@ -771,14 +1000,27 @@ fn test_overlay_vs_mc_add_outside_dropped() {
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let mc: MultiConstraint = vec![
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(1.0)); c },
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(4.0)); c },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(1.0));
+            c
+        },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(4.0));
+            c
+        },
     ];
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(2.0)), ("b", bool_val(true))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(2.0)), ("b", bool_val(true))]),
+    });
 
     assert_eq!(spy.borrow().fetches.len(), 1);
     let vals = fetch_vals(&spy.borrow().fetches[0], "a");
@@ -794,14 +1036,27 @@ fn test_overlay_vs_mc_remove_matching() {
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let mc: MultiConstraint = vec![
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(1.0)); c },
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(2.0)); c },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(1.0));
+            c
+        },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(2.0));
+            c
+        },
     ];
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
-    source.borrow_mut().push(SourceChange::Remove { row: make_row(&[("a", num(2.0)), ("b", bool_val(true))]) });
+    source.borrow_mut().push(SourceChange::Remove {
+        row: make_row(&[("a", num(2.0)), ("b", bool_val(true))]),
+    });
 
     assert_eq!(spy.borrow().fetches.len(), 1);
     let vals = fetch_vals(&spy.borrow().fetches[0], "a");
@@ -816,10 +1071,21 @@ fn test_overlay_vs_mc_edit_remove_in_add_out() {
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let mc: MultiConstraint = vec![
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(1.0)); c },
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(5.0)); c },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(1.0));
+            c
+        },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(5.0));
+            c
+        },
     ];
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
@@ -841,18 +1107,37 @@ fn test_overlay_vs_mc_two_anded() {
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let mc1: MultiConstraint = vec![
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(3.0)); c },
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(4.0)); c },
-        { let mut c = Constraint::default(); c.insert("a".to_string(), num(5.0)); c },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(3.0));
+            c
+        },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(4.0));
+            c
+        },
+        {
+            let mut c = Constraint::default();
+            c.insert("a".to_string(), num(5.0));
+            c
+        },
     ];
-    let mc2: MultiConstraint = vec![
-        { let mut c = Constraint::default(); c.insert("b".to_string(), bool_val(true)); c },
-    ];
-    let req = FetchRequest { multi_constraints: vec![mc1, mc2], ..Default::default() };
+    let mc2: MultiConstraint = vec![{
+        let mut c = Constraint::default();
+        c.insert("b".to_string(), bool_val(true));
+        c
+    }];
+    let req = FetchRequest {
+        multi_constraints: vec![mc1, mc2],
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(4.0)), ("b", bool_val(true))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(4.0)), ("b", bool_val(true))]),
+    });
 
     assert_eq!(spy.borrow().fetches.len(), 1);
     let vals = fetch_vals(&spy.borrow().fetches[0], "a");
@@ -866,11 +1151,16 @@ fn test_overlay_vs_mc_empty_entry_ignored() {
 
     let input = source.borrow_mut().connect(None, None, None, None);
     let mc: MultiConstraint = vec![];
-    let req = FetchRequest { multi_constraints: vec![mc], ..Default::default() };
+    let req = FetchRequest {
+        multi_constraints: vec![mc],
+        ..Default::default()
+    };
     let spy = OverlaySpy::new(input.clone(), req);
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
 
-    source.borrow_mut().push(SourceChange::Add { row: make_row(&[("a", num(4.0)), ("b", bool_val(true))]) });
+    source.borrow_mut().push(SourceChange::Add {
+        row: make_row(&[("a", num(4.0)), ("b", bool_val(true))]),
+    });
 
     assert_eq!(spy.borrow().fetches.len(), 1);
     let vals = fetch_vals(&spy.borrow().fetches[0], "a");
@@ -883,10 +1173,14 @@ fn test_overlay_vs_mc_empty_entry_ignored() {
 
 #[test]
 fn test_constraint_c1() {
-    let source = make_source("table", &["a"], &[
-        ("a", ColumnType::Number { optional: false }),
-        ("b", ColumnType::String { optional: false }),
-    ]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[
+            ("a", ColumnType::Number { optional: false }),
+            ("b", ColumnType::String { optional: false }),
+        ],
+    );
     add_row(&source, &[("a", num(1.0)), ("b", s("1000"))]);
     add_row(&source, &[("a", num(2.0)), ("b", s("3000"))]);
     add_row(&source, &[("a", num(3.0)), ("b", s("2000"))]);
@@ -899,7 +1193,10 @@ fn test_constraint_c1() {
     constraint.insert("b".to_string(), s("1000"));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(3.0)), ("b", s("2000"))]), basis: Basis::At }),
+        start: Some(Start {
+            row: make_row(&[("a", num(3.0)), ("b", s("2000"))]),
+            basis: Basis::At,
+        }),
         ..Default::default()
     };
     let nodes = fetch_all(&input, &req);
@@ -909,10 +1206,14 @@ fn test_constraint_c1() {
 
 #[test]
 fn test_constraint_c1_reverse() {
-    let source = make_source("table", &["a"], &[
-        ("a", ColumnType::Number { optional: false }),
-        ("b", ColumnType::String { optional: false }),
-    ]);
+    let source = make_source(
+        "table",
+        &["a"],
+        &[
+            ("a", ColumnType::Number { optional: false }),
+            ("b", ColumnType::String { optional: false }),
+        ],
+    );
     add_row(&source, &[("a", num(1.0)), ("b", s("1000"))]);
     add_row(&source, &[("a", num(2.0)), ("b", s("3000"))]);
     add_row(&source, &[("a", num(3.0)), ("b", s("2000"))]);
@@ -925,7 +1226,10 @@ fn test_constraint_c1_reverse() {
     constraint.insert("b".to_string(), s("1000"));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(3.0)), ("b", s("2000"))]), basis: Basis::At }),
+        start: Some(Start {
+            row: make_row(&[("a", num(3.0)), ("b", s("2000"))]),
+            basis: Basis::At,
+        }),
         reverse: true,
         ..Default::default()
     };
@@ -949,7 +1253,10 @@ fn test_constraint_c2() {
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]), basis: Basis::At }),
+        start: Some(Start {
+            row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]),
+            basis: Basis::At,
+        }),
         ..Default::default()
     };
     let nodes = fetch_all(&input, &req);
@@ -972,7 +1279,10 @@ fn test_constraint_c2_reverse() {
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]), basis: Basis::At }),
+        start: Some(Start {
+            row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]),
+            basis: Basis::At,
+        }),
         reverse: true,
         ..Default::default()
     };
@@ -1000,7 +1310,10 @@ fn test_constraint_c3() {
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]), basis: Basis::After }),
+        start: Some(Start {
+            row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]),
+            basis: Basis::After,
+        }),
         ..Default::default()
     };
     let nodes = fetch_all(&input, &req);
@@ -1025,7 +1338,10 @@ fn test_constraint_c3_reverse() {
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]), basis: Basis::After }),
+        start: Some(Start {
+            row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]),
+            basis: Basis::After,
+        }),
         reverse: true,
         ..Default::default()
     };
@@ -1050,7 +1366,10 @@ fn test_constraint_c4() {
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]), basis: Basis::After }),
+        start: Some(Start {
+            row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]),
+            basis: Basis::After,
+        }),
         ..Default::default()
     };
     let nodes = fetch_all(&input, &req);
@@ -1072,7 +1391,10 @@ fn test_constraint_c4_reverse() {
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
         constraint: Some(constraint),
-        start: Some(Start { row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]), basis: Basis::After }),
+        start: Some(Start {
+            row: make_row(&[("a", num(6.0)), ("b", bool_val(false))]),
+            basis: Basis::After,
+        }),
         reverse: true,
         ..Default::default()
     };
@@ -1090,7 +1412,11 @@ fn test_constraint_c4_reverse() {
 // ===========================================================================
 
 fn make_source_a() -> Rc<RefCell<MemorySource>> {
-    make_source("table", &["a"], &[("a", ColumnType::Number { optional: false })])
+    make_source(
+        "table",
+        &["a"],
+        &[("a", ColumnType::Number { optional: false })],
+    )
 }
 
 fn overlay_vs_fetch_start(
@@ -1106,7 +1432,10 @@ fn overlay_vs_fetch_start(
     }
     let input = source.borrow_mut().connect(sort_by("a"), None, None, None);
     let req = FetchRequest {
-        start: Some(Start { row: make_row(&[("a", num(start_val))]), basis }),
+        start: Some(Start {
+            row: make_row(&[("a", num(start_val))]),
+            basis,
+        }),
         reverse,
         ..Default::default()
     };
@@ -1123,248 +1452,465 @@ fn overlay_vs_fetch_start(
 // c9: start at a=2, add a=1 → forward [2,4] (overlay 1 before start)
 #[test]
 fn test_overlay_vs_start_c9() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, false,
-        SourceChange::Add { row: make_row(&[("a", num(1.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(1.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0), num(4.0)]]);
 }
 
 // c9 reverse: TS [2,1] (reverse from 2, overlay 1 appended)
 #[test]
 fn test_overlay_vs_start_c9_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, true,
-        SourceChange::Add { row: make_row(&[("a", num(1.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(1.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0), num(1.0)]]);
 }
 
 // c10: start at a=2, add a=3 → [2,3,4]
 #[test]
 fn test_overlay_vs_start_c10() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, false,
-        SourceChange::Add { row: make_row(&[("a", num(3.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(3.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0), num(3.0), num(4.0)]]);
 }
 
 // c10 reverse: TS [2] (overlay 3 > 2, dropped by reversed start filter)
 #[test]
 fn test_overlay_vs_start_c10_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, true,
-        SourceChange::Add { row: make_row(&[("a", num(3.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(3.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0)]]);
 }
 
 // c11: start at a=2, add a=5 → [2,4,5]
 #[test]
 fn test_overlay_vs_start_c11() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, false,
-        SourceChange::Add { row: make_row(&[("a", num(5.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(5.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0), num(4.0), num(5.0)]]);
 }
 
 // c11 reverse: TS [2] (overlay 5 > 2, dropped)
 #[test]
 fn test_overlay_vs_start_c11_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, true,
-        SourceChange::Add { row: make_row(&[("a", num(5.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(5.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0)]]);
 }
 
 // c12: start after a=2, add a=1 → [4]
 #[test]
 fn test_overlay_vs_start_c12() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, false,
-        SourceChange::Add { row: make_row(&[("a", num(1.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(1.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(4.0)]]);
 }
 
 // c12 reverse: TS [1] (reverse after 2 → [], overlay 1 < 2 passes, appended)
 #[test]
 fn test_overlay_vs_start_c12_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, true,
-        SourceChange::Add { row: make_row(&[("a", num(1.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(1.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(1.0)]]);
 }
 
 // c13: start after a=2, add a=3 → [3,4]
 #[test]
 fn test_overlay_vs_start_c13() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, false,
-        SourceChange::Add { row: make_row(&[("a", num(3.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(3.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(3.0), num(4.0)]]);
 }
 
 // c13 reverse: TS [] (overlay 3 >= 2, dropped by reversed after filter)
 #[test]
 fn test_overlay_vs_start_c13_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, true,
-        SourceChange::Add { row: make_row(&[("a", num(3.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(3.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c14: start after a=2, add a=5 → [4,5]
 #[test]
 fn test_overlay_vs_start_c14() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, false,
-        SourceChange::Add { row: make_row(&[("a", num(5.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(5.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(4.0), num(5.0)]]);
 }
 
 // c14 reverse: TS [] (overlay 5 >= 2, dropped)
 #[test]
 fn test_overlay_vs_start_c14_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, true,
-        SourceChange::Add { row: make_row(&[("a", num(5.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(5.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c15: start after a=4, add a=3 → []
 #[test]
 fn test_overlay_vs_start_c15() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, false,
-        SourceChange::Add { row: make_row(&[("a", num(3.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(3.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c15 reverse: TS [3,2] (reverse after 4 → [2], overlay 3 < 4 passes, spliced before 2)
 #[test]
 fn test_overlay_vs_start_c15_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, true,
-        SourceChange::Add { row: make_row(&[("a", num(3.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(3.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(3.0), num(2.0)]]);
 }
 
 // c16: start after a=4, add a=5 → [5]
 #[test]
 fn test_overlay_vs_start_c16() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, false,
-        SourceChange::Add { row: make_row(&[("a", num(5.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        false,
+        SourceChange::Add {
+            row: make_row(&[("a", num(5.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(5.0)]]);
 }
 
 // c16 reverse: TS [2] (overlay 5 >= 4, dropped)
 #[test]
 fn test_overlay_vs_start_c16_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, true,
-        SourceChange::Add { row: make_row(&[("a", num(5.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        true,
+        SourceChange::Add {
+            row: make_row(&[("a", num(5.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0)]]);
 }
 
 // c23: start at a=2, remove a=2 → [4]
 #[test]
 fn test_overlay_vs_start_c23() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, false,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(4.0)]]);
 }
 
 // c23 reverse: TS [] (reverse at 2 → [2], remove 2 → [])
 #[test]
 fn test_overlay_vs_start_c23_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, true,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        true,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c24: start at a=2, remove a=4 → [2]
 #[test]
 fn test_overlay_vs_start_c24() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, false,
-        SourceChange::Remove { row: make_row(&[("a", num(4.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(4.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0)]]);
 }
 
 // c24 reverse: Rust gives [2] (matches TS — only one row)
 #[test]
 fn test_overlay_vs_start_c24_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::At, true,
-        SourceChange::Remove { row: make_row(&[("a", num(4.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::At,
+        true,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(4.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0)]]);
 }
 
 // c25: start at a=4, remove a=2 → [4]
 #[test]
 fn test_overlay_vs_start_c25() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::At, false,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::At,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(4.0)]]);
 }
 
 // c25 reverse: Rust gives [4] (matches TS — only one row)
 #[test]
 fn test_overlay_vs_start_c25_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::At, true,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::At,
+        true,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(4.0)]]);
 }
 
 // c26: start at a=4, remove a=4 → []
 #[test]
 fn test_overlay_vs_start_c26() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::At, false,
-        SourceChange::Remove { row: make_row(&[("a", num(4.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::At,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(4.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c26 reverse: TS [2] (reverse at 4 → [4,2], remove 4 → [2])
 #[test]
 fn test_overlay_vs_start_c26_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::At, true,
-        SourceChange::Remove { row: make_row(&[("a", num(4.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::At,
+        true,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(4.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0)]]);
 }
 
 // c27: start after a=2, remove a=2 → [4]
 #[test]
 fn test_overlay_vs_start_c27() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, false,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(4.0)]]);
 }
 
 // c27 reverse: TS [] (reverse after 2 → [], remove 2 >= 2 dropped)
 #[test]
 fn test_overlay_vs_start_c27_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, true,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        true,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c28: start after a=2, remove a=4 → []
 #[test]
 fn test_overlay_vs_start_c28() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 2.0, Basis::After, false,
-        SourceChange::Remove { row: make_row(&[("a", num(4.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        2.0,
+        Basis::After,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(4.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c29: start after a=4, remove a=2 → []
 #[test]
 fn test_overlay_vs_start_c29() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, false,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c29 reverse: Rust gives [] (matches TS)
 #[test]
 fn test_overlay_vs_start_c29_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, true,
-        SourceChange::Remove { row: make_row(&[("a", num(2.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        true,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(2.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c30: start after a=4, remove a=4 → []
 #[test]
 fn test_overlay_vs_start_c30() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, false,
-        SourceChange::Remove { row: make_row(&[("a", num(4.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        false,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(4.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![]]);
 }
 
 // c30 reverse: TS [2] (reverse after 4 → [2], remove 4 >= 4 dropped)
 #[test]
 fn test_overlay_vs_start_c30_reverse() {
-    let fetches = overlay_vs_fetch_start(&[2.0, 4.0], 4.0, Basis::After, true,
-        SourceChange::Remove { row: make_row(&[("a", num(4.0))]) });
+    let fetches = overlay_vs_fetch_start(
+        &[2.0, 4.0],
+        4.0,
+        Basis::After,
+        true,
+        SourceChange::Remove {
+            row: make_row(&[("a", num(4.0))]),
+        },
+    );
     assert_eq!(fetches, vec![vec![num(2.0)]]);
 }
 
@@ -1382,7 +1928,9 @@ fn overlay_vs_filter(
     for &(a, b) in start_data {
         add_row(&source, &[("a", num(a)), ("b", bool_val(b))]);
     }
-    let input = source.borrow_mut().connect(sort_by("a"), None, Some(predicate), None);
+    let input = source
+        .borrow_mut()
+        .connect(sort_by("a"), None, Some(predicate), None);
     let spy = OverlaySpy::new(input.clone(), FetchRequest::default());
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
     source.borrow_mut().push(change);
@@ -1404,7 +1952,9 @@ fn test_overlay_vs_filter_c5() {
     let fetches = overlay_vs_filter(
         &[(2.0, false), (4.0, true)],
         pred,
-        SourceChange::Add { row: make_row(&[("a", num(1.0)), ("b", bool_val(false))]) },
+        SourceChange::Add {
+            row: make_row(&[("a", num(1.0)), ("b", bool_val(false))]),
+        },
     );
     assert_eq!(fetches, vec![vec![num(1.0), num(2.0), num(4.0)]]);
 }
@@ -1420,7 +1970,9 @@ fn test_overlay_vs_filter_c6() {
     let fetches = overlay_vs_filter(
         &[(2.0, false), (4.0, true)],
         pred,
-        SourceChange::Add { row: make_row(&[("a", num(1.0)), ("b", bool_val(false))]) },
+        SourceChange::Add {
+            row: make_row(&[("a", num(1.0)), ("b", bool_val(false))]),
+        },
     );
     assert_eq!(fetches, vec![vec![num(1.0), num(2.0), num(4.0)]]);
 }

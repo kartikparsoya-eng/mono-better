@@ -13,12 +13,13 @@ use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{make_source_change_add, make_source_change_edit, ChangeType};
+use rust_ivm::ivm::change::{ChangeType, make_source_change_add, make_source_change_edit};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::streamer::RowChange;
 
+#[allow(dead_code)]
 fn str_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<std::cell::RefCell<MemorySource>> {
     let columns: HashMap<String, ColumnType> = cols
         .iter()
@@ -34,11 +35,16 @@ fn str_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<std::cell::RefCell<M
 fn num_source(name: &str, cols: &[&str], pk: &[&str]) -> Rc<std::cell::RefCell<MemorySource>> {
     let columns: HashMap<String, ColumnType> = cols
         .iter()
-        .map(|c| (c.to_string(), if c == &"leftAt" || c == &"joinedAt" {
-            ColumnType::Number { optional: true }
-        } else {
-            ColumnType::String { optional: false }
-        }))
+        .map(|c| {
+            (
+                c.to_string(),
+                if c == &"leftAt" || c == &"joinedAt" {
+                    ColumnType::Number { optional: true }
+                } else {
+                    ColumnType::String { optional: false }
+                },
+            )
+        })
         .collect();
     Rc::new(std::cell::RefCell::new(MemorySource::new(
         name,
@@ -59,12 +65,18 @@ fn org_members_ast() -> Ast {
         alias: None,
         where_clause: Some(Condition::And(vec![
             Condition::Simple(SimpleCondition {
-                left: ValuePosition::Column { name: "orgId".to_string() },
+                left: ValuePosition::Column {
+                    name: "orgId".to_string(),
+                },
                 op: "=".to_string(),
-                right: ValuePosition::Literal { value: Value::Str(Arc::from("org1")) },
+                right: ValuePosition::Literal {
+                    value: Value::Str(Arc::from("org1")),
+                },
             }),
             Condition::Simple(SimpleCondition {
-                left: ValuePosition::Column { name: "leftAt".to_string() },
+                left: ValuePosition::Column {
+                    name: "leftAt".to_string(),
+                },
                 op: "IS".to_string(),
                 right: ValuePosition::Literal { value: Value::Null },
             }),
@@ -94,7 +106,8 @@ fn member_ids(changes: &[RowChange]) -> Vec<String> {
 }
 
 fn change_types(changes: &[RowChange]) -> Vec<(String, ChangeType)> {
-    changes.iter()
+    changes
+        .iter()
         .filter(|c| c.table == "org_members")
         .map(|c| {
             let id = match c.row.as_ref().and_then(|r| r.get("memberId")) {
@@ -108,7 +121,11 @@ fn change_types(changes: &[RowChange]) -> Vec<(String, ChangeType)> {
 
 #[test]
 fn edit_removes_row_from_filter_view() {
-    let source = num_source("org_members", &["memberId", "orgId", "leftAt", "role", "email", "joinedAt"], &["memberId"]);
+    let source = num_source(
+        "org_members",
+        &["memberId", "orgId", "leftAt", "role", "email", "joinedAt"],
+        &["memberId"],
+    );
     let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
     engine.add_queries(&[QuerySpec {
@@ -117,19 +134,23 @@ fn edit_removes_row_from_filter_view() {
     }]);
 
     // 1. Add row with leftAt=null -> should be in view (passes filter)
-    let changes1 = engine.advance(&[
-        ("org_members".to_string(), make_source_change_add(row(vec![
+    let changes1 = engine.advance(&[(
+        "org_members".to_string(),
+        make_source_change_add(row(vec![
             ("memberId", Value::Str(Arc::from("m1"))),
             ("orgId", Value::Str(Arc::from("org1"))),
             ("leftAt", Value::Null),
             ("role", Value::Str(Arc::from("OWNER"))),
             ("email", Value::Str(Arc::from("test@example.com"))),
             ("joinedAt", Value::F64(1000.0)),
-        ]))),
-    ]);
+        ])),
+    )]);
     println!("After Add(leftAt=null): {:?}", change_types(&changes1));
-    assert_eq!(member_ids(&changes1), vec!["m1".to_string()],
-        "m1 should be added to view (leftAt IS NULL passes)");
+    assert_eq!(
+        member_ids(&changes1),
+        vec!["m1".to_string()],
+        "m1 should be added to view (leftAt IS NULL passes)"
+    );
 
     // 2. Edit: leftAt=null -> leftAt=1000 -> should be REMOVED from view
     let old_row = row(vec![
@@ -148,24 +169,34 @@ fn edit_removes_row_from_filter_view() {
         ("email", Value::Str(Arc::from("test@example.com"))),
         ("joinedAt", Value::F64(1000.0)),
     ]);
-    let changes2 = engine.advance(&[
-        ("org_members".to_string(), make_source_change_edit(new_row, old_row)),
-    ]);
-    println!("After Edit(leftAt=null -> 1000): {:?}", change_types(&changes2));
-    
-    // The Edit should produce a Remove (old passes filter, new doesn't)
-    let has_remove = changes2.iter().any(|c| 
-        c.table == "org_members" && c.change_type == ChangeType::Remove
+    let changes2 = engine.advance(&[(
+        "org_members".to_string(),
+        make_source_change_edit(new_row, old_row),
+    )]);
+    println!(
+        "After Edit(leftAt=null -> 1000): {:?}",
+        change_types(&changes2)
     );
-    assert!(has_remove, 
+
+    // The Edit should produce a Remove (old passes filter, new doesn't)
+    let has_remove = changes2
+        .iter()
+        .any(|c| c.table == "org_members" && c.change_type == ChangeType::Remove);
+    assert!(
+        has_remove,
         "Edit should emit Remove when old passes filter (leftAt IS NULL) and new doesn't. Got: {:?}",
-        change_types(&changes2));
+        change_types(&changes2)
+    );
 }
 
 #[test]
 fn edit_that_doesnt_change_filter_keeps_row() {
     // Edit that doesn't change leftAt or orgId should keep the row in view
-    let source = num_source("org_members", &["memberId", "orgId", "leftAt", "role", "email", "joinedAt"], &["memberId"]);
+    let source = num_source(
+        "org_members",
+        &["memberId", "orgId", "leftAt", "role", "email", "joinedAt"],
+        &["memberId"],
+    );
     let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
     engine.add_queries(&[QuerySpec {
@@ -174,16 +205,17 @@ fn edit_that_doesnt_change_filter_keeps_row() {
     }]);
 
     // Add
-    engine.advance(&[
-        ("org_members".to_string(), make_source_change_add(row(vec![
+    engine.advance(&[(
+        "org_members".to_string(),
+        make_source_change_add(row(vec![
             ("memberId", Value::Str(Arc::from("m1"))),
             ("orgId", Value::Str(Arc::from("org1"))),
             ("leftAt", Value::Null),
             ("role", Value::Str(Arc::from("OWNER"))),
             ("email", Value::Str(Arc::from("test@example.com"))),
             ("joinedAt", Value::F64(1000.0)),
-        ]))),
-    ]);
+        ])),
+    )]);
 
     // Edit role only (leftAt stays null)
     let old_row = row(vec![
@@ -202,14 +234,18 @@ fn edit_that_doesnt_change_filter_keeps_row() {
         ("email", Value::Str(Arc::from("test@example.com"))),
         ("joinedAt", Value::F64(1000.0)),
     ]);
-    let changes2 = engine.advance(&[
-        ("org_members".to_string(), make_source_change_edit(new_row, old_row)),
-    ]);
+    let changes2 = engine.advance(&[(
+        "org_members".to_string(),
+        make_source_change_edit(new_row, old_row),
+    )]);
     println!("After Edit(role change): {:?}", change_types(&changes2));
-    
+
     // Should be an Edit (both old and new pass filter)
-    let has_edit = changes2.iter().any(|c| 
-        c.table == "org_members" && c.change_type == ChangeType::Edit
+    let has_edit = changes2
+        .iter()
+        .any(|c| c.table == "org_members" && c.change_type == ChangeType::Edit);
+    assert!(
+        has_edit,
+        "Edit that doesn't change filter fields should pass through as Edit"
     );
-    assert!(has_edit, "Edit that doesn't change filter fields should pass through as Edit");
 }

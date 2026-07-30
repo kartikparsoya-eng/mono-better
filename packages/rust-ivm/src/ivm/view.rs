@@ -10,8 +10,7 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
-use crate::ivm::change::ChangeType;
-use crate::ivm::data::{compare_values, Comparator, Node, Row, Value};
+use crate::ivm::data::{Comparator, Node, Row, Value};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::NodeStream;
 
@@ -117,17 +116,18 @@ impl ViewNode {
             ViewNode::Lazy(node) => {
                 if let Some(rel_fn) = node.relationships.get(relationship) {
                     let stream: NodeStream = rel_fn();
-                    crate::ivm::stream::skip_yields(stream).map(ViewNode::Lazy).collect()
+                    crate::ivm::stream::skip_yields(stream)
+                        .map(ViewNode::Lazy)
+                        .collect()
                 } else {
                     Vec::new()
                 }
             }
-            ViewNode::Expanded(node) => {
-                node.relationships
-                    .get(relationship)
-                    .map(|children| children.iter().cloned().map(ViewNode::Expanded).collect())
-                    .unwrap_or_default()
-            }
+            ViewNode::Expanded(node) => node
+                .relationships
+                .get(relationship)
+                .map(|children| children.iter().cloned().map(ViewNode::Expanded).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -147,13 +147,20 @@ impl ViewNode {
 /// A change to apply to the view tree. Port of TS `ViewChange`.
 #[derive(Clone, Debug)]
 pub enum ViewChange {
-    Add { node: ViewNode },
-    Remove { node: ViewNode },
+    Add {
+        node: ViewNode,
+    },
+    Remove {
+        node: ViewNode,
+    },
     Child {
         node: RowOnlyNode,
         child: ChildViewChange,
     },
-    Edit { node: RowOnlyNode, old_node: RowOnlyNode },
+    Edit {
+        node: RowOnlyNode,
+        old_node: RowOnlyNode,
+    },
 }
 
 /// A node with only its row (relationships are not consumed for edit/child nodes).
@@ -189,7 +196,15 @@ pub fn apply_change(
     with_ids: bool,
     mutate: Mutate,
 ) -> Entry {
-    apply_change_internal(parent_entry, change, schema, relationship, format, with_ids, mutate)
+    apply_change_internal(
+        parent_entry,
+        change,
+        schema,
+        relationship,
+        format,
+        with_ids,
+        mutate,
+    )
 }
 
 /// Batch apply multiple changes.
@@ -205,7 +220,15 @@ pub fn apply_changes(
 ) -> Entry {
     let mut result = parent_entry.clone();
     for change in changes {
-        result = apply_change(&result, change, schema, relationship, format, with_ids, mutate);
+        result = apply_change(
+            &result,
+            change,
+            schema,
+            relationship,
+            format,
+            with_ids,
+            mutate,
+        );
     }
     result
 }
@@ -230,9 +253,25 @@ fn apply_change_internal(
     match change {
         ViewChange::Add { node } => {
             if singular {
-                apply_add_singular(parent_entry, node, schema, relationship, child_formats, with_ids, mutate)
+                apply_add_singular(
+                    parent_entry,
+                    node,
+                    schema,
+                    relationship,
+                    child_formats,
+                    with_ids,
+                    mutate,
+                )
             } else {
-                apply_add_plural(parent_entry, node, schema, relationship, child_formats, with_ids, mutate)
+                apply_add_plural(
+                    parent_entry,
+                    node,
+                    schema,
+                    relationship,
+                    child_formats,
+                    with_ids,
+                    mutate,
+                )
             }
         }
         ViewChange::Remove { node } => {
@@ -242,14 +281,37 @@ fn apply_change_internal(
                 apply_remove_plural(parent_entry, node, schema, relationship, mutate)
             }
         }
-        ViewChange::Child { node, child } => {
-            apply_child(parent_entry, node, child, schema, relationship, format, with_ids, mutate)
-        }
+        ViewChange::Child { node, child } => apply_child(
+            parent_entry,
+            node,
+            child,
+            schema,
+            relationship,
+            format,
+            with_ids,
+            mutate,
+        ),
         ViewChange::Edit { node, old_node } => {
             if singular {
-                apply_edit_singular(parent_entry, node, old_node, schema, relationship, with_ids, mutate)
+                apply_edit_singular(
+                    parent_entry,
+                    node,
+                    old_node,
+                    schema,
+                    relationship,
+                    with_ids,
+                    mutate,
+                )
             } else {
-                apply_edit_plural(parent_entry, node, old_node, schema, relationship, with_ids, mutate)
+                apply_edit_plural(
+                    parent_entry,
+                    node,
+                    old_node,
+                    schema,
+                    relationship,
+                    with_ids,
+                    mutate,
+                )
             }
         }
     }
@@ -273,7 +335,11 @@ fn apply_change_hidden(
             let rel_names = node.relationship_names();
             for rel_name in &rel_names {
                 if let Some(child_schema) = schema.relationships.get(rel_name) {
-                    let child_format = format.relationships.get(rel_name).cloned().unwrap_or_default();
+                    let child_format = format
+                        .relationships
+                        .get(rel_name)
+                        .cloned()
+                        .unwrap_or_default();
                     for child_node in node.children(rel_name) {
                         let child_change = match change {
                             ViewChange::Add { .. } => ViewChange::Add { node: child_node },
@@ -381,13 +447,7 @@ fn apply_add_plural(
     if let Some((pos, new_entry)) = result.new_entry {
         let mut new_entry = new_entry;
         let entry_mut = Rc::make_mut(&mut new_entry);
-        initialize_relationships_for_new_entry(
-            entry_mut,
-            node,
-            schema,
-            child_formats,
-            with_ids,
-        );
+        initialize_relationships_for_new_entry(entry_mut, node, schema, child_formats, with_ids);
         // Replace the cloned entry with the initialized one.
         new_view[pos] = new_entry;
     }
@@ -417,14 +477,20 @@ fn add_to_list(
         let mut new_view = view.to_vec();
         let entry = Rc::make_mut(&mut new_view[pos]);
         entry.ref_count += 1;
-        AddResult { new_entry: None, view: new_view }
+        AddResult {
+            new_entry: None,
+            view: new_view,
+        }
     } else {
         // Not found: insert at ~rawPos
         let pos = (!raw_pos) as usize;
         let new_entry = make_new_meta_entry(row, schema, with_ids, 1);
         let mut new_view = view.to_vec();
         new_view.insert(pos, Rc::clone(&new_entry));
-        AddResult { new_entry: Some((pos, new_entry)), view: new_view }
+        AddResult {
+            new_entry: Some((pos, new_entry)),
+            view: new_view,
+        }
     }
 }
 
@@ -486,6 +552,7 @@ fn remove_and_update_ref_count(
 // CHILD — propagate nested change
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn apply_child(
     parent_entry: &Entry,
     node: &RowOnlyNode,
@@ -523,7 +590,12 @@ fn apply_child(
         if entries_equal(existing, &new_existing_rc) {
             return parent_entry.clone();
         }
-        set_relation(parent_entry, relationship, View::Single(new_existing_rc), mutate)
+        set_relation(
+            parent_entry,
+            relationship,
+            View::Single(new_existing_rc),
+            mutate,
+        )
     } else {
         let view = get_child_entry_list(parent_entry, relationship);
         let pos = binary_search(&view, &node.row, &schema.compare_rows);
@@ -531,7 +603,7 @@ fn apply_child(
         let pos = pos as usize;
         let existing = &view[pos];
         let new_existing = apply_change_internal(
-            &**existing,
+            existing,
             &child.change,
             child_schema,
             &child.relationship_name,
@@ -564,7 +636,12 @@ fn apply_edit_singular(
 ) -> Entry {
     let existing = get_singular_entry(parent_entry, relationship);
     let new_entry = apply_edit(existing, node, old_node, schema, with_ids, mutate);
-    set_relation(parent_entry, relationship, View::Single(Rc::new(new_entry)), mutate)
+    set_relation(
+        parent_entry,
+        relationship,
+        View::Single(Rc::new(new_entry)),
+        mutate,
+    )
 }
 
 fn apply_edit_plural(
@@ -589,11 +666,15 @@ fn apply_edit_plural(
 
         let raw_pos = binary_search(&view, &node.row, compare_rows);
         let found = raw_pos >= 0;
-        let pos = if found { raw_pos as usize } else { (!raw_pos) as usize };
+        let pos = if found {
+            raw_pos as usize
+        } else {
+            (!raw_pos) as usize
+        };
 
         // Special case: rc=1 and new pos is same as or directly after old pos
         if old_entry.ref_count == 1 && (pos == old_pos || pos - 1 == old_pos) {
-            let new_entry = apply_edit(&**old_entry, node, old_node, schema, with_ids, mutate);
+            let new_entry = apply_edit(old_entry, node, old_node, schema, with_ids, mutate);
             let mut new_view = view.to_vec();
             new_view[old_pos] = Rc::new(new_entry);
             return set_relation(parent_entry, relationship, View::List(new_view), mutate);
@@ -615,7 +696,8 @@ fn apply_edit_plural(
         if found {
             // Merge with existing at new pos
             let existing_entry = &new_view[adjusted_pos];
-            let mut edited = apply_edit(&**existing_entry, node, old_node, schema, with_ids, mutate);
+            let mut edited =
+                apply_edit(existing_entry, node, old_node, schema, with_ids, mutate);
             edited.ref_count = existing_entry.ref_count + 1;
             new_view[adjusted_pos] = Rc::new(edited);
         } else {
@@ -707,7 +789,8 @@ fn initialize_relationships_for_new_entry(
 
             for child_node in node.children(rel_name) {
                 let new_entry = make_new_meta_entry(child_node.row(), child_schema, with_ids, 1);
-                let raw_pos = binary_search(&child_array, child_node.row(), &child_schema.compare_rows);
+                let raw_pos =
+                    binary_search(&child_array, child_node.row(), &child_schema.compare_rows);
 
                 if raw_pos >= 0 {
                     Rc::make_mut(&mut child_array[raw_pos as usize]).ref_count += 1;
@@ -725,7 +808,9 @@ fn initialize_relationships_for_new_entry(
                 }
             }
 
-            entry.relationships.insert(rel_name.clone(), View::List(child_array));
+            entry
+                .relationships
+                .insert(rel_name.clone(), View::List(child_array));
         }
     }
 }
@@ -799,7 +884,10 @@ fn get_singular_entry<'a>(parent_entry: &'a Entry, relationship: &str) -> &'a Rc
 }
 
 /// Get singular entry or None if not set.
-fn get_optional_singular_entry<'a>(parent_entry: &'a Entry, relationship: &str) -> Option<&'a Rc<Entry>> {
+fn get_optional_singular_entry<'a>(
+    parent_entry: &'a Entry,
+    relationship: &str,
+) -> Option<&'a Rc<Entry>> {
     match parent_entry.relationships.get(relationship) {
         Some(View::Single(e)) => Some(e),
         _ => None,
@@ -807,7 +895,7 @@ fn get_optional_singular_entry<'a>(parent_entry: &'a Entry, relationship: &str) 
 }
 
 /// Get child entry list as a slice.
-fn get_child_entry_list<'a>(parent_entry: &'a Entry, relationship: &str) -> Vec<Rc<Entry>> {
+fn get_child_entry_list(parent_entry: &Entry, relationship: &str) -> Vec<Rc<Entry>> {
     match parent_entry.relationships.get(relationship) {
         Some(View::List(v)) => v.clone(),
         Some(View::Single(_)) | None | Some(View::None) => Vec::new(),
@@ -831,7 +919,9 @@ fn dec_ref_count(entry: &Rc<Entry>, _mutate: Mutate) -> Rc<Entry> {
 /// Set a relationship on a parent entry, returning a new entry.
 fn set_relation(parent_entry: &Entry, relationship: &str, value: View, _mutate: Mutate) -> Entry {
     let mut new_entry = parent_entry.clone();
-    new_entry.relationships.insert(relationship.to_string(), value);
+    new_entry
+        .relationships
+        .insert(relationship.to_string(), value);
     new_entry
 }
 
@@ -847,18 +937,17 @@ fn entries_equal(a: &Rc<Entry>, b: &Rc<Entry>) -> bool {
 }
 
 /// Deep-compare two relationship view maps for structural equality.
-fn views_equal(
-    a: &FxHashMap<String, View>,
-    b: &FxHashMap<String, View>,
-) -> bool {
+fn views_equal(a: &FxHashMap<String, View>, b: &FxHashMap<String, View>) -> bool {
     if a.len() != b.len() {
         return false;
     }
     for (key, va) in a {
         match b.get(key) {
             None => return false,
-            Some(vb) => if !view_equal(va, vb) {
-                return false;
+            Some(vb) => {
+                if !view_equal(va, vb) {
+                    return false;
+                }
             }
         }
     }
@@ -871,8 +960,7 @@ fn view_equal(a: &View, b: &View) -> bool {
         (View::None, View::None) => true,
         (View::Single(ea), View::Single(eb)) => entries_equal(ea, eb),
         (View::List(la), View::List(lb)) => {
-            la.len() == lb.len()
-                && la.iter().zip(lb.iter()).all(|(a, b)| entries_equal(a, b))
+            la.len() == lb.len() && la.iter().zip(lb.iter()).all(|(a, b)| entries_equal(a, b))
         }
         _ => false,
     }
@@ -894,11 +982,17 @@ pub fn change_to_view_change(change: &crate::ivm::change::Change) -> ViewChange 
             node: ViewNode::Lazy(node.clone()),
         },
         C::Edit { node, old_node } => ViewChange::Edit {
-            node: RowOnlyNode { row: node.row.clone() },
-            old_node: RowOnlyNode { row: old_node.row.clone() },
+            node: RowOnlyNode {
+                row: node.row.clone(),
+            },
+            old_node: RowOnlyNode {
+                row: old_node.row.clone(),
+            },
         },
         C::Child { node, child } => ViewChange::Child {
-            node: RowOnlyNode { row: node.row.clone() },
+            node: RowOnlyNode {
+                row: node.row.clone(),
+            },
             child: ChildViewChange {
                 relationship_name: child.relationship_name.clone(),
                 change: Box::new(change_to_view_change(&child.change)),

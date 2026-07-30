@@ -13,19 +13,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::builder::ast::{
-    Ast, Bound, Condition, CorrelatedSubqueryCondition, OrderPart, RelatedSubquery,
-    SimpleCondition, ValuePosition,
+    Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery,
 };
 use crate::builder::filter::{create_predicate, create_simple_predicate, transform_filters};
 use crate::ivm::cap::Cap;
 use crate::ivm::data::{Row, SortOrder};
 use crate::ivm::exists::Exists;
 use crate::ivm::filter::Filter;
-use crate::ivm::fan_in::FanIn;
-use crate::ivm::fan_out::FanOut;
 use crate::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
 use crate::ivm::join::{Join, JoinArgs};
-use crate::ivm::operator::{Input, InputBase, Shared, Storage};
+use crate::ivm::operator::{Input, Shared, Storage};
 use crate::ivm::schema::System;
 use crate::ivm::skip::Skip;
 use crate::ivm::source::Source;
@@ -50,7 +47,9 @@ pub trait BuilderDelegate {
     /// Create a new storage instance for an operator that requires it.
     /// Port of TS `createStorage()`.
     fn create_storage(&mut self) -> Shared<dyn Storage> {
-        Rc::new(RefCell::new(crate::ivm::memory_storage::MemoryStorage::new()))
+        Rc::new(RefCell::new(
+            crate::ivm::memory_storage::MemoryStorage::new(),
+        ))
     }
 }
 
@@ -77,11 +76,10 @@ fn build_pipeline_internal(
     };
 
     // Validate NOT EXISTS if not enabled
-    if !delegate.enable_not_exists() {
-        if let Some(ref where_clause) = ast.where_clause {
+    if !delegate.enable_not_exists()
+        && let Some(ref where_clause) = ast.where_clause {
             assert_no_not_exists(where_clause);
         }
-    }
 
     // Uniquify correlated subquery aliases: each CSQ gets alias + "_" + counter.
     // Port of TS uniquifyCorrelatedSubqueryConditionAliases (builder.ts:763).
@@ -111,7 +109,10 @@ fn build_pipeline_internal(
     // EXISTS subqueries must not have start or related
     if is_non_flipped_exists_child {
         assert!(ast.start.is_none(), "EXISTS subqueries must not have start");
-        assert!(ast.related.is_empty(), "EXISTS subqueries must not have related");
+        assert!(
+            ast.related.is_empty(),
+            "EXISTS subqueries must not have related"
+        );
     }
 
     // The Cap optimization needs the source connect to be unordered, but
@@ -122,7 +123,7 @@ fn build_pipeline_internal(
         && !(ast
             .where_clause
             .as_ref()
-            .map(|w| condition_includes_flipped_subquery_at_any_level(w))
+            .map(condition_includes_flipped_subquery_at_any_level)
             .unwrap_or(false));
 
     // Build sort order
@@ -141,10 +142,7 @@ fn build_pipeline_internal(
 
     // Transform filters: strip correlated subquery conditions for source-level filtering
     let transformed = transform_filters(ast.where_clause.as_ref());
-    let filter_predicate = transformed
-        .filters
-        .as_ref()
-        .map(|c| create_predicate(c));
+    let filter_predicate = transformed.filters.as_ref().map(|c| create_predicate(c));
     let filter_condition = transformed.filters.clone();
 
     let split_keys = if split_edit_keys.is_empty() {
@@ -167,23 +165,19 @@ fn build_pipeline_internal(
     // Apply non-flipped EXISTS correlated subqueries
     for csq_condition in &csq_conditions {
         if csq_condition.flip != Some(true) {
-            current = apply_correlated_subquery(
-                csq_condition,
-                delegate,
-                current.clone(),
-                name,
-                true,
-            );
+            current =
+                apply_correlated_subquery(csq_condition, delegate, current.clone(), name, true);
         }
     }
 
     // Apply WHERE clause if not fully applied at source or if there are flipped conditions
     let needs_where = ast.where_clause.is_some()
         && (transformed.conditions_removed
-            || condition_includes_flipped_subquery_at_any_level(ast.where_clause.as_ref().unwrap()));
+            || condition_includes_flipped_subquery_at_any_level(
+                ast.where_clause.as_ref().unwrap(),
+            ));
 
-    if std::env::var("IVM_TRACE").is_ok() {
-    }
+    let _ = std::env::var("IVM_TRACE");
     if needs_where {
         current = apply_where(
             current.clone(),
@@ -194,8 +188,7 @@ fn build_pipeline_internal(
     }
 
     // Apply limit
-    if std::env::var("IVM_TRACE").is_ok() {
-    }
+    let _ = std::env::var("IVM_TRACE");
     if let Some(limit) = ast.limit {
         if use_cap {
             let cap = Cap::new(
@@ -271,12 +264,8 @@ fn apply_filter(
             }
             end
         }
-        Condition::Or(conditions) => {
-            apply_or_filter(input, conditions, delegate, name)
-        }
-        Condition::CorrelatedSubquery(csq) => {
-            apply_csq_condition(input, csq)
-        }
+        Condition::Or(conditions) => apply_or_filter(input, conditions, delegate, name),
+        Condition::CorrelatedSubquery(csq) => apply_csq_condition(input, csq),
         Condition::Simple(simple) => {
             let predicate = create_simple_predicate(simple);
             Filter::new(input, predicate)
@@ -289,11 +278,12 @@ fn apply_filter(
 fn apply_or_filter(
     input: Shared<dyn Input>,
     conditions: &[Condition],
-    delegate: &mut dyn BuilderDelegate,
-    name: &str,
+    _delegate: &mut dyn BuilderDelegate,
+    _name: &str,
 ) -> Shared<dyn Input> {
-    let (subquery_conds, other_conds): (Vec<&Condition>, Vec<&Condition>) =
-        conditions.iter().partition(|c| !is_not_and_does_not_contain_subquery(c));
+    let (subquery_conds, other_conds): (Vec<&Condition>, Vec<&Condition>) = conditions
+        .iter()
+        .partition(|c| !is_not_and_does_not_contain_subquery(c));
 
     if subquery_conds.is_empty() {
         let or_cond = Condition::Or(other_conds.iter().cloned().cloned().collect());
@@ -346,9 +336,13 @@ fn apply_csq_condition(
     }
 
     let not = op == "NOT EXISTS";
-    if std::env::var("IVM_TRACE").is_ok() {
-    }
-    Exists::new(input, sq.relationship_name.clone(), sq.parent_key.clone(), not)
+    let _ = std::env::var("IVM_TRACE");
+    Exists::new(
+        input,
+        sq.relationship_name.clone(),
+        sq.parent_key.clone(),
+        not,
+    )
 }
 
 /// Apply filter with flips (for OR with flipped subqueries).
@@ -391,7 +385,12 @@ fn apply_filter_with_flips(
             let mut branches: Vec<Shared<dyn Input>> = Vec::new();
 
             if !without_flipped.is_empty() {
-                let branch = apply_or_filter(end.clone(), &without_flipped.iter().cloned().cloned().collect::<Vec<_>>(), delegate, name);
+                let branch = apply_or_filter(
+                    end.clone(),
+                    &without_flipped.iter().cloned().cloned().collect::<Vec<_>>(),
+                    delegate,
+                    name,
+                );
                 branches.push(branch);
             }
 
@@ -409,7 +408,11 @@ fn apply_filter_with_flips(
             // push batches open/close via fanOutStarted/DonePushing).
             for branch in &branches {
                 ufi.borrow_mut().add_input(branch.clone());
-                branch.borrow().set_output(crate::ivm::union_fan_in::UnionFanIn::output_adapter(ufi.clone()));
+                branch
+                    .borrow()
+                    .set_output(crate::ivm::union_fan_in::UnionFanIn::output_adapter(
+                        ufi.clone(),
+                    ));
             }
             ufo.borrow().set_fan_in(ufi.clone());
             end = ufi;
@@ -455,7 +458,7 @@ fn apply_correlated_subquery(
 ) -> Shared<dyn Input> {
     let sq = &csq_condition.related;
     let op = csq_condition.op.as_str();
-    let flip = csq_condition.flip.unwrap_or(false);
+    let _flip = csq_condition.flip.unwrap_or(false);
 
     assert!(
         op == "EXISTS" || op == "NOT EXISTS",
@@ -509,8 +512,7 @@ fn apply_correlated_subquery(
         hidden: sq.hidden,
         system: sq.system.unwrap_or(System::Client),
     });
-    if std::env::var("IVM_TRACE").is_ok() {
-    }
+    let _ = std::env::var("IVM_TRACE");
     join
 }
 
@@ -540,8 +542,7 @@ fn apply_correlated_subquery_join(
         hidden: sq.hidden,
         system: sq.system.unwrap_or(System::Client),
     });
-    if std::env::var("IVM_TRACE").is_ok() {
-    }
+    let _ = std::env::var("IVM_TRACE");
     join
 }
 
@@ -576,9 +577,9 @@ fn gather_csq_conditions(condition: &Condition, csqs: &mut Vec<CorrelatedSubquer
 pub fn condition_includes_flipped_subquery_at_any_level(cond: &Condition) -> bool {
     match cond {
         Condition::CorrelatedSubquery(csq) => csq.flip.unwrap_or(false),
-        Condition::And(conditions) | Condition::Or(conditions) => {
-            conditions.iter().any(condition_includes_flipped_subquery_at_any_level)
-        }
+        Condition::And(conditions) | Condition::Or(conditions) => conditions
+            .iter()
+            .any(condition_includes_flipped_subquery_at_any_level),
         Condition::Simple(_) => false,
     }
 }
@@ -644,7 +645,6 @@ pub fn build_predicate(condition: &Condition) -> Arc<dyn Fn(&Row) -> bool> {
         _ => create_predicate(condition),
     }
 }
-
 
 /// Uniquify correlated subquery condition aliases by appending "_<counter>".
 /// Port of TS `uniquifyCorrelatedSubqueryConditionAliases` (builder.ts:763).

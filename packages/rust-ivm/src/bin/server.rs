@@ -17,8 +17,8 @@
 //!   GET  /sources          — list registered source tables
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -31,12 +31,12 @@ use rust_ivm::builder::ast::{
 };
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::change::{
-    make_source_change_add, make_source_change_edit, make_source_change_remove, ChangeType,
-    SourceChange,
+    ChangeType, SourceChange, make_source_change_add, make_source_change_edit,
+    make_source_change_remove,
 };
-use rust_ivm::ivm::data::{row as make_row, Row, Value};
+use rust_ivm::ivm::data::{Row, Value, row as make_row};
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::{MemorySource, Source};
+use rust_ivm::ivm::source::MemorySource;
 
 // ---------------------------------------------------------------------------
 // Value / Row conversion: serde_json ↔ Rust
@@ -63,13 +63,14 @@ fn rust_value_to_json(v: &Value) -> JsonValue {
                 JsonValue::Number(serde_json::Number::from(*n as i64))
             } else {
                 JsonValue::Number(
-                    serde_json::Number::from_f64(*n)
-                        .unwrap_or_else(|| serde_json::Number::from(0)),
+                    serde_json::Number::from_f64(*n).unwrap_or_else(|| serde_json::Number::from(0)),
                 )
             }
         }
         Value::Str(s) => JsonValue::String(s.to_string()),
-        Value::Json(s) => serde_json::from_str(s).unwrap_or_else(|_| JsonValue::String(s.to_string())),
+        Value::Json(s) => {
+            serde_json::from_str(s).unwrap_or_else(|_| JsonValue::String(s.to_string()))
+        }
     }
 }
 
@@ -98,10 +99,15 @@ fn json_to_value_position(v: &JsonValue) -> ValuePosition {
     match kind {
         "column" => {
             let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            ValuePosition::Column { name: name.to_string() }
+            ValuePosition::Column {
+                name: name.to_string(),
+            }
         }
-        "literal" | _ => {
-            let val = v.get("value").map(json_to_rust_value).unwrap_or(Value::Null);
+        _ => {
+            let val = v
+                .get("value")
+                .map(json_to_rust_value)
+                .unwrap_or(Value::Null);
             ValuePosition::Literal { value: val }
         }
     }
@@ -109,7 +115,11 @@ fn json_to_value_position(v: &JsonValue) -> ValuePosition {
 
 fn json_to_simple_condition(v: &JsonValue) -> SimpleCondition {
     SimpleCondition {
-        op: v.get("op").and_then(|o| o.as_str()).unwrap_or("=").to_string(),
+        op: v
+            .get("op")
+            .and_then(|o| o.as_str())
+            .unwrap_or("=")
+            .to_string(),
         left: json_to_value_position(v.get("left").unwrap_or(&JsonValue::Null)),
         right: json_to_value_position(v.get("right").unwrap_or(&JsonValue::Null)),
     }
@@ -141,10 +151,20 @@ fn json_to_condition(v: &JsonValue) -> Condition {
         }
         "correlatedSubquery" => {
             let related = json_to_related_subquery(v.get("related").unwrap_or(&JsonValue::Null));
-            let op = v.get("op").and_then(|o| o.as_str()).unwrap_or("EXISTS").to_string();
+            let op = v
+                .get("op")
+                .and_then(|o| o.as_str())
+                .unwrap_or("EXISTS")
+                .to_string();
             let flip = v.get("flip").and_then(|f| f.as_bool());
             let scalar = v.get("scalar").and_then(|s| s.as_bool()).unwrap_or(false);
-            Condition::CorrelatedSubquery(CorrelatedSubqueryCondition { related, op, flip, scalar, plan_id: None })
+            Condition::CorrelatedSubquery(CorrelatedSubqueryCondition {
+                related,
+                op,
+                flip,
+                scalar,
+                plan_id: None,
+            })
         }
         _ => panic!("Unknown condition type: {}", kind),
     }
@@ -152,19 +172,30 @@ fn json_to_condition(v: &JsonValue) -> Condition {
 
 fn json_to_related_subquery(v: &JsonValue) -> RelatedSubquery {
     let subquery = json_to_ast(v.get("subquery").unwrap_or(&JsonValue::Null));
-    let relationship_name = v.get("alias")
+    let relationship_name = v
+        .get("alias")
         .and_then(|a| a.as_str())
         .unwrap_or("")
         .to_string();
 
     let (parent_key, child_key) = if let Some(corr) = v.get("correlation") {
-        let parent = corr.get("parentField")
+        let parent = corr
+            .get("parentField")
             .and_then(|p| p.as_array())
-            .map(|a| a.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect())
+            .map(|a| {
+                a.iter()
+                    .map(|s| s.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
             .unwrap_or_default();
-        let child = corr.get("childField")
+        let child = corr
+            .get("childField")
             .and_then(|c| c.as_array())
-            .map(|a| a.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect())
+            .map(|a| {
+                a.iter()
+                    .map(|s| s.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
             .unwrap_or_default();
         (parent, child)
     } else {
@@ -189,8 +220,15 @@ fn json_to_related_subquery(v: &JsonValue) -> RelatedSubquery {
 }
 
 fn json_to_ast(v: &JsonValue) -> Ast {
-    let table = v.get("table").and_then(|t| t.as_str()).unwrap_or("").to_string();
-    let alias = v.get("alias").and_then(|a| a.as_str()).map(|s| s.to_string());
+    let table = v
+        .get("table")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let alias = v
+        .get("alias")
+        .and_then(|a| a.as_str())
+        .map(|s| s.to_string());
     let where_clause = v.get("where").map(json_to_condition);
 
     let related: Vec<RelatedSubquery> = v
@@ -210,8 +248,15 @@ fn json_to_ast(v: &JsonValue) -> Ast {
                 let empty_arr = vec![];
                 let arr = p.as_array().unwrap_or(&empty_arr);
                 OrderPart {
-                    column: arr.get(0).and_then(|c| c.as_str()).unwrap_or("").to_string(),
-                    direction: arr.get(1).and_then(|d| d.as_str()).unwrap_or("asc").to_string(),
+                    column: arr.first()
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    direction: arr
+                        .get(1)
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("asc")
+                        .to_string(),
                 }
             })
             .collect()
@@ -227,7 +272,10 @@ fn json_to_ast(v: &JsonValue) -> Ast {
         }
         Bound {
             row: make_row(map),
-            exclusive: s.get("exclusive").and_then(|e| e.as_bool()).unwrap_or(false),
+            exclusive: s
+                .get("exclusive")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false),
         }
     });
 
@@ -258,14 +306,20 @@ fn change_type_str(ct: ChangeType) -> &'static str {
 
 fn row_change_to_json(rc: &rust_ivm::streamer::RowChange) -> JsonValue {
     let mut obj = serde_json::Map::new();
-    obj.insert("type".into(), JsonValue::String(change_type_str(rc.change_type).into()));
+    obj.insert(
+        "type".into(),
+        JsonValue::String(change_type_str(rc.change_type).into()),
+    );
     obj.insert("query_id".into(), JsonValue::String(rc.query_id.clone()));
     obj.insert("table".into(), JsonValue::String(rc.table.clone()));
     obj.insert("row_key".into(), row_to_json(&rc.row_key));
-    obj.insert("row".into(), match &rc.row {
-        Some(r) => row_to_json(r),
-        None => JsonValue::Null,
-    });
+    obj.insert(
+        "row".into(),
+        match &rc.row {
+            Some(r) => row_to_json(r),
+            None => JsonValue::Null,
+        },
+    );
     JsonValue::Object(obj)
 }
 
@@ -287,10 +341,13 @@ fn handle_health() -> Response<std::io::Cursor<Vec<u8>>> {
 }
 
 fn handle_version() -> Response<std::io::Cursor<Vec<u8>>> {
-    json_response(200, &serde_json::json!({
-        "version": "0.1.0",
-        "protocol_rev": 12
-    }))
+    json_response(
+        200,
+        &serde_json::json!({
+            "version": "0.1.0",
+            "protocol_rev": 12
+        }),
+    )
 }
 
 fn handle_init(state: &mut ServerState, body: &JsonValue) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -301,16 +358,27 @@ fn handle_init(state: &mut ServerState, body: &JsonValue) -> Response<std::io::C
 
     for (name, schema) in tables {
         let columns_json = schema.get("columns").and_then(|c| c.as_object());
-        let pk: Vec<String> = schema.get("primary_key")
+        let pk: Vec<String> = schema
+            .get("primary_key")
             .and_then(|p| p.as_array())
-            .map(|a| a.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect())
+            .map(|a| {
+                a.iter()
+                    .map(|s| s.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut columns = HashMap::new();
         if let Some(cols) = columns_json {
             for (col, spec) in cols {
-                let type_str = spec.get("type").and_then(|t| t.as_str()).unwrap_or("number");
-                let optional = spec.get("optional").and_then(|o| o.as_bool()).unwrap_or(false);
+                let type_str = spec
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("number");
+                let optional = spec
+                    .get("optional")
+                    .and_then(|o| o.as_bool())
+                    .unwrap_or(false);
                 let ct = match type_str {
                     "boolean" => ColumnType::Boolean { optional },
                     "number" => ColumnType::Number { optional },
@@ -323,7 +391,9 @@ fn handle_init(state: &mut ServerState, body: &JsonValue) -> Response<std::io::C
         }
 
         let source = Rc::new(RefCell::new(MemorySource::new(name, columns, pk.clone())));
-        state.engine.register_source(source.clone() as Rc<RefCell<dyn rust_ivm::ivm::source::Source>>);
+        state
+            .engine
+            .register_source(source.clone() as Rc<RefCell<dyn rust_ivm::ivm::source::Source>>);
         state.sources.insert(name.clone(), source);
 
         if let Some(mrv) = schema.get("min_row_version").and_then(|m| m.as_str()) {
@@ -334,7 +404,10 @@ fn handle_init(state: &mut ServerState, body: &JsonValue) -> Response<std::io::C
     json_response(200, &serde_json::json!({"ok": true}))
 }
 
-fn handle_add_queries(state: &mut ServerState, body: &JsonValue) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_add_queries(
+    state: &mut ServerState,
+    body: &JsonValue,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     let queries = match body.get("queries").and_then(|q| q.as_array()) {
         Some(q) => q,
         None => return error_response(400, "Missing 'queries' field"),
@@ -343,7 +416,11 @@ fn handle_add_queries(state: &mut ServerState, body: &JsonValue) -> Response<std
     let specs: Vec<QuerySpec> = queries
         .iter()
         .map(|q| QuerySpec {
-            query_id: q.get("query_id").and_then(|q| q.as_str()).unwrap_or("").to_string(),
+            query_id: q
+                .get("query_id")
+                .and_then(|q| q.as_str())
+                .unwrap_or("")
+                .to_string(),
             ast: json_to_ast(q.get("ast").unwrap_or(&JsonValue::Null)),
         })
         .collect();
@@ -373,7 +450,11 @@ fn handle_advance(state: &mut ServerState, body: &JsonValue) -> Response<std::io
     let rust_changes: Vec<(String, SourceChange)> = changes
         .iter()
         .map(|c| {
-            let table = c.get("table").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let table = c
+                .get("table")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             let change_type = c.get("type").and_then(|t| t.as_str()).unwrap_or("add");
             let empty = serde_json::Map::new();
             let row = c.get("row").and_then(|r| r.as_object()).unwrap_or(&empty);
@@ -381,7 +462,10 @@ fn handle_advance(state: &mut ServerState, body: &JsonValue) -> Response<std::io
                 "add" => make_source_change_add(json_to_row(row)),
                 "remove" => make_source_change_remove(json_to_row(row)),
                 "edit" => {
-                    let old_row = c.get("old_row").and_then(|r| r.as_object()).unwrap_or(&empty);
+                    let old_row = c
+                        .get("old_row")
+                        .and_then(|r| r.as_object())
+                        .unwrap_or(&empty);
                     make_source_change_edit(json_to_row(row), json_to_row(old_row))
                 }
                 _ => panic!("Unknown change type: {}", change_type),
@@ -419,7 +503,10 @@ fn handle_add_row(state: &mut ServerState, body: &JsonValue) -> Response<std::io
     }
 }
 
-fn handle_remove_query(state: &mut ServerState, body: &JsonValue) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_remove_query(
+    state: &mut ServerState,
+    body: &JsonValue,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     let query_id = match body.get("query_id").and_then(|q| q.as_str()) {
         Some(q) => q.to_string(),
         None => return error_response(400, "Missing 'query_id' field"),
@@ -435,7 +522,9 @@ fn handle_destroy(state: &mut ServerState) -> Response<std::io::Cursor<Vec<u8>>>
 }
 
 fn handle_queries(state: &ServerState) -> Response<std::io::Cursor<Vec<u8>>> {
-    let queries: Vec<JsonValue> = state.engine.pipeline_query_ids()
+    let queries: Vec<JsonValue> = state
+        .engine
+        .pipeline_query_ids()
         .into_iter()
         .map(JsonValue::String)
         .collect();
@@ -443,7 +532,9 @@ fn handle_queries(state: &ServerState) -> Response<std::io::Cursor<Vec<u8>>> {
 }
 
 fn handle_sources(state: &ServerState) -> Response<std::io::Cursor<Vec<u8>>> {
-    let sources: Vec<JsonValue> = state.sources.keys()
+    let sources: Vec<JsonValue> = state
+        .sources
+        .keys()
         .cloned()
         .map(JsonValue::String)
         .collect();
@@ -454,7 +545,10 @@ fn handle_sources(state: &ServerState) -> Response<std::io::Cursor<Vec<u8>>> {
 // Streaming endpoint (Phase 1 — chunked NDJSON frames)
 // ---------------------------------------------------------------------------
 
-fn handle_add_queries_stream(state: &mut ServerState, body: &JsonValue) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_add_queries_stream(
+    state: &mut ServerState,
+    body: &JsonValue,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     let queries = match body.get("queries").and_then(|q| q.as_array()) {
         Some(q) => q,
         None => return error_response(400, "Missing 'queries' field"),
@@ -463,7 +557,11 @@ fn handle_add_queries_stream(state: &mut ServerState, body: &JsonValue) -> Respo
     let specs: Vec<QuerySpec> = queries
         .iter()
         .map(|q| QuerySpec {
-            query_id: q.get("query_id").and_then(|q| q.as_str()).unwrap_or("").to_string(),
+            query_id: q
+                .get("query_id")
+                .and_then(|q| q.as_str())
+                .unwrap_or("")
+                .to_string(),
             ast: json_to_ast(q.get("ast").unwrap_or(&JsonValue::Null)),
         })
         .collect();
@@ -486,7 +584,11 @@ fn handle_add_queries_stream(state: &mut ServerState, body: &JsonValue) -> Respo
     let mut ndjson = String::new();
     for frame in &sink.frames {
         let json = match frame {
-            rust_ivm::streamer::StreamFrame::Partial { chunk_index, query_id, changes } => {
+            rust_ivm::streamer::StreamFrame::Partial {
+                chunk_index,
+                query_id,
+                changes,
+            } => {
                 let changes_json: Vec<JsonValue> = changes.iter().map(row_change_to_json).collect();
                 serde_json::json!({
                     "type": "partial",
@@ -495,7 +597,10 @@ fn handle_add_queries_stream(state: &mut ServerState, body: &JsonValue) -> Respo
                     "changes": changes_json,
                 })
             }
-            rust_ivm::streamer::StreamFrame::Final { chunk_index, query_id } => {
+            rust_ivm::streamer::StreamFrame::Final {
+                chunk_index,
+                query_id,
+            } => {
                 serde_json::json!({
                     "type": "final",
                     "chunkIndex": chunk_index,
@@ -508,7 +613,10 @@ fn handle_add_queries_stream(state: &mut ServerState, body: &JsonValue) -> Respo
                     "chunkIndex": chunk_index,
                 })
             }
-            rust_ivm::streamer::StreamFrame::Error { chunk_index, message } => {
+            rust_ivm::streamer::StreamFrame::Error {
+                chunk_index,
+                message,
+            } => {
                 serde_json::json!({
                     "type": "error",
                     "chunkIndex": chunk_index,
@@ -530,7 +638,10 @@ fn handle_add_queries_stream(state: &mut ServerState, body: &JsonValue) -> Respo
     response
 }
 
-fn handle_advance_stream(state: &mut ServerState, body: &JsonValue) -> Response<std::io::Cursor<Vec<u8>>> {
+fn handle_advance_stream(
+    state: &mut ServerState,
+    body: &JsonValue,
+) -> Response<std::io::Cursor<Vec<u8>>> {
     let changes = match body.get("changes").and_then(|c| c.as_array()) {
         Some(c) => c,
         None => return error_response(400, "Missing 'changes' field"),
@@ -539,7 +650,11 @@ fn handle_advance_stream(state: &mut ServerState, body: &JsonValue) -> Response<
     let rust_changes: Vec<(String, SourceChange)> = changes
         .iter()
         .map(|c| {
-            let table = c.get("table").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let table = c
+                .get("table")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             let change_type = c.get("type").and_then(|t| t.as_str()).unwrap_or("add");
             let empty = serde_json::Map::new();
             let row = c.get("row").and_then(|r| r.as_object()).unwrap_or(&empty);
@@ -547,7 +662,10 @@ fn handle_advance_stream(state: &mut ServerState, body: &JsonValue) -> Response<
                 "add" => make_source_change_add(json_to_row(row)),
                 "remove" => make_source_change_remove(json_to_row(row)),
                 "edit" => {
-                    let old_row = c.get("old_row").and_then(|r| r.as_object()).unwrap_or(&empty);
+                    let old_row = c
+                        .get("old_row")
+                        .and_then(|r| r.as_object())
+                        .unwrap_or(&empty);
                     make_source_change_edit(json_to_row(row), json_to_row(old_row))
                 }
                 _ => panic!("Unknown change type: {}", change_type),
@@ -568,7 +686,11 @@ fn handle_advance_stream(state: &mut ServerState, body: &JsonValue) -> Response<
     let mut ndjson = String::new();
     for frame in &sink.frames {
         let json = match frame {
-            rust_ivm::streamer::StreamFrame::Partial { chunk_index, query_id, changes } => {
+            rust_ivm::streamer::StreamFrame::Partial {
+                chunk_index,
+                query_id,
+                changes,
+            } => {
                 let changes_json: Vec<JsonValue> = changes.iter().map(row_change_to_json).collect();
                 serde_json::json!({
                     "type": "partial",
@@ -577,7 +699,10 @@ fn handle_advance_stream(state: &mut ServerState, body: &JsonValue) -> Response<
                     "changes": changes_json,
                 })
             }
-            rust_ivm::streamer::StreamFrame::Final { chunk_index, query_id } => {
+            rust_ivm::streamer::StreamFrame::Final {
+                chunk_index,
+                query_id,
+            } => {
                 serde_json::json!({
                     "type": "final",
                     "chunkIndex": chunk_index,
@@ -590,7 +715,10 @@ fn handle_advance_stream(state: &mut ServerState, body: &JsonValue) -> Response<
                     "chunkIndex": chunk_index,
                 })
             }
-            rust_ivm::streamer::StreamFrame::Error { chunk_index, message } => {
+            rust_ivm::streamer::StreamFrame::Error {
+                chunk_index,
+                message,
+            } => {
                 serde_json::json!({
                     "type": "error",
                     "chunkIndex": chunk_index,
@@ -618,8 +746,7 @@ fn handle_advance_stream(state: &mut ServerState, body: &JsonValue) -> Response<
 
 fn json_response(status: u16, body: &JsonValue) -> Response<std::io::Cursor<Vec<u8>>> {
     let body_str = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
-    let mut response = Response::from_string(body_str)
-        .with_status_code(status);
+    let mut response = Response::from_string(body_str).with_status_code(status);
     if let Ok(header) = Header::from_bytes(b"Content-Type", b"application/json") {
         response = response.with_header(header);
     }
@@ -667,60 +794,48 @@ fn main() {
             (Method::Get, "/queries") => handle_queries(&state),
             (Method::Get, "/sources") => handle_sources(&state),
 
-            (Method::Post, "/init") => {
-                match read_body(&mut request) {
-                    Some(body) => handle_init(&mut state, &body),
-                    None => error_response(400, "Invalid JSON body"),
-                }
-            }
-            (Method::Post, "/add-queries") => {
-                match read_body(&mut request) {
-                    Some(body) => handle_add_queries(&mut state, &body),
-                    None => error_response(400, "Invalid JSON body"),
-                }
-            }
-            (Method::Post, "/advance") => {
-                match read_body(&mut request) {
-                    Some(body) => handle_advance(&mut state, &body),
-                    None => error_response(400, "Invalid JSON body"),
-                }
-            }
-            (Method::Post, "/add-row") => {
-                match read_body(&mut request) {
-                    Some(body) => handle_add_row(&mut state, &body),
-                    None => error_response(400, "Invalid JSON body"),
-                }
-            }
-            (Method::Post, "/remove-query") => {
-                match read_body(&mut request) {
-                    Some(body) => handle_remove_query(&mut state, &body),
-                    None => error_response(400, "Invalid JSON body"),
-                }
-            }
+            (Method::Post, "/init") => match read_body(&mut request) {
+                Some(body) => handle_init(&mut state, &body),
+                None => error_response(400, "Invalid JSON body"),
+            },
+            (Method::Post, "/add-queries") => match read_body(&mut request) {
+                Some(body) => handle_add_queries(&mut state, &body),
+                None => error_response(400, "Invalid JSON body"),
+            },
+            (Method::Post, "/advance") => match read_body(&mut request) {
+                Some(body) => handle_advance(&mut state, &body),
+                None => error_response(400, "Invalid JSON body"),
+            },
+            (Method::Post, "/add-row") => match read_body(&mut request) {
+                Some(body) => handle_add_row(&mut state, &body),
+                None => error_response(400, "Invalid JSON body"),
+            },
+            (Method::Post, "/remove-query") => match read_body(&mut request) {
+                Some(body) => handle_remove_query(&mut state, &body),
+                None => error_response(400, "Invalid JSON body"),
+            },
             (Method::Post, "/destroy") => handle_destroy(&mut state),
-            (Method::Post, "/add-queries-stream") => {
-                match read_body(&mut request) {
-                    Some(body) => handle_add_queries_stream(&mut state, &body),
-                    None => error_response(400, "Invalid JSON body"),
-                }
-            }
-            (Method::Post, "/advance-stream") => {
-                match read_body(&mut request) {
-                    Some(body) => handle_advance_stream(&mut state, &body),
-                    None => error_response(400, "Invalid JSON body"),
-                }
-            }
+            (Method::Post, "/add-queries-stream") => match read_body(&mut request) {
+                Some(body) => handle_add_queries_stream(&mut state, &body),
+                None => error_response(400, "Invalid JSON body"),
+            },
+            (Method::Post, "/advance-stream") => match read_body(&mut request) {
+                Some(body) => handle_advance_stream(&mut state, &body),
+                None => error_response(400, "Invalid JSON body"),
+            },
 
             (Method::Options, _) => {
-                let mut resp = Response::from_string("")
-                    .with_status_code(204);
+                let mut resp = Response::from_string("").with_status_code(204);
                 if let Ok(h) = Header::from_bytes(b"Access-Control-Allow-Origin", b"*") {
                     resp = resp.with_header(h);
                 }
-                if let Ok(h) = Header::from_bytes(b"Access-Control-Allow-Methods", b"GET, POST, OPTIONS") {
+                if let Ok(h) =
+                    Header::from_bytes(b"Access-Control-Allow-Methods", b"GET, POST, OPTIONS")
+                {
                     resp = resp.with_header(h);
                 }
-                if let Ok(h) = Header::from_bytes(b"Access-Control-Allow-Headers", b"Content-Type") {
+                if let Ok(h) = Header::from_bytes(b"Access-Control-Allow-Headers", b"Content-Type")
+                {
                     resp = resp.with_header(h);
                 }
                 resp

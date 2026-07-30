@@ -43,14 +43,17 @@ impl Storage for MemoryStorage {
 
     fn scan(&self, prefix: Option<&str>) -> Vec<(String, Value)> {
         match prefix {
-            None => self.data.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            Some(p) => {
-                self.data
-                    .range(p.to_string()..)
-                    .take_while(|(k, _)| k.starts_with(p))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            }
+            None => self
+                .data
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            Some(p) => self
+                .data
+                .range(p.to_string()..)
+                .take_while(|(k, _)| k.starts_with(p))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         }
     }
 }

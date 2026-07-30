@@ -10,19 +10,21 @@
 pub mod worker;
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::builder::ast::Ast;
-use crate::builder::builder::{build_pipeline, BuilderDelegate};
+use crate::builder::builder::{BuilderDelegate, build_pipeline};
 use crate::builder::complete_ordering::complete_ordering;
-use crate::ivm::change::{make_source_change_add, make_source_change_edit, make_source_change_remove, Change, SourceChange};
-use crate::ivm::data::{make_comparator, Row, SortOrder, Value};
+use crate::ivm::change::{
+    Change, SourceChange,
+};
+use crate::ivm::data::{Row, Value};
 use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared, Storage};
-use crate::ivm::schema::{SourceSchema, System};
-use crate::ivm::source::{CollectOutput, MemorySource, Source};
+use crate::ivm::schema::SourceSchema;
+use crate::ivm::source::{CollectOutput, Source};
 use crate::streamer::{RowChange, Streamer, TableSpecInfo};
 
 // ---------------------------------------------------------------------------
@@ -59,7 +61,7 @@ struct PipelineEntry {
     schema: SourceSchema,
     query_id: String,
     hydration_time_ms: f64,
-    transformed_ast: Ast,
+    _transformed_ast: Ast,
     /// Live companion pipelines monitoring resolved scalar subqueries for this
     /// query (empty for queries with no scalar subqueries).
     companions: Vec<CompanionPipeline>,
@@ -151,7 +153,13 @@ fn js_scalar_string(value: &Option<Value>, undefined: bool) -> String {
     match value {
         None => "null".to_string(),
         Some(Value::Null) => "null".to_string(),
-        Some(Value::Bool(b)) => if *b { "true".into() } else { "false".into() },
+        Some(Value::Bool(b)) => {
+            if *b {
+                "true".into()
+            } else {
+                "false".into()
+            }
+        }
         Some(Value::F64(n)) => {
             // JS Number stringification for the integer/float literals a
             // resolvable scalar subquery yields.
@@ -208,7 +216,7 @@ struct ScalarResolveOut {
 /// A companion pipeline built during scalar resolution, awaiting a monitoring
 /// output. `resolved_undefined == true` ⇔ TS `undefined` (no row matched);
 /// `resolved_value == None` with `resolved_undefined == false` ⇔ null.
-struct CompanionBuilt {
+pub struct CompanionBuilt {
     input: Shared<dyn Input>,
     table: String,
     child_field: String,
@@ -295,9 +303,7 @@ impl AdvanceContext {
             if elapsed > self.total_hydration_time_ms {
                 return true;
             }
-            if elapsed > self.total_hydration_time_ms / 2.0
-                && self.pos <= self.num_changes / 2
-            {
+            if elapsed > self.total_hydration_time_ms / 2.0 && self.pos <= self.num_changes / 2 {
                 return true;
             }
         }
@@ -324,7 +330,7 @@ pub struct Engine {
     /// Whether NOT EXISTS is allowed (server-side: true).
     enable_not_exists: bool,
     /// Storage factory counter.
-    next_storage_id: usize,
+    _next_storage_id: usize,
     /// Cancellation token for advance/hydrate abort.
     cancellation_token: CancellationToken,
 }
@@ -339,17 +345,15 @@ impl Engine {
             pipelines: Vec::new(),
             row_set_signatures: HashMap::new(),
             enable_not_exists: true, // server-side
-            next_storage_id: 0,
+            _next_storage_id: 0,
             cancellation_token: CancellationToken::new(),
         }
     }
 
     /// Set table spec info (for minRowVersion bumping in Streamer).
     pub fn set_table_spec(&mut self, table: &str, min_row_version: Option<String>) {
-        self.table_specs.insert(
-            table.to_string(),
-            TableSpecInfo { min_row_version },
-        );
+        self.table_specs
+            .insert(table.to_string(), TableSpecInfo { min_row_version });
     }
 
     /// Set the unique keys for a table (PK plus any unique indexes), used by
@@ -428,7 +432,9 @@ impl Engine {
             let pipeline = build_pipeline(&ast, &mut delegate);
 
             let collector = Rc::new(RefCell::new(CollectOutput::new()));
-            pipeline.borrow().set_output(collector.clone() as OutputHandle);
+            pipeline
+                .borrow()
+                .set_output(collector.clone() as OutputHandle);
 
             let schema = pipeline.borrow().get_schema();
             built.push(Built {
@@ -539,7 +545,7 @@ impl Engine {
                 schema: b.schema,
                 query_id: b.query_id,
                 hydration_time_ms,
-                transformed_ast: b.ast,
+                _transformed_ast: b.ast,
                 companions: live_companions,
             });
         }
@@ -584,9 +590,11 @@ impl Engine {
                 let _pipeline_changes = source.borrow_mut().push_parallel(change.clone());
 
                 for entry in &self.pipelines {
-                    let collected: Vec<Change> = std::mem::take(&mut entry.collector.borrow_mut().changes);
+                    let collected: Vec<Change> =
+                        std::mem::take(&mut entry.collector.borrow_mut().changes);
                     if !collected.is_empty() {
-                        let mut streamer = Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
+                        let mut streamer =
+                            Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
                         streamer.accumulate(&entry.query_id, &entry.schema, &collected);
                         for rc in streamer.stream() {
                             on_row_change(&rc);
@@ -598,7 +606,8 @@ impl Engine {
                     for c in &entry.companions {
                         let cc: Vec<Change> = std::mem::take(&mut c.output.borrow_mut().changes);
                         if !cc.is_empty() {
-                            let mut streamer = Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
+                            let mut streamer =
+                                Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
                             streamer.accumulate(&entry.query_id, &c.schema, &cc);
                             for rc in streamer.stream() {
                                 on_row_change(&rc);
@@ -615,21 +624,28 @@ impl Engine {
     pub fn add_queries(&mut self, queries: &[QuerySpec]) -> Vec<QueryResult> {
         let mut by_qid: HashMap<String, Vec<RowChange>> = HashMap::new();
         let results = self.add_queries_streaming(queries, |rc| {
-            by_qid.entry(rc.query_id.clone()).or_default().push(rc.clone());
+            by_qid
+                .entry(rc.query_id.clone())
+                .or_default()
+                .push(rc.clone());
         });
         for changes in by_qid.values() {
             for rc in changes {
                 if rc.change_type != crate::ivm::change::ChangeType::Edit {
                     let sig = *self.row_set_signatures.get(&rc.query_id).unwrap_or(&0);
                     let unit = row_signature_unit(&rc.table, &rc.row_key);
-                    self.row_set_signatures.insert(rc.query_id.clone(), sig ^ unit);
+                    self.row_set_signatures
+                        .insert(rc.query_id.clone(), sig ^ unit);
                 }
             }
         }
-        results.into_iter().map(|mut r| {
-            r.changes = by_qid.remove(&r.query_id).unwrap_or_default();
-            r
-        }).collect()
+        results
+            .into_iter()
+            .map(|mut r| {
+                r.changes = by_qid.remove(&r.query_id).unwrap_or_default();
+                r
+            })
+            .collect()
     }
 
     /// Advance to head: Rust derives its own diff from the snapshotter,
@@ -655,8 +671,9 @@ impl Engine {
         H: FnMut(&str, usize),
     {
         // 1. Advance the snapshotter — get the diff between prev and curr.
-        let diff = snapshotter.advance(syncable_tables, all_table_names)
-            .map_err(|e| crate::snapshotter::DiffError::Other(e))?;
+        let diff = snapshotter
+            .advance(syncable_tables, all_table_names)
+            .map_err(crate::snapshotter::DiffError::Other)?;
 
         let new_version = diff.curr_version().to_string();
         let num_changes = diff.changes() as usize;
@@ -711,7 +728,7 @@ impl Engine {
                                 "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
                                 elapsed_ms, budget, pos, num_changes
                             ),
-                        }
+                        },
                     ));
                 }
                 if elapsed_ms > budget / 2.0 && pos <= num_changes / 2 {
@@ -722,7 +739,7 @@ impl Engine {
                                 "Advancement timed out at half-budget ({:.0}ms, pos: {}/{})",
                                 elapsed_ms, pos, num_changes
                             ),
-                        }
+                        },
                     ));
                 }
             }
@@ -735,12 +752,19 @@ impl Engine {
             // removed ALL prev_values including the same-PK one and used
             // prev_values[0] as the edit-old — an extra REMOVE + wrong old-row
             // pick for an in-place update, diverging from TS.)
-            let pk_cols = self.primary_keys.get(&sc.table).cloned().unwrap_or_default();
+            let pk_cols = self
+                .primary_keys
+                .get(&sc.table)
+                .cloned()
+                .unwrap_or_default();
             let same_pk = |pv: &std::collections::HashMap<String, rusqlite::types::Value>| -> bool {
                 match &sc.next_value {
                     Some(next) if !pk_cols.is_empty() => pk_cols.iter().all(|col| {
                         pv.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
-                            == next.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
+                            == next
+                                .get(col)
+                                .cloned()
+                                .unwrap_or(rusqlite::types::Value::Null)
                     }),
                     _ => false,
                 }
@@ -754,8 +778,15 @@ impl Engine {
                     let change = crate::ivm::change::make_source_change_remove(
                         sqlite_value_to_row(prev_row, col_types),
                     );
-                    push_source_change(&self.sources, &self.pipelines, &sc.table, change,
-                        &self.primary_keys, &self.table_specs, &mut on_row_change);
+                    push_source_change(
+                        &self.sources,
+                        &self.pipelines,
+                        &sc.table,
+                        change,
+                        &self.primary_keys,
+                        &self.table_specs,
+                        &mut on_row_change,
+                    );
                 }
             }
 
@@ -766,8 +797,15 @@ impl Engine {
                 } else {
                     crate::ivm::change::make_source_change_add(row)
                 };
-                push_source_change(&self.sources, &self.pipelines, &sc.table, change,
-                    &self.primary_keys, &self.table_specs, &mut on_row_change);
+                push_source_change(
+                    &self.sources,
+                    &self.pipelines,
+                    &sc.table,
+                    change,
+                    &self.primary_keys,
+                    &self.table_specs,
+                    &mut on_row_change,
+                );
             }
 
             Ok(())
@@ -788,15 +826,13 @@ impl Engine {
                 reset_reason: None,
                 reset_msg: None,
             }),
-            Err(crate::snapshotter::DiffError::Reset(sig)) => {
-                Ok(AdvanceToHeadResult {
-                    version: new_version,
-                    num_changes: pos,
-                    aborted: true,
-                    reset_reason: Some(sig.reason.to_string()),
-                    reset_msg: Some(sig.msg),
-                })
-            }
+            Err(crate::snapshotter::DiffError::Reset(sig)) => Ok(AdvanceToHeadResult {
+                version: new_version,
+                num_changes: pos,
+                aborted: true,
+                reset_reason: Some(sig.reason.to_string()),
+                reset_msg: Some(sig.msg),
+            }),
             Err(e) => Err(e),
         }
     }
@@ -823,7 +859,7 @@ impl Engine {
     /// `companion_rows` for emission on hydrate.
     fn resolve_scalar_subqueries(&self, ast: &Ast) -> ScalarResolveOut {
         use crate::sqlite::resolve_scalar_subqueries::{
-            resolve_simple_scalar_subqueries, ScalarExecutor, TableSpecWithUniqueKeys,
+            ScalarExecutor, TableSpecWithUniqueKeys, resolve_simple_scalar_subqueries,
         };
 
         // Build the unique-key table specs from the engine's known keys.
@@ -833,7 +869,9 @@ impl Engine {
             .map(|(t, keys)| {
                 (
                     t.clone(),
-                    TableSpecWithUniqueKeys { unique_keys: keys.clone() },
+                    TableSpecWithUniqueKeys {
+                        unique_keys: keys.clone(),
+                    },
                 )
             })
             .collect();
@@ -855,7 +893,10 @@ impl Engine {
             let completed = complete_ordering(subquery_ast, &|table: &str| {
                 primary_keys.get(table).cloned().unwrap_or_default()
             });
-            let mut delegate = EngineDelegate { sources, enable_not_exists };
+            let mut delegate = EngineDelegate {
+                sources,
+                enable_not_exists,
+            };
             let input = build_pipeline(&completed, &mut delegate);
 
             // Consume the full stream (the subquery is at-most-one-row) and
@@ -999,7 +1040,9 @@ impl<'a> BuilderDelegate for EngineDelegate<'a> {
     }
 
     fn create_storage(&mut self) -> Shared<dyn Storage> {
-        Rc::new(RefCell::new(crate::ivm::memory_storage::MemoryStorage::new()))
+        Rc::new(RefCell::new(
+            crate::ivm::memory_storage::MemoryStorage::new(),
+        ))
     }
 }
 
@@ -1018,11 +1061,14 @@ fn sqlite_value_to_row(
     col_types: Option<&std::collections::HashMap<String, crate::ivm::schema::ColumnType>>,
 ) -> crate::ivm::data::Row {
     let row: crate::ivm::data::Row = Arc::new(
-        map.iter().map(|(k, v)| {
-            let ct = col_types.and_then(|c| c.get(k));
-            let val = crate::sqlite::table_source::sqlite_value_to_ivm(Ok(v.clone()), ct, "", k);
-            (k.clone(), val)
-        }).collect()
+        map.iter()
+            .map(|(k, v)| {
+                let ct = col_types.and_then(|c| c.get(k));
+                let val =
+                    crate::sqlite::table_source::sqlite_value_to_ivm(Ok(v.clone()), ct, "", k);
+                (k.clone(), val)
+            })
+            .collect(),
     );
     row
 }
@@ -1100,11 +1146,13 @@ impl CancellationToken {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     pub fn reset(&self) {
-        self.cancelled.store(false, std::sync::atomic::Ordering::Release);
+        self.cancelled
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 

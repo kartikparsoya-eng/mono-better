@@ -59,18 +59,22 @@ fn complete_ordering_in_condition(
         Condition::Simple(_) => condition.clone(),
         Condition::CorrelatedSubquery(csq) => {
             let mut csq = csq.clone();
-            csq.related.subquery = Box::new(complete_ordering(
-                &csq.related.subquery,
-                get_primary_key,
-            ));
+            csq.related.subquery =
+                Box::new(complete_ordering(&csq.related.subquery, get_primary_key));
             Condition::CorrelatedSubquery(csq)
         }
-        Condition::And(conds) => {
-            Condition::And(conds.iter().map(|c| complete_ordering_in_condition(c, get_primary_key)).collect())
-        }
-        Condition::Or(conds) => {
-            Condition::Or(conds.iter().map(|c| complete_ordering_in_condition(c, get_primary_key)).collect())
-        }
+        Condition::And(conds) => Condition::And(
+            conds
+                .iter()
+                .map(|c| complete_ordering_in_condition(c, get_primary_key))
+                .collect(),
+        ),
+        Condition::Or(conds) => Condition::Or(
+            conds
+                .iter()
+                .map(|c| complete_ordering_in_condition(c, get_primary_key))
+                .collect(),
+        ),
     }
 }
 
@@ -83,7 +87,8 @@ fn add_primary_keys(
         None => Vec::new(),
     };
 
-    let existing: std::collections::HashSet<String> = result.iter().map(|o| o.column.clone()).collect();
+    let existing: std::collections::HashSet<String> =
+        result.iter().map(|o| o.column.clone()).collect();
 
     for pk_col in primary_key {
         if !existing.contains(pk_col) {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::builder::ast::{Condition, SimpleCondition, ValuePosition};
 use crate::builder::like::get_like_predicate;
-use crate::ivm::data::{compare_values, Value};
+use crate::ivm::data::{Value, compare_values};
 
 /// A predicate function: row → bool.
 pub type Predicate = Arc<dyn Fn(&crate::ivm::data::Row) -> bool>;
@@ -68,7 +68,10 @@ pub fn create_simple_predicate(simple: &SimpleCondition) -> Predicate {
                 pred(&lhs)
             })
         }
-        (ValuePosition::Literal { value: left_val }, ValuePosition::Literal { value: right_val }) => {
+        (
+            ValuePosition::Literal { value: left_val },
+            ValuePosition::Literal { value: right_val },
+        ) => {
             // Literal = literal — evaluate at build time
             let result = match op.as_str() {
                 "=" => left_val == right_val,

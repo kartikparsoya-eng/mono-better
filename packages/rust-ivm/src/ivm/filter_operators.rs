@@ -9,15 +9,12 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use crate::ivm::change::Change;
 use crate::ivm::data::Node;
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{from_vec, NodeStream};
+use crate::ivm::stream::NodeStream;
 
 /// FilterInput — like Input but with `set_filter_output` instead of `set_output`.
 pub trait FilterInput: InputBase {
@@ -71,7 +68,7 @@ impl Input for FilterStart {
 
     fn fetch(&self, req: &FetchRequest) -> NodeStream {
         let input = self.input.borrow();
-        let output = self.output.borrow().clone();
+        let _output = self.output.borrow().clone();
 
         // In a full implementation, this calls begin_filter, filters each
         // node through the filter chain, then end_filter.
@@ -138,9 +135,7 @@ impl Output for FilterEnd {
 
 /// Build a filter pipeline: FilterStart → middle → FilterEnd.
 /// Port of TS `buildFilterPipeline` (filter-operators.ts:152).
-pub fn build_filter_pipeline(
-    input: Shared<dyn Input>,
-) -> (Shared<FilterStart>, Shared<FilterEnd>) {
+pub fn build_filter_pipeline(input: Shared<dyn Input>) -> (Shared<FilterStart>, Shared<FilterEnd>) {
     let start = FilterStart::new(input);
     let end = FilterEnd::new(start.clone());
     (start, end)

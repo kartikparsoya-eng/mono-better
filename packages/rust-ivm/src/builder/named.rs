@@ -74,13 +74,19 @@ impl SyncedQuery {
 
     /// Call the query with args, applying validation if a parse function exists.
     /// Port of TS `withValidation` (named.ts:98).
-    pub fn call(&self, context: Option<&Value>, args: &[Value]) -> Result<crate::builder::query::Query, crate::builder::error::QueryParseError> {
+    pub fn call(
+        &self,
+        context: Option<&Value>,
+        args: &[Value],
+    ) -> Result<crate::builder::query::Query, crate::builder::error::QueryParseError> {
         let parsed_args = match &self.parse {
             Some(parse_fn) => match parse_fn(args) {
                 Ok(parsed) => parsed,
-                Err(msg) => return Err(crate::builder::error::QueryParseError::new(Some(
-                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
-                ))),
+                Err(msg) => {
+                    return Err(crate::builder::error::QueryParseError::new(Some(Box::new(
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, msg),
+                    ))));
+                }
             },
             None => args.to_vec(),
         };

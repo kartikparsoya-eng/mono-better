@@ -1,15 +1,15 @@
 //! End-to-end tests for TableSource — the production SQLite-backed source.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rusqlite::Connection;
 use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::Value;
-use rust_ivm::ivm::operator::{Input, InputBase, Output, OutputHandle};
+use rust_ivm::ivm::operator::OutputHandle;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::CollectOutput;
 use rust_ivm::sqlite::table_source::TableSource;
@@ -20,11 +20,7 @@ fn create_db_with_table(table_name: &str, columns: &[(&str, &str)]) -> Rc<RefCel
         .iter()
         .map(|(name, col)| format!("\"{}\" {}", name, col))
         .collect();
-    let sql = format!(
-        "CREATE TABLE \"{}\" ({});",
-        table_name,
-        col_defs.join(", ")
-    );
+    let sql = format!("CREATE TABLE \"{}\" ({});", table_name, col_defs.join(", "));
     conn.execute(&sql, []).unwrap();
     Rc::new(RefCell::new(conn))
 }
@@ -43,7 +39,10 @@ fn test_table_source_fetch_all() {
 
     // Insert some data
     db.borrow()
-        .execute("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')", [])
+        .execute(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')",
+            [],
+        )
         .unwrap();
 
     let mut columns = HashMap::new();
@@ -67,7 +66,10 @@ fn test_table_source_fetch_all() {
 fn test_table_source_fetch_with_constraint() {
     let db = create_db_with_table("users", &[("id", "INTEGER PRIMARY KEY"), ("name", "TEXT")]);
     db.borrow()
-        .execute("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')", [])
+        .execute(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')",
+            [],
+        )
         .unwrap();
 
     let mut columns = HashMap::new();
@@ -95,7 +97,14 @@ fn test_table_source_fetch_with_constraint() {
 
 #[test]
 fn test_table_source_fetch_with_filter() {
-    let db = create_db_with_table("users", &[("id", "INTEGER PRIMARY KEY"), ("name", "TEXT"), ("age", "INTEGER")]);
+    let db = create_db_with_table(
+        "users",
+        &[
+            ("id", "INTEGER PRIMARY KEY"),
+            ("name", "TEXT"),
+            ("age", "INTEGER"),
+        ],
+    );
     db.borrow()
         .execute(
             "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 25), (2, 'Bob', 30), (3, 'Carol', 25)",
@@ -132,7 +141,10 @@ fn test_table_source_fetch_with_filter() {
 fn test_table_source_fetch_with_order() {
     let db = create_db_with_table("users", &[("id", "INTEGER PRIMARY KEY"), ("name", "TEXT")]);
     db.borrow()
-        .execute("INSERT INTO users (id, name) VALUES (3, 'Carol'), (1, 'Alice'), (2, 'Bob')", [])
+        .execute(
+            "INSERT INTO users (id, name) VALUES (3, 'Carol'), (1, 'Alice'), (2, 'Bob')",
+            [],
+        )
         .unwrap();
 
     let mut columns = HashMap::new();
@@ -141,7 +153,8 @@ fn test_table_source_fetch_with_order() {
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
 
-    let sort: rust_ivm::ivm::data::SortOrder = Arc::new(vec![["id".to_string(), "asc".to_string()]]);
+    let sort: rust_ivm::ivm::data::SortOrder =
+        Arc::new(vec![["id".to_string(), "asc".to_string()]]);
 
     let input = source.connect(Some(sort), None, None, None);
 
@@ -150,9 +163,18 @@ fn test_table_source_fetch_with_order() {
 
     assert_eq!(nodes.len(), 3);
     // Should be ordered by id asc: 1, 2, 3
-    assert_eq!(nodes[0].row.get("id").cloned().unwrap_or(Value::Null), Value::F64(1.0));
-    assert_eq!(nodes[1].row.get("id").cloned().unwrap_or(Value::Null), Value::F64(2.0));
-    assert_eq!(nodes[2].row.get("id").cloned().unwrap_or(Value::Null), Value::F64(3.0));
+    assert_eq!(
+        nodes[0].row.get("id").cloned().unwrap_or(Value::Null),
+        Value::F64(1.0)
+    );
+    assert_eq!(
+        nodes[1].row.get("id").cloned().unwrap_or(Value::Null),
+        Value::F64(2.0)
+    );
+    assert_eq!(
+        nodes[2].row.get("id").cloned().unwrap_or(Value::Null),
+        Value::F64(3.0)
+    );
 }
 
 #[test]
@@ -172,7 +194,9 @@ fn test_table_source_push_add() {
     // Connect a pipeline
     let input = source.connect(None, None, None, None);
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
-    input.borrow_mut().set_output(collector.clone() as OutputHandle);
+    input
+        .borrow_mut()
+        .set_output(collector.clone() as OutputHandle);
 
     // Push an add
     let new_row = make_row(&[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into()))]);
@@ -197,7 +221,10 @@ fn test_table_source_push_add() {
 fn test_table_source_push_remove() {
     let db = create_db_with_table("users", &[("id", "INTEGER PRIMARY KEY"), ("name", "TEXT")]);
     db.borrow()
-        .execute("INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')", [])
+        .execute(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
+            [],
+        )
         .unwrap();
 
     let mut columns = HashMap::new();
@@ -208,10 +235,15 @@ fn test_table_source_push_remove() {
 
     let input = source.connect(None, None, None, None);
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
-    input.borrow_mut().set_output(collector.clone() as OutputHandle);
+    input
+        .borrow_mut()
+        .set_output(collector.clone() as OutputHandle);
 
     // Push a remove
-    let row = make_row(&[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into()))]);
+    let row = make_row(&[
+        ("id", Value::F64(1.0)),
+        ("name", Value::Str("Alice".into())),
+    ]);
     source.push(rust_ivm::ivm::change::make_source_change_remove(row));
 
     // Verify it was deleted from SQLite
@@ -238,12 +270,19 @@ fn test_table_source_push_edit() {
 
     let input = source.connect(None, None, None, None);
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
-    input.borrow_mut().set_output(collector.clone() as OutputHandle);
+    input
+        .borrow_mut()
+        .set_output(collector.clone() as OutputHandle);
 
     // Push an edit (same PK, different name)
-    let old_row = make_row(&[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into()))]);
+    let old_row = make_row(&[
+        ("id", Value::F64(1.0)),
+        ("name", Value::Str("Alice".into())),
+    ]);
     let new_row = make_row(&[("id", Value::F64(1.0)), ("name", Value::Str("Bob".into()))]);
-    source.push(rust_ivm::ivm::change::make_source_change_edit(new_row, old_row));
+    source.push(rust_ivm::ivm::change::make_source_change_edit(
+        new_row, old_row,
+    ));
 
     // Verify the name was updated in SQLite
     let name: String = db
@@ -293,7 +332,7 @@ fn test_table_source_fetch_with_multi_constraint() {
     let nodes: Vec<_> = rust_ivm::ivm::stream::skip_yields(stream).collect();
 
     assert_eq!(nodes.len(), 2);
-    let ids: Vec<f64> = nodes
+    let _ids: Vec<f64> = nodes
         .iter()
         .map(|n| match n.row.get("id").cloned().unwrap_or(Value::Null) {
             Value::F64(f) => f,

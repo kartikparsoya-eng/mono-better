@@ -1,8 +1,8 @@
 //! Tests for builder features: LIKE/ILIKE, IN/NOT IN, IS/IS NOT, EXISTS, transformFilters.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -11,10 +11,10 @@ use rust_ivm::builder::ast::{
     Ast, Condition, CorrelatedSubqueryCondition, OrderPart, RelatedSubquery, SimpleCondition,
     ValuePosition,
 };
-use rust_ivm::builder::filter::{create_predicate, transform_filters, TransformedFilters};
+use rust_ivm::builder::filter::{TransformedFilters, create_predicate, transform_filters};
 use rust_ivm::builder::like::get_like_predicate;
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::data::{Value, Row};
+use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
 
@@ -96,8 +96,12 @@ fn test_like_in_predicate() {
     // Test LIKE through create_predicate
     let cond = Condition::Simple(SimpleCondition {
         op: "LIKE".to_string(),
-        left: ValuePosition::Column { name: "name".to_string() },
-        right: ValuePosition::Literal { value: Value::Str("user%".into()) },
+        left: ValuePosition::Column {
+            name: "name".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::Str("user%".into()),
+        },
     });
     let pred = create_predicate(&cond);
     assert!(pred(&make_row(&[("name", Value::Str("user1".into()))])));
@@ -109,8 +113,12 @@ fn test_like_in_predicate() {
 fn test_ilike_in_predicate() {
     let cond = Condition::Simple(SimpleCondition {
         op: "ILIKE".to_string(),
-        left: ValuePosition::Column { name: "name".to_string() },
-        right: ValuePosition::Literal { value: Value::Str("USER%".into()) },
+        left: ValuePosition::Column {
+            name: "name".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::Str("USER%".into()),
+        },
     });
     let pred = create_predicate(&cond);
     assert!(pred(&make_row(&[("name", Value::Str("user1".into()))])));
@@ -122,8 +130,12 @@ fn test_ilike_in_predicate() {
 fn test_not_like_in_predicate() {
     let cond = Condition::Simple(SimpleCondition {
         op: "NOT LIKE".to_string(),
-        left: ValuePosition::Column { name: "name".to_string() },
-        right: ValuePosition::Literal { value: Value::Str("user%".into()) },
+        left: ValuePosition::Column {
+            name: "name".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::Str("user%".into()),
+        },
     });
     let pred = create_predicate(&cond);
     assert!(!pred(&make_row(&[("name", Value::Str("user1".into()))])));
@@ -138,7 +150,9 @@ fn test_not_like_in_predicate() {
 fn test_is_null_predicate() {
     let cond = Condition::Simple(SimpleCondition {
         op: "IS".to_string(),
-        left: ValuePosition::Column { name: "name".to_string() },
+        left: ValuePosition::Column {
+            name: "name".to_string(),
+        },
         right: ValuePosition::Literal { value: Value::Null },
     });
     let pred = create_predicate(&cond);
@@ -150,7 +164,9 @@ fn test_is_null_predicate() {
 fn test_is_not_null_predicate() {
     let cond = Condition::Simple(SimpleCondition {
         op: "IS NOT".to_string(),
-        left: ValuePosition::Column { name: "name".to_string() },
+        left: ValuePosition::Column {
+            name: "name".to_string(),
+        },
         right: ValuePosition::Literal { value: Value::Null },
     });
     let pred = create_predicate(&cond);
@@ -166,8 +182,12 @@ fn test_is_not_null_predicate() {
 fn test_is_with_bool_literal() {
     let cond = Condition::Simple(SimpleCondition {
         op: "IS".to_string(),
-        left: ValuePosition::Column { name: "active".to_string() },
-        right: ValuePosition::Literal { value: Value::Bool(true) },
+        left: ValuePosition::Column {
+            name: "active".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::Bool(true),
+        },
     });
     let pred = create_predicate(&cond);
     assert!(pred(&make_row(&[("active", Value::Bool(true))])));
@@ -183,8 +203,12 @@ fn test_is_with_bool_literal() {
 fn test_transform_filters_no_subqueries() {
     let cond = Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: "id".to_string() },
-        right: ValuePosition::Literal { value: Value::F64(1.0) },
+        left: ValuePosition::Column {
+            name: "id".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::F64(1.0),
+        },
     });
     let result = transform_filters(Some(&cond));
     assert!(!result.conditions_removed);
@@ -214,13 +238,17 @@ fn test_transform_filters_strips_subquery() {
         op: "EXISTS".to_string(),
         flip: Some(false),
         scalar: false,
-                plan_id: None,
+        plan_id: None,
     };
 
     let simple = Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: "active".to_string() },
-        right: ValuePosition::Literal { value: Value::Bool(true) },
+        left: ValuePosition::Column {
+            name: "active".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::Bool(true),
+        },
     });
 
     // AND([simple, CSQ]) → should strip CSQ, keep simple
@@ -258,13 +286,17 @@ fn test_transform_filters_or_with_subquery_removes_all() {
         op: "EXISTS".to_string(),
         flip: Some(false),
         scalar: false,
-                plan_id: None,
+        plan_id: None,
     };
 
     let simple = Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: "id".to_string() },
-        right: ValuePosition::Literal { value: Value::F64(1.0) },
+        left: ValuePosition::Column {
+            name: "id".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::F64(1.0),
+        },
     });
 
     // OR([simple, CSQ]) → if any branch is removed, the whole OR is removed
@@ -327,8 +359,14 @@ fn test_complete_ordering_no_dup_pks() {
         related: vec![],
         limit: None,
         order_by: Some(vec![
-            OrderPart { column: "name".to_string(), direction: "asc".to_string() },
-            OrderPart { column: "id".to_string(), direction: "asc".to_string() },
+            OrderPart {
+                column: "name".to_string(),
+                direction: "asc".to_string(),
+            },
+            OrderPart {
+                column: "id".to_string(),
+                direction: "asc".to_string(),
+            },
         ]),
         start: None,
     };
@@ -367,7 +405,7 @@ fn test_assert_no_not_exists_passes_for_exists() {
         op: "EXISTS".to_string(),
         flip: Some(false),
         scalar: false,
-                plan_id: None,
+        plan_id: None,
     };
 
     // Should not panic
@@ -400,7 +438,7 @@ fn test_assert_no_not_exists_panics_for_not_exists() {
         op: "NOT EXISTS".to_string(),
         flip: Some(false),
         scalar: false,
-                plan_id: None,
+        plan_id: None,
     };
 
     assert_no_not_exists(&Condition::CorrelatedSubquery(csq));
@@ -416,8 +454,12 @@ fn test_condition_includes_flipped_false() {
 
     let simple = Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: "id".to_string() },
-        right: ValuePosition::Literal { value: Value::F64(1.0) },
+        left: ValuePosition::Column {
+            name: "id".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::F64(1.0),
+        },
     });
     assert!(!condition_includes_flipped_subquery_at_any_level(&simple));
 }
@@ -447,13 +489,17 @@ fn test_condition_includes_flipped_true() {
         op: "EXISTS".to_string(),
         flip: Some(true),
         scalar: false,
-                plan_id: None,
+        plan_id: None,
     };
 
     let simple = Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: "id".to_string() },
-        right: ValuePosition::Literal { value: Value::F64(1.0) },
+        left: ValuePosition::Column {
+            name: "id".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::F64(1.0),
+        },
     });
 
     let and = Condition::And(vec![simple, Condition::CorrelatedSubquery(csq)]);
@@ -467,11 +513,14 @@ fn test_condition_includes_flipped_true() {
 #[test]
 fn test_pipeline_with_like_filter() {
     let source = make_source("users", &["id"]);
-    add_rows(&source, &[
-        ("id", Value::F64(1.0), "name", Value::Str("user1".into())),
-        ("id", Value::F64(2.0), "name", Value::Str("user2".into())),
-        ("id", Value::F64(3.0), "name", Value::Str("admin".into())),
-    ]);
+    add_rows(
+        &source,
+        &[
+            ("id", Value::F64(1.0), "name", Value::Str("user1".into())),
+            ("id", Value::F64(2.0), "name", Value::Str("user2".into())),
+            ("id", Value::F64(3.0), "name", Value::Str("admin".into())),
+        ],
+    );
 
     let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
@@ -482,16 +531,26 @@ fn test_pipeline_with_like_filter() {
         alias: None,
         where_clause: Some(Condition::Simple(SimpleCondition {
             op: "LIKE".to_string(),
-            left: ValuePosition::Column { name: "name".to_string() },
-            right: ValuePosition::Literal { value: Value::Str("user%".into()) },
+            left: ValuePosition::Column {
+                name: "name".to_string(),
+            },
+            right: ValuePosition::Literal {
+                value: Value::Str("user%".into()),
+            },
         })),
         related: vec![],
         limit: None,
-        order_by: Some(vec![OrderPart { column: "id".to_string(), direction: "asc".to_string() }]),
+        order_by: Some(vec![OrderPart {
+            column: "id".to_string(),
+            direction: "asc".to_string(),
+        }]),
         start: None,
     };
 
-    let results = engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast }]);
+    let results = engine.add_queries(&[QuerySpec {
+        query_id: "q1".to_string(),
+        ast,
+    }]);
     // user1 and user2 match, admin does not
     assert_eq!(results[0].changes.len(), 2);
 }
@@ -527,19 +586,30 @@ fn test_pipeline_with_is_null_filter() {
         alias: None,
         where_clause: Some(Condition::Simple(SimpleCondition {
             op: "IS".to_string(),
-            left: ValuePosition::Column { name: "bio".to_string() },
+            left: ValuePosition::Column {
+                name: "bio".to_string(),
+            },
             right: ValuePosition::Literal { value: Value::Null },
         })),
         related: vec![],
         limit: None,
-        order_by: Some(vec![OrderPart { column: "id".to_string(), direction: "asc".to_string() }]),
+        order_by: Some(vec![OrderPart {
+            column: "id".to_string(),
+            direction: "asc".to_string(),
+        }]),
         start: None,
     };
 
-    let results = engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast }]);
+    let results = engine.add_queries(&[QuerySpec {
+        query_id: "q1".to_string(),
+        ast,
+    }]);
     // Only alice has NULL bio
     assert_eq!(results[0].changes.len(), 1);
-    assert_eq!(results[0].changes[0].row.as_ref().unwrap().get("name"), Some(&Value::Str("alice".into())));
+    assert_eq!(
+        results[0].changes[0].row.as_ref().unwrap().get("name"),
+        Some(&Value::Str("alice".into()))
+    );
 }
 
 // ===========================================================================
@@ -549,11 +619,14 @@ fn test_pipeline_with_is_null_filter() {
 #[test]
 fn test_pipeline_with_and_or() {
     let source = make_source("users", &["id"]);
-    add_rows(&source, &[
-        ("id", Value::F64(1.0), "name", Value::Str("alice".into())),
-        ("id", Value::F64(2.0), "name", Value::Str("bob".into())),
-        ("id", Value::F64(3.0), "name", Value::Str("charlie".into())),
-    ]);
+    add_rows(
+        &source,
+        &[
+            ("id", Value::F64(1.0), "name", Value::Str("alice".into())),
+            ("id", Value::F64(2.0), "name", Value::Str("bob".into())),
+            ("id", Value::F64(3.0), "name", Value::Str("charlie".into())),
+        ],
+    );
 
     let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
@@ -566,21 +639,35 @@ fn test_pipeline_with_and_or() {
         where_clause: Some(Condition::Or(vec![
             Condition::Simple(SimpleCondition {
                 op: "=".to_string(),
-                left: ValuePosition::Column { name: "id".to_string() },
-                right: ValuePosition::Literal { value: Value::F64(1.0) },
+                left: ValuePosition::Column {
+                    name: "id".to_string(),
+                },
+                right: ValuePosition::Literal {
+                    value: Value::F64(1.0),
+                },
             }),
             Condition::Simple(SimpleCondition {
                 op: "=".to_string(),
-                left: ValuePosition::Column { name: "id".to_string() },
-                right: ValuePosition::Literal { value: Value::F64(3.0) },
+                left: ValuePosition::Column {
+                    name: "id".to_string(),
+                },
+                right: ValuePosition::Literal {
+                    value: Value::F64(3.0),
+                },
             }),
         ])),
         related: vec![],
         limit: None,
-        order_by: Some(vec![OrderPart { column: "id".to_string(), direction: "asc".to_string() }]),
+        order_by: Some(vec![OrderPart {
+            column: "id".to_string(),
+            direction: "asc".to_string(),
+        }]),
         start: None,
     };
 
-    let results = engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast }]);
+    let results = engine.add_queries(&[QuerySpec {
+        query_id: "q1".to_string(),
+        ast,
+    }]);
     assert_eq!(results[0].changes.len(), 2);
 }

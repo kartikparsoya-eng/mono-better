@@ -3,12 +3,11 @@
 //! breaking the strong-ref cycle Source → Connection → Operator → Source.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use rust_ivm::builder::ast::Ast;
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::{MemorySource, Source};
 
@@ -20,9 +19,11 @@ fn make_engine() -> Engine {
     let mut cols = HashMap::new();
     cols.insert("id".to_string(), ColumnType::Number { optional: false });
     cols.insert("name".to_string(), ColumnType::String { optional: false });
-    let source: Rc<RefCell<dyn Source>> = Rc::new(RefCell::new(
-        MemorySource::new("t", cols, vec!["id".to_string()]),
-    ));
+    let source: Rc<RefCell<dyn Source>> = Rc::new(RefCell::new(MemorySource::new(
+        "t",
+        cols,
+        vec!["id".to_string()],
+    )));
     eng.register_source(source);
     eng
 }
@@ -35,12 +36,10 @@ fn make_ast() -> Ast {
         where_clause: None,
         related: vec![],
         limit: None,
-        order_by: Some(vec![
-            rust_ivm::builder::ast::OrderPart {
-                column: "id".to_string(),
-                direction: "asc".to_string(),
-            },
-        ]),
+        order_by: Some(vec![rust_ivm::builder::ast::OrderPart {
+            column: "id".to_string(),
+            direction: "asc".to_string(),
+        }]),
         start: None,
     }
 }
@@ -52,7 +51,7 @@ fn test_add_remove_no_leak() {
     // Add rows to the source so hydration produces output
     {
         let source = eng.sources().get("t").unwrap();
-        let mut s = source.borrow_mut();
+        let _s = source.borrow_mut();
         // Access through MemorySource-specific method via downcast not possible
         // on dyn Source, so we add rows via push instead
     }
@@ -80,8 +79,14 @@ fn test_destroy_clears_pipelines() {
     let mut eng = make_engine();
 
     let specs = vec![
-        QuerySpec { query_id: "q1".to_string(), ast: make_ast() },
-        QuerySpec { query_id: "q2".to_string(), ast: make_ast() },
+        QuerySpec {
+            query_id: "q1".to_string(),
+            ast: make_ast(),
+        },
+        QuerySpec {
+            query_id: "q2".to_string(),
+            ast: make_ast(),
+        },
     ];
     let _ = eng.add_queries(&specs);
     assert_eq!(eng.pipeline_query_ids().len(), 2);
@@ -95,8 +100,14 @@ fn test_reset_clears_pipelines() {
     let mut eng = make_engine();
 
     let specs = vec![
-        QuerySpec { query_id: "q1".to_string(), ast: make_ast() },
-        QuerySpec { query_id: "q2".to_string(), ast: make_ast() },
+        QuerySpec {
+            query_id: "q1".to_string(),
+            ast: make_ast(),
+        },
+        QuerySpec {
+            query_id: "q2".to_string(),
+            ast: make_ast(),
+        },
     ];
     let _ = eng.add_queries(&specs);
     assert_eq!(eng.pipeline_query_ids().len(), 2);

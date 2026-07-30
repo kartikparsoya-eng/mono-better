@@ -12,8 +12,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use std::collections::HashMap;
 use rusqlite::Connection;
+use std::collections::HashMap;
 
 use rust_ivm::builder::ast::{Ast, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
@@ -27,8 +27,10 @@ use rust_ivm::streamer::RowChange;
 /// output can be compared byte-for-byte regardless of hash-map iteration order.
 fn canon(rc: &RowChange) -> String {
     fn row_str(r: &rust_ivm::ivm::data::Row) -> String {
-        let mut kv: Vec<(String, String)> =
-            r.iter().map(|(k, v)| (k.clone(), format!("{:?}", v))).collect();
+        let mut kv: Vec<(String, String)> = r
+            .iter()
+            .map(|(k, v)| (k.clone(), format!("{:?}", v)))
+            .collect();
         kv.sort();
         format!("{:?}", kv)
     }
@@ -120,7 +122,10 @@ fn hydrate_run(path: &str, pool_lanes: usize) -> (std::time::Duration, Vec<Strin
     .collect();
     let child_columns: std::collections::HashMap<String, ColumnType> = [
         ("id".to_string(), ColumnType::String { optional: false }),
-        ("parent_id".to_string(), ColumnType::String { optional: false }),
+        (
+            "parent_id".to_string(),
+            ColumnType::String { optional: false },
+        ),
         ("name".to_string(), ColumnType::String { optional: false }),
     ]
     .into_iter()
@@ -163,7 +168,9 @@ fn hydrate_run(path: &str, pool_lanes: usize) -> (std::time::Duration, Vec<Strin
     let elapsed = start.elapsed();
     eprintln!(
         "  pool_lanes={}: {} rows in {:?}",
-        pool_lanes, rows.len(), elapsed
+        pool_lanes,
+        rows.len(),
+        elapsed
     );
     (elapsed, rows)
 }

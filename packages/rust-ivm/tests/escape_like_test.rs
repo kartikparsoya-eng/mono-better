@@ -13,11 +13,6 @@ fn test_escape_like_basics() {
     ];
 
     for (input, expected) in cases {
-        assert_eq!(
-            escape_like(input),
-            *expected,
-            "input: {:?}",
-            input
-        );
+        assert_eq!(escape_like(input), *expected, "input: {:?}", input);
     }
 }

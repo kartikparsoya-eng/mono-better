@@ -2,26 +2,28 @@
 //! Tests schema creation, fetch merge (sorted + dedup), and push propagation.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::data::{Node, Row, SortOrder, Value};
-use rust_ivm::ivm::operator::{
-    FetchRequest, Input, InputBase, OutputHandle, Shared,
-};
+use rust_ivm::ivm::data::{Node, SortOrder, Value};
+use rust_ivm::ivm::operator::{FetchRequest, Input, InputBase, OutputHandle, Shared};
 use rust_ivm::ivm::schema::{ColumnType, SourceSchema, System};
-use rust_ivm::ivm::source::{MemorySource};
-use rust_ivm::ivm::stream::{from_vec, NodeStream};
+use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::stream::{NodeStream, from_vec};
 use rust_ivm::ivm::union_fan_in::UnionFanIn;
 
 fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))
 }
 
-fn make_source(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Rc<RefCell<MemorySource>> {
+fn make_source(
+    name: &str,
+    pk: &[&str],
+    columns: &[(&str, ColumnType)],
+) -> Rc<RefCell<MemorySource>> {
     let cols: HashMap<String, ColumnType> = columns
         .iter()
         .map(|(n, t)| (n.to_string(), t.clone()))
@@ -42,7 +44,11 @@ fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
 }
 
 fn pk_sort(pk: &[&str]) -> SortOrder {
-    Arc::new(pk.iter().map(|s| [s.to_string(), "asc".to_string()]).collect::<Vec<_>>())
+    Arc::new(
+        pk.iter()
+            .map(|s| [s.to_string(), "asc".to_string()])
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn make_schema(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> SourceSchema {
@@ -67,7 +73,8 @@ fn make_schema(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Sourc
 }
 
 fn connect_sorted(src: &Rc<RefCell<MemorySource>>, pk: &[&str]) -> Shared<dyn Input> {
-    src.borrow_mut().connect(Some(pk_sort(pk)), None, None, None)
+    src.borrow_mut()
+        .connect(Some(pk_sort(pk)), None, None, None)
 }
 
 fn row_id(node: &Node) -> Value {
@@ -122,18 +129,27 @@ fn make_node(id: &str) -> Node {
 
 #[test]
 fn test_fetch_empty_inputs() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     let ufi = UnionFanIn::new(schema);
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
     assert_eq!(nodes.len(), 0);
 }
 
 #[test]
 fn test_schema_preserved() {
-    let schema = make_schema("custom", &["id", "name"], &[
-        ("id", ColumnType::String { optional: false }),
-        ("name", ColumnType::String { optional: false }),
-    ]);
+    let schema = make_schema(
+        "custom",
+        &["id", "name"],
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("name", ColumnType::String { optional: false }),
+        ],
+    );
     let ufi = UnionFanIn::new(schema);
     let result = ufi.borrow().get_schema();
     assert_eq!(result.table_name, "custom");
@@ -168,8 +184,16 @@ fn test_schema_preserves_all_properties() {
 
 #[test]
 fn test_fetch_single_input() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let src = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let src = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src, &[("id", str_val("a"))]);
     add_row(&src, &[("id", str_val("b"))]);
     let input = connect_sorted(&src, &["id"]);
@@ -177,7 +201,8 @@ fn test_fetch_single_input() {
     let ufi = UnionFanIn::new(schema);
     ufi.borrow_mut().add_input(input);
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
     assert_eq!(nodes.len(), 2);
     assert_eq!(row_id(&nodes[0]), str_val("a"));
     assert_eq!(row_id(&nodes[1]), str_val("b"));
@@ -185,14 +210,26 @@ fn test_fetch_single_input() {
 
 #[test]
 fn test_fetch_merge_two_inputs_sorted() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
-    let src1 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src1 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src1, &[("id", str_val("a"))]);
     add_row(&src1, &[("id", str_val("c"))]);
     let input1 = connect_sorted(&src1, &["id"]);
 
-    let src2 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src2 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src2, &[("id", str_val("b"))]);
     add_row(&src2, &[("id", str_val("d"))]);
     let input2 = connect_sorted(&src2, &["id"]);
@@ -201,7 +238,8 @@ fn test_fetch_merge_two_inputs_sorted() {
     ufi.borrow_mut().add_input(input1);
     ufi.borrow_mut().add_input(input2);
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
     assert_eq!(nodes.len(), 4);
     assert_eq!(row_id(&nodes[0]), str_val("a"));
     assert_eq!(row_id(&nodes[1]), str_val("b"));
@@ -211,14 +249,26 @@ fn test_fetch_merge_two_inputs_sorted() {
 
 #[test]
 fn test_fetch_merge_dedup() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
-    let src1 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src1 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src1, &[("id", str_val("a"))]);
     add_row(&src1, &[("id", str_val("b"))]);
     let input1 = connect_sorted(&src1, &["id"]);
 
-    let src2 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src2 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src2, &[("id", str_val("a"))]);
     add_row(&src2, &[("id", str_val("c"))]);
     let input2 = connect_sorted(&src2, &["id"]);
@@ -227,7 +277,8 @@ fn test_fetch_merge_dedup() {
     ufi.borrow_mut().add_input(input1);
     ufi.borrow_mut().add_input(input2);
 
-    let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
+    let nodes: Vec<Node> =
+        rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&FetchRequest::default())).collect();
     assert_eq!(nodes.len(), 3, "Duplicate 'a' should be deduplicated");
     assert_eq!(row_id(&nodes[0]), str_val("a"));
     assert_eq!(row_id(&nodes[1]), str_val("b"));
@@ -246,7 +297,11 @@ fn test_fetch_merge_tiebreak_lower_index_wins() {
     // node first — leaking the flipped subquery's relationship into the output
     // where TS suppresses it (TS yields the non-flipped, relationship-less
     // node first and drops the flipped duplicate).
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
     // input1 (index 0): node 'a' with NO relationship (the non-flipped branch).
     let node_a_plain = make_node("a");
@@ -255,8 +310,7 @@ fn test_fetch_merge_tiebreak_lower_index_wins() {
     // input2 (index 1): node 'a' WITH a subquery relationship (the flipped
     // branch — FlippedJoin attaches the matched child rows).
     let child = make_node("child");
-    let rel: rust_ivm::ivm::stream::RelStream =
-        Rc::new(move || from_vec(vec![child.clone()]));
+    let rel: rust_ivm::ivm::stream::RelStream = Rc::new(move || from_vec(vec![child.clone()]));
     let node_a_with_rel = make_node("a").set_relationship("zsubq_t2_0", rel);
     let input2 = mock_input(schema.clone(), vec![node_a_with_rel]);
 
@@ -277,14 +331,26 @@ fn test_fetch_merge_tiebreak_lower_index_wins() {
 
 #[test]
 fn test_fetch_reverse() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
-    let src1 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src1 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src1, &[("id", str_val("a"))]);
     add_row(&src1, &[("id", str_val("c"))]);
     let input1 = connect_sorted(&src1, &["id"]);
 
-    let src2 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src2 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src2, &[("id", str_val("b"))]);
     add_row(&src2, &[("id", str_val("d"))]);
     let input2 = connect_sorted(&src2, &["id"]);
@@ -308,15 +374,27 @@ fn test_fetch_reverse() {
 #[test]
 fn test_fetch_reverse_with_overlap_dedup() {
     // Both branches contain id=2 and id=4. Reverse merge should dedup adjacent duplicates.
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::Number { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::Number { optional: false })],
+    );
 
-    let src1 = make_source("test", &["id"], &[("id", ColumnType::Number { optional: false })]);
+    let src1 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::Number { optional: false })],
+    );
     add_row(&src1, &[("id", Value::F64(1.0))]);
     add_row(&src1, &[("id", Value::F64(2.0))]);
     add_row(&src1, &[("id", Value::F64(4.0))]);
     let input1 = connect_sorted(&src1, &["id"]);
 
-    let src2 = make_source("test", &["id"], &[("id", ColumnType::Number { optional: false })]);
+    let src2 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::Number { optional: false })],
+    );
     add_row(&src2, &[("id", Value::F64(2.0))]);
     add_row(&src2, &[("id", Value::F64(3.0))]);
     add_row(&src2, &[("id", Value::F64(4.0))]);
@@ -332,20 +410,43 @@ fn test_fetch_reverse_with_overlap_dedup() {
     };
     let nodes: Vec<Node> = rust_ivm::ivm::stream::skip_yields(ufi.borrow().fetch(&req)).collect();
     assert_eq!(nodes.len(), 4);
-    let ids: Vec<Value> = nodes.iter().map(|n| n.row.get("id").cloned().unwrap_or(Value::Null)).collect();
-    assert_eq!(ids, vec![Value::F64(4.0), Value::F64(3.0), Value::F64(2.0), Value::F64(1.0)]);
+    let ids: Vec<Value> = nodes
+        .iter()
+        .map(|n| n.row.get("id").cloned().unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            Value::F64(4.0),
+            Value::F64(3.0),
+            Value::F64(2.0),
+            Value::F64(1.0)
+        ]
+    );
 }
 
 #[test]
 fn test_fetch_with_constraint() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
-    let src1 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src1 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src1, &[("id", str_val("a"))]);
     add_row(&src1, &[("id", str_val("b"))]);
     let input1 = connect_sorted(&src1, &["id"]);
 
-    let src2 = make_source("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let src2 = make_source(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     add_row(&src2, &[("id", str_val("b"))]);
     add_row(&src2, &[("id", str_val("c"))]);
     let input2 = connect_sorted(&src2, &["id"]);
@@ -370,8 +471,16 @@ fn test_fetch_with_constraint() {
 #[test]
 #[should_panic(expected = "Table name mismatch")]
 fn test_mismatch_table_name() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let mismatched = make_schema("different", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let mismatched = make_schema(
+        "different",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     let (input, _) = mock_input(mismatched, vec![]);
     let ufi = UnionFanIn::new(schema);
     ufi.borrow_mut().add_input(input);
@@ -380,11 +489,19 @@ fn test_mismatch_table_name() {
 #[test]
 #[should_panic(expected = "Primary key mismatch")]
 fn test_mismatch_primary_key() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let mismatched = make_schema("test", &["id", "name"], &[
-        ("id", ColumnType::String { optional: false }),
-        ("name", ColumnType::String { optional: false }),
-    ]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let mismatched = make_schema(
+        "test",
+        &["id", "name"],
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("name", ColumnType::String { optional: false }),
+        ],
+    );
     let (input, _) = mock_input(mismatched, vec![]);
     let ufi = UnionFanIn::new(schema);
     ufi.borrow_mut().add_input(input);
@@ -393,8 +510,16 @@ fn test_mismatch_primary_key() {
 #[test]
 #[should_panic(expected = "System mismatch")]
 fn test_mismatch_system() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let mut mismatched = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let mut mismatched = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     mismatched.system = System::Test;
     let (input, _) = mock_input(mismatched, vec![]);
     let ufi = UnionFanIn::new(schema);
@@ -404,8 +529,16 @@ fn test_mismatch_system() {
 #[test]
 #[should_panic(expected = "Sort mismatch")]
 fn test_mismatch_sort() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let mut mismatched = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let mut mismatched = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     mismatched.sort = Some(Arc::new(vec![["name".to_string(), "asc".to_string()]]));
     let (input, _) = mock_input(mismatched, vec![]);
     let ufi = UnionFanIn::new(schema);
@@ -416,15 +549,35 @@ fn test_mismatch_sort() {
 
 #[test]
 fn test_relationship_merging_from_inputs() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
-    let mut input1_schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    let child_schema = make_schema("child", &["id"], &[("id", ColumnType::String { optional: false })]);
-    input1_schema.relationships.insert("rel1".to_string(), child_schema.clone());
+    let mut input1_schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    let child_schema = make_schema(
+        "child",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    input1_schema
+        .relationships
+        .insert("rel1".to_string(), child_schema.clone());
     input1_schema.relationship_order.push("rel1".to_string());
 
-    let mut input2_schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    input2_schema.relationships.insert("rel2".to_string(), child_schema);
+    let mut input2_schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    input2_schema
+        .relationships
+        .insert("rel2".to_string(), child_schema);
     input2_schema.relationship_order.push("rel2".to_string());
 
     let (input1, _) = mock_input(input1_schema, vec![]);
@@ -442,17 +595,41 @@ fn test_relationship_merging_from_inputs() {
 #[test]
 #[should_panic(expected = "exists in multiple upstream inputs")]
 fn test_relationship_conflict() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
-    let child_schema = make_schema("child", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let child_schema = make_schema(
+        "child",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
 
-    let mut input1_schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    input1_schema.relationships.insert("sharedRel".to_string(), child_schema.clone());
-    input1_schema.relationship_order.push("sharedRel".to_string());
+    let mut input1_schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    input1_schema
+        .relationships
+        .insert("sharedRel".to_string(), child_schema.clone());
+    input1_schema
+        .relationship_order
+        .push("sharedRel".to_string());
 
-    let mut input2_schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
-    input2_schema.relationships.insert("sharedRel".to_string(), child_schema);
-    input2_schema.relationship_order.push("sharedRel".to_string());
+    let mut input2_schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
+    input2_schema
+        .relationships
+        .insert("sharedRel".to_string(), child_schema);
+    input2_schema
+        .relationship_order
+        .push("sharedRel".to_string());
 
     let (input1, _) = mock_input(input1_schema, vec![]);
     let (input2, _) = mock_input(input2_schema, vec![]);
@@ -466,11 +643,19 @@ fn test_relationship_conflict() {
 
 #[test]
 fn test_destroy_destroys_all_inputs() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     let (input1, destroyed1) = mock_input(schema.clone(), vec![]);
     let (input2, destroyed2) = mock_input(schema, vec![]);
 
-    let ufi = UnionFanIn::new(make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]));
+    let ufi = UnionFanIn::new(make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    ));
     ufi.borrow_mut().add_input(input1);
     ufi.borrow_mut().add_input(input2);
 
@@ -482,7 +667,11 @@ fn test_destroy_destroys_all_inputs() {
 
 #[test]
 fn test_destroy_empty_inputs() {
-    let schema = make_schema("test", &["id"], &[("id", ColumnType::String { optional: false })]);
+    let schema = make_schema(
+        "test",
+        &["id"],
+        &[("id", ColumnType::String { optional: false })],
+    );
     let ufi = UnionFanIn::new(schema);
     ufi.borrow_mut().destroy();
 }

@@ -2,16 +2,20 @@
 //! Tests hydrate, join, filter, advance (push), and parallel behavior.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::builder::ast::{Ast, Condition, OrderPart, RelatedSubquery, SimpleCondition, ValuePosition};
+use rust_ivm::builder::ast::{
+    Ast, Condition, RelatedSubquery, SimpleCondition, ValuePosition,
+};
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{SourceChange, make_source_change_add, make_source_change_remove, make_source_change_edit};
-use rust_ivm::ivm::data::{row, Value};
+use rust_ivm::ivm::change::{
+    make_source_change_add, make_source_change_remove,
+};
+use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::source::MemorySource;
 
 fn make_row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
@@ -25,7 +29,12 @@ fn make_row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
 fn make_source(name: &str, pk: &[&str]) -> Rc<RefCell<MemorySource>> {
     let columns: HashMap<String, rust_ivm::ivm::schema::ColumnType> = pk
         .iter()
-        .map(|c| (c.to_string(), rust_ivm::ivm::schema::ColumnType::Number { optional: false }))
+        .map(|c| {
+            (
+                c.to_string(),
+                rust_ivm::ivm::schema::ColumnType::Number { optional: false },
+            )
+        })
         .collect();
     Rc::new(RefCell::new(MemorySource::new(
         name,
@@ -39,19 +48,28 @@ fn test_hydrate_single_table() {
     // Create a source with 3 rows
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row(
-        [("id".to_string(), Value::F64(1.0)), ("name".to_string(), Value::Str("Alice".into()))]
-            .into_iter()
-            .collect(),
+        [
+            ("id".to_string(), Value::F64(1.0)),
+            ("name".to_string(), Value::Str("Alice".into())),
+        ]
+        .into_iter()
+        .collect(),
     );
     source.borrow_mut().add_row(
-        [("id".to_string(), Value::F64(2.0)), ("name".to_string(), Value::Str("Bob".into()))]
-            .into_iter()
-            .collect(),
+        [
+            ("id".to_string(), Value::F64(2.0)),
+            ("name".to_string(), Value::Str("Bob".into())),
+        ]
+        .into_iter()
+        .collect(),
     );
     source.borrow_mut().add_row(
-        [("id".to_string(), Value::F64(3.0)), ("name".to_string(), Value::Str("Carol".into()))]
-            .into_iter()
-            .collect(),
+        [
+            ("id".to_string(), Value::F64(3.0)),
+            ("name".to_string(), Value::Str("Carol".into())),
+        ]
+        .into_iter()
+        .collect(),
     );
 
     let mut engine = Engine::new(HashMap::new());
@@ -101,8 +119,12 @@ fn test_hydrate_with_filter() {
         alias: None,
         where_clause: Some(Condition::Simple(SimpleCondition {
             op: "=".to_string(),
-            left: ValuePosition::Column { name: "name".to_string() },
-            right: ValuePosition::Literal { value: Value::Str("Bob".into()) },
+            left: ValuePosition::Column {
+                name: "name".to_string(),
+            },
+            right: ValuePosition::Literal {
+                value: Value::Str("Bob".into()),
+            },
         })),
         related: vec![],
         limit: None,
@@ -127,14 +149,20 @@ fn test_hydrate_with_join() {
     // users: [{id:1, name:"Alice"}, {id:2, name:"Bob"}]
     let users = make_source("users", &["id"]);
     users.borrow_mut().add_row(
-        [("id".to_string(), Value::F64(1.0)), ("name".to_string(), Value::Str("Alice".into()))]
-            .into_iter()
-            .collect(),
+        [
+            ("id".to_string(), Value::F64(1.0)),
+            ("name".to_string(), Value::Str("Alice".into())),
+        ]
+        .into_iter()
+        .collect(),
     );
     users.borrow_mut().add_row(
-        [("id".to_string(), Value::F64(2.0)), ("name".to_string(), Value::Str("Bob".into()))]
-            .into_iter()
-            .collect(),
+        [
+            ("id".to_string(), Value::F64(2.0)),
+            ("name".to_string(), Value::Str("Bob".into())),
+        ]
+        .into_iter()
+        .collect(),
     );
 
     // posts: [{id:10, author_id:1, title:"Hello"}, {id:11, author_id:2, title:"World"}]
@@ -175,14 +203,14 @@ fn test_hydrate_with_join() {
                 where_clause: None,
                 related: vec![],
                 limit: None,
-        start: None,
+                start: None,
                 order_by: None,
             }),
             relationship_name: "posts".to_string(),
             parent_key: vec!["id".to_string()],
             child_key: vec!["author_id".to_string()],
             hidden: false,
-        system: None,
+            system: None,
         }],
         limit: None,
         start: None,
@@ -197,8 +225,16 @@ fn test_hydrate_with_join() {
     assert_eq!(results.len(), 1);
     // With recursive streamNodes: 2 users + 2 posts = 4 changes.
     assert_eq!(results[0].changes.len(), 4, "expected 2 users + 2 posts");
-    let user_count = results[0].changes.iter().filter(|c| c.table == "users").count();
-    let post_count = results[0].changes.iter().filter(|c| c.table == "posts").count();
+    let user_count = results[0]
+        .changes
+        .iter()
+        .filter(|c| c.table == "users")
+        .count();
+    let post_count = results[0]
+        .changes
+        .iter()
+        .filter(|c| c.table == "posts")
+        .count();
     assert_eq!(user_count, 2, "expected 2 users");
     assert_eq!(post_count, 2, "expected 2 posts");
     for change in &results[0].changes {
@@ -210,9 +246,12 @@ fn test_hydrate_with_join() {
 fn test_advance_add() {
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row(
-        [("id".to_string(), Value::F64(1.0)), ("name".to_string(), Value::Str("Alice".into()))]
-            .into_iter()
-            .collect(),
+        [
+            ("id".to_string(), Value::F64(1.0)),
+            ("name".to_string(), Value::Str("Alice".into())),
+        ]
+        .into_iter()
+        .collect(),
     );
 
     let mut engine = Engine::new(HashMap::new());
@@ -236,10 +275,7 @@ fn test_advance_add() {
 
     // Advance: add a new user
     let new_row = make_row(&[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into()))]);
-    let changes = engine.advance(&[(
-        "users".to_string(),
-        make_source_change_add(new_row),
-    )]);
+    let changes = engine.advance(&[("users".to_string(), make_source_change_add(new_row))]);
 
     // Should produce changes from the push
     // The exact count depends on how many pipelines are connected
@@ -251,9 +287,12 @@ fn test_advance_add() {
 fn test_advance_remove() {
     let source = make_source("users", &["id"]);
     source.borrow_mut().add_row(
-        [("id".to_string(), Value::F64(1.0)), ("name".to_string(), Value::Str("Alice".into()))]
-            .into_iter()
-            .collect(),
+        [
+            ("id".to_string(), Value::F64(1.0)),
+            ("name".to_string(), Value::Str("Alice".into())),
+        ]
+        .into_iter()
+        .collect(),
     );
 
     let mut engine = Engine::new(HashMap::new());
@@ -275,11 +314,11 @@ fn test_advance_remove() {
     }]);
 
     // Advance: remove a user
-    let row = make_row(&[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into()))]);
-    let changes = engine.advance(&[(
-        "users".to_string(),
-        make_source_change_remove(row),
-    )]);
+    let row = make_row(&[
+        ("id", Value::F64(1.0)),
+        ("name", Value::Str("Alice".into())),
+    ]);
+    let changes = engine.advance(&[("users".to_string(), make_source_change_remove(row))]);
 
     println!("advance remove produced {} changes", changes.len());
 }
@@ -316,8 +355,14 @@ fn test_multiple_sources_independent() {
     };
 
     let results = engine.add_queries(&[
-        QuerySpec { query_id: "q1".to_string(), ast: ast1 },
-        QuerySpec { query_id: "q2".to_string(), ast: ast2 },
+        QuerySpec {
+            query_id: "q1".to_string(),
+            ast: ast1,
+        },
+        QuerySpec {
+            query_id: "q2".to_string(),
+            ast: ast2,
+        },
     ]);
 
     assert_eq!(results.len(), 2);

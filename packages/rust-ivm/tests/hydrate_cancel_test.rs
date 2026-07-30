@@ -10,7 +10,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 

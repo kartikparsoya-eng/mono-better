@@ -2,12 +2,13 @@
 
 use std::collections::HashMap;
 
-use rustc_hash::FxHashMap;
 
-use rust_ivm::builder::ast::{Condition, SimpleCondition, ValuePosition};
-use rust_ivm::builder::expression::{and, or, not, cmp_eq, simplify_condition, negate_operator, TRUE, FALSE};
+use rust_ivm::builder::ast::Condition;
+use rust_ivm::builder::expression::{
+    false_val, true_val, and, cmp_eq, negate_operator, not, or, simplify_condition,
+};
 use rust_ivm::builder::query::{Cardinality, ExistsOptions, Query, RelationshipSpec};
-use rust_ivm::builder::ttl::{parse_ttl, clamp_ttl, compare_ttl, DEFAULT_TTL_MS, MAX_TTL_MS};
+use rust_ivm::builder::ttl::{DEFAULT_TTL_MS, MAX_TTL_MS, clamp_ttl, compare_ttl, parse_ttl};
 use rust_ivm::ivm::data::Value;
 
 fn make_relationships() -> HashMap<String, HashMap<String, RelationshipSpec>> {
@@ -119,8 +120,8 @@ fn test_simplify_condition_single_and() {
 
 #[test]
 fn test_true_false_conditions() {
-    let t = TRUE();
-    let f = FALSE();
+    let t = true_val();
+    let f = false_val();
     match t {
         Condition::And(conds) => assert!(conds.is_empty()),
         _ => panic!("Expected empty AND for TRUE"),
@@ -230,7 +231,9 @@ fn test_query_related_with_callback() {
     let rels = make_relationships();
     let q = Query::new("users", rels).related(
         "posts",
-        Some(Box::new(|sub| sub.where_op("published", "=", Value::Bool(true)).limit(5))),
+        Some(Box::new(|sub| {
+            sub.where_op("published", "=", Value::Bool(true)).limit(5)
+        })),
     );
     assert_eq!(q.ast().related.len(), 1);
     let sub = &q.ast().related[0].subquery;
@@ -244,7 +247,10 @@ fn test_query_where_exists() {
     let q = Query::new("users", rels).where_exists(
         "posts",
         None,
-        ExistsOptions { flip: None, scalar: None },
+        ExistsOptions {
+            flip: None,
+            scalar: None,
+        },
     );
     match &q.ast().where_clause {
         Some(Condition::CorrelatedSubquery(csq)) => {
@@ -254,7 +260,11 @@ fn test_query_where_exists() {
         }
         Some(Condition::And(conds)) => {
             // Simplified may wrap in AND
-            assert!(conds.iter().any(|c| matches!(c, Condition::CorrelatedSubquery(_))));
+            assert!(
+                conds
+                    .iter()
+                    .any(|c| matches!(c, Condition::CorrelatedSubquery(_)))
+            );
         }
         _ => panic!("Expected correlated subquery condition"),
     }

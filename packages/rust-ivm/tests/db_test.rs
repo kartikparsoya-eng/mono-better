@@ -6,10 +6,8 @@ use std::sync::Arc;
 
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::operator::Storage;
+use rust_ivm::sqlite::database_storage::{CREATE_STORAGE_TABLE, ClientGroupStorage};
 use rust_ivm::sqlite::db::Database;
-use rust_ivm::sqlite::database_storage::{
-    ClientGroupStorage, CREATE_STORAGE_TABLE,
-};
 
 #[test]
 fn test_database_in_memory() {
@@ -44,7 +42,8 @@ fn test_database_storage_create() {
     let db = Database::in_memory().expect("Failed to open database");
     db.exec("PRAGMA journal_mode = OFF").expect("pragma");
     db.exec("PRAGMA synchronous = OFF").expect("pragma");
-    db.exec(CREATE_STORAGE_TABLE).expect("Failed to create storage table");
+    db.exec(CREATE_STORAGE_TABLE)
+        .expect("Failed to create storage table");
 
     let conn = db.conn();
     let conn = conn.borrow();
@@ -66,7 +65,9 @@ fn test_database_storage_set_get_del() {
     let cg = ClientGroupStorage::new(Rc::new(RefCell::new(db)), "test-cg".to_string());
     let storage = cg.create_storage();
 
-    storage.borrow_mut().set("mykey".to_string(), Value::Str("myvalue".into()));
+    storage
+        .borrow_mut()
+        .set("mykey".to_string(), Value::Str("myvalue".into()));
 
     let result = storage.borrow().get("mykey");
     assert!(result.is_some());
@@ -88,9 +89,15 @@ fn test_database_storage_scan() {
     let cg = ClientGroupStorage::new(Rc::new(RefCell::new(db)), "test-cg".to_string());
     let storage = cg.create_storage();
 
-    storage.borrow_mut().set("alpha".to_string(), Value::F64(1.0));
-    storage.borrow_mut().set("beta".to_string(), Value::F64(2.0));
-    storage.borrow_mut().set("gamma".to_string(), Value::F64(3.0));
+    storage
+        .borrow_mut()
+        .set("alpha".to_string(), Value::F64(1.0));
+    storage
+        .borrow_mut()
+        .set("beta".to_string(), Value::F64(2.0));
+    storage
+        .borrow_mut()
+        .set("gamma".to_string(), Value::F64(3.0));
 
     let all = storage.borrow().scan(None);
     assert_eq!(all.len(), 3);
@@ -108,7 +115,9 @@ fn test_database_storage_number_values() {
     let cg = ClientGroupStorage::new(Rc::new(RefCell::new(db)), "test-cg".to_string());
     let storage = cg.create_storage();
 
-    storage.borrow_mut().set("count".to_string(), Value::F64(42.0));
+    storage
+        .borrow_mut()
+        .set("count".to_string(), Value::F64(42.0));
     let result = storage.borrow().get("count");
     match result {
         Some(Value::F64(n)) => assert_eq!(n, 42.0),
@@ -124,7 +133,9 @@ fn test_database_storage_bool_values() {
     let cg = ClientGroupStorage::new(Rc::new(RefCell::new(db)), "test-cg".to_string());
     let storage = cg.create_storage();
 
-    storage.borrow_mut().set("flag".to_string(), Value::Bool(true));
+    storage
+        .borrow_mut()
+        .set("flag".to_string(), Value::Bool(true));
     let result = storage.borrow().get("flag");
     match result {
         Some(Value::Bool(b)) => assert!(b),

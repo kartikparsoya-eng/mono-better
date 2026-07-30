@@ -5,7 +5,6 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use rusqlite::Connection;
 
@@ -19,7 +18,7 @@ pub struct Database {
     /// connection is interruptible from another thread; may be registered with
     /// a `JobWatchdog` when this Database runs under one. `None` only if
     /// `install_interrupt` was skipped (it never is — infallible).
-    interrupt_handle: Option<rusqlite::InterruptHandle>,
+    _interrupt_handle: Option<rusqlite::InterruptHandle>,
 }
 
 /// Error initializing the database.
@@ -55,7 +54,7 @@ impl Database {
             conn: Rc::new(RefCell::new(conn)),
             path: path.to_string(),
             page_size,
-            interrupt_handle: Some(interrupt_handle),
+            _interrupt_handle: Some(interrupt_handle),
         })
     }
 
@@ -70,7 +69,7 @@ impl Database {
             conn: Rc::new(RefCell::new(conn)),
             path: ":memory:".to_string(),
             page_size: 4096,
-            interrupt_handle: Some(interrupt_handle),
+            _interrupt_handle: Some(interrupt_handle),
         })
     }
 
@@ -162,10 +161,12 @@ impl Statement {
     }
 
     /// Get a single row as a map.
+    #[allow(clippy::needless_range_loop)]
     pub fn get(
         &self,
         params: &[&dyn rusqlite::ToSql],
-    ) -> Result<Option<rustc_hash::FxHashMap<String, rusqlite::types::Value>>, rusqlite::Error> {
+    ) -> Result<Option<rustc_hash::FxHashMap<String, rusqlite::types::Value>>, rusqlite::Error>
+    {
         let conn = self.conn.borrow();
         let mut stmt = conn.prepare(&self.sql)?;
         let col_count = stmt.column_count();
@@ -188,6 +189,7 @@ impl Statement {
     }
 
     /// Get all rows as a list of maps.
+    #[allow(clippy::needless_range_loop)]
     pub fn all(
         &self,
         params: &[&dyn rusqlite::ToSql],

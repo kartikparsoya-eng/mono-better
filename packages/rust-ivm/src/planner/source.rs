@@ -1,9 +1,8 @@
 //! Planner source — port of `planner-source.ts`.
 
-use std::rc::Rc;
 
 use crate::builder::ast::Condition;
-use crate::planner::connection::{PlannerConnection, ConnectionCostModel};
+use crate::planner::connection::{ConnectionCostModel, PlannerConnection};
 use crate::planner::constraint::PlannerConstraint;
 
 pub struct PlannerSource {

@@ -1,7 +1,7 @@
 //! Constraint types — port of `zql/src/ivm/constraint.ts`.
 
-use crate::ivm::data::{values_equal, Value};
 use crate::builder::ast::{Condition, SimpleCondition, ValuePosition};
+use crate::ivm::data::{Value, values_equal};
 
 /// A constraint: column-name → value. Maps to TS `Constraint` (constraint.ts:5).
 pub type Constraint = rustc_hash::FxHashMap<String, Value>;
@@ -26,11 +26,10 @@ pub fn constraint_matches_row(constraint: &Constraint, row: &crate::ivm::data::R
 /// Compatible if: no keys in common, OR shared keys have equal values.
 pub fn constraints_are_compatible(left: &Constraint, right: &Constraint) -> bool {
     for (key, value) in left {
-        if let Some(right_val) = right.get(key) {
-            if !values_equal(value, right_val) {
+        if let Some(right_val) = right.get(key)
+            && !values_equal(value, right_val) {
                 return false;
             }
-        }
     }
     true
 }
@@ -56,7 +55,10 @@ pub fn constraint_matches_primary_key(constraint: &Constraint, primary: &[String
 /// Within one MultiConstraint, entries are OR'd (IN semantics).
 /// Across the list, entries are AND'd.
 /// Port of TS `RowMatchesMultiConstraints` (Go operator.go:49).
-pub fn row_matches_multi_constraints(multis: &[MultiConstraint], row: &crate::ivm::data::Row) -> bool {
+pub fn row_matches_multi_constraints(
+    multis: &[MultiConstraint],
+    row: &crate::ivm::data::Row,
+) -> bool {
     for mc in multis {
         if mc.is_empty() {
             continue;
@@ -92,9 +94,10 @@ pub fn key_matches_primary_key(key: impl IntoIterator<Item = String>, primary: &
 /// Port of TS `pullSimpleAndComponents` (constraint.ts:60).
 pub fn pull_simple_and_components(condition: &Condition) -> Vec<SimpleCondition> {
     match condition {
-        Condition::And(conditions) => {
-            conditions.iter().flat_map(pull_simple_and_components).collect()
-        }
+        Condition::And(conditions) => conditions
+            .iter()
+            .flat_map(pull_simple_and_components)
+            .collect(),
         Condition::Simple(simple) => vec![simple.clone()],
         Condition::Or(conditions) if conditions.len() == 1 => {
             pull_simple_and_components(&conditions[0])
@@ -107,12 +110,10 @@ pub fn pull_simple_and_components(condition: &Condition) -> Vec<SimpleCondition>
 /// Port of TS `extractColumn` (constraint.ts:126).
 fn extract_column(condition: &SimpleCondition) -> Option<(String, Value)> {
     match &condition.left {
-        ValuePosition::Column { name } => {
-            match &condition.right {
-                ValuePosition::Literal { value } => Some((name.clone(), value.clone())),
-                _ => None,
-            }
-        }
+        ValuePosition::Column { name } => match &condition.right {
+            ValuePosition::Literal { value } => Some((name.clone(), value.clone())),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -132,13 +133,11 @@ pub fn primary_key_constraint_from_filters(
 
     let mut ret: Constraint = Constraint::default();
     for sub in &conditions {
-        if sub.op == "=" {
-            if let Some((name, value)) = extract_column(sub) {
-                if primary.contains(&name) {
+        if sub.op == "="
+            && let Some((name, value)) = extract_column(sub)
+                && primary.contains(&name) {
                     ret.insert(name, value);
                 }
-            }
-        }
     }
 
     if ret.len() != primary.len() {
@@ -157,8 +156,10 @@ pub fn constraint_equals(a: &Constraint, b: &Constraint) -> bool {
     for (key, val) in a {
         match b.get(key) {
             None => return false,
-            Some(bval) => if !values_equal(val, bval) {
-                return false;
+            Some(bval) => {
+                if !values_equal(val, bval) {
+                    return false;
+                }
             }
         }
     }

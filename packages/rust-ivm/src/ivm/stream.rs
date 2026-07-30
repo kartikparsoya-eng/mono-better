@@ -6,7 +6,6 @@
 //! the event loop during long hydrations.
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use crate::ivm::data::Node;
 

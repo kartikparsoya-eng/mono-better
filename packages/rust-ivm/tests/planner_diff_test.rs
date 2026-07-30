@@ -16,7 +16,7 @@ use std::rc::Rc;
 use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::System;
-use rust_ivm::planner::{plan_query, ConnectionCostModel, CostModelCost};
+use rust_ivm::planner::{ConnectionCostModel, CostModelCost, plan_query};
 
 /// A simple mock cost model where each table has a fixed row count.
 /// This makes flip decisions deterministic and testable.
@@ -25,22 +25,27 @@ fn mock_cost_model(table_costs: Vec<(&str, f64)>) -> ConnectionCostModel {
         .into_iter()
         .map(|(t, c)| (t.to_string(), c))
         .collect();
-    Rc::new(move |table: &str, _sort: &[(String, String)], _filters: Option<&Condition>, constraint: Option<&std::collections::BTreeMap<String, Option<Value>>>| {
-        let base = *costs.get(table).unwrap_or(&100.0);
-        // A constrained read is an indexed key seek (~1 row), like SQLite's
-        // planner reports via scanstatus — NOT a full scan. Modelling this is
-        // what lets the planner see that a flipped join's constrained parent
-        // lookup is cheap; a constraint-blind mock could never make flip win.
-        let rows = if constraint.is_some() { 1.0 } else { base };
-        CostModelCost {
-            startup_cost: 1.0,
-            rows,
-            fanout: Rc::new(|_cols: &[String]| rust_ivm::planner::FanoutEst {
-                fanout: 1.0,
-                confidence: rust_ivm::planner::Confidence::None,
-            }),
-        }
-    })
+    Rc::new(
+        move |table: &str,
+              _sort: &[(String, String)],
+              _filters: Option<&Condition>,
+              constraint: Option<&std::collections::BTreeMap<String, Option<Value>>>| {
+            let base = *costs.get(table).unwrap_or(&100.0);
+            // A constrained read is an indexed key seek (~1 row), like SQLite's
+            // planner reports via scanstatus — NOT a full scan. Modelling this is
+            // what lets the planner see that a flipped join's constrained parent
+            // lookup is cheap; a constraint-blind mock could never make flip win.
+            let rows = if constraint.is_some() { 1.0 } else { base };
+            CostModelCost {
+                startup_cost: 1.0,
+                rows,
+                fanout: Rc::new(|_cols: &[String]| rust_ivm::planner::FanoutEst {
+                    fanout: 1.0,
+                    confidence: rust_ivm::planner::Confidence::None,
+                }),
+            }
+        },
+    )
 }
 
 fn simple_ast(table: &str) -> Ast {
@@ -134,14 +139,21 @@ fn test_single_exists_no_flip_when_child_larger() {
     // (don't flip: iterate 100 parents, check each against child)
     let mut ast = simple_ast("parent");
     ast.where_clause = Some(Condition::CorrelatedSubquery(exists_condition(
-        "child", "id", "parent_id", None,
+        "child",
+        "id",
+        "parent_id",
+        None,
     )));
 
     let model = mock_cost_model(vec![("parent", 100.0), ("child", 1000.0)]);
     let planned = plan_query(&ast, model);
     let flips = extract_flips(&planned);
     assert_eq!(flips.len(), 1, "one EXISTS condition");
-    assert_eq!(flips[0], Some(false), "should not flip when child is larger");
+    assert_eq!(
+        flips[0],
+        Some(false),
+        "should not flip when child is larger"
+    );
 }
 
 #[test]
@@ -150,7 +162,10 @@ fn test_single_exists_flip_when_child_smaller() {
     // (iterate 10 children, look up parents)
     let mut ast = simple_ast("parent");
     ast.where_clause = Some(Condition::CorrelatedSubquery(exists_condition(
-        "child", "id", "parent_id", None,
+        "child",
+        "id",
+        "parent_id",
+        None,
     )));
 
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
@@ -164,7 +179,9 @@ fn test_single_exists_flip_when_child_smaller() {
 fn test_not_exists_never_flips() {
     let mut ast = simple_ast("parent");
     ast.where_clause = Some(Condition::CorrelatedSubquery(not_exists_condition(
-        "child", "id", "parent_id",
+        "child",
+        "id",
+        "parent_id",
     )));
 
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
@@ -178,7 +195,10 @@ fn test_not_exists_never_flips() {
 fn test_explicit_flip_true_not_changed() {
     let mut ast = simple_ast("parent");
     ast.where_clause = Some(Condition::CorrelatedSubquery(exists_condition(
-        "child", "id", "parent_id", Some(true),
+        "child",
+        "id",
+        "parent_id",
+        Some(true),
     )));
 
     // Even though child is larger (would normally not flip),
@@ -193,7 +213,10 @@ fn test_explicit_flip_true_not_changed() {
 fn test_explicit_flip_false_not_changed() {
     let mut ast = simple_ast("parent");
     ast.where_clause = Some(Condition::CorrelatedSubquery(exists_condition(
-        "child", "id", "parent_id", Some(false),
+        "child",
+        "id",
+        "parent_id",
+        Some(false),
     )));
 
     // Even though child is smaller (would normally flip),
@@ -201,7 +224,11 @@ fn test_explicit_flip_false_not_changed() {
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
     let planned = plan_query(&ast, model);
     let flips = extract_flips(&planned);
-    assert_eq!(flips[0], Some(false), "explicit flip=false must be preserved");
+    assert_eq!(
+        flips[0],
+        Some(false),
+        "explicit flip=false must be preserved"
+    );
 }
 
 #[test]
@@ -254,7 +281,10 @@ fn test_nested_exists() {
     // parent EXISTS(child EXISTS(grandchild))
     let mut grandchild_ast = simple_ast("grandchild");
     grandchild_ast.where_clause = Some(Condition::CorrelatedSubquery(exists_condition(
-        "grandchild", "child_id", "id", None,
+        "grandchild",
+        "child_id",
+        "id",
+        None,
     )));
 
     let mut ast = simple_ast("parent");
@@ -263,7 +293,10 @@ fn test_nested_exists() {
             subquery: Box::new(Ast {
                 table: "child".to_string(),
                 where_clause: Some(Condition::CorrelatedSubquery(exists_condition(
-                    "grandchild", "child_id", "id", None,
+                    "grandchild",
+                    "child_id",
+                    "id",
+                    None,
                 ))),
                 ..Default::default()
             }),
@@ -286,7 +319,11 @@ fn test_nested_exists() {
     ]);
     let planned = plan_query(&ast, model);
     let flips = extract_flips(&planned);
-    assert_eq!(flips.len(), 2, "two EXISTS (parent→child and child→grandchild)");
+    assert_eq!(
+        flips.len(),
+        2,
+        "two EXISTS (parent→child and child→grandchild)"
+    );
     // Both should have definite flip annotations
     for (i, flip) in flips.iter().enumerate() {
         assert!(flip.is_some(), "flip[{}] must be decided", i);
@@ -298,11 +335,18 @@ fn test_replanning_planned_ast() {
     // Planning an already-planned AST (flip=false) should preserve flip=false
     let mut ast = simple_ast("parent");
     ast.where_clause = Some(Condition::CorrelatedSubquery(exists_condition(
-        "child", "id", "parent_id", Some(false),
+        "child",
+        "id",
+        "parent_id",
+        Some(false),
     )));
 
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
     let planned = plan_query(&ast, model);
     let flips = extract_flips(&planned);
-    assert_eq!(flips[0], Some(false), "re-planning flip=false must preserve it");
+    assert_eq!(
+        flips[0],
+        Some(false),
+        "re-planning flip=false must preserve it"
+    );
 }

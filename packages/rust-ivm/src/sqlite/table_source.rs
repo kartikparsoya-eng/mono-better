@@ -11,11 +11,10 @@
 //! - Values are converted between IVM types and SQLite types
 
 use std::cell::{Ref, RefCell};
-use std::rc::Rc;
-use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rusqlite::{Connection, params_from_iter};
@@ -24,22 +23,17 @@ use rustc_hash::FxHashMap;
 
 use crate::builder::ast::Condition;
 use crate::ivm::change::{
-    make_add_change, make_edit_change, make_remove_change, Change, SourceChange,
+    Change, SourceChange, make_add_change, make_edit_change, make_remove_change,
 };
-use crate::ivm::constraint::{constraint_matches_row, Constraint};
-use crate::ivm::data::{
-    make_comparator, values_equal, Comparator, Node, Row, SortOrder, Value,
-};
+use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
 use crate::ivm::filter_push::filter_push;
 use crate::ivm::operator::{
-    Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
+    FetchRequest, Input, InputBase, OutputHandle, Shared,
 };
 use crate::ivm::schema::{ColumnType, SourceSchema, System};
 use crate::ivm::source::Source;
 use crate::ivm::stream::NodeStream;
-use crate::sqlite::query_builder::{
-    build_select_query, SqlParam, SqlQuery, to_sqlite_value,
-};
+use crate::sqlite::query_builder::{SqlParam, SqlQuery, build_select_query};
 
 /// Streaming iterator over a SQLite SELECT result.
 ///
@@ -61,7 +55,7 @@ use crate::sqlite::query_builder::{
 struct LazyRows {
     _conn: Rc<RefCell<Connection>>,
     _guard: Ref<'static, Connection>,
-    stmt: Pin<Box<rusqlite::Statement<'static>>>,
+    _stmt: Pin<Box<rusqlite::Statement<'static>>>,
     rows: Option<rusqlite::Rows<'static>>,
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
@@ -101,7 +95,7 @@ impl LazyRows {
         Ok(Box::pin(LazyRows {
             _conn: conn,
             _guard: guard_static,
-            stmt: stmt_pin,
+            _stmt: stmt_pin,
             rows: Some(rows_static),
             column_names,
             columns,
@@ -128,12 +122,7 @@ impl Iterator for LazyRowsIter {
                 let mut map: FxHashMap<String, Value> = FxHashMap::default();
                 for (i, col) in column_names.iter().enumerate() {
                     let val = raw_row.get::<usize, rusqlite::types::Value>(i);
-                    let value = sqlite_value_to_ivm(
-                        val,
-                        columns.get(col),
-                        &table_name,
-                        col,
-                    );
+                    let value = sqlite_value_to_ivm(val, columns.get(col), &table_name, col);
                     map.insert(col.clone(), value);
                 }
                 Some(Arc::new(map))
@@ -166,7 +155,10 @@ fn stream_query(
     ) {
         Ok(lazy) => lazy,
         Err(e) => {
-            eprintln!("[rust-ivm] query prepare error for {}: {}", table_name_for_err, e);
+            eprintln!(
+                "[rust-ivm] query prepare error for {}: {}",
+                table_name_for_err, e
+            );
             return Box::new(std::iter::empty());
         }
     };
@@ -212,7 +204,7 @@ pub(crate) fn sqlite_value_to_ivm(
         Ok(Sv::Integer(n)) => {
             // Reject integers outside ±(2^53-1) rather than silently losing
             // precision, matching TS fromSQLiteType.
-            if n > 9_007_199_254_740_991 || n < -9_007_199_254_740_991 {
+            if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&n) {
                 panic!("value {n} (in {table}.{col}) is outside of supported bounds");
             }
             Value::F64(n as f64)
@@ -315,7 +307,9 @@ impl TableSource {
         filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
         split_edit_keys: Option<Vec<String>>,
     ) -> Shared<dyn Input> {
-        let internal_sort = sort.clone().unwrap_or_else(|| self.primary_index_sort.clone());
+        let internal_sort = sort
+            .clone()
+            .unwrap_or_else(|| self.primary_index_sort.clone());
         let compare_rows = make_comparator(internal_sort.clone(), false);
 
         let conn = Rc::new(RefCell::new(TableConnection {
@@ -344,7 +338,7 @@ impl TableSource {
         let column_names = self.column_names.clone();
         let table_name = self.table_name.clone();
         let columns = self.columns.clone();
-        let overlay_epoch = Rc::new(RefCell::new(0usize)); // tracks last_pushed_epoch
+        let _overlay_epoch = Rc::new(RefCell::new(0usize)); // tracks last_pushed_epoch
 
         let input: Shared<dyn Input> = Rc::new(RefCell::new(TableSourceInput {
             db,
@@ -372,10 +366,14 @@ impl TableSource {
         // Remove(old) + Add(new) BEFORE pushing. This is what lets a partition/
         // PK-crossing edit through a Take/Join without hitting the
         // "Unexpected change of partition key" assert.
-        if let SourceChange::Edit { ref row, ref old_row } = change {
+        if let SourceChange::Edit {
+            ref row,
+            ref old_row,
+        } = change
+        {
             let should_split = self.connections.iter().any(|c| {
                 let conn = c.borrow();
-                conn.split_edit_keys.as_ref().map_or(false, |keys| {
+                conn.split_edit_keys.as_ref().is_some_and(|keys| {
                     keys.iter().any(|k| {
                         old_row.get(k).cloned().unwrap_or(Value::Null)
                             != row.get(k).cloned().unwrap_or(Value::Null)
@@ -418,7 +416,7 @@ impl TableSource {
             .cloned()
             .collect();
 
-        let mut all_changes = Vec::new();
+        let all_changes = Vec::new();
 
         for conn in &active {
             let (output, predicate) = {
@@ -435,7 +433,10 @@ impl TableSource {
 
         // Write the change to SQLite
         if let Err(e) = self.write_change(&change) {
-            eprintln!("[rust-ivm] write_change error for {}: {}", self.table_name, e);
+            eprintln!(
+                "[rust-ivm] write_change error for {}: {}",
+                self.table_name, e
+            );
         }
 
         // Overlay cleared by _overlay_guard Drop
@@ -458,7 +459,10 @@ impl TableSource {
             }
             SourceChange::Edit { old_row, .. } => {
                 if !self.check_exists(&db, old_row) {
-                    panic!("source drift: Edit missing old row from {}", self.table_name);
+                    panic!(
+                        "source drift: Edit missing old row from {}",
+                        self.table_name
+                    );
                 }
             }
         }
@@ -485,11 +489,16 @@ impl TableSource {
         let mut stmt = match db.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[rust-ivm] check_exists prepare error for {}: {}", self.table_name, e);
+                eprintln!(
+                    "[rust-ivm] check_exists prepare error for {}: {}",
+                    self.table_name, e
+                );
                 return false;
             }
         };
-        let result = stmt.exists(params_from_iter(params.iter().map(|p| p as &dyn rusqlite::ToSql)));
+        let result = stmt.exists(params_from_iter(
+            params.iter().map(|p| p as &dyn rusqlite::ToSql),
+        ));
         result.unwrap_or(false)
     }
 
@@ -498,7 +507,7 @@ impl TableSource {
         // The Rust IVM reads from zero.db for hydrate and stores pushed changes
         // in the in-memory overlay. Writing to zero.db here would conflict with
         // the change-streamer's WAL2-mode writes (rusqlite doesn't support WAL2).
-        return Ok(());
+        Ok(())
     }
 
     fn _write_change_unused(&self, change: &SourceChange) -> Result<(), rusqlite::Error> {
@@ -528,8 +537,7 @@ impl TableSource {
                 tx.execute(
                     &sql,
                     params_from_iter(params.iter().map(|p| p as &dyn rusqlite::ToSql)),
-                )
-                ?;
+                )?;
             }
             SourceChange::Remove { row } => {
                 let where_clause: Vec<String> = self
@@ -550,18 +558,16 @@ impl TableSource {
                 tx.execute(
                     &sql,
                     params_from_iter(params.iter().map(|p| p as &dyn rusqlite::ToSql)),
-                )
-                ?;
+                )?;
             }
             SourceChange::Edit { row, old_row } => {
                 // If PK is the same, use UPDATE; else DELETE + INSERT
-                let pk_same = self
-                    .primary_key
-                    .iter()
-                    .all(|k| values_equal(
+                let pk_same = self.primary_key.iter().all(|k| {
+                    values_equal(
                         &row.get(k).cloned().unwrap_or(Value::Null),
                         &old_row.get(k).cloned().unwrap_or(Value::Null),
-                    ));
+                    )
+                });
 
                 if pk_same {
                     let non_pk: Vec<String> = self
@@ -570,10 +576,8 @@ impl TableSource {
                         .filter(|c| !self.primary_key.contains(c))
                         .cloned()
                         .collect();
-                    let set_clause: Vec<String> = non_pk
-                        .iter()
-                        .map(|c| format!("\"{}\" = ?", c))
-                        .collect();
+                    let set_clause: Vec<String> =
+                        non_pk.iter().map(|c| format!("\"{}\" = ?", c)).collect();
                     let where_clause: Vec<String> = self
                         .primary_key
                         .iter()
@@ -589,14 +593,15 @@ impl TableSource {
                         .iter()
                         .map(|c| SqlParam::from(&row.get(c).cloned().unwrap_or(Value::Null)))
                         .collect();
-                    params.extend(self.primary_key.iter().map(|k| {
-                        SqlParam::from(&row.get(k).cloned().unwrap_or(Value::Null))
-                    }));
+                    params.extend(
+                        self.primary_key
+                            .iter()
+                            .map(|k| SqlParam::from(&row.get(k).cloned().unwrap_or(Value::Null))),
+                    );
                     tx.execute(
                         &sql,
                         params_from_iter(params.iter().map(|p| p as &dyn rusqlite::ToSql)),
-                    )
-                    ?;
+                    )?;
                 } else {
                     // DELETE old + INSERT new
                     let where_clause: Vec<String> = self
@@ -617,8 +622,7 @@ impl TableSource {
                     tx.execute(
                         &del_sql,
                         params_from_iter(del_params.iter().map(|p| p as &dyn rusqlite::ToSql)),
-                    )
-                    ?;
+                    )?;
 
                     let placeholders: Vec<String> = (0..self.column_names.len())
                         .map(|_| "?".to_string())
@@ -641,8 +645,7 @@ impl TableSource {
                     tx.execute(
                         &ins_sql,
                         params_from_iter(ins_params.iter().map(|p| p as &dyn rusqlite::ToSql)),
-                    )
-                    ?;
+                    )?;
                 }
             }
         }
@@ -665,7 +668,9 @@ impl TableSource {
     /// prepared statement rather than collecting into a Vec — matches TS
     /// `table-source.ts` `#fetch`.
     pub fn fetch(&self, req: &FetchRequest, conn: &TableConnection) -> NodeStream {
-        let order: Vec<(String, String)> = conn.sort.as_ref()
+        let order: Vec<(String, String)> = conn
+            .sort
+            .as_ref()
             .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
             .unwrap_or_default();
         let reverse = req.reverse;
@@ -682,7 +687,9 @@ impl TableSource {
         let overlay_change = {
             let ov = self.overlay.borrow();
             match *ov {
-                Some((epoch, ref change)) if conn.last_pushed_epoch >= epoch => Some(change.clone()),
+                Some((epoch, ref change)) if conn.last_pushed_epoch >= epoch => {
+                    Some(change.clone())
+                }
                 _ => None,
             }
         };
@@ -738,7 +745,9 @@ impl Input for TableSourceInput {
 
     fn fetch(&self, req: &FetchRequest) -> NodeStream {
         let conn = self.conn.borrow();
-        let order: Vec<(String, String)> = conn.sort.as_ref()
+        let order: Vec<(String, String)> = conn
+            .sort
+            .as_ref()
             .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
             .unwrap_or_default();
         let reverse = req.reverse;
@@ -755,7 +764,9 @@ impl Input for TableSourceInput {
         let overlay_change = {
             let ov = self.overlay.borrow();
             match *ov {
-                Some((epoch, ref change)) if conn.last_pushed_epoch >= epoch => Some(change.clone()),
+                Some((epoch, ref change)) if conn.last_pushed_epoch >= epoch => {
+                    Some(change.clone())
+                }
                 _ => None,
             }
         };
@@ -845,8 +856,11 @@ impl Input for TableSourceInput {
                 let table = self.table_name.clone();
                 move |conn: &Connection| -> Result<Vec<Row>, String> {
                     let mut stmt = conn.prepare(&query.text).map_err(|e| e.to_string())?;
-                    let param_refs: Vec<&dyn rusqlite::ToSql> =
-                        query.params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+                    let param_refs: Vec<&dyn rusqlite::ToSql> = query
+                        .params
+                        .iter()
+                        .map(|p| p as &dyn rusqlite::ToSql)
+                        .collect();
                     let mut rows = stmt
                         .query(params_from_iter(param_refs.iter().copied()))
                         .map_err(|e| e.to_string())?;
@@ -855,7 +869,10 @@ impl Input for TableSourceInput {
                         let mut map: FxHashMap<String, Value> = FxHashMap::default();
                         for (i, col) in col_names.iter().enumerate() {
                             let val = raw.get::<usize, rusqlite::types::Value>(i);
-                            map.insert(col.clone(), sqlite_value_to_ivm(val, columns.get(col), &table, col));
+                            map.insert(
+                                col.clone(),
+                                sqlite_value_to_ivm(val, columns.get(col), &table, col),
+                            );
                         }
                         out.push(Arc::new(map));
                     }
@@ -874,7 +891,7 @@ impl Input for TableSourceInput {
                 .into_iter()
                 .map(|rows| {
                     rows.into_iter()
-                        .filter(|r| filter_predicate.as_ref().map_or(true, |p| p(r)))
+                        .filter(|r| filter_predicate.as_ref().is_none_or(|p| p(r)))
                         .map(Node::new)
                         .collect()
                 })

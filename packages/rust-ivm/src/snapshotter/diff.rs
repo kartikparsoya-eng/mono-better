@@ -11,15 +11,14 @@
 //!
 //! The caller provides two `&rusqlite::Connection` references (prev and curr
 /// snapshots). The diff is only valid until the next `advance()`.
+use std::collections::HashMap;
 
-use std::collections::{HashMap, HashSet};
-
-use crate::snapshotter::spec::{LiteAndZqlSpec, TableSpec, quote_ident, sorted_keys};
 use crate::snapshotter::snapshotter::{
-    DiffOwned, InvalidDiffError, ResetPipelinesSignal, SnapshotChange,
-    REASON_PERMISSIONS_CHANGE, REASON_SCHEMA_CHANGE, REASON_TRUNCATION,
+    DiffOwned, InvalidDiffError, REASON_PERMISSIONS_CHANGE, REASON_SCHEMA_CHANGE,
+    REASON_TRUNCATION, ResetPipelinesSignal, SnapshotChange,
 };
-use crate::snapshotter::{SET_OP, DEL_OP, RESET_OP, TRUNCATE_OP, ZERO_VERSION_COLUMN_NAME};
+use crate::snapshotter::spec::{TableSpec, quote_ident, sorted_keys};
+use crate::snapshotter::{RESET_OP, SET_OP, TRUNCATE_OP, ZERO_VERSION_COLUMN_NAME};
 
 /// Change-log entry row.
 struct ChangeLogEntry {
@@ -108,10 +107,13 @@ fn get_row(
         .map(|c| format!("{}=?", quote_ident(c)))
         .collect();
     let cols = spec.cols();
-    let col_list: Vec<String> = cols.iter().map(|c| {
-        let q = quote_ident(c);
-        format!("+{} AS {}", q, q)
-    }).collect();
+    let col_list: Vec<String> = cols
+        .iter()
+        .map(|c| {
+            let q = quote_ident(c);
+            format!("+{} AS {}", q, q)
+        })
+        .collect();
 
     let sql = format!(
         "SELECT {} FROM {} WHERE {}",
@@ -120,7 +122,9 @@ fn get_row(
         conds.join(" AND ")
     );
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| format!("get_row prepare: {}", e))?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("get_row prepare: {}", e))?;
     let params: Vec<&dyn rusqlite::ToSql> = key_cols
         .iter()
         .map(|c| row_key.get(c).unwrap() as &dyn rusqlite::ToSql)
@@ -178,10 +182,13 @@ fn get_rows(
         .collect();
 
     let cols = spec.cols();
-    let col_list: Vec<String> = cols.iter().map(|c| {
-        let q = quote_ident(c);
-        format!("+{} AS {}", q, q)
-    }).collect();
+    let col_list: Vec<String> = cols
+        .iter()
+        .map(|c| {
+            let q = quote_ident(c);
+            format!("+{} AS {}", q, q)
+        })
+        .collect();
 
     let sql = format!(
         "SELECT {} FROM {} WHERE {}",
@@ -197,7 +204,9 @@ fn get_rows(
         }
     }
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| format!("get_rows prepare: {}", e))?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("get_rows prepare: {}", e))?;
     let mut rows = stmt
         .query(rusqlite::params_from_iter(binds.iter()))
         .map_err(|e| format!("get_rows query: {}", e))?;
@@ -250,8 +259,8 @@ fn check_valid(
             });
         }
     }
-    if op == SET_OP {
-        if let Some(next) = next_raw {
+    if op == SET_OP
+        && let Some(next) = next_raw {
             let ver = next
                 .get(ZERO_VERSION_COLUMN_NAME)
                 .map(|v| match v {
@@ -265,11 +274,11 @@ fn check_valid(
                 });
             }
         }
-    }
     Ok(())
 }
 
 /// Raw scalar comparison for permissions change detection.
+#[allow(dead_code)]
 fn raw_scalar_equal(a: &rusqlite::types::Value, b: &rusqlite::types::Value) -> bool {
     a == b
 }
@@ -326,11 +335,16 @@ where
 
         // Catch-up invariant: every change-log op has stateVersion strictly
         // greater than the table's minRowVersion.
-        if !spec.min_row_version.as_deref().unwrap_or("").lt(&e.state_version) {
+        if !spec
+            .min_row_version
+            .as_deref()
+            .unwrap_or("")
+            .lt(&e.state_version)
+        {
             // Actually we need lexicographic comparison. In Rust, String comparison
             // IS lexicographic, matching TS's `<`.
             let min = spec.min_row_version.as_deref().unwrap_or("");
-            if !(min < e.state_version.as_str()) {
+            if min >= e.state_version.as_str() {
                 return Err(DiffError::Other(format!(
                     "unexpected change @{} for table {} with minRowVersion {:?}: {}({})",
                     e.state_version, e.table, spec.min_row_version, e.op, e.row_key
@@ -342,8 +356,8 @@ where
 
         // nextValue: the new contents for a set, None for a delete.
         let next_raw = if e.op == SET_OP {
-            let row = get_row(&curr_conn.borrow(), spec, &row_key)?;
-            row
+            
+            get_row(&curr_conn.borrow(), spec, &row_key)?
         } else {
             None
         };
@@ -381,8 +395,8 @@ where
         }
 
         // Permissions change → abort & rehydrate.
-        if e.table == permissions_table {
-            if let Some(ref next) = next_raw {
+        if e.table == permissions_table
+            && let Some(ref next) = next_raw {
                 for pv in &prev_values {
                     let old_perms = pv.get("permissions");
                     let new_perms = next.get("permissions");
@@ -398,7 +412,6 @@ where
                     }
                 }
             }
-        }
 
         let change = SnapshotChange {
             table: e.table.clone(),

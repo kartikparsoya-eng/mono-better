@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::ivm::change::{make_add_change, make_remove_change, Change};
+use crate::ivm::change::{Change, make_add_change, make_remove_change};
 use crate::ivm::data::Row;
-use crate::ivm::operator::{InputBase, Output, OutputHandle};
+use crate::ivm::operator::{InputBase, OutputHandle};
 
 /// Port of TS `filterPush`. Returns void (no 'yield' in Rust).
 pub fn filter_push(
@@ -27,9 +27,13 @@ pub fn filter_push(
             if old_was_present && new_is_present {
                 output.borrow_mut().push(change, pusher);
             } else if old_was_present && !new_is_present {
-                output.borrow_mut().push(make_remove_change(old_node.clone()), pusher);
+                output
+                    .borrow_mut()
+                    .push(make_remove_change(old_node.clone()), pusher);
             } else if !old_was_present && new_is_present {
-                output.borrow_mut().push(make_add_change(node.clone()), pusher);
+                output
+                    .borrow_mut()
+                    .push(make_add_change(node.clone()), pusher);
             }
         }
     }

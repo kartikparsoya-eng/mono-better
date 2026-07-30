@@ -10,10 +10,8 @@ use std::process::Command;
 
 #[test]
 fn advance_fixture_replay() {
-    let advance_dir = std::path::PathBuf::from(
-        std::env!("CARGO_MANIFEST_DIR"),
-    )
-    .join("agentic/fixtures/advance");
+    let advance_dir =
+        std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR")).join("agentic/fixtures/advance");
 
     let mut inputs: Vec<_> = std::fs::read_dir(&advance_dir)
         .expect("read regressions dir")
@@ -37,8 +35,8 @@ fn advance_fixture_replay() {
             continue;
         }
 
-        let actual = std::env::temp_dir()
-            .join(format!("adv-fixture-{}.actual.json", std::process::id()));
+        let actual =
+            std::env::temp_dir().join(format!("adv-fixture-{}.actual.json", std::process::id()));
 
         let run = |cmd: &str| {
             let out = Command::new("node")
@@ -47,7 +45,7 @@ fn advance_fixture_replay() {
                 .arg("--out")
                 .arg(&actual)
                 .output()
-                .expect(&format!("{} failed to run", cmd));
+                .unwrap_or_else(|_| panic!("{} failed to run", cmd));
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 return Err(format!("{} failed: {}", cmd, stderr));
@@ -75,7 +73,11 @@ fn advance_fixture_replay() {
 
     if !diverged.is_empty() {
         for (p, e) in &diverged {
-            eprintln!("DIVERGED {}: {}", p.display(), e.lines().next().unwrap_or(""));
+            eprintln!(
+                "DIVERGED {}: {}",
+                p.display(),
+                e.lines().next().unwrap_or("")
+            );
         }
         panic!(
             "advance_fixture_replay: {} fixtures diverged ({} skipped)",

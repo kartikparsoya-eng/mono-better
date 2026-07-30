@@ -7,7 +7,7 @@
 // values_equal (data.rs:68): null != null (join semantics), else structural ==.
 
 use proptest::prelude::*;
-use rust_ivm::ivm::data::{compare_values, values_equal, Value};
+use rust_ivm::ivm::data::{Value, compare_values, values_equal};
 use std::cmp::Ordering;
 
 // Finite, non-NaN numbers (real data has no NaN; NaN would break total order).

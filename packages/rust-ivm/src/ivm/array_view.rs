@@ -6,13 +6,13 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use crate::ivm::change::Change;
-use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::NodeStream;
-use crate::ivm::view::{apply_change, change_to_view_change, empty_root_entry, Entry, Format, View, ViewChange};
+use crate::ivm::view::{
+    Entry, Format, View, ViewChange, apply_change, change_to_view_change, empty_root_entry,
+};
 
 /// A listener callback for view updates.
 pub type Listener = Rc<dyn Fn(&View)>;
@@ -41,9 +41,9 @@ impl ArrayView {
         }));
 
         let av_clone = av.clone();
-        input.borrow_mut().set_output(Rc::new(RefCell::new(ArrayViewOutput {
-            av: av_clone,
-        })));
+        input
+            .borrow_mut()
+            .set_output(Rc::new(RefCell::new(ArrayViewOutput { av: av_clone })));
 
         // Hydrate
         {

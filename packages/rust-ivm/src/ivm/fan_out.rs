@@ -6,7 +6,6 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use crate::ivm::change::Change;
 use crate::ivm::fan_in::FanIn;

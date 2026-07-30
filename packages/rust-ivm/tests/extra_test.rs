@@ -1,15 +1,15 @@
 //! Tests for the newly ported query utilities and ZQLite extras.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use rust_ivm::builder::error::{NotImplementedError, QueryParseError};
 use rust_ivm::builder::escape_like::escape_like;
-use rust_ivm::builder::error::{QueryParseError, NotImplementedError};
-use rust_ivm::builder::metrics_delegate::{Metric, NullMetricsDelegate, MetricsDelegate};
+use rust_ivm::builder::metrics_delegate::{Metric, MetricsDelegate, NullMetricsDelegate};
 use rust_ivm::builder::named::SyncedQuery;
+use rust_ivm::builder::query::{Cardinality, RelationshipSpec};
 use rust_ivm::builder::query_registry::CustomQuery;
-use rust_ivm::builder::query::{Cardinality, Query, RelationshipSpec};
-use rust_ivm::builder::schema_query::{create_builder, SchemaQuery};
+use rust_ivm::builder::schema_query::{SchemaQuery, create_builder};
 use rust_ivm::builder::validate_input::validate_input;
 use rust_ivm::ivm::data::Value;
 
@@ -94,9 +94,18 @@ fn test_not_implemented_error() {
 
 #[test]
 fn test_metric_names() {
-    assert_eq!(Metric::QueryMaterializationClient.name(), "query-materialization-client");
-    assert_eq!(Metric::QueryMaterializationEndToEnd.name(), "query-materialization-end-to-end");
-    assert_eq!(Metric::QueryMaterializationServer.name(), "query-materialization-server");
+    assert_eq!(
+        Metric::QueryMaterializationClient.name(),
+        "query-materialization-client"
+    );
+    assert_eq!(
+        Metric::QueryMaterializationEndToEnd.name(),
+        "query-materialization-end-to-end"
+    );
+    assert_eq!(
+        Metric::QueryMaterializationServer.name(),
+        "query-materialization-server"
+    );
     assert_eq!(Metric::QueryUpdateClient.name(), "query-update-client");
     assert_eq!(Metric::QueryUpdateServer.name(), "query-update-server");
 }
@@ -176,13 +185,9 @@ fn test_create_builder() {
 #[test]
 fn test_custom_query_call() {
     let schema = make_schema();
-    let cq = CustomQuery::new(
-        "getUsers",
-        None,
-        move |_input| {
-            create_builder(&schema, "users")
-        },
-    );
+    let cq = CustomQuery::new("getUsers", None, move |_input| {
+        create_builder(&schema, "users")
+    });
 
     let request = cq.call(Value::Null);
     assert_eq!(request.custom_query.query_name, "getUsers");
@@ -194,28 +199,21 @@ fn test_custom_query_call() {
 
 #[test]
 fn test_custom_query_with_validator() {
-    let schema = make_schema();
+    let _schema = make_schema();
     let validator = Arc::new(|v: &Value| match v {
         Value::F64(_) => Ok(v.clone()),
         _ => Err(vec!["expected number".to_string()]),
     });
 
-    let cq = CustomQuery::new(
-        "getById",
-        Some(validator),
-        move |input| {
-            let schema = make_schema();
-            let mut q = create_builder(&schema, "users");
-            // Use the validated input value
-            match input {
-                Value::F64(n) => {
-                    q = q.where_eq("id", Value::F64(*n));
-                }
-                _ => {}
-            }
-            q
-        },
-    );
+    let cq = CustomQuery::new("getById", Some(validator), move |input| {
+        let schema = make_schema();
+        let mut q = create_builder(&schema, "users");
+        // Use the validated input value
+        if let Value::F64(n) = input {
+            q = q.where_eq("id", Value::F64(*n));
+        }
+        q
+    });
 
     // Valid input
     let request = cq.call(Value::F64(42.0));
@@ -240,9 +238,7 @@ fn test_synced_query_basic() {
     let sq = SyncedQuery::new(
         "myQuery",
         None,
-        Box::new(move |_args| {
-            create_builder(&schema, "users")
-        }),
+        Box::new(move |_args| create_builder(&schema, "users")),
     );
     assert_eq!(sq.query_name, "myQuery");
     assert!(!sq.takes_context);

@@ -12,10 +12,7 @@ pub type SimplePredicate = Box<dyn Fn(&crate::ivm::data::Value) -> bool>;
 /// Get a LIKE predicate.
 /// `flags` = "" for LIKE (case-sensitive), "i" for ILIKE (case-insensitive).
 /// Port of TS `getLikePredicate` (like.ts:4).
-pub fn get_like_predicate(
-    pattern: &crate::ivm::data::Value,
-    flags: &str,
-) -> SimplePredicate {
+pub fn get_like_predicate(pattern: &crate::ivm::data::Value, flags: &str) -> SimplePredicate {
     let pattern_str = match pattern {
         crate::ivm::data::Value::Str(s) => s.to_string(),
         _ => panic!("LIKE pattern must be a string"),
@@ -96,5 +93,8 @@ fn pattern_to_regex(source: &str, flags: &str) -> regex_lite::Regex {
 }
 
 fn is_special_regex_char(c: char) -> bool {
-    matches!(c, '$' | '(' | ')' | '*' | '+' | '.' | '?' | '[' | ']' | '\\' | '^' | '{' | '|' | '}')
+    matches!(
+        c,
+        '$' | '(' | ')' | '*' | '+' | '.' | '?' | '[' | ']' | '\\' | '^' | '{' | '|' | '}'
+    )
 }

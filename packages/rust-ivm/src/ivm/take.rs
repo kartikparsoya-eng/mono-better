@@ -9,24 +9,26 @@
 //! mid-processing of a push.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::cmp::Ordering as CmpOrdering;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::ivm::change::{make_add_change, make_remove_change, Change, ChangeType};
-use crate::ivm::constraint::{constraint_matches_primary_key, Constraint};
-use crate::ivm::data::{compare_values, Comparator, Node, Row, Value};
+use crate::ivm::change::{Change, ChangeType, make_add_change, make_remove_change};
+use crate::ivm::constraint::{Constraint, constraint_matches_primary_key};
+use crate::ivm::data::{Comparator, Node, Row, Value, compare_values};
 use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Basis, Start,
+    Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
 };
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{from_vec, NodeStream, StreamItem, skip_yields, take as stream_take, first as stream_first};
+use crate::ivm::stream::{
+    NodeStream, StreamItem, first as stream_first, from_vec, skip_yields,
+};
 
 const MAX_BOUND_KEY: &str = "maxBound";
 
 /// Take state — tracks count and bound per partition.
 #[derive(Clone, Debug)]
-struct TakeState {
+pub struct TakeState {
     size: usize,
     bound: Option<Row>,
 }
@@ -92,9 +94,13 @@ impl Drop for InitialFetchGuard {
         // finally) then reset via panic.
         let b = self.bound.borrow().clone();
         let size = self.count.get();
-        self.storage
-            .borrow_mut()
-            .set(self.key.clone(), TakeState { size, bound: b.clone() });
+        self.storage.borrow_mut().set(
+            self.key.clone(),
+            TakeState {
+                size,
+                bound: b.clone(),
+            },
+        );
         if let Some(ref bval) = b {
             let current_max = self
                 .storage
@@ -103,7 +109,7 @@ impl Drop for InitialFetchGuard {
                 .and_then(|s| s.bound.clone());
             if current_max
                 .as_ref()
-                .map_or(true, |m| (self.compare)(bval, m) == CmpOrdering::Greater)
+                .is_none_or(|m| (self.compare)(bval, m) == CmpOrdering::Greater)
             {
                 self.storage
                     .borrow_mut()
@@ -128,7 +134,6 @@ pub struct Take {
     output: Rc<RefCell<Option<OutputHandle>>>,
 }
 
-
 /// RAII guard that clears row_hidden_from_fetch on drop, even if a panic occurs.
 struct HiddenRowGuard(Rc<RefCell<Option<Row>>>);
 impl Drop for HiddenRowGuard {
@@ -144,7 +149,9 @@ impl Take {
         limit: usize,
         partition_key: Option<PartitionKey>,
     ) -> Shared<Take> {
-        assert!(limit >= 0, "Limit must be non-negative");
+        // limit is usize, always >= 0. TS asserts limit >= 0 but that's
+        // trivially true for unsigned types.
+        debug_assert!(limit < usize::MAX, "Limit must be reasonable");
         let schema = input.borrow().get_schema();
         let sort = schema.sort.clone();
         let pk_comparator = partition_key.as_ref().map(make_partition_key_comparator);
@@ -156,9 +163,12 @@ impl Take {
             partition_key,
             partition_key_comparator: pk_comparator,
             row_hidden_from_fetch: Rc::new(RefCell::new(None)),
-            schema: if sort.is_some() { schema } else {
+            schema: if sort.is_some() {
+                schema
+            } else {
                 let pk = schema.primary_key.clone();
-                let order: Vec<[String; 2]> = pk.iter().map(|k| [k.clone(), "asc".to_string()]).collect();
+                let order: Vec<[String; 2]> =
+                    pk.iter().map(|k| [k.clone(), "asc".to_string()]).collect();
                 SourceSchema {
                     sort: Some(Arc::new(order)),
                     ..schema
@@ -168,9 +178,9 @@ impl Take {
         }));
 
         let take_clone = take.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(TakeOutput {
-            take: take_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(TakeOutput { take: take_clone })));
         take
     }
 
@@ -178,13 +188,15 @@ impl Take {
         &self.schema.compare_rows
     }
 
+    #[allow(dead_code)]
     fn get_take_state_key(&self, row_or_constraint: Option<(&Row, &Constraint)>) -> String {
         match (&self.partition_key, row_or_constraint) {
             (Some(pk), Some((row, c))) => {
                 // Prefer constraint values; fall back to row values
                 let mut key = String::new();
                 for col in pk {
-                    let v = c.get(col).map(|v| v.clone())
+                    let v = c
+                        .get(col).cloned()
                         .or_else(|| row.get(col).cloned())
                         .unwrap_or(Value::Null);
                     key.push_str(&format!("{}={:?};", col, v));
@@ -196,7 +208,10 @@ impl Take {
         }
     }
 
-    fn get_state_and_constraint(&self, row: &Row) -> Option<(TakeState, String, Option<Row>, Option<Constraint>)> {
+    fn get_state_and_constraint(
+        &self,
+        row: &Row,
+    ) -> Option<(TakeState, String, Option<Row>, Option<Constraint>)> {
         let take_state_key = match &self.partition_key {
             Some(pk) => {
                 let mut key = String::new();
@@ -211,7 +226,11 @@ impl Take {
         };
 
         let take_state = self.storage.borrow().get(&take_state_key).cloned()?;
-        let max_bound = self.storage.borrow().get(MAX_BOUND_KEY).map(|s| s.bound.clone()).flatten();
+        let max_bound = self
+            .storage
+            .borrow()
+            .get(MAX_BOUND_KEY)
+            .and_then(|s| s.bound.clone());
         let constraint = self.partition_key.as_ref().map(|pk| {
             pk.iter()
                 .map(|k| (k.clone(), row.get(k).cloned().unwrap_or(Value::Null)))
@@ -221,13 +240,37 @@ impl Take {
         Some((take_state, take_state_key, max_bound, constraint))
     }
 
-    fn set_take_state(&self, take_state_key: &str, size: usize, bound: Option<Row>, _max_bound: Option<Row>) {
-        self.storage.borrow_mut().set(take_state_key.to_string(), TakeState { size, bound: bound.clone() });
+    fn set_take_state(
+        &self,
+        take_state_key: &str,
+        size: usize,
+        bound: Option<Row>,
+        _max_bound: Option<Row>,
+    ) {
+        self.storage.borrow_mut().set(
+            take_state_key.to_string(),
+            TakeState {
+                size,
+                bound: bound.clone(),
+            },
+        );
         if let Some(ref b) = bound {
-            let current_max = self.storage.borrow().get(MAX_BOUND_KEY).and_then(|s| s.bound.clone());
-            let should_update = current_max.as_ref().map_or(true, |m| (self.compare_rows())(b, m) == CmpOrdering::Greater);
+            let current_max = self
+                .storage
+                .borrow()
+                .get(MAX_BOUND_KEY)
+                .and_then(|s| s.bound.clone());
+            let should_update = current_max.as_ref().is_none_or(|m| {
+                (self.compare_rows())(b, m) == CmpOrdering::Greater
+            });
             if should_update {
-                self.storage.borrow_mut().set(MAX_BOUND_KEY.to_string(), TakeState { size: 0, bound: Some(b.clone()) });
+                self.storage.borrow_mut().set(
+                    MAX_BOUND_KEY.to_string(),
+                    TakeState {
+                        size: 0,
+                        bound: Some(b.clone()),
+                    },
+                );
             }
         }
     }
@@ -274,43 +317,73 @@ impl Take {
             if persisted_c.get() {
                 return None;
             }
-            loop {
-                match stream.next() {
-                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+            match stream.next() {
+                    Some(StreamItem::Yield) => Some(StreamItem::Yield),
                     Some(StreamItem::Data(node)) => {
                         *bound_c.borrow_mut() = Some(node.row.clone());
                         let c = count_c.get() + 1;
                         count_c.set(c);
                         if c >= limit {
                             let b = bound_c.borrow().clone();
-                            storage_c.borrow_mut().set(take_state_key_c.clone(), TakeState { size: c, bound: b.clone() });
+                            storage_c.borrow_mut().set(
+                                take_state_key_c.clone(),
+                                TakeState {
+                                    size: c,
+                                    bound: b.clone(),
+                                },
+                            );
                             // Update max bound
-                            let current_max = storage_c.borrow().get(MAX_BOUND_KEY).and_then(|s| s.bound.clone());
-                            if let Some(ref bval) = b {
-                                if current_max.as_ref().map_or(true, |m| compare(bval, m) == CmpOrdering::Greater) {
-                                    storage_c.borrow_mut().set(MAX_BOUND_KEY.to_string(), TakeState { size: 0, bound: Some(bval.clone()) });
+                            let current_max = storage_c
+                                .borrow()
+                                .get(MAX_BOUND_KEY)
+                                .and_then(|s| s.bound.clone());
+                            if let Some(ref bval) = b
+                                && current_max
+                                    .as_ref()
+                                    .is_none_or(|m| compare(bval, m) == CmpOrdering::Greater)
+                                {
+                                    storage_c.borrow_mut().set(
+                                        MAX_BOUND_KEY.to_string(),
+                                        TakeState {
+                                            size: 0,
+                                            bound: Some(bval.clone()),
+                                        },
+                                    );
                                 }
-                            }
                             persisted_c.set(true);
                         }
-                        return Some(StreamItem::Data(node));
+                        Some(StreamItem::Data(node))
                     }
                     None => {
                         let b = bound_c.borrow().clone();
                         let size = count_c.get();
-                        storage_c.borrow_mut().set(take_state_key_c.clone(), TakeState { size, bound: b.clone() });
+                        storage_c.borrow_mut().set(
+                            take_state_key_c.clone(),
+                            TakeState {
+                                size,
+                                bound: b.clone(),
+                            },
+                        );
                         // Update max bound
                         if let Some(ref bval) = b {
-                            let current_max = storage_c.borrow().get(MAX_BOUND_KEY).and_then(|s| s.bound.clone());
-                            if current_max.as_ref().map_or(true, |m| compare(bval, m) == CmpOrdering::Greater) {
-                                storage_c.borrow_mut().set(MAX_BOUND_KEY.to_string(), TakeState { size: 0, bound: b });
+                            let current_max = storage_c
+                                .borrow()
+                                .get(MAX_BOUND_KEY)
+                                .and_then(|s| s.bound.clone());
+                            if current_max
+                                .as_ref()
+                                .is_none_or(|m| compare(bval, m) == CmpOrdering::Greater)
+                            {
+                                storage_c.borrow_mut().set(
+                                    MAX_BOUND_KEY.to_string(),
+                                    TakeState { size: 0, bound: b },
+                                );
                             }
                         }
                         persisted_c.set(true);
-                        return None;
+                        None
                     }
                 }
-            }
         }))
     }
 
@@ -347,29 +420,46 @@ impl Take {
     }
 
     fn push_add_change(&self, node: &Node, output: &OutputHandle, pusher: &dyn InputBase) {
-        let Some((take_state, take_state_key, max_bound, constraint)) = self.get_state_and_constraint(&node.row) else { return };
+        let Some((take_state, take_state_key, max_bound, constraint)) =
+            self.get_state_and_constraint(&node.row)
+        else {
+            return;
+        };
         let compare = self.compare_rows().clone();
 
         if take_state.size < self.limit {
-            let new_bound = if take_state.bound.as_ref().map_or(true, |b| compare(b, &node.row) == CmpOrdering::Less) {
+            let new_bound = if take_state
+                .bound
+                .as_ref()
+                .is_none_or(|b| compare(b, &node.row) == CmpOrdering::Less)
+            {
                 Some(node.row.clone())
             } else {
                 take_state.bound.clone()
             };
             self.set_take_state(&take_state_key, take_state.size + 1, new_bound, max_bound);
-            output.borrow_mut().push(make_add_change(node.clone()), pusher);
+            output
+                .borrow_mut()
+                .push(make_add_change(node.clone()), pusher);
             return;
         }
 
         // size === limit
-        let Some(bound) = &take_state.bound else { return };
-        if compare(&node.row, bound) != CmpOrdering::Less { return }
+        let Some(bound) = &take_state.bound else {
+            return;
+        };
+        if compare(&node.row, bound) != CmpOrdering::Less {
+            return;
+        }
 
         // added row < bound — need to remove the bound row and add the new row
         let bound_node = if self.limit == 1 {
             // Fetch the bound row itself
             let req = FetchRequest {
-                start: Some(Start { row: bound.clone(), basis: Basis::At }),
+                start: Some(Start {
+                    row: bound.clone(),
+                    basis: Basis::At,
+                }),
                 constraint: constraint.clone(),
                 ..Default::default()
             };
@@ -377,7 +467,10 @@ impl Take {
         } else {
             // Fetch bound and the row before it
             let req = FetchRequest {
-                start: Some(Start { row: bound.clone(), basis: Basis::At }),
+                start: Some(Start {
+                    row: bound.clone(),
+                    basis: Basis::At,
+                }),
                 constraint: constraint.clone(),
                 reverse: true,
                 ..Default::default()
@@ -392,9 +485,19 @@ impl Take {
                 } else {
                     Some(bbn.row.clone())
                 };
-                self.set_take_state(&take_state_key, take_state.size, new_bound, max_bound.clone());
+                self.set_take_state(
+                    &take_state_key,
+                    take_state.size,
+                    new_bound,
+                    max_bound.clone(),
+                );
             } else {
-                self.set_take_state(&take_state_key, take_state.size, Some(node.row.clone()), max_bound.clone());
+                self.set_take_state(
+                    &take_state_key,
+                    take_state.size,
+                    Some(node.row.clone()),
+                    max_bound.clone(),
+                );
             }
             bound_node
         };
@@ -404,31 +507,56 @@ impl Take {
             // Just need to do the remove-before-add with row hiding
             if let Some(bn) = bound_node {
                 // Remove before add to maintain invariant output size <= limit
-                self.push_with_row_hidden_from_fetch(&node.row, make_remove_change(bn), output, pusher);
-                output.borrow_mut().push(make_add_change(node.clone()), pusher);
+                self.push_with_row_hidden_from_fetch(
+                    &node.row,
+                    make_remove_change(bn),
+                    output,
+                    pusher,
+                );
+                output
+                    .borrow_mut()
+                    .push(make_add_change(node.clone()), pusher);
             }
             return;
         }
 
         // limit == 1
         if let Some(bn) = bound_node {
-            self.set_take_state(&take_state_key, take_state.size, Some(node.row.clone()), max_bound.clone());
+            self.set_take_state(
+                &take_state_key,
+                take_state.size,
+                Some(node.row.clone()),
+                max_bound.clone(),
+            );
             self.push_with_row_hidden_from_fetch(&node.row, make_remove_change(bn), output, pusher);
-            output.borrow_mut().push(make_add_change(node.clone()), pusher);
+            output
+                .borrow_mut()
+                .push(make_add_change(node.clone()), pusher);
         }
     }
 
     fn push_remove_change(&self, node: &Node, output: &OutputHandle, pusher: &dyn InputBase) {
-        let Some((take_state, take_state_key, max_bound, constraint)) = self.get_state_and_constraint(&node.row) else { return };
+        let Some((take_state, take_state_key, max_bound, constraint)) =
+            self.get_state_and_constraint(&node.row)
+        else {
+            return;
+        };
         let compare = self.compare_rows().clone();
 
-        let Some(bound) = &take_state.bound else { return };
+        let Some(bound) = &take_state.bound else {
+            return;
+        };
         let comp_to_bound = compare(&node.row, bound);
-        if comp_to_bound == CmpOrdering::Greater { return }
+        if comp_to_bound == CmpOrdering::Greater {
+            return;
+        }
 
         // Find the row before the bound (replacement candidate)
         let req = FetchRequest {
-            start: Some(Start { row: bound.clone(), basis: Basis::After }),
+            start: Some(Start {
+                row: bound.clone(),
+                basis: Basis::After,
+            }),
             constraint: constraint.clone(),
             reverse: true,
             ..Default::default()
@@ -441,36 +569,69 @@ impl Take {
             new_bound = Some((bbn.clone(), push));
         }
 
-        if new_bound.as_ref().map_or(true, |(_, push)| !push) {
+        if new_bound.as_ref().is_none_or(|(_, push)| !push) {
             // Iterate the at-bound stream to find the first row > bound.
             // Port of TS: always set newBound to each found node, break when push=true.
             let req = FetchRequest {
-                start: Some(Start { row: bound.clone(), basis: Basis::At }),
+                start: Some(Start {
+                    row: bound.clone(),
+                    basis: Basis::At,
+                }),
                 constraint: constraint.clone(),
                 ..Default::default()
             };
             for n in skip_yields(self.input.borrow().fetch(&req)) {
                 let push = compare(&n.row, bound) == CmpOrdering::Greater;
                 new_bound = Some((n, push));
-                if push { break; }
+                if push {
+                    break;
+                }
             }
         }
 
         if let Some((new_bound_node, true)) = new_bound {
-            output.borrow_mut().push(make_remove_change(node.clone()), pusher);
-            self.set_take_state(&take_state_key, take_state.size, Some(new_bound_node.row.clone()), max_bound);
-            output.borrow_mut().push(make_add_change(new_bound_node), pusher);
+            output
+                .borrow_mut()
+                .push(make_remove_change(node.clone()), pusher);
+            self.set_take_state(
+                &take_state_key,
+                take_state.size,
+                Some(new_bound_node.row.clone()),
+                max_bound,
+            );
+            output
+                .borrow_mut()
+                .push(make_add_change(new_bound_node), pusher);
         } else {
             let new_bound_row = new_bound.map(|(n, _)| n.row);
-            self.set_take_state(&take_state_key, take_state.size - 1, new_bound_row, max_bound);
-            output.borrow_mut().push(make_remove_change(node.clone()), pusher);
+            self.set_take_state(
+                &take_state_key,
+                take_state.size - 1,
+                new_bound_row,
+                max_bound,
+            );
+            output
+                .borrow_mut()
+                .push(make_remove_change(node.clone()), pusher);
         }
     }
 
-    fn push_child_change(&self, change: &Change, node: &Node, output: &OutputHandle, pusher: &dyn InputBase) {
-        let Some((take_state, _, _, _)) = self.get_state_and_constraint(&node.row) else { return };
+    fn push_child_change(
+        &self,
+        change: &Change,
+        node: &Node,
+        output: &OutputHandle,
+        pusher: &dyn InputBase,
+    ) {
+        let Some((take_state, _, _, _)) = self.get_state_and_constraint(&node.row) else {
+            return;
+        };
         let compare = self.compare_rows().clone();
-        if take_state.bound.as_ref().map_or(true, |b| compare(&node.row, b) != CmpOrdering::Greater) {
+        if take_state
+            .bound
+            .as_ref()
+            .is_none_or(|b| compare(&node.row, b) != CmpOrdering::Greater)
+        {
             output.borrow_mut().push(change.clone(), pusher);
         }
     }
@@ -489,8 +650,14 @@ impl Take {
             );
         }
 
-        let Some((take_state, take_state_key, max_bound, constraint)) = self.get_state_and_constraint(&old_node.row) else { return };
-        let Some(bound) = &take_state.bound else { return };
+        let Some((take_state, take_state_key, max_bound, constraint)) =
+            self.get_state_and_constraint(&old_node.row)
+        else {
+            return;
+        };
+        let Some(bound) = &take_state.bound else {
+            return;
+        };
         let compare = self.compare_rows().clone();
 
         let old_cmp = compare(&old_node.row, bound);
@@ -505,19 +672,32 @@ impl Take {
             }
             if new_cmp == CmpOrdering::Less {
                 if self.limit == 1 {
-                    self.set_take_state(&take_state_key, take_state.size, Some(node.row.clone()), max_bound);
+                    self.set_take_state(
+                        &take_state_key,
+                        take_state.size,
+                        Some(node.row.clone()),
+                        max_bound,
+                    );
                     output.borrow_mut().push(change.clone(), pusher);
                     return;
                 }
                 // Find the row before the bound
                 let req = FetchRequest {
-                    start: Some(Start { row: bound.clone(), basis: Basis::After }),
+                    start: Some(Start {
+                        row: bound.clone(),
+                        basis: Basis::After,
+                    }),
                     constraint: constraint.clone(),
                     reverse: true,
                     ..Default::default()
                 };
                 if let Some(before_bound) = stream_first(self.input.borrow().fetch(&req)) {
-                    self.set_take_state(&take_state_key, take_state.size, Some(before_bound.row.clone()), max_bound);
+                    self.set_take_state(
+                        &take_state_key,
+                        take_state.size,
+                        Some(before_bound.row.clone()),
+                        max_bound,
+                    );
                 }
                 output.borrow_mut().push(change.clone(), pusher);
                 return;
@@ -529,36 +709,63 @@ impl Take {
             );
             // Find the first item at the old bound — it becomes the new bound
             let req = FetchRequest {
-                start: Some(Start { row: bound.clone(), basis: Basis::At }),
+                start: Some(Start {
+                    row: bound.clone(),
+                    basis: Basis::At,
+                }),
                 constraint: constraint.clone(),
                 ..Default::default()
             };
             if let Some(new_bound_node) = stream_first(self.input.borrow().fetch(&req)) {
                 if compare(&new_bound_node.row, &node.row) == CmpOrdering::Equal {
                     // The new row is the next row — replace bound and keep the edit
-                    self.set_take_state(&take_state_key, take_state.size, Some(node.row.clone()), max_bound);
+                    self.set_take_state(
+                        &take_state_key,
+                        take_state.size,
+                        Some(node.row.clone()),
+                        max_bound,
+                    );
                     output.borrow_mut().push(change.clone(), pusher);
                     return;
                 }
                 // The new row is outside bounds — remove old row, add new bound
-                self.set_take_state(&take_state_key, take_state.size, Some(new_bound_node.row.clone()), max_bound);
+                self.set_take_state(
+                    &take_state_key,
+                    take_state.size,
+                    Some(new_bound_node.row.clone()),
+                    max_bound,
+                );
                 self.push_with_row_hidden_from_fetch(
                     &new_bound_node.row,
                     make_remove_change(old_node.clone()),
-                    output, pusher,
+                    output,
+                    pusher,
                 );
-                output.borrow_mut().push(make_add_change(new_bound_node), pusher);
+                output
+                    .borrow_mut()
+                    .push(make_add_change(new_bound_node), pusher);
             }
             return;
         }
 
         if old_cmp == CmpOrdering::Greater {
-            assert!(new_cmp != CmpOrdering::Equal, "Invalid state. Row has duplicate primary key");
-            if new_cmp == CmpOrdering::Greater { return } // both outside
+            assert!(
+                new_cmp != CmpOrdering::Equal,
+                "Invalid state. Row has duplicate primary key"
+            );
+            if new_cmp == CmpOrdering::Greater {
+                return;
+            } // both outside
             // old was outside, new is inside — push out the old bound (TS take.ts:571).
-            assert!(new_cmp == CmpOrdering::Less, "New comparison must be less than 0");
+            assert!(
+                new_cmp == CmpOrdering::Less,
+                "New comparison must be less than 0"
+            );
             let req = FetchRequest {
-                start: Some(Start { row: bound.clone(), basis: Basis::At }),
+                start: Some(Start {
+                    row: bound.clone(),
+                    basis: Basis::At,
+                }),
                 constraint: constraint.clone(),
                 reverse: true,
                 ..Default::default()
@@ -567,11 +774,17 @@ impl Take {
             let old_bound_node = iter.next();
             let new_bound_node = iter.next();
             if let (Some(obn), Some(nbn)) = (old_bound_node, new_bound_node) {
-                self.set_take_state(&take_state_key, take_state.size, Some(nbn.row.clone()), max_bound);
+                self.set_take_state(
+                    &take_state_key,
+                    take_state.size,
+                    Some(nbn.row.clone()),
+                    max_bound,
+                );
                 self.push_with_row_hidden_from_fetch(
                     &node.row,
                     make_remove_change(obn),
-                    output, pusher,
+                    output,
+                    pusher,
                 );
                 output.borrow_mut().push(make_add_change(node), pusher);
             }
@@ -579,7 +792,10 @@ impl Take {
         }
 
         // old_cmp == Less
-        assert!(new_cmp != CmpOrdering::Equal, "Invalid state. Row has duplicate primary key");
+        assert!(
+            new_cmp != CmpOrdering::Equal,
+            "Invalid state. Row has duplicate primary key"
+        );
         if new_cmp == CmpOrdering::Less {
             // both inside bounds
             output.borrow_mut().push(change.clone(), pusher);
@@ -592,20 +808,37 @@ impl Take {
         );
         // Find the row after the bound
         let req = FetchRequest {
-            start: Some(Start { row: bound.clone(), basis: Basis::After }),
+            start: Some(Start {
+                row: bound.clone(),
+                basis: Basis::After,
+            }),
             constraint: constraint.clone(),
             ..Default::default()
         };
         if let Some(after_bound) = stream_first(self.input.borrow().fetch(&req)) {
             if compare(&after_bound.row, &node.row) == CmpOrdering::Equal {
                 // New row is the new bound — use edit change
-                self.set_take_state(&take_state_key, take_state.size, Some(node.row.clone()), max_bound);
+                self.set_take_state(
+                    &take_state_key,
+                    take_state.size,
+                    Some(node.row.clone()),
+                    max_bound,
+                );
                 output.borrow_mut().push(change.clone(), pusher);
                 return;
             }
-            output.borrow_mut().push(make_remove_change(old_node.clone()), pusher);
-            self.set_take_state(&take_state_key, take_state.size, Some(after_bound.row.clone()), max_bound);
-            output.borrow_mut().push(make_add_change(after_bound), pusher);
+            output
+                .borrow_mut()
+                .push(make_remove_change(old_node.clone()), pusher);
+            self.set_take_state(
+                &take_state_key,
+                take_state.size,
+                Some(after_bound.row.clone()),
+                max_bound,
+            );
+            output
+                .borrow_mut()
+                .push(make_add_change(after_bound), pusher);
         }
     }
 
@@ -672,14 +905,15 @@ impl Input for Take {
                         if compare(&n.row, &bound) == CmpOrdering::Greater {
                             return None;
                         }
-                        if let Some(ref h) = hidden {
-                            if compare(&n.row, h) == CmpOrdering::Equal {
-                                return None;
+                        if let Some(ref h) = hidden
+                            && compare(&n.row, h) == CmpOrdering::Equal {
+                            return None;
                             }
-                        }
                         Some(crate::ivm::stream::StreamItem::Data(n))
                     }
-                    crate::ivm::stream::StreamItem::Yield => Some(crate::ivm::stream::StreamItem::Yield),
+                    crate::ivm::stream::StreamItem::Yield => {
+                        Some(crate::ivm::stream::StreamItem::Yield)
+                    }
                 }))
             }
         }
@@ -718,6 +952,9 @@ fn make_partition_key_comparator(partition_key: &PartitionKey) -> Comparator {
 }
 
 /// Check if a constraint matches a partition key.
-pub fn constraint_matches_partition_key(constraint: &Constraint, partition_key: &PartitionKey) -> bool {
+pub fn constraint_matches_partition_key(
+    constraint: &Constraint,
+    partition_key: &PartitionKey,
+) -> bool {
     constraint_matches_primary_key(constraint, partition_key)
 }

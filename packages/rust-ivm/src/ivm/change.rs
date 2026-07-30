@@ -33,14 +33,8 @@ pub struct ChildData {
 pub enum Change {
     Add(Node),
     Remove(Node),
-    Child {
-        node: Node,
-        child: ChildData,
-    },
-    Edit {
-        node: Node,
-        old_node: Node,
-    },
+    Child { node: Node, child: ChildData },
+    Edit { node: Node, old_node: Node },
 }
 
 impl Change {
@@ -106,8 +100,12 @@ pub fn make_edit_change(node: Node, old_node: Node) -> Change {
 /// TS: `SourceChangeEdit = [ChangeType.EDIT, row: Row, oldRow: Row]`
 #[derive(Clone, Debug)]
 pub enum SourceChange {
-    Add { row: crate::ivm::data::Row },
-    Remove { row: crate::ivm::data::Row },
+    Add {
+        row: crate::ivm::data::Row,
+    },
+    Remove {
+        row: crate::ivm::data::Row,
+    },
     Edit {
         row: crate::ivm::data::Row,
         old_row: crate::ivm::data::Row,

@@ -40,7 +40,8 @@ impl PlannerFanOut {
         constraint: Option<&PlannerConstraint>,
         _from: Option<&PlannerNode>,
     ) {
-        self.input.propagate_constraints(branch_pattern, constraint, None);
+        self.input
+            .propagate_constraints(branch_pattern, constraint, None);
     }
 
     pub fn estimate_cost(
@@ -48,7 +49,8 @@ impl PlannerFanOut {
         downstream_child_selectivity: f64,
         branch_pattern: &[usize],
     ) -> CostEstimate {
-        self.input.estimate_cost(downstream_child_selectivity, branch_pattern)
+        self.input
+            .estimate_cost(downstream_child_selectivity, branch_pattern)
     }
 
     pub fn convert_to_ufo(&mut self) {

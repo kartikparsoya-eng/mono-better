@@ -7,9 +7,7 @@ use std::cmp::Ordering;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
-use rust_ivm::ivm::data::{
-    compare_values, make_comparator, values_equal, Value, SortOrder,
-};
+use rust_ivm::ivm::data::{SortOrder, Value, compare_values, make_comparator, values_equal};
 
 // ---------------------------------------------------------------------------
 // normalizeUndefined
@@ -39,23 +37,50 @@ fn test_compare_values_null_and_null_equal() {
 
 #[test]
 fn test_compare_values_null_less_than_anything() {
-    assert_eq!(compare_values(&Value::Null, &Value::Bool(true)), Ordering::Less);
-    assert_eq!(compare_values(&Value::Null, &Value::F64(1.0)), Ordering::Less);
-    assert_eq!(compare_values(&Value::Null, &Value::Str("a".into())), Ordering::Less);
+    assert_eq!(
+        compare_values(&Value::Null, &Value::Bool(true)),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_values(&Value::Null, &Value::F64(1.0)),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_values(&Value::Null, &Value::Str("a".into())),
+        Ordering::Less
+    );
 }
 
 #[test]
 fn test_compare_values_anything_greater_than_null() {
-    assert_eq!(compare_values(&Value::Bool(true), &Value::Null), Ordering::Greater);
-    assert_eq!(compare_values(&Value::F64(1.0), &Value::Null), Ordering::Greater);
-    assert_eq!(compare_values(&Value::Str("a".into()), &Value::Null), Ordering::Greater);
+    assert_eq!(
+        compare_values(&Value::Bool(true), &Value::Null),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_values(&Value::F64(1.0), &Value::Null),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_values(&Value::Str("a".into()), &Value::Null),
+        Ordering::Greater
+    );
 }
 
 #[test]
 fn test_compare_values_bool() {
-    assert_eq!(compare_values(&Value::Bool(true), &Value::Bool(true)), Ordering::Equal);
-    assert_eq!(compare_values(&Value::Bool(true), &Value::Bool(false)), Ordering::Greater);
-    assert_eq!(compare_values(&Value::Bool(false), &Value::Bool(true)), Ordering::Less);
+    assert_eq!(
+        compare_values(&Value::Bool(true), &Value::Bool(true)),
+        Ordering::Equal
+    );
+    assert_eq!(
+        compare_values(&Value::Bool(true), &Value::Bool(false)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_values(&Value::Bool(false), &Value::Bool(true)),
+        Ordering::Less
+    );
 }
 
 #[test]
@@ -72,9 +97,18 @@ fn test_compare_values_bool_and_string_panics() {
 
 #[test]
 fn test_compare_values_number() {
-    assert_eq!(compare_values(&Value::F64(1.0), &Value::F64(2.0)), Ordering::Less);
-    assert_eq!(compare_values(&Value::F64(2.0), &Value::F64(1.0)), Ordering::Greater);
-    assert_eq!(compare_values(&Value::F64(1.0), &Value::F64(1.0)), Ordering::Equal);
+    assert_eq!(
+        compare_values(&Value::F64(1.0), &Value::F64(2.0)),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_values(&Value::F64(2.0), &Value::F64(1.0)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_values(&Value::F64(1.0), &Value::F64(1.0)),
+        Ordering::Equal
+    );
 }
 
 #[test]
@@ -91,9 +125,18 @@ fn test_compare_values_number_and_string_panics() {
 
 #[test]
 fn test_compare_values_string_utf8() {
-    assert_eq!(compare_values(&Value::Str("a".into()), &Value::Str("b".into())), Ordering::Less);
-    assert_eq!(compare_values(&Value::Str("b".into()), &Value::Str("a".into())), Ordering::Greater);
-    assert_eq!(compare_values(&Value::Str("a".into()), &Value::Str("a".into())), Ordering::Equal);
+    assert_eq!(
+        compare_values(&Value::Str("a".into()), &Value::Str("b".into())),
+        Ordering::Less
+    );
+    assert_eq!(
+        compare_values(&Value::Str("b".into()), &Value::Str("a".into())),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare_values(&Value::Str("a".into()), &Value::Str("a".into())),
+        Ordering::Equal
+    );
 }
 
 #[test]
@@ -116,14 +159,20 @@ fn test_compare_values_string_and_number_panics() {
 fn test_values_equal_same_type_same_value() {
     assert!(values_equal(&Value::Bool(true), &Value::Bool(true)));
     assert!(values_equal(&Value::F64(1.0), &Value::F64(1.0)));
-    assert!(values_equal(&Value::Str("a".into()), &Value::Str("a".into())));
+    assert!(values_equal(
+        &Value::Str("a".into()),
+        &Value::Str("a".into())
+    ));
 }
 
 #[test]
 fn test_values_equal_same_type_different_value() {
     assert!(!values_equal(&Value::Bool(true), &Value::Bool(false)));
     assert!(!values_equal(&Value::F64(1.0), &Value::F64(2.0)));
-    assert!(!values_equal(&Value::Str("a".into()), &Value::Str("b".into())));
+    assert!(!values_equal(
+        &Value::Str("a".into()),
+        &Value::Str("b".into())
+    ));
 }
 
 #[test]
@@ -151,7 +200,12 @@ fn make_row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
 }
 
 fn sort_order(parts: &[(&str, &str)]) -> SortOrder {
-    Arc::new(parts.iter().map(|(c, d)| [c.to_string(), d.to_string()]).collect())
+    Arc::new(
+        parts
+            .iter()
+            .map(|(c, d)| [c.to_string(), d.to_string()])
+            .collect(),
+    )
 }
 
 #[test]

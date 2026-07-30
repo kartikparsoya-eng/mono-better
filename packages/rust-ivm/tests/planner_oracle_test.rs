@@ -17,7 +17,7 @@ use serde_json::Value as JsonValue;
 
 use rust_ivm::builder::ast::{Ast, Condition};
 use rust_ivm::ivm::data::Value;
-use rust_ivm::planner::{plan_query, Confidence, ConnectionCostModel, CostModelCost, FanoutEst};
+use rust_ivm::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, plan_query};
 use rust_ivm::replay::json_to_ast;
 
 /// Constraint-aware mock — MUST match the JS mock in planner-ts-runner.mjs:
@@ -87,7 +87,13 @@ fn json_flips(v: &JsonValue) -> Vec<Option<bool>> {
     v.as_array()
         .unwrap()
         .iter()
-        .map(|f| if f.is_null() { None } else { Some(f.as_bool().unwrap()) })
+        .map(|f| {
+            if f.is_null() {
+                None
+            } else {
+                Some(f.as_bool().unwrap())
+            }
+        })
         .collect()
 }
 

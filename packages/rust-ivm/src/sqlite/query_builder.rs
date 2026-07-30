@@ -5,7 +5,7 @@
 //! ORDER BY (with reverse), start (pagination).
 
 use crate::builder::ast::{Condition, SimpleCondition, ValuePosition};
-use crate::ivm::constraint::{Constraint, MultiConstraint};
+use crate::ivm::constraint::MultiConstraint;
 use crate::ivm::data::Value;
 use crate::ivm::operator::{Basis, FetchRequest, Start};
 
@@ -32,7 +32,11 @@ impl From<&Value> for SqlParam {
             Value::Null => SqlParam::Null,
             Value::Bool(b) => SqlParam::Bool(*b),
             Value::F64(n) => {
-                if n.fract() == 0.0 && n.is_finite() && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
+                if n.fract() == 0.0
+                    && n.is_finite()
+                    && *n >= i64::MIN as f64
+                    && *n <= i64::MAX as f64
+                {
                     SqlParam::Int(*n as i64)
                 } else {
                     SqlParam::F64(*n)
@@ -94,13 +98,12 @@ pub fn build_select_query(
     }
 
     // Start (pagination)
-    if let Some(start) = &req.start {
-        if let Some(order) = order {
+    if let Some(start) = &req.start
+        && let Some(order) = order {
             let (start_sql, start_params) = gather_start_constraints(start, reverse, order);
             where_clauses.push(start_sql);
             params.extend(start_params);
         }
-    }
 
     // Filters (WHERE clause from the AST, with CSQ conditions stripped)
     if let Some(filters) = filters {
@@ -117,8 +120,8 @@ pub fn build_select_query(
     }
 
     // ORDER BY
-    if let Some(order) = order {
-        if !order.is_empty() {
+    if let Some(order) = order
+        && !order.is_empty() {
             sql.push_str(" ORDER BY ");
             for (i, ord) in order.iter().enumerate() {
                 if i > 0 {
@@ -132,7 +135,6 @@ pub fn build_select_query(
                 sql.push_str(&format!("{} {}", quote_ident(&ord.0), dir));
             }
         }
-    }
 
     // NOTE: Do NOT push LIMIT to SQL. The Cap/Take limit applies AFTER
     // all filters (including EXISTS subqueries). Pushing LIMIT to SQL
@@ -151,7 +153,10 @@ fn multi_constraint_to_sql(mc: &MultiConstraint) -> (String, Vec<SqlParam>) {
     assert!(!mc.is_empty(), "multiConstraint must be non-empty");
 
     let keys: Vec<&String> = mc[0].keys().collect();
-    assert!(!keys.is_empty(), "multiConstraint entries must have at least one key");
+    assert!(
+        !keys.is_empty(),
+        "multiConstraint entries must have at least one key"
+    );
 
     let mut params: Vec<SqlParam> = Vec::new();
     let mut sql = String::new();
@@ -210,6 +215,7 @@ fn multi_constraint_to_sql(mc: &MultiConstraint) -> (String, Vec<SqlParam>) {
 ///
 /// For `after` (a=1, b=2, c=3) with [a asc, b desc, c asc]:
 /// `WHERE a > 1 OR (a = 1 AND b < 2) OR (a = 1 AND b = 2 AND c > 3)`
+#[allow(clippy::needless_range_loop)]
 fn gather_start_constraints(
     start: &Start,
     reverse: bool,
@@ -235,9 +241,7 @@ fn gather_start_constraints(
                     //   - operator '<' means "before NULL": nothing qualifies.
                     let operator = if i_dir == "asc" {
                         if reverse { "<" } else { ">" }
-                    } else {
-                        if reverse { ">" } else { "<" }
-                    };
+                    } else if reverse { ">" } else { "<" };
                     if operator == ">" {
                         group.push(format!("{} IS NOT NULL", quote_ident(i_field)));
                     } else {
@@ -246,9 +250,7 @@ fn gather_start_constraints(
                 } else {
                     let operator = if i_dir == "asc" {
                         if reverse { "<" } else { ">" }
-                    } else {
-                        if reverse { ">" } else { "<" }
-                    };
+                    } else if reverse { ">" } else { "<" };
                     // The IVM comparator treats Null as less than any non-null
                     // value (TS compareValues). When the range operator is '<',
                     // rows with NULL in this column must be included because
@@ -308,11 +310,14 @@ fn condition_to_sql(cond: &Condition) -> (String, Vec<SqlParam>) {
             if conds.is_empty() {
                 return ("TRUE".to_string(), vec![]);
             }
-            let parts: Vec<(String, Vec<SqlParam>)> =
-                conds.iter().map(condition_to_sql).collect();
+            let parts: Vec<(String, Vec<SqlParam>)> = conds.iter().map(condition_to_sql).collect();
             let sql = format!(
                 "({})",
-                parts.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(" AND ")
+                parts
+                    .iter()
+                    .map(|(s, _)| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
             );
             let params = parts.into_iter().flat_map(|(_, p)| p).collect();
             (sql, params)
@@ -321,11 +326,14 @@ fn condition_to_sql(cond: &Condition) -> (String, Vec<SqlParam>) {
             if conds.is_empty() {
                 return ("FALSE".to_string(), vec![]);
             }
-            let parts: Vec<(String, Vec<SqlParam>)> =
-                conds.iter().map(condition_to_sql).collect();
+            let parts: Vec<(String, Vec<SqlParam>)> = conds.iter().map(condition_to_sql).collect();
             let sql = format!(
                 "({})",
-                parts.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(" OR ")
+                parts
+                    .iter()
+                    .map(|(s, _)| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
             );
             let params = parts.into_iter().flat_map(|(_, p)| p).collect();
             (sql, params)
@@ -352,7 +360,10 @@ fn simple_condition_to_sql(s: &SimpleCondition) -> (String, Vec<SqlParam>) {
 
     // IN / NOT IN: inline JSON array via json_each
     if op == "IN" || op == "NOT IN" {
-        if let ValuePosition::Literal { value: Value::Json(json) } = &s.right {
+        if let ValuePosition::Literal {
+            value: Value::Json(json),
+        } = &s.right
+        {
             let mut params = left_params;
             params.push(SqlParam::Text(json.to_string()));
             return (
@@ -386,7 +397,10 @@ fn simple_condition_to_sql(s: &SimpleCondition) -> (String, Vec<SqlParam>) {
         let mut params = left_params;
         params.extend(right_params);
         return (
-            format!("lower({}) {} lower({}) ESCAPE '\\'", left_sql, like_op, right_sql),
+            format!(
+                "lower({}) {} lower({}) ESCAPE '\\'",
+                left_sql, like_op, right_sql
+            ),
             params,
         );
     }
@@ -450,7 +464,7 @@ impl rusqlite::ToSql for SqlParam {
             SqlParam::Int(n) => n.to_sql(),
             SqlParam::F64(n) => n.to_sql(),
             SqlParam::Text(s) => s.to_sql(),
-            SqlParam::Bool(b) => Ok(rusqlite::types::Value::Integer(if *b { 1 } else { 0 })).map(rusqlite::types::ToSqlOutput::Owned),
+            SqlParam::Bool(b) => Ok(rusqlite::types::ToSqlOutput::Owned(rusqlite::types::Value::Integer(if *b { 1 } else { 0 }))),
         }
     }
 }
@@ -465,7 +479,9 @@ mod literal_left_tests {
         ValuePosition::Literal { value: v }
     }
     fn col(n: &str) -> ValuePosition {
-        ValuePosition::Column { name: n.to_string() }
+        ValuePosition::Column {
+            name: n.to_string(),
+        }
     }
     fn placeholders(sql: &str) -> usize {
         sql.matches('?').count()
@@ -484,7 +500,11 @@ mod literal_left_tests {
                 right: lit(Value::F64(0.0)),
             };
             let (sql, params) = simple_condition_to_sql(&cond);
-            assert_eq!(placeholders(&sql), params.len(), "op {op}: {sql} / {params:?}");
+            assert_eq!(
+                placeholders(&sql),
+                params.len(),
+                "op {op}: {sql} / {params:?}"
+            );
             assert_eq!(params.len(), 2, "op {op}: expected 2 params");
         }
     }

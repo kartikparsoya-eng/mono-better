@@ -2,11 +2,11 @@
 //! Verifies: monotonic chunkIndex, per-query Final, terminal Done,
 //! bounded frame size, query-switch flushing.
 
-use rust_ivm::streamer::{Chunker, CollectSink, StreamFrame, RowChange};
 use rust_ivm::ivm::change::ChangeType;
-use rust_ivm::ivm::data::{Row, Value};
-use std::sync::Arc;
+use rust_ivm::ivm::data::Value;
+use rust_ivm::streamer::{Chunker, CollectSink, RowChange, StreamFrame};
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 fn make_row_change(qid: &str, table: &str, val: f64) -> RowChange {
     let mut key: FxHashMap<String, Value> = FxHashMap::default();
@@ -56,7 +56,9 @@ fn test_chunk_invariants_single_query() {
 
     // First two Partial frames should have 3 rows each
     match &frames[0] {
-        StreamFrame::Partial { changes, query_id, .. } => {
+        StreamFrame::Partial {
+            changes, query_id, ..
+        } => {
             assert_eq!(changes.len(), 3);
             assert_eq!(query_id, "q1");
         }
@@ -102,7 +104,9 @@ fn test_chunk_multi_query_switch() {
     assert_eq!(frames.len(), 5, "Expected 5 frames, got {}", frames.len());
 
     match &frames[0] {
-        StreamFrame::Partial { query_id, changes, .. } => {
+        StreamFrame::Partial {
+            query_id, changes, ..
+        } => {
             assert_eq!(query_id, "q1");
             assert_eq!(changes.len(), 2);
         }
@@ -113,7 +117,9 @@ fn test_chunk_multi_query_switch() {
         _ => panic!("Expected Final(q1) at 1"),
     }
     match &frames[2] {
-        StreamFrame::Partial { query_id, changes, .. } => {
+        StreamFrame::Partial {
+            query_id, changes, ..
+        } => {
             assert_eq!(query_id, "q2");
             assert_eq!(changes.len(), 2);
         }
@@ -144,7 +150,12 @@ fn test_chunk_empty_query() {
     // Actually: flush_query checks if current_query_id matches, but we never
     // pushed any rows, so current_query_id is None. flush_query does nothing.
     // done() flushes (empty), then Done.
-    assert_eq!(frames.len(), 1, "Expected 1 frame (Done), got {}", frames.len());
+    assert_eq!(
+        frames.len(),
+        1,
+        "Expected 1 frame (Done), got {}",
+        frames.len()
+    );
     match &frames[0] {
         StreamFrame::Done { .. } => {}
         _ => panic!("Expected Done at 0"),

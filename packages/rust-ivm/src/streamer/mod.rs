@@ -110,10 +110,22 @@ impl Streamer {
         for change in changes {
             match change {
                 Change::Add(node) => {
-                    self.stream_nodes(query_id, schema, ChangeType::Add, std::iter::once(node), hidden);
+                    self.stream_nodes(
+                        query_id,
+                        schema,
+                        ChangeType::Add,
+                        std::iter::once(node),
+                        hidden,
+                    );
                 }
                 Change::Remove(node) => {
-                    self.stream_nodes(query_id, schema, ChangeType::Remove, std::iter::once(node), hidden);
+                    self.stream_nodes(
+                        query_id,
+                        schema,
+                        ChangeType::Remove,
+                        std::iter::once(node),
+                        hidden,
+                    );
                 }
                 Change::Edit { node, .. } => {
                     // EDIT: emit node with empty relationships (no recursion).
@@ -122,9 +134,15 @@ impl Streamer {
                         relationships: HashMap::new(),
                         rel_order: Vec::new(),
                     };
-                    self.stream_nodes(query_id, schema, ChangeType::Edit, std::iter::once(&edit_node), hidden);
+                    self.stream_nodes(
+                        query_id,
+                        schema,
+                        ChangeType::Edit,
+                        std::iter::once(&edit_node),
+                        hidden,
+                    );
                 }
-                Change::Child { node, child } => {
+                Change::Child { node: _, child } => {
                     // CHILD: recurse into the child schema with the child change.
                     if let Some(child_schema) = schema.relationships.get(&child.relationship_name) {
                         // The child change is a single change — wrap in a vec.
@@ -192,8 +210,8 @@ impl Streamer {
             // Recurse into relationships — emit child rows.
             // Use rel_order for deterministic iteration order.
             for rel_name in &node.rel_order {
-                if let Some(rel_fn) = node.relationships.get(rel_name) {
-                    if let Some(child_schema) = schema.relationships.get(rel_name) {
+                if let Some(rel_fn) = node.relationships.get(rel_name)
+                    && let Some(child_schema) = schema.relationships.get(rel_name) {
                         let stream = rel_fn();
                         let child_hidden = hidden || is_exists_condition_rel(rel_name);
                         // Stream children one at a time rather than collecting
@@ -209,7 +227,6 @@ impl Streamer {
                             );
                         }
                     }
-                }
             }
         }
     }
@@ -275,14 +292,9 @@ pub enum StreamFrame {
         query_id: String,
     },
     /// Terminal frame — the entire operation is complete.
-    Done {
-        chunk_index: usize,
-    },
+    Done { chunk_index: usize },
     /// Error frame — the operation failed.
-    Error {
-        chunk_index: usize,
-        message: String,
-    },
+    Error { chunk_index: usize, message: String },
 }
 
 /// A sink that receives streaming frames.
@@ -301,6 +313,12 @@ impl StreamSink for NullSink {
 pub struct CollectSink {
     pub frames: Vec<StreamFrame>,
 }
+impl Default for CollectSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CollectSink {
     pub fn new() -> Self {
         CollectSink { frames: Vec::new() }
@@ -313,7 +331,7 @@ impl StreamSink for CollectSink {
 }
 
 /// A chunker that wraps a StreamSink and batches RowChanges into bounded frames.
-/// 
+///
 /// Usage: call `push_row_change` for each row, then `flush_query` when a query's
 /// stream is done, then `done` when the entire operation is complete.
 /// The chunker emits `Partial` frames when the batch reaches `chunk_size`,
@@ -340,7 +358,10 @@ impl<S: StreamSink> Chunker<S> {
     /// Push a row change into the current batch. Flushes when batch is full.
     pub fn push_row_change(&mut self, query_id: &str, rc: RowChange) {
         // If query_id changed, flush the previous query
-        let need_flush = self.current_query_id.as_ref().map_or(false, |cur| cur != query_id);
+        let need_flush = self
+            .current_query_id
+            .as_ref()
+            .is_some_and(|cur| cur != query_id);
         if need_flush {
             let prev_qid = self.current_query_id.clone().unwrap();
             self.flush();
@@ -373,8 +394,8 @@ impl<S: StreamSink> Chunker<S> {
 
     /// Mark a query as done (flush remaining + emit Final).
     pub fn flush_query(&mut self, query_id: &str) {
-        if let Some(ref cur) = self.current_query_id {
-            if cur == query_id {
+        if let Some(ref cur) = self.current_query_id
+            && cur == query_id {
                 self.flush();
                 self.sink.send(StreamFrame::Final {
                     chunk_index: self.chunk_index,
@@ -383,7 +404,6 @@ impl<S: StreamSink> Chunker<S> {
                 self.chunk_index += 1;
                 self.current_query_id = None;
             }
-        }
     }
 
     /// Emit the terminal Done frame.

@@ -9,19 +9,14 @@
 //! for the parent node. Other changes are forwarded if the filter passes.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
-use crate::ivm::change::{
-    make_add_change, make_remove_change, Change, ChangeType, ChildData,
-};
+use crate::ivm::change::{Change, ChangeType, make_add_change, make_remove_change};
 use crate::ivm::data::{Node, Value};
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{from_vec, NodeStream};
+use crate::ivm::stream::NodeStream;
 
 /// Build a cache key from a node's parent join key values.
 /// Port of TS Exists.#getCacheKey (exists.ts:224).
@@ -87,9 +82,11 @@ impl Exists {
         }));
 
         let exists_clone = exists.clone();
-        input.borrow().set_output(Rc::new(RefCell::new(ExistsOutput {
-            exists: exists_clone,
-        })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(ExistsOutput {
+                exists: exists_clone,
+            })));
 
         exists
     }
@@ -106,17 +103,20 @@ impl Exists {
 
     /// Check if the node passes the EXISTS/NOT EXISTS filter.
     /// `exists_size` is optional — if None, the size is fetched.
+    #[allow(dead_code)]
     fn filter(&self, node: &Node, exists_size: Option<usize>) -> bool {
         let exists = exists_size.unwrap_or_else(|| self.fetch_size(node)) > 0;
-        if self.not {
-            !exists
-        } else {
-            exists
-        }
+        if self.not { !exists } else { exists }
     }
 
     /// Push a change through the filter (forwarding if it passes).
-    fn push_with_filter(&self, change: &Change, exists_size: Option<usize>, pusher: &dyn InputBase) {
+    #[allow(dead_code)]
+    fn push_with_filter(
+        &self,
+        change: &Change,
+        exists_size: Option<usize>,
+        pusher: &dyn InputBase,
+    ) {
         if self.filter(change.node(), exists_size) {
             let output = self.output.borrow().clone();
             if let Some(output) = output {
@@ -162,7 +162,7 @@ impl Input for Exists {
             let n = match &item {
                 crate::ivm::stream::StreamItem::Data(n) => n,
                 crate::ivm::stream::StreamItem::Yield => {
-                    return Some(crate::ivm::stream::StreamItem::Yield)
+                    return Some(crate::ivm::stream::StreamItem::Yield);
                 }
             };
             // Cache lookup: if we've seen this parent join key before, reuse.
@@ -258,7 +258,10 @@ impl Output for ExistsOutput {
                 // can change the size. Other child changes (different relationship
                 // or edit/child child changes) just pass through the filter.
                 if child.relationship_name != rel_name
-                    || matches!(child.change.change_type(), ChangeType::Edit | ChangeType::Child)
+                    || matches!(
+                        child.change.change_type(),
+                        ChangeType::Edit | ChangeType::Child
+                    )
                 {
                     let size = exists.fetch_size(&node);
                     let passes = if not { size == 0 } else { size > 0 };
@@ -282,10 +285,13 @@ impl Output for ExistsOutput {
                                 // NOT EXISTS: was passing (size=0), now fails.
                                 // Push a remove with the relationship emptied.
                                 let mut removed_node = node.clone();
-                                removed_node = removed_node.set_relationship(&rel_name, crate::ivm::stream::empty_rel());
+                                removed_node = removed_node
+                                    .set_relationship(&rel_name, crate::ivm::stream::empty_rel());
                                 drop(exists);
                                 if let Some(output) = output {
-                                    output.borrow_mut().push(make_remove_change(removed_node), pusher);
+                                    output
+                                        .borrow_mut()
+                                        .push(make_remove_change(removed_node), pusher);
                                 }
                             } else {
                                 // EXISTS: was failing (size=0), now passes.
@@ -299,11 +305,10 @@ impl Output for ExistsOutput {
                             // Size > 1: filter result unchanged, forward if passing.
                             let passes = if not { size == 0 } else { size > 0 };
                             drop(exists);
-                            if passes {
-                                if let Some(output) = output {
+                            if passes
+                                && let Some(output) = output {
                                     output.borrow_mut().push(change, pusher);
                                 }
-                            }
                         }
                     }
                     ChangeType::Remove => {
@@ -325,22 +330,24 @@ impl Output for ExistsOutput {
                                     _ => unreachable!(),
                                 };
                                 let mut removed_node = node.clone();
-                                let rel = crate::ivm::stream::rel_from_vec(vec![removed_child_node]);
+                                let rel =
+                                    crate::ivm::stream::rel_from_vec(vec![removed_child_node]);
                                 removed_node = removed_node.set_relationship(&rel_name, rel);
                                 drop(exists);
                                 if let Some(output) = output {
-                                    output.borrow_mut().push(make_remove_change(removed_node), pusher);
+                                    output
+                                        .borrow_mut()
+                                        .push(make_remove_change(removed_node), pusher);
                                 }
                             }
                         } else {
                             // Size > 0: filter result unchanged, forward if passing.
                             let passes = if not { size == 0 } else { size > 0 };
                             drop(exists);
-                            if passes {
-                                if let Some(output) = output {
+                            if passes
+                                && let Some(output) = output {
                                     output.borrow_mut().push(change, pusher);
                                 }
-                            }
                         }
                     }
                     _ => {
@@ -348,11 +355,10 @@ impl Output for ExistsOutput {
                         let size = exists.fetch_size(&node);
                         let passes = if not { size == 0 } else { size > 0 };
                         drop(exists);
-                        if passes {
-                            if let Some(output) = output {
+                        if passes
+                            && let Some(output) = output {
                                 output.borrow_mut().push(change, pusher);
                             }
-                        }
                     }
                 }
             }

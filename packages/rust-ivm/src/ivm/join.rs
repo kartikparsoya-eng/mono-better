@@ -4,22 +4,18 @@
 //! matching child nodes. The relationship is a LAZY stream.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::ivm::change::{
-    make_add_change, make_child_change, make_edit_change, make_remove_change, Change, ChildData,
+    Change, ChildData, make_add_change, make_child_change, make_edit_change, make_remove_change,
 };
 use crate::ivm::constraint::Constraint;
-use crate::ivm::data::{values_equal, Node, Row, Value};
-use crate::ivm::operator::{
-    FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
-};
+use crate::ivm::data::{Node, Row, Value, compare_values, values_equal};
+use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::{SourceSchema, System};
-use crate::ivm::stream::{empty_stream, from_vec, NodeStream, RelStream, skip_yields, StreamItem};
-use crate::ivm::join_utils::{generate_with_overlay};
+use crate::ivm::stream::{NodeStream, RelStream, StreamItem, empty_stream, skip_yields};
 
 pub type CompoundKey = Vec<String>;
 
@@ -45,7 +41,6 @@ pub struct Join {
     inprogress_child_change: Rc<RefCell<Option<Change>>>,
     inprogress_child_change_position: Rc<RefCell<Option<Row>>>,
 }
-
 
 /// RAII guard that clears in-progress overlay state on drop, even if a panic occurs.
 struct InprogressGuard {
@@ -92,14 +87,14 @@ impl Join {
         }));
 
         let join_clone = join.clone();
-        args.parent.borrow().set_output(Rc::new(RefCell::new(ParentOutput {
-            join: join_clone,
-        })));
+        args.parent
+            .borrow()
+            .set_output(Rc::new(RefCell::new(ParentOutput { join: join_clone })));
 
         let join_clone = join.clone();
-        args.child.borrow().set_output(Rc::new(RefCell::new(ChildOutput {
-            join: join_clone,
-        })));
+        args.child
+            .borrow()
+            .set_output(Rc::new(RefCell::new(ChildOutput { join: join_clone })));
 
         join
     }
@@ -120,11 +115,14 @@ impl Join {
 
         let parent_row_for_closure = parent_row.clone();
         let child_stream: RelStream = Rc::new(move || {
-            let constraint = build_join_constraint(&parent_row_for_closure, &parent_key, &child_key);
+            let constraint =
+                build_join_constraint(&parent_row_for_closure, &parent_key, &child_key);
             let child_input = child.borrow();
             let stream = match constraint {
                 Some(c) => child_input.fetch(&FetchRequest {
-                    constraint: Some(c), ..Default::default()}),
+                    constraint: Some(c),
+                    ..Default::default()
+                }),
                 None => empty_stream(),
             };
 
@@ -135,18 +133,32 @@ impl Join {
                 (inprogress_change.as_ref(), inprogress_position.as_ref())
             {
                 let change_row = change.node().row.clone();
-                let matches = is_join_match(&parent_row_for_closure, &parent_key, &change_row, &child_key);
+                let matches = is_join_match(
+                    &parent_row_for_closure,
+                    &parent_key,
+                    &change_row,
+                    &child_key,
+                );
 
                 if matches {
                     let compare = schema.compare_rows.clone();
-                    let needs_overlay = compare(&parent_row_for_closure, pos) == CmpOrdering::Greater;
+                    let needs_overlay =
+                        compare(&parent_row_for_closure, pos) == CmpOrdering::Greater;
 
                     if needs_overlay {
                         // TS join.ts: unordered when the child schema has no sort.
                         return if schema.sort.is_none() {
-                            crate::ivm::join_utils::generate_with_overlay_unordered(stream, change.clone(), &schema)
+                            crate::ivm::join_utils::generate_with_overlay_unordered(
+                                stream,
+                                change.clone(),
+                                &schema,
+                            )
                         } else {
-                            crate::ivm::join_utils::generate_with_overlay(stream, change.clone(), &schema)
+                            crate::ivm::join_utils::generate_with_overlay(
+                                stream,
+                                change.clone(),
+                                &schema,
+                            )
                         };
                     }
                 }
@@ -186,10 +198,13 @@ impl Join {
             Change::Child { child, .. } => {
                 let node = self.process_parent_node(parent_row, parent_rels, parent_order);
                 output.borrow_mut().push(
-                    make_child_change(node, ChildData {
-                        relationship_name: child.relationship_name.clone(),
-                        change: child.change.clone(),
-                    }),
+                    make_child_change(
+                        node,
+                        ChildData {
+                            relationship_name: child.relationship_name.clone(),
+                            change: child.change.clone(),
+                        },
+                    ),
                     pusher,
                 );
             }
@@ -209,7 +224,9 @@ impl Join {
 
                 let node = self.process_parent_node(parent_row, parent_rels, parent_order);
                 let old_node = self.process_parent_node(old_row, old_rels, old_order);
-                output.borrow_mut().push(make_edit_change(node, old_node), pusher);
+                output
+                    .borrow_mut()
+                    .push(make_edit_change(node, old_node), pusher);
             }
         }
     }
@@ -248,14 +265,15 @@ impl Join {
         if let Some(c) = constraint {
             let parent_input = self.parent.borrow();
             let parent_stream = skip_yields(parent_input.fetch(&FetchRequest {
-                constraint: Some(c), ..Default::default()}));
+                constraint: Some(c),
+                ..Default::default()
+            }));
 
             let output = self.output.borrow().clone();
             let output = output.expect("Join output not set");
 
             for parent_node in parent_stream {
-                *self.inprogress_child_change_position.borrow_mut() =
-                    Some(parent_node.row.clone());
+                *self.inprogress_child_change_position.borrow_mut() = Some(parent_node.row.clone());
 
                 let parent_rels = parent_node.relationships.clone();
                 let parent_order = parent_node.rel_order.clone();
@@ -266,7 +284,9 @@ impl Join {
                     relationship_name: self.relationship_name.clone(),
                     change: Box::new(change.clone()),
                 };
-                output.borrow_mut().push(make_child_change(processed, child_change), pusher);
+                output
+                    .borrow_mut()
+                    .push(make_child_change(processed, child_change), pusher);
             }
         }
 
@@ -301,11 +321,10 @@ impl Input for Join {
         // overlay is None during hydrate). Any miss → the exact lazy path.
         let can_batch = self.inprogress_child_change.borrow().is_none()
             && self.child.borrow().supports_parallel_leaf();
-        if can_batch {
-            if let Some(stream) = self.fetch_batched_leaf(req) {
+        if can_batch
+            && let Some(stream) = self.fetch_batched_leaf(req) {
                 return stream;
             }
-        }
         self.fetch_lazy(req)
     }
 }
@@ -338,8 +357,8 @@ impl Join {
         let mut index_of: HashMap<String, usize> = HashMap::new();
         for c in per_parent.iter().flatten() {
             let key = constraint_canonical(c);
-            if !index_of.contains_key(&key) {
-                index_of.insert(key, distinct.len());
+            if let std::collections::hash_map::Entry::Vacant(e) = index_of.entry(key) {
+                e.insert(distinct.len());
                 distinct.push(c.clone());
             }
         }
@@ -379,11 +398,11 @@ impl Join {
         let schema = self.schema.clone();
         let relationship_name = self.relationship_name.clone();
 
-        Box::new(parent_stream.filter_map(move |item| {
+        Box::new(parent_stream.map(move |item| {
             use crate::ivm::stream::StreamItem;
             let pn = match item {
                 StreamItem::Data(n) => n,
-                StreamItem::Yield => return Some(StreamItem::Yield),
+                StreamItem::Yield => return StreamItem::Yield,
             };
             let parent_rels = pn.relationships.clone();
             let parent_order = pn.rel_order.clone();
@@ -397,11 +416,14 @@ impl Join {
             let inprogress_pos = inprogress_pos.clone();
             let schema = schema.clone();
             let child_stream: RelStream = Rc::new(move || {
-                let constraint = build_join_constraint(&parent_row_for_closure, &parent_key, &child_key);
+                let constraint =
+                    build_join_constraint(&parent_row_for_closure, &parent_key, &child_key);
                 let child_input = child.borrow();
                 let stream = match constraint {
                     Some(c) => child_input.fetch(&FetchRequest {
-                        constraint: Some(c), ..Default::default()}),
+                        constraint: Some(c),
+                        ..Default::default()
+                    }),
                     None => empty_stream(),
                 };
 
@@ -412,18 +434,32 @@ impl Join {
                     (inprogress_change.as_ref(), inprogress_position.as_ref())
                 {
                     let change_row = change.node().row.clone();
-                    let matches = is_join_match(&parent_row_for_closure, &parent_key, &change_row, &child_key);
+                    let matches = is_join_match(
+                        &parent_row_for_closure,
+                        &parent_key,
+                        &change_row,
+                        &child_key,
+                    );
 
                     if matches {
                         let compare = schema.compare_rows.clone();
-                        let needs_overlay = compare(&parent_row_for_closure, pos) == CmpOrdering::Greater;
+                        let needs_overlay =
+                            compare(&parent_row_for_closure, pos) == CmpOrdering::Greater;
 
                         if needs_overlay {
                             // TS join.ts: unordered when the child schema has no sort.
                             return if schema.sort.is_none() {
-                                crate::ivm::join_utils::generate_with_overlay_unordered(stream, change.clone(), &schema)
+                                crate::ivm::join_utils::generate_with_overlay_unordered(
+                                    stream,
+                                    change.clone(),
+                                    &schema,
+                                )
                             } else {
-                                crate::ivm::join_utils::generate_with_overlay(stream, change.clone(), &schema)
+                                crate::ivm::join_utils::generate_with_overlay(
+                                    stream,
+                                    change.clone(),
+                                    &schema,
+                                )
                             };
                         }
                     }
@@ -440,7 +476,7 @@ impl Join {
                 }
             }
             node = node.set_relationship(&relationship_name, child_stream);
-            Some(StreamItem::Data(node))
+            StreamItem::Data(node)
         }))
     }
 }
@@ -523,13 +559,16 @@ pub fn row_equals_for_compound_key(a: &Row, b: &Row, key: &CompoundKey) -> bool 
     for k in key {
         let av = a.get(k).cloned().unwrap_or(Value::Null);
         let bv = b.get(k).cloned().unwrap_or(Value::Null);
-        if !values_equal(&av, &bv) {
+        // TS uses compareValues (null === null → 0, i.e. equal).
+        // NOT valuesEqual (which treats null as never equal — that's for joins).
+        if compare_values(&av, &bv) != CmpOrdering::Equal {
             return false;
         }
     }
     true
 }
 
+#[allow(dead_code)]
 fn generate_with_overlay_join(
     stream: NodeStream,
     change: Change,

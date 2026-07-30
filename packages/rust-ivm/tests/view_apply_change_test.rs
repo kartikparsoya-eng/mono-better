@@ -5,15 +5,15 @@
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::data::{make_comparator, Node, Row, SortOrder, Value};
+use rust_ivm::ivm::data::{Node, Row, SortOrder, Value, make_comparator};
 use rust_ivm::ivm::schema::{ColumnType, SourceSchema, System};
 use rust_ivm::ivm::stream::rel_from_vec;
 use rust_ivm::ivm::view::{
-    apply_change, default_format, empty_root_entry, Format, View, ViewChange, ViewNode,
+    Format, View, ViewChange, ViewNode, apply_change, default_format, empty_root_entry,
 };
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
     let map: FxHashMap<String, Value> = pairs
@@ -78,9 +78,12 @@ fn test_simple_plural_add_remove_refcount() {
     };
 
     // Add id=1 Aaron
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
     match root.relationships.get("") {
         Some(View::List(entries)) => {
             assert_eq!(entries.len(), 1);
@@ -92,9 +95,12 @@ fn test_simple_plural_add_remove_refcount() {
 
     // Add id=2 Greg 5 times → rc=5
     for _ in 0..5 {
-        root = apply(&root, &ViewChange::Add {
-            node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
-        });
+        root = apply(
+            &root,
+            &ViewChange::Add {
+                node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
+            },
+        );
     }
     match root.relationships.get("") {
         Some(View::List(entries)) => {
@@ -107,9 +113,12 @@ fn test_simple_plural_add_remove_refcount() {
 
     // Remove id=2 four times → rc=1
     for _ in 0..4 {
-        root = apply(&root, &ViewChange::Remove {
-            node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
-        });
+        root = apply(
+            &root,
+            &ViewChange::Remove {
+                node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
+            },
+        );
     }
     match root.relationships.get("") {
         Some(View::List(entries)) => {
@@ -120,9 +129,12 @@ fn test_simple_plural_add_remove_refcount() {
     }
 
     // Remove id=2 one more time → gone
-    root = apply(&root, &ViewChange::Remove {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Remove {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
+        },
+    );
     match root.relationships.get("") {
         Some(View::List(entries)) => {
             assert_eq!(entries.len(), 1);
@@ -139,9 +151,17 @@ fn test_remove_nonexistent_panics() {
     let format = default_format();
     let root = empty_root_entry();
 
-    let _ = apply_change(&root, &ViewChange::Remove {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
-    }, &schema, "", &format, true, false);
+    let _ = apply_change(
+        &root,
+        &ViewChange::Remove {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("2")), ("name", s("Greg"))]))),
+        },
+        &schema,
+        "",
+        &format,
+        true,
+        false,
+    );
 }
 
 // ===========================================================================
@@ -151,7 +171,10 @@ fn test_remove_nonexistent_panics() {
 #[test]
 fn test_simple_singular_add_remove() {
     let schema = make_string_schema("event", &["id"], &[("id", "string"), ("name", "string")]);
-    let format = Format { singular: true, relationships: FxHashMap::default() };
+    let format = Format {
+        singular: true,
+        relationships: FxHashMap::default(),
+    };
     let mut root = empty_root_entry();
 
     let apply = |root: &_, change: &ViewChange| {
@@ -159,9 +182,12 @@ fn test_simple_singular_add_remove() {
     };
 
     // Add id=1 Aaron
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
     match root.relationships.get("") {
         Some(View::Single(entry)) => {
             assert_eq!(entry.ref_count, 1);
@@ -171,27 +197,36 @@ fn test_simple_singular_add_remove() {
     }
 
     // Add again → rc=2
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
     match root.relationships.get("") {
         Some(View::Single(entry)) => assert_eq!(entry.ref_count, 2),
         _ => panic!("Expected single entry with rc=2"),
     }
 
     // Remove → rc=1
-    root = apply(&root, &ViewChange::Remove {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Remove {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
     match root.relationships.get("") {
         Some(View::Single(entry)) => assert_eq!(entry.ref_count, 1),
         _ => panic!("Expected single entry with rc=1"),
     }
 
     // Remove again → gone
-    root = apply(&root, &ViewChange::Remove {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Remove {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
     match root.relationships.get("") {
         Some(View::None) | None => {}
         _ => panic!("Expected None after final remove"),
@@ -213,15 +248,25 @@ fn test_edit_plural_non_pk() {
     };
 
     // Add id=1 Aaron
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
 
     // Edit name Aaron → Greg (same PK)
-    root = apply(&root, &ViewChange::Edit {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Greg"))]) },
-        old_node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Aaron"))]) },
-    });
+    root = apply(
+        &root,
+        &ViewChange::Edit {
+            node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Greg"))]),
+            },
+            old_node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
+            },
+        },
+    );
     match root.relationships.get("") {
         Some(View::List(entries)) => {
             assert_eq!(entries.len(), 1);
@@ -233,9 +278,12 @@ fn test_edit_plural_non_pk() {
 
     // Add id=1 twice more → rc=3
     for _ in 0..2 {
-        root = apply(&root, &ViewChange::Add {
-            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Greg"))]))),
-        });
+        root = apply(
+            &root,
+            &ViewChange::Add {
+                node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Greg"))]))),
+            },
+        );
     }
     match root.relationships.get("") {
         Some(View::List(entries)) => assert_eq!(entries[0].ref_count, 3),
@@ -243,10 +291,17 @@ fn test_edit_plural_non_pk() {
     }
 
     // Edit name Greg → Aaron (rc preserved)
-    root = apply(&root, &ViewChange::Edit {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Aaron"))]) },
-        old_node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Greg"))]) },
-    });
+    root = apply(
+        &root,
+        &ViewChange::Edit {
+            node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
+            },
+            old_node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Greg"))]),
+            },
+        },
+    );
     match root.relationships.get("") {
         Some(View::List(entries)) => {
             assert_eq!(entries[0].row.get("name"), Some(&s("Aaron")));
@@ -271,18 +326,34 @@ fn test_edit_plural_primary_key() {
     };
 
     // Add [id=1, id=3]
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("3")), ("name", s("Charlie"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[
+                ("id", s("3")),
+                ("name", s("Charlie")),
+            ]))),
+        },
+    );
 
     // Edit id=1 → id=2 (changes sort key, moves position)
-    root = apply(&root, &ViewChange::Edit {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("2")), ("name", s("Aaron"))]) },
-        old_node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Aaron"))]) },
-    });
+    root = apply(
+        &root,
+        &ViewChange::Edit {
+            node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("2")), ("name", s("Aaron"))]),
+            },
+            old_node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
+            },
+        },
+    );
 
     match root.relationships.get("") {
         Some(View::List(entries)) => {
@@ -301,20 +372,33 @@ fn test_edit_plural_primary_key() {
 #[test]
 fn test_edit_singular_non_pk() {
     let schema = make_string_schema("event", &["id"], &[("id", "string"), ("name", "string")]);
-    let format = Format { singular: true, relationships: FxHashMap::default() };
+    let format = Format {
+        singular: true,
+        relationships: FxHashMap::default(),
+    };
     let mut root = empty_root_entry();
 
     let apply = |root: &_, change: &ViewChange| {
         apply_change(root, change, &schema, "", &format, true, false)
     };
 
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
-    root = apply(&root, &ViewChange::Edit {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Greg"))]) },
-        old_node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Aaron"))]) },
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
+    root = apply(
+        &root,
+        &ViewChange::Edit {
+            node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Greg"))]),
+            },
+            old_node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
+            },
+        },
+    );
 
     match root.relationships.get("") {
         Some(View::Single(entry)) => {
@@ -332,20 +416,33 @@ fn test_edit_singular_non_pk() {
 #[test]
 fn test_edit_singular_primary_key() {
     let schema = make_string_schema("event", &["id"], &[("id", "string"), ("name", "string")]);
-    let format = Format { singular: true, relationships: FxHashMap::default() };
+    let format = Format {
+        singular: true,
+        relationships: FxHashMap::default(),
+    };
     let mut root = empty_root_entry();
 
     let apply = |root: &_, change: &ViewChange| {
         apply_change(root, change, &schema, "", &format, true, false)
     };
 
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
-    });
-    root = apply(&root, &ViewChange::Edit {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("2")), ("name", s("Greg"))]) },
-        old_node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("1")), ("name", s("Aaron"))]) },
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("1")), ("name", s("Aaron"))]))),
+        },
+    );
+    root = apply(
+        &root,
+        &ViewChange::Edit {
+            node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("2")), ("name", s("Greg"))]),
+            },
+            old_node: rust_ivm::ivm::view::RowOnlyNode {
+                row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
+            },
+        },
+    );
 
     match root.relationships.get("") {
         Some(View::Single(entry)) => {
@@ -362,14 +459,20 @@ fn test_edit_singular_primary_key() {
 // ===========================================================================
 
 fn make_schema_with_children() -> SourceSchema {
-    let child_schema = make_string_schema("child", &["id"], &[("id", "string"), ("parentId", "string")]);
-    let parent_schema = make_string_schema("parent", &["id"], &[("id", "string"), ("name", "string")]);
+    let child_schema = make_string_schema(
+        "child",
+        &["id"],
+        &[("id", "string"), ("parentId", "string")],
+    );
+    let parent_schema =
+        make_string_schema("parent", &["id"], &[("id", "string"), ("name", "string")]);
     parent_schema.with_relationship("children", child_schema, false, System::Client)
 }
 
 fn format_with_children() -> Format {
     let mut fmt = default_format();
-    fmt.relationships.insert("children".to_string(), default_format());
+    fmt.relationships
+        .insert("children".to_string(), default_format());
     fmt
 }
 
@@ -385,24 +488,51 @@ fn test_entry_with_children_correct_position() {
 
     // Add 'b' Bob with child c1
     let mut bob_node = make_node(make_row(&[("id", s("b")), ("name", s("Bob"))]));
-    bob_node = bob_node.set_relationship("children", rel_from_vec(vec![
-        make_node(make_row(&[("id", s("c1")), ("parentId", s("b"))])),
-    ]));
-    root = apply(&root, &ViewChange::Add { node: ViewNode::Lazy(bob_node) });
+    bob_node = bob_node.set_relationship(
+        "children",
+        rel_from_vec(vec![make_node(make_row(&[
+            ("id", s("c1")),
+            ("parentId", s("b")),
+        ]))]),
+    );
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(bob_node),
+        },
+    );
 
     // Add 'd' Dave with child c2
     let mut dave_node = make_node(make_row(&[("id", s("d")), ("name", s("Dave"))]));
-    dave_node = dave_node.set_relationship("children", rel_from_vec(vec![
-        make_node(make_row(&[("id", s("c2")), ("parentId", s("d"))])),
-    ]));
-    root = apply(&root, &ViewChange::Add { node: ViewNode::Lazy(dave_node) });
+    dave_node = dave_node.set_relationship(
+        "children",
+        rel_from_vec(vec![make_node(make_row(&[
+            ("id", s("c2")),
+            ("parentId", s("d")),
+        ]))]),
+    );
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(dave_node),
+        },
+    );
 
     // Add 'a' Alice with child c3 — should be inserted at position 0
     let mut alice_node = make_node(make_row(&[("id", s("a")), ("name", s("Alice"))]));
-    alice_node = alice_node.set_relationship("children", rel_from_vec(vec![
-        make_node(make_row(&[("id", s("c3")), ("parentId", s("a"))])),
-    ]));
-    root = apply(&root, &ViewChange::Add { node: ViewNode::Lazy(alice_node) });
+    alice_node = alice_node.set_relationship(
+        "children",
+        rel_from_vec(vec![make_node(make_row(&[
+            ("id", s("c3")),
+            ("parentId", s("a")),
+        ]))]),
+    );
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(alice_node),
+        },
+    );
 
     match root.relationships.get("") {
         Some(View::List(entries)) => {
@@ -449,21 +579,38 @@ fn test_entry_inserted_in_middle_with_children() {
     };
 
     // Add 'a' Alice (no children)
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("a")), ("name", s("Alice"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[("id", s("a")), ("name", s("Alice"))]))),
+        },
+    );
     // Add 'c' Charlie (no children)
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("c")), ("name", s("Charlie"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[
+                ("id", s("c")),
+                ("name", s("Charlie")),
+            ]))),
+        },
+    );
 
     // Insert 'b' Bob in the middle with 2 children
     let mut bob_node = make_node(make_row(&[("id", s("b")), ("name", s("Bob"))]));
-    bob_node = bob_node.set_relationship("children", rel_from_vec(vec![
-        make_node(make_row(&[("id", s("child1")), ("parentId", s("b"))])),
-        make_node(make_row(&[("id", s("child2")), ("parentId", s("b"))])),
-    ]));
-    root = apply(&root, &ViewChange::Add { node: ViewNode::Lazy(bob_node) });
+    bob_node = bob_node.set_relationship(
+        "children",
+        rel_from_vec(vec![
+            make_node(make_row(&[("id", s("child1")), ("parentId", s("b"))])),
+            make_node(make_row(&[("id", s("child2")), ("parentId", s("b"))])),
+        ]),
+    );
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(bob_node),
+        },
+    );
 
     match root.relationships.get("") {
         Some(View::List(entries)) => {
@@ -506,13 +653,10 @@ fn make_event_schema() -> SourceSchema {
             ("disciplineID", "string"),
         ],
     );
-    let matchup_with_athletes = matchup_schema.with_relationship(
-        "athletes",
-        athlete_schema,
-        false,
-        System::Client,
-    );
-    let event_schema = make_string_schema("event", &["id"], &[("id", "string"), ("name", "string")]);
+    let matchup_with_athletes =
+        matchup_schema.with_relationship("athletes", athlete_schema, false, System::Client);
+    let event_schema =
+        make_string_schema("event", &["id"], &[("id", "string"), ("name", "string")]);
     event_schema.with_relationship("athletes", matchup_with_athletes, true, System::Client)
 }
 
@@ -520,11 +664,15 @@ fn make_event_format(singular_athletes: bool) -> Format {
     let mut fmt = default_format();
     let athlete_fmt = default_format();
     let mut matchup_fmt = default_format();
-    matchup_fmt.relationships.insert("athletes".to_string(), Format {
-        singular: singular_athletes,
-        relationships: FxHashMap::default(),
-    });
-    fmt.relationships.insert("athletes".to_string(), matchup_fmt);
+    matchup_fmt.relationships.insert(
+        "athletes".to_string(),
+        Format {
+            singular: singular_athletes,
+            relationships: FxHashMap::default(),
+        },
+    );
+    fmt.relationships
+        .insert("athletes".to_string(), matchup_fmt);
     let _ = athlete_fmt;
     fmt
 }
@@ -540,9 +688,15 @@ fn test_multiple_entries_plural_athletes() {
     };
 
     // Add event e1
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[
+                ("id", s("e1")),
+                ("name", s("Buffalo Big Board Classic")),
+            ]))),
+        },
+    );
 
     // Add athlete matchup (e1, USA, a1, d1) with nested athlete (USA, a1, Mason Ho)
     let mut matchup_node = make_node(make_row(&[
@@ -551,15 +705,24 @@ fn test_multiple_entries_plural_athletes() {
         ("athleteID", s("a1")),
         ("disciplineID", s("d1")),
     ]));
-    matchup_node = matchup_node.set_relationship("athletes", rel_from_vec(vec![
-        make_node(make_row(&[("country", s("USA")), ("id", s("a1")), ("name", s("Mason Ho"))])),
-    ]));
+    matchup_node = matchup_node.set_relationship(
+        "athletes",
+        rel_from_vec(vec![make_node(make_row(&[
+            ("country", s("USA")),
+            ("id", s("a1")),
+            ("name", s("Mason Ho")),
+        ]))]),
+    );
 
     let child1 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]) },
+        node: rust_ivm::ivm::view::RowOnlyNode {
+            row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
+        },
         child: rust_ivm::ivm::view::ChildViewChange {
             relationship_name: "athletes".to_string(),
-            change: Box::new(ViewChange::Add { node: ViewNode::Lazy(matchup_node) }),
+            change: Box::new(ViewChange::Add {
+                node: ViewNode::Lazy(matchup_node),
+            }),
         },
     };
     root = apply(&root, &child1);
@@ -571,15 +734,24 @@ fn test_multiple_entries_plural_athletes() {
         ("athleteID", s("a1")),
         ("disciplineID", s("d2")),
     ]));
-    matchup_node2 = matchup_node2.set_relationship("athletes", rel_from_vec(vec![
-        make_node(make_row(&[("country", s("USA")), ("id", s("a1")), ("name", s("Mason Ho"))])),
-    ]));
+    matchup_node2 = matchup_node2.set_relationship(
+        "athletes",
+        rel_from_vec(vec![make_node(make_row(&[
+            ("country", s("USA")),
+            ("id", s("a1")),
+            ("name", s("Mason Ho")),
+        ]))]),
+    );
 
     let child2 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]) },
+        node: rust_ivm::ivm::view::RowOnlyNode {
+            row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
+        },
         child: rust_ivm::ivm::view::ChildViewChange {
             relationship_name: "athletes".to_string(),
-            change: Box::new(ViewChange::Add { node: ViewNode::Lazy(matchup_node2) }),
+            change: Box::new(ViewChange::Add {
+                node: ViewNode::Lazy(matchup_node2),
+            }),
         },
     };
     root = apply(&root, &child2);
@@ -604,7 +776,9 @@ fn test_multiple_entries_plural_athletes() {
 
     // Remove matchup d1 → athlete rc=1
     let remove_d1 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]) },
+        node: rust_ivm::ivm::view::RowOnlyNode {
+            row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
+        },
         child: rust_ivm::ivm::view::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
@@ -615,9 +789,14 @@ fn test_multiple_entries_plural_athletes() {
                         ("athleteID", s("a1")),
                         ("disciplineID", s("d1")),
                     ]));
-                    n = n.set_relationship("athletes", rel_from_vec(vec![
-                        make_node(make_row(&[("country", s("USA")), ("id", s("a1")), ("name", s("Mason Ho"))])),
-                    ]));
+                    n = n.set_relationship(
+                        "athletes",
+                        rel_from_vec(vec![make_node(make_row(&[
+                            ("country", s("USA")),
+                            ("id", s("a1")),
+                            ("name", s("Mason Ho")),
+                        ]))]),
+                    );
                     n
                 }),
             }),
@@ -626,21 +805,21 @@ fn test_multiple_entries_plural_athletes() {
     root = apply(&root, &remove_d1);
 
     match root.relationships.get("") {
-        Some(View::List(entries)) => {
-            match entries[0].relationships.get("athletes") {
-                Some(View::List(athletes)) => {
-                    assert_eq!(athletes.len(), 1);
-                    assert_eq!(athletes[0].ref_count, 1);
-                }
-                _ => panic!("Expected athlete with rc=1"),
+        Some(View::List(entries)) => match entries[0].relationships.get("athletes") {
+            Some(View::List(athletes)) => {
+                assert_eq!(athletes.len(), 1);
+                assert_eq!(athletes[0].ref_count, 1);
             }
-        }
+            _ => panic!("Expected athlete with rc=1"),
+        },
         _ => panic!("Expected event"),
     }
 
     // Remove matchup d2 → athletes list empty
     let remove_d2 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]) },
+        node: rust_ivm::ivm::view::RowOnlyNode {
+            row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
+        },
         child: rust_ivm::ivm::view::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
@@ -651,9 +830,14 @@ fn test_multiple_entries_plural_athletes() {
                         ("athleteID", s("a1")),
                         ("disciplineID", s("d2")),
                     ]));
-                    n = n.set_relationship("athletes", rel_from_vec(vec![
-                        make_node(make_row(&[("country", s("USA")), ("id", s("a1")), ("name", s("Mason Ho"))])),
-                    ]));
+                    n = n.set_relationship(
+                        "athletes",
+                        rel_from_vec(vec![make_node(make_row(&[
+                            ("country", s("USA")),
+                            ("id", s("a1")),
+                            ("name", s("Mason Ho")),
+                        ]))]),
+                    );
                     n
                 }),
             }),
@@ -662,12 +846,10 @@ fn test_multiple_entries_plural_athletes() {
     root = apply(&root, &remove_d2);
 
     match root.relationships.get("") {
-        Some(View::List(entries)) => {
-            match entries[0].relationships.get("athletes") {
-                Some(View::List(athletes)) => assert_eq!(athletes.len(), 0),
-                _ => panic!("Expected empty athletes list"),
-            }
-        }
+        Some(View::List(entries)) => match entries[0].relationships.get("athletes") {
+            Some(View::List(athletes)) => assert_eq!(athletes.len(), 0),
+            _ => panic!("Expected empty athletes list"),
+        },
         _ => panic!("Expected event"),
     }
 }
@@ -683,9 +865,15 @@ fn test_multiple_entries_singular_athletes() {
     };
 
     // Add event e1
-    root = apply(&root, &ViewChange::Add {
-        node: ViewNode::Lazy(make_node(make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]))),
-    });
+    root = apply(
+        &root,
+        &ViewChange::Add {
+            node: ViewNode::Lazy(make_node(make_row(&[
+                ("id", s("e1")),
+                ("name", s("Buffalo Big Board Classic")),
+            ]))),
+        },
+    );
 
     // Add two matchups with the same athlete → athlete is singular, rc=2
     for disc in &["d1", "d2"] {
@@ -695,37 +883,49 @@ fn test_multiple_entries_singular_athletes() {
             ("athleteID", s("a1")),
             ("disciplineID", s(disc)),
         ]));
-        matchup_node = matchup_node.set_relationship("athletes", rel_from_vec(vec![
-            make_node(make_row(&[("country", s("USA")), ("id", s("a1")), ("name", s("Mason Ho"))])),
-        ]));
+        matchup_node = matchup_node.set_relationship(
+            "athletes",
+            rel_from_vec(vec![make_node(make_row(&[
+                ("country", s("USA")),
+                ("id", s("a1")),
+                ("name", s("Mason Ho")),
+            ]))]),
+        );
 
-        root = apply(&root, &ViewChange::Child {
-            node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]) },
-            child: rust_ivm::ivm::view::ChildViewChange {
-                relationship_name: "athletes".to_string(),
-                change: Box::new(ViewChange::Add { node: ViewNode::Lazy(matchup_node) }),
+        root = apply(
+            &root,
+            &ViewChange::Child {
+                node: rust_ivm::ivm::view::RowOnlyNode {
+                    row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
+                },
+                child: rust_ivm::ivm::view::ChildViewChange {
+                    relationship_name: "athletes".to_string(),
+                    change: Box::new(ViewChange::Add {
+                        node: ViewNode::Lazy(matchup_node),
+                    }),
+                },
             },
-        });
+        );
     }
 
     // Verify: hidden matchup schema strips the matchup wrapper and adds
     // athletes directly. Athlete format is singular → athlete is Single with rc=2.
     match root.relationships.get("") {
-        Some(View::List(entries)) => {
-            match entries[0].relationships.get("athletes") {
-                Some(View::Single(athlete)) => {
-                    assert_eq!(athlete.ref_count, 2);
-                    assert_eq!(athlete.row.get("name"), Some(&s("Mason Ho")));
-                }
-                _ => panic!("Expected single athlete with rc=2"),
+        Some(View::List(entries)) => match entries[0].relationships.get("athletes") {
+            Some(View::Single(athlete)) => {
+                assert_eq!(athlete.ref_count, 2);
+                assert_eq!(athlete.row.get("name"), Some(&s("Mason Ho")));
             }
-        }
+            _ => panic!("Expected single athlete with rc=2"),
+        },
         _ => panic!("Expected event"),
     }
 
     // Remove d1 → athlete rc=1
     let remove_d1 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]) },
+        node: rust_ivm::ivm::view::RowOnlyNode {
+            row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
+        },
         child: rust_ivm::ivm::view::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
@@ -736,9 +936,14 @@ fn test_multiple_entries_singular_athletes() {
                         ("athleteID", s("a1")),
                         ("disciplineID", s("d1")),
                     ]));
-                    n = n.set_relationship("athletes", rel_from_vec(vec![
-                        make_node(make_row(&[("country", s("USA")), ("id", s("a1")), ("name", s("Mason Ho"))])),
-                    ]));
+                    n = n.set_relationship(
+                        "athletes",
+                        rel_from_vec(vec![make_node(make_row(&[
+                            ("country", s("USA")),
+                            ("id", s("a1")),
+                            ("name", s("Mason Ho")),
+                        ]))]),
+                    );
                     n
                 }),
             }),
@@ -747,18 +952,18 @@ fn test_multiple_entries_singular_athletes() {
     root = apply(&root, &remove_d1);
 
     match root.relationships.get("") {
-        Some(View::List(entries)) => {
-            match entries[0].relationships.get("athletes") {
-                Some(View::Single(athlete)) => assert_eq!(athlete.ref_count, 1),
-                _ => panic!("Expected single athlete with rc=1"),
-            }
-        }
+        Some(View::List(entries)) => match entries[0].relationships.get("athletes") {
+            Some(View::Single(athlete)) => assert_eq!(athlete.ref_count, 1),
+            _ => panic!("Expected single athlete with rc=1"),
+        },
         _ => panic!("Expected event"),
     }
 
     // Remove d2 → athlete is None (singular, rc went to 0)
     let remove_d2 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]) },
+        node: rust_ivm::ivm::view::RowOnlyNode {
+            row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
+        },
         child: rust_ivm::ivm::view::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
@@ -769,9 +974,14 @@ fn test_multiple_entries_singular_athletes() {
                         ("athleteID", s("a1")),
                         ("disciplineID", s("d2")),
                     ]));
-                    n = n.set_relationship("athletes", rel_from_vec(vec![
-                        make_node(make_row(&[("country", s("USA")), ("id", s("a1")), ("name", s("Mason Ho"))])),
-                    ]));
+                    n = n.set_relationship(
+                        "athletes",
+                        rel_from_vec(vec![make_node(make_row(&[
+                            ("country", s("USA")),
+                            ("id", s("a1")),
+                            ("name", s("Mason Ho")),
+                        ]))]),
+                    );
                     n
                 }),
             }),
@@ -780,12 +990,10 @@ fn test_multiple_entries_singular_athletes() {
     root = apply(&root, &remove_d2);
 
     match root.relationships.get("") {
-        Some(View::List(entries)) => {
-            match entries[0].relationships.get("athletes") {
-                Some(View::None) | None => {}
-                _ => panic!("Expected None after final remove"),
-            }
-        }
+        Some(View::List(entries)) => match entries[0].relationships.get("athletes") {
+            Some(View::None) | None => {}
+            _ => panic!("Expected None after final remove"),
+        },
         _ => panic!("Expected event"),
     }
 }

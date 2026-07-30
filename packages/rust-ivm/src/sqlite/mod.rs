@@ -10,26 +10,26 @@
 //! explain-queries: EXPLAIN QUERY PLAN utilities.
 //! query-delegate: ZQLite QueryDelegate implementation.
 
-pub mod query_builder;
-pub mod table_source;
-pub mod db;
 pub mod database_storage;
-pub mod resolve_scalar_subqueries;
-pub mod sqlite_stat_fanout;
-pub mod sqlite_cost_model;
+pub mod db;
 pub mod explain_queries;
+pub mod interrupt;
 pub mod options;
+pub mod query_builder;
 pub mod query_delegate;
-pub mod interrupt; // cross-thread SQLite interrupt + job-scoped watchdog (N1/N2)
+pub mod resolve_scalar_subqueries;
+pub mod sqlite_cost_model;
+pub mod sqlite_stat_fanout;
+pub mod table_source; // cross-thread SQLite interrupt + job-scoped watchdog (N1/N2)
 
-pub use table_source::*;
-pub use query_builder::*;
-pub use db::*;
 pub use database_storage::*;
-pub use resolve_scalar_subqueries::*;
-pub use sqlite_stat_fanout::*;
-pub use sqlite_cost_model::*;
+pub use db::*;
 pub use explain_queries::*;
+pub use interrupt::{JobWatchdog, WatchGuard, install_interrupt};
 pub use options::*;
+pub use query_builder::*;
 pub use query_delegate::*;
-pub use interrupt::{install_interrupt, JobWatchdog, WatchGuard};
+pub use resolve_scalar_subqueries::*;
+pub use sqlite_cost_model::*;
+pub use sqlite_stat_fanout::*;
+pub use table_source::*;

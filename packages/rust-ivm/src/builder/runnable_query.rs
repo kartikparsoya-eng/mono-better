@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 
 use crate::builder::query::{Query, RelationshipSpec};
-use crate::ivm::schema::System;
 
 /// Create a new runnable query.
 /// Port of TS `newRunnableQuery` (runnable-query-impl.ts:23).
@@ -23,10 +22,10 @@ pub fn new_static_query(
     table: &str,
     relationships: HashMap<String, HashMap<String, RelationshipSpec>>,
 ) -> Query {
-    let mut q = Query::new(table, relationships);
+    
     // Static queries use the permissions system.
     // This is set via the system field in the builder.
-    q
+    Query::new(table, relationships)
 }
 
 /// Create a new expression builder for a table.

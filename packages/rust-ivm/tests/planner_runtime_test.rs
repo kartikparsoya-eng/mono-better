@@ -52,5 +52,9 @@ fn no_flip_when_child_is_larger() {
     // parent=10, child=200 → semi-join (iterate 10 parents) wins.
     let conn = conn_with(&[("parent", 10), ("child", 200)]);
     let flips = plan_ast_flips(&exists_ast("child"), create_snapshot_cost_model(conn));
-    assert_eq!(flips, vec![Some(false)], "should not flip when child is larger");
+    assert_eq!(
+        flips,
+        vec![Some(false)],
+        "should not flip when child is larger"
+    );
 }

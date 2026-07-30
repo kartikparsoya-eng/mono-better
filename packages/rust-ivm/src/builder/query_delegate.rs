@@ -9,13 +9,11 @@ use std::sync::Arc;
 
 use crate::builder::ast::Ast;
 use crate::builder::builder::BuilderDelegate;
-use crate::builder::metrics_delegate::{Metric, MetricsDelegate};
+use crate::builder::metrics_delegate::MetricsDelegate;
 use crate::builder::named::CustomQueryID;
 use crate::builder::query::Query;
-use crate::builder::ttl;
-use crate::ivm::operator::{Input, InputBase, Shared, Storage};
+use crate::ivm::operator::{Shared, Storage};
 use crate::ivm::source::Source;
-use crate::ivm::view::View;
 
 /// Commit listener callback.
 pub type CommitListener = Arc<dyn Fn()>;
@@ -52,8 +50,19 @@ pub struct PreloadOptions {
 /// Query delegate interface — supports materializing, running, and preloading.
 /// Port of TS `QueryDelegate` (query-delegate.ts:36).
 pub trait QueryDelegate: BuilderDelegate + MetricsDelegate {
-    fn add_server_query(&mut self, ast: &Ast, ttl: &str, got_callback: Option<GotCallback>) -> Box<dyn FnOnce()>;
-    fn add_custom_query(&mut self, ast: &Ast, custom_query_id: &CustomQueryID, ttl: &str, got_callback: Option<GotCallback>) -> Box<dyn FnOnce()>;
+    fn add_server_query(
+        &mut self,
+        ast: &Ast,
+        ttl: &str,
+        got_callback: Option<GotCallback>,
+    ) -> Box<dyn FnOnce()>;
+    fn add_custom_query(
+        &mut self,
+        ast: &Ast,
+        custom_query_id: &CustomQueryID,
+        ttl: &str,
+        got_callback: Option<GotCallback>,
+    ) -> Box<dyn FnOnce()>;
     fn update_server_query(&mut self, ast: &Ast, ttl: &str);
     fn update_custom_query(&mut self, custom_query_id: &CustomQueryID, ttl: &str);
     fn flush_query_changes(&mut self);
@@ -62,9 +71,17 @@ pub trait QueryDelegate: BuilderDelegate + MetricsDelegate {
     fn assert_valid_run_options(&self, options: &RunOptions);
     fn default_query_complete(&self) -> bool;
     fn create_storage(&mut self) -> Shared<dyn Storage>;
-    fn materialize(&mut self, query: &Query, options: Option<MaterializeOptions>) -> Rc<RefCell<crate::ivm::array_view::ArrayView>>;
+    fn materialize(
+        &mut self,
+        query: &Query,
+        options: Option<MaterializeOptions>,
+    ) -> Rc<RefCell<crate::ivm::array_view::ArrayView>>;
     fn run(&mut self, query: &Query, options: Option<RunOptions>) -> Vec<Value>;
-    fn preload(&mut self, query: &Query, options: Option<PreloadOptions>) -> (Box<dyn FnOnce()>, bool);
+    fn preload(
+        &mut self,
+        query: &Query,
+        options: Option<PreloadOptions>,
+    ) -> (Box<dyn FnOnce()>, bool);
 }
 
 use crate::ivm::data::Value;
@@ -95,12 +112,14 @@ impl QueryDelegateBase {
     }
 
     pub fn create_storage(&mut self) -> Shared<dyn Storage> {
-        Rc::new(RefCell::new(crate::ivm::memory_storage::MemoryStorage::new()))
+        Rc::new(RefCell::new(
+            crate::ivm::memory_storage::MemoryStorage::new(),
+        ))
     }
 
     pub fn on_transaction_commit(&mut self, cb: CommitListener) -> Box<dyn FnOnce()> {
         self.commit_observers.push(cb.clone());
-        let cb2 = cb;
+        let _cb2 = cb;
         Box::new(move || {
             // In a full impl, this removes the observer.
             // For now, it's a no-op since we can't easily remove Rc callbacks.

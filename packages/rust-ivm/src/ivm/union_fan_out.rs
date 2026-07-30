@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ivm::change::{Change, ChangeType};
+use crate::ivm::change::Change;
 use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::NodeStream;
@@ -36,7 +36,9 @@ impl UnionFanOut {
         // from downstream (Take via ufi→Filter) takes an immutable borrow that
         // succeeds alongside the live one. Re-entrancy fix for the flipped push
         // path; same pattern as CapOutput/ExistsOutput/UfiOutput.
-        input.borrow().set_output(Rc::new(RefCell::new(UfoOutput { ufo: ufo.clone() })));
+        input
+            .borrow()
+            .set_output(Rc::new(RefCell::new(UfoOutput { ufo: ufo.clone() })));
         ufo
     }
 
@@ -92,7 +94,7 @@ struct UfoOutput {
 impl UnionFanOut {
     /// Push logic, run via an immutable borrow (from `UfoOutput`). `outputs`
     /// and `fan_in` are interior-mutable, so `&self` suffices.
-    fn push_internal(&self, change: Change, pusher: &dyn InputBase) {
+    fn push_internal(&self, change: Change, _pusher: &dyn InputBase) {
         crate::ivm::trace::recv("union_fan_out#1", &change);
         let change_type = change.change_type();
         let fan_in = self.fan_in.borrow().clone();

@@ -10,16 +10,14 @@
 //! node at the correct position based on the comparator.
 //! `generateWithOverlayUnordered` — for unsorted streams: uses PK equality.
 
-use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering as CmpOrdering;
-use std::sync::Arc;
-use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::ivm::change::{Change, ChangeType};
-use crate::ivm::data::{compare_values, values_equal, Comparator, Node, Row, Value};
-use crate::ivm::stream::{from_vec, NodeStream, RelStream, skip_yields};
+use crate::ivm::data::{Comparator, Node, Row, Value, compare_values, values_equal};
 use crate::ivm::schema::SourceSchema;
+use crate::ivm::stream::{NodeStream, RelStream, skip_yields};
 
 /// Check if two rows are equal for a compound key.
 /// Port of TS `rowEqualsForCompoundKey` (join-utils.ts:232).
@@ -206,26 +204,26 @@ pub fn generate_with_overlay(
             let inner_change2 = inner_change.clone();
             let child_schema2 = child_schema.clone();
             let applied2 = applied.clone();
-            let inner = skip_yields(stream).filter_map(move |node| {
-                if !applied2.get() && compare2(&overlay_node2.row, &node.row) == CmpOrdering::Equal {
+            let inner = skip_yields(stream).map(move |node| {
+                if !applied2.get() && compare2(&overlay_node2.row, &node.row) == CmpOrdering::Equal
+                {
                     applied2.set(true);
                     // Replace the matching node's relationship with overlaid stream
                     let existing_rel_fn = node.relationships.get(&rel_name2).cloned();
                     let inner_change3 = inner_change2.clone();
                     let child_schema3 = child_schema2.clone();
                     let rel_name3 = rel_name2.clone();
-                    let overlaid_rel: RelStream = Rc::new(move || {
-                        match (&existing_rel_fn, &child_schema3) {
+                    let overlaid_rel: RelStream =
+                        Rc::new(move || match (&existing_rel_fn, &child_schema3) {
                             (Some(rel_fn), Some(cs)) => {
                                 generate_with_overlay(rel_fn(), inner_change3.as_ref().clone(), cs)
                             }
                             _ => crate::ivm::stream::empty_stream(),
-                        }
-                    });
+                        });
                     let new_node = node.clone().set_relationship(&rel_name3, overlaid_rel);
-                    Some(StreamItem::Data(new_node))
+                    StreamItem::Data(new_node)
                 } else {
-                    Some(StreamItem::Data(node))
+                    StreamItem::Data(node)
                 }
             });
             Box::new(inner)
@@ -298,16 +296,15 @@ pub fn generate_with_overlay_unordered(
                         let child_schema = rels.get(&rel_name).cloned();
                         let existing_rel_fn = node.relationships.get(&rel_name).cloned();
                         let rel_name3 = rel_name.clone();
-                        let overlaid_rel: RelStream = Rc::new(move || {
-                            match (&existing_rel_fn, &child_schema) {
+                        let overlaid_rel: RelStream =
+                            Rc::new(move || match (&existing_rel_fn, &child_schema) {
                                 (Some(rel_fn), Some(cs)) => generate_with_overlay(
                                     rel_fn(),
                                     inner_change.as_ref().clone(),
                                     cs,
                                 ),
                                 _ => crate::ivm::stream::empty_stream(),
-                            }
-                        });
+                            });
                         let new_node = node.clone().set_relationship(&rel_name3, overlaid_rel);
                         return Some(StreamItem::Data(new_node));
                     }
@@ -359,7 +356,11 @@ pub fn generate_with_start(
             crate::ivm::operator::Basis::At => cmp != CmpOrdering::Less,
             crate::ivm::operator::Basis::After => cmp == CmpOrdering::Greater,
         };
-        if passes { Some(StreamItem::Data(node)) } else { None }
+        if passes {
+            Some(StreamItem::Data(node))
+        } else {
+            None
+        }
     }))
 }
 

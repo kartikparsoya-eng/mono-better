@@ -6,13 +6,13 @@
 //! losing rows when the worker produced faster than the consumer pulled.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 // Re-create the StreamState semantics locally — the NAPI module's StreamState
 // is not exposed to tests, so we mirror its semantics exactly.
 
 struct StreamState {
     queue: parking_lot::Mutex<std::collections::VecDeque<i32>>,
+    #[allow(dead_code)]
     done: std::sync::atomic::AtomicBool,
 }
 
@@ -83,11 +83,19 @@ fn test_queue_buggy_drops_rows() {
 #[test]
 fn test_queue_interleaved_push_pull() {
     let state = Arc::new(StreamState::new());
-    for i in 0..100 { state.push(i); }
-    for _ in 0..50 { assert!(state.pop().is_some()); }
-    for i in 100..200 { state.push(i); }
+    for i in 0..100 {
+        state.push(i);
+    }
+    for _ in 0..50 {
+        assert!(state.pop().is_some());
+    }
+    for i in 100..200 {
+        state.push(i);
+    }
     let mut count = 0;
-    while state.pop().is_some() { count += 1; }
+    while state.pop().is_some() {
+        count += 1;
+    }
     assert_eq!(count, 150, "100+100-50=150 remaining");
     assert_eq!(state.len(), 0, "queue should be empty");
 }
@@ -95,8 +103,12 @@ fn test_queue_interleaved_push_pull() {
 #[test]
 fn test_queue_large_scale_no_loss() {
     let state = Arc::new(StreamState::new());
-    for i in 0..100_000 { state.push(i); }
+    for i in 0..100_000 {
+        state.push(i);
+    }
     let mut count = 0;
-    while state.pop().is_some() { count += 1; }
+    while state.pop().is_some() {
+        count += 1;
+    }
     assert_eq!(count, 100_000, "must not lose any of 100k rows");
 }

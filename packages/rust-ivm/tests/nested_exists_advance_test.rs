@@ -10,28 +10,32 @@
 //! joinChannel mutation inserts:
 //!   1. channel_participants (userId=user1, channelId=X) — flips inner EXISTS
 //!   2. conversations (channelId=X) — the row we want to see emitted
+//!
 //! Both in the same advance. The live view must gain the conversation,
 //! exactly as a fresh hydrate would.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{
-    Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery,
-    SimpleCondition, ValuePosition,
+    Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery, SimpleCondition, ValuePosition,
 };
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{make_source_change_add, ChangeType};
+use rust_ivm::ivm::change::{ChangeType, make_source_change_add};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::streamer::RowChange;
 
-fn make_source(name: &str, columns: &[(&str, ColumnType)], pk: &[&str]) -> Rc<RefCell<MemorySource>> {
+fn make_source(
+    name: &str,
+    columns: &[(&str, ColumnType)],
+    pk: &[&str],
+) -> Rc<RefCell<MemorySource>> {
     let cols: HashMap<String, ColumnType> = columns
         .iter()
         .map(|(n, t)| (n.to_string(), t.clone()))
@@ -55,8 +59,12 @@ fn row(pairs: &[(&str, &str)]) -> Arc<FxHashMap<String, Value>> {
 fn simple(col: &str, op: &str, val: &str) -> Condition {
     Condition::Simple(SimpleCondition {
         op: op.to_string(),
-        left: ValuePosition::Column { name: col.to_string() },
-        right: ValuePosition::Literal { value: Value::Str(val.into()) },
+        left: ValuePosition::Column {
+            name: col.to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::Str(val.into()),
+        },
     })
 }
 
@@ -66,7 +74,7 @@ fn exists(rel: RelatedSubquery) -> Condition {
         op: "EXISTS".to_string(),
         flip: Some(false),
         scalar: false,
-                plan_id: None,
+        plan_id: None,
     })
 }
 
@@ -117,8 +125,10 @@ fn convo_ids(changes: &[RowChange]) -> Vec<String> {
 fn production_ast() -> Ast {
     // Inner EXISTS: channel_participants WHERE userId = "user1" AND channelId = "ch1"
     let zsubq_participants = related_subquery(
-        "zsubq_participants", "channel_participants",
-        &["id"], &["channelId"],
+        "zsubq_participants",
+        "channel_participants",
+        &["id"],
+        &["channelId"],
         Some(Condition::And(vec![
             simple("userId", "=", "user1"),
             simple("channelId", "=", "ch1"),
@@ -128,11 +138,11 @@ fn production_ast() -> Ast {
     // Outer EXISTS: channels WHERE id = conversations.channelId
     //   AND EXISTS(channel_participants ...)
     let zsubq_channel = related_subquery(
-        "zsubq_channel", "channels",
-        &["channelId"], &["id"],
-        Some(Condition::And(vec![
-            exists(zsubq_participants),
-        ])),
+        "zsubq_channel",
+        "channels",
+        &["channelId"],
+        &["id"],
+        Some(Condition::And(vec![exists(zsubq_participants)])),
     );
 
     Ast {
@@ -151,20 +161,30 @@ fn production_ast() -> Ast {
 }
 
 fn setup() -> Engine {
-    let channels = make_source("channels", &[
-        ("id", ColumnType::String { optional: false }),
-    ], &["id"]);
+    let channels = make_source(
+        "channels",
+        &[("id", ColumnType::String { optional: false })],
+        &["id"],
+    );
 
-    let channel_participants = make_source("channel_participants", &[
-        ("id", ColumnType::String { optional: false }),
-        ("channelId", ColumnType::String { optional: false }),
-        ("userId", ColumnType::String { optional: false }),
-    ], &["id"]);
+    let channel_participants = make_source(
+        "channel_participants",
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("channelId", ColumnType::String { optional: false }),
+            ("userId", ColumnType::String { optional: false }),
+        ],
+        &["id"],
+    );
 
-    let conversations = make_source("conversations", &[
-        ("id", ColumnType::String { optional: false }),
-        ("channelId", ColumnType::String { optional: false }),
-    ], &["id"]);
+    let conversations = make_source(
+        "conversations",
+        &[
+            ("id", ColumnType::String { optional: false }),
+            ("channelId", ColumnType::String { optional: false }),
+        ],
+        &["id"],
+    );
 
     let mut engine = Engine::new(HashMap::new());
     engine.register_source(channels);
@@ -184,19 +204,26 @@ fn nested_exists_channel_exists_new_participant_new_conversation_same_advance() 
     let mut engine = setup();
 
     // Pre-populate: channel ch1 already exists (but no participants → inner EXISTS false)
-    let _ = engine.advance(&[
-        ("channels".to_string(), make_source_change_add(row(&[("id", "ch1")]))),
-    ]);
+    let _ = engine.advance(&[(
+        "channels".to_string(),
+        make_source_change_add(row(&[("id", "ch1")])),
+    )]);
 
     // Now advance: add participant (flips inner EXISTS) + add conversation (the row we want)
     // Order: participant first, then conversation
     let changes = engine.advance(&[
-        ("channel_participants".to_string(), make_source_change_add(row(&[
-            ("id", "cp1"), ("channelId", "ch1"), ("userId", "user1"),
-        ]))),
-        ("conversations".to_string(), make_source_change_add(row(&[
-            ("id", "conv1"), ("channelId", "ch1"),
-        ]))),
+        (
+            "channel_participants".to_string(),
+            make_source_change_add(row(&[
+                ("id", "cp1"),
+                ("channelId", "ch1"),
+                ("userId", "user1"),
+            ])),
+        ),
+        (
+            "conversations".to_string(),
+            make_source_change_add(row(&[("id", "conv1"), ("channelId", "ch1")])),
+        ),
     ]);
 
     assert_eq!(
@@ -204,7 +231,10 @@ fn nested_exists_channel_exists_new_participant_new_conversation_same_advance() 
         vec!["conv1".to_string()],
         "conv1 must be emitted (inner EXISTS flipped by participant, outer EXISTS passes); \
          got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type)).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -216,18 +246,25 @@ fn nested_exists_conversation_first_then_participant_same_advance() {
     let mut engine = setup();
 
     // Pre-populate: channel ch1 already exists
-    let _ = engine.advance(&[
-        ("channels".to_string(), make_source_change_add(row(&[("id", "ch1")]))),
-    ]);
+    let _ = engine.advance(&[(
+        "channels".to_string(),
+        make_source_change_add(row(&[("id", "ch1")])),
+    )]);
 
     // Advance: conversation first, then participant
     let changes = engine.advance(&[
-        ("conversations".to_string(), make_source_change_add(row(&[
-            ("id", "conv1"), ("channelId", "ch1"),
-        ]))),
-        ("channel_participants".to_string(), make_source_change_add(row(&[
-            ("id", "cp1"), ("channelId", "ch1"), ("userId", "user1"),
-        ]))),
+        (
+            "conversations".to_string(),
+            make_source_change_add(row(&[("id", "conv1"), ("channelId", "ch1")])),
+        ),
+        (
+            "channel_participants".to_string(),
+            make_source_change_add(row(&[
+                ("id", "cp1"),
+                ("channelId", "ch1"),
+                ("userId", "user1"),
+            ])),
+        ),
     ]);
 
     assert_eq!(
@@ -235,7 +272,10 @@ fn nested_exists_conversation_first_then_participant_same_advance() {
         vec!["conv1".to_string()],
         "conv1 must be emitted even when added before the participant (EXISTS should flip); \
          got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type)).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -247,13 +287,22 @@ fn nested_exists_all_new_same_advance() {
 
     // All three in one advance, channel first
     let changes = engine.advance(&[
-        ("channels".to_string(), make_source_change_add(row(&[("id", "ch1")]))),
-        ("channel_participants".to_string(), make_source_change_add(row(&[
-            ("id", "cp1"), ("channelId", "ch1"), ("userId", "user1"),
-        ]))),
-        ("conversations".to_string(), make_source_change_add(row(&[
-            ("id", "conv1"), ("channelId", "ch1"),
-        ]))),
+        (
+            "channels".to_string(),
+            make_source_change_add(row(&[("id", "ch1")])),
+        ),
+        (
+            "channel_participants".to_string(),
+            make_source_change_add(row(&[
+                ("id", "cp1"),
+                ("channelId", "ch1"),
+                ("userId", "user1"),
+            ])),
+        ),
+        (
+            "conversations".to_string(),
+            make_source_change_add(row(&[("id", "conv1"), ("channelId", "ch1")])),
+        ),
     ]);
 
     assert_eq!(
@@ -261,7 +310,10 @@ fn nested_exists_all_new_same_advance() {
         vec!["conv1".to_string()],
         "conv1 must be emitted when all three are new in one advance; \
          got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type)).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -272,13 +324,22 @@ fn nested_exists_all_new_conversation_first() {
     let mut engine = setup();
 
     let changes = engine.advance(&[
-        ("conversations".to_string(), make_source_change_add(row(&[
-            ("id", "conv1"), ("channelId", "ch1"),
-        ]))),
-        ("channels".to_string(), make_source_change_add(row(&[("id", "ch1")]))),
-        ("channel_participants".to_string(), make_source_change_add(row(&[
-            ("id", "cp1"), ("channelId", "ch1"), ("userId", "user1"),
-        ]))),
+        (
+            "conversations".to_string(),
+            make_source_change_add(row(&[("id", "conv1"), ("channelId", "ch1")])),
+        ),
+        (
+            "channels".to_string(),
+            make_source_change_add(row(&[("id", "ch1")])),
+        ),
+        (
+            "channel_participants".to_string(),
+            make_source_change_add(row(&[
+                ("id", "cp1"),
+                ("channelId", "ch1"),
+                ("userId", "user1"),
+            ])),
+        ),
     ]);
 
     assert_eq!(
@@ -286,6 +347,9 @@ fn nested_exists_all_new_conversation_first() {
         vec!["conv1".to_string()],
         "conv1 must be emitted even when conversation is added first (hardest case); \
          got {:?}",
-        changes.iter().map(|c| (c.table.clone(), c.change_type)).collect::<Vec<_>>(),
+        changes
+            .iter()
+            .map(|c| (c.table.clone(), c.change_type))
+            .collect::<Vec<_>>(),
     );
 }

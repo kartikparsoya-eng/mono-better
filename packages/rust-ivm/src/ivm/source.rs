@@ -9,29 +9,25 @@
 //!   No preloading needed — fetch() queries SQLite with constraints.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
 use crate::builder::ast::Condition;
 use crate::ivm::change::{
-    make_add_change, make_edit_change, make_remove_change, Change, SourceChange,
+    Change, SourceChange, make_add_change, make_edit_change, make_remove_change,
 };
-use crate::ivm::constraint::{
-    constraint_matches_primary_key, constraint_matches_row, Constraint,
-};
-use crate::ivm::data::{
-    make_comparator, values_equal, Comparator, Node, Row, SortOrder, Value,
-};
+use crate::ivm::constraint::{Constraint, constraint_matches_primary_key, constraint_matches_row};
+use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
 use crate::ivm::filter_push::filter_push;
 use crate::ivm::operator::{
-    Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
+    Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared,
 };
 use crate::ivm::schema::{SourceSchema, System};
-use crate::ivm::stream::{StreamItem, empty_stream, from_vec, NodeStream};
+use crate::ivm::stream::{NodeStream, StreamItem, empty_stream, from_vec};
 
 // ---------------------------------------------------------------------------
 // Source trait — port of TS `Source` interface (source.ts:42).
@@ -93,9 +89,9 @@ pub trait Source {
     fn set_read_pool(
         &mut self,
         _pool: std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>,
-    ) {}
+    ) {
+    }
 }
-
 
 /// Connection: a downstream consumer of the source.
 pub struct Connection {
@@ -156,9 +152,16 @@ pub struct MemorySource {
 }
 
 impl MemorySource {
-    pub fn new(table_name: &str, columns: HashMap<String, crate::ivm::schema::ColumnType>, primary_key: Vec<String>) -> Self {
+    pub fn new(
+        table_name: &str,
+        columns: HashMap<String, crate::ivm::schema::ColumnType>,
+        primary_key: Vec<String>,
+    ) -> Self {
         let primary_index_sort: SortOrder = Arc::new(
-            primary_key.iter().map(|k| [k.clone(), "asc".to_string()]).collect(),
+            primary_key
+                .iter()
+                .map(|k| [k.clone(), "asc".to_string()])
+                .collect(),
         );
         let comparator = make_comparator(primary_index_sort.clone(), false);
         let column_names: Vec<String> = columns.keys().cloned().collect();
@@ -227,7 +230,10 @@ impl MemorySource {
                 *self.db_conn.borrow_mut() = Some(c);
             }
             Err(e) => {
-                eprintln!("[rust-ivm] Failed to open connection for {}: {}", self.table_name, e);
+                eprintln!(
+                    "[rust-ivm] Failed to open connection for {}: {}",
+                    self.table_name, e
+                );
             }
         }
     }
@@ -255,9 +261,7 @@ impl MemorySource {
             data[idx] = r;
             return;
         }
-        let pos = data.partition_point(|existing| {
-            comparator(existing, &r) == CmpOrdering::Less
-        });
+        let pos = data.partition_point(|existing| comparator(existing, &r) == CmpOrdering::Less);
         data.insert(pos, r);
     }
 
@@ -276,12 +280,14 @@ impl MemorySource {
     /// Port of TS `TableSource.getRow()`.
     pub fn get_row(&self, pk: &[(String, Value)]) -> Option<Row> {
         let data = self.data.borrow();
-        data.iter().find(|existing| {
-            pk.iter().all(|(col, val)| {
-                let a = existing.get(col).cloned().unwrap_or(Value::Null);
-                values_equal(&a, val)
+        data.iter()
+            .find(|existing| {
+                pk.iter().all(|(col, val)| {
+                    let a = existing.get(col).cloned().unwrap_or(Value::Null);
+                    values_equal(&a, val)
+                })
             })
-        }).cloned()
+            .cloned()
     }
 
     /// Get all rows (for preloading into the engine).
@@ -297,7 +303,9 @@ impl MemorySource {
         filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
         split_edit_keys: Option<Vec<String>>,
     ) -> Shared<dyn Input> {
-        let internal_sort = sort.clone().unwrap_or_else(|| self.primary_index_sort.clone());
+        let internal_sort = sort
+            .clone()
+            .unwrap_or_else(|| self.primary_index_sort.clone());
         let compare_rows = make_comparator(internal_sort.clone(), false);
         let group = self.next_connect_group.clone();
 
@@ -367,12 +375,17 @@ impl MemorySource {
         self.push_internal(change, false)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn push_internal(&mut self, change: SourceChange, force_parallel: bool) -> Vec<Change> {
         // Split-edit: if any connection has split_edit_keys and this Edit
         // changes one of them, split into Remove(OldRow) + Add(Row) BEFORE
         // pushing. This prevents Join panics on key-changing edits.
         // Port of Go IVM's genPushAndWriteWithSplitEdit (source.go:282-308).
-        if let SourceChange::Edit { ref row, ref old_row } = change {
+        if let SourceChange::Edit {
+            ref row,
+            ref old_row,
+        } = change
+        {
             let should_split = self.connections.iter().any(|c| {
                 let conn = c.borrow();
                 if let Some(ref keys) = conn.split_edit_keys {
@@ -412,7 +425,10 @@ impl MemorySource {
                 }
                 SourceChange::Edit { old_row, .. } => {
                     if !self.has(old_row) {
-                        panic!("source drift: Edit missing old row from {}", self.table_name);
+                        panic!(
+                            "source drift: Edit missing old row from {}",
+                            self.table_name
+                        );
                     }
                 }
             }
@@ -431,7 +447,7 @@ impl MemorySource {
             .collect();
 
         let groups = group_connections(&active);
-        let mut all_changes = Vec::new();
+        let all_changes = Vec::new();
 
         // A pusher standing in for this source (TS passes `this`). Carries the
         // source schema so a downstream operator that reads pusher.get_schema()
@@ -486,12 +502,13 @@ impl MemorySource {
         let mut data = data.borrow_mut();
         match change {
             SourceChange::Add { row } => {
-                let pos = data.partition_point(|existing| {
-                    comparator(existing, row) == CmpOrdering::Less
-                });
+                let pos =
+                    data.partition_point(|existing| comparator(existing, row) == CmpOrdering::Less);
                 data.insert(pos, row.clone());
                 // Re-added after a same-advance remove: no longer removed.
-                self.removed_this_advance.borrow_mut().remove(&pk_key(row, &pk));
+                self.removed_this_advance
+                    .borrow_mut()
+                    .remove(&pk_key(row, &pk));
             }
             SourceChange::Remove { row } => {
                 if let Some(pos) = data.iter().position(|existing| {
@@ -504,7 +521,9 @@ impl MemorySource {
                     data.remove(pos);
                 }
                 // Record the removal so the SQLite (PREV) fetch merge drops it.
-                self.removed_this_advance.borrow_mut().insert(pk_key(row, &pk));
+                self.removed_this_advance
+                    .borrow_mut()
+                    .insert(pk_key(row, &pk));
             }
             SourceChange::Edit { row, old_row } => {
                 if let Some(pos) = data.iter().position(|existing| {
@@ -516,9 +535,8 @@ impl MemorySource {
                 }) {
                     data.remove(pos);
                 }
-                let pos = data.partition_point(|existing| {
-                    comparator(existing, row) == CmpOrdering::Less
-                });
+                let pos =
+                    data.partition_point(|existing| comparator(existing, row) == CmpOrdering::Less);
                 data.insert(pos, row.clone());
                 // A PK-changing edit is split into remove(old)+add(new) upstream,
                 // but a value-only edit lands here: the new PK exists, and if the
@@ -609,12 +627,16 @@ fn group_connections(connections: &[Shared<Connection>]) -> Vec<Vec<Shared<Conne
         }
         groups.entry(g).or_default().push(conn.clone());
     }
-    order.into_iter().map(|g| groups.remove(&g).unwrap()).collect()
+    order
+        .into_iter()
+        .map(|g| groups.remove(&g).unwrap())
+        .collect()
 }
 
 /// SourceInput — implements the Input trait for a connection.
 pub struct SourceInput {
     data: SharedData,
+    #[allow(dead_code)]
     comparator: Comparator,
     conn: Shared<Connection>,
     schema: SourceSchema,
@@ -654,8 +676,9 @@ impl Input for SourceInput {
         let filter_condition = self.filter_condition.clone();
         let schema_columns = self.schema.columns.clone();
 
-        if let Some(ref db_path) = db_path {
-            let order: Vec<(String, String)> = sort.as_ref()
+        if db_path.is_some() {
+            let order: Vec<(String, String)> = sort
+                .as_ref()
                 .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
                 .unwrap_or_default();
             let reverse = req.reverse;
@@ -683,8 +706,11 @@ impl Input for SourceInput {
                 Err(_) => return from_vec(Vec::new()),
             };
 
-            let param_refs: Vec<&dyn rusqlite::ToSql> =
-                query.params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            let param_refs: Vec<&dyn rusqlite::ToSql> = query
+                .params
+                .iter()
+                .map(|p| p as &dyn rusqlite::ToSql)
+                .collect();
 
             let col_names: Vec<String> = if !self.column_names.is_empty() {
                 self.column_names.clone()
@@ -704,19 +730,19 @@ impl Input for SourceInput {
                         let val = row.get::<usize, rusqlite::types::Value>(i);
                         let col_type = column_types.get(col);
                         let value = match val {
-                            Ok(rusqlite::types::Value::Integer(n)) => {
-                                match col_type {
-                                    Some(crate::ivm::schema::ColumnType::Boolean { .. }) => Value::Bool(n != 0),
-                                    _ => Value::F64(n as f64),
+                            Ok(rusqlite::types::Value::Integer(n)) => match col_type {
+                                Some(crate::ivm::schema::ColumnType::Boolean { .. }) => {
+                                    Value::Bool(n != 0)
                                 }
-                            }
+                                _ => Value::F64(n as f64),
+                            },
                             Ok(rusqlite::types::Value::Real(n)) => Value::F64(n),
-                            Ok(rusqlite::types::Value::Text(s)) => {
-                                match col_type {
-                                    Some(crate::ivm::schema::ColumnType::Json { .. }) => Value::Json(Arc::from(s.as_str())),
-                                    _ => Value::Str(Arc::from(s.as_str())),
+                            Ok(rusqlite::types::Value::Text(s)) => match col_type {
+                                Some(crate::ivm::schema::ColumnType::Json { .. }) => {
+                                    Value::Json(Arc::from(s.as_str()))
                                 }
-                            }
+                                _ => Value::Str(Arc::from(s.as_str())),
+                            },
                             Ok(rusqlite::types::Value::Blob(b)) => {
                                 Value::Str(Arc::from(String::from_utf8_lossy(&b).as_ref()))
                             }
@@ -740,9 +766,10 @@ impl Input for SourceInput {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                if let Some(pred) = &conn.filter_predicate {
-                    if !pred(&row) { continue; }
-                }
+                if let Some(pred) = &conn.filter_predicate
+                    && !pred(&row) {
+                        continue;
+                    }
                 rows.push(row);
             }
 
@@ -764,15 +791,22 @@ impl Input for SourceInput {
                 // Filter a data-sourced row through the same predicates the
                 // SQLite query + fetch applied (its value may have changed).
                 let passes = |r: &Row| -> bool {
-                    if let Some(c) = &req.constraint {
-                        if !constraint_matches_row(c, r) { return false; }
-                    }
+                    if let Some(c) = &req.constraint
+                        && !constraint_matches_row(c, r) {
+                            return false;
+                        }
                     if !req.multi_constraints.is_empty()
                         && !crate::ivm::constraint::row_matches_multi_constraints(
-                            &req.multi_constraints, r) { return false; }
-                    if let Some(pred) = &conn.filter_predicate {
-                        if !pred(r) { return false; }
+                            &req.multi_constraints,
+                            r,
+                        )
+                    {
+                        return false;
                     }
+                    if let Some(pred) = &conn.filter_predicate
+                        && !pred(r) {
+                            return false;
+                        }
                     if let Some(start) = &req.start {
                         let cmp = &conn.compare_rows;
                         let sr = &start.row;
@@ -788,7 +822,9 @@ impl Input for SourceInput {
                                 Basis::After => ord == CmpOrdering::Greater,
                             }
                         };
-                        if !keep { return false; }
+                        if !keep {
+                            return false;
+                        }
                     }
                     true
                 };
@@ -810,7 +846,9 @@ impl Input for SourceInput {
                     }
                 }
                 rows.sort_by(|a, b| (conn.compare_rows)(a, b));
-                if req.reverse { rows.reverse(); }
+                if req.reverse {
+                    rows.reverse();
+                }
             }
 
             return self.apply_overlay_and_stream(rows, &conn, req);
@@ -829,11 +867,10 @@ impl Input for SourceInput {
             let data = self.data.borrow();
             data.iter()
                 .filter(|r| {
-                    if let Some(constraint) = &req.constraint {
-                        if !constraint_matches_row(constraint, r) {
+                    if let Some(constraint) = &req.constraint
+                        && !constraint_matches_row(constraint, r) {
                             return false;
                         }
-                    }
                     if !req.multi_constraints.is_empty()
                         && !crate::ivm::constraint::row_matches_multi_constraints(
                             &req.multi_constraints,
@@ -842,11 +879,10 @@ impl Input for SourceInput {
                     {
                         return false;
                     }
-                    if let Some(predicate) = &conn.filter_predicate {
-                        if !predicate(r) {
+                    if let Some(predicate) = &conn.filter_predicate
+                        && !predicate(r) {
                             return false;
                         }
-                    }
                     true
                 })
                 .cloned()
@@ -897,11 +933,8 @@ impl SourceInput {
                 _ => None,
             }
         };
-        let index_compare = compute_index_compare(
-            conn.sort.as_ref(),
-            req,
-            &self.schema.primary_key,
-        );
+        let index_compare =
+            compute_index_compare(conn.sort.as_ref(), req, &self.schema.primary_key);
         apply_source_overlay(
             Box::new(rows.into_iter()),
             overlay_change,
@@ -976,15 +1009,14 @@ pub(crate) fn compute_index_compare(
         .map(|c| constraint_matches_primary_key(c, primary_key))
         .unwrap_or(false);
     let append_requested = primary_key.len() > 1 || effective_pk_constraint.is_none() || !pk_match;
-    if append_requested {
-        if let Some(s) = conn_sort {
+    if append_requested
+        && let Some(s) = conn_sort {
             for p in s.iter() {
-                if index_sort.iter().all(|existing| &existing[0] != &p[0]) {
+                if index_sort.iter().all(|existing| existing[0] != p[0]) {
                     index_sort.push(p.clone());
                 }
             }
         }
-    }
     make_comparator(Arc::new(index_sort), false)
 }
 
@@ -1003,7 +1035,14 @@ pub(crate) fn apply_source_overlay(
     filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
     req: &FetchRequest,
 ) -> NodeStream {
-    apply_source_overlay_impl(rows, overlay_change, compare, index_compare, filter_predicate, req)
+    apply_source_overlay_impl(
+        rows,
+        overlay_change,
+        compare,
+        index_compare,
+        filter_predicate,
+        req,
+    )
 }
 
 fn apply_source_overlay_impl(
@@ -1038,17 +1077,21 @@ fn apply_source_overlay_impl(
             // constraint/predicate checks are comparator-independent.
             let index_compare_for_filter = index_compare.clone();
             let filter_fn = move |r: &Row| -> bool {
-                if let Some(c) = &req.constraint {
-                    if !constraint_matches_row(c, r) { return false; }
-                }
-                if !req.multi_constraints.is_empty() {
-                    if !crate::ivm::constraint::row_matches_multi_constraints(&req.multi_constraints, r) {
+                if let Some(c) = &req.constraint
+                    && !constraint_matches_row(c, r) {
                         return false;
                     }
-                }
-                if let Some(pred) = &filter_predicate {
-                    if !pred(r) { return false; }
-                }
+                if !req.multi_constraints.is_empty()
+                    && !crate::ivm::constraint::row_matches_multi_constraints(
+                        &req.multi_constraints,
+                        r,
+                    ) {
+                        return false;
+                    }
+                if let Some(pred) = &filter_predicate
+                    && !pred(r) {
+                        return false;
+                    }
                 // Match TS `overlaysForStartAt` (memory-source.ts): drop an
                 // overlay row only if it sorts STRICTLY before `start` in
                 // INDEX order (compare < 0). Basis (At/After) is NOT
@@ -1061,9 +1104,11 @@ fn apply_source_overlay_impl(
                 if let Some(start) = &req.start {
                     let ord = index_compare_for_filter(r, &start.row);
                     if reverse {
-                        if ord == CmpOrdering::Greater { return false; }
-                    } else {
-                        if ord == CmpOrdering::Less { return false; }
+                        if ord == CmpOrdering::Greater {
+                            return false;
+                        }
+                    } else if ord == CmpOrdering::Less {
+                        return false;
                     }
                 }
                 true
@@ -1081,31 +1126,39 @@ fn apply_source_overlay_impl(
             let ay = add_yielded.clone();
             let rs = remove_skipped.clone();
 
-            let inner = rows.flat_map(move |row| {
-                let mut out: Vec<Row> = Vec::new();
+            let inner = rows
+                .flat_map(move |row| {
+                    let mut out: Vec<Row> = Vec::new();
 
-                if !ay.get() {
-                    if let Some(ref add) = add_row2 {
-                        let ord = if reverse { compare2(&row, add) } else { compare2(add, &row) };
-                        if ord == CmpOrdering::Less {
-                            out.push(add.clone());
-                            ay.set(true);
+                    if !ay.get()
+                        && let Some(ref add) = add_row2 {
+                            let ord = if reverse {
+                                compare2(&row, add)
+                            } else {
+                                compare2(add, &row)
+                            };
+                            if ord == CmpOrdering::Less {
+                                out.push(add.clone());
+                                ay.set(true);
+                            }
                         }
-                    }
-                }
-                if !rs.get() {
-                    if let Some(ref rm) = remove_row2 {
-                        let ord = if reverse { compare2(&row, rm) } else { compare2(rm, &row) };
-                        if ord == CmpOrdering::Equal {
-                            rs.set(true);
-                            // skip this row
-                            return out;
+                    if !rs.get()
+                        && let Some(ref rm) = remove_row2 {
+                            let ord = if reverse {
+                                compare2(&row, rm)
+                            } else {
+                                compare2(rm, &row)
+                            };
+                            if ord == CmpOrdering::Equal {
+                                rs.set(true);
+                                // skip this row
+                                return out;
+                            }
                         }
-                    }
-                }
-                out.push(row);
-                out
-            }).map(|r| StreamItem::Data(Node::new(r)));
+                    out.push(row);
+                    out
+                })
+                .map(|r| StreamItem::Data(Node::new(r)));
 
             // Handle trailing add_row if not yet yielded.
             // Check add_yielded LAZILY (at stream exhaustion, not at binding time).
@@ -1117,7 +1170,10 @@ fn apply_source_overlay_impl(
                     return None;
                 }
                 ay_for_trailing.set(true);
-                add_for_trailing.borrow_mut().take().map(|r| StreamItem::Data(Node::new(r)))
+                add_for_trailing
+                    .borrow_mut()
+                    .take()
+                    .map(|r| StreamItem::Data(Node::new(r)))
             })))
         }
     }
@@ -1188,7 +1244,9 @@ pub struct CollectOutput {
 
 impl CollectOutput {
     pub fn new() -> Self {
-        CollectOutput { changes: Vec::new() }
+        CollectOutput {
+            changes: Vec::new(),
+        }
     }
 }
 
@@ -1215,10 +1273,7 @@ pub type NodeCompare = Rc<dyn Fn(&Node, &Node) -> CmpOrdering>;
 /// Streams are consumed lazily — one node is pulled from each
 /// stream to prime the heap, then refilled one at a time as
 /// nodes are yielded. Early drop closes remaining streams.
-pub fn merge_sorted_streams(
-    streams: Vec<NodeStream>,
-    compare: NodeCompare,
-) -> NodeStream {
+pub fn merge_sorted_streams(streams: Vec<NodeStream>, compare: NodeCompare) -> NodeStream {
     if streams.is_empty() {
         return empty_stream();
     }
@@ -1240,8 +1295,7 @@ impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
         // Equal iff same row AND same stream index. Including `idx` keeps
         // Ord/Eq consistent now that `cmp` uses `idx` as a tiebreaker.
-        self.idx == other.idx
-            && (self.compare)(&self.node, &other.node) == CmpOrdering::Equal
+        self.idx == other.idx && (self.compare)(&self.node, &other.node) == CmpOrdering::Equal
     }
 }
 impl Eq for HeapEntry {}
@@ -1295,7 +1349,7 @@ impl KWayMerge {
 
     fn advance(&mut self, idx: usize) {
         if let Some(stream) = &mut self.streams[idx] {
-            while let Some(item) = stream.next() {
+            for item in stream.by_ref() {
                 match item {
                     crate::ivm::stream::StreamItem::Data(n) => {
                         self.heap.push(HeapEntry {
@@ -1325,7 +1379,6 @@ impl Iterator for KWayMerge {
         }
     }
 }
-
 
 /// String-based PK key for deduplication (Value doesn't implement Hash).
 fn pk_key(row: &Row, pk: &[String]) -> String {

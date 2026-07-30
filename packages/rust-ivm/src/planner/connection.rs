@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::builder::ast::Condition;
-use crate::planner::constraint::{merge_constraints, PlannerConstraint};
+use crate::planner::constraint::{PlannerConstraint, merge_constraints};
 use crate::planner::node::{CostEstimate, FanoutCostModel, JoinOrConnection};
 
 /// Cost model output for a connection.
@@ -96,7 +96,11 @@ impl PlannerConnection {
         c: Option<&PlannerConstraint>,
         _from: Option<&crate::planner::node::PlannerNode>,
     ) {
-        let key = branch_pattern.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let key = branch_pattern
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         self.constraints.insert(key, c.cloned());
         self.cached_costs.clear();
     }
@@ -106,7 +110,11 @@ impl PlannerConnection {
         downstream_child_selectivity: f64,
         branch_pattern: &[usize],
     ) -> CostEstimate {
-        let key = branch_pattern.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let key = branch_pattern
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
 
         if let Some(cached) = self.cached_costs.get(&key) {
             return cached.clone();
@@ -115,11 +123,18 @@ impl PlannerConnection {
         let constraint = self.constraints.get(&key).cloned().flatten();
         let merged = merge_constraints(self.base_constraints.as_ref(), constraint.as_ref());
 
-        let result = (self.model)(&self.table, &self.sort, self.filters.as_ref(), merged.as_ref());
+        let result = (self.model)(
+            &self.table,
+            &self.sort,
+            self.filters.as_ref(),
+            merged.as_ref(),
+        );
 
         let scan_est = match self.limit {
             None => result.rows,
-            Some(lim) => result.rows.min(lim as f64 / downstream_child_selectivity.max(1e-10)),
+            Some(lim) => result
+                .rows
+                .min(lim as f64 / downstream_child_selectivity.max(1e-10)),
         };
 
         CostEstimate {
@@ -134,7 +149,9 @@ impl PlannerConnection {
     }
 
     pub fn unlimit(&mut self) {
-        if self.is_root { return; }
+        if self.is_root {
+            return;
+        }
         self.limit = None;
     }
 

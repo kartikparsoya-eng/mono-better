@@ -20,7 +20,7 @@ pub fn and(conditions: &[Condition]) -> Condition {
     }
 
     if filtered.iter().any(is_always_false) {
-        return FALSE();
+        return false_val();
     }
 
     Condition::And(filtered)
@@ -40,7 +40,7 @@ pub fn or(conditions: &[Condition]) -> Condition {
     }
 
     if filtered.iter().any(is_always_true) {
-        return TRUE();
+        return true_val();
     }
 
     Condition::Or(filtered)
@@ -50,12 +50,8 @@ pub fn or(conditions: &[Condition]) -> Condition {
 /// Port of TS `not` (expression.ts:167).
 pub fn not(expression: &Condition) -> Condition {
     match expression {
-        Condition::And(conditions) => {
-            Condition::Or(conditions.iter().map(not).collect())
-        }
-        Condition::Or(conditions) => {
-            Condition::And(conditions.iter().map(not).collect())
-        }
+        Condition::And(conditions) => Condition::Or(conditions.iter().map(not).collect()),
+        Condition::Or(conditions) => Condition::And(conditions.iter().map(not).collect()),
         Condition::CorrelatedSubquery(csq) => {
             Condition::CorrelatedSubquery(CorrelatedSubqueryCondition {
                 related: csq.related.clone(),
@@ -65,13 +61,11 @@ pub fn not(expression: &Condition) -> Condition {
                 plan_id: None,
             })
         }
-        Condition::Simple(simple) => {
-            Condition::Simple(SimpleCondition {
-                op: negate_operator(&simple.op),
-                left: simple.left.clone(),
-                right: simple.right.clone(),
-            })
-        }
+        Condition::Simple(simple) => Condition::Simple(SimpleCondition {
+            op: negate_operator(&simple.op),
+            left: simple.left.clone(),
+            right: simple.right.clone(),
+        }),
     }
 }
 
@@ -84,8 +78,12 @@ pub fn cmp(field: &str, op_or_value: &str, value: Option<&Value>) -> Condition {
     let actual_value = value.cloned().unwrap_or(Value::Null);
     Condition::Simple(SimpleCondition {
         op: op_or_value.to_string(),
-        left: ValuePosition::Column { name: field.to_string() },
-        right: ValuePosition::Literal { value: actual_value },
+        left: ValuePosition::Column {
+            name: field.to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: actual_value,
+        },
     })
 }
 
@@ -93,7 +91,9 @@ pub fn cmp(field: &str, op_or_value: &str, value: Option<&Value>) -> Condition {
 pub fn cmp_eq(field: &str, value: Value) -> Condition {
     Condition::Simple(SimpleCondition {
         op: "=".to_string(),
-        left: ValuePosition::Column { name: field.to_string() },
+        left: ValuePosition::Column {
+            name: field.to_string(),
+        },
         right: ValuePosition::Literal { value },
     })
 }
@@ -111,7 +111,7 @@ pub fn simplify_condition(c: &Condition) -> Condition {
             }
             let flattened = flatten(conditions.len(), &simplified);
             if flattened.iter().any(is_always_false) {
-                return FALSE();
+                return false_val();
             }
             Condition::And(flattened)
         }
@@ -122,7 +122,7 @@ pub fn simplify_condition(c: &Condition) -> Condition {
             }
             let flattened = flatten(conditions.len(), &simplified);
             if flattened.iter().any(is_always_true) {
-                return TRUE();
+                return true_val();
             }
             Condition::Or(flattened)
         }
@@ -178,12 +178,12 @@ pub fn negate_operator(op: &str) -> String {
 }
 
 /// Always-true condition: AND with no conditions.
-pub fn TRUE() -> Condition {
+pub fn true_val() -> Condition {
     Condition::And(Vec::new())
 }
 
 /// Always-false condition: OR with no conditions.
-pub fn FALSE() -> Condition {
+pub fn false_val() -> Condition {
     Condition::Or(Vec::new())
 }
 

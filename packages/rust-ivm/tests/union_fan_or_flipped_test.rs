@@ -7,6 +7,7 @@
 //!     inputs, so `UnionFanIn::fetch` returned empty,
 //!   - the builder never called `UnionFanOut::set_fan_in` -> accumulated
 //!     branch pushes never collapsed.
+//!
 //! Net effect: any query with an OR containing a flipped subquery hydrated to
 //! ZERO rows (silent data loss). This test builds exactly that shape and
 //! asserts the deduplicated union — it fails (empty) before the wiring fix and
@@ -26,9 +27,15 @@ use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
 
-fn make_source(name: &str, columns: &[(&str, ColumnType)], pk: &[&str]) -> Rc<RefCell<MemorySource>> {
-    let cols: HashMap<String, ColumnType> =
-        columns.iter().map(|(n, t)| (n.to_string(), t.clone())).collect();
+fn make_source(
+    name: &str,
+    columns: &[(&str, ColumnType)],
+    pk: &[&str],
+) -> Rc<RefCell<MemorySource>> {
+    let cols: HashMap<String, ColumnType> = columns
+        .iter()
+        .map(|(n, t)| (n.to_string(), t.clone()))
+        .collect();
     Rc::new(RefCell::new(MemorySource::new(
         name,
         cols,
@@ -47,7 +54,9 @@ fn add_row(source: &Rc<RefCell<MemorySource>>, pairs: &[(&str, Value)]) {
 fn simple(col: &str, op: &str, val: Value) -> Condition {
     Condition::Simple(SimpleCondition {
         op: op.to_string(),
-        left: ValuePosition::Column { name: col.to_string() },
+        left: ValuePosition::Column {
+            name: col.to_string(),
+        },
         right: ValuePosition::Literal { value: val },
     })
 }
@@ -81,12 +90,15 @@ fn flipped_exists(
         op: "EXISTS".to_string(),
         flip: Some(true),
         scalar: false,
-                plan_id: None,
+        plan_id: None,
     })
 }
 
 fn hydrated_ids(engine: &mut Engine, ast: Ast) -> Vec<String> {
-    let results = engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast }]);
+    let results = engine.add_queries(&[QuerySpec {
+        query_id: "q1".to_string(),
+        ast,
+    }]);
     let mut ids: Vec<String> = results[0]
         .changes
         .iter()
@@ -131,13 +143,49 @@ fn or_with_flipped_subquery_returns_deduped_union() {
     // doc2: private, has tag     -> matches flipped-EXISTS branch only
     // doc3: private, no tag      -> matches neither -> excluded
     // doc4: public, has tag      -> matches BOTH -> must appear exactly once
-    add_row(&docs, &[("id", Value::Str("doc1".into())), ("kind", Value::Str("public".into()))]);
-    add_row(&docs, &[("id", Value::Str("doc2".into())), ("kind", Value::Str("private".into()))]);
-    add_row(&docs, &[("id", Value::Str("doc3".into())), ("kind", Value::Str("private".into()))]);
-    add_row(&docs, &[("id", Value::Str("doc4".into())), ("kind", Value::Str("public".into()))]);
+    add_row(
+        &docs,
+        &[
+            ("id", Value::Str("doc1".into())),
+            ("kind", Value::Str("public".into())),
+        ],
+    );
+    add_row(
+        &docs,
+        &[
+            ("id", Value::Str("doc2".into())),
+            ("kind", Value::Str("private".into())),
+        ],
+    );
+    add_row(
+        &docs,
+        &[
+            ("id", Value::Str("doc3".into())),
+            ("kind", Value::Str("private".into())),
+        ],
+    );
+    add_row(
+        &docs,
+        &[
+            ("id", Value::Str("doc4".into())),
+            ("kind", Value::Str("public".into())),
+        ],
+    );
 
-    add_row(&tags, &[("id", Value::Str("t2".into())), ("docId", Value::Str("doc2".into()))]);
-    add_row(&tags, &[("id", Value::Str("t4".into())), ("docId", Value::Str("doc4".into()))]);
+    add_row(
+        &tags,
+        &[
+            ("id", Value::Str("t2".into())),
+            ("docId", Value::Str("doc2".into())),
+        ],
+    );
+    add_row(
+        &tags,
+        &[
+            ("id", Value::Str("t4".into())),
+            ("docId", Value::Str("doc4".into())),
+        ],
+    );
 
     let mut engine = Engine::new(HashMap::new());
     engine.register_source(docs);
