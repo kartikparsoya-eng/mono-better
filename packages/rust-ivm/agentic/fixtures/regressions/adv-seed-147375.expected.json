@@ -1,0 +1,37 @@
+{
+ "advance": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": null,
+    "c1": 10000000000,
+    "c2": "%",
+    "c3": true,
+    "id": "t0-p614"
+   },
+   "rowKey": {
+    "id": "t0-p614"
+   },
+   "table": "t0"
+  }
+ ],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": null,
+    "c1": 10000000000,
+    "c2": "%",
+    "c3": true,
+    "id": "t0-p614"
+   },
+   "rowKey": {
+    "id": "t0-p614"
+   },
+   "table": "t0"
+  }
+ ],
+ "hydrate": []
+}
