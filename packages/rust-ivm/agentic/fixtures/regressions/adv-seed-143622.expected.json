@@ -1,0 +1,161 @@
+{
+ "advance": [
+  {
+   "changeType": 1,
+   "queryId": "q1",
+   "row": null,
+   "rowKey": {
+    "id": "t1-r1"
+   },
+   "table": "t1"
+  }
+ ],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 1000000,
+    "c1": "café",
+    "c2": 1e-10,
+    "c3": "null",
+    "fk": "t0-r31",
+    "id": "t1-r17"
+   },
+   "rowKey": {
+    "id": "t1-r17"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 1000000,
+    "c1": "null",
+    "c2": 2,
+    "c3": "null",
+    "fk": "t0-r17",
+    "id": "t1-r2"
+   },
+   "rowKey": {
+    "id": "t1-r2"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 123456789,
+    "c1": "false",
+    "c2": 9007199254740991,
+    "c3": "null",
+    "fk": "t0-r12",
+    "id": "t1-r16"
+   },
+   "rowKey": {
+    "id": "t1-r16"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 10000000000,
+    "c1": "%",
+    "c2": 1000000,
+    "c3": null,
+    "fk": "t0-r24",
+    "id": "t1-r4"
+   },
+   "rowKey": {
+    "id": "t1-r4"
+   },
+   "table": "t1"
+  }
+ ],
+ "hydrate": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 10,
+    "c1": "café",
+    "c2": -0.5,
+    "c3": null,
+    "fk": "t0-r3",
+    "id": "t1-r1"
+   },
+   "rowKey": {
+    "id": "t1-r1"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 1000000,
+    "c1": "café",
+    "c2": 1e-10,
+    "c3": "null",
+    "fk": "t0-r31",
+    "id": "t1-r17"
+   },
+   "rowKey": {
+    "id": "t1-r17"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 1000000,
+    "c1": "null",
+    "c2": 2,
+    "c3": "null",
+    "fk": "t0-r17",
+    "id": "t1-r2"
+   },
+   "rowKey": {
+    "id": "t1-r2"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 123456789,
+    "c1": "false",
+    "c2": 9007199254740991,
+    "c3": "null",
+    "fk": "t0-r12",
+    "id": "t1-r16"
+   },
+   "rowKey": {
+    "id": "t1-r16"
+   },
+   "table": "t1"
+  },
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": 10000000000,
+    "c1": "%",
+    "c2": 1000000,
+    "c3": null,
+    "fk": "t0-r24",
+    "id": "t1-r4"
+   },
+   "rowKey": {
+    "id": "t1-r4"
+   },
+   "table": "t1"
+  }
+ ]
+}
