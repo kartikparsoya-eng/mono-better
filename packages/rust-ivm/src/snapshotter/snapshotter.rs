@@ -17,7 +17,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use std::sync::{Arc, Mutex};
+
 use crate::snapshotter::diff::Diff;
+use crate::snapshotter::read_pool::FramePinnedPool;
 use crate::snapshotter::spec::LiteAndZqlSpec;
 
 /// Shared handle to a pinned snapshot connection. The TableSources share these
@@ -39,10 +42,32 @@ pub struct Snapshotter {
     curr: Option<Snapshot>,
     prev: Option<Snapshot>,
     destroyed: bool,
+    /// Frame-pinned read pool for parallel cold hydrate (read-level
+    /// parallelism). Co-pinned with `curr` at `init` while `head ==
+    /// curr.version` (PipelineCount==0). Unpinned once advancing begins — later
+    /// (warm) hydrates fall back to serial. See DESIGN-read-parallelism.md §2b.
+    read_pool: Arc<FramePinnedPool>,
+    /// How many connections to co-pin (≤ pool capacity).
+    pool_pin_count: usize,
+    /// Watchdog interrupt registry (N1) — pooled connections register here so a
+    /// slow parallel read can be hard-aborted like the actor's own connection.
+    interrupt_registry: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
 }
 
 impl Snapshotter {
     pub fn new(db_file: &str, app_id: &str, page_cache_size_kib: Option<i64>) -> Self {
+        Self::with_read_pool(db_file, app_id, page_cache_size_kib, 0, None)
+    }
+
+    /// Construct with an explicit parallel-read pool size and watchdog registry.
+    /// `pool_capacity == 0` disables read-level parallelism (serial hydrate).
+    pub fn with_read_pool(
+        db_file: &str,
+        app_id: &str,
+        page_cache_size_kib: Option<i64>,
+        pool_capacity: usize,
+        interrupt_registry: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
+    ) -> Self {
         Snapshotter {
             db_file: db_file.to_string(),
             app_id: app_id.to_string(),
@@ -50,17 +75,48 @@ impl Snapshotter {
             curr: None,
             prev: None,
             destroyed: false,
+            read_pool: Arc::new(FramePinnedPool::new(
+                db_file,
+                page_cache_size_kib,
+                pool_capacity.max(1),
+            )),
+            pool_pin_count: pool_capacity,
+            interrupt_registry,
         }
     }
 
+    /// The frame-pinned parallel-read pool (shared with the TableSources).
+    pub fn read_pool(&self) -> Arc<FramePinnedPool> {
+        self.read_pool.clone()
+    }
+
     /// Pin the initial snapshot at the current head. Must be called exactly once.
+    /// Co-pins the parallel-read pool at the same frame (head == curr.version,
+    /// PipelineCount==0) so the first cold hydrate can fan its reads out.
     pub fn init(&mut self) -> Result<(), String> {
         if self.curr.is_some() {
             return Err("Already initialized".to_string());
         }
         let snap = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
+        let version = snap.version.clone();
         self.curr = Some(snap);
+        self.pin_read_pool(&version);
         Ok(())
+    }
+
+    /// Co-pin the read pool at `version` (best-effort: on failure the pool is
+    /// left unpinned and hydrate reads fall back to serial — never wrong-frame).
+    fn pin_read_pool(&self, version: &str) {
+        if self.pool_pin_count == 0 {
+            return;
+        }
+        if let Err(e) = self.read_pool.pin_frame(
+            version,
+            self.pool_pin_count,
+            self.interrupt_registry.as_ref(),
+        ) {
+            eprintln!("[rust-ivm] read pool co-pin at {} failed (serial hydrate): {}", version, e);
+        }
     }
 
     pub fn initialized(&self) -> bool {
@@ -116,6 +172,10 @@ impl Snapshotter {
         syncable_tables: &HashMap<String, LiteAndZqlSpec>,
         all_table_names: &HashSet<String>,
     ) -> Result<DiffOwned, String> {
+        // Advancing moves curr off its cold-hydrate frame — release the parallel
+        // read pool (rollback its read txs so the WAL can checkpoint). Later
+        // (warm) hydrates run serially until the next cold re-pin.
+        self.read_pool.unpin_frame();
         // Prepare the head pin WITHOUT touching prev/curr (leapfrog core).
         let mut next = if let Some(mut prev_snap) = self.prev.take() {
             // Reuse the prev connection: rollback + re-pin at head.
@@ -178,6 +238,7 @@ impl Snapshotter {
     /// FAILURE-ATOMIC: the swap commits only after the new head pin succeeds.
     /// On error, prev/curr are untouched — the caller may retry in place.
     pub fn advance_without_diff(&mut self) -> Result<&str, String> {
+        self.read_pool.unpin_frame();
         let next = if let Some(mut prev_snap) = self.prev.take() {
             prev_snap.reset_to_head()?;
             prev_snap
@@ -198,8 +259,14 @@ impl Snapshotter {
     ///
     /// ONLY safe when no pipeline depends on curr yet (initial hydrate).
     pub fn refresh_current_to_head(&mut self) -> Result<(), String> {
+        // Re-pin curr at head (safe only at PipelineCount==0) — and co-pin the
+        // read pool at the same fresh frame so this cold hydrate can fan out.
+        self.read_pool.unpin_frame();
         if let Some(curr) = self.curr.as_mut() {
-            curr.reset_to_head()
+            curr.reset_to_head()?;
+            let version = curr.version.clone();
+            self.pin_read_pool(&version);
+            Ok(())
         } else {
             Err("Snapshotter has not been initialized".to_string())
         }
@@ -208,6 +275,7 @@ impl Snapshotter {
     /// Close both snapshot connections.
     pub fn destroy(&mut self) {
         self.destroyed = true;
+        self.read_pool.unpin_frame();
         self.curr.take();
         self.prev.take();
     }

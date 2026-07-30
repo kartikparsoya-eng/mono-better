@@ -54,7 +54,7 @@ fn test_hydrate_single_table() {
             .collect(),
     );
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -92,7 +92,7 @@ fn test_hydrate_with_filter() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -158,7 +158,7 @@ fn test_hydrate_with_join() {
         .collect(),
     );
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(users);
     engine.register_source(posts);
 
@@ -215,7 +215,7 @@ fn test_advance_add() {
             .collect(),
     );
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source.clone());
 
     // Build a pipeline
@@ -256,7 +256,7 @@ fn test_advance_remove() {
             .collect(),
     );
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source.clone());
 
     let ast = Ast {
@@ -290,7 +290,7 @@ fn test_multiple_sources_independent() {
     let users = make_source("users", &["id"]);
     let posts = make_source("posts", &["id"]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(users);
     engine.register_source(posts);
 

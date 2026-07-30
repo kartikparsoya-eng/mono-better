@@ -54,7 +54,7 @@ fn basic_ast(table: &str) -> Ast {
 #[test]
 fn cancel_mid_hydrate_stops_producing_and_registers_nothing() {
     let source = make_source("users", 50);
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let cancel = engine.cancellation_token();
@@ -97,7 +97,7 @@ fn normal_hydrate_still_registers_after_a_prior_cancel() {
     // A cancel is per-call: the token resets at the start of the next hydrate,
     // so a fresh hydrate after a cancelled one behaves normally.
     let source = make_source("users", 5);
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let cancel = engine.cancellation_token();

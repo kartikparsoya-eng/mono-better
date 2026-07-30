@@ -174,7 +174,7 @@ fn setup() -> Engine {
     // both rows are brand new.
     let convos = str_source("convos", &["id", "chan"], &["id"]);
     let members = str_source("members", &["id", "chan"], &["id"]);
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(convos);
     engine.register_source(members);
     engine.add_queries(&[QuerySpec {
@@ -205,7 +205,7 @@ fn setup_with_related() -> Engine {
     let convos = str_source("convos", &["id", "chan"], &["id"]);
     let members = str_source("members", &["id", "chan"], &["id"]);
     let messages = str_source("messages", &["id", "convo"], &["id"]);
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(convos);
     engine.register_source(members);
     engine.register_source(messages);

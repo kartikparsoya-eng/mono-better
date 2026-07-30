@@ -165,7 +165,7 @@ fn setup() -> Engine {
         ("channelId", ColumnType::String { optional: false }),
     ], &["id"]);
 
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(channels);
     engine.register_source(channel_participants);
     engine.register_source(conversations);

@@ -103,7 +103,7 @@ fn setup() -> (Engine, Rc<RefCell<MemorySource>>) {
     add_row(&issues, &[("id", "i1"), ("ownerId", "Alice")]);
     add_row(&issues, &[("id", "i2"), ("ownerId", "Bob")]);
 
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(users.clone());
     engine.register_source(issues);
     engine.set_unique_keys("users", vec![vec!["id".to_string()]]);

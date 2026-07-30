@@ -468,7 +468,7 @@ fn test_pipeline_with_like_filter() {
         ("id", Value::F64(3.0), "name", Value::Str("admin".into())),
     ]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -513,7 +513,7 @@ fn test_pipeline_with_is_null_filter() {
         m
     });
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -550,7 +550,7 @@ fn test_pipeline_with_and_or() {
         ("id", Value::F64(3.0), "name", Value::Str("charlie".into())),
     ]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     // WHERE (id = 1 OR id = 3)

@@ -15,7 +15,7 @@ use rust_ivm::ivm::source::{MemorySource, Source};
 fn make_engine() -> Engine {
     let mut pks = HashMap::new();
     pks.insert("t".to_string(), vec!["id".to_string()]);
-    let mut eng = Engine::new(pks, 1);
+    let mut eng = Engine::new(pks);
 
     let mut cols = HashMap::new();
     cols.insert("id".to_string(), ColumnType::Number { optional: false });

@@ -86,31 +86,14 @@ pub trait Source {
     /// Set parallel push mode.
     fn set_parallel(&mut self, _enabled: bool, _threshold: usize) {}
 
-    /// Extract a `Send` spec of this source's data so a parallel-hydrate worker
-    /// can rebuild a transient copy on its own thread (DESIGN §2). The worker
-    /// creates a fresh source from this spec, builds a transient pipeline, and
-    /// fetches — never touching the actor's `!Send` graph.
-    ///
-    /// - `MemorySource` returns its rows (owned copy).
-    /// - `TableSource` returns its db file path (worker opens a pooled read-only
-    ///   connection via `ReadPool`).
-    /// - Default: `Memory { rows: Vec::new() }` (empty source — no data to copy).
-    fn parallel_spec(&self) -> ParallelSourceSpec {
-        ParallelSourceSpec::Memory { rows: Vec::new() }
-    }
-}
-
-/// A `Send` description of a source's data, extractable from the `!Send` source
-/// so a worker can rebuild a transient copy (DESIGN §2). The worker creates a
-/// fresh source from this spec on its own thread.
-#[derive(Clone)]
-pub enum ParallelSourceSpec {
-    /// In-memory source: the worker creates a `MemorySource` and populates it
-    /// with these owned rows.
-    Memory { rows: Vec<Row> },
-    /// SQLite-backed source: the worker creates a `TableSource` bound to a
-    /// pooled read-only connection (via `ReadPool::acquire`).
-    Sqlite { db_path: String },
+    /// Attach the frame-pinned parallel-read pool (read-level parallelism).
+    /// The source uses it to fan multi-constraint hydrate reads out across the
+    /// co-pinned connections; `MemorySource` has no SQLite reads → no-op.
+    /// See DESIGN-read-parallelism.md.
+    fn set_read_pool(
+        &mut self,
+        _pool: std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>,
+    ) {}
 }
 
 
@@ -613,10 +596,6 @@ impl Source for MemorySource {
 
     fn set_parallel(&mut self, enabled: bool, threshold: usize) {
         self.set_parallel(enabled, threshold);
-    }
-
-    fn parallel_spec(&self) -> ParallelSourceSpec {
-        ParallelSourceSpec::Memory { rows: self.all_rows() }
     }
 }
 

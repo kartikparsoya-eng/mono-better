@@ -653,7 +653,7 @@ fn main() {
     eprintln!("rust-ivm-server listening on http://{}", addr);
 
     let mut state = ServerState {
-        engine: Engine::new(HashMap::new(), 4),
+        engine: Engine::new(HashMap::new()),
         sources: HashMap::new(),
     };
 

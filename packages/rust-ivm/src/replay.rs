@@ -380,73 +380,14 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
 
     let catch = Catch::new(pipeline, false);
 
-    // When RUST_IVM_PARALLEL_HYDRATE is not explicitly disabled, dispatch the
-    // hydrate fetch to a parallel worker (exercising the production parallel-
-    // hydrate path: source spec extraction, WorkerDelegate transient rebuild,
-    // ParallelJob dispatch). The worker rebuilds a transient pipeline from Send
-    // source specs, fetches through a Catch, and streams CaughtNodes — same
-    // output format as serial, diffable against the TS oracle. Pushes +
-    // finalView still run on the actor's Catch (serial, same as the production
-    // path where advance is single-threaded).
-    let parallel = std::env::var("RUST_IVM_PARALLEL_HYDRATE")
-        .ok()
-        .map(|v| {
-            v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off")
-        })
-        .unwrap_or(true);
-
-    let hydrate: Vec<CaughtNode> = if parallel {
-        use crate::engine::parallel_hydrate::{extract_source_specs, referenced_tables};
-        use crate::engine::worker::ParallelJob;
-        use crate::engine::CancellationToken;
-
-        let tables = referenced_tables(&completed);
-        let source_specs = extract_source_specs(&sources, &tables);
-        let ast_clone = completed.clone();
-        let enable_ne = enable_not_exists;
-        let task = Box::new(
-            move |_scope: &crate::engine::worker::WorkerScope,
-                  sink: &dyn Fn(CaughtNode)| -> Result<(), String> {
-                // Rebuild transient sources from Send specs (same as production
-                // WorkerDelegate).
-                let mut wdelegate = crate::engine::parallel_hydrate::WorkerDelegate::new(
-                    source_specs.clone(),
-                    enable_ne,
-                )?;
-                let tpipeline = build_pipeline(&ast_clone, &mut wdelegate);
-                let tcatch = Catch::new(tpipeline, false);
-                let nodes = tcatch.borrow().fetch(&FetchRequest::default());
-                for node in nodes {
-                    sink(node);
-                }
-                Ok(())
-            },
-        );
-        let job: ParallelJob<CaughtNode, String> = ParallelJob::new(2, 4);
-        let mut collected: Vec<CaughtNode> = Vec::new();
-        let cancel = CancellationToken::new();
-        match job.run_streaming(vec![task], cancel, |node| collected.push(node)) {
-            Ok(()) => collected,
-            Err(e) => {
-                // Parallel failed — fall back to serial (S4).
-                eprintln!("[replay] parallel hydrate failed, falling back to serial: {:?}", e);
-                catch.borrow().fetch(&FetchRequest::default())
-            }
-        }
-    } else {
-        catch.borrow().fetch(&FetchRequest::default())
-    };
-
-    // Phase 2b (parallel only): the worker fetched a TRANSIENT pipeline. The
-    // actor's pipeline was built but never fetched, so its operators lack the
-    // fetch-time state (join caches, cap counters, etc.) that pushes rely on.
-    // Fetch the actor's pipeline (discarding the output — the worker already
-    // produced the hydrate rows) to set up operator state for pushes. The
-    // Catch's fetch eagerly expands relationships, so child operators are
-    // set up too (same as the recurse_node_relationships fix in the engine).
-    if parallel {
-        let _ = catch.borrow().fetch(&FetchRequest::default());
-    }
+    // Single-fetch: one fetch on the actor's Catch warms operator state (join
+    // caches, cap counters, etc.) AND produces the hydrate rows in the same
+    // pass — identical to the production single-fetch hydrate path. (The prior
+    // throwaway-worker "parallel hydrate" was removed: it fetched twice — once
+    // in a transient worker pipeline for output, then again here to warm state
+    // — which was net-additive work, and its worker connections bypassed the
+    // pinned-snapshot version guarantee. Read-level parallelism replaces it.)
+    let hydrate: Vec<CaughtNode> = catch.borrow().fetch(&FetchRequest::default());
 
     let hydrate_json = JsonValue::Array(hydrate.iter().map(caught_node_to_json).collect());
 

@@ -125,7 +125,7 @@ fn test_nested_exists_with_or() {
     add_row(&conversation_participants, &[("id", Value::Str("conp2".into())), ("conversationId", Value::Str("conv3".into())), ("visibleTo", Value::Null)]);
     add_row(&conversation_participants, &[("id", Value::Str("conp3".into())), ("conversationId", Value::Str("conv4".into())), ("visibleTo", Value::Null)]);
 
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(channels);
     engine.register_source(channel_participants);
     engine.register_source(conversations);
@@ -218,7 +218,7 @@ fn test_or_with_exists_and_cap_limit() {
     // user1 in ch4 only
     add_row(&channel_participants, &[("id", Value::Str("cp1".into())), ("channelId", Value::Str("ch4".into())), ("userId", Value::Str("user1".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(channels);
     engine.register_source(channel_participants);
 
@@ -280,7 +280,7 @@ fn test_missing_table_returns_empty() {
     // Test that querying an unregistered table returns 0 rows (EmptyInput).
     // This reproduces the "3 missing tickets" issue.
 
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     // Don't register the "tickets" table
 
     let ast = Ast {
@@ -312,7 +312,7 @@ fn test_table_registered_after_query() {
     add_row(&tickets, &[("id", Value::Str("t1".into())), ("title", Value::Str("Test ticket".into()))]);
     add_row(&tickets, &[("id", Value::Str("t2".into())), ("title", Value::Str("Another ticket".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(tickets);
 
     let ast = Ast {

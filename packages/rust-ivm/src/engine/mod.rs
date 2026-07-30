@@ -8,7 +8,6 @@
 //! Parallel hydration via std::thread::scope (mirrors Go IVM goroutine model).
 
 pub mod worker;
-pub mod parallel_hydrate;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -319,7 +318,6 @@ pub struct Engine {
     /// unique-key info.
     unique_keys: HashMap<String, Vec<Vec<String>>>,
     table_specs: HashMap<String, TableSpecInfo>,
-    hydrate_lanes: usize,
     pipelines: Vec<PipelineEntry>,
     /// XOR signature of the row-set per query.
     row_set_signatures: HashMap<String, u64>,
@@ -332,13 +330,12 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(primary_keys: HashMap<String, Vec<String>>, hydrate_lanes: usize) -> Self {
+    pub fn new(primary_keys: HashMap<String, Vec<String>>) -> Self {
         Engine {
             sources: HashMap::new(),
             primary_keys,
             unique_keys: HashMap::new(),
             table_specs: HashMap::new(),
-            hydrate_lanes,
             pipelines: Vec::new(),
             row_set_signatures: HashMap::new(),
             enable_not_exists: true, // server-side
@@ -548,196 +545,6 @@ impl Engine {
         }
 
         results
-    }
-
-    /// Parallel hydrate — coarse: one task per pipeline (DESIGN §2, Phase 1).
-    ///
-    /// Builds all pipelines (Phase 1, same as serial), then dispatches one task
-    /// per pipeline to the `ParallelJob` worker pool. Each worker rebuilds a
-    /// TRANSIENT pipeline from the AST + fresh sources (copied rows for
-    /// `MemorySource`, pooled connection for `TableSource`), fetches it, and
-    /// streams `RowChange`s one at a time. The actor drains in dispatch order
-    /// → byte-identical to serial (§6). Then registers the actor's pipelines
-    /// (Phase 3, same as serial) for advance.
-    ///
-    /// On ANY failure (pool exhaustion, version mismatch, worker panic, first
-    /// error): destroys the built pipelines and falls back to
-    /// `add_queries_streaming` (serial) — one clean reset, no partial results
-    /// committed (S4).
-    ///
-    /// `workers` = bounded pool size. `per_task_bound` = bounded channel cap.
-    pub fn parallel_add_queries_streaming<F: FnMut(&RowChange)>(
-        &mut self,
-        queries: &[QuerySpec],
-        workers: usize,
-        per_task_bound: usize,
-        mut on_row_change: F,
-    ) -> Result<Vec<QueryResult>, crate::engine::worker::ParallelError<String>> {
-        self.cancellation_token.reset();
-        for q in queries {
-            self.remove_query(&q.query_id);
-        }
-
-        // Phase 1: Build all pipelines (same as serial — mutates source
-        // connections, must be sequential).
-        let mut built: Vec<Built> = Vec::new();
-        for q in queries {
-            let timer = Instant::now();
-            let resolved = self.resolve_scalar_subqueries(&q.ast);
-            let primary_keys = &self.primary_keys;
-            let ast = complete_ordering(&resolved.ast, &|table: &str| {
-                primary_keys.get(table).cloned().unwrap_or_default()
-            });
-            let mut delegate = EngineDelegate {
-                sources: &self.sources,
-                enable_not_exists: self.enable_not_exists,
-            };
-            let pipeline = build_pipeline(&ast, &mut delegate);
-            let collector = Rc::new(RefCell::new(CollectOutput::new()));
-            pipeline.borrow().set_output(collector.clone() as OutputHandle);
-            let schema = pipeline.borrow().get_schema();
-            built.push(Built {
-                query_id: q.query_id.clone(),
-                ast: ast.clone(),
-                pipeline,
-                collector,
-                schema,
-                timer,
-                companion_rows: resolved.companion_rows.clone(),
-                companions: resolved.companions,
-            });
-        }
-
-        // Collect all referenced tables across all queries for source spec
-        // extraction.
-        let mut referenced = std::collections::HashSet::new();
-        for b in &built {
-            let tables = crate::engine::parallel_hydrate::referenced_tables(&b.ast);
-            referenced.extend(tables);
-        }
-
-        // Extract Send source specs from the !Send sources.
-        let source_specs =
-            crate::engine::parallel_hydrate::extract_source_specs(&self.sources, &referenced);
-
-        // Build task specs — one per pipeline.
-        let specs: Vec<crate::engine::parallel_hydrate::HydrateTaskSpec> = built
-            .iter()
-            .map(|b| crate::engine::parallel_hydrate::HydrateTaskSpec {
-                query_id: b.query_id.clone(),
-                ast: b.ast.clone(),
-                source_specs: source_specs.clone(),
-                primary_keys: self.primary_keys.clone(),
-                table_specs: self.table_specs.clone(),
-                enable_not_exists: self.enable_not_exists,
-                companion_rows: b.companion_rows.clone(),
-            })
-            .collect();
-
-        // Phase 2: Try parallel hydrate.
-        let cancel = self.cancellation_token.clone();
-        let mut parallel_ok = false;
-        let result = crate::engine::parallel_hydrate::parallel_hydrate_streaming(
-            specs,
-            cancel,
-            workers,
-            per_task_bound,
-            |rc| on_row_change(rc),
-        );
-        match result {
-            Ok(()) => parallel_ok = true,
-            Err(_e) => {
-                // Parallel failed — destroy built pipelines and fall back to
-                // serial. The serial path rebuilds from scratch.
-                for b in &built {
-                    b.pipeline.borrow_mut().destroy();
-                    for cb in &b.companions {
-                        cb.input.borrow_mut().destroy();
-                    }
-                }
-            }
-        }
-
-        if !parallel_ok {
-            // Parallel failed — destroy built pipelines and return Err so the
-            // caller can clear any partial RowChanges already emitted and
-            // re-run serially. We do NOT fall back to serial here because
-            // on_row_change was already called for some rows (the parallel path
-            // streams as it produces); calling add_queries_streaming would
-            // emit duplicates. The caller owns the clear+retry decision.
-            for b in &built {
-                b.pipeline.borrow_mut().destroy();
-                for cb in &b.companions {
-                    cb.input.borrow_mut().destroy();
-                }
-            }
-            return Err(crate::engine::worker::ParallelError::Panic(
-                "parallel hydrate failed — caller should fall back to serial".to_string(),
-            ));
-        }
-
-        // Phase 2b: Fetch the actor's pipelines to set up operator state for
-        // advance. The workers fetched TRANSIENT pipelines — the actor's
-        // pipelines were built but never fetched, so their operators lack the
-        // fetch-time state (join caches, take counters, etc.) that advance
-        // (push) relies on. Discard the output — the workers already emitted
-        // the RowChanges. This is serial but necessary for correctness; the
-        // parallel speedup is on the RowChange emission path (Streamer), not
-        // the raw fetch.
-        //
-        // CRITICAL: must recurse into Node.relationships (RelStream closures),
-        // exactly like the Streamer's stream_nodes does. Without this, child
-        // operators (joins, sources) are never fetched and lack the state that
-        // advance's push relies on → divergent output.
-        for b in &built {
-            if self.cancellation_token.is_cancelled() {
-                break;
-            }
-            let stream = b.pipeline.borrow().fetch(&Default::default());
-            for node in crate::ivm::stream::skip_yields(stream) {
-                recurse_node_relationships(&node);
-            }
-        }
-
-        // Phase 3: Register pipelines (same as serial).
-        let mut results = Vec::new();
-        for b in built {
-            let hydration_time_ms = b.timer.elapsed().as_secs_f64() * 1000.0;
-            results.push(QueryResult {
-                query_id: b.query_id.clone(),
-                changes: Vec::new(),
-            });
-
-            let mut live_companions = Vec::with_capacity(b.companions.len());
-            for cb in b.companions {
-                let schema = cb.input.borrow().get_schema();
-                let output = Rc::new(RefCell::new(CompanionOutput {
-                    table: cb.table,
-                    child_field: cb.child_field,
-                    resolved_value: cb.resolved_value,
-                    resolved_undefined: cb.resolved_undefined,
-                    changes: Vec::new(),
-                }));
-                cb.input.borrow().set_output(output.clone() as OutputHandle);
-                live_companions.push(CompanionPipeline {
-                    input: cb.input,
-                    output,
-                    schema,
-                });
-            }
-
-            self.pipelines.push(PipelineEntry {
-                pipeline: b.pipeline,
-                collector: b.collector,
-                schema: b.schema,
-                query_id: b.query_id,
-                hydration_time_ms,
-                transformed_ast: b.ast,
-                companions: live_companions,
-            });
-        }
-
-        Ok(results)
     }
 
     /// Advance with streaming — calls `on_row_change` for each RowChange as produced.
@@ -1265,24 +1072,6 @@ fn push_source_change(
                         on_row_change(&rc);
                     }
                 }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Parallel hydrate helper — recurse into Node relationships to set up operator
-// state during the actor's state-setup fetch (Phase 2b). Without this, child
-// operators (joins, sources) are never fetched and lack the state that
-// advance's push relies on.
-// ---------------------------------------------------------------------------
-
-fn recurse_node_relationships(node: &crate::ivm::data::Node) {
-    for rel_name in &node.rel_order {
-        if let Some(rel_fn) = node.relationships.get(rel_name) {
-            let stream = rel_fn();
-            for child in crate::ivm::stream::skip_yields(stream) {
-                recurse_node_relationships(&child);
             }
         }
     }

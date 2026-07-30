@@ -117,7 +117,7 @@ fn e2e_hydrate_all_rows() {
     add_row(&source, &[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into()))]);
     add_row(&source, &[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let results = engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast: basic_ast("users") }]);
@@ -137,7 +137,7 @@ fn e2e_hydrate_where_eq() {
     add_row(&source, &[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into())), ("active", Value::Bool(false))]);
     add_row(&source, &[("id", Value::F64(3.0)), ("name", Value::Str("Carol".into())), ("active", Value::Bool(true))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -158,7 +158,7 @@ fn e2e_hydrate_limit() {
         add_row(&source, &[("id", Value::F64(i as f64)), ("name", Value::Str(format!("user{}", i).into()))]);
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -180,7 +180,7 @@ fn e2e_hydrate_and_filter() {
     add_row(&source, &[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into())), ("age", Value::F64(25.0))]);
     add_row(&source, &[("id", Value::F64(3.0)), ("name", Value::Str("Carol".into())), ("age", Value::F64(30.0))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -200,7 +200,7 @@ fn e2e_hydrate_or_filter() {
     add_row(&source, &[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into()))]);
     add_row(&source, &[("id", Value::F64(3.0)), ("name", Value::Str("Carol".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -224,7 +224,7 @@ fn e2e_hydrate_like() {
     add_row(&source, &[("id", Value::F64(2.0)), ("name", Value::Str("bob".into()))]);
     add_row(&source, &[("id", Value::F64(3.0)), ("name", Value::Str("alex".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -244,7 +244,7 @@ fn e2e_hydrate_is_null() {
     add_row(&source, &[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into())), ("bio", Value::Null)]);
     add_row(&source, &[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into())), ("bio", Value::Str("Hello".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -265,7 +265,7 @@ fn e2e_hydrate_gt() {
         add_row(&source, &[("id", Value::F64(i as f64)), ("age", Value::F64(i as f64 * 10.0))]);
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -282,7 +282,7 @@ fn e2e_hydrate_ne() {
     add_row(&source, &[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into()))]);
     add_row(&source, &[("id", Value::F64(3.0)), ("name", Value::Str("Carol".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast = basic_ast("users");
@@ -301,7 +301,7 @@ fn e2e_advance_add() {
     let source = make_source("users", &["id"]);
     add_row(&source, &[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source.clone());
 
     engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast: basic_ast("users") }]);
@@ -328,7 +328,7 @@ fn e2e_advance_remove() {
     let source = make_source("users", &["id"]);
     add_row(&source, &[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source.clone());
 
     engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast: basic_ast("users") }]);
@@ -356,7 +356,7 @@ fn e2e_advance_edit() {
     let source = make_source("users", &["id"]);
     add_row(&source, &[("id", Value::F64(1.0)), ("name", Value::Str("Alice".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source.clone());
 
     engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast: basic_ast("users") }]);
@@ -385,7 +385,7 @@ fn e2e_multiple_queries() {
         add_row(&source, &[("id", Value::F64(i as f64)), ("name", Value::Str(format!("user{}", i).into()))]);
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let mut ast1 = basic_ast("users");
@@ -417,7 +417,7 @@ fn e2e_hydrate_join() {
     add_row(&posts, &[("id", Value::F64(10.0)), ("author_id", Value::F64(1.0)), ("title", Value::Str("Hello".into()))]);
     add_row(&posts, &[("id", Value::F64(11.0)), ("author_id", Value::F64(2.0)), ("title", Value::Str("World".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(users);
     engine.register_source(posts);
 
@@ -471,7 +471,7 @@ fn e2e_row_data_integrity() {
         ("bio", Value::Null),
     ]);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let results = engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast: basic_ast("users") }]);
@@ -492,7 +492,7 @@ fn e2e_row_data_integrity() {
 #[test]
 fn e2e_empty_source() {
     let source = make_source("users", &["id"]);
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let results = engine.add_queries(&[QuerySpec { query_id: "q1".to_string(), ast: basic_ast("users") }]);

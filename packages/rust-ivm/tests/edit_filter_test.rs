@@ -109,7 +109,7 @@ fn change_types(changes: &[RowChange]) -> Vec<(String, ChangeType)> {
 #[test]
 fn edit_removes_row_from_filter_view() {
     let source = num_source("org_members", &["memberId", "orgId", "leftAt", "role", "email", "joinedAt"], &["memberId"]);
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
     engine.add_queries(&[QuerySpec {
         query_id: "q".to_string(),
@@ -166,7 +166,7 @@ fn edit_removes_row_from_filter_view() {
 fn edit_that_doesnt_change_filter_keeps_row() {
     // Edit that doesn't change leftAt or orgId should keep the row in view
     let source = num_source("org_members", &["memberId", "orgId", "leftAt", "role", "email", "joinedAt"], &["memberId"]);
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
     engine.add_queries(&[QuerySpec {
         query_id: "q".to_string(),

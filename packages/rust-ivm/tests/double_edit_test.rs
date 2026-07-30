@@ -75,7 +75,7 @@ fn double_edit_same_advance_final_state_correct() {
         ("isArchived", ColumnType::Boolean { optional: false }),
     ], &["id"]);
     
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(src);
     engine.add_queries(&[QuerySpec {
         query_id: "q".to_string(),

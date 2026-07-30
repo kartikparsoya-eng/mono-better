@@ -257,6 +257,10 @@ pub struct TableSource {
     connections: Vec<Shared<TableConnection>>,
     overlay: SharedOverlay,
     push_epoch: usize,
+    /// Frame-pinned parallel-read pool (read-level parallelism). Shared with
+    /// every `TableSourceInput` this source connects. `None` until set by the
+    /// engine at cold hydrate. See DESIGN-read-parallelism.md.
+    read_pool: Option<std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>>,
 }
 
 impl TableSource {
@@ -284,6 +288,7 @@ impl TableSource {
             connections: Vec::new(),
             overlay: Rc::new(RefCell::new(None)),
             push_epoch: 0,
+            read_pool: None,
         }
     }
 
@@ -351,6 +356,7 @@ impl TableSource {
             primary_key: self.primary_key.clone(),
             filter_condition: filter_condition.clone(),
             overlay: self.overlay.clone(),
+            read_pool: self.read_pool.clone(),
         }));
 
         self.connections.push(conn.clone());
@@ -712,6 +718,7 @@ pub struct TableSourceInput {
     primary_key: Vec<String>,
     filter_condition: Option<Condition>,
     overlay: SharedOverlay,
+    read_pool: Option<std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>>,
 }
 
 impl InputBase for TableSourceInput {
@@ -771,6 +778,109 @@ impl Input for TableSourceInput {
             req,
         )
     }
+
+    /// Read-level parallelism: run one single-constraint SELECT per constraint
+    /// across the frame-pinned pool, returning `Vec<Node>` per constraint in
+    /// input order. Byte-identical to `fetch(constraint=c)` for each `c` on the
+    /// hydrate path: the SQL (incl. ORDER BY + filter_condition) is built the
+    /// same way, rows are mapped identically, `filter_predicate` is applied, and
+    /// (overlay is `None` during hydrate, so `apply_source_overlay` is a
+    /// pass-through — we assert that and bail otherwise).
+    ///
+    /// Returns `None` (→ serial) when: no pool, pool not pinned at the read
+    /// frame, or a push overlay is in flight (not the hydrate path).
+    fn supports_parallel_leaf(&self) -> bool {
+        self.read_pool
+            .as_ref()
+            .and_then(|p| p.pinned_version())
+            .is_some()
+            && self.overlay.borrow().is_none()
+    }
+
+    fn parallel_leaf_fetch(
+        &self,
+        constraints: &[crate::ivm::constraint::Constraint],
+    ) -> Option<Vec<Vec<Node>>> {
+        let pool = self.read_pool.as_ref()?;
+        let version = pool.pinned_version()?;
+        // Hydrate-only: never parallelize while a push overlay is live (the
+        // serial path folds the overlay in; we must not diverge).
+        if self.overlay.borrow().is_some() {
+            return None;
+        }
+        if constraints.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let (order, filter_predicate) = {
+            let conn = self.conn.borrow();
+            let order: Vec<(String, String)> = conn
+                .sort
+                .as_ref()
+                .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
+                .unwrap_or_default();
+            (order, conn.filter_predicate.clone())
+        };
+
+        // One `Send` SELECT task per constraint (same SQL the serial fetch
+        // builds). Workers return `Vec<Row>` (Send) — `Node` and `filter_predicate`
+        // are `!Send`, so Node construction + the post-filter run on the actor.
+        let tasks: Vec<_> = constraints
+            .iter()
+            .map(|c| {
+                let req = FetchRequest {
+                    constraint: Some(c.clone()),
+                    ..Default::default()
+                };
+                let query = build_select_query(
+                    &self.table_name,
+                    &self.column_names,
+                    &req,
+                    self.filter_condition.as_ref(),
+                    Some(&order),
+                    false,
+                );
+                let col_names = self.column_names.clone();
+                let columns = self.columns.clone();
+                let table = self.table_name.clone();
+                move |conn: &Connection| -> Result<Vec<Row>, String> {
+                    let mut stmt = conn.prepare(&query.text).map_err(|e| e.to_string())?;
+                    let param_refs: Vec<&dyn rusqlite::ToSql> =
+                        query.params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+                    let mut rows = stmt
+                        .query(params_from_iter(param_refs.iter().copied()))
+                        .map_err(|e| e.to_string())?;
+                    let mut out: Vec<Row> = Vec::new();
+                    while let Some(raw) = rows.next().map_err(|e| e.to_string())? {
+                        let mut map: FxHashMap<String, Value> = FxHashMap::default();
+                        for (i, col) in col_names.iter().enumerate() {
+                            let val = raw.get::<usize, rusqlite::types::Value>(i);
+                            map.insert(col.clone(), sqlite_value_to_ivm(val, columns.get(col), &table, col));
+                        }
+                        out.push(Arc::new(map));
+                    }
+                    Ok(out)
+                }
+            })
+            .collect();
+
+        // Any pin/version failure → None → the caller keeps the serial path.
+        let per_constraint_rows: Vec<Vec<Row>> = pool.parallel_read(&version, tasks).ok()?;
+
+        // On the actor thread: apply `filter_predicate` (the same post-filter
+        // `stream_query` applies) and build leaf Nodes (empty relationships).
+        Some(
+            per_constraint_rows
+                .into_iter()
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter(|r| filter_predicate.as_ref().map_or(true, |p| p(r)))
+                        .map(Node::new)
+                        .collect()
+                })
+                .collect(),
+        )
+    }
 }
 
 impl Source for TableSource {
@@ -816,15 +926,11 @@ impl Source for TableSource {
         None
     }
 
-    fn parallel_spec(&self) -> crate::ivm::source::ParallelSourceSpec {
-        let db = self.db.borrow();
-        let path = db
-            .query_row("PRAGMA database_list", [], |row| {
-                let p: String = row.get(2).unwrap_or_default();
-                Ok(p)
-            })
-            .unwrap_or_default();
-        crate::ivm::source::ParallelSourceSpec::Sqlite { db_path: path }
+    fn set_read_pool(
+        &mut self,
+        pool: std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>,
+    ) {
+        self.read_pool = Some(pool);
     }
 }
 

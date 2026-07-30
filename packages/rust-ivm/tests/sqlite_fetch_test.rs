@@ -160,7 +160,7 @@ fn test_sqlite_engine_add_queries() {
     let db_path = "/tmp/rust-ivm-test-engine.db";
     create_test_db(db_path);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
 
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     engine.register_source(source.clone());
@@ -196,7 +196,7 @@ fn test_sqlite_engine_add_queries_with_limit() {
     let db_path = "/tmp/rust-ivm-test-limit.db";
     create_test_db(db_path);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
 
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     engine.register_source(source.clone());
@@ -225,7 +225,7 @@ fn test_sqlite_engine_advance_add() {
     let db_path = "/tmp/rust-ivm-test-advance-add.db";
     create_test_db(db_path);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
 
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     engine.register_source(source.clone());
@@ -269,7 +269,7 @@ fn test_sqlite_engine_advance_edit() {
     let db_path = "/tmp/rust-ivm-test-advance-edit.db";
     create_test_db(db_path);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
 
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     engine.register_source(source.clone());
@@ -319,7 +319,7 @@ fn test_sqlite_engine_advance_remove() {
     let db_path = "/tmp/rust-ivm-test-advance-remove.db";
     create_test_db(db_path);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
 
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     engine.register_source(source.clone());
@@ -441,7 +441,7 @@ fn test_sqlite_row_set_signature() {
     let db_path = "/tmp/rust-ivm-test-sig.db";
     create_test_db(db_path);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
 
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     engine.register_source(source.clone());
@@ -473,7 +473,7 @@ fn test_sqlite_query_with_where_clause() {
     let db_path = "/tmp/rust-ivm-test-where.db";
     create_test_db(db_path);
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
 
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     engine.register_source(source.clone());

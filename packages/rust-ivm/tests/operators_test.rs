@@ -47,7 +47,7 @@ fn test_take_limit() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -76,7 +76,7 @@ fn test_skip_pagination() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let start_row = make_row(&[("id", Value::F64(2.0))]);
@@ -109,7 +109,7 @@ fn test_filter_not_equal() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -144,7 +144,7 @@ fn test_filter_greater_than() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -178,7 +178,7 @@ fn test_filter_and() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -220,7 +220,7 @@ fn test_filter_or() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let ast = Ast {
@@ -258,7 +258,7 @@ fn test_advance_edit() {
             .collect(),
     );
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source.clone());
 
     let ast = Ast {
@@ -294,7 +294,7 @@ fn test_multiple_queries_parallel_hydrate() {
         );
     }
 
-    let mut engine = Engine::new(HashMap::new(), 4);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(source);
 
     let queries: Vec<QuerySpec> = (0..5)

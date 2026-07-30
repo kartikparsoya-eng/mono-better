@@ -138,7 +138,7 @@ fn or_with_flipped_subquery_returns_deduped_union() {
     add_row(&tags, &[("id", Value::Str("t2".into())), ("docId", Value::Str("doc2".into()))]);
     add_row(&tags, &[("id", Value::Str("t4".into())), ("docId", Value::Str("doc4".into()))]);
 
-    let mut engine = Engine::new(HashMap::new(), 1);
+    let mut engine = Engine::new(HashMap::new());
     engine.register_source(docs);
     engine.register_source(tags);
 

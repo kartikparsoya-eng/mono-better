@@ -46,6 +46,17 @@ use rust_ivm::sqlite::{install_interrupt, JobWatchdog};
 /// query. Override via env for soak/stress tuning:
 ///   RUST_IVM_WATCHDOG_WARN_MS   (default 120000)
 ///   RUST_IVM_WATCHDOG_ABORT_MS  (default 600000)
+/// Number of connections the frame-pinned read pool co-pins for parallel cold
+/// hydrate (read-level parallelism). `0` disables it (serial hydrate). Env
+/// `RUST_IVM_READ_LANES` (default 0 — ships dark until the fuzzer + microbench
+/// gate in DESIGN-read-parallelism.md is cleared).
+fn read_pool_lanes() -> usize {
+    std::env::var("RUST_IVM_READ_LANES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
 fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
     fn env_ms(name: &str, default: u64) -> u64 {
         std::env::var(name)
@@ -550,37 +561,10 @@ struct EngineState {
     /// retries advance rather than tearing down after the thrown error. Cleared
     /// by (re)hydrate / reset / init.
     poisoned: bool,
-    /// Parallel hydrate flag (DESIGN Phase 1, default on).
-    /// When true (default), hydrate dispatches one task per pipeline to a
-    /// bounded worker pool; when false, hydrate runs serially. Disabled via
-    /// env `RUST_IVM_PARALLEL_HYDRATE=0` or the `set_parallel_hydrate` napi method.
-    parallel_hydrate: bool,
-    /// Worker pool size for parallel hydrate (default 2). Env
-    /// `RUST_IVM_HYDRATE_LANES`.
-    hydrate_lanes: usize,
-    /// Bounded channel capacity per task for parallel hydrate (default 4). Env
-    /// `RUST_IVM_HYDRATE_BOUND`.
-    hydrate_bound: usize,
 }
 
 impl Default for EngineState {
     fn default() -> Self {
-        let parallel_hydrate = std::env::var("RUST_IVM_PARALLEL_HYDRATE")
-            .ok()
-            .map(|v| {
-                v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off")
-            })
-            .unwrap_or(true);
-        let hydrate_lanes = std::env::var("RUST_IVM_HYDRATE_LANES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v: &usize| *v > 0)
-            .unwrap_or(2);
-        let hydrate_bound = std::env::var("RUST_IVM_HYDRATE_BOUND")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v: &usize| *v > 0)
-            .unwrap_or(4);
         EngineState {
             engine: None,
             snapshotter: None,
@@ -589,9 +573,6 @@ impl Default for EngineState {
             sources: HashMap::new(),
             primary_keys: HashMap::new(),
             poisoned: false,
-            parallel_hydrate,
-            hydrate_lanes,
-            hydrate_bound,
         }
     }
 }
@@ -624,11 +605,12 @@ impl RustIvmEngine {
         db_path: String,
         app_id: String,
     ) -> Result<()> {
+        let reg = self.handle.interrupt_handles.clone();
         self.handle.call(move |state| -> std::result::Result<(), String> {
             if state.snapshotter.is_some() {
                 return Ok(()); // already initialized
             }
-            let mut snap = Snapshotter::new(&db_path, &app_id, None);
+            let mut snap = Snapshotter::with_read_pool(&db_path, &app_id, None, read_pool_lanes(), Some(reg));
             snap.init().map_err(|e| format!("snapshotter init: {}", e))?;
             eprintln!("[rust-ivm] snapshotter pre-initialized at version {}", snap.current_version().unwrap_or("?"));
             state.snapshotter = Some(snap);
@@ -736,7 +718,7 @@ impl RustIvmEngine {
             state.all_table_names.insert(spec.table.clone());
         }
 
-        let mut eng = Engine::new(primary_keys.clone(), 1);
+        let mut eng = Engine::new(primary_keys.clone());
         for (_, source) in &state.sources {
             eng.register_source(source.clone());
         }
@@ -760,7 +742,7 @@ impl RustIvmEngine {
 
         if let Some(ref path) = db_path {
             if state.snapshotter.is_none() {
-                let mut snap = Snapshotter::new(path, &app_id, None);
+                let mut snap = Snapshotter::with_read_pool(path, &app_id, None, read_pool_lanes(), Some(interrupt_handles.clone()));
                 match snap.init() {
                     Ok(()) => {
                         eprintln!("[rust-ivm] snapshotter initialized at version {}", snap.current_version().unwrap_or("?"));
@@ -776,8 +758,15 @@ impl RustIvmEngine {
             // engine advances over.
             if let Some(ref snap) = state.snapshotter {
                 if let Ok(curr) = snap.current_conn() {
+                    let pool = snap.read_pool();
                     for source in state.sources.values() {
-                        source.borrow_mut().set_snapshot_db(curr.clone());
+                        let mut src = source.borrow_mut();
+                        src.set_snapshot_db(curr.clone());
+                        // Read-level parallelism: the source fans its leaf child
+                        // reads out across this frame-pinned pool during cold
+                        // hydrate (co-pinned at curr's frame). Serial fallback
+                        // whenever the pool isn't pinned at the read frame.
+                        src.set_read_pool(pool.clone());
                     }
                 }
                 // N1: register the snapshot connection's interrupt handle.
@@ -867,19 +856,6 @@ impl RustIvmEngine {
         self.handle.call(move |state| {
             if let Some(ref mut eng) = state.engine {
                 eng.remove_query(&query_id);
-            }
-        })
-    }
-
-    /// Enable/disable parallel hydrate (DESIGN Phase 1, behind a flag, default
-    /// off). When enabled, hydrate dispatches one task per pipeline to a bounded
-    /// worker pool. Falls back to serial on any failure (S4).
-    #[napi]
-    pub fn set_parallel_hydrate(&self, enabled: bool, lanes: Option<u32>) -> Result<()> {
-        self.handle.call(move |state| {
-            state.parallel_hydrate = enabled;
-            if let Some(l) = lanes {
-                state.hydrate_lanes = l as usize;
             }
         })
     }
@@ -1088,23 +1064,11 @@ impl Task for HydrateTask {
                     specs.push(QuerySpec { query_id: q.query_id.clone(), ast });
                 }
                 let mut rows: Vec<NapiRowChange> = Vec::new();
-                if state.parallel_hydrate {
-                    let result = eng.parallel_add_queries_streaming(
-                        &specs,
-                        state.hydrate_lanes,
-                        state.hydrate_bound,
-                        |rc| rows.push(row_change_to_napi(rc)),
-                    );
-                    if let Err(_e) = result {
-                        // Parallel failed — partial rows may have been emitted.
-                        // Clear and fall back to serial (S4: one clean reset,
-                        // no partial results committed).
-                        rows.clear();
-                        eng.add_queries_streaming(&specs, |rc| rows.push(row_change_to_napi(rc)));
-                    }
-                } else {
-                    eng.add_queries_streaming(&specs, |rc| rows.push(row_change_to_napi(rc)));
-                }
+                // Single-fetch hydrate: one fetch per pipeline warms operator
+                // state AND emits output in the same pass, on the actor's pinned
+                // snapshot connection. Read-level parallelism lives below the
+                // source; the actor graph stays single-writer.
+                eng.add_queries_streaming(&specs, |rc| rows.push(row_change_to_napi(rc)));
                 Ok(rows)
             })?
             .map_err(NapiError::from_reason)
@@ -1294,23 +1258,11 @@ impl Task for HydrateStreamingTask {
                         cancel.cancel();
                     }
                 };
-                if state.parallel_hydrate {
-                    let result = eng.parallel_add_queries_streaming(
-                        &specs,
-                        state.hydrate_lanes,
-                        state.hydrate_bound,
-                        do_hydrate,
-                    );
-                    if let Err(_e) = result {
-                        // Parallel failed — partial rows may have been streamed.
-                        // Fall back to serial (the driver's row-set signatures
-                        // reconcile any duplicates). The parallel flag is
-                        // default-off; this path is rare.
-                        eng.add_queries_streaming(&specs, do_hydrate);
-                    }
-                } else {
-                    eng.add_queries_streaming(&specs, do_hydrate);
-                }
+                // Single-fetch hydrate, streaming row-by-row to JS via the TSFN
+                // (blocking backpressure). One fetch per pipeline warms operator
+                // state AND emits output; read-level parallelism lives below the
+                // source, keeping the actor graph single-writer.
+                eng.add_queries_streaming(&specs, do_hydrate);
                 Ok(())
             })?
             .map_err(NapiError::from_reason)
