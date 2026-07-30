@@ -120,6 +120,16 @@ type QueryInfo = {
 
 // napiToRow and fromNapiValue removed — row data is now JSON strings.
 
+// ⚠ Integer precision limit: row/rowKey values arrive as a JSON string and are
+// parsed with JSON.parse, so integers deserialize as JS `number` (float64). This
+// silently loses precision for any column whose value exceeds 2^53 (9.0e15) —
+// unlike TS's TableSource, which uses better-sqlite3 `safeIntegers(true)` +
+// fromSQLiteTypes to keep large ints as BigInt. NOT reachable in the current
+// schema: all PKs are TEXT and every integer column is a ms-epoch timestamp
+// (~1.7e12), a small count, or a version — all well under 2^53. This will bite a
+// future column that can exceed 2^53 (nanosecond timestamps, snowflake/bigint
+// IDs); such a column needs a lossless int path (string-encode on the Rust side
+// and revive here) rather than plain JSON.parse.
 function napiToRowChange(c: NapiRowChange): RowChange {
   return {
     type: c.changeType,

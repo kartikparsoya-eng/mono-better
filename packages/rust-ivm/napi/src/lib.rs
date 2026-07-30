@@ -564,6 +564,11 @@ struct EngineState {
     /// retries advance rather than tearing down after the thrown error. Cleared
     /// by (re)hydrate / reset / init.
     poisoned: bool,
+    /// Version-keyed table row-count cache for the planner cost model, shared
+    /// across `plan_ast` calls so a connection-init burst of `addQuery`s reuses
+    /// one `COUNT(*)` per table rather than re-counting per query. Self-
+    /// invalidates on snapshot version change (see `create_snapshot_cost_model_cached`).
+    plan_count_cache: rust_ivm::planner::PlanCountCache,
 }
 
 impl Default for EngineState {
@@ -576,6 +581,7 @@ impl Default for EngineState {
             sources: HashMap::new(),
             primary_keys: HashMap::new(),
             poisoned: false,
+            plan_count_cache: std::rc::Rc::new(RefCell::new((String::new(), HashMap::new()))),
         }
     }
 }
@@ -912,11 +918,22 @@ impl RustIvmEngine {
             .call(move |state| -> std::result::Result<String, String> {
                 let ast_value: serde_json::Value = serde_json::from_str(&ast_json)
                     .map_err(|e| format!("plan_ast parse: {}", e))?;
-                let conn = match state.snapshotter.as_ref().and_then(|s| s.current_conn().ok()) {
-                    Some(c) => c,
+                let snap = match state.snapshotter.as_ref() {
+                    Some(s) => s,
                     None => return Ok("[]".to_string()),
                 };
-                let model = rust_ivm::planner::create_snapshot_cost_model(conn);
+                let (conn, version) = match (snap.current_conn(), snap.current_version()) {
+                    (Ok(c), Ok(v)) => (c, v.to_string()),
+                    _ => return Ok("[]".to_string()),
+                };
+                // Reuse row counts across the connection-init addQuery burst
+                // (same snapshot version); COUNT(*) runs at most once per
+                // (table, version) instead of once per table per addQuery.
+                let model = rust_ivm::planner::create_snapshot_cost_model_cached(
+                    conn,
+                    &version,
+                    state.plan_count_cache.clone(),
+                );
                 let flips = rust_ivm::planner::plan_ast_flips(&ast_value, model);
                 let arr: Vec<serde_json::Value> = flips
                     .iter()
