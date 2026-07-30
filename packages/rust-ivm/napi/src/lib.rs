@@ -999,8 +999,15 @@ impl RustIvmEngine {
                 .as_mut()
                 .ok_or_else(|| "Snapshotter not initialized".to_string())?;
             snap.advance_without_diff()
-                .map(|v| v.to_string())
-                .map_err(|e| format!("advance_without_diff: {}", e))
+                .map_err(|e| format!("advance_without_diff: {}", e))?;
+            // Re-point every TableSource at the new curr connection.
+            // advance_without_diff swaps prev/curr, so sources that were
+            // pointing at the old curr (now prev) would read stale data.
+            let curr = snap.current_conn().map_err(|e| format!("advance_without_diff: {}", e))?;
+            for source in state.sources.values() {
+                source.borrow_mut().set_snapshot_db(curr.clone());
+            }
+            Ok(snap.current_version().unwrap_or_default().to_string())
         })?.map_err(NapiError::from_reason)
     }
 
