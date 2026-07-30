@@ -83,6 +83,10 @@ export interface NapiTableSpec {
   table: string;
   columns: Record<string, {type: string; optional: boolean}>;
   primaryKey: string[];
+  // All unique keys (PK plus secondary unique indexes). Drives scalar-EXISTS
+  // subquery resolution in the engine; omitting them degrades scalar subqueries
+  // keyed on a non-PK unique index to a live per-parent Exists (see G8 gap).
+  uniqueKeys?: string[][];
   minRowVersion?: string;
 }
 
@@ -425,6 +429,14 @@ export class RustIVMDriver {
         table,
         columns,
         primaryKey: [...spec.tableSpec.primaryKey],
+        // Pass ALL unique keys (PK plus secondary unique indexes), not just the
+        // PK. The engine uses these to resolve scalar EXISTS subqueries keyed on
+        // a non-PK unique index (e.g. channel_participants(channelId,userId) in
+        // the conversation ACL). Without them the scalar can't be pre-resolved,
+        // degrades to a live per-parent Exists, and the matched row is only
+        // streamed as a hidden companion — diverging from TS (missing rows in
+        // the client store; see the G8 diff-oracle gap).
+        uniqueKeys: spec.tableSpec.uniqueKeys.map(key => [...key]),
         ...(spec.tableSpec.minRowVersion && {minRowVersion: spec.tableSpec.minRowVersion}),
       });
     }

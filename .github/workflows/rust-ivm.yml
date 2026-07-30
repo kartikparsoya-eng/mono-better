@@ -85,13 +85,13 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Download NAPI addon
-        uses: actions/download-artifact@958a8c9e9d2b3c9d4d3e0a8e0e7c5d6e3f5a8b7e # v4.1.0
+        uses: actions/download-artifact@v4
         with:
           name: rust-ivm-node-linux-x64
           path: packages/rust-ivm/napi
 
       - name: Install Node.js
-        uses: actions/setup-node@1d0ff463b4ec634df5e7e1a4e5b8c6e2d0d3f4e5 # v4.0.0
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
