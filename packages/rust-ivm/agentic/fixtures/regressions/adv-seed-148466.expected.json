@@ -1,0 +1,37 @@
+{
+ "advance": [],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "true",
+    "c2": "false",
+    "c3": "🦀rust",
+    "id": "t0-r9"
+   },
+   "rowKey": {
+    "id": "t0-r9"
+   },
+   "table": "t0"
+  }
+ ],
+ "hydrate": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": false,
+    "c1": "true",
+    "c2": "false",
+    "c3": "🦀rust",
+    "id": "t0-r9"
+   },
+   "rowKey": {
+    "id": "t0-r9"
+   },
+   "table": "t0"
+  }
+ ]
+}
