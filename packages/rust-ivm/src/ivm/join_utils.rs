@@ -281,33 +281,31 @@ pub fn generate_with_overlay_unordered(
     let body = skip_yields(stream).filter_map(move |node| {
         if !sup_body.get() {
             match overlay_type {
-                ChangeType::Add | ChangeType::Edit => {
-                    if row_equals_for_compound_key(&overlay_node2.row, &node.row, &pk) {
-                        sup_body.set(true);
-                        return None; // suppress the superseded/added row
-                    }
+                ChangeType::Add | ChangeType::Edit
+                    if row_equals_for_compound_key(&overlay_node2.row, &node.row, &pk) =>
+                {
+                    sup_body.set(true);
+                    return None; // suppress the superseded/added row
                 }
-                ChangeType::Child => {
-                    if row_equals_for_compound_key(&overlay_node2.row, &node.row, &pk) {
-                        sup_body.set(true);
-                        let cd = child.as_ref().expect("child overlay without ChildData");
-                        let rel_name = cd.relationship_name.clone();
-                        let inner_change = cd.change.clone();
-                        let child_schema = rels.get(&rel_name).cloned();
-                        let existing_rel_fn = node.relationships.get(&rel_name).cloned();
-                        let rel_name3 = rel_name.clone();
-                        let overlaid_rel: RelStream =
-                            Rc::new(move || match (&existing_rel_fn, &child_schema) {
-                                (Some(rel_fn), Some(cs)) => generate_with_overlay(
-                                    rel_fn(),
-                                    inner_change.as_ref().clone(),
-                                    cs,
-                                ),
-                                _ => crate::ivm::stream::empty_stream(),
-                            });
-                        let new_node = node.clone().set_relationship(&rel_name3, overlaid_rel);
-                        return Some(StreamItem::Data(new_node));
-                    }
+                ChangeType::Child
+                    if row_equals_for_compound_key(&overlay_node2.row, &node.row, &pk) =>
+                {
+                    sup_body.set(true);
+                    let cd = child.as_ref().expect("child overlay without ChildData");
+                    let rel_name = cd.relationship_name.clone();
+                    let inner_change = cd.change.clone();
+                    let child_schema = rels.get(&rel_name).cloned();
+                    let existing_rel_fn = node.relationships.get(&rel_name).cloned();
+                    let rel_name3 = rel_name.clone();
+                    let overlaid_rel: RelStream =
+                        Rc::new(move || match (&existing_rel_fn, &child_schema) {
+                            (Some(rel_fn), Some(cs)) => {
+                                generate_with_overlay(rel_fn(), inner_change.as_ref().clone(), cs)
+                            }
+                            _ => crate::ivm::stream::empty_stream(),
+                        });
+                    let new_node = node.clone().set_relationship(&rel_name3, overlaid_rel);
+                    return Some(StreamItem::Data(new_node));
                 }
                 _ => {}
             }

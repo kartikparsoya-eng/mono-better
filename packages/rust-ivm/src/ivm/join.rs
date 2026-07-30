@@ -369,7 +369,7 @@ impl Join {
 
         let relationship_name = self.relationship_name.clone();
         let mut out: Vec<StreamItem<Node>> = Vec::with_capacity(parents.len());
-        for (parent_node, constraint) in parents.into_iter().zip(per_parent.into_iter()) {
+        for (parent_node, constraint) in parents.into_iter().zip(per_parent) {
             let child_rel: RelStream = match constraint {
                 Some(c) => {
                     let idx = index_of[&constraint_canonical(&c)];
