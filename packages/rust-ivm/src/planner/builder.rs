@@ -41,8 +41,11 @@ fn order_to_tuples(order: &Option<Vec<crate::builder::ast::OrderPart>>) -> Vec<(
     order.as_ref().map(|v| v.iter().map(|p| (p.column.clone(), p.direction.clone())).collect()).unwrap_or_default()
 }
 
+/// Walks the WHERE tree building the plan graph. Takes `&mut Condition` so that
+/// the `plan_id` assigned to each correlated subquery lands on the REAL AST node
+/// (the one `apply_to_condition` later reads) — not a discarded clone.
 fn process_condition(
-    condition: Condition,
+    condition: &mut Condition,
     input: PlannerNode,
     graph: &mut PlannerGraph,
     model: &ConnectionCostModel,
@@ -53,17 +56,16 @@ fn process_condition(
         Condition::Simple(_) => input,
         Condition::And(conds) => {
             let mut end = input;
-            for sub in conds {
+            for sub in conds.iter_mut() {
                 end = process_condition(sub, end, graph, model, parent_table, plan_id_counter);
             }
             end
         }
         Condition::Or(conds) => {
-            let subquery_conds: Vec<Condition> = conds.into_iter()
-                .filter(|c| matches!(c, Condition::CorrelatedSubquery(_)) || has_correlated_subquery(c))
-                .collect();
-
-            if subquery_conds.is_empty() {
+            let has_subquery = conds
+                .iter()
+                .any(|c| matches!(c, Condition::CorrelatedSubquery(_)) || has_correlated_subquery(c));
+            if !has_subquery {
                 return input;
             }
 
@@ -72,10 +74,15 @@ fn process_condition(
             let fo_node = PlannerNode::FanOut(fo);
             wire_output(&input, fo_node.clone());
 
+            // Process the subquery branches in order (iter_mut preserves order),
+            // mutating the real conditions so their plan_ids stick.
             let mut branches = Vec::new();
-            for sub in subquery_conds {
-                let branch = process_condition(sub, fo_node.clone(), graph, model, parent_table, plan_id_counter);
-                branches.push(branch);
+            for sub in conds.iter_mut() {
+                if matches!(sub, Condition::CorrelatedSubquery(_)) || has_correlated_subquery(sub) {
+                    let branch =
+                        process_condition(sub, fo_node.clone(), graph, model, parent_table, plan_id_counter);
+                    branches.push(branch);
+                }
             }
 
             let fi = Rc::new(RefCell::new(PlannerFanIn::new(branches.clone())));
@@ -87,8 +94,8 @@ fn process_condition(
 
             fi_node
         }
-        Condition::CorrelatedSubquery(mut csq) => {
-            process_correlated_subquery(&mut csq, input, graph, model, parent_table, plan_id_counter)
+        Condition::CorrelatedSubquery(csq) => {
+            process_correlated_subquery(csq, input, graph, model, parent_table, plan_id_counter)
         }
     }
 }
@@ -101,8 +108,15 @@ fn process_correlated_subquery(
     _parent_table: &str,
     plan_id_counter: &mut usize,
 ) -> PlannerNode {
-    let related = &condition.related;
-    let child_table = related.subquery.table.clone();
+    // Snapshot the read-only bits before taking a mutable borrow of the nested
+    // where clause below.
+    let child_table = condition.related.subquery.table.clone();
+    let order = order_to_tuples(&condition.related.subquery.order_by);
+    let sub_filters = condition.related.subquery.where_clause.clone();
+    let op_is_exists = condition.op == "EXISTS";
+    let is_not_exists = condition.op == "NOT EXISTS";
+    let parent_constraint = extract_constraint(&condition.related.parent_key);
+    let child_constraint = extract_constraint(&condition.related.child_key);
 
     // Create child source if needed
     if !graph.has_source(&child_table) {
@@ -111,27 +125,24 @@ fn process_correlated_subquery(
 
     let child_conn = graph.connect_source(
         &child_table,
-        order_to_tuples(&related.subquery.order_by),
-        related.subquery.where_clause.clone(),
+        order,
+        sub_filters,
         false,
         None,
-        if condition.op == "EXISTS" { Some(1) } else { None },
+        if op_is_exists { Some(1) } else { None },
     );
     graph.connections.push(child_conn.clone());
     let mut child_end = PlannerNode::Connection(child_conn);
 
-    if let Some(ref where_clause) = related.subquery.where_clause {
-        child_end = process_condition(where_clause.clone(), child_end, graph, model, &child_table, plan_id_counter);
+    // Recurse into the nested subquery's where clause MUTABLY so nested
+    // correlated-subquery plan_ids also land on the real AST.
+    if let Some(sub_where) = condition.related.subquery.where_clause.as_mut() {
+        child_end = process_condition(sub_where, child_end, graph, model, &child_table, plan_id_counter);
     }
-
-    let parent_constraint = extract_constraint(&related.parent_key);
-    let child_constraint = extract_constraint(&related.child_key);
 
     let plan_id = *plan_id_counter;
     *plan_id_counter += 1;
     condition.plan_id = Some(plan_id);
-
-    let is_not_exists = condition.op == "NOT EXISTS";
 
     let (flippable, initial_type) = if is_not_exists {
         (false, JoinType::Semi)
@@ -178,8 +189,9 @@ pub fn build_plan_graph(
     graph.connections.push(conn.clone());
     let mut end = PlannerNode::Connection(conn);
 
-    if let Some(where_clause) = ast.where_clause.take() {
-        end = process_condition(where_clause, end, &mut graph, &model, &ast.table, &mut plan_id_counter);
+    let table_name = ast.table.clone();
+    if let Some(where_clause) = ast.where_clause.as_mut() {
+        end = process_condition(where_clause, end, &mut graph, &model, &table_name, &mut plan_id_counter);
     }
 
     let terminus = Rc::new(RefCell::new(PlannerTerminus::new(end.clone())));

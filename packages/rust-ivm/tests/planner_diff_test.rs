@@ -13,9 +13,9 @@
 
 use std::rc::Rc;
 
-use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery, SimpleCondition, ValuePosition};
+use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use rust_ivm::ivm::data::Value;
-use rust_ivm::ivm::schema::{ColumnType, System};
+use rust_ivm::ivm::schema::System;
 use rust_ivm::planner::{plan_query, ConnectionCostModel, CostModelCost};
 
 /// A simple mock cost model where each table has a fixed row count.
@@ -25,8 +25,13 @@ fn mock_cost_model(table_costs: Vec<(&str, f64)>) -> ConnectionCostModel {
         .into_iter()
         .map(|(t, c)| (t.to_string(), c))
         .collect();
-    Rc::new(move |table: &str, _sort: &[(String, String)], _filters: Option<&Condition>, _constraint: Option<&std::collections::BTreeMap<String, Option<Value>>>| {
-        let rows = *costs.get(table).unwrap_or(&100.0);
+    Rc::new(move |table: &str, _sort: &[(String, String)], _filters: Option<&Condition>, constraint: Option<&std::collections::BTreeMap<String, Option<Value>>>| {
+        let base = *costs.get(table).unwrap_or(&100.0);
+        // A constrained read is an indexed key seek (~1 row), like SQLite's
+        // planner reports via scanstatus — NOT a full scan. Modelling this is
+        // what lets the planner see that a flipped join's constrained parent
+        // lookup is cheap; a constraint-blind mock could never make flip win.
+        let rows = if constraint.is_some() { 1.0 } else { base };
         CostModelCost {
             startup_cost: 1.0,
             rows,
