@@ -338,6 +338,7 @@ fn open_readwrite(db_file: &str) -> rusqlite::Result<Connection> {
             | OpenFlags::SQLITE_OPEN_URI,
     )
     .or_else(|_| {
+        eprintln!("[rust-ivm] read pool read-write open failed, falling back to read-only");
         Connection::open_with_flags(
             db_file,
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -363,7 +364,7 @@ fn open_and_pin(
     }
     let mode: String = conn
         .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-        .unwrap_or_default();
+        .map_err(|e| format!("read pool journal_mode: {}", e))?;
     let is_wal2 = mode.eq_ignore_ascii_case("wal2");
     let pin_sql = if is_wal2 { "BEGIN CONCURRENT" } else { "BEGIN" };
     conn.execute_batch(pin_sql)

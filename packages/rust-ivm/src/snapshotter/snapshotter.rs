@@ -306,6 +306,7 @@ impl Snapshot {
                 | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
         .or_else(|_| {
+            eprintln!("[rust-ivm] read-write snapshot open failed, falling back to read-only (torn-read risk on wal2)");
             rusqlite::Connection::open_with_flags(
                 db_file,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
