@@ -202,17 +202,16 @@ fn find_fi_and_joins(graph: &PlannerGraph, fo: &PlannerFanOut) -> FofiInfo {
 
         match &node {
             PlannerNode::Join(j) => {
-                // Find join index by pointer equality
                 for (i, gj) in graph.joins.iter().enumerate() {
                     if Rc::ptr_eq(j, gj) {
                         join_indices.push(i);
                         break;
                     }
                 }
-                // Traverse to join's output — but we can't get output from PlannerJoin
-                // without borrowing. The join's output is set during graph construction.
-                // We need to traverse the graph forward. For now, we collect joins
-                // and fan-in from the outputs list.
+                // Traverse to join's output (TS: queue.push(node.output))
+                if let Some(out) = j.borrow().get_output() {
+                    queue.push(out.clone());
+                }
             }
             PlannerNode::FanOut(inner_fo) => {
                 queue.extend(inner_fo.borrow().outputs().iter().cloned());

@@ -123,9 +123,9 @@ pub fn json_to_condition(v: &JsonValue) -> Condition {
         "correlatedSubquery" => {
             let related = json_to_related_subquery(v.get("related").unwrap_or(&JsonValue::Null));
             let op = v.get("op").and_then(|o| o.as_str()).unwrap_or("EXISTS").to_string();
-            let flip = v.get("flip").and_then(|f| f.as_bool()).unwrap_or(false);
+            let flip = v.get("flip").and_then(|f| f.as_bool());
             let scalar = v.get("scalar").and_then(|s| s.as_bool()).unwrap_or(false);
-            Condition::CorrelatedSubquery(CorrelatedSubqueryCondition { related, op, flip, scalar })
+            Condition::CorrelatedSubquery(CorrelatedSubqueryCondition { related, op, flip, scalar, plan_id: None })
         }
         _ => panic!("unknown condition type: {kind}"),
     }

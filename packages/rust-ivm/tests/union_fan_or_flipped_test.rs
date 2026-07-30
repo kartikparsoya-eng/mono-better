@@ -79,8 +79,9 @@ fn flipped_exists(
             system: None,
         },
         op: "EXISTS".to_string(),
-        flip: true,
+        flip: Some(true),
         scalar: false,
+                plan_id: None,
     })
 }
 

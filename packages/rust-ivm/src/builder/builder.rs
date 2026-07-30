@@ -166,7 +166,7 @@ fn build_pipeline_internal(
 
     // Apply non-flipped EXISTS correlated subqueries
     for csq_condition in &csq_conditions {
-        if !csq_condition.flip {
+        if csq_condition.flip != Some(true) {
             current = apply_correlated_subquery(
                 csq_condition,
                 delegate,
@@ -455,7 +455,7 @@ fn apply_correlated_subquery(
 ) -> Shared<dyn Input> {
     let sq = &csq_condition.related;
     let op = csq_condition.op.as_str();
-    let flip = csq_condition.flip;
+    let flip = csq_condition.flip.unwrap_or(false);
 
     assert!(
         op == "EXISTS" || op == "NOT EXISTS",
@@ -575,7 +575,7 @@ fn gather_csq_conditions(condition: &Condition, csqs: &mut Vec<CorrelatedSubquer
 /// Port of TS `conditionIncludesFlippedSubqueryAtAnyLevel` (builder.ts:819).
 pub fn condition_includes_flipped_subquery_at_any_level(cond: &Condition) -> bool {
     match cond {
-        Condition::CorrelatedSubquery(csq) => csq.flip,
+        Condition::CorrelatedSubquery(csq) => csq.flip.unwrap_or(false),
         Condition::And(conditions) | Condition::Or(conditions) => {
             conditions.iter().any(condition_includes_flipped_subquery_at_any_level)
         }

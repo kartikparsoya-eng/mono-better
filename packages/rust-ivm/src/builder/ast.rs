@@ -70,12 +70,22 @@ pub enum ValuePosition {
 pub struct CorrelatedSubqueryCondition {
     pub related: RelatedSubquery,
     pub op: String, // "EXISTS" | "NOT EXISTS"
-    pub flip: bool,
+    /// Tri-state flip annotation (matches TS `condition.flip`):
+    /// - `None` (absent): planner decides whether to flip
+    /// - `Some(true)`: force flipped (planner may not change)
+    /// - `Some(false)`: force not-flipped (planner may not change)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flip: Option<bool>,
     /// TS `condition.scalar` — set by the permission system's
     /// `whereExists(rel, q, {scalar: true})`. Only scalar-flagged subqueries
     /// are pre-resolved to literals by `resolve_simple_scalar_subqueries`.
     #[serde(default)]
     pub scalar: bool,
+    /// Planner-assigned ID (TS `planIdSymbol`). Set during `build_plan_graph`,
+    /// read by `apply_to_condition` to determine which conditions to flip.
+    /// Not serialized — internal to planning.
+    #[serde(skip)]
+    pub plan_id: Option<usize>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

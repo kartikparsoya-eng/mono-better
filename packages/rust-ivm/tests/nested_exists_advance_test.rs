@@ -64,8 +64,9 @@ fn exists(rel: RelatedSubquery) -> Condition {
     Condition::CorrelatedSubquery(CorrelatedSubqueryCondition {
         related: rel,
         op: "EXISTS".to_string(),
-        flip: false,
+        flip: Some(false),
         scalar: false,
+                plan_id: None,
     })
 }
 

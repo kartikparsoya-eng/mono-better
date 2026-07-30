@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition};
-use crate::planner::connection::{ConnectionCostModel, PlannerConnection};
+use crate::planner::connection::ConnectionCostModel;
 use crate::planner::constraint::PlannerConstraint;
 use crate::planner::fan_in::PlannerFanIn;
 use crate::planner::fan_out::PlannerFanOut;
@@ -42,7 +42,7 @@ fn order_to_tuples(order: &Option<Vec<crate::builder::ast::OrderPart>>) -> Vec<(
 }
 
 fn process_condition(
-    condition: &Condition,
+    condition: Condition,
     input: PlannerNode,
     graph: &mut PlannerGraph,
     model: &ConnectionCostModel,
@@ -59,7 +59,7 @@ fn process_condition(
             end
         }
         Condition::Or(conds) => {
-            let subquery_conds: Vec<&Condition> = conds.iter()
+            let subquery_conds: Vec<Condition> = conds.into_iter()
                 .filter(|c| matches!(c, Condition::CorrelatedSubquery(_)) || has_correlated_subquery(c))
                 .collect();
 
@@ -73,7 +73,7 @@ fn process_condition(
             wire_output(&input, fo_node.clone());
 
             let mut branches = Vec::new();
-            for sub in &subquery_conds {
+            for sub in subquery_conds {
                 let branch = process_condition(sub, fo_node.clone(), graph, model, parent_table, plan_id_counter);
                 branches.push(branch);
             }
@@ -87,14 +87,14 @@ fn process_condition(
 
             fi_node
         }
-        Condition::CorrelatedSubquery(csq) => {
-            process_correlated_subquery(csq, input, graph, model, parent_table, plan_id_counter)
+        Condition::CorrelatedSubquery(mut csq) => {
+            process_correlated_subquery(&mut csq, input, graph, model, parent_table, plan_id_counter)
         }
     }
 }
 
 fn process_correlated_subquery(
-    condition: &CorrelatedSubqueryCondition,
+    condition: &mut CorrelatedSubqueryCondition,
     input: PlannerNode,
     graph: &mut PlannerGraph,
     model: &ConnectionCostModel,
@@ -102,15 +102,15 @@ fn process_correlated_subquery(
     plan_id_counter: &mut usize,
 ) -> PlannerNode {
     let related = &condition.related;
-    let child_table = &related.subquery.table;
+    let child_table = related.subquery.table.clone();
 
     // Create child source if needed
-    if !graph.has_source(child_table) {
-        graph.add_source(child_table, model.clone());
+    if !graph.has_source(&child_table) {
+        graph.add_source(&child_table, model.clone());
     }
 
     let child_conn = graph.connect_source(
-        child_table,
+        &child_table,
         order_to_tuples(&related.subquery.order_by),
         related.subquery.where_clause.clone(),
         false,
@@ -121,7 +121,7 @@ fn process_correlated_subquery(
     let mut child_end = PlannerNode::Connection(child_conn);
 
     if let Some(ref where_clause) = related.subquery.where_clause {
-        child_end = process_condition(where_clause, child_end, graph, model, child_table, plan_id_counter);
+        child_end = process_condition(where_clause.clone(), child_end, graph, model, &child_table, plan_id_counter);
     }
 
     let parent_constraint = extract_constraint(&related.parent_key);
@@ -129,15 +129,18 @@ fn process_correlated_subquery(
 
     let plan_id = *plan_id_counter;
     *plan_id_counter += 1;
+    condition.plan_id = Some(plan_id);
 
     let is_not_exists = condition.op == "NOT EXISTS";
 
     let (flippable, initial_type) = if is_not_exists {
         (false, JoinType::Semi)
-    } else if condition.flip {
+    } else if condition.flip == Some(true) {
         (false, JoinType::Flipped)
+    } else if condition.flip == Some(false) {
+        (false, JoinType::Semi)
     } else {
-        // flip is false: planner can decide
+        // flip is None: planner can decide
         (true, JoinType::Semi)
     };
 
@@ -155,7 +158,7 @@ fn process_correlated_subquery(
 }
 
 pub fn build_plan_graph(
-    ast: &Ast,
+    ast: &mut Ast,
     model: ConnectionCostModel,
     is_root: bool,
     base_constraints: Option<PlannerConstraint>,
@@ -175,7 +178,7 @@ pub fn build_plan_graph(
     graph.connections.push(conn.clone());
     let mut end = PlannerNode::Connection(conn);
 
-    if let Some(ref where_clause) = ast.where_clause {
+    if let Some(where_clause) = ast.where_clause.take() {
         end = process_condition(where_clause, end, &mut graph, &model, &ast.table, &mut plan_id_counter);
     }
 
@@ -183,14 +186,12 @@ pub fn build_plan_graph(
     graph.set_terminus(terminus);
 
     let mut sub_plans = HashMap::new();
-    if let related = &ast.related {
-        for csq in related {
-            if let Some(ref alias) = csq.subquery.alias {
-                let child_constraints = extract_constraint(&csq.child_key);
-                sub_plans.insert(alias.clone(), build_plan_graph(
-                    &csq.subquery, model.clone(), true, Some(child_constraints),
-                ));
-            }
+    for csq in &mut ast.related {
+        if let Some(ref alias) = csq.subquery.alias {
+            let child_constraints = extract_constraint(&csq.child_key);
+            sub_plans.insert(alias.clone(), build_plan_graph(
+                &mut csq.subquery, model.clone(), true, Some(child_constraints),
+            ));
         }
     }
 
@@ -205,9 +206,10 @@ fn plan_recursively(plans: &mut Plans) {
 }
 
 pub fn plan_query(ast: &Ast, model: ConnectionCostModel) -> Ast {
-    let mut plans = build_plan_graph(ast, model, true, None);
+    let mut ast = ast.clone();
+    let mut plans = build_plan_graph(&mut ast, model, true, None);
     plan_recursively(&mut plans);
-    apply_plans_to_ast(ast, &plans)
+    apply_plans_to_ast(&ast, &plans)
 }
 
 pub fn apply_plans_to_ast(ast: &Ast, plans: &Plans) -> Ast {
@@ -240,13 +242,11 @@ fn apply_to_condition(condition: &Condition, flipped_ids: &std::collections::Has
     match condition {
         Condition::Simple(_) => condition.clone(),
         Condition::CorrelatedSubquery(csq) => {
-            // The plan_id is stored on the join, not on the condition in our port.
-            // We match by position — the nth CorrelatedSubquery in the condition tree
-            // corresponds to the nth join with that plan_id.
-            // For now, use the scalar field as plan_id (matches TS planIdSymbol).
-            let should_flip = flipped_ids.contains(&(csq.scalar as usize));
+            let should_flip = csq.plan_id
+                .map(|pid| flipped_ids.contains(&pid))
+                .unwrap_or(false);
             let mut result = csq.clone();
-            result.flip = should_flip;
+            result.flip = if should_flip { Some(true) } else { Some(false) };
             if let Some(ref sub_where) = csq.related.subquery.where_clause {
                 result.related.subquery = Box::new({
                     let mut sub = (*csq.related.subquery).clone();

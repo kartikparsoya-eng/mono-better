@@ -218,8 +218,9 @@ impl Query {
                 system: Some(self.system),
             },
             op: "EXISTS".to_string(),
-            flip: options.flip.unwrap_or(false),
+            flip: options.flip,
             scalar: options.scalar.unwrap_or(false),
+            plan_id: None,
         };
 
         let cond = Condition::CorrelatedSubquery(csq);

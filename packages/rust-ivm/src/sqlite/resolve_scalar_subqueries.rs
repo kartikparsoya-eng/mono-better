@@ -130,6 +130,7 @@ fn resolve_condition(
                 op: csq.op.clone(),
                 flip: csq.flip,
                 scalar: csq.scalar,
+                plan_id: None,
             })
         }
         Condition::And(conditions) => {
@@ -177,6 +178,7 @@ fn resolve_scalar_subquery(
             op: condition.op.clone(),
             flip: condition.flip,
             scalar: condition.scalar,
+            plan_id: None,
         });
     }
 

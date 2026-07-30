@@ -62,6 +62,7 @@ pub fn not(expression: &Condition) -> Condition {
                 op: negate_operator(&csq.op),
                 flip: csq.flip,
                 scalar: csq.scalar,
+                plan_id: None,
             })
         }
         Condition::Simple(simple) => {

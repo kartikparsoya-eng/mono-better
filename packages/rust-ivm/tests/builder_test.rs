@@ -212,8 +212,9 @@ fn test_transform_filters_strips_subquery() {
             system: None,
         },
         op: "EXISTS".to_string(),
-        flip: false,
+        flip: Some(false),
         scalar: false,
+                plan_id: None,
     };
 
     let simple = Condition::Simple(SimpleCondition {
@@ -255,8 +256,9 @@ fn test_transform_filters_or_with_subquery_removes_all() {
             system: None,
         },
         op: "EXISTS".to_string(),
-        flip: false,
+        flip: Some(false),
         scalar: false,
+                plan_id: None,
     };
 
     let simple = Condition::Simple(SimpleCondition {
@@ -363,8 +365,9 @@ fn test_assert_no_not_exists_passes_for_exists() {
             system: None,
         },
         op: "EXISTS".to_string(),
-        flip: false,
+        flip: Some(false),
         scalar: false,
+                plan_id: None,
     };
 
     // Should not panic
@@ -395,8 +398,9 @@ fn test_assert_no_not_exists_panics_for_not_exists() {
             system: None,
         },
         op: "NOT EXISTS".to_string(),
-        flip: false,
+        flip: Some(false),
         scalar: false,
+                plan_id: None,
     };
 
     assert_no_not_exists(&Condition::CorrelatedSubquery(csq));
@@ -441,8 +445,9 @@ fn test_condition_includes_flipped_true() {
             system: None,
         },
         op: "EXISTS".to_string(),
-        flip: true,
+        flip: Some(true),
         scalar: false,
+                plan_id: None,
     };
 
     let simple = Condition::Simple(SimpleCondition {

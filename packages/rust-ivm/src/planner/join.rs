@@ -144,6 +144,10 @@ impl PlannerJoin {
         }
     }
 
+    pub fn get_output(&self) -> Option<&PlannerNode> {
+        self.output.as_ref()
+    }
+
     pub fn reset(&mut self) { self.join_type = self.initial_type; }
 
     pub fn get_name(&self) -> String {
