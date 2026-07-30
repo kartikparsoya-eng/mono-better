@@ -204,6 +204,7 @@ impl Snapshotter {
         self.prev = Some(Snapshot {
             conn: prev_conn,
             version: prev_version_for_diff.clone(),
+            is_wal2: old_curr.is_wal2,
             interrupt_handle: prev_interrupt_handle,
         });
 
@@ -213,6 +214,7 @@ impl Snapshotter {
         let curr_snapshot = Snapshot {
             conn: curr_conn,
             version: curr_version_for_diff.clone(),
+            is_wal2: next.is_wal2,
             interrupt_handle: curr_interrupt_handle,
         };
         self.curr = Some(curr_snapshot);
@@ -281,6 +283,8 @@ impl Snapshotter {
 pub struct Snapshot {
     conn: SharedConn,
     version: String,
+    /// Whether the replica is in wal2 mode (determined at open).
+    is_wal2: bool,
     /// Cross-thread interrupt handle (N1). `None` only if the snapshot was
     /// constructed bypassing `create` (tests). The napi layer can extract this
     /// to register with the EngineHandle watchdog.
@@ -290,40 +294,45 @@ pub struct Snapshot {
 impl Snapshot {
     /// Open a fresh connection and pin it at the current head.
     fn create(db_file: &str, page_cache_size_kib: Option<i64>) -> Result<Self, String> {
-        // Open READ-ONLY to avoid lock contention with the zero-cache write-worker's
-        // WAL2-aware SQLite. Standard SQLite (rusqlite) doesn't support WAL2 mode,
-        // so read-write connections hold incompatible locks that block the
-        // write-worker's COMMITs.
+        // Open read-write so wal2 can register a checkpoint-blocking read-mark
+        // in -shm via BEGIN CONCURRENT. A read-only open cannot write -shm,
+        // so the checkpointer ignores it and recycles needed frames → torn read.
+        // This matches TS (snapshotter.ts opens rw + beginConcurrent).
+        // If rw open fails (e.g. exclusive lock), fall back to read-only.
         let conn = rusqlite::Connection::open_with_flags(
             db_file,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
+        .or_else(|_| {
+            rusqlite::Connection::open_with_flags(
+                db_file,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )
+        })
         .map_err(|e| format!("Snapshot::create open: {}", e))?;
 
-        // N1 (DESIGN §1a seam 1): install a cross-thread interrupt handle on
-        // every connection open. The snapshot connection is read-only and pinned;
-        // its handle lets the watchdog/cancel hard-abort a slow replicationState
-        // read or a leapfrog re-pin. Stored on the Snapshot so the napi layer can
-        // register it with the EngineHandle watchdog in Phase 1.
         let interrupt_handle = crate::sqlite::install_interrupt(&conn);
 
-        // These pragmas are write operations that fail in read-only mode.
-        // They're performance hints, not correctness requirements — ignore errors.
+        // These pragmas now take effect (read-write connection).
         let _ = conn.pragma_update(None, "synchronous", "OFF");
         let _ = conn.pragma_update(None, "case_sensitive_like", "ON");
         if let Some(cache_kib) = page_cache_size_kib {
             let _ = conn.pragma_update(None, "cache_size", -(cache_kib));
         }
 
-        let _mode: String = conn
+        let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .map_err(|e| format!("pragma journal_mode: {}", e))?;
+        let is_wal2 = mode.eq_ignore_ascii_case("wal2");
 
         let mut snap = Snapshot {
             conn: Rc::new(RefCell::new(conn)),
             version: String::new(),
+            is_wal2,
             interrupt_handle: Some(interrupt_handle),
         };
         snap.begin_and_pin()?;
@@ -333,15 +342,15 @@ impl Snapshot {
     /// BEGIN CONCURRENT then read `_zero.replicationState` to acquire the read lock.
     /// The read is mandatory — BEGIN CONCURRENT alone does NOT create the snapshot.
     fn begin_and_pin(&mut self) -> Result<(), String> {
-        // Use BEGIN instead of BEGIN CONCURRENT — the latter is a WAL2 write
-        // operation that requires write access. In read-only mode, BEGIN creates
-        // a deferred transaction; the subsequent read of replicationState pins
-        // the snapshot at the current head. In WAL/WAL2 mode, this read snapshot
-        // does not block the write-worker.
+        // BEGIN CONCURRENT on wal2 registers a read-mark in -shm that the
+        // checkpointer respects. On plain WAL (tests), BEGIN creates a
+        // deferred read snapshot. Both are followed by the mandatory
+        // replicationState read that pins the snapshot frame.
+        let sql = if self.is_wal2 { "BEGIN CONCURRENT" } else { "BEGIN" };
         self.conn
             .borrow()
-            .execute_batch("BEGIN")
-            .map_err(|e| format!("BEGIN: {}", e))?;
+            .execute_batch(sql)
+            .map_err(|e| format!("{}: {}", sql, e))?;
 
         let version: String = self
             .conn
@@ -395,10 +404,11 @@ impl Snapshot {
             .execute_batch("ROLLBACK")
             .map_err(|e| format!("resetToHead ROLLBACK: {}", e))?;
 
+        let sql = if self.is_wal2 { "BEGIN CONCURRENT" } else { "BEGIN" };
         self.conn
             .borrow()
-            .execute_batch("BEGIN")
-            .map_err(|e| format!("resetToHead BEGIN: {}", e))?;
+            .execute_batch(sql)
+            .map_err(|e| format!("resetToHead {}: {}", sql, e))?;
 
         let version: String = self
             .conn

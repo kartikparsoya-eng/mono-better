@@ -328,14 +328,23 @@ impl Drop for FramePinnedPool {
     }
 }
 
-/// Open a read-only connection on the replica file (matches `Snapshot::create`).
-fn open_readonly(db_file: &str) -> rusqlite::Result<Connection> {
+/// Open a read-write connection on the replica file (matches `Snapshot::create`).
+/// Read-write so wal2 BEGIN CONCURRENT can register a read-mark in -shm.
+fn open_readwrite(db_file: &str) -> rusqlite::Result<Connection> {
     Connection::open_with_flags(
         db_file,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
+        OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_URI,
     )
+    .or_else(|_| {
+        Connection::open_with_flags(
+            db_file,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
+        )
+    })
 }
 
 /// Open a connection and `BEGIN`-pin it, returning it only if it pinned exactly
@@ -346,14 +355,19 @@ fn open_and_pin(
     target_version: &str,
     page_cache_size_kib: Option<i64>,
 ) -> Result<Connection, String> {
-    let conn = open_readonly(db_file).map_err(|e| format!("read pool open: {}", e))?;
+    let conn = open_readwrite(db_file).map_err(|e| format!("read pool open: {}", e))?;
     let _ = conn.pragma_update(None, "synchronous", "OFF");
     let _ = conn.pragma_update(None, "case_sensitive_like", "ON");
     if let Some(cache_kib) = page_cache_size_kib {
         let _ = conn.pragma_update(None, "cache_size", -(cache_kib));
     }
-    conn.execute_batch("BEGIN")
-        .map_err(|e| format!("read pool BEGIN: {}", e))?;
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap_or_default();
+    let is_wal2 = mode.eq_ignore_ascii_case("wal2");
+    let pin_sql = if is_wal2 { "BEGIN CONCURRENT" } else { "BEGIN" };
+    conn.execute_batch(pin_sql)
+        .map_err(|e| format!("read pool {}: {}", pin_sql, e))?;
     let version: String = conn
         .query_row(
             "SELECT stateVersion FROM \"_zero.replicationState\"",
