@@ -37,6 +37,7 @@ import {
 import type {StatementRunner} from '../../db/statements.ts';
 
 // NAPI addon types
+// NapiValue interface retained for NapiTableSpec columns that still use it.
 export interface NapiValue {
   kind: string;
   boolVal?: boolean;
@@ -49,8 +50,8 @@ export interface NapiRowChange {
   changeType: number;
   queryId: string;
   table: string;
-  rowKey: Record<string, NapiValue>;
-  row?: Record<string, NapiValue>;
+  rowKey: string;
+  row?: string;
   isHidden: boolean;
 }
 
@@ -113,37 +114,15 @@ type QueryInfo = {
   readonly queryName?: string | undefined;
 };
 
-function fromNapiValue(val: NapiValue): unknown {
-  switch (val.kind) {
-    case 'null':
-      return null;
-    case 'bool':
-      return val.boolVal ?? false;
-    case 'f64':
-      return val.f64Val ?? 0;
-    case 'str':
-      return val.strVal ?? '';
-    case 'json':
-      return JSON.parse(val.jsonVal ?? 'null');
-    default:
-      return null;
-  }
-}
-
-function napiToRow(row: Record<string, NapiValue> | undefined): Row | undefined {
-  if (!row) return undefined;
-  return Object.fromEntries(
-    Object.entries(row).map(([k, v]) => [k, fromNapiValue(v)]),
-  ) as Row;
-}
+// napiToRow and fromNapiValue removed — row data is now JSON strings.
 
 function napiToRowChange(c: NapiRowChange): RowChange {
   return {
     type: c.changeType,
     queryID: c.queryId,
     table: c.table,
-    rowKey: napiToRow(c.rowKey) ?? {},
-    row: napiToRow(c.row),
+    rowKey: JSON.parse(c.rowKey) as any,
+    row: c.row ? (JSON.parse(c.row) as any) : undefined,
   };
 }
 
@@ -735,16 +714,18 @@ export class RustIVMDriver {
 
     const header = await headerPromise;
     if (header.changeType === -2) {
-      const reason = header.rowKey['reason']?.strVal ?? 'schema-change';
-      const msg = header.rowKey['msg']?.strVal ?? 'advance reset';
+      const hk = JSON.parse(header.rowKey);
+      const reason = hk['reason'] ?? 'schema-change';
+      const msg = hk['msg'] ?? 'advance reset';
       return new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
     }
     if (header.changeType !== -1) {
       throw new Error('advanceToHeadStreaming expected header row (changeType=-1) as first row');
     }
-    const version = header.rowKey['version']?.strVal ?? '';
-    const numChanges = header.rowKey['numChanges']?.f64Val ?? 0;
-    const aborted = header.rowKey['aborted']?.boolVal ?? false;
+    const hk = JSON.parse(header.rowKey);
+    const version = hk['version'] ?? '';
+    const numChanges = hk['numChanges'] ?? 0;
+    const aborted = hk['aborted'] ?? false;
     this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
 
     if (version) {
@@ -769,8 +750,8 @@ export class RustIVMDriver {
       const row = rows[i];
 
       if (row.changeType === -2) {
-        const reason = row.rowKey['reason']?.strVal ?? 'schema-change';
-        const msg = row.rowKey['msg']?.strVal ?? 'advance reset';
+        const rk = JSON.parse(row.rowKey); const reason = rk['reason'] ?? 'schema-change';
+        const msg = rk['msg'] ?? 'advance reset';
         throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
       }
 
@@ -810,8 +791,8 @@ export class RustIVMDriver {
     try {
       for await (const row of queue) {
         if (row.changeType === -2) {
-          const reason = row.rowKey['reason']?.strVal ?? 'schema-change';
-          const msg = row.rowKey['msg']?.strVal ?? 'advance reset';
+          const rk = JSON.parse(row.rowKey); const reason = rk['reason'] ?? 'schema-change';
+          const msg = rk['msg'] ?? 'advance reset';
           throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
         }
 

@@ -116,29 +116,19 @@ function createSqliteDb(dbPath, tables) {
 // NapiRowChange → comparable flat JSON (shared with napi-sqlite-runner.mjs)
 // ---------------------------------------------------------------------------
 
-function napiValueToJs(v) {
-  switch (v.kind) {
-    case 'null': return null;
-    case 'bool': return v.boolVal;
-    case 'f64': return v.f64Val;
-    case 'str': return v.strVal;
-    case 'json':
-      try { return JSON.parse(v.jsonVal); } catch { return v.jsonVal; }
-    default: return null;
-  }
-}
-
 function napiRowToJs(rc) {
+  const rawRowKey = typeof rc.rowKey === 'string' ? JSON.parse(rc.rowKey) : rc.rowKey || {};
   const rowKey = {};
-  for (const [k, v] of Object.entries(rc.rowKey || {})) {
-    if (k === '_0_version') continue; // strip internal column
-    rowKey[k] = napiValueToJs(v);
+  for (const [k, v] of Object.entries(rawRowKey)) {
+    if (k === '_0_version') continue;
+    rowKey[k] = v;
   }
+  const rawRow = typeof rc.row === 'string' ? JSON.parse(rc.row) : rc.row;
   const row = {};
-  if (rc.row) {
-    for (const [k, v] of Object.entries(rc.row)) {
-      if (k === '_0_version') continue; // strip internal column
-      row[k] = napiValueToJs(v);
+  if (rawRow) {
+    for (const [k, v] of Object.entries(rawRow)) {
+      if (k === '_0_version') continue;
+      row[k] = v;
     }
   }
   return {
