@@ -17,11 +17,31 @@ use rusqlite::Connection;
 
 use rust_ivm::builder::ast::{Ast, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::Source;
 use rust_ivm::snapshotter::Snapshotter;
 use rust_ivm::sqlite::table_source::TableSource;
+use rust_ivm::streamer::RowChange;
+
+/// Deterministic string for a RowChange (sorted keys) so serial and parallel
+/// output can be compared byte-for-byte regardless of hash-map iteration order.
+fn canon(rc: &RowChange) -> String {
+    fn row_str(r: &rust_ivm::ivm::data::Row) -> String {
+        let mut kv: Vec<(String, String)> =
+            r.iter().map(|(k, v)| (k.clone(), format!("{:?}", v))).collect();
+        kv.sort();
+        format!("{:?}", kv)
+    }
+    format!(
+        "ct={:?} q={} t={} key={} row={} hidden={}",
+        rc.change_type,
+        rc.query_id,
+        rc.table,
+        row_str(&rc.row_key),
+        rc.row.as_ref().map(row_str).unwrap_or_default(),
+        rc.is_hidden,
+    )
+}
 
 fn create_replica(path: &str, num_parents: usize, children_per_parent: usize) {
     let conn = Connection::open(path).unwrap();
@@ -74,6 +94,13 @@ fn build_join_ast() -> Ast {
 }
 
 fn hydrate_bench(path: &str, pool_lanes: usize) -> std::time::Duration {
+    hydrate_run(path, pool_lanes).0
+}
+
+/// Hydrate the join once, returning (wall time, canonical RowChange list in
+/// emission order). `pool_lanes > 0` co-pins the read pool and exercises the
+/// parallel Join-batching path; `0` is the serial baseline.
+fn hydrate_run(path: &str, pool_lanes: usize) -> (std::time::Duration, Vec<String>) {
     let pks: HashMap<String, Vec<String>> = [
         ("parents".to_string(), vec!["id".to_string()]),
         ("children".to_string(), vec!["id".to_string()]),
@@ -129,16 +156,41 @@ fn hydrate_bench(path: &str, pool_lanes: usize) -> std::time::Duration {
     }];
 
     let start = Instant::now();
-    let mut count = 0;
-    eng.add_queries_streaming(&specs, |_rc| {
-        count += 1;
+    let mut rows: Vec<String> = Vec::new();
+    eng.add_queries_streaming(&specs, |rc| {
+        rows.push(canon(rc));
     });
     let elapsed = start.elapsed();
     eprintln!(
         "  pool_lanes={}: {} rows in {:?}",
-        pool_lanes, count, elapsed
+        pool_lanes, rows.len(), elapsed
     );
-    elapsed
+    (elapsed, rows)
+}
+
+/// The correctness gate for the parallel Join-batching path: its emitted
+/// RowChanges must be byte-identical to the serial path.
+#[test]
+fn parallel_join_batch_matches_serial() {
+    let path = "/tmp/rust-ivm-parallel-equiv.db";
+    for p in [path, &format!("{}-wal", path), &format!("{}-shm", path)] {
+        let _ = std::fs::remove_file(p);
+    }
+    // Duplicate join keys, empty-child parents, and >1 child/parent all exercised.
+    create_replica(path, 25, 4);
+
+    let (_, serial) = hydrate_run(path, 0);
+    let (_, parallel) = hydrate_run(path, 3);
+
+    assert!(!serial.is_empty(), "hydrate produced rows");
+    assert_eq!(
+        serial, parallel,
+        "parallel Join-batch output must be byte-identical to serial"
+    );
+
+    for p in [path, &format!("{}-wal", path), &format!("{}-shm", path)] {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 #[test]

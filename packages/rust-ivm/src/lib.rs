@@ -13,6 +13,7 @@ pub mod streamer;
 pub mod sqlite;
 pub mod snapshotter;
 pub mod replay;
+pub mod planner;
 
 pub use ivm::*;
 pub use builder::*;

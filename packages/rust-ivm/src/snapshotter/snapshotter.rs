@@ -49,9 +49,6 @@ pub struct Snapshotter {
     read_pool: Arc<FramePinnedPool>,
     /// How many connections to co-pin (≤ pool capacity).
     pool_pin_count: usize,
-    /// Watchdog interrupt registry (N1) — pooled connections register here so a
-    /// slow parallel read can be hard-aborted like the actor's own connection.
-    interrupt_registry: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
 }
 
 impl Snapshotter {
@@ -79,9 +76,9 @@ impl Snapshotter {
                 db_file,
                 page_cache_size_kib,
                 pool_capacity.max(1),
+                interrupt_registry,
             )),
             pool_pin_count: pool_capacity,
-            interrupt_registry,
         }
     }
 
@@ -110,11 +107,7 @@ impl Snapshotter {
         if self.pool_pin_count == 0 {
             return;
         }
-        if let Err(e) = self.read_pool.pin_frame(
-            version,
-            self.pool_pin_count,
-            self.interrupt_registry.as_ref(),
-        ) {
+        if let Err(e) = self.read_pool.pin_frame(version, self.pool_pin_count) {
             eprintln!("[rust-ivm] read pool co-pin at {} failed (serial hydrate): {}", version, e);
         }
     }

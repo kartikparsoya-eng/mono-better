@@ -118,7 +118,40 @@ push/advance (inprogress change present) and for `MemorySource`.
 ## Status
 
 - Phase 1: DONE + verified (suite + 3283 fuzz seeds).
-- Phase 2a: DONE + tested (primitive).
-- Phase 2b/2c: specified above; the pool co-pin integration (2b) is the
-  prerequisite and must land before 2c gives any real (non-serial-fallback)
-  parallelism.
+- Phase 2a: DONE + tested — `FramePinnedPool` (frame-pinned lifecycle, not the
+  original lazy-acquire `ReadPool`) + `parallel_read`; 7 unit tests incl.
+  frame-survives-head-advance.
+- Phase 2b: DONE — `Snapshotter` owns the pool, co-pins it in `init` /
+  `refresh_current_to_head` (head==curr.version, PipelineCount==0) and unpins on
+  `advance`/`destroy`. `Source::set_read_pool` plumbs it to `TableSource(Input)`;
+  napi sizes it via `RUST_IVM_READ_LANES` (default 0 = dark) and attaches it to
+  every source at cold hydrate.
+- Phase 2c: DONE (leaf children) — `TableSourceInput::parallel_leaf_fetch`
+  (one SELECT per constraint across the pool; `Send` `Vec<Row>` workers, actor
+  builds Nodes + applies the post-filter) + `supports_parallel_leaf` pre-check;
+  `Join::fetch` dispatches to `fetch_batched_leaf` on the hydrate path with a
+  bare-`TableSource` child, else the exact original `fetch_lazy`.
+  **Verified:** `parallel_join_batch_matches_serial` proves byte-identical
+  output; the microbench shows **32.7% faster** at 200 parents × 5 children
+  (15.65ms → 10.53ms, 2 lanes). Full suite 508 green; lazy path 2991 fuzz seeds
+  0 findings.
+
+### Hardening done (adversarial pass)
+- **Worker-panic safety:** a panicking read task (e.g. `sqlite_value_to_ivm`'s
+  ±2^53 assert) is caught (`catch_unwind`) so a worker never unwinds; the batch
+  aborts → serial fallback, connections return, and `borrowed` is restored
+  unconditionally (no counter corruption / pin-assert time-bomb).
+- **Interrupt-handle lifecycle:** pooled connections' interrupt handles are
+  appended to the shared registry on `pin_frame` (so `cancel()`/watchdog reach
+  them while pinned) and **drained** on `unpin_frame` (the pool tracks its own
+  contiguous range; the registry is append-only between pin/unpin). No stale
+  handles accumulate after `advance`, and no growth under re-pin. Lock order is
+  `inner → registry` everywhere → no deadlock with the out-of-band `cancel()`.
+
+### Remaining before flipping `RUST_IVM_READ_LANES` on by default
+- Broaden `parallel_leaf_fetch` past bare tables (propagate through
+  `Filter`/`Take` children) — today a filtered child → serial.
+- Differential fuzzer over the **parallel** path (TableSource + pinned pool),
+  ≥50k seeds byte-identical (the equivalence test covers one shape today).
+- Prod-scale cold-hydrate microbench + soak (`free_count` returns to pool size,
+  no WAL-pin leak).
