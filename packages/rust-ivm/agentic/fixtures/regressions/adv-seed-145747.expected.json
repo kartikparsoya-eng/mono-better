@@ -1,0 +1,35 @@
+{
+ "advance": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": null,
+    "c1": true,
+    "c2": "🦀rust",
+    "id": "t0-p940"
+   },
+   "rowKey": {
+    "id": "t0-p940"
+   },
+   "table": "t0"
+  }
+ ],
+ "finalView": [
+  {
+   "changeType": 0,
+   "queryId": "q1",
+   "row": {
+    "c0": null,
+    "c1": true,
+    "c2": "🦀rust",
+    "id": "t0-p940"
+   },
+   "rowKey": {
+    "id": "t0-p940"
+   },
+   "table": "t0"
+  }
+ ],
+ "hydrate": []
+}
