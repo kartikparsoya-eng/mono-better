@@ -112,6 +112,11 @@ RUN pnpm add -w tsx@4
 
 # Required/sane defaults — DO NOT ask Shivral to remember these.
 ENV USE_RUST_IVM=true
+# Absolute path to the native addon (baked below at COPY). The driver's relative
+# fallback ('../../../../packages/rust-ivm/napi/rust-ivm.node') mis-resolves in
+# this layout (doubled 'packages') and silently falls back to TS — so without
+# this env the rust engine never loads. Must match the COPY destination.
+ENV RUST_IVM_ADDON_PATH=/app/mono/packages/rust-ivm/napi/rust-ivm.node
 # Read-level parallelism (frame-pinned pool). 2 = parallel cold-hydrate reads
 # (validated: 0 divergences over 65k+ seeds, 65.5% faster on whale hydrates).
 ENV RUST_IVM_READ_LANES=2
