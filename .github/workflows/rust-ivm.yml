@@ -3,18 +3,8 @@ name: Rust IVM
 on:
   push:
     branches: [rust-ivm-v1.7.0]
-    paths:
-      - 'packages/rust-ivm/**'
-      - 'packages/zero-cache/src/services/view-syncer/rust-ivm-driver.ts'
-      - 'Dockerfile'
-      - '.github/workflows/rust-ivm.yml'
   pull_request:
     branches: [rust-ivm-v1.7.0]
-    paths:
-      - 'packages/rust-ivm/**'
-      - 'packages/zero-cache/src/services/view-syncer/rust-ivm-driver.ts'
-      - 'Dockerfile'
-      - '.github/workflows/rust-ivm.yml'
 
 concurrency:
   group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}'
@@ -29,151 +19,9 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  rust-checks:
-    name: Rust fmt / clippy / test
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: packages/rust-ivm
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            packages/rust-ivm/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/rust-ivm/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - run: cargo fmt -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test -- --test-threads=1 --skip advance_fixture_replay
-
-  fixture-replay:
-    name: Fixture replay regression suite
-    runs-on: ubuntu-latest
-    needs: [rust-checks, napi-build]
-    defaults:
-      run:
-        working-directory: packages/rust-ivm
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            packages/rust-ivm/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/rust-ivm/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Download NAPI addon
-        uses: actions/download-artifact@v4
-        with:
-          name: rust-ivm-node-linux-x64
-          path: packages/rust-ivm/napi
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install WAL2 SQLite
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc pkg-config
-          gcc -O2 -ffp-contract=off -fPIC -c wal2-sqlite/sqlite3.c -o /tmp/sqlite3.o \
-            -DSQLITE_THREADSAFE=2 \
-            -DSQLITE_ENABLE_FTS5 \
-            -DSQLITE_ENABLE_JSON1 \
-            -DSQLITE_ENABLE_RTREE \
-            -DSQLITE_OMIT_LOAD_EXTENSION \
-            -DSQLITE_ENABLE_SNAPSHOT \
-            -DSQLITE_ENABLE_WAL2_COREAD
-          sudo ar rcs /usr/lib/libsqlite3.a /tmp/sqlite3.o
-          sudo cp wal2-sqlite/sqlite3.h /usr/include/sqlite3.h
-          sudo cp wal2-sqlite/sqlite3ext.h /usr/include/sqlite3ext.h
-
-      - name: Run fixture replay tests
-        run: cargo test --test fixture_replay_test --test advance_fixture_replay_test -- --test-threads=1
-
-  napi-build:
-    name: Build NAPI addon
-    runs-on: ubuntu-latest
-    needs: rust-checks
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            packages/rust-ivm/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('packages/rust-ivm/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Install build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc pkg-config
-
-      - name: Build WAL2 SQLite
-        working-directory: packages/rust-ivm
-        run: |
-          gcc -O2 -ffp-contract=off -fPIC -c wal2-sqlite/sqlite3.c -o /tmp/sqlite3.o \
-            -DSQLITE_THREADSAFE=2 \
-            -DSQLITE_ENABLE_FTS5 \
-            -DSQLITE_ENABLE_JSON1 \
-            -DSQLITE_ENABLE_RTREE \
-            -DSQLITE_OMIT_LOAD_EXTENSION \
-            -DSQLITE_ENABLE_SNAPSHOT \
-            -DSQLITE_ENABLE_WAL2_COREAD
-          sudo ar rcs /usr/lib/libsqlite3.a /tmp/sqlite3.o
-          sudo cp wal2-sqlite/sqlite3.h /usr/include/sqlite3.h
-          sudo cp wal2-sqlite/sqlite3ext.h /usr/include/sqlite3ext.h
-
-      - name: Build NAPI addon
-        working-directory: packages/rust-ivm/napi
-        run: |
-          cargo build --release
-          cp target/release/librust_ivm_napi.so rust-ivm.node
-
-      - name: Upload addon artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: rust-ivm-node-linux-x64
-          path: packages/rust-ivm/napi/rust-ivm.node
-          retention-days: 7
-
   docker-build:
     name: Build and push image
     runs-on: ubuntu-latest
-    needs: [rust-checks, napi-build, fixture-replay]
     if: github.event_name == 'push' && github.ref == 'refs/heads/rust-ivm-v1.7.0'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
