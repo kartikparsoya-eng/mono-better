@@ -63,18 +63,35 @@ export class WorkerDispatcher implements Service {
       }
     });
 
+    // Round-robin counter for ZERO_ROUND_ROBIN_ROUTING=1.
+    // Distributes CGs evenly across syncers by count, regardless of CG ID.
+    // Not sticky across restarts (counter resets) — reconnecting CGs may
+    // land on a different worker and re-hydrate.
+    const useRoundRobin =
+      process.env.ZERO_ROUND_ROBIN_ROUTING === '1';
+    let roundRobinIdx = 0;
+    const seen = new Set<string>();
+
     const handleSync = (req: IncomingMessageSubset) => {
       assert(syncers.length, 'Received a sync request with no sync workers.');
       const params = connectParams(req);
       const {clientGroupID, protocolVersion} = params;
       maxProtocolVersion = Math.max(maxProtocolVersion, protocolVersion);
 
-      // Include the TaskID when hash-bucketting the client group to the sync
-      // worker. This diversifies the distribution of client groups (across
-      // workers) for different tasks, so that if one task sheds connections
-      // from its most heavily loaded sync worker(s), those client groups will
-      // be distributed uniformly across workers on the receiving task(s).
-      const syncer = h32(taskID + '/' + clientGroupID) % syncers.length;
+      let syncer: number;
+      if (useRoundRobin) {
+        // Sticky for seen CGs, round-robin for new ones.
+        if (seen.has(clientGroupID)) {
+          syncer = h32(taskID + '/' + clientGroupID) % syncers.length;
+        } else {
+          seen.add(clientGroupID);
+          syncer = roundRobinIdx % syncers.length;
+          roundRobinIdx++;
+        }
+      } else {
+        // Hash-based: same CG always goes to same worker.
+        syncer = h32(taskID + '/' + clientGroupID) % syncers.length;
+      }
 
       lc.debug?.(`connecting ${clientGroupID} to syncer ${syncer}`);
       return {payload: params, sender: syncers[syncer]};
