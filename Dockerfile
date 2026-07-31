@@ -119,6 +119,13 @@ ENV RUST_IVM_READ_LANES=2
 # when enabled, Rust runs the planner on its own DB connection instead of
 # round-tripping to JS for planQuery.
 ENV RUST_IVM_PLANNER=1
+# Distribute client groups across sync workers by count (round-robin) instead
+# of by CG-id hash. Sticky per CG within a process lifetime; evens out load
+# when hash bucketing leaves workers lopsided.
+ENV ZERO_ROUND_ROBIN_ROUTING=1
+# Hydration cursor page size (default 10000). Smaller pages = more, lighter
+# frames during cold hydrate.
+ENV ZERO_CURSOR_PAGE_SIZE=100
 ENV UV_THREADPOOL_SIZE=16
 ENV ZERO_IN_CONTAINER=1
 ENV ZERO_LOG_FORMAT=json
