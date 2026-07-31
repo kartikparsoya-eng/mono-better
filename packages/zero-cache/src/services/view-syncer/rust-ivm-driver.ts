@@ -308,6 +308,7 @@ export class RustIVMDriver {
   // statements against. completeOrdering alone is correct (slower on
   // OR-with-CSQ). TODO: expose cost model via Rust NAPI.
   #replicaVersion: string | null = null;
+  #currentVersion: string | null = null;
   #permissions: LoadedPermissions | null = null;
   #permissionsVersion: string | null = null;
   #queryInfo = new Map<string, QueryInfo>();
@@ -463,6 +464,7 @@ export class RustIVMDriver {
       this.#runner() as unknown as StatementRunner,
     );
     this.#replicaVersion = replicaVersion;
+    this.#currentVersion = replicaVersion;
   }
 
   get replicaVersion(): string {
@@ -470,10 +472,8 @@ export class RustIVMDriver {
   }
 
   currentVersion(): string {
-    // #replicaVersion is updated by init/advance/advanceWithoutDiff.
-    // Single-owner: only the Rust engine has a replica connection.
     assert(this.initialized(), 'Not yet initialized');
-    return must(this.#replicaVersion, 'Not yet initialized');
+    return must(this.#currentVersion, 'Not yet initialized');
   }
 
   currentPermissions(): LoadedPermissions | null {
@@ -484,7 +484,7 @@ export class RustIVMDriver {
     // (synchronous NAPI call). Without caching, this fires on every
     // query batch — blocking the JS event loop dozens of times per
     // hydration cycle.
-    if (this.#permissions !== null && this.#permissionsVersion === this.#replicaVersion) {
+    if (this.#permissions !== null && this.#permissionsVersion === this.#currentVersion) {
       return this.#permissions;
     }
     const res = reloadPermissionsIfChanged(
@@ -497,14 +497,14 @@ export class RustIVMDriver {
     if (res.changed) {
       this.#permissions = res.permissions;
     }
-    this.#permissionsVersion = this.#replicaVersion;
+    this.#permissionsVersion = this.#currentVersion;
     return this.#permissions;
   }
 
   advanceWithoutDiff(): string {
     // Single-owner: the Rust engine advances its own snapshotter.
     const version = this.#engine.advanceWithoutDiff();
-    this.#replicaVersion = version;
+    this.#currentVersion = version;
     return version;
   }
 
@@ -728,7 +728,7 @@ export class RustIVMDriver {
     this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
 
     if (version) {
-      this.#replicaVersion = version;
+      this.#currentVersion = version;
     }
 
     return {
@@ -788,7 +788,7 @@ export class RustIVMDriver {
     this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
 
     if (version) {
-      this.#replicaVersion = version;
+      this.#currentVersion = version;
     }
 
     return {
