@@ -2570,8 +2570,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   }
 }
 
-// Update CVR after every 10000 rows.
-const CURSOR_PAGE_SIZE = 10000;
+// Update CVR after every N rows. Lower values stream patches to clients
+// sooner (less buffering) at the cost of more frequent CVR updater calls.
+// Default 10000 matches Go IVM's hydrateChunkSize / advanceChunkSize so
+// the streaming chunk boundary aligns with the CVR flush boundary.
+const CURSOR_PAGE_SIZE = parseInt(
+  process.env.ZERO_CURSOR_PAGE_SIZE ?? "10000",
+  10,
+);
 
 // A global Lock acts as a queue to run a single IVM time slice per iteration
 // of the node event loop, thus bounding I/O delay to the duration of a single
