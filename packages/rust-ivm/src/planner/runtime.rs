@@ -74,8 +74,7 @@ fn cost_model_with_cache(
                 1.0
             } else {
                 let mut c = cache.borrow_mut();
-                *c.1
-                    .entry(table.to_string())
+                *c.1.entry(table.to_string())
                     .or_insert_with(|| row_count(&conn.borrow(), table).unwrap_or(1000.0))
             };
             CostModelCost {

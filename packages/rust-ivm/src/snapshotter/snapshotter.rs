@@ -347,7 +347,11 @@ impl Snapshot {
         // checkpointer respects. On plain WAL (tests), BEGIN creates a
         // deferred read snapshot. Both are followed by the mandatory
         // replicationState read that pins the snapshot frame.
-        let sql = if self.is_wal2 { "BEGIN CONCURRENT" } else { "BEGIN" };
+        let sql = if self.is_wal2 {
+            "BEGIN CONCURRENT"
+        } else {
+            "BEGIN"
+        };
         self.conn
             .borrow()
             .execute_batch(sql)
@@ -405,7 +409,11 @@ impl Snapshot {
             .execute_batch("ROLLBACK")
             .map_err(|e| format!("resetToHead ROLLBACK: {}", e))?;
 
-        let sql = if self.is_wal2 { "BEGIN CONCURRENT" } else { "BEGIN" };
+        let sql = if self.is_wal2 {
+            "BEGIN CONCURRENT"
+        } else {
+            "BEGIN"
+        };
         self.conn
             .borrow()
             .execute_batch(sql)
