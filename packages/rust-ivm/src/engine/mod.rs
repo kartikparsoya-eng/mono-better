@@ -7,7 +7,6 @@
 //!
 //! Parallel hydration via std::thread::scope (mirrors Go IVM goroutine model).
 
-pub mod cg_scheduler;
 pub mod worker;
 
 use std::cell::RefCell;

@@ -119,8 +119,13 @@ struct Pool {
 static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
 static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn pool(k: usize) -> &'static Pool {
-    POOL.get_or_init(|| {
+impl Pool {
+    /// Spawn `k` worker threads, each owning the `EngineState` of every engine
+    /// assigned to it.
+    ///
+    /// Separate from the `pool()` singleton so tests can build a pool directly;
+    /// the `OnceLock` would otherwise make worker count global and untestable.
+    fn new(k: usize) -> Pool {
         let mut senders = Vec::with_capacity(k);
         for i in 0..k {
             let (tx, rx) = channel::<PoolJob>();
@@ -137,11 +142,22 @@ fn pool(k: usize) -> &'static Pool {
                                 f(st);
                             }
                             PoolJob::Release(id) => {
-                                if let Some(mut st) = states.remove(&id) {
-                                    if let Some(ref mut eng) = st.engine {
-                                        eng.destroy();
-                                    }
-                                }
+                                // Contain panics. Unlike `PoolJob::Run` — whose
+                                // closure is already wrapped by `call` /
+                                // `call_detached` — this arm runs `destroy()`
+                                // directly on the shared worker. An unwind here
+                                // would take down every OTHER engine on this
+                                // thread: the one place pooling turns a
+                                // single-engine fault into an N-engine outage.
+                                let _ = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        if let Some(mut st) = states.remove(&id) {
+                                            if let Some(ref mut eng) = st.engine {
+                                                eng.destroy();
+                                            }
+                                        }
+                                    }),
+                                );
                             }
                         }
                     }
@@ -153,7 +169,27 @@ fn pool(k: usize) -> &'static Pool {
             .map(|_| std::sync::atomic::AtomicUsize::new(0))
             .collect();
         Pool { senders, loads }
-    })
+    }
+
+    /// Claim the least-loaded worker for a new engine, incrementing its count.
+    ///
+    /// Least-loaded rather than hashed: at low engine counts a hash collides
+    /// often, and two engines sharing a worker halves the inter-CG parallelism
+    /// `scripts/parallelism-test.mjs` measures.
+    fn claim(&self) -> usize {
+        let (idx, _) = self
+            .loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, l)| l.load(std::sync::atomic::Ordering::Relaxed))
+            .expect("pool has workers");
+        self.loads[idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        idx
+    }
+}
+
+fn pool(k: usize) -> &'static Pool {
+    POOL.get_or_init(|| Pool::new(k))
 }
 
 /// Where an `EngineHandle` sends its jobs.
@@ -161,15 +197,22 @@ fn pool(k: usize) -> &'static Pool {
 enum Dispatch {
     /// One OS thread owned by this engine alone.
     Dedicated(Sender<Job>),
-    /// A slot on a shared worker, addressed by engine id.
-    Pooled { tx: Sender<PoolJob>, id: u64 },
+    /// A slot on a shared worker, addressed by engine id. `worker` is the
+    /// index into `Pool::loads`, needed so `release()` can decrement the live
+    /// count — without it the counters only ever grow and least-loaded
+    /// placement degenerates into meaningless round-robin.
+    Pooled {
+        tx: Sender<PoolJob>,
+        id: u64,
+        worker: usize,
+    },
 }
 
 impl Dispatch {
     fn send(&self, f: Box<dyn FnOnce(&mut EngineState) + Send>) -> std::result::Result<(), ()> {
         match self {
             Dispatch::Dedicated(tx) => tx.send(Job(f)).map_err(|_| ()),
-            Dispatch::Pooled { tx, id } => tx.send(PoolJob::Run(*id, f)).map_err(|_| ()),
+            Dispatch::Pooled { tx, id, .. } => tx.send(PoolJob::Run(*id, f)).map_err(|_| ()),
         }
     }
     fn is_pooled(&self) -> bool {
@@ -218,20 +261,12 @@ impl EngineHandle {
             }
             k => {
                 let p = pool(k);
-                // Least-loaded placement, fixed for this engine's life. Hashing
-                // would collide badly at low engine counts and halve the
-                // inter-CG parallelism `scripts/parallelism-test.mjs` measures.
-                let (idx, _) = p
-                    .loads
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, l)| l.load(std::sync::atomic::Ordering::Relaxed))
-                    .expect("pool has workers");
-                p.loads[idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let idx = p.claim();
                 let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Dispatch::Pooled {
                     tx: p.senders[idx].clone(),
                     id,
+                    worker: idx,
                 }
             }
         };
@@ -308,9 +343,24 @@ impl EngineHandle {
     /// loop; the teardown job runs as soon as the actor finishes its current op.
     /// Reclaim this engine's slot on a shared worker. No-op when dedicated —
     /// that thread exits on its own once every sender is dropped.
-    fn release(&self) {
-        if let Dispatch::Pooled { tx, id } = &self.dispatch {
+    /// Drop the worker's `EngineState` entry without touching the load
+    /// counter. Used by explicit `destroy()`; `Drop` still owns the counter.
+    fn release_state_only(&self) {
+        if let Dispatch::Pooled { tx, id, .. } = &self.dispatch {
             let _ = tx.send(PoolJob::Release(*id));
+        }
+    }
+
+    fn release(&self) {
+        if let Dispatch::Pooled { tx, id, worker } = &self.dispatch {
+            let _ = tx.send(PoolJob::Release(*id));
+            // Decrement this worker's live-engine count. Called only from
+            // `Drop for RustIvmEngine`, so it runs exactly once per engine —
+            // without it the counters only grow and least-loaded placement
+            // stops reflecting reality.
+            if let Some(p) = POOL.get() {
+                p.loads[*worker].fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -1560,6 +1610,35 @@ impl HydrateStreamingTask {
 }
 
 /// Advance streaming task. Streams rows via TSFN instead of materializing.
+///
+/// # Known limitation: advance is NOT quantum-stepped
+///
+/// Hydrate was split into `begin_hydrate` / `hydrate_step` / `finish_hydrate`
+/// so a whale cannot starve engines sharing its worker. Advance has no
+/// equivalent: it runs as a single `handle.call`, so in pooled mode
+/// (`RUST_IVM_CG_WORKERS > 0`) one advance occupies its worker until complete
+/// and co-located engines queue behind it.
+///
+/// **This is a deliberate deferral, not an oversight.** From the production
+/// baseline (`xyne-art/art-baseline.json`, 7d):
+///
+/// | metric                     | p50  | p95   | p99   |
+/// |----------------------------|------|-------|-------|
+/// | `zero_sync_ivm_advance_time` | 0.55 | 3.04  | 9.19  |
+/// | `zero_sync_advance_time`     | 1.23 | 14.42 | 41.69 |
+/// | `zero_sync_hydration_time`   | 20.8 | 1252  | 5380  |
+///
+/// Worst-case head-of-line delay from an un-quantised advance is therefore
+/// ~42 ms, against the ~5.4 s that motivated splitting hydrate — two orders of
+/// magnitude less, on the path that runs on *every* mutation and is thus the
+/// most expensive place to introduce a regression.
+///
+/// If it is ever needed, it is tractable: `iterate_diff` reads the changelog
+/// into an owned `Vec` (`read_changelog`) and never holds a SQLite borrow
+/// across `emit`, so the resumable state is just an index into that `Vec` —
+/// the same shape as `HydrateCursor`. It is *not* a self-referential cursor
+/// problem. The work is threading a cursor through `advance_to_head_stream`'s
+/// header / reset / companion / signature handling.
 pub struct AdvanceStreamingTask {
     handle: EngineHandle,
     tsfn: ThreadsafeFunction<NapiRowChange>,
@@ -1750,7 +1829,7 @@ impl Task for DestroyTask {
     type JsValue = ();
 
     fn compute(&mut self) -> Result<Self::Output> {
-        self.handle.call(|state| {
+        let r = self.handle.call(|state| {
             if let Some(ref mut eng) = state.engine {
                 eng.destroy();
             }
@@ -1758,10 +1837,215 @@ impl Task for DestroyTask {
                 snap.destroy();
             }
             *state = EngineState::default();
-        })
+        });
+        // Pooled only: drop the (now empty) map entry immediately rather than
+        // leaving it resident until JS garbage-collects the handle. In
+        // dedicated mode the thread exits when its sender drops and the state
+        // goes with it; a shared worker outlives the engine, so without this
+        // the entry lingers for an unbounded time.
+        //
+        // The load counter is deliberately NOT decremented here — that happens
+        // exactly once, in `Drop for RustIvmEngine`. `Release` on an id that is
+        // already gone is a no-op, so the two paths compose safely.
+        self.handle.release_state_only();
+        r
     }
 
     fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for the production pool.
+//
+// These previously lived in `src/engine/cg_scheduler.rs`, a second scheduler
+// that was never wired into napi — so its tests exercised a code path that did
+// not ship. They now run against the `Pool` that actually serves engines.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::channel as std_channel;
+    use std::sync::Arc;
+
+    /// Run `f` on `pool` for engine `id` and block for the reply, mirroring
+    /// what `EngineHandle::call` does.
+    fn run_on<T: Send + 'static>(
+        pool: &Pool,
+        worker: usize,
+        id: u64,
+        f: impl FnOnce(&mut EngineState) -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std_channel();
+        pool.senders[worker]
+            .send(PoolJob::Run(
+                id,
+                Box::new(move |st| {
+                    let _ = tx.send(f(st));
+                }),
+            ))
+            .expect("worker alive");
+        rx.recv().expect("worker replied")
+    }
+
+    #[test]
+    fn claim_spreads_one_engine_per_worker_while_workers_are_free() {
+        // The property that protects `scripts/parallelism-test.mjs`: with more
+        // workers than engines, no two engines may share a worker. Hashing
+        // would collide here roughly half the time.
+        let pool = Pool::new(12);
+        let picked: std::collections::HashSet<usize> = (0..4).map(|_| pool.claim()).collect();
+        assert_eq!(
+            picked.len(),
+            4,
+            "4 engines over 12 workers must not collide; got {picked:?}"
+        );
+    }
+
+    #[test]
+    fn claim_balances_when_engines_exceed_workers() {
+        let pool = Pool::new(4);
+        for _ in 0..40 {
+            pool.claim();
+        }
+        let counts: Vec<usize> = pool
+            .loads
+            .iter()
+            .map(|l| l.load(Ordering::Relaxed))
+            .collect();
+        assert!(
+            counts.iter().all(|c| *c == 10),
+            "least-loaded must distribute 40 engines evenly over 4 workers, got {counts:?}"
+        );
+    }
+
+    /// C13 regression: the load counter must come back down, or least-loaded
+    /// placement silently stops reflecting reality.
+    #[test]
+    fn load_counter_returns_to_zero_after_release() {
+        let pool = Pool::new(2);
+        let w0 = pool.claim();
+        let w1 = pool.claim();
+        assert_eq!(pool.loads[w0].load(Ordering::Relaxed), 1);
+        assert_eq!(pool.loads[w1].load(Ordering::Relaxed), 1);
+
+        // `release()` on EngineHandle does this pair; simulate it directly.
+        pool.loads[w0].fetch_sub(1, Ordering::Relaxed);
+        pool.loads[w1].fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(pool.loads[w0].load(Ordering::Relaxed), 0);
+        assert_eq!(pool.loads[w1].load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn many_engines_share_one_worker_and_keep_separate_state() {
+        let pool = Pool::new(1);
+        for id in 1..=8u64 {
+            run_on(&pool, 0, id, move |st| {
+                st.primary_keys
+                    .insert(format!("t{id}"), vec!["id".to_string()]);
+            });
+        }
+        // Each engine id must see only its own state.
+        for id in 1..=8u64 {
+            let n = run_on(&pool, 0, id, |st| st.primary_keys.len());
+            assert_eq!(n, 1, "engine {id} saw another engine's state");
+        }
+    }
+
+    /// C7 regression: a panic in one engine's job must not kill the worker,
+    /// which in pooled mode would take every co-located engine with it.
+    #[test]
+    fn a_panicking_job_does_not_kill_the_worker() {
+        let pool = Pool::new(1);
+        run_on(&pool, 0, 1, |st| {
+            st.primary_keys.insert("a".into(), vec!["id".into()]);
+        });
+
+        // Send a panicking job the way `call` does — wrapped in catch_unwind.
+        let (tx, rx) = std_channel();
+        pool.senders[0]
+            .send(PoolJob::Run(
+                2,
+                Box::new(move |_st| {
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        panic!("boom");
+                    }));
+                    let _ = tx.send(r.is_err());
+                }),
+            ))
+            .expect("worker alive");
+        assert!(rx.recv().expect("reply"), "panic should have been caught");
+
+        // Worker must still be alive and engine 1's state intact.
+        let n = run_on(&pool, 0, 1, |st| st.primary_keys.len());
+        assert_eq!(n, 1, "worker died or lost state after a panicking job");
+    }
+
+    /// C10 regression: an explicit release must drop the state immediately,
+    /// not leave it resident until JS garbage-collects the handle.
+    #[test]
+    fn release_drops_the_state_immediately() {
+        let pool = Pool::new(1);
+        run_on(&pool, 0, 7, |st| {
+            st.primary_keys.insert("a".into(), vec!["id".into()]);
+        });
+        assert_eq!(run_on(&pool, 0, 7, |st| st.primary_keys.len()), 1);
+
+        pool.senders[0].send(PoolJob::Release(7)).expect("alive");
+
+        // A job after release lands on a fresh default state, proving the old
+        // one was removed rather than retained.
+        let n = run_on(&pool, 0, 7, |st| st.primary_keys.len());
+        assert_eq!(n, 0, "state survived Release");
+    }
+
+    #[test]
+    fn workers_run_concurrently() {
+        let pool = Pool::new(4);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut rxs = Vec::new();
+        for w in 0..4 {
+            let (tx, rx) = std_channel();
+            let c = counter.clone();
+            pool.senders[w]
+                .send(PoolJob::Run(
+                    w as u64,
+                    Box::new(move |_st| {
+                        c.fetch_add(1, Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_millis(60));
+                        let _ = tx.send(());
+                    }),
+                ))
+                .expect("alive");
+            rxs.push(rx);
+        }
+        let start = std::time::Instant::now();
+        for rx in rxs {
+            rx.recv().expect("done");
+        }
+        let elapsed = start.elapsed();
+        assert_eq!(counter.load(Ordering::Relaxed), 4);
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "4 x 60ms jobs on 4 workers took {elapsed:?} — they serialized instead of \
+             running in parallel"
+        );
+    }
+
+    #[test]
+    fn env_toggle_selects_the_mode() {
+        unsafe { std::env::remove_var("RUST_IVM_CG_WORKERS") };
+        assert_eq!(cg_worker_count(), 0, "unset must mean thread-per-CG");
+        unsafe { std::env::set_var("RUST_IVM_CG_WORKERS", "0") };
+        assert_eq!(cg_worker_count(), 0);
+        unsafe { std::env::set_var("RUST_IVM_CG_WORKERS", "6") };
+        assert_eq!(cg_worker_count(), 6);
+        unsafe { std::env::set_var("RUST_IVM_CG_WORKERS", "auto") };
+        assert!(cg_worker_count() >= 1);
+        unsafe { std::env::set_var("RUST_IVM_CG_WORKERS", "garbage") };
+        assert_eq!(cg_worker_count(), 0, "unparseable must fall back to OFF");
+        unsafe { std::env::remove_var("RUST_IVM_CG_WORKERS") };
     }
 }
