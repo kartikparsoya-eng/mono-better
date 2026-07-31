@@ -112,9 +112,32 @@ RUN pnpm add -w tsx@4
 
 # Required/sane defaults — DO NOT ask Shivral to remember these.
 ENV USE_RUST_IVM=true
-# Read-level parallelism (frame-pinned pool). 0 = serial (default until
-# fuzz+bench gate clears). Set to 2+ to enable parallel cold-hydrate reads.
-ENV RUST_IVM_READ_LANES=0
+# Absolute path to the native addon (baked below at COPY). The driver's relative
+# fallback ('../../../../packages/rust-ivm/napi/rust-ivm.node') mis-resolves in
+# this layout (doubled 'packages') and silently falls back to TS — so without
+# this env the rust engine never loads. Must match the COPY destination.
+ENV RUST_IVM_ADDON_PATH=/app/mono/packages/rust-ivm/napi/rust-ivm.node
+# Read-level parallelism (frame-pinned pool). 2 = parallel cold-hydrate reads
+# (validated: 0 divergences over 65k+ seeds, 65.5% faster on whale hydrates).
+ENV RUST_IVM_READ_LANES=2
+# Native query planner (cost model + flip decision). Dark behind this flag;
+# when enabled, Rust runs the planner on its own DB connection instead of
+# round-tripping to JS for planQuery.
+ENV RUST_IVM_PLANNER=1
+# Bounded TSFN queue depth for per-row streaming delivery. 1 = actor parks after
+# every row until JS drains it; a busy main thread then stalls delivery per-row
+# (microbench: 0.5–5ms bursts inflate per-row 180–750×). K=64 lets the actor run
+# 64 rows ahead without parking → 134–166× faster delivery under a busy loop,
+# output byte-identical (FIFO queue preserves order). O(64) NapiRowChanges in
+# flight per stream (bounded). Enabled here; set to 1 to revert instantly.
+ENV RUST_IVM_TSFN_QUEUE=64
+# Distribute client groups across sync workers by count (round-robin) instead
+# of by CG-id hash. Sticky per CG within a process lifetime; evens out load
+# when hash bucketing leaves workers lopsided.
+ENV ZERO_ROUND_ROBIN_ROUTING=1
+# Hydration cursor page size (default 10000). Smaller pages = more, lighter
+# frames during cold hydrate.
+ENV ZERO_CURSOR_PAGE_SIZE=100
 ENV UV_THREADPOOL_SIZE=16
 ENV ZERO_IN_CONTAINER=1
 ENV ZERO_LOG_FORMAT=json
@@ -124,6 +147,9 @@ ENV ZERO_LITESTREAM_EXECUTABLE_V5=/usr/local/bin/litestream-v5
 ENV ZERO_LITESTREAM_CONFIG_PATH=/etc/litestream.yml
 # OTel needs a user; otherwise user.current() throws in containers.
 ENV USER=zero-cache
+# OTel: omit endpoint in sandbox (no collector). Set per-env if a collector
+# exists. Leaving unset avoids ECONNREFUSED on 127.0.0.1:4318.
+ENV OTEL_EXPORTER_OTLP_ENDPOINT=
 # Set a safe cap on sync workers. Override per env if cores differ.
 ENV ZERO_NUM_SYNC_WORKERS=8
 # Bound JS heap to avoid OOM death spirals on unbounded hydration paths.

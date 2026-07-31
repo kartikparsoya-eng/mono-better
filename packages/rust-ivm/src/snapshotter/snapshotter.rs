@@ -171,15 +171,20 @@ impl Snapshotter {
         // read pool (rollback its read txs so the WAL can checkpoint). Later
         // (warm) hydrates run serially until the next cold re-pin.
         self.read_pool.unpin_frame();
-        // Prepare the head pin WITHOUT touching prev/curr (leapfrog core).
-        let next = if let Some(mut prev_snap) = self.prev.take() {
-            // Reuse the prev connection: rollback + re-pin at head.
-            prev_snap.reset_to_head()?;
-            prev_snap
-        } else {
-            // First advance: no prev yet, open a fresh second connection.
-            Snapshot::create(&self.db_file, self.page_cache_size_kib)?
-        };
+        // Leapfrog WITHOUT a read-mark gap (match TS — TS never tears). Open the
+        // new head snapshot on a FRESH connection: its BEGIN CONCURRENT locks the
+        // head frames while every other reader's mark is still held. Reusing the
+        // prev connection via reset_to_head does ROLLBACK-in-place, dropping its
+        // read-mark between ROLLBACK and the re-lock — under drive-mode ramp the
+        // checkpointer recycles frames in that window, poisoning the snapshot,
+        // which later tears in get_rows ("database disk image is malformed"). A
+        // fresh connection never drops a live mark, so no frame is ever
+        // unprotected. (See DESIGN-wal2-snapshot-isolation.md §2.)
+        let next = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
+        // Release the stale prev connection now that `next` holds head — its
+        // frames are no longer referenced by any reader (safe: mark held until
+        // now, and `next` already locked what the diff needs).
+        drop(self.prev.take());
 
         // Read the change count BEFORE swapping — only fallible step after pin.
         let prev_version = self
@@ -204,6 +209,7 @@ impl Snapshotter {
         self.prev = Some(Snapshot {
             conn: prev_conn,
             version: prev_version_for_diff.clone(),
+            is_wal2: old_curr.is_wal2,
             interrupt_handle: prev_interrupt_handle,
         });
 
@@ -213,6 +219,7 @@ impl Snapshotter {
         let curr_snapshot = Snapshot {
             conn: curr_conn,
             version: curr_version_for_diff.clone(),
+            is_wal2: next.is_wal2,
             interrupt_handle: curr_interrupt_handle,
         };
         self.curr = Some(curr_snapshot);
@@ -234,12 +241,10 @@ impl Snapshotter {
     /// On error, prev/curr are untouched — the caller may retry in place.
     pub fn advance_without_diff(&mut self) -> Result<&str, String> {
         self.read_pool.unpin_frame();
-        let next = if let Some(mut prev_snap) = self.prev.take() {
-            prev_snap.reset_to_head()?;
-            prev_snap
-        } else {
-            Snapshot::create(&self.db_file, self.page_cache_size_kib)?
-        };
+        // Gap-free leapfrog (see advance()): fresh head connection, drop the
+        // stale prev after — never a ROLLBACK-in-place read-mark gap.
+        let next = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
+        drop(self.prev.take());
 
         // Commit the swap: prev = old curr, curr = next at head.
         self.prev = self.curr.take();
@@ -257,9 +262,14 @@ impl Snapshotter {
         // Re-pin curr at head (safe only at PipelineCount==0) — and co-pin the
         // read pool at the same fresh frame so this cold hydrate can fan out.
         self.read_pool.unpin_frame();
-        if let Some(curr) = self.curr.as_mut() {
-            curr.reset_to_head()?;
-            let version = curr.version.clone();
+        if self.curr.is_some() {
+            // Gap-free re-pin (see advance()): create a fresh head snapshot, then
+            // drop the old curr — no ROLLBACK-in-place read-mark gap. Safe here:
+            // called only at PipelineCount==0, so no source references old curr's
+            // connection yet (the hydrate re-reads curr.conn after this).
+            let fresh = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
+            let version = fresh.version.clone();
+            self.curr = Some(fresh);
             self.pin_read_pool(&version);
             Ok(())
         } else {
@@ -281,6 +291,8 @@ impl Snapshotter {
 pub struct Snapshot {
     conn: SharedConn,
     version: String,
+    /// Whether the replica is in wal2 mode (determined at open).
+    is_wal2: bool,
     /// Cross-thread interrupt handle (N1). `None` only if the snapshot was
     /// constructed bypassing `create` (tests). The napi layer can extract this
     /// to register with the EngineHandle watchdog.
@@ -290,40 +302,46 @@ pub struct Snapshot {
 impl Snapshot {
     /// Open a fresh connection and pin it at the current head.
     fn create(db_file: &str, page_cache_size_kib: Option<i64>) -> Result<Self, String> {
-        // Open READ-ONLY to avoid lock contention with the zero-cache write-worker's
-        // WAL2-aware SQLite. Standard SQLite (rusqlite) doesn't support WAL2 mode,
-        // so read-write connections hold incompatible locks that block the
-        // write-worker's COMMITs.
+        // Open read-write so wal2 can register a checkpoint-blocking read-mark
+        // in -shm via BEGIN CONCURRENT. A read-only open cannot write -shm,
+        // so the checkpointer ignores it and recycles needed frames → torn read.
+        // This matches TS (snapshotter.ts opens rw + beginConcurrent).
+        // If rw open fails (e.g. exclusive lock), fall back to read-only.
         let conn = rusqlite::Connection::open_with_flags(
             db_file,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
                 | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
+        .or_else(|_| {
+            eprintln!("[rust-ivm] read-write snapshot open failed, falling back to read-only (torn-read risk on wal2)");
+            rusqlite::Connection::open_with_flags(
+                db_file,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            )
+        })
         .map_err(|e| format!("Snapshot::create open: {}", e))?;
 
-        // N1 (DESIGN §1a seam 1): install a cross-thread interrupt handle on
-        // every connection open. The snapshot connection is read-only and pinned;
-        // its handle lets the watchdog/cancel hard-abort a slow replicationState
-        // read or a leapfrog re-pin. Stored on the Snapshot so the napi layer can
-        // register it with the EngineHandle watchdog in Phase 1.
         let interrupt_handle = crate::sqlite::install_interrupt(&conn);
 
-        // These pragmas are write operations that fail in read-only mode.
-        // They're performance hints, not correctness requirements — ignore errors.
+        // These pragmas now take effect (read-write connection).
         let _ = conn.pragma_update(None, "synchronous", "OFF");
         let _ = conn.pragma_update(None, "case_sensitive_like", "ON");
         if let Some(cache_kib) = page_cache_size_kib {
             let _ = conn.pragma_update(None, "cache_size", -(cache_kib));
         }
 
-        let _mode: String = conn
+        let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .map_err(|e| format!("pragma journal_mode: {}", e))?;
+        let is_wal2 = mode.eq_ignore_ascii_case("wal2");
 
         let mut snap = Snapshot {
             conn: Rc::new(RefCell::new(conn)),
             version: String::new(),
+            is_wal2,
             interrupt_handle: Some(interrupt_handle),
         };
         snap.begin_and_pin()?;
@@ -333,15 +351,19 @@ impl Snapshot {
     /// BEGIN CONCURRENT then read `_zero.replicationState` to acquire the read lock.
     /// The read is mandatory — BEGIN CONCURRENT alone does NOT create the snapshot.
     fn begin_and_pin(&mut self) -> Result<(), String> {
-        // Use BEGIN instead of BEGIN CONCURRENT — the latter is a WAL2 write
-        // operation that requires write access. In read-only mode, BEGIN creates
-        // a deferred transaction; the subsequent read of replicationState pins
-        // the snapshot at the current head. In WAL/WAL2 mode, this read snapshot
-        // does not block the write-worker.
+        // BEGIN CONCURRENT on wal2 registers a read-mark in -shm that the
+        // checkpointer respects. On plain WAL (tests), BEGIN creates a
+        // deferred read snapshot. Both are followed by the mandatory
+        // replicationState read that pins the snapshot frame.
+        let sql = if self.is_wal2 {
+            "BEGIN CONCURRENT"
+        } else {
+            "BEGIN"
+        };
         self.conn
             .borrow()
-            .execute_batch("BEGIN")
-            .map_err(|e| format!("BEGIN: {}", e))?;
+            .execute_batch(sql)
+            .map_err(|e| format!("{}: {}", sql, e))?;
 
         let version: String = self
             .conn
@@ -388,31 +410,11 @@ impl Snapshot {
         Ok(count)
     }
 
-    /// End this snapshot's tx and re-pin the same connection at the new head.
-    fn reset_to_head(&mut self) -> Result<(), String> {
-        self.conn
-            .borrow()
-            .execute_batch("ROLLBACK")
-            .map_err(|e| format!("resetToHead ROLLBACK: {}", e))?;
-
-        self.conn
-            .borrow()
-            .execute_batch("BEGIN")
-            .map_err(|e| format!("resetToHead BEGIN: {}", e))?;
-
-        let version: String = self
-            .conn
-            .borrow()
-            .query_row(
-                "SELECT stateVersion FROM \"_zero.replicationState\"",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("resetToHead read replicationState: {}", e))?;
-
-        self.version = version;
-        Ok(())
-    }
+    // reset_to_head (ROLLBACK-in-place re-pin) was removed: it dropped the wal2
+    // read-mark between ROLLBACK and the re-lock, poisoning the snapshot under
+    // drive-mode checkpoint churn (torn read → "database disk image is
+    // malformed"). All leapfrog/re-pin paths now open a fresh gap-free snapshot
+    // via Snapshot::create instead. See advance() / DESIGN-wal2-snapshot-isolation.md.
 }
 
 /// Owned diff data — the caller iterates this to produce Changes.

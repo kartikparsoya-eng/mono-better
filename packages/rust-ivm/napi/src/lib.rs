@@ -57,6 +57,51 @@ fn read_pool_lanes() -> usize {
         .unwrap_or(0)
 }
 
+/// Bounded TSFN queue depth for the per-row streaming callbacks. `1` (default)
+/// = the actor parks after every row until JS drains it — O(1) rows in flight,
+/// but each row's delivery waits on a full event-loop turn, so a busy main
+/// thread (CVR flush / poke serialize / WS writes / other CGs) stalls delivery
+/// per-row (microbench: 0.5–5ms main-thread bursts inflate per-row 180–750×).
+/// Raising to K lets the actor enqueue up to K rows without parking, so it stops
+/// blocking per-row on a contended event loop (rows drain K-per-turn). Trade:
+/// O(K) buffered NapiRowChanges (bounded); delivery stays incremental. Env
+/// `RUST_IVM_TSFN_QUEUE` (default 1 — ships dark until the rig A/B is cleared).
+fn tsfn_queue_depth() -> usize {
+    std::env::var("RUST_IVM_TSFN_QUEUE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
+}
+
+/// Return freed heap memory to the OS after a CG teardown. glibc retains freed
+/// arena memory under reconnect churn (RSS climbs and never drops); `malloc_trim`
+/// releases it. Rate-limited to ≤1/s so a churn storm doesn't pay the heap walk
+/// on every destroy. No-op off glibc (musl/macOS) where the crate isn't linked.
+#[cfg(target_env = "gnu")]
+fn maybe_malloc_trim() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_TRIM_SECS: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_TRIM_SECS.load(Ordering::Relaxed);
+    if now > last
+        && LAST_TRIM_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        // SAFETY: malloc_trim is a glibc-only, thread-safe housekeeping call.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn maybe_malloc_trim() {}
+
 fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
     fn env_ms(name: &str, default: u64) -> u64 {
         std::env::var(name)
@@ -156,6 +201,19 @@ impl Pool {
                                 // answer for an engine that no longer exists.
                                 if let Some(st) = states.get_mut(&id) {
                                     f(st);
+                                    // `should_exit` means "this ENGINE is done".
+                                    // In dedicated mode that ends the thread; here
+                                    // the thread is shared, so ending it would
+                                    // destroy every co-located engine. Drop just
+                                    // this engine's state instead — same intent,
+                                    // correct blast radius.
+                                    if st.should_exit {
+                                        if let Some(mut st) = states.remove(&id) {
+                                            if let Some(ref mut eng) = st.engine {
+                                                eng.destroy();
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             PoolJob::Release(id) => {
@@ -273,6 +331,13 @@ impl EngineHandle {
                         let mut state = EngineState::default();
                         while let Ok(Job(f)) = rx.recv() {
                             f(&mut state);
+                            // Deterministic teardown: DestroyTask sets
+                            // should_exit so the thread exits now (freeing its
+                            // stack) rather than lingering until the last
+                            // Sender drops at GC time.
+                            if state.should_exit {
+                                break;
+                            }
                         }
                         if let Some(ref mut eng) = state.engine {
                             eng.destroy();
@@ -770,6 +835,16 @@ struct EngineState {
     /// retries advance rather than tearing down after the thrown error. Cleared
     /// by (re)hydrate / reset / init.
     poisoned: bool,
+    /// Version-keyed table row-count cache for the planner cost model, shared
+    /// across `plan_ast` calls so a connection-init burst of `addQuery`s reuses
+    /// one `COUNT(*)` per table rather than re-counting per query. Self-
+    /// invalidates on snapshot version change (see `create_snapshot_cost_model_cached`).
+    plan_count_cache: rust_ivm::planner::PlanCountCache,
+    /// Set by `DestroyTask` after teardown so the actor loop exits promptly and
+    /// frees its 2 MB stack — instead of lingering (blocked on `rx.recv()`) until
+    /// V8 GCs the owning `RustIvmEngine`. Under reconnect churn, GC-timing-bound
+    /// thread lingering would accumulate stacks; this makes teardown deterministic.
+    should_exit: bool,
 }
 
 impl Default for EngineState {
@@ -783,6 +858,8 @@ impl Default for EngineState {
             primary_keys: HashMap::new(),
             hydrate_cursor: None,
             poisoned: false,
+            plan_count_cache: std::rc::Rc::new(RefCell::new((String::new(), HashMap::new()))),
+            should_exit: false,
         }
     }
 }
@@ -990,12 +1067,16 @@ impl RustIvmEngine {
                         src.set_read_pool(pool.clone());
                     }
                 }
-                // N1: register the snapshot connection's interrupt handle.
-                if let Some(ref mut snap) = state.snapshotter {
-                    if let Some(h) = snap.take_current_interrupt_handle() {
-                        interrupt_handles.lock().unwrap().push(h);
-                    }
-                }
+                // The snapshot connection's interrupt handle is deliberately NOT
+                // registered for cancel/watchdog. The pin-race fix replaces the
+                // snapshot connection on every advance, so a once-registered
+                // handle goes stale (a harmless no-op after the old conn closes).
+                // It isn't needed anyway: snapshot diff reads run BEGIN CONCURRENT
+                // on the local wal2 replica — they return SQLITE_BUSY/error rather
+                // than blocking, and advance is already cancelled BETWEEN changes
+                // via the cancellation_token + economic abort. Only the source
+                // FETCH connections (long correlated-EXISTS scans) are registered
+                // above — those genuinely need mid-query hard-abort.
             }
             eprintln!("[rust-ivm] sources initialized (db_path={})", path);
         }
@@ -1040,7 +1121,7 @@ impl RustIvmEngine {
     ) -> Result<AsyncTask<HydrateStreamingTask>> {
         let tsfn = env.create_threadsafe_function(
             &on_row,
-            1, // max_queue_size=1: real backpressure — actor parks when full
+            tsfn_queue_depth(), // default 1 (park per row); RUST_IVM_TSFN_QUEUE raises it
             |ctx| Ok(vec![ctx.value]),
         )?;
         Ok(AsyncTask::new(HydrateStreamingTask {
@@ -1063,7 +1144,7 @@ impl RustIvmEngine {
     ) -> Result<AsyncTask<AdvanceStreamingTask>> {
         let tsfn = env.create_threadsafe_function(
             &on_row,
-            1, // max_queue_size=1: real backpressure
+            tsfn_queue_depth(), // default 1 (park per row); RUST_IVM_TSFN_QUEUE raises it
             |ctx| Ok(vec![ctx.value]),
         )?;
         Ok(AsyncTask::new(AdvanceStreamingTask {
@@ -1113,6 +1194,14 @@ impl RustIvmEngine {
             state.primary_keys.clear();
             state.syncable_tables.clear();
             state.all_table_names.clear();
+            // Drop cached planner row-counts so post-reset planning recomputes
+            // against the fresh snapshot. Version-keyed already, but a reset may
+            // re-pin the same version over changed data — clear defensively.
+            {
+                let mut cache = state.plan_count_cache.borrow_mut();
+                cache.0.clear();
+                cache.1.clear();
+            }
             state.poisoned = false;
         })
     }
@@ -1130,11 +1219,22 @@ impl RustIvmEngine {
             .call(move |state| -> std::result::Result<String, String> {
                 let ast_value: serde_json::Value = serde_json::from_str(&ast_json)
                     .map_err(|e| format!("plan_ast parse: {}", e))?;
-                let conn = match state.snapshotter.as_ref().and_then(|s| s.current_conn().ok()) {
-                    Some(c) => c,
+                let snap = match state.snapshotter.as_ref() {
+                    Some(s) => s,
                     None => return Ok("[]".to_string()),
                 };
-                let model = rust_ivm::planner::create_snapshot_cost_model(conn);
+                let (conn, version) = match (snap.current_conn(), snap.current_version()) {
+                    (Ok(c), Ok(v)) => (c, v.to_string()),
+                    _ => return Ok("[]".to_string()),
+                };
+                // Reuse row counts across the connection-init addQuery burst
+                // (same snapshot version); COUNT(*) runs at most once per
+                // (table, version) instead of once per table per addQuery.
+                let model = rust_ivm::planner::create_snapshot_cost_model_cached(
+                    conn,
+                    &version,
+                    state.plan_count_cache.clone(),
+                );
                 let flips = rust_ivm::planner::plan_ast_flips(&ast_value, model);
                 let arr: Vec<serde_json::Value> = flips
                     .iter()
@@ -1217,8 +1317,15 @@ impl RustIvmEngine {
                 .as_mut()
                 .ok_or_else(|| "Snapshotter not initialized".to_string())?;
             snap.advance_without_diff()
-                .map(|v| v.to_string())
-                .map_err(|e| format!("advance_without_diff: {}", e))
+                .map_err(|e| format!("advance_without_diff: {}", e))?;
+            // Re-point every TableSource at the new curr connection.
+            // advance_without_diff swaps prev/curr, so sources that were
+            // pointing at the old curr (now prev) would read stale data.
+            let curr = snap.current_conn().map_err(|e| format!("advance_without_diff: {}", e))?;
+            for source in state.sources.values() {
+                source.borrow_mut().set_snapshot_db(curr.clone());
+            }
+            Ok(snap.current_version().unwrap_or_default().to_string())
         })?.map_err(NapiError::from_reason)
     }
 
@@ -1999,17 +2106,25 @@ impl Task for DestroyTask {
                 snap.destroy();
             }
             *state = EngineState::default();
+            // Signal the actor loop to exit after this job so its stack is freed
+            // immediately (see EngineState::should_exit). Set AFTER the default
+            // reset above (which would otherwise clear it).
+            state.should_exit = true;
         });
-        // Pooled only: drop the (now empty) map entry immediately rather than
-        // leaving it resident until JS garbage-collects the handle. In
-        // dedicated mode the thread exits when its sender drops and the state
-        // goes with it; a shared worker outlives the engine, so without this
-        // the entry lingers for an unbounded time.
+        // Pooled only: drop the map entry now rather than leaving it resident
+        // until JS garbage-collects the handle. In dedicated mode `should_exit`
+        // ends the thread and the state goes with it; a shared worker outlives
+        // the engine, so it needs an explicit removal.
         //
-        // The load counter is deliberately NOT decremented here — that happens
-        // exactly once, in `Drop for RustIvmEngine`. `Release` on an id that is
-        // already gone is a no-op, so the two paths compose safely.
+        // Deliberately before `?` on the result, so an errored destroy still
+        // releases. The load counter is NOT touched here — that happens exactly
+        // once, in `Drop for RustIvmEngine`.
         self.handle.release_state_only();
+        // Return the CG's just-freed heap to the OS. glibc retains freed arena
+        // memory under reconnect churn (profiled: ~2.3GB/worker of [anon]+[heap]
+        // held post-soak) — malloc_trim forces it back. Rate-limited (≤1/s) so
+        // heavy churn doesn't pay the heap walk on every teardown.
+        maybe_malloc_trim();
         r
     }
 

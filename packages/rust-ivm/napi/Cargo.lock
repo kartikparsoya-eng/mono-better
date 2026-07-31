@@ -427,6 +427,7 @@ dependencies = [
 name = "rust-ivm-napi"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "napi",
  "napi-build",
  "napi-derive",

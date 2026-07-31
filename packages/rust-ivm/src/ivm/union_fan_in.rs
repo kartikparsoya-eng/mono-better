@@ -209,6 +209,8 @@ impl InputBase for UnionFanIn {
         for input in &self.inputs {
             input.borrow_mut().destroy();
         }
+        // Break the Rc cycle: clear the back-edge to the downstream output.
+        *self.output.borrow_mut() = None;
     }
 }
 

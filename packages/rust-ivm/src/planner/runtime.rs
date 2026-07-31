@@ -25,10 +25,45 @@ use crate::builder::ast::{Ast, Condition};
 use crate::ivm::data::Value;
 use crate::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, plan_query};
 
+/// Version-keyed row-count cache: `(snapshot_version, table -> COUNT(*))`.
+/// Shared across `plan_ast` calls so a connection-init burst of `addQuery`s (all
+/// at the same snapshot version) reuses one `COUNT(*)` per table instead of
+/// re-counting per query. Auto-invalidates when the version bumps (an advance
+/// changed the data) — no explicit advance hook needed.
+pub type PlanCountCache = Rc<RefCell<(String, HashMap<String, f64>)>>;
+
 /// A cost model backed by a live SQLite connection (the pinned snapshot). Table
 /// row counts are read once and memoised for the duration of one plan.
 pub fn create_snapshot_cost_model(conn: Rc<RefCell<rusqlite::Connection>>) -> ConnectionCostModel {
-    let counts: Rc<RefCell<HashMap<String, f64>>> = Rc::new(RefCell::new(HashMap::new()));
+    // Fresh per-call cache (tests + callers without a shared cache).
+    cost_model_with_cache(conn, Rc::new(RefCell::new((String::new(), HashMap::new()))))
+}
+
+/// Like [`create_snapshot_cost_model`] but reuses `cache` across calls, keyed by
+/// `version`. On a version change the cached counts are dropped (the advance
+/// changed table sizes); within one version every `plan_ast` reuses them. Keeps
+/// the planner's `COUNT(*)`s off the hot path when a client subscribes to many
+/// queries at once: `COUNT(*)` runs at most once per (table, version) rather
+/// than once per table per `addQuery`. Matters in prod where the planner is on.
+pub fn create_snapshot_cost_model_cached(
+    conn: Rc<RefCell<rusqlite::Connection>>,
+    version: &str,
+    cache: PlanCountCache,
+) -> ConnectionCostModel {
+    {
+        let mut c = cache.borrow_mut();
+        if c.0 != version {
+            c.0 = version.to_string();
+            c.1.clear();
+        }
+    }
+    cost_model_with_cache(conn, cache)
+}
+
+fn cost_model_with_cache(
+    conn: Rc<RefCell<rusqlite::Connection>>,
+    cache: PlanCountCache,
+) -> ConnectionCostModel {
     Rc::new(
         move |table: &str,
               _sort: &[(String, String)],
@@ -38,9 +73,8 @@ pub fn create_snapshot_cost_model(conn: Rc<RefCell<rusqlite::Connection>>) -> Co
                 // Indexed key seek — a handful of rows; model as ~1.
                 1.0
             } else {
-                let mut cache = counts.borrow_mut();
-                *cache
-                    .entry(table.to_string())
+                let mut c = cache.borrow_mut();
+                *c.1.entry(table.to_string())
                     .or_insert_with(|| row_count(&conn.borrow(), table).unwrap_or(1000.0))
             };
             CostModelCost {

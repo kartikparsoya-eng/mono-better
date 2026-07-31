@@ -13,6 +13,7 @@ Send Shivral **exactly one message** containing: image tag, target env, one-pod 
 - [ ] Target env's base Zero version is known (e.g. `1.7.0`) and this branch is rebased on top of it.
 - [ ] Schema version in this image matches target env DB.
 - [ ] Sync protocol version matches target env servers/clients.
+- [ ] Syncer and replicator are the **same version** — version mismatch breaks the replicator immediately.
 
 ## Build & CI
 
@@ -29,7 +30,10 @@ Send Shivral **exactly one message** containing: image tag, target env, one-pod 
 - [ ] `/app/mono/packages/rust-ivm/napi/rust-ivm.node` exists.
 - [ ] `USER=zero-cache` is set in env.
 - [ ] `ZERO_LITESTREAM_EXECUTABLE=/usr/local/bin/litestream` is set.
+- [ ] `OTEL_EXPORTER_OTLP_ENDPOINT` is set to the actual collector (or left empty for sandbox).
 - [ ] `ZERO_NUM_SYNC_WORKERS` is ≤ target pod CPU core limit (default 8).
+- [ ] `RUST_IVM_READ_LANES=2` is set.
+- [ ] `RUST_IVM_PLANNER=1` is set.
 
 ## Local / sandbox validation
 
@@ -38,6 +42,7 @@ Send Shivral **exactly one message** containing: image tag, target env, one-pod 
 - [ ] No unbounded-memory hydration paths (heap stays under limit).
 - [ ] No false-drift rehydration loops observed.
 - [ ] Backup replicator pod starts without `Missing --litestream-executable`.
+- [ ] Pod logs show the correct image tag was pulled (not a stale image).
 
 ## Rollout message template
 
@@ -45,5 +50,5 @@ Send Shivral **exactly one message** containing: image tag, target env, one-pod 
 Env: <sandbox|pre-prod>
 Image: ghcr.io/<repo>/zero-cache-rust-ivm:rust-ivm-v1.7.0-<sha>
 Rollout: one pod first, compare against existing pods, scale if healthy.
-Checks: schema v<>, sync protocol v<>, workers=<>, heap=4Gi.
+Checks: schema v<>, sync protocol v<>, syncer=replicator v<>, workers=<>, heap=4Gi, read_lanes=2, planner=1.
 ```
