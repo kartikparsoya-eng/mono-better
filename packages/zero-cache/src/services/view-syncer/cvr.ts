@@ -598,6 +598,12 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
     );
     if (stateVersion > cvr.version.stateVersion) {
       this._setVersion({stateVersion});
+    } else if (stateVersion === cvr.version.stateVersion) {
+      // The CVR's stateVersion already matches (e.g. poisoned CVR from a
+      // prior bug, or a same-version re-advance). Bump the minor version so
+      // that received()/#assertNewVersion doesn't fire — row changes still
+      // need a version bump to be written to the CVR store.
+      this._ensureNewVersion();
     }
   }
 
