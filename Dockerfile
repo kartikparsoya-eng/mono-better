@@ -119,7 +119,7 @@ ENV USE_RUST_IVM=true
 ENV RUST_IVM_ADDON_PATH=/app/mono/packages/rust-ivm/napi/rust-ivm.node
 # Read-level parallelism (frame-pinned pool). 2 = parallel cold-hydrate reads
 # (validated: 0 divergences over 65k+ seeds, 65.5% faster on whale hydrates).
-ENV RUST_IVM_READ_LANES=2
+ENV RUST_IVM_READ_LANES=4
 # Native query planner (cost model + flip decision). Dark behind this flag;
 # when enabled, Rust runs the planner on its own DB connection instead of
 # round-tripping to JS for planQuery.
