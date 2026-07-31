@@ -109,6 +109,9 @@ RUN cp /app/mono/packages/zero-cache/src/services/litestream/config.yml /etc/lit
 WORKDIR /app/mono
 RUN pnpm install --frozen-lockfile
 RUN pnpm add -w tsx@4
+# Prune devDependencies — runtime runs via tsx (a prod dep), so build-only
+# packages (typescript, vitest, etc.) are dead weight. Saves ~1-1.5 GB.
+RUN pnpm prune --prod
 
 # Required/sane defaults — DO NOT ask Shivral to remember these.
 ENV USE_RUST_IVM=true
