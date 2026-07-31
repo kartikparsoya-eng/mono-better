@@ -108,6 +108,12 @@ impl EngineHandle {
                 let mut state = EngineState::default();
                 while let Ok(Job(f)) = rx.recv() {
                     f(&mut state);
+                    // Deterministic teardown: DestroyTask sets should_exit so the
+                    // thread exits now (freeing its stack) rather than lingering
+                    // until the last Sender drops at GC time.
+                    if state.should_exit {
+                        break;
+                    }
                 }
                 if let Some(ref mut eng) = state.engine {
                     eng.destroy();
@@ -569,6 +575,11 @@ struct EngineState {
     /// one `COUNT(*)` per table rather than re-counting per query. Self-
     /// invalidates on snapshot version change (see `create_snapshot_cost_model_cached`).
     plan_count_cache: rust_ivm::planner::PlanCountCache,
+    /// Set by `DestroyTask` after teardown so the actor loop exits promptly and
+    /// frees its 2 MB stack — instead of lingering (blocked on `rx.recv()`) until
+    /// V8 GCs the owning `RustIvmEngine`. Under reconnect churn, GC-timing-bound
+    /// thread lingering would accumulate stacks; this makes teardown deterministic.
+    should_exit: bool,
 }
 
 impl Default for EngineState {
@@ -582,6 +593,7 @@ impl Default for EngineState {
             primary_keys: HashMap::new(),
             poisoned: false,
             plan_count_cache: std::rc::Rc::new(RefCell::new((String::new(), HashMap::new()))),
+            should_exit: false,
         }
     }
 }
@@ -778,12 +790,16 @@ impl RustIvmEngine {
                         src.set_read_pool(pool.clone());
                     }
                 }
-                // N1: register the snapshot connection's interrupt handle.
-                if let Some(ref mut snap) = state.snapshotter {
-                    if let Some(h) = snap.take_current_interrupt_handle() {
-                        interrupt_handles.lock().unwrap().push(h);
-                    }
-                }
+                // The snapshot connection's interrupt handle is deliberately NOT
+                // registered for cancel/watchdog. The pin-race fix replaces the
+                // snapshot connection on every advance, so a once-registered
+                // handle goes stale (a harmless no-op after the old conn closes).
+                // It isn't needed anyway: snapshot diff reads run BEGIN CONCURRENT
+                // on the local wal2 replica — they return SQLITE_BUSY/error rather
+                // than blocking, and advance is already cancelled BETWEEN changes
+                // via the cancellation_token + economic abort. Only the source
+                // FETCH connections (long correlated-EXISTS scans) are registered
+                // above — those genuinely need mid-query hard-abort.
             }
             eprintln!("[rust-ivm] sources initialized (db_path={})", path);
         }
@@ -1538,6 +1554,10 @@ impl Task for DestroyTask {
                 snap.destroy();
             }
             *state = EngineState::default();
+            // Signal the actor loop to exit after this job so its stack is freed
+            // immediately (see EngineState::should_exit). Set AFTER the default
+            // reset above (which would otherwise clear it).
+            state.should_exit = true;
         })
     }
 

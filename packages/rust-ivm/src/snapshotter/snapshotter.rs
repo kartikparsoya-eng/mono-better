@@ -171,15 +171,20 @@ impl Snapshotter {
         // read pool (rollback its read txs so the WAL can checkpoint). Later
         // (warm) hydrates run serially until the next cold re-pin.
         self.read_pool.unpin_frame();
-        // Prepare the head pin WITHOUT touching prev/curr (leapfrog core).
-        let next = if let Some(mut prev_snap) = self.prev.take() {
-            // Reuse the prev connection: rollback + re-pin at head.
-            prev_snap.reset_to_head()?;
-            prev_snap
-        } else {
-            // First advance: no prev yet, open a fresh second connection.
-            Snapshot::create(&self.db_file, self.page_cache_size_kib)?
-        };
+        // Leapfrog WITHOUT a read-mark gap (match TS — TS never tears). Open the
+        // new head snapshot on a FRESH connection: its BEGIN CONCURRENT locks the
+        // head frames while every other reader's mark is still held. Reusing the
+        // prev connection via reset_to_head does ROLLBACK-in-place, dropping its
+        // read-mark between ROLLBACK and the re-lock — under drive-mode ramp the
+        // checkpointer recycles frames in that window, poisoning the snapshot,
+        // which later tears in get_rows ("database disk image is malformed"). A
+        // fresh connection never drops a live mark, so no frame is ever
+        // unprotected. (See DESIGN-wal2-snapshot-isolation.md §2.)
+        let next = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
+        // Release the stale prev connection now that `next` holds head — its
+        // frames are no longer referenced by any reader (safe: mark held until
+        // now, and `next` already locked what the diff needs).
+        drop(self.prev.take());
 
         // Read the change count BEFORE swapping — only fallible step after pin.
         let prev_version = self
@@ -236,12 +241,10 @@ impl Snapshotter {
     /// On error, prev/curr are untouched — the caller may retry in place.
     pub fn advance_without_diff(&mut self) -> Result<&str, String> {
         self.read_pool.unpin_frame();
-        let next = if let Some(mut prev_snap) = self.prev.take() {
-            prev_snap.reset_to_head()?;
-            prev_snap
-        } else {
-            Snapshot::create(&self.db_file, self.page_cache_size_kib)?
-        };
+        // Gap-free leapfrog (see advance()): fresh head connection, drop the
+        // stale prev after — never a ROLLBACK-in-place read-mark gap.
+        let next = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
+        drop(self.prev.take());
 
         // Commit the swap: prev = old curr, curr = next at head.
         self.prev = self.curr.take();
@@ -259,9 +262,14 @@ impl Snapshotter {
         // Re-pin curr at head (safe only at PipelineCount==0) — and co-pin the
         // read pool at the same fresh frame so this cold hydrate can fan out.
         self.read_pool.unpin_frame();
-        if let Some(curr) = self.curr.as_mut() {
-            curr.reset_to_head()?;
-            let version = curr.version.clone();
+        if self.curr.is_some() {
+            // Gap-free re-pin (see advance()): create a fresh head snapshot, then
+            // drop the old curr — no ROLLBACK-in-place read-mark gap. Safe here:
+            // called only at PipelineCount==0, so no source references old curr's
+            // connection yet (the hydrate re-reads curr.conn after this).
+            let fresh = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
+            let version = fresh.version.clone();
+            self.curr = Some(fresh);
             self.pin_read_pool(&version);
             Ok(())
         } else {
@@ -402,36 +410,11 @@ impl Snapshot {
         Ok(count)
     }
 
-    /// End this snapshot's tx and re-pin the same connection at the new head.
-    fn reset_to_head(&mut self) -> Result<(), String> {
-        self.conn
-            .borrow()
-            .execute_batch("ROLLBACK")
-            .map_err(|e| format!("resetToHead ROLLBACK: {}", e))?;
-
-        let sql = if self.is_wal2 {
-            "BEGIN CONCURRENT"
-        } else {
-            "BEGIN"
-        };
-        self.conn
-            .borrow()
-            .execute_batch(sql)
-            .map_err(|e| format!("resetToHead {}: {}", sql, e))?;
-
-        let version: String = self
-            .conn
-            .borrow()
-            .query_row(
-                "SELECT stateVersion FROM \"_zero.replicationState\"",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("resetToHead read replicationState: {}", e))?;
-
-        self.version = version;
-        Ok(())
-    }
+    // reset_to_head (ROLLBACK-in-place re-pin) was removed: it dropped the wal2
+    // read-mark between ROLLBACK and the re-lock, poisoning the snapshot under
+    // drive-mode checkpoint churn (torn read → "database disk image is
+    // malformed"). All leapfrog/re-pin paths now open a fresh gap-free snapshot
+    // via Snapshot::create instead. See advance() / DESIGN-wal2-snapshot-isolation.md.
 }
 
 /// Owned diff data — the caller iterates this to produce Changes.
