@@ -79,10 +79,108 @@ fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
 /// i.e. when the owning `RustIvmEngine` and any in-flight `AsyncTask`s are gone.
 struct Job(Box<dyn FnOnce(&mut EngineState) + Send>);
 
+/// A job addressed to one engine living on a shared worker.
+enum PoolJob {
+    Run(u64, Box<dyn FnOnce(&mut EngineState) + Send>),
+    /// Engine handle dropped — reclaim its state so the map does not grow.
+    Release(u64),
+}
+
+/// How many CG worker threads to run, from `RUST_IVM_CG_WORKERS`:
+///
+/// * **unset / `0`** — *thread-per-client-group*: every engine gets its own OS
+///   thread. Today's behaviour, and the default, so this ships dark.
+/// * **`N`** — *pooled*: N worker threads, client groups multiplexed onto them.
+/// * **`auto`** — pooled with N = available parallelism.
+///
+/// Which is right depends on the box: few large client groups favour a thread
+/// each (the OS preempts, and a whale never blocks a neighbour); many small
+/// ones favour pooling (bounded threads, less scheduler pressure).
+fn cg_worker_count() -> usize {
+    match std::env::var("RUST_IVM_CG_WORKERS").ok().as_deref() {
+        None | Some("") | Some("0") => 0,
+        Some("auto") => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+        Some(v) => v.parse().unwrap_or(0),
+    }
+}
+
+/// Rows a pooled hydrate produces before returning to the worker's job queue,
+/// letting co-located engines run. Only used on the pooled path; the dedicated
+/// path keeps its single run-to-completion call.
+const HYDRATE_QUANTUM: usize = 256;
+
+struct Pool {
+    senders: Vec<Sender<PoolJob>>,
+    loads: Vec<std::sync::atomic::AtomicUsize>,
+}
+
+static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
+static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn pool(k: usize) -> &'static Pool {
+    POOL.get_or_init(|| {
+        let mut senders = Vec::with_capacity(k);
+        for i in 0..k {
+            let (tx, rx) = channel::<PoolJob>();
+            std::thread::Builder::new()
+                .name(format!("rust-ivm-cg-{i}"))
+                .spawn(move || {
+                    // Every engine on this worker keeps its own state. States
+                    // are `!Send` (Rc graphs) and never leave this thread.
+                    let mut states: HashMap<u64, EngineState> = HashMap::new();
+                    while let Ok(job) = rx.recv() {
+                        match job {
+                            PoolJob::Run(id, f) => {
+                                let st = states.entry(id).or_default();
+                                f(st);
+                            }
+                            PoolJob::Release(id) => {
+                                if let Some(mut st) = states.remove(&id) {
+                                    if let Some(ref mut eng) = st.engine {
+                                        eng.destroy();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+                .expect("spawn rust-ivm cg worker");
+            senders.push(tx);
+        }
+        let loads = (0..k)
+            .map(|_| std::sync::atomic::AtomicUsize::new(0))
+            .collect();
+        Pool { senders, loads }
+    })
+}
+
+/// Where an `EngineHandle` sends its jobs.
+#[derive(Clone)]
+enum Dispatch {
+    /// One OS thread owned by this engine alone.
+    Dedicated(Sender<Job>),
+    /// A slot on a shared worker, addressed by engine id.
+    Pooled { tx: Sender<PoolJob>, id: u64 },
+}
+
+impl Dispatch {
+    fn send(&self, f: Box<dyn FnOnce(&mut EngineState) + Send>) -> std::result::Result<(), ()> {
+        match self {
+            Dispatch::Dedicated(tx) => tx.send(Job(f)).map_err(|_| ()),
+            Dispatch::Pooled { tx, id } => tx.send(PoolJob::Run(*id, f)).map_err(|_| ()),
+        }
+    }
+    fn is_pooled(&self) -> bool {
+        matches!(self, Dispatch::Pooled { .. })
+    }
+}
+
 /// Handle to an engine actor thread. Cheaply cloneable; `Send + Sync`.
 #[derive(Clone)]
 struct EngineHandle {
-    tx: Sender<Job>,
+    dispatch: Dispatch,
     /// Populated by `init` once the engine exists; read by out-of-band `cancel`.
     cancel_slot: Arc<Mutex<Option<CancellationToken>>>,
     /// Persistent interrupt handles for every SQLite connection the actor owns
@@ -101,21 +199,44 @@ struct EngineHandle {
 
 impl EngineHandle {
     fn spawn() -> Self {
-        let (tx, rx) = channel::<Job>();
-        std::thread::Builder::new()
-            .name("rust-ivm-engine".into())
-            .spawn(move || {
-                let mut state = EngineState::default();
-                while let Ok(Job(f)) = rx.recv() {
-                    f(&mut state);
+        let dispatch = match cg_worker_count() {
+            0 => {
+                let (tx, rx) = channel::<Job>();
+                std::thread::Builder::new()
+                    .name("rust-ivm-engine".into())
+                    .spawn(move || {
+                        let mut state = EngineState::default();
+                        while let Ok(Job(f)) = rx.recv() {
+                            f(&mut state);
+                        }
+                        if let Some(ref mut eng) = state.engine {
+                            eng.destroy();
+                        }
+                    })
+                    .expect("spawn rust-ivm engine actor thread");
+                Dispatch::Dedicated(tx)
+            }
+            k => {
+                let p = pool(k);
+                // Least-loaded placement, fixed for this engine's life. Hashing
+                // would collide badly at low engine counts and halve the
+                // inter-CG parallelism `scripts/parallelism-test.mjs` measures.
+                let (idx, _) = p
+                    .loads
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, l)| l.load(std::sync::atomic::Ordering::Relaxed))
+                    .expect("pool has workers");
+                p.loads[idx].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Dispatch::Pooled {
+                    tx: p.senders[idx].clone(),
+                    id,
                 }
-                if let Some(ref mut eng) = state.engine {
-                    eng.destroy();
-                }
-            })
-            .expect("spawn rust-ivm engine actor thread");
+            }
+        };
         EngineHandle {
-            tx,
+            dispatch,
             cancel_slot: Arc::new(Mutex::new(None)),
             interrupt_handles: Arc::new(Mutex::new(Vec::new())),
             watchdog: Arc::new(JobWatchdog::new()),
@@ -157,8 +278,8 @@ impl EngineHandle {
             cancel.clone(),
             handles,
         );
-        self.tx
-            .send(Job(Box::new(move |s| {
+        self.dispatch
+            .send(Box::new(move |s| {
                 // Contain any panic so it (a) does NOT unwind out of and kill the
                 // actor thread, and (b) surfaces to JS as a THROWN error. This
                 // matches the TS engine contract: an unexpected error during
@@ -170,7 +291,7 @@ impl EngineHandle {
                 // reserves for advancement-timeout/schema-change/etc.).
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
                 let _ = rtx.send(r);
-            })))
+            }))
             .map_err(|_| NapiError::from_reason("engine actor thread is gone"))?;
         match rrx.recv() {
             Ok(Ok(v)) => Ok(v),
@@ -185,14 +306,22 @@ impl EngineHandle {
     /// parked inside a streaming `tsfn.call` (waiting on the same event loop to
     /// drain the TSFN), that is a deadlock. Fire-and-forget can never block the
     /// loop; the teardown job runs as soon as the actor finishes its current op.
+    /// Reclaim this engine's slot on a shared worker. No-op when dedicated —
+    /// that thread exits on its own once every sender is dropped.
+    fn release(&self) {
+        if let Dispatch::Pooled { tx, id } = &self.dispatch {
+            let _ = tx.send(PoolJob::Release(*id));
+        }
+    }
+
     fn call_detached<F>(&self, f: F)
     where
         F: FnOnce(&mut EngineState) + Send + 'static,
     {
         // Contain panics so a detached job can't unwind out of the actor thread.
-        let _ = self.tx.send(Job(Box::new(move |s| {
+        let _ = self.dispatch.send(Box::new(move |s| {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
-        })));
+        }));
     }
 }
 
@@ -556,6 +685,9 @@ struct EngineState {
     all_table_names: HashSet<String>,
     sources: HashMap<String, std::rc::Rc<RefCell<dyn Source>>>,
     primary_keys: HashMap<String, Vec<String>>,
+    /// A hydrate suspended between quanta (pooled mode only). `!Send`, which is
+    /// fine: `EngineState` never leaves its worker thread.
+    hydrate_cursor: Option<rust_ivm::engine::HydrateCursor>,
     /// Set true when a non-scalar panic (e.g. a source-drift assert) was caught
     /// mid-advance. The engine graph may be left half-mutated; the restored
     /// engine must NOT advance again until it is rehydrated. A poisoned engine
@@ -575,6 +707,7 @@ impl Default for EngineState {
             all_table_names: HashSet::new(),
             sources: HashMap::new(),
             primary_keys: HashMap::new(),
+            hydrate_cursor: None,
             poisoned: false,
         }
     }
@@ -583,6 +716,17 @@ impl Default for EngineState {
 #[napi]
 pub struct RustIvmEngine {
     handle: EngineHandle,
+}
+
+/// Reclaim the engine's slot when JS drops the object.
+///
+/// Dedicated mode needs nothing — the thread exits when its sender drops. In
+/// pooled mode the worker outlives the engine, so its `EngineState` must be
+/// removed explicitly or the map grows for the life of the process.
+impl Drop for RustIvmEngine {
+    fn drop(&mut self) {
+        self.handle.release();
+    }
 }
 
 #[napi]
@@ -1269,6 +1413,13 @@ impl Task for HydrateStreamingTask {
     type JsValue = ();
 
     fn compute(&mut self) -> Result<Self::Output> {
+        // Pooled engines share a thread, so a hydrate must yield between quanta
+        // or it starves its neighbours. Dedicated engines own their thread and
+        // keep the original single run-to-completion call, so the default path
+        // stays byte-identical.
+        if self.handle.dispatch.is_pooled() {
+            return self.compute_pooled();
+        }
         let queries = std::mem::take(&mut self.queries);
         let tsfn = self.tsfn.clone();
         self.handle
@@ -1302,8 +1453,109 @@ impl Task for HydrateStreamingTask {
             .map_err(NapiError::from_reason)
     }
 
+
+
     fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
         Ok(())
+    }
+}
+
+impl HydrateStreamingTask {
+    /// Pooled hydrate: produce at most `HYDRATE_QUANTUM` rows per job, then
+    /// return to the worker's queue so co-located engines get a turn.
+    ///
+    /// This is what makes sharing a thread safe. With one run-to-completion job
+    /// a whale hydrate (legitimately 43-144s) would block every engine on its
+    /// worker for minutes — strictly worse than a thread each, where the OS
+    /// preempts. Fairness here comes from the job being short, not from the OS.
+    ///
+    /// Backpressure note: rows cross the TSFN from this libuv worker rather
+    /// than from the engine thread, and up to `HYDRATE_QUANTUM` are in flight
+    /// instead of 1. Memory stays O(quantum), not O(result), so the flat-RSS
+    /// property `agentic/whale-validate.mjs` checks still holds — and the
+    /// engine thread is no longer parked inside `tsfn.call`.
+    fn compute_pooled(&mut self) -> Result<()> {
+        let queries = std::mem::take(&mut self.queries);
+        let tsfn = self.tsfn.clone();
+
+        self.handle
+            .call(move |state| -> std::result::Result<(), String> {
+                state.poisoned = false;
+                let EngineState {
+                    engine,
+                    hydrate_cursor,
+                    ..
+                } = state;
+                let eng = engine.as_mut().ok_or_else(|| "Engine not initialized".to_string())?;
+                let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
+                for q in queries.iter() {
+                    let ast: rust_ivm::builder::ast::Ast = parse_ts_ast(&q.ast_json)
+                        .map_err(|e| format!("AST parse error for qid={}: {}", q.query_id, e))?;
+                    specs.push(QuerySpec {
+                        query_id: q.query_id.clone(),
+                        ast,
+                    });
+                }
+                *hydrate_cursor = Some(eng.begin_hydrate(&specs));
+                Ok(())
+            })?
+            .map_err(NapiError::from_reason)?;
+
+        loop {
+            let rows = self
+                .handle
+                .call(move |state| -> std::result::Result<Vec<rust_ivm::streamer::RowChange>, String> {
+                    let EngineState {
+                        engine,
+                        hydrate_cursor,
+                        ..
+                    } = state;
+                    let eng = engine.as_mut().ok_or_else(|| "Engine not initialized".to_string())?;
+                    let Some(cur) = hydrate_cursor.as_mut() else {
+                        return Ok(Vec::new());
+                    };
+                    let mut out = Vec::with_capacity(HYDRATE_QUANTUM);
+                    for _ in 0..HYDRATE_QUANTUM {
+                        match eng.hydrate_step(cur) {
+                            Some(rc) => out.push(rc),
+                            None => break,
+                        }
+                    }
+                    Ok(out)
+                })?
+                .map_err(NapiError::from_reason)?;
+
+            if rows.is_empty() {
+                break;
+            }
+            for rc in &rows {
+                let napi_rc = row_change_to_napi(rc);
+                if tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking) != Status::Ok {
+                    // Consumer went away — cancel and let finish discard.
+                    self.handle.call_detached(|state| {
+                        if let Some(ref eng) = state.engine {
+                            eng.cancellation_token().cancel();
+                        }
+                    });
+                    break;
+                }
+            }
+        }
+
+        self.handle
+            .call(move |state| -> std::result::Result<(), String> {
+                let EngineState {
+                    engine,
+                    hydrate_cursor,
+                    ..
+                } = state;
+                let eng = engine.as_mut().ok_or_else(|| "Engine not initialized".to_string())?;
+                if let Some(cur) = hydrate_cursor.take() {
+                    eng.finish_hydrate(cur);
+                }
+                Ok(())
+            })?
+            .map_err(NapiError::from_reason)
     }
 }
 

@@ -7,10 +7,11 @@
 //!
 //! Parallel hydration via std::thread::scope (mirrors Go IVM goroutine model).
 
+pub mod cg_scheduler;
 pub mod worker;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,7 +20,7 @@ use crate::builder::ast::Ast;
 use crate::builder::builder::{BuilderDelegate, build_pipeline};
 use crate::builder::complete_ordering::complete_ordering;
 use crate::ivm::change::{Change, SourceChange};
-use crate::ivm::data::{Row, Value};
+use crate::ivm::data::{Node, Row, Value};
 use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared, Storage};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::source::{CollectOutput, Source};
@@ -52,6 +53,54 @@ pub(crate) struct Built {
     pub companions: Vec<CompanionBuilt>,
 }
 
+/// Resumable state for a hydrate in progress.
+///
+/// Everything Phase 2's loop previously held on the stack lives here instead,
+/// so the loop can be **suspended between rows and resumed later**. That is
+/// what allows one OS thread to interleave several client groups: a whale
+/// hydrate (legitimately 43-144s per the napi watchdog bounds) no longer owns
+/// its thread until completion.
+///
+/// This works only because `NodeStream` is `Box<dyn Iterator<..>>` with no
+/// lifetime parameter — the stream owns `Rc` handles to the operator graph
+/// rather than borrowing the pipeline — so it can simply be parked in a field
+/// between steps. A stream that borrowed its pipeline would be
+/// self-referential and could not be stored at all.
+///
+/// The cursor is `!Send` (it holds `Rc`s), which is correct and load-bearing:
+/// a hydrate must resume on the *same* worker thread that started it. Any
+/// scheduler built on this must therefore pin a client group to one worker,
+/// never work-steal it.
+pub struct HydrateCursor {
+    built: Vec<Built>,
+    primary_keys: HashMap<String, Vec<String>>,
+    table_specs: HashMap<String, TableSpecInfo>,
+    /// Index of the query currently being hydrated.
+    q: usize,
+    /// Node stream for `built[q]`. Created lazily on first step so that
+    /// `begin_hydrate` performs no fetching.
+    stream: Option<Box<dyn Iterator<Item = Node>>>,
+    streamer: Option<Streamer>,
+    /// Rows produced by the streamer but not yet handed to the caller — one
+    /// node can expand into several RowChanges.
+    pending: VecDeque<RowChange>,
+    /// Index into `built[q].companion_rows`.
+    companion: usize,
+    cancelled: bool,
+    done: bool,
+}
+
+impl HydrateCursor {
+    /// True if the hydrate was abandoned via the cancellation token.
+    pub fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+    /// True once every query has been fully drained.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+}
+
 /// A registered pipeline: the pipeline input + its push collector + schema.
 struct PipelineEntry {
     pipeline: Shared<dyn Input>,
@@ -78,7 +127,7 @@ fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
     table.hash(&mut hasher);
     for (k, v) in row_key.iter() {
         k.hash(&mut hasher);
-        format!("{:?}", v).hash(&mut hasher);
+        format!("{v:?}").hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -164,7 +213,7 @@ fn js_scalar_string(value: &Option<Value>, undefined: bool) -> String {
             if n.fract() == 0.0 && n.is_finite() {
                 format!("{}", *n as i64)
             } else {
-                format!("{}", n)
+                format!("{n}")
             }
         }
         Some(Value::Str(s)) => s.to_string(),
@@ -396,27 +445,43 @@ impl Engine {
     /// Build pipelines and hydrate them — STREAMING version.
     /// Calls `on_row_change` for each RowChange as it's produced, row by row.
     /// No collecting into Vec — true streaming matching TS generator behavior.
+    /// Hydrate `queries`, calling `on_row_change` for each RowChange produced.
+    ///
+    /// Thin wrapper over the resumable `begin_hydrate` / `hydrate_step` /
+    /// `finish_hydrate` trio. Kept byte-identical in behaviour so every
+    /// existing caller and test exercises the pull path underneath — the
+    /// differential and fixture-replay suites are the correctness gate for the
+    /// inversion.
     pub fn add_queries_streaming<F: FnMut(&RowChange)>(
         &mut self,
         queries: &[QuerySpec],
         mut on_row_change: F,
     ) -> Vec<QueryResult> {
+        let mut cursor = self.begin_hydrate(queries);
+        while let Some(rc) = self.hydrate_step(&mut cursor) {
+            on_row_change(&rc);
+        }
+        self.finish_hydrate(cursor)
+    }
+
+    /// Phase 1 — resolve scalar subqueries and build every pipeline.
+    ///
+    /// Performs no fetching, so it is cheap and bounded: a scheduler can call
+    /// this for many client groups before draining any of them.
+    pub fn begin_hydrate(&mut self, queries: &[QuerySpec]) -> HydrateCursor {
         // Reset cancellation at the start of hydration.
         self.cancellation_token.reset();
         for q in queries {
             self.remove_query(&q.query_id);
         }
 
-        // Phase 1: Resolve scalar subqueries, then build all pipelines
-        // sequentially (mutates source connections). Resolution runs first so
-        // the main pipeline is built from the literal-resolved AST, and the
-        // companion pipelines it builds are retained for advance-time monitoring.
+        // Resolution runs first so the main pipeline is built from the
+        // literal-resolved AST, and the companion pipelines it builds are
+        // retained for advance-time monitoring.
         let mut built: Vec<Built> = Vec::new();
 
         for q in queries {
             let timer = Instant::now();
-            // Resolve scalar subqueries against the live sources (`&self`),
-            // producing the resolved AST + retained live companion pipelines.
             let resolved = self.resolve_scalar_subqueries(&q.ast);
 
             let primary_keys = &self.primary_keys;
@@ -447,59 +512,109 @@ impl Engine {
             });
         }
 
-        // Phase 2: Hydrate. Sequential — Rc/RefCell are !Send, so all fetch()
-        // calls run on this thread. After the main query rows, emit the matched
-        // scalar-subquery companion rows as ADDs (TS yields them post-hydrate
-        // so the client's own EXISTS rewrite has the row).
-        let primary_keys = self.primary_keys.clone();
-        let table_specs = self.table_specs.clone();
+        HydrateCursor {
+            built,
+            primary_keys: self.primary_keys.clone(),
+            table_specs: self.table_specs.clone(),
+            q: 0,
+            stream: None,
+            streamer: None,
+            pending: VecDeque::new(),
+            companion: 0,
+            cancelled: false,
+            done: false,
+        }
+    }
 
-        // Cancellation: the consumer (view-syncer) may abandon a hydrate mid-
-        // stream (client disconnect / teardown). The driver flips this token
-        // via the out-of-band `cancel()`; we check it between rows so we stop
-        // producing promptly instead of materializing the whole result into a
-        // queue nobody drains. A partially-fetched pipeline is left in an
-        // inconsistent operator state, so on cancel we register NOTHING and
-        // destroy what we built (the queries are being discarded anyway).
-        let mut cancelled = false;
-        'hydrate: for b in &built {
-            if self.cancellation_token.is_cancelled() {
-                cancelled = true;
-                break 'hydrate;
+    /// Phase 2, one row at a time. Returns `None` when the hydrate is finished
+    /// **or cancelled** — check `cursor.cancelled()` to distinguish.
+    ///
+    /// Sequential by construction: `Rc`/`RefCell` are `!Send`, so all `fetch()`
+    /// calls run on the calling thread. Returning between rows is what makes
+    /// the *scheduling* concurrent without making the *graph* concurrent.
+    pub fn hydrate_step(&mut self, cursor: &mut HydrateCursor) -> Option<RowChange> {
+        loop {
+            if let Some(rc) = cursor.pending.pop_front() {
+                return Some(rc);
             }
-            let stream = b.pipeline.borrow().fetch(&Default::default());
-            let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
-            for node in crate::ivm::stream::skip_yields(stream) {
+            if cursor.done || cursor.cancelled {
+                return None;
+            }
+            if cursor.q >= cursor.built.len() {
+                cursor.done = true;
+                return None;
+            }
+
+            // Start the current query's stream. Matches the original loop,
+            // which tested cancellation once per query before fetching.
+            if cursor.stream.is_none() {
                 if self.cancellation_token.is_cancelled() {
-                    cancelled = true;
-                    break 'hydrate;
+                    cursor.cancelled = true;
+                    return None;
                 }
-                let change = crate::ivm::change::make_add_change(node);
-                streamer.accumulate(&b.query_id, &b.schema, std::slice::from_ref(&change));
-                for rc in streamer.stream() {
-                    on_row_change(&rc);
-                }
+                let b = &cursor.built[cursor.q];
+                let stream = b.pipeline.borrow().fetch(&Default::default());
+                cursor.stream = Some(crate::ivm::stream::skip_yields(stream));
+                cursor.streamer = Some(Streamer::new(
+                    cursor.primary_keys.clone(),
+                    cursor.table_specs.clone(),
+                ));
+                cursor.companion = 0;
             }
 
-            // Companion rows: raw ADD RowChanges for each matched subquery row.
-            for (table, row) in &b.companion_rows {
-                let pk = primary_keys.get(table).cloned().unwrap_or_default();
-                let row_key = crate::streamer::get_row_key(&pk, row);
-                on_row_change(&RowChange {
-                    change_type: crate::ivm::change::ChangeType::Add,
-                    query_id: b.query_id.clone(),
-                    table: table.clone(),
-                    row_key,
-                    row: Some(row.clone()),
-                    is_hidden: false,
-                });
+            let next = cursor.stream.as_mut().and_then(|s| s.next());
+            match next {
+                Some(node) => {
+                    // Cancellation is checked per node, as in the original.
+                    if self.cancellation_token.is_cancelled() {
+                        cursor.cancelled = true;
+                        return None;
+                    }
+                    let b = &cursor.built[cursor.q];
+                    let change = crate::ivm::change::make_add_change(node);
+                    let streamer = cursor.streamer.as_mut().expect("streamer");
+                    streamer.accumulate(&b.query_id, &b.schema, std::slice::from_ref(&change));
+                    cursor.pending.extend(streamer.stream());
+                }
+                None => {
+                    // Companion rows: raw ADD RowChanges for each matched
+                    // subquery row, emitted after the query's own rows.
+                    let b = &cursor.built[cursor.q];
+                    if cursor.companion < b.companion_rows.len() {
+                        let (table, row) = &b.companion_rows[cursor.companion];
+                        let pk = cursor.primary_keys.get(table).cloned().unwrap_or_default();
+                        let row_key = crate::streamer::get_row_key(&pk, row);
+                        cursor.pending.push_back(RowChange {
+                            change_type: crate::ivm::change::ChangeType::Add,
+                            query_id: b.query_id.clone(),
+                            table: table.clone(),
+                            row_key,
+                            row: Some(row.clone()),
+                            is_hidden: false,
+                        });
+                        cursor.companion += 1;
+                    } else {
+                        cursor.stream = None;
+                        cursor.streamer = None;
+                        cursor.q += 1;
+                    }
+                }
             }
         }
+    }
+
+    /// Phase 3 — register the hydrated pipelines, or discard everything if the
+    /// hydrate was cancelled.
+    ///
+    /// On cancel nothing is registered: a partially-fetched pipeline is in an
+    /// inconsistent operator state, so a later advance must never run on it.
+    /// The consumer re-adds the query on the next connection.
+    pub fn finish_hydrate(&mut self, cursor: HydrateCursor) -> Vec<QueryResult> {
+        let HydrateCursor {
+            built, cancelled, ..
+        } = cursor;
 
         if cancelled {
-            // Discard everything built this call — no partial pipeline is
-            // registered, so a later advance can never run on a half-fetched
-            // graph. The consumer will re-add the query on the next connection.
             for b in built {
                 b.pipeline.borrow_mut().destroy();
                 for cb in b.companions {
@@ -509,8 +624,6 @@ impl Engine {
             return Vec::new();
         }
 
-        // Phase 3: Attach monitoring outputs to companion pipelines and
-        // register everything.
         let mut results = Vec::new();
         for b in built {
             let hydration_time_ms = b.timer.elapsed().as_secs_f64() * 1000.0;
@@ -723,8 +836,7 @@ impl Engine {
                         crate::snapshotter::ResetPipelinesSignal {
                             reason: "advancement-timeout",
                             msg: format!(
-                                "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
-                                elapsed_ms, budget, pos, num_changes
+                                "Advancement timed out after {elapsed_ms:.0}ms (budget: {budget:.0}ms, pos: {pos}/{num_changes})"
                             ),
                         },
                     ));
@@ -734,8 +846,7 @@ impl Engine {
                         crate::snapshotter::ResetPipelinesSignal {
                             reason: "advancement-timeout",
                             msg: format!(
-                                "Advancement timed out at half-budget ({:.0}ms, pos: {}/{})",
-                                elapsed_ms, pos, num_changes
+                                "Advancement timed out at half-budget ({elapsed_ms:.0}ms, pos: {pos}/{num_changes})"
                             ),
                         },
                     ));
