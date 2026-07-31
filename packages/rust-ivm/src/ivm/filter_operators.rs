@@ -58,6 +58,8 @@ impl InputBase for FilterStart {
 
     fn destroy(&mut self) {
         self.input.borrow_mut().destroy();
+        // Break the Rc cycle: clear the back-edge to the downstream output.
+        *self.output.borrow_mut() = None;
     }
 }
 
@@ -110,7 +112,10 @@ impl InputBase for FilterEnd {
         self.schema.clone()
     }
 
-    fn destroy(&mut self) {}
+    fn destroy(&mut self) {
+        // Break the Rc cycle: clear the back-edge to the downstream output.
+        *self.output.borrow_mut() = None;
+    }
 }
 
 impl Input for FilterEnd {

@@ -901,6 +901,14 @@ impl RustIvmEngine {
             state.primary_keys.clear();
             state.syncable_tables.clear();
             state.all_table_names.clear();
+            // Drop cached planner row-counts so post-reset planning recomputes
+            // against the fresh snapshot. Version-keyed already, but a reset may
+            // re-pin the same version over changed data — clear defensively.
+            {
+                let mut cache = state.plan_count_cache.borrow_mut();
+                cache.0.clear();
+                cache.1.clear();
+            }
             state.poisoned = false;
         })
     }

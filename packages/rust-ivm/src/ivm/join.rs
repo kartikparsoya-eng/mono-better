@@ -302,6 +302,8 @@ impl InputBase for Join {
     fn destroy(&mut self) {
         self.parent.borrow_mut().destroy();
         self.child.borrow_mut().destroy();
+        // Break the Rc cycle: clear the back-edge to the downstream output.
+        *self.output.borrow_mut() = None;
     }
 }
 

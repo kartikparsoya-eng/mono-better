@@ -25,6 +25,21 @@ use crate::ivm::schema::SourceSchema;
 use crate::ivm::source::{CollectOutput, Source};
 use crate::streamer::{RowChange, Streamer, TableSpecInfo};
 
+/// Floor capacity retained by a per-push collector buffer after `clear()`.
+/// Keeps normal reuse capacity (no per-push reallocation) while reclaiming the
+/// memory a one-off giant batch would otherwise pin for the engine's lifetime.
+const COLLECTOR_CAP_FLOOR: usize = 1024;
+
+/// Clear a per-push collector buffer, reclaiming pathologically large capacity.
+/// `Vec::clear` retains capacity, so a single huge advance would keep that
+/// allocation alive forever; shrink back to `COLLECTOR_CAP_FLOOR` once past it.
+fn clear_and_cap<T>(v: &mut Vec<T>) {
+    v.clear();
+    if v.capacity() > COLLECTOR_CAP_FLOOR {
+        v.shrink_to(COLLECTOR_CAP_FLOOR);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -576,9 +591,9 @@ impl Engine {
 
             if let Some(source) = self.sources.get(table) {
                 for entry in &self.pipelines {
-                    entry.collector.borrow_mut().changes.clear();
+                    clear_and_cap(&mut entry.collector.borrow_mut().changes);
                     for c in &entry.companions {
-                        c.output.borrow_mut().changes.clear();
+                        clear_and_cap(&mut c.output.borrow_mut().changes);
                     }
                 }
 
@@ -985,6 +1000,7 @@ impl Engine {
         self.row_set_signatures.clear();
         self.primary_keys.clear();
         self.table_specs.clear();
+        self.unique_keys.clear();
     }
 
     /// Get a row by table name and primary key.

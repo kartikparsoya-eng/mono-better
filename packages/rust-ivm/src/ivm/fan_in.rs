@@ -58,7 +58,10 @@ impl InputBase for FanIn {
         self.schema.clone()
     }
 
-    fn destroy(&mut self) {}
+    fn destroy(&mut self) {
+        // Break the Rc cycle: clear the back-edge to the downstream output.
+        *self.output.borrow_mut() = None;
+    }
 }
 
 impl Input for FanIn {

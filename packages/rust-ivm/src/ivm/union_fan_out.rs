@@ -58,6 +58,10 @@ impl InputBase for UnionFanOut {
             self.destroy_count += 1;
             if self.destroy_count == outputs_len {
                 self.input.borrow_mut().destroy();
+                // Break the Rc cycle: drop the back-edges to downstream outputs
+                // and the strong ref to the reconvergence UnionFanIn.
+                self.outputs.borrow_mut().clear();
+                *self.fan_in.borrow_mut() = None;
             }
         }
     }
