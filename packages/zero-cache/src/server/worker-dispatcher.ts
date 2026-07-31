@@ -63,14 +63,17 @@ export class WorkerDispatcher implements Service {
       }
     });
 
-    // Round-robin counter for ZERO_ROUND_ROBIN_ROUTING=1.
+    // Round-robin routing for ZERO_ROUND_ROBIN_ROUTING=1.
     // Distributes CGs evenly across syncers by count, regardless of CG ID.
-    // Not sticky across restarts (counter resets) — reconnecting CGs may
-    // land on a different worker and re-hydrate.
+    // Sticky within a process lifetime (via assignedSyncer); not sticky across
+    // restarts (the map resets), so a CG may land on a different worker and
+    // re-hydrate after a dispatcher restart.
     const useRoundRobin =
       process.env.ZERO_ROUND_ROBIN_ROUTING === '1';
     let roundRobinIdx = 0;
-    const seen = new Set<string>();
+    // Remembers the round-robin worker each CG was assigned, so reconnects
+    // stay on that worker (sticky) instead of bouncing to the hash worker.
+    const assignedSyncer = new Map<string, number>();
 
     const handleSync = (req: IncomingMessageSubset) => {
       assert(syncers.length, 'Received a sync request with no sync workers.');
@@ -80,13 +83,15 @@ export class WorkerDispatcher implements Service {
 
       let syncer: number;
       if (useRoundRobin) {
-        // Sticky for seen CGs, round-robin for new ones.
-        if (seen.has(clientGroupID)) {
-          syncer = h32(taskID + '/' + clientGroupID) % syncers.length;
+        // Sticky to the round-robin worker first assigned; new CGs get the
+        // next worker in rotation so distribution stays even by count.
+        const existing = assignedSyncer.get(clientGroupID);
+        if (existing !== undefined) {
+          syncer = existing;
         } else {
-          seen.add(clientGroupID);
           syncer = roundRobinIdx % syncers.length;
           roundRobinIdx++;
+          assignedSyncer.set(clientGroupID, syncer);
         }
       } else {
         // Hash-based: same CG always goes to same worker.
