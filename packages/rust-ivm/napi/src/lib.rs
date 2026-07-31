@@ -57,6 +57,34 @@ fn read_pool_lanes() -> usize {
         .unwrap_or(0)
 }
 
+/// Return freed heap memory to the OS after a CG teardown. glibc retains freed
+/// arena memory under reconnect churn (RSS climbs and never drops); `malloc_trim`
+/// releases it. Rate-limited to ≤1/s so a churn storm doesn't pay the heap walk
+/// on every destroy. No-op off glibc (musl/macOS) where the crate isn't linked.
+#[cfg(target_env = "gnu")]
+fn maybe_malloc_trim() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_TRIM_SECS: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_TRIM_SECS.load(Ordering::Relaxed);
+    if now > last
+        && LAST_TRIM_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        // SAFETY: malloc_trim is a glibc-only, thread-safe housekeeping call.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn maybe_malloc_trim() {}
+
 fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
     fn env_ms(name: &str, default: u64) -> u64 {
         std::env::var(name)
@@ -1558,7 +1586,13 @@ impl Task for DestroyTask {
             // immediately (see EngineState::should_exit). Set AFTER the default
             // reset above (which would otherwise clear it).
             state.should_exit = true;
-        })
+        })?;
+        // Return the CG's just-freed heap to the OS. glibc retains freed arena
+        // memory under reconnect churn (profiled: ~2.3GB/worker of [anon]+[heap]
+        // held post-soak) — malloc_trim forces it back. Rate-limited (≤1/s) so
+        // heavy churn doesn't pay the heap walk on every teardown.
+        maybe_malloc_trim();
+        Ok(())
     }
 
     fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {

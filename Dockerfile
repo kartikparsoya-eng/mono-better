@@ -112,9 +112,13 @@ RUN pnpm add -w tsx@4
 
 # Required/sane defaults — DO NOT ask Shivral to remember these.
 ENV USE_RUST_IVM=true
-# Read-level parallelism (frame-pinned pool). 0 = serial (default until
-# fuzz+bench gate clears). Set to 2+ to enable parallel cold-hydrate reads.
-ENV RUST_IVM_READ_LANES=0
+# Read-level parallelism (frame-pinned pool). 2 = parallel cold-hydrate reads
+# (validated: 0 divergences over 65k+ seeds, 65.5% faster on whale hydrates).
+ENV RUST_IVM_READ_LANES=2
+# Native query planner (cost model + flip decision). Dark behind this flag;
+# when enabled, Rust runs the planner on its own DB connection instead of
+# round-tripping to JS for planQuery.
+ENV RUST_IVM_PLANNER=1
 ENV UV_THREADPOOL_SIZE=16
 ENV ZERO_IN_CONTAINER=1
 ENV ZERO_LOG_FORMAT=json
@@ -124,6 +128,9 @@ ENV ZERO_LITESTREAM_EXECUTABLE_V5=/usr/local/bin/litestream-v5
 ENV ZERO_LITESTREAM_CONFIG_PATH=/etc/litestream.yml
 # OTel needs a user; otherwise user.current() throws in containers.
 ENV USER=zero-cache
+# OTel: omit endpoint in sandbox (no collector). Set per-env if a collector
+# exists. Leaving unset avoids ECONNREFUSED on 127.0.0.1:4318.
+ENV OTEL_EXPORTER_OTLP_ENDPOINT=
 # Set a safe cap on sync workers. Override per env if cores differ.
 ENV ZERO_NUM_SYNC_WORKERS=8
 # Bound JS heap to avoid OOM death spirals on unbounded hydration paths.
