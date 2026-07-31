@@ -119,6 +119,13 @@ ENV RUST_IVM_READ_LANES=2
 # when enabled, Rust runs the planner on its own DB connection instead of
 # round-tripping to JS for planQuery.
 ENV RUST_IVM_PLANNER=1
+# Bounded TSFN queue depth for per-row streaming delivery. 1 = actor parks after
+# every row until JS drains it; a busy main thread then stalls delivery per-row
+# (microbench: 0.5–5ms bursts inflate per-row 180–750×). K=64 lets the actor run
+# 64 rows ahead without parking → 134–166× faster delivery under a busy loop,
+# output byte-identical (FIFO queue preserves order). O(64) NapiRowChanges in
+# flight per stream (bounded). Enabled here; set to 1 to revert instantly.
+ENV RUST_IVM_TSFN_QUEUE=64
 # Distribute client groups across sync workers by count (round-robin) instead
 # of by CG-id hash. Sticky per CG within a process lifetime; evens out load
 # when hash bucketing leaves workers lopsided.

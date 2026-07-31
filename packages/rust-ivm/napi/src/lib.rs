@@ -57,6 +57,23 @@ fn read_pool_lanes() -> usize {
         .unwrap_or(0)
 }
 
+/// Bounded TSFN queue depth for the per-row streaming callbacks. `1` (default)
+/// = the actor parks after every row until JS drains it — O(1) rows in flight,
+/// but each row's delivery waits on a full event-loop turn, so a busy main
+/// thread (CVR flush / poke serialize / WS writes / other CGs) stalls delivery
+/// per-row (microbench: 0.5–5ms main-thread bursts inflate per-row 180–750×).
+/// Raising to K lets the actor enqueue up to K rows without parking, so it stops
+/// blocking per-row on a contended event loop (rows drain K-per-turn). Trade:
+/// O(K) buffered NapiRowChanges (bounded); delivery stays incremental. Env
+/// `RUST_IVM_TSFN_QUEUE` (default 1 — ships dark until the rig A/B is cleared).
+fn tsfn_queue_depth() -> usize {
+    std::env::var("RUST_IVM_TSFN_QUEUE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
+}
+
 /// Return freed heap memory to the OS after a CG teardown. glibc retains freed
 /// arena memory under reconnect churn (RSS climbs and never drops); `malloc_trim`
 /// releases it. Rate-limited to ≤1/s so a churn storm doesn't pay the heap walk
@@ -872,7 +889,7 @@ impl RustIvmEngine {
     ) -> Result<AsyncTask<HydrateStreamingTask>> {
         let tsfn = env.create_threadsafe_function(
             &on_row,
-            1, // max_queue_size=1: real backpressure — actor parks when full
+            tsfn_queue_depth(), // default 1 (park per row); RUST_IVM_TSFN_QUEUE raises it
             |ctx| Ok(vec![ctx.value]),
         )?;
         Ok(AsyncTask::new(HydrateStreamingTask {
@@ -895,7 +912,7 @@ impl RustIvmEngine {
     ) -> Result<AsyncTask<AdvanceStreamingTask>> {
         let tsfn = env.create_threadsafe_function(
             &on_row,
-            1, // max_queue_size=1: real backpressure
+            tsfn_queue_depth(), // default 1 (park per row); RUST_IVM_TSFN_QUEUE raises it
             |ctx| Ok(vec![ctx.value]),
         )?;
         Ok(AsyncTask::new(AdvanceStreamingTask {
