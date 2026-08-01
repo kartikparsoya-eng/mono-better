@@ -58,6 +58,9 @@ struct LazyRows {
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
     table_name: String,
+    /// Rows produced so far — used to THROTTLE the per-fetch economic budget
+    /// check (advance_gate) to every 64 rows.
+    fetched: u64,
     _pin: PhantomPinned,
 }
 
@@ -98,6 +101,7 @@ impl LazyRows {
             column_names,
             columns,
             table_name,
+            fetched: 0,
             _pin: PhantomPinned,
         }))
     }
@@ -151,6 +155,17 @@ impl Iterator for LazyRowsIter {
 
     fn next(&mut self) -> Option<Row> {
         let this: &mut LazyRows = unsafe { Pin::get_unchecked_mut(Pin::as_mut(&mut self.0)) };
+        // Per-fetch economic budget check (TS parity, point 2): if an advance is
+        // in flight on this (actor) thread and has blown its hydration-time
+        // budget, END this stream now instead of grinding through a fat fetch.
+        // Returning None reads as a normal short-input end-of-stream (Take/Cap
+        // finalize cleanly — no guard trip), and the advance loop sees the gate
+        // tripped and rehydrates. Throttled to every 64 rows. Off during hydrate
+        // and on worker threads (gate is thread-local + only armed for advance).
+        this.fetched = this.fetched.wrapping_add(1);
+        if this.fetched % 64 == 1 && crate::advance_gate::should_stop_fetch() {
+            return None;
+        }
         let rows = this.rows.as_mut()?;
         let column_names = this.column_names.clone();
         let columns = this.columns.clone();
@@ -1006,4 +1021,86 @@ impl InputBase for NullInputBase {
         panic!("NullInputBase has no schema");
     }
     fn destroy(&mut self) {}
+}
+
+#[cfg(test)]
+mod advance_gate_fetch_tests {
+    //! Drives the REAL fetch path (`stream_query` → `LazyRowsIter::next`) to
+    //! prove the per-fetch economic breaker actually stops a live fetch — the
+    //! thing a load run can't reliably force (timeouts need a disproportionately
+    //! slow advance, not uniform slowness).
+    use super::*;
+    use crate::sqlite::query_builder::SqlQuery;
+    use std::time::{Duration, Instant};
+
+    fn conn_with_rows(n: i64) -> Rc<RefCell<Connection>> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER)").unwrap();
+        for i in 0..n {
+            conn.execute("INSERT INTO t(id) VALUES (?1)", [i]).unwrap();
+        }
+        Rc::new(RefCell::new(conn))
+    }
+
+    fn fetch_count(db: Rc<RefCell<Connection>>) -> usize {
+        let q = SqlQuery {
+            text: "SELECT id FROM t".to_string(),
+            params: vec![],
+        };
+        stream_query(
+            db,
+            q,
+            vec!["id".to_string()],
+            HashMap::new(),
+            "t".to_string(),
+            None,
+        )
+        .count()
+    }
+
+    fn past_gate(ms_ago: u64, budget_ms: f64) -> std::sync::Arc<crate::advance_gate::AdvanceGate> {
+        let start = Instant::now()
+            .checked_sub(Duration::from_millis(ms_ago))
+            .unwrap_or_else(Instant::now);
+        crate::advance_gate::AdvanceGate::new(start, budget_ms, 4)
+    }
+
+    #[test]
+    fn fetch_returns_all_rows_when_no_gate_armed() {
+        // Hydrate / worker path: no advance gate → every row is produced.
+        assert_eq!(fetch_count(conn_with_rows(300)), 300);
+    }
+
+    #[test]
+    fn fetch_stops_when_gate_over_budget() {
+        let db = conn_with_rows(300);
+        let gate = past_gate(1000, 1.0); // 1s elapsed, 1ms budget → immediately over
+        let _guard = crate::advance_gate::arm(gate.clone());
+        let got = fetch_count(db);
+        assert!(got < 300, "expected the breaker to stop the fetch, got {got}/300");
+        assert!(gate.tripped(), "gate must latch tripped after stopping a fetch");
+        // _guard drops here → thread-local disarmed
+    }
+
+    #[test]
+    fn fetch_resumes_all_rows_after_guard_drops() {
+        // Prove the RAII guard disarms: a fetch AFTER an over-budget advance
+        // (whose guard has dropped) is unaffected — no stale-budget leakage.
+        {
+            let gate = past_gate(1000, 1.0);
+            let _guard = crate::advance_gate::arm(gate);
+            let _ = fetch_count(conn_with_rows(100)); // stops early
+        }
+        assert_eq!(fetch_count(conn_with_rows(300)), 300);
+    }
+
+    #[test]
+    fn fetch_returns_all_rows_when_gate_under_floor() {
+        // Gate armed but only ~5ms elapsed (< 50ms floor) → never trips.
+        let db = conn_with_rows(300);
+        let gate = past_gate(5, 1.0);
+        let _guard = crate::advance_gate::arm(gate.clone());
+        assert_eq!(fetch_count(db), 300);
+        assert!(!gate.tripped());
+    }
 }

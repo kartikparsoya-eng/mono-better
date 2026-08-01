@@ -763,6 +763,16 @@ impl Engine {
         let advance_start = Instant::now();
         let mut pos = 0usize;
 
+        // Per-FETCH arm of the same economic budget (TS parity, point 2): arm a
+        // thread-local gate that the TableSource row-read loop checks between
+        // rows, so a single fat change (e.g. a big correlated-EXISTS re-fetch) is
+        // abandoned mid-fetch instead of grinding to the change boundary. The
+        // per-change check below is the other arm. Disarmed on every exit path.
+        let advance_gate =
+            crate::advance_gate::AdvanceGate::new(advance_start, total_hydration_time_ms, num_changes);
+        // Guard disarms the thread-local on scope exit (incl. panic unwind).
+        let _gate_guard = crate::advance_gate::arm(advance_gate.clone());
+
         // 3. Iterate the diff, converting each SnapshotChange to SourceChange(s).
         let prev_conn = snapshotter.prev_conn()?;
         let curr_conn = snapshotter.current_conn()?;
@@ -788,6 +798,10 @@ impl Engine {
 
         let result = crate::snapshotter::diff::iterate_diff(&diff, &prev_conn, &curr_conn, |sc| {
             let col_types = table_columns.get(&sc.table);
+            // Publish current progress to the per-fetch gate so its budget check
+            // (run inside the row-read loop during this change's push) uses the
+            // same `pos` as the per-change check below.
+            advance_gate.set_pos(pos);
             // Economic abort check per-change (TS parity).
             let elapsed_ms = advance_start.elapsed().as_secs_f64() * 1000.0;
             if elapsed_ms > MIN_ADVANCEMENT_TIME_LIMIT_MS {
@@ -810,8 +824,8 @@ impl Engine {
                         crate::snapshotter::ResetPipelinesSignal {
                             reason: "advancement-timeout",
                             msg: format!(
-                                "Advancement timed out at half-budget ({:.0}ms, pos: {}/{})",
-                                elapsed_ms, pos, num_changes
+                                "Advancement timed out at half-budget ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
+                                elapsed_ms, budget, pos, num_changes
                             ),
                         },
                     ));
@@ -880,6 +894,25 @@ impl Engine {
                     &self.table_specs,
                     &mut on_row_change,
                 );
+            }
+
+            // Per-fetch arm: a fetch during this change's push blew the budget
+            // and ended its stream early (truncated — discarded on rehydrate).
+            // Surface it as the same advancement-timeout reset the per-change
+            // arm produces, so we rehydrate at head rather than emit a partial.
+            if advance_gate.tripped() {
+                return Err(crate::snapshotter::DiffError::Reset(
+                    crate::snapshotter::ResetPipelinesSignal {
+                        reason: "advancement-timeout",
+                        msg: format!(
+                            "Advancement timed out mid-fetch ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
+                            advance_gate.elapsed_ms(),
+                            advance_gate.budget_ms(),
+                            pos,
+                            num_changes
+                        ),
+                    },
+                ));
             }
 
             Ok(())

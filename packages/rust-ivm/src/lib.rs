@@ -12,6 +12,7 @@
 #![allow(clippy::type_complexity)]
 #![allow(ambiguous_glob_reexports)]
 
+pub mod advance_gate;
 pub mod builder;
 pub mod engine;
 pub mod ivm;
