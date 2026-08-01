@@ -489,6 +489,11 @@ pub struct SnapshotChange {
 pub const REASON_SCHEMA_CHANGE: &str = "schema-change";
 pub const REASON_TRUNCATION: &str = "truncation";
 pub const REASON_PERMISSIONS_CHANGE: &str = "permissions-change";
+/// A prev/curr snapshot advanced past its pinned version mid-diff — RECOVERABLE
+/// snapshot-staleness (the replica is intact; the diff just can't be computed).
+/// Rehydrating at head fully recovers. Distinct from the schema/truncate/perms
+/// resets only in trigger, not in handling. See diff.rs check_valid.
+pub const REASON_STALE_SNAPSHOT: &str = "stale-snapshot";
 
 /// A reset signal — aborts diff iteration and tells the caller to re-hydrate.
 /// Port of TS `ResetPipelinesSignal` (snapshotter.ts:262).

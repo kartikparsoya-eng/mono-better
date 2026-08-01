@@ -15,13 +15,22 @@
 //! FIX (part B, the real one): remove the read-only fallback — retry the rw open,
 //! never serve an unmarked read-only wal2 snapshot. PART (B) below gates this.
 //!
-//! PART (A) locks in TS-FAITHFUL propagation: an InvalidDiff still propagates as
-//! a HARD `Err` → teardown, EXACTLY as TS does. TS throws `InvalidDiffError` as a
-//! plain `Error` (snapshotter.ts:565/574/579); it is NOT a ResetPipelinesSignal
-//! and nothing catches it, so the client tears down and reconnects. We must NOT
-//! smooth this into an in-place reset — that would diverge from TS and could mask
-//! a genuine stale read. With part (B) fixed, this path almost never fires, so
-//! matching TS's teardown here is both faithful and non-disruptive.
+//! PART (A) gates the RECOVERY semantics. A stale-snapshot slip is NOT
+//! corruption — the replica is intact; the diff simply can't be computed against
+//! a moved snapshot, and rehydrating at head fully recovers. So the engine now
+//! surfaces it as a RECOVERABLE reset (`DiffError::Reset`, reason
+//! `stale-snapshot`) → the view-syncer rehydrates in place, NOT a fatal teardown.
+//!
+//! This DELIBERATELY reverses the earlier "match TS's InvalidDiff teardown"
+//! choice, on empirical grounds: a differential lifecycle-churn load test drove
+//! 64 of these slips on rust vs 0 on TS (TS reuses two persistent connections via
+//! resetToHead, so its wal2 read-marks never slip). Tearing the client down
+//! cascaded into reconnect churn + latency. TS never REACHES this path, so there
+//! is no observable TS behavior to match; treating it as a reset mirrors how
+//! every other recoverable snapshot-move (schema-change/truncation/permissions)
+//! is already handled. Genuine hard errors (corrupt reads, missing rows) still
+//! propagate as `Err` → teardown (engine mod.rs). Reducing the slip RATE
+//! (read-pool frame-pin + fresh-connection isolation) is a separate follow-up.
 
 use std::collections::{HashMap, HashSet};
 
@@ -124,15 +133,14 @@ fn users_spec() -> LiteAndZqlSpec {
     }
 }
 
-/// PART (A): an InvalidDiff (stale prev/curr snapshot) propagates as a HARD
-/// `Err`, MATCHING TS. TS throws `InvalidDiffError` (a plain Error, not a
-/// ResetPipelinesSignal) and nothing catches it → teardown + reconnect. This
-/// test guards against re-introducing an in-place-reset divergence: the Rust
-/// engine must surface InvalidDiff as `Err(DiffError::InvalidDiff)`, which napi
-/// turns into a thrown `advance failed: ...` exactly as the TS view-syncer would.
-/// (Part B removes the read-only fallback so this path almost never fires.)
+/// PART (A): a stale prev/curr snapshot surfaces as a RECOVERABLE reset
+/// (`aborted=true`, reason `stale-snapshot`), NOT a fatal teardown. The
+/// view-syncer rehydrates in place on this signal. This guards against
+/// regressing back to the fatal-teardown behavior that cascaded into reconnect
+/// churn under lifecycle load (64 slips on rust vs 0 on TS). Genuine hard errors
+/// are covered separately (they still propagate as `Err`).
 #[test]
-fn invalid_diff_propagates_as_hard_err_matching_ts() {
+fn stale_snapshot_surfaces_as_recoverable_reset() {
     let db_path = "/tmp/rust-ivm-stale-diff-reset.db";
     create_stale_diff_replica(db_path);
 
@@ -159,22 +167,33 @@ fn invalid_diff_propagates_as_hard_err_matching_ts() {
     );
 
     match result {
-        Ok(res) => panic!(
-            "stale InvalidDiff must propagate as a HARD Err (matching TS teardown), \
-             not be smoothed into a reset/normal advance; got Ok(aborted={}, reason={:?})",
-            res.aborted, res.reset_reason
-        ),
-        Err(e) => {
-            // TS-faithful: InvalidDiff surfaces as an error that napi rethrows as
-            // `advance failed: ...` → the same teardown TS produces for
-            // InvalidDiffError. Confirm it is the stale-diff guard, not some other
-            // failure.
-            let msg = e.to_string();
+        Ok(res) => {
+            // Recoverable: the engine aborts the advance and asks the caller to
+            // rehydrate, carrying the stale-snapshot reason — exactly how a
+            // schema-change / truncation / permissions-change reset is surfaced.
             assert!(
-                msg.contains("no longer valid"),
-                "expected the stale-diff guard error, got: {msg}"
+                res.aborted,
+                "stale snapshot must abort the advance (aborted=true), got aborted={}",
+                res.aborted
+            );
+            assert_eq!(
+                res.reset_reason.as_deref(),
+                Some("stale-snapshot"),
+                "stale snapshot must carry the recoverable reason, got {:?}",
+                res.reset_reason
+            );
+            assert!(
+                res.reset_msg
+                    .as_deref()
+                    .is_some_and(|m| m.contains("no longer valid")),
+                "reset msg must identify the stale-diff guard, got {:?}",
+                res.reset_msg
             );
         }
+        Err(e) => panic!(
+            "stale snapshot must be a RECOVERABLE reset (rehydrate), NOT a fatal \
+             teardown Err (that cascaded into reconnect churn: 64 rust vs 0 TS); got Err({e})"
+        ),
     }
 
     snapshotter.destroy();

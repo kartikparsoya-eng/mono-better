@@ -907,15 +907,21 @@ impl Engine {
                 reset_reason: Some(sig.reason.to_string()),
                 reset_msg: Some(sig.msg),
             }),
-            // A stale-snapshot InvalidDiff (prev/curr read view slipped forward)
-            // propagates as a hard error → teardown, MATCHING TS: TS throws
-            // InvalidDiffError as a plain Error (snapshotter.ts:565/574/579), it
-            // is NOT a ResetPipelinesSignal, and nothing catches it — the client
-            // tears down and reconnects. The real fix for the live storm is
-            // removing the read-only snapshot fallback (snapshotter.rs) so the
-            // guard almost never fires, exactly as in TS (which has no RO
-            // fallback). Do NOT smooth this into an in-place reset here — that
-            // would diverge from TS and could mask a genuine stale read.
+            // Genuine hard errors (DiffError::Other: corrupt get_rows, a SET
+            // whose row is missing in curr, a change for an unknown table)
+            // propagate → teardown, MATCHING TS (an unrecoverable error there
+            // also tears the connection down). These are NOT recoverable by a
+            // rehydrate, so they must NOT be smoothed into a reset.
+            //
+            // NOTE: the stale-snapshot case ("prev/curr db has advanced past")
+            // is NO LONGER routed here — diff.rs now surfaces it as
+            // DiffError::Reset(REASON_STALE_SNAPSHOT) (handled above), because
+            // it is RECOVERABLE staleness, not corruption. Under lifecycle/
+            // reconnect churn rust's fresh-connection-per-advance lets the prev
+            // snapshot slip (a rust-only condition TS never hits: 64 vs 0 in a
+            // differential load test); tearing the client down cascaded into
+            // reconnect churn + latency. Rehydrating self-heals with no data
+            // loss. See diff.rs check_valid for the full rationale.
             Err(e) => Err(e),
         }
     }

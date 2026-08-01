@@ -260,7 +260,10 @@ export type ResetPipelinesReason =
   | 'scalar-subquery'
   | 'schema-change'
   | 'truncation'
-  | 'permissions-change';
+  | 'permissions-change'
+  // rust-ivm only: a prev/curr snapshot slipped past its pinned version mid-diff
+  // (recoverable staleness → rehydrate). See rust-ivm diff.rs check_valid.
+  | 'stale-snapshot';
 
 export class ResetPipelinesSignal extends Error {
   readonly name = 'ResetPipelinesSignal';
