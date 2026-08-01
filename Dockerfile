@@ -117,9 +117,18 @@ ENV USE_RUST_IVM=true
 # this layout (doubled 'packages') and silently falls back to TS — so without
 # this env the rust engine never loads. Must match the COPY destination.
 ENV RUST_IVM_ADDON_PATH=/app/mono/packages/rust-ivm/napi/rust-ivm.node
-# Read-level parallelism (frame-pinned pool). 2 = parallel cold-hydrate reads
-# (validated: 0 divergences over 65k+ seeds, 65.5% faster on whale hydrates).
-ENV RUST_IVM_READ_LANES=4
+# Read-level parallelism (frame-pinned pool). DISABLED (0 = serial hydrate,
+# matching TS which has no read pool) — this rust-only optimization pins extra
+# per-CG connections at diverse frames and, under lifecycle/reconnect churn,
+# exhausts the fixed wal2 -shm read-mark slots, making the prev snapshot slip
+# ("Diff is no longer valid. prev db has advanced past X"). Differential proof:
+# same 50c mutations+lifecycle load, LANES=4/2 → 33 stale-snapshot slips,
+# LANES=0 → 2 (TS: 0). The frame-pinned pool must be made churn-safe (bounded
+# global read-mark diversity) before re-enabling. Cold-hydrate correctness is
+# unaffected (serial reads are the TS-faithful path); only initial-hydrate
+# latency regresses vs the dark optimization. Code default is already 0
+# (napi/src/lib.rs:51); this stops the deploy image from overriding it on.
+ENV RUST_IVM_READ_LANES=0
 # Native query planner (cost model + flip decision). Dark behind this flag;
 # when enabled, Rust runs the planner on its own DB connection instead of
 # round-tripping to JS for planQuery.
