@@ -168,6 +168,7 @@ export class PokeHandler {
           this.#pokeBuffer,
           this.#schema,
           this.#serverToClient,
+          lc,
         );
         this.#pokeBuffer.length = 0;
         if (merged === undefined) {
@@ -215,6 +216,7 @@ export function mergePokes(
   pokeBuffer: PokeAccumulator[],
   schema: Schema,
   serverToClient: NameMapper,
+  lc?: LogContext | undefined,
 ):
   | (PokeInternal & {mutationResults?: MutationPatch[] | undefined})
   | undefined {
@@ -277,6 +279,7 @@ export function mergePokes(
             p,
             schema,
             serverToClient,
+            lc,
           );
           if (patchOp) {
             mergedPatch.push(patchOp);
@@ -349,10 +352,26 @@ export function mutationPatchOpToReplicachePatchOp(
   }
 }
 
+/**
+ * Resilience guard: returns true iff every client primary-key column is present
+ * (not undefined) in the mapped row key. A single poisoned/malformed historical
+ * server rowKey (e.g. a CVR row keyed by the wrong columns, missing a PK column)
+ * must never crash-loop the entire client group via toPrimaryKeyString throwing
+ * `Expected string, number or boolean. Got undefined`. toPrimaryKeyString stays
+ * strict; callers use this to detect-and-skip a malformed op instead.
+ */
+function hasAllPrimaryKeyColumns(
+  primaryKey: readonly string[],
+  rowKey: Readonly<Record<string, unknown>>,
+): boolean {
+  return primaryKey.every(col => rowKey[col] !== undefined);
+}
+
 function rowsPatchOpToReplicachePatchOp(
   op: RowPatchOp,
   schema: Schema,
   serverToClient: NameMapper,
+  lc?: LogContext | undefined,
 ): PatchOperationInternal | undefined {
   if (op.op === 'clear') {
     return op;
@@ -364,39 +383,65 @@ function rowsPatchOpToReplicachePatchOp(
   if (!tableName) {
     return undefined;
   }
+  const {primaryKey} = schema.tables[tableName];
   switch (op.op) {
-    case 'del':
+    case 'del': {
+      const rowKey = serverToClient.row(op.tableName, op.id);
+      // Resilience guard (see hasAllPrimaryKeyColumns): a poisoned/malformed
+      // server rowKey missing a primary-key column would make
+      // toPrimaryKeyString throw and crash-loop the whole client group. Skip
+      // the op (like an unknown table) instead so only that one row fails to
+      // sync. Do NOT change behavior for well-formed rows.
+      if (!hasAllPrimaryKeyColumns(primaryKey, rowKey)) {
+        lc?.warn?.(
+          'Skipping del rowsPatch op with malformed rowKey missing a ' +
+            'primary-key column',
+          {tableName, primaryKey},
+        );
+        return undefined;
+      }
       return {
         op: 'del',
-        key: toPrimaryKeyString(
-          tableName,
-          schema.tables[tableName].primaryKey,
-          serverToClient.row(op.tableName, op.id),
-        ),
+        key: toPrimaryKeyString(tableName, primaryKey, rowKey),
       };
-    case 'put':
+    }
+    case 'put': {
+      const row = serverToClient.row(op.tableName, op.value);
+      // Same resilience guard for the put key, which is derived from the row.
+      if (!hasAllPrimaryKeyColumns(primaryKey, row)) {
+        lc?.warn?.(
+          'Skipping put rowsPatch op with malformed row missing a ' +
+            'primary-key column',
+          {tableName, primaryKey},
+        );
+        return undefined;
+      }
       return {
         op: 'put',
-        key: toPrimaryKeyString(
-          tableName,
-          schema.tables[tableName].primaryKey,
-          serverToClient.row(op.tableName, op.value),
-        ),
-        value: serverToClient.row(op.tableName, op.value),
+        key: toPrimaryKeyString(tableName, primaryKey, row),
+        value: row,
       };
-    case 'update':
+    }
+    case 'update': {
+      const rowKey = serverToClient.row(op.tableName, op.id);
+      // Same resilience guard for the update key.
+      if (!hasAllPrimaryKeyColumns(primaryKey, rowKey)) {
+        lc?.warn?.(
+          'Skipping update rowsPatch op with malformed rowKey missing a ' +
+            'primary-key column',
+          {tableName, primaryKey},
+        );
+        return undefined;
+      }
       return {
         op: 'update',
-        key: toPrimaryKeyString(
-          tableName,
-          schema.tables[tableName].primaryKey,
-          serverToClient.row(op.tableName, op.id),
-        ),
+        key: toPrimaryKeyString(tableName, primaryKey, rowKey),
         merge: op.merge
           ? serverToClient.row(op.tableName, op.merge)
           : undefined,
         constrain: serverToClient.columns(op.tableName, op.constrain),
       };
+    }
     default:
       unreachable(op);
   }

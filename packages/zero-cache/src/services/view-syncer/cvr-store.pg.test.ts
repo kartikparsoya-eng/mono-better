@@ -16,7 +16,11 @@ import {
   type CVRSnapshot,
   type RowUpdate,
 } from './cvr.ts';
-import {setupCVRTables, type RowsRow} from './schema/cvr.ts';
+import {
+  rowsRowToRowRecord,
+  setupCVRTables,
+  type RowsRow,
+} from './schema/cvr.ts';
 import type {
   ClientQueryRecord,
   CustomQueryRecord,
@@ -480,6 +484,147 @@ describe('view-syncer/cvr-store', () => {
         {stateVersion: '02'},
         {stateVersion: '02'},
       ),
+    ).rejects.toThrowErrorMatchingInlineSnapshot(
+      `[ConcurrentModificationException: CVR has been concurrently modified. Expected 02, got 03]`,
+    );
+  });
+
+  // Regression test for prod Bug 3 (poisoned-CVR catchup).
+  //
+  // In prod, an old build wrote a `channel_participants` CVR row keyed by its
+  // UNIQUE key {channelId,userId} instead of the table's primaryKey {id}. On a
+  // reconnect/catchup the stored row is replayed to the client VERBATIM. The
+  // client's zero-poke-handler then tries to read `id` off the row key, gets
+  // `undefined`, and crashes ("Got undefined"). The client now guards this, but
+  // the durable fix is to prevent/purge the poison at the SOURCE (an operational
+  // CVR migration), because — as this test pins — the CVR faithfully replays
+  // whatever key is stored. This test locks in that replay behavior as the
+  // regression baseline: if catchup ever silently rewrote or dropped a
+  // malformed key we'd want to know, but as-is the poisoned key propagates
+  // unchanged, which is exactly the server-side source of the client crash.
+  //
+  // NOTE: There is no server-side defense here today (no validation that a
+  // stored rowKey contains the table's PK columns). We intentionally do NOT
+  // invent such behavior; we only assert the current faithful-replay contract.
+  test('catchup replays a poisoned (non-PK) rowKey verbatim', async () => {
+    // Seed a channel_participants row keyed by the UNIQUE key {channelId,userId}
+    // (NO "id"), exactly as the old build would have poisoned the CVR. Give it a
+    // fresh patchVersion ('04') so we can catch it up in isolation.
+    await db.unsafe(`
+      UPDATE "roze_1/cvr".instances SET version = '04';
+      UPDATE "roze_1/cvr"."rowsVersion" SET version = '04';
+      INSERT INTO "roze_1/cvr".rows
+        ("clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts")
+        VALUES('${CVR_ID}', '', 'channel_participants',
+               '{"channelId":"ch1","userId":"u1"}', '01', '04', '{"q1":1}');
+    `);
+
+    const rows = await catchupRows(
+      {stateVersion: '03'},
+      {stateVersion: '04'},
+      {stateVersion: '04'},
+    );
+
+    expect(rows).toMatchInlineSnapshot(`
+      [
+        {
+          "clientGroupID": "my-cvr",
+          "patchVersion": "04",
+          "refCounts": {
+            "q1": 1,
+          },
+          "rowKey": {
+            "channelId": "ch1",
+            "userId": "u1",
+          },
+          "rowVersion": "01",
+          "schema": "",
+          "table": "channel_participants",
+        },
+      ]
+    `);
+
+    // The load-bearing assertion: the emitted rowKey is the poisoned key,
+    // verbatim, and crucially does NOT contain an `id`. This is the server-side
+    // source of the client "Got undefined" crash.
+    const [poisoned] = rows;
+    expect(poisoned.rowKey).toEqual({channelId: 'ch1', userId: 'u1'});
+    expect('id' in poisoned.rowKey).toBe(false);
+
+    // And the row record derived for delivery carries the same malformed id
+    // (rowKey), confirming the poison flows through the conversion the client
+    // consumes unchanged.
+    const record = rowsRowToRowRecord(poisoned);
+    expect(record.id.rowKey).toEqual({channelId: 'ch1', userId: 'u1'});
+    expect('id' in record.id.rowKey).toBe(false);
+  });
+
+  // Regression test for prod Bug 2 (base != head CVR version).
+  //
+  // The deep fix for Bug 2 lives in the rust driver seed (already fixed/tested
+  // there). This test documents the CVR-level version handling so that a
+  // regression in version comparison is catchable locally: a CVR whose stored
+  // rows sit at the replica BASE version ('01') while the head/current has
+  // advanced ('03') must catch up with the correct per-row patchVersion
+  // boundaries and must NOT mis-detect concurrent modification (the base rows
+  // are legitimately older than head, not a concurrent write).
+  test('catchup handles rows at base version while head has advanced', async () => {
+    // The beforeEach seeds rows across patchVersions 01/02/03 with head === '03'.
+    // Catch up from before the base (00) up to a head that has advanced to '03',
+    // and assert the base-version rows (patchVersion '01') are emitted with the
+    // correct boundaries alongside the later versions — i.e. base < head is
+    // handled, not conflated.
+    const rows = await catchupRows(
+      {stateVersion: '00'},
+      {stateVersion: '03'},
+      {stateVersion: '03'},
+      // Exclude 'foo' and 'bar' query hashes to keep the assertion focused on
+      // the version boundaries (the deleted/tombstone rows), not refCount fanout.
+      ['foo', 'bar'],
+    );
+
+    // One tombstone per version: id 1 @ base '01', id 5 @ '02', id 9 @ head '03'.
+    // This proves base ('01') < head ('03') rows are all emitted at their own
+    // patchVersion, with the base row NOT dropped or promoted to head.
+    expect(
+      rows.map(r => ({
+        rowKey: r.rowKey,
+        patchVersion: r.patchVersion,
+      })),
+    ).toMatchInlineSnapshot(`
+      [
+        {
+          "patchVersion": "01",
+          "rowKey": {
+            "id": "1",
+          },
+        },
+        {
+          "patchVersion": "02",
+          "rowKey": {
+            "id": "5",
+          },
+        },
+        {
+          "patchVersion": "03",
+          "rowKey": {
+            "id": "9",
+          },
+        },
+      ]
+    `);
+
+    // Explicit base < head assertion: the earliest emitted patchVersion is the
+    // base '01' and the latest matches the advanced head '03'.
+    const versions = rows.map(r => r.patchVersion);
+    expect(versions[0]).toBe('01');
+    expect(versions[versions.length - 1]).toBe('03');
+
+    // And a base-version catchup that stops BELOW head must still detect a
+    // genuinely concurrent head advance (guards against the version-comparison
+    // regression going the other way — treating base<head as always-safe).
+    await expect(
+      catchupRows({stateVersion: '00'}, {stateVersion: '02'}, {stateVersion: '02'}),
     ).rejects.toThrowErrorMatchingInlineSnapshot(
       `[ConcurrentModificationException: CVR has been concurrently modified. Expected 02, got 03]`,
     );

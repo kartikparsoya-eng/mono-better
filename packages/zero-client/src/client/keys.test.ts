@@ -153,6 +153,32 @@ test('no clashes - multiple pk', () => {
   );
 });
 
+// Root-cause pin: toPrimaryKeyString is (intentionally) strict. A rowKey that
+// is missing a primary-key column throws `Expected string, number or boolean.
+// Got undefined`. This is the exact prod crash that a poisoned/malformed
+// historical CVR rowKey triggered inside rowsPatchOpToReplicachePatchOp. The
+// defensive guard lives in the poke-handler (which can skip the op); this test
+// documents WHY that guard is needed and that the function itself stays strict.
+test('toPrimaryKeyString throws when a primary-key column is missing (single-col)', () => {
+  expect(() =>
+    // channel_participants client PK is ['id'] but a poisoned historical row
+    // was keyed by {channelId,userId} with no id.
+    toPrimaryKeyStringImpl('channel_participants', ['id'], {
+      channelId: 'c1',
+      userId: 'u1',
+    } as unknown as PrimaryKeyValueRecord),
+  ).toThrow('Expected string, number or boolean. Got undefined');
+});
+
+test('toPrimaryKeyString throws when a primary-key column is missing (compound)', () => {
+  expect(() =>
+    toPrimaryKeyStringImpl('issue_label', ['issueID', 'labelID'], {
+      issueID: 'issue1',
+      // labelID missing
+    } as unknown as PrimaryKeyValueRecord),
+  ).toThrow('Expected string, number or boolean. Got undefined');
+});
+
 test('toMutationResponseKey', () => {
   expect(
     toMutationResponseKey({

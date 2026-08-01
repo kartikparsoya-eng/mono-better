@@ -1720,6 +1720,135 @@ describe('poke handler', () => {
     });
   });
 
+  test('mergePokes skips a del op whose rowKey is missing a primary-key column', () => {
+    // Regression: a poisoned/malformed historical CVR rowKey (missing the client
+    // primary-key column) must NOT crash the whole client group. Prod symptom:
+    // `TypeError: Expected string, number or boolean. Got undefined` thrown from
+    // toPrimaryKeyString via rowsPatchOpToReplicachePatchOp. The malformed op is
+    // skipped (like an unknown table); well-formed ops in the same poke apply.
+    const result = mergePokes(
+      [
+        {
+          pokeStart: {
+            pokeID: 'poke1',
+            baseCookie: '1',
+          },
+          parts: [
+            {
+              pokeID: 'poke1',
+              lastMutationIDChanges: {c1: 1},
+              rowsPatch: [
+                {
+                  op: 'put',
+                  tableName: 'issues',
+                  value: {['issue_id']: 'issue1', title: 'foo1'},
+                },
+                {
+                  // Poisoned del: PK column `issue_id` is absent from the rowKey.
+                  op: 'del',
+                  tableName: 'issues',
+                  id: {someOtherCol: 'x'} as unknown as {issue_id: string},
+                },
+                {
+                  op: 'put',
+                  tableName: 'issues',
+                  value: {['issue_id']: 'issue2', title: 'bar1'},
+                },
+              ],
+            },
+          ],
+          pokeEnd: {
+            pokeID: 'poke1',
+            cookie: '2',
+          },
+        },
+      ],
+      schema,
+      serverToClient(schema.tables),
+    );
+
+    // The malformed del is skipped; both well-formed puts still apply.
+    expect(result).toEqual({
+      baseCookie: '1',
+      pullResponse: {
+        cookie: '2',
+        lastMutationIDChanges: {c1: 1},
+        patch: [
+          {
+            op: 'put',
+            key: 'e/issue/issue1',
+            value: {id: 'issue1', title: 'foo1'},
+          },
+          {
+            op: 'put',
+            key: 'e/issue/issue2',
+            value: {id: 'issue2', title: 'bar1'},
+          },
+        ],
+      },
+    });
+  });
+
+  test('poke with a malformed del rowKey is processed without crashing the client group', async () => {
+    const onPokeErrorStub = vi.fn();
+    const replicachePokeStub = vi.fn();
+    const clientID = 'c1';
+    const logContext = new LogContext('error');
+    const pokeHandler = new PokeHandler(
+      replicachePokeStub,
+      onPokeErrorStub,
+      clientID,
+      schema,
+      logContext,
+      new MutationTracker(logContext, ackMutationResponses, onFatalError),
+    );
+
+    pokeHandler.handlePokeStart({pokeID: 'poke1', baseCookie: '1'});
+    pokeHandler.handlePokePart({
+      pokeID: 'poke1',
+      lastMutationIDChanges: {c1: 1},
+      rowsPatch: [
+        {
+          // Poisoned del: missing the PK column entirely.
+          op: 'del',
+          tableName: 'issues',
+          id: {someOtherCol: 'x'} as unknown as {issue_id: string},
+        },
+        {
+          // Well-formed op in the SAME poke must still be applied.
+          op: 'put',
+          tableName: 'issues',
+          value: {['issue_id']: 'issue1', title: 'foo1'},
+        },
+      ],
+    });
+    pokeHandler.handlePokeEnd({pokeID: 'poke1', cookie: '2'});
+
+    const timeoutCallback = setTimeoutStub.mock
+      .calls[0][0] as () => Promise<void>;
+    await timeoutCallback();
+
+    // No crash-loop: onPokeError is never called.
+    expect(onPokeErrorStub).toHaveBeenCalledTimes(0);
+    expect(replicachePokeStub).toHaveBeenCalledTimes(1);
+    const replicachePoke0 = replicachePokeStub.mock.calls[0][0];
+    // Malformed op skipped; well-formed op applied.
+    expect(replicachePoke0).toEqual({
+      baseCookie: '1',
+      pullResponse: {
+        cookie: '2',
+        lastMutationIDChanges: {c1: 1},
+        patch: [
+          {
+            op: 'put',
+            key: 'e/issue/issue1',
+            value: {id: 'issue1', title: 'foo1'},
+          },
+        ],
+      },
+    });
+  });
+
   test('mergePokes throws error on cookie gaps', () => {
     expect(() => {
       mergePokes(
