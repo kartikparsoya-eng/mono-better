@@ -73,7 +73,12 @@ WORKDIR /build
 COPY packages/rust-ivm/ ./rust-ivm/
 
 WORKDIR /build/rust-ivm/napi
-RUN cargo build --release
+# --features rust-ivm/wal2_coread: this system SQLite is the SQLITE_ENABLE_WAL2_COREAD
+# fork, so the sqlite3_wal2_coread_* symbols are present. The feature makes the
+# parallel read pool CO-READ at curr's frame (sharing its read-mark) instead of
+# each pool conn claiming its own — the fix that lets the pool stay enabled under
+# churn without exhausting wal2's read-mark slots (see read_pool.rs).
+RUN cargo build --release --features rust-ivm/wal2_coread
 RUN cp target/release/librust_ivm_napi.so rust-ivm.node
 
 # ---------------------------------------------------------------------------
@@ -117,18 +122,17 @@ ENV USE_RUST_IVM=true
 # this layout (doubled 'packages') and silently falls back to TS — so without
 # this env the rust engine never loads. Must match the COPY destination.
 ENV RUST_IVM_ADDON_PATH=/app/mono/packages/rust-ivm/napi/rust-ivm.node
-# Read-level parallelism (frame-pinned pool). DISABLED (0 = serial hydrate,
-# matching TS which has no read pool) — this rust-only optimization pins extra
-# per-CG connections at diverse frames and, under lifecycle/reconnect churn,
-# exhausts the fixed wal2 -shm read-mark slots, making the prev snapshot slip
-# ("Diff is no longer valid. prev db has advanced past X"). Differential proof:
-# same 50c mutations+lifecycle load, LANES=4/2 → 33 stale-snapshot slips,
-# LANES=0 → 2 (TS: 0). The frame-pinned pool must be made churn-safe (bounded
-# global read-mark diversity) before re-enabling. Cold-hydrate correctness is
-# unaffected (serial reads are the TS-faithful path); only initial-hydrate
-# latency regresses vs the dark optimization. Code default is already 0
-# (napi/src/lib.rs:51); this stops the deploy image from overriding it on.
-ENV RUST_IVM_READ_LANES=0
+# Read-level parallelism (frame-pinned pool). RE-ENABLED (4) now that the pool
+# CO-READS at curr's frame via the wal2_coread feature (built above): the K pool
+# connections share curr's single -shm read-mark instead of each claiming its
+# own, so they no longer exhaust wal2's fixed read-mark slots under churn (the
+# cause of the "prev db has advanced past X" slips). Before coread, LANES=4 drove
+# 33 stale-snapshot slips per 50c churn load vs 2 at LANES=0; with coread the
+# pool is expected at ~0 like the Go port (which uses the same coread API).
+# Guarded: if coread capture/arm ever fails at runtime, the pool falls back to
+# the old independent BEGIN CONCURRENT pin (read_pool.rs), and the self-heal
+# reset (diff.rs) still absorbs any residual slip.
+ENV RUST_IVM_READ_LANES=4
 # Native query planner (cost model + flip decision). Dark behind this flag;
 # when enabled, Rust runs the planner on its own DB connection instead of
 # round-tripping to JS for planQuery.

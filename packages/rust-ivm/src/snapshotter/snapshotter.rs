@@ -106,7 +106,17 @@ impl Snapshotter {
         if self.pool_pin_count == 0 {
             return;
         }
-        if let Err(e) = self.read_pool.pin_frame(version, self.pool_pin_count) {
+        // Anchor the pool on `curr`'s live snapshot connection so (under the
+        // wal2_coread feature) the pool co-reads at curr's frame, sharing its
+        // read-mark instead of each pool conn claiming its own (which exhausts
+        // wal2's fixed read-mark slots under churn → prev-snapshot slips).
+        // Safe to borrow: pin_read_pool runs at init / refresh_current_to_head,
+        // i.e. PipelineCount==0, when no source is borrowing curr.
+        let anchor = self.curr.as_ref().map(|s| s.conn.borrow());
+        if let Err(e) =
+            self.read_pool
+                .pin_frame(anchor.as_deref(), version, self.pool_pin_count)
+        {
             eprintln!(
                 "[rust-ivm] read pool co-pin at {} failed (serial hydrate): {}",
                 version, e

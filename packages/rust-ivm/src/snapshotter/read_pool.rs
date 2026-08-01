@@ -40,6 +40,82 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OpenFlags};
 
+/// wal2 co-located read (feature `wal2_coread`, Docker/wal2-only). Lets K pool
+/// connections latch the SAME wal2 frame the anchor (curr snapshot) holds,
+/// SHARING its one -shm read-mark instead of each claiming its own via an
+/// independent `BEGIN CONCURRENT`. The independent-mark approach exhausts wal2's
+/// fixed read-mark slots (5) once ~50 churning CGs sit at diverse frames, which
+/// makes the prev snapshot slip ("Diff is no longer valid. prev db has advanced
+/// past X"); co-reading eliminates that. Port of go-ivm coread.go, driven per
+/// the fork's coread_public_smoke.c call sequence.
+#[cfg(feature = "wal2_coread")]
+mod coread {
+    use rusqlite::Connection;
+    use rusqlite::ffi;
+    use std::os::raw::{c_char, c_int};
+
+    #[repr(C)]
+    pub struct Sqlite3Wal2Coread {
+        _private: [u8; 0],
+    }
+
+    unsafe extern "C" {
+        fn sqlite3_wal2_coread_get(
+            db: *mut ffi::sqlite3,
+            z_schema: *const c_char,
+            out: *mut *mut Sqlite3Wal2Coread,
+        ) -> c_int;
+        fn sqlite3_wal2_coread_open(
+            db: *mut ffi::sqlite3,
+            z_schema: *const c_char,
+            co: *mut Sqlite3Wal2Coread,
+        ) -> c_int;
+        fn sqlite3_wal2_coread_free(co: *mut Sqlite3Wal2Coread);
+    }
+
+    const MAIN: &[u8] = b"main\0";
+
+    /// Owns the heap coread capture. Freeing does NOT release the anchor's frame
+    /// (the anchor's own read tx does — the anchor MUST outlive every reader; it
+    /// does: `curr` is held by the Snapshotter for the frame's whole lifetime).
+    pub struct CoReadHandle(*mut Sqlite3Wal2Coread);
+
+    impl Drop for CoReadHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { sqlite3_wal2_coread_free(self.0) };
+                self.0 = std::ptr::null_mut();
+            }
+        }
+    }
+
+    /// Capture the anchor's current read point. Anchor must hold an open READ
+    /// transaction with an assigned snapshot — `curr` (BEGIN CONCURRENT + the
+    /// mandatory replicationState read) satisfies this.
+    pub fn capture(anchor: &Connection) -> Result<CoReadHandle, String> {
+        let raw = unsafe { anchor.handle() };
+        let mut out: *mut Sqlite3Wal2Coread = std::ptr::null_mut();
+        let rc =
+            unsafe { sqlite3_wal2_coread_get(raw, MAIN.as_ptr() as *const c_char, &mut out) };
+        if rc != 0 || out.is_null() {
+            return Err(format!("sqlite3_wal2_coread_get rc={rc}"));
+        }
+        Ok(CoReadHandle(out))
+    }
+
+    /// Arm `conn` (which has issued a deferred `BEGIN` — autoCommit=0, txnState
+    /// NONE) onto the captured frame. After this it reads at the anchor's frame,
+    /// sharing its read-mark (no new slot claimed).
+    pub fn arm(conn: &Connection, co: &CoReadHandle) -> Result<(), String> {
+        let raw = unsafe { conn.handle() };
+        let rc = unsafe { sqlite3_wal2_coread_open(raw, MAIN.as_ptr() as *const c_char, co.0) };
+        if rc != 0 {
+            return Err(format!("sqlite3_wal2_coread_open rc={rc}"));
+        }
+        Ok(())
+    }
+}
+
 /// A bounded pool of read-only connections, all pinned at one snapshot frame.
 ///
 /// `Send + Sync` (guarded by a `Mutex`). Lives on the actor thread but lends
@@ -121,7 +197,19 @@ impl FramePinnedPool {
     /// snapshot pins `curr` to head at cold hydrate). Each connection's
     /// cross-thread interrupt handle is appended to the pool's registry (N1) and
     /// drained again by `unpin_frame`.
-    pub fn pin_frame(&self, target_version: &str, count: usize) -> Result<(), String> {
+    /// `anchor` is the snapshot connection the pool co-reads with (the
+    /// Snapshotter's `curr`). When the `wal2_coread` feature is compiled in and
+    /// an anchor is given, pool connections latch the anchor's frame via the
+    /// co-read API (sharing its read-mark → no wal2 slot pressure). Otherwise
+    /// (local/plain-WAL, or coread capture fails) they fall back to an
+    /// independent `BEGIN CONCURRENT` pin, exactly as before. Tests pass `None`.
+    pub fn pin_frame(
+        &self,
+        anchor: Option<&Connection>,
+        target_version: &str,
+        count: usize,
+    ) -> Result<(), String> {
+        let _ = anchor; // unused when the wal2_coread feature is off
         let mut inner = self.inner.lock().unwrap();
         if inner.version.as_deref() == Some(target_version) {
             return Ok(()); // already pinned at this frame
@@ -136,16 +224,65 @@ impl FramePinnedPool {
 
         let n = count.min(self.capacity).max(1);
         let mut conns: Vec<Connection> = Vec::with_capacity(n);
-        for _ in 0..n {
-            let conn = match open_and_pin(&self.db_file, target_version, self.page_cache_size_kib) {
-                Ok(c) => c,
-                Err(e) => {
-                    // Frame moved (or open failed) — abandon the whole pin.
-                    rollback_all(&mut conns);
-                    return Err(e);
+
+        // Co-read fast path (wal2 only): capture the anchor's frame once, then
+        // arm each pool connection onto it — all K share the anchor's single
+        // read-mark. On ANY failure (not wal2, anchor not a valid read tx, a
+        // torn arm), roll back and fall through to the independent-pin path so
+        // behavior degrades cleanly to what it was before.
+        #[cfg(feature = "wal2_coread")]
+        let coread_ok = if let Some(a) = anchor {
+            match coread::capture(a) {
+                Ok(co) => {
+                    let mut ok = true;
+                    for _ in 0..n {
+                        match open_and_coread(
+                            &self.db_file,
+                            &co,
+                            target_version,
+                            self.page_cache_size_kib,
+                        ) {
+                            Ok(c) => conns.push(c),
+                            Err(e) => {
+                                eprintln!(
+                                    "[rust-ivm] read pool coread arm failed ({e}) — \
+                                     BEGIN CONCURRENT fallback"
+                                );
+                                rollback_all(&mut conns);
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    ok // `co` freed here; anchor's own tx keeps the frame pinned
                 }
-            };
-            conns.push(conn);
+                Err(e) => {
+                    eprintln!(
+                        "[rust-ivm] read pool coread capture failed ({e}) — \
+                         BEGIN CONCURRENT fallback"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        #[cfg(not(feature = "wal2_coread"))]
+        let coread_ok = false;
+
+        if !coread_ok {
+            for _ in 0..n {
+                let conn =
+                    match open_and_pin(&self.db_file, target_version, self.page_cache_size_kib) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            // Frame moved (or open failed) — abandon the whole pin.
+                            rollback_all(&mut conns);
+                            return Err(e);
+                        }
+                    };
+                conns.push(conn);
+            }
         }
         // Append this frame's interrupt handles as a contiguous range so
         // `unpin_frame` can drain exactly them.
@@ -386,6 +523,51 @@ fn open_and_pin(
     Ok(conn)
 }
 
+/// Open a fresh connection and latch it onto `co` (the anchor's captured wal2
+/// frame) via the co-read API, sharing the anchor's read-mark. Sequence matches
+/// the fork's coread_public_smoke.c: open → warm autocommit read (lazily opens
+/// this connection's Wal, required before arming) → deferred `BEGIN`
+/// (autoCommit=0, txnState NONE — the arm's precondition; NOT `BEGIN
+/// CONCURRENT`, which would take its own read-mark) → `coread_open` → verify the
+/// armed frame == the anchor's target. On mismatch/failure roll back + drop.
+#[cfg(feature = "wal2_coread")]
+fn open_and_coread(
+    db_file: &str,
+    co: &coread::CoReadHandle,
+    target_version: &str,
+    page_cache_size_kib: Option<i64>,
+) -> Result<Connection, String> {
+    let conn = open_readwrite(db_file).map_err(|e| format!("coread open: {e}"))?;
+    let _ = conn.pragma_update(None, "synchronous", "OFF");
+    let _ = conn.pragma_update(None, "case_sensitive_like", "ON");
+    if let Some(cache_kib) = page_cache_size_kib {
+        let _ = conn.pragma_update(None, "cache_size", -(cache_kib));
+    }
+    // Warm autocommit read: opens this connection's Wal subsystem before the arm.
+    let _: i64 = conn
+        .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+        .map_err(|e| format!("coread warm read: {e}"))?;
+    // Deferred BEGIN — autoCommit=0, txnState NONE (arm's precondition).
+    conn.execute_batch("BEGIN")
+        .map_err(|e| format!("coread BEGIN: {e}"))?;
+    coread::arm(&conn, co)?;
+    // Defensive: confirm the arm latched the anchor's exact frame.
+    let version: String = conn
+        .query_row(
+            "SELECT stateVersion FROM \"_zero.replicationState\"",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("coread read replicationState: {e}"))?;
+    if version != target_version {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(format!(
+            "coread latched {version} but anchor target is {target_version}"
+        ));
+    }
+    Ok(conn)
+}
+
 /// Best-effort string for a caught panic payload.
 fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
     p.downcast_ref::<&str>()
@@ -457,7 +639,7 @@ mod tests {
     fn pin_frame_at_head_then_parallel_read_in_order() {
         let tf = Replica::new();
         let pool = FramePinnedPool::new(&tf.path, None, 4, None);
-        pool.pin_frame("v1", 4).unwrap();
+        pool.pin_frame(None, "v1", 4).unwrap();
         assert_eq!(pool.pinned_version().as_deref(), Some("v1"));
 
         let tasks: Vec<_> = (0..20usize)
@@ -494,7 +676,7 @@ mod tests {
         // the replicator advances head (lazy-open would fail here).
         let tf = Replica::new();
         let pool = FramePinnedPool::new(&tf.path, None, 3, None);
-        pool.pin_frame("v1", 3).unwrap();
+        pool.pin_frame(None, "v1", 3).unwrap();
         // Replicator moves head forward AFTER we pinned.
         tf.set_version("v2");
         for _ in 0..3 {
@@ -524,7 +706,7 @@ mod tests {
         let tf = Replica::new();
         let pool = FramePinnedPool::new(&tf.path, None, 4, None);
         // Head is v1; asking to pin v2 must fail without leaving a partial pin.
-        assert!(pool.pin_frame("v2", 4).is_err());
+        assert!(pool.pin_frame(None, "v2", 4).is_err());
         assert_eq!(pool.pinned_version(), None, "no partial frame left");
         assert_eq!(pool.free_count(), 0);
     }
@@ -544,7 +726,7 @@ mod tests {
     fn parallel_read_task_error_wins() {
         let tf = Replica::new();
         let pool = FramePinnedPool::new(&tf.path, None, 3, None);
-        pool.pin_frame("v1", 3).unwrap();
+        pool.pin_frame(None, "v1", 3).unwrap();
         let tasks: Vec<Box<dyn FnOnce(&Connection) -> Result<usize, String> + Send>> = (0..12usize)
             .map(|i| {
                 Box::new(move |_c: &Connection| -> Result<usize, String> {
@@ -567,7 +749,7 @@ mod tests {
         // `borrowed` counter is restored, and a subsequent pin/read still works.
         let tf = Replica::new();
         let pool = FramePinnedPool::new(&tf.path, None, 3, None);
-        pool.pin_frame("v1", 3).unwrap();
+        pool.pin_frame(None, "v1", 3).unwrap();
         let tasks: Vec<Box<dyn FnOnce(&Connection) -> Result<usize, String> + Send>> = (0..9usize)
             .map(|i| {
                 Box::new(move |_c: &Connection| -> Result<usize, String> {
@@ -603,12 +785,12 @@ mod tests {
     fn unpin_then_repin_new_frame() {
         let tf = Replica::new();
         let pool = FramePinnedPool::new(&tf.path, None, 2, None);
-        pool.pin_frame("v1", 2).unwrap();
+        pool.pin_frame(None, "v1", 2).unwrap();
         pool.unpin_frame();
         assert_eq!(pool.pinned_version(), None);
         // Head moved to v2; re-pin succeeds at the new frame.
         tf.set_version("v2");
-        pool.pin_frame("v2", 2).unwrap();
+        pool.pin_frame(None, "v2", 2).unwrap();
         assert_eq!(pool.pinned_version().as_deref(), Some("v2"));
     }
 
@@ -626,7 +808,7 @@ mod tests {
             std::mem::forget(c); // keep the handle valid for the test
         }
         let pool = FramePinnedPool::new(&tf.path, None, 3, Some(reg.clone()));
-        pool.pin_frame("v1", 3).unwrap();
+        pool.pin_frame(None, "v1", 3).unwrap();
         // While pinned the pool's handles live in the shared registry, so the
         // existing cancel()/watchdog sweep reaches them (N1).
         assert_eq!(
@@ -642,7 +824,7 @@ mod tests {
             "pool handles drained on unpin, actor's kept"
         );
         // Re-pin appends a fresh range (no accumulation across frames).
-        pool.pin_frame("v1", 3).unwrap();
+        pool.pin_frame(None, "v1", 3).unwrap();
         assert_eq!(
             reg.lock().unwrap().len(),
             4,
