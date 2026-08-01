@@ -16,6 +16,18 @@ use rust_ivm::ivm::operator::{FetchRequest, Input};
 use rust_ivm::ivm::schema::{ColumnType, System};
 use rust_ivm::ivm::source::MemorySource;
 
+// `set_multi_constraint_chunk_size_for_test` mutates a process-global AtomicUsize.
+// cargo runs the tests in this file on parallel threads, so every test that touches
+// that global must serialize on this lock — otherwise one test's swap/restore chain
+// races another's assertions (observed as a flaky `test_chunk_size_getter_setter`).
+// Poison-safe: a panicking test still yields the guard to the next.
+static CHUNK_SIZE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn chunk_serial() -> std::sync::MutexGuard<'static, ()> {
+    CHUNK_SIZE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[allow(dead_code)]
 fn make_row(pairs: &[(&str, Value)]) -> Row {
     let map: FxHashMap<String, Value> = pairs
@@ -55,6 +67,7 @@ fn str_val(s: &str) -> Value {
 
 #[test]
 fn test_chunked_fetch_small_chunk_size() {
+    let _serial = chunk_serial();
     let restore = set_multi_constraint_chunk_size_for_test(2);
 
     let parent = make_source(
@@ -121,6 +134,7 @@ fn test_chunked_fetch_small_chunk_size() {
 
 #[test]
 fn test_chunked_fetch_preserves_order() {
+    let _serial = chunk_serial();
     let restore = set_multi_constraint_chunk_size_for_test(3);
 
     let parent = make_source(
@@ -266,6 +280,7 @@ fn test_chunked_fetch_empty_children() {
 
 #[test]
 fn test_chunked_fetch_multiple_children_per_parent() {
+    let _serial = chunk_serial();
     let restore = set_multi_constraint_chunk_size_for_test(2);
 
     let parent = make_source(
@@ -315,6 +330,7 @@ fn test_chunked_fetch_multiple_children_per_parent() {
 
 #[test]
 fn test_chunk_size_getter_setter() {
+    let _serial = chunk_serial();
     let restore = set_multi_constraint_chunk_size_for_test(42);
     assert_eq!(
         rust_ivm::ivm::flipped_join::get_multi_constraint_chunk_size(),
