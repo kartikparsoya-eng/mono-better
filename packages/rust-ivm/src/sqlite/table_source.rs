@@ -103,6 +103,46 @@ impl LazyRows {
     }
 }
 
+/// Classification of a SQLite step (`rows.next()`) error, deciding how the row
+/// iterator reacts.
+///
+/// TS (`zqlite/src/table-source.ts` `#mapFromSQLiteTypes`, line 377) calls
+/// `rowIterator.next()` with NO try/catch — any step error THROWS and
+/// propagates out of `#fetch`, aborting the pipeline (→ view-syncer teardown →
+/// client rehydrate at a consistent frame). It never truncates the stream.
+/// Cancellation in TS is driver-level (the JS caller stops pulling); a
+/// SQLITE_INTERRUPT surfaces only when the actor's own cancel path has already
+/// been engaged.
+///
+/// Rust must match:
+/// - `Interrupt` (SQLITE_INTERRUPT): a cancellation. The engine's advance loop
+///   checks `cancellation_token.is_cancelled()` between rows and unwinds
+///   cleanly; the row iterator just stops quietly (no "row read error" log, no
+///   panic) and lets that cancel path drive teardown.
+/// - `HardError` (SQLITE_CORRUPT / "malformed" / anything else): a real read
+///   failure. We must NOT silently return `None` (that truncates the result and
+///   serves a partial/corrupt view). We propagate it — a panic here is caught by
+///   the napi `catch_unwind` (napi/src/lib.rs:222) and surfaced as a thrown
+///   error, exactly the TS lifecycle for a thrown SQLite step error.
+enum RowErr {
+    Interrupt,
+    HardError,
+}
+
+/// Classify a `rows.next()` error into clean-cancel vs propagate. Uses the
+/// extended-code-aware `sqlite_error_code()` (rusqlite 0.32) so any
+/// SQLITE_CORRUPT variant (e.g. SQLITE_CORRUPT_VTAB) also classifies as a hard
+/// error.
+fn classify_row_error(e: &rusqlite::Error) -> RowErr {
+    match e.sqlite_error_code() {
+        Some(rusqlite::ffi::ErrorCode::OperationInterrupted) => RowErr::Interrupt,
+        // Everything else — corruption ("database disk image is malformed"),
+        // I/O errors, etc. — is a hard error that must abort rather than
+        // truncate.
+        _ => RowErr::HardError,
+    }
+}
+
 /// Wrapper so `LazyRows` (which must stay pinned) can implement `Iterator`.
 struct LazyRowsIter(Pin<Box<LazyRows>>);
 
@@ -126,10 +166,21 @@ impl Iterator for LazyRowsIter {
                 Some(Arc::new(map))
             }
             Ok(None) => None,
-            Err(e) => {
-                eprintln!("[rust-ivm] row read error for {}: {}", table_name, e);
-                None
-            }
+            Err(e) => match classify_row_error(&e) {
+                // Cancellation: stop iterating quietly. The engine's between-rows
+                // cancel check + napi cancel path own teardown; do not log this
+                // as a "row read error" and do not panic. Matches TS, where
+                // cancellation is driver-level and never a corruption error.
+                RowErr::Interrupt => None,
+                // Corruption / I/O / other: DO NOT truncate — a swallowed corrupt
+                // read serves a partial result (a correctness leak). Propagate as
+                // a hard error so the napi catch_unwind surfaces it as a thrown
+                // error → view-syncer teardown → rehydrate at a consistent frame.
+                // This mirrors TS `rowIterator.next()` throwing out of `#fetch`.
+                RowErr::HardError => {
+                    panic!("[rust-ivm] row read error for {}: {}", table_name, e);
+                }
+            },
         }
     }
 }

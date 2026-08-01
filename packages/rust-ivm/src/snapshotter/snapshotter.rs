@@ -303,26 +303,53 @@ impl Snapshot {
     /// Open a fresh connection and pin it at the current head.
     fn create(db_file: &str, page_cache_size_kib: Option<i64>) -> Result<Self, String> {
         // Open read-write so wal2 can register a checkpoint-blocking read-mark
-        // in -shm via BEGIN CONCURRENT. A read-only open cannot write -shm,
-        // so the checkpointer ignores it and recycles needed frames → torn read.
-        // This matches TS (snapshotter.ts opens rw + beginConcurrent).
-        // If rw open fails (e.g. exclusive lock), fall back to read-only.
-        let conn = rusqlite::Connection::open_with_flags(
-            db_file,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-        )
-        .or_else(|_| {
-            eprintln!("[rust-ivm] read-write snapshot open failed, falling back to read-only (torn-read risk on wal2)");
-            rusqlite::Connection::open_with_flags(
-                db_file,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        // in -shm via BEGIN CONCURRENT. A read-only open cannot write -shm, so the
+        // checkpointer IGNORES it and recycles needed frames under the pinned
+        // snapshot → torn read → InvalidDiff teardown one advance later. TS opens
+        // rw + beginConcurrent and has NO read-only fallback; we match that.
+        //
+        // Instead of silently degrading to an unsafe RO connection on rw-open
+        // failure (e.g. a transient exclusive lock), retry the rw open a few times
+        // with brief backoff; if it still fails, surface a retryable open error so
+        // the caller can retry — never pin an unmarked RO snapshot.
+        const RW_OPEN_ATTEMPTS: u32 = 5;
+        const RW_OPEN_BACKOFF_MS: u64 = 20;
+        let rw_flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+        let mut last_err: Option<rusqlite::Error> = None;
+        let mut conn = None;
+        for attempt in 0..RW_OPEN_ATTEMPTS {
+            match rusqlite::Connection::open_with_flags(db_file, rw_flags) {
+                Ok(c) => {
+                    conn = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[rust-ivm] read-write snapshot open failed (attempt {}/{}): {} — retrying (NO read-only fallback: RO cannot write the wal2 -shm read-mark)",
+                        attempt + 1,
+                        RW_OPEN_ATTEMPTS,
+                        e
+                    );
+                    last_err = Some(e);
+                    if attempt + 1 < RW_OPEN_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            RW_OPEN_BACKOFF_MS * (attempt as u64 + 1),
+                        ));
+                    }
+                }
+            }
+        }
+        let conn = conn.ok_or_else(|| {
+            format!(
+                "Snapshot::create open: read-write open failed after {} attempts (retryable): {}",
+                RW_OPEN_ATTEMPTS,
+                last_err
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
             )
-        })
-        .map_err(|e| format!("Snapshot::create open: {}", e))?;
+        })?;
 
         let interrupt_handle = crate::sqlite::install_interrupt(&conn);
 

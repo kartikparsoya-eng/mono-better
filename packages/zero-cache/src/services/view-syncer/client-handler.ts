@@ -243,7 +243,7 @@ export class ClientHandler {
             const patches = (body.mutationsPatch ??= []);
             if (op === 'put') {
               const row = v.parse(
-                ensureSafeJSON(patch.contents),
+                normalizeMutationResult(ensureSafeJSON(patch.contents)),
                 mutationRowSchema,
                 'passthrough',
               );
@@ -398,6 +398,32 @@ const mutationRowSchema = v.object({
   mutationID: v.number(),
   result: mutationResultSchema,
 });
+
+/**
+ * Defense-in-depth: the `{app}_{shard}.mutations.result` column is Postgres
+ * type JSON, stored in the SQLite replica as stringified text, and must be
+ * re-parsed to an OBJECT on read (see zqlite `fromSQLiteTypes` →
+ * `case 'json': JSON.parse(v)`). `mutationRowSchema` REQUIRES `result` to be an
+ * object and never parses it itself. If the engine ever emits `result` as a
+ * JSON string (an encoding slip in the source column typing), `v.parse` below
+ * would throw a fatal `ProtocolError` that tears down the WebSocket connection
+ * — even for a LAWFUL failed-mutation result (e.g. a `MutationACLError` app
+ * error). A lawful app error must NEVER fatal the connection. So mirror
+ * `fromSQLiteTypes` here: if `result` arrives as a string, JSON.parse it back
+ * to an object before validation, degrading a slip to a normal failed mutation.
+ */
+function normalizeMutationResult(row: SafeJSONObject): SafeJSONObject {
+  const {result} = row;
+  if (typeof result !== 'string') {
+    return row;
+  }
+  try {
+    return {...row, result: JSON.parse(result)};
+  } catch {
+    // Not valid JSON — leave as-is and let v.parse produce its normal error.
+    return row;
+  }
+}
 
 function makeRowPatch(patch: RowPatch): RowPatchOp {
   const {

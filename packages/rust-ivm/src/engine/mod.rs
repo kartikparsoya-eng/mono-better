@@ -63,7 +63,7 @@ pub(crate) struct Built {
     pub collector: Shared<CollectOutput>,
     pub schema: SourceSchema,
     pub timer: Instant,
-    pub companion_rows: Vec<(String, Row)>,
+    pub companion_rows: Vec<(String, Vec<String>, Row)>,
     pub companions: Vec<CompanionBuilt>,
 }
 
@@ -220,9 +220,15 @@ fn scalar_values_equal(
 /// resolved values) and the matched companion rows to emit on hydrate.
 struct ScalarResolveOut {
     ast: Ast,
-    /// (table, row) for each matched scalar subquery — emitted as ADD rows on
-    /// hydrate so the client's own EXISTS rewrite has the row it needs.
-    companion_rows: Vec<(String, Row)>,
+    /// (table, primary_key, row) for each matched scalar subquery — emitted as
+    /// ADD rows on hydrate so the client's own EXISTS rewrite has the row it
+    /// needs. The primary key is captured here from the companion pipeline's
+    /// OWN schema (the source it was built from), so the row key is always
+    /// well-formed at emission time regardless of what the top-level
+    /// `primary_keys` map happens to contain — mirroring TS, where the EXISTS
+    /// companion row is keyed by the subquery table's own primary key, and
+    /// mirroring the Streamer's `schema.primary_key` fallback (streamer/mod.rs).
+    companion_rows: Vec<(String, Vec<String>, Row)>,
     companions: Vec<CompanionBuilt>,
 }
 
@@ -383,6 +389,17 @@ impl Engine {
         self.sources.insert(table_name, source);
     }
 
+    /// TEST-ONLY: drop a table's entry from the top-level `primary_keys` map,
+    /// leaving its source (and thus its pipeline schema's `primary_key`) intact.
+    /// Used to simulate the (normally impossible) asymmetry where a scalar-EXISTS
+    /// companion table is absent from the map — proving the emission path still
+    /// keys the companion row by the source schema's primary key (faithful to
+    /// TS), rather than emitting an empty `{}` rowKey. Never called in prod.
+    #[doc(hidden)]
+    pub fn __test_drop_primary_key(&mut self, table: &str) {
+        self.primary_keys.remove(table);
+    }
+
     /// Get the row-set signature for a query.
     /// Port of TS `rowSetSignature()`.
     pub fn row_set_signature(&self, query_id: &str) -> Option<u64> {
@@ -484,9 +501,27 @@ impl Engine {
             }
             let stream = b.pipeline.borrow().fetch(&Default::default());
             let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
-            for node in crate::ivm::stream::skip_yields(stream) {
+            let mut nodes = crate::ivm::stream::skip_yields(stream);
+            while let Some(node) = nodes.next() {
                 if self.cancellation_token.is_cancelled() {
                     cancelled = true;
+                    // TS-faithful graceful cancel: the TS view-syncer ALWAYS
+                    // fully drains the hydrate generator, so a Take/Cap stream
+                    // is never abandoned mid-iteration. The Rust `break 'hydrate`
+                    // is a new early-return path with no TS analog; dropping the
+                    // in-flight `nodes` iterator here (limit not reached, input
+                    // not exhausted) would trip the Take/Cap `InitialFetchGuard`
+                    // panic (take.rs:117 / cap.rs). Mirror TS by draining the
+                    // remaining stream to exhaustion (discarding rows — the query
+                    // is being discarded anyway) so the Take sees a normal
+                    // end-of-stream, persists, and its guard no-ops. The
+                    // `cancelled` cleanup below then destroys the pipelines.
+                    // A Take stream abandoned with NO cancel in flight still
+                    // panics (the genuine-bug guard is intact).
+                    drop(node);
+                    for discarded in nodes.by_ref() {
+                        drop(discarded);
+                    }
                     break 'hydrate;
                 }
                 let change = crate::ivm::change::make_add_change(node);
@@ -497,9 +532,35 @@ impl Engine {
             }
 
             // Companion rows: raw ADD RowChanges for each matched subquery row.
-            for (table, row) in &b.companion_rows {
-                let pk = primary_keys.get(table).cloned().unwrap_or_default();
-                let row_key = crate::streamer::get_row_key(&pk, row);
+            for (table, schema_pk, row) in &b.companion_rows {
+                // Faithful to TS: the EXISTS companion row is keyed by the
+                // subquery table's OWN primary key, which is always available.
+                // Prefer the top-level `primary_keys` map (the registered PK),
+                // but fall back to the primary key captured from the companion
+                // pipeline's own schema at resolve time (`schema_pk`) — exactly
+                // the `schema.primary_key` fallback the Streamer uses for the
+                // main-hydrate path (streamer/mod.rs). This guarantees a
+                // well-formed row key in the normal path, so the client never
+                // sees `rowKey:"{}"` ("Got undefined").
+                //
+                // The panic below is retained as a NEVER-HAPPEN assertion: it
+                // can only fire if BOTH the map lacks the table AND the source
+                // schema carried no primary key — which is impossible for a
+                // registered source. It stays as a loud guard so a future
+                // wiring regression that emits an empty-PK companion row fails
+                // fast here instead of crashing the client.
+                let pk: &Vec<String> = match primary_keys.get(table) {
+                    Some(pk) if !pk.is_empty() => pk,
+                    _ if !schema_pk.is_empty() => schema_pk,
+                    _ => panic!(
+                        "companion/scalar-EXISTS table {table:?} has no primary \
+                         key in the registered map NOR in its pipeline schema — \
+                         cannot emit its row key (would produce an empty rowKey \
+                         and crash the client). Registered PK tables: {:?}",
+                        primary_keys.keys().collect::<Vec<_>>(),
+                    ),
+                };
+                let row_key = crate::streamer::get_row_key(pk, row);
                 on_row_change(&RowChange {
                     change_type: crate::ivm::change::ChangeType::Add,
                     query_id: b.query_id.clone(),
@@ -846,6 +907,15 @@ impl Engine {
                 reset_reason: Some(sig.reason.to_string()),
                 reset_msg: Some(sig.msg),
             }),
+            // A stale-snapshot InvalidDiff (prev/curr read view slipped forward)
+            // propagates as a hard error → teardown, MATCHING TS: TS throws
+            // InvalidDiffError as a plain Error (snapshotter.ts:565/574/579), it
+            // is NOT a ResetPipelinesSignal, and nothing catches it — the client
+            // tears down and reconnects. The real fix for the live storm is
+            // removing the read-only snapshot fallback (snapshotter.rs) so the
+            // guard almost never fires, exactly as in TS (which has no RO
+            // fallback). Do NOT smooth this into an in-place reset here — that
+            // would diverge from TS and could mask a genuine stale read.
             Err(e) => Err(e),
         }
     }
@@ -894,9 +964,9 @@ impl Engine {
         let enable_not_exists = self.enable_not_exists;
 
         // Collected during resolution by the executor closure (Fn → interior
-        // mutability). `companion_rows`: matched (table, row) for hydrate.
-        // `companions`: the built live pipelines + resolved values.
-        let companion_rows: RefCell<Vec<(String, Row)>> = RefCell::new(Vec::new());
+        // mutability). `companion_rows`: matched (table, primary_key, row) for
+        // hydrate. `companions`: the built live pipelines + resolved values.
+        let companion_rows: RefCell<Vec<(String, Vec<String>, Row)>> = RefCell::new(Vec::new());
         let companions: RefCell<Vec<CompanionBuilt>> = RefCell::new(Vec::new());
 
         let executor: ScalarExecutor = Box::new(|subquery_ast: &Ast, child_field: &str| {
@@ -942,9 +1012,22 @@ impl Engine {
                         None | Some(Value::Null) => None,
                         Some(v) => Some(v.clone()),
                     };
-                    companion_rows
-                        .borrow_mut()
-                        .push((subquery_ast.table.clone(), node.row.clone()));
+                    // Capture the subquery table's primary key from the
+                    // companion pipeline's OWN schema. This is the same source
+                    // of truth the Streamer uses for the main-hydrate path
+                    // (`schema.primary_key`, streamer/mod.rs), and it is always
+                    // present because a companion is only ever produced for a
+                    // table that has a registered source (is_simple_subquery
+                    // requires the table's unique keys, which are registered
+                    // together with its source/PK). TS keys the EXISTS companion
+                    // row by this same primary key — so the emitted rowKey is
+                    // always well-formed, never `{}`.
+                    let companion_pk = input.borrow().get_schema().primary_key.clone();
+                    companion_rows.borrow_mut().push((
+                        subquery_ast.table.clone(),
+                        companion_pk,
+                        node.row.clone(),
+                    ));
                     companions.borrow_mut().push(CompanionBuilt {
                         input: input.clone(),
                         table: subquery_ast.table.clone(),

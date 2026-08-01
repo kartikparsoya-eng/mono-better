@@ -576,6 +576,82 @@ describe('view-syncer/client-handler', () => {
       `);
       expect(err).toBeUndefined();
     });
+
+    // Defense-in-depth: if the engine ever emits `result` as a JSON *string*
+    // (an encoding slip in the source column typing) instead of a parsed
+    // object, a lawful failed-mutation result (here a MutationACLError) must
+    // still be normalized to an object and delivered — NOT fatal the connection
+    // with a ProtocolError.
+    test('string-encoded result is normalized to an object', async () => {
+      await poker.addPatch({
+        toVersion: {stateVersion: '123'},
+        patch: {
+          type: 'row',
+          op: 'put',
+          id: {
+            schema: '',
+            table: 'zapp_6.mutations',
+            rowKey: {clientGroupID: 'g1', clientID: 'boo', mutationID: 123n},
+          },
+          contents: {
+            clientGroupID: 'g1',
+            clientID: 'boo',
+            mutationID: 123n,
+            // A lawful app error, stringified (as an unparsed SQLite JSON cell).
+            result:
+              '{"error":"app","message":"Acl not defined for upsert on table X","details":{"name":"MutationACLError"}}',
+          },
+        },
+      });
+
+      await poker.end({stateVersion: '123'});
+
+      const {received, err} = await closer();
+      expect(received).toMatchInlineSnapshot(`
+        [
+          [
+            "pokeStart",
+            {
+              "baseCookie": "121",
+              "pokeID": "123",
+            },
+          ],
+          [
+            "pokePart",
+            {
+              "mutationsPatch": [
+                {
+                  "mutation": {
+                    "id": {
+                      "clientID": "boo",
+                      "id": 123,
+                    },
+                    "result": {
+                      "details": {
+                        "name": "MutationACLError",
+                      },
+                      "error": "app",
+                      "message": "Acl not defined for upsert on table X",
+                    },
+                  },
+                  "op": "put",
+                },
+              ],
+              "pokeID": "123",
+            },
+          ],
+          [
+            "pokeEnd",
+            {
+              "cookie": "123",
+              "pokeID": "123",
+            },
+          ],
+        ]
+      `);
+      // The lawful app error must NOT tear down the connection.
+      expect(err).toBeUndefined();
+    });
   });
 
   test('error on unsafe integer', async () => {

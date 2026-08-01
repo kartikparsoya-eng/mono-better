@@ -460,11 +460,21 @@ export class RustIVMDriver {
     );
     this.#lc.info?.(`RustIVMDriver: init complete, db=${this.#replicaFile}`);
 
-    const {replicaVersion} = getSubscriptionState(
+    // replicaVersion is the IMMUTABLE base stamped at replica creation.
+    // watermark (= _zero.replicationState.stateVersion) is the LIVE head the
+    // snapshot is pinned at. These diverge on any replica that has advanced
+    // past its creation stamp (i.e. every restored replica). currentVersion()
+    // must return the live head, matching TS PipelineDriver.currentVersion()
+    // which reads `this.#snapshotter.current().version` (pipeline-driver.ts).
+    // Seeding #currentVersion from replicaVersion (the base) floors the CVR at
+    // the base version; a later real row version then trips cvr.ts
+    // #assertNewVersion ("Expected CVR version to have been bumped above
+    // original") and crash-loops the client group.
+    const {replicaVersion, watermark} = getSubscriptionState(
       this.#runner() as unknown as StatementRunner,
     );
     this.#replicaVersion = replicaVersion;
-    this.#currentVersion = replicaVersion;
+    this.#currentVersion = watermark;
   }
 
   get replicaVersion(): string {

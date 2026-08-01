@@ -68,7 +68,7 @@ describe.skipIf(!ADDON_PATH)(
       dbFile.delete();
     });
 
-    function setupDriver(): RustIVMDriver {
+    function setupDriver(headAtInit?: string): RustIVMDriver {
       const storage = new Database(lc, ':memory:');
       storage.prepare(CREATE_STORAGE_TABLE).run();
 
@@ -107,6 +107,15 @@ describe.skipIf(!ADDON_PATH)(
         'INSERT INTO issues (id, kind, _0_version) VALUES (?, ?, ?)',
       ).run('i0', 'public', BASE);
       populateFromExistingTables(db, listTables(db, false));
+
+      // Simulate a RESTORED replica whose head has already advanced past its
+      // immutable creation base BEFORE the driver ever initializes. This is the
+      // steady-state production condition (litestream-restored replica caught up
+      // via change-stream). The driver must seed currentVersion() from this live
+      // head (watermark), not from the base.
+      if (headAtInit !== undefined) {
+        bumpHead(headAtInit);
+      }
 
       driver.init(clientSchema);
       return driver;
@@ -149,6 +158,37 @@ describe.skipIf(!ADDON_PATH)(
       // — i.e. base-vs-base never trips "older replica".
       expect(driver.replicaVersion < driver.currentVersion()).toBe(true);
       expect(driver.replicaVersion < driver.replicaVersion).toBe(false);
+    });
+
+    // Regression guard for the "Expected CVR version to have been bumped above
+    // original" crash-loop (the OTHER half of the replicaVersion/currentVersion
+    // conflation). The field split (13bd25e02) stopped advances from
+    // overwriting the base, but the INIT SEED was still wrong: currentVersion()
+    // was seeded from `replicaVersion` (the base) instead of `watermark` (the
+    // live head from _zero.replicationState.stateVersion). On a restored replica
+    // whose head > base, the hydrate CVR updater was then built at the base
+    // floor; when a row's real _0_version later surfaced on advance, cvr.ts
+    // #assertNewVersion threw "Expected CVR version to have been bumped above
+    // original" and crash-looped the client group.
+    //
+    // TS PipelineDriver.currentVersion() returns the snapshotter's live head
+    // (pipeline-driver.ts:285); this asserts the Rust driver matches it AT INIT,
+    // before any advance() has had a chance to correct #currentVersion.
+    test('currentVersion() seeds to the live HEAD (watermark), not the base, when head > base at init', () => {
+      const HEAD = '8423ce4ih4'; // head has advanced well past BASE
+      expect(BASE < HEAD).toBe(true);
+
+      const driver = setupDriver(HEAD);
+
+      // The base is still the immutable creation stamp...
+      expect(driver.replicaVersion).toBe(BASE);
+      // ...but currentVersion() must reflect the live head the snapshot is
+      // pinned at — NOT the base. Pre-fix this returned BASE (the seed bug),
+      // flooring the CVR and later tripping #assertNewVersion.
+      expect(driver.currentVersion()).toBe(HEAD);
+
+      // And the older-replica guard invariant still holds: base <= head.
+      expect(driver.replicaVersion <= driver.currentVersion()).toBe(true);
     });
   },
 );

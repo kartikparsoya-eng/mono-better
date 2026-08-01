@@ -235,10 +235,34 @@ impl Streamer {
 
 /// Extract the row key (PK columns) from a row.
 /// Port of TS `getRowKey()`.
+///
+/// Invariant: a primary key is REQUIRED and is never legitimately absent or
+/// null. An empty `cols` slice would silently produce an empty `{}` row key,
+/// and a missing/null PK column would produce a `null` key value — both of
+/// which reach the client as `rowKey:"{}"` / `rowKey:{"id":null}` and crash
+/// `toPrimaryKeyString` ("Expected string, number or boolean. Got
+/// undefined/null"). This is the common choke point for both the "undefined"
+/// (empty key) and the torn-read "Got null" variants, so we hard-fail here
+/// rather than emit a key that cannot round-trip. Matches TS, where a PK
+/// column is always present and non-null.
 pub(crate) fn get_row_key(cols: &[String], row: &Row) -> Row {
+    assert!(
+        !cols.is_empty(),
+        "get_row_key called with an empty primary-key column list — a row key \
+         must contain at least one PK column (empty key would emit rowKey:\"{{}}\" \
+         and crash the client at toPrimaryKeyString)",
+    );
     let mut key: FxHashMap<String, Value> = FxHashMap::default();
     for col in cols {
-        let val = row.get(col).cloned().unwrap_or(Value::Null);
+        let val = match row.get(col) {
+            Some(Value::Null) | None => panic!(
+                "get_row_key: primary-key column {col:?} is {} in the row — a \
+                 primary key is never legitimately null/absent (would emit a \
+                 null/undefined rowKey and crash the client)",
+                if row.contains_key(col) { "null" } else { "absent" },
+            ),
+            Some(v) => v.clone(),
+        };
         key.insert(col.clone(), val);
     }
     Arc::new(key)
@@ -436,5 +460,66 @@ impl<S: StreamSink> Chunker<S> {
     /// Consume the underlying sink.
     pub fn into_sink(self) -> S {
         self.sink
+    }
+}
+
+#[cfg(test)]
+mod get_row_key_tests {
+    use super::get_row_key;
+    use crate::ivm::data::{Row, Value};
+    use rustc_hash::FxHashMap;
+    use std::sync::Arc;
+
+    fn row(pairs: &[(&str, Value)]) -> Row {
+        let mut m: FxHashMap<String, Value> = FxHashMap::default();
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        Arc::new(m)
+    }
+
+    /// BUG 3 repro: an empty PK column list (what `unwrap_or_default()` yields
+    /// when a companion/scalar table is not registered in `primary_keys`) must
+    /// NOT silently produce an empty `{}` row key. An empty key emits
+    /// `rowKey:"{}"` on the wire and crashes the client at `toPrimaryKeyString`
+    /// with "Got undefined". Locks in the invariant that a PK is never absent.
+    #[test]
+    #[should_panic(expected = "empty primary-key column list")]
+    fn empty_pk_list_does_not_yield_empty_key() {
+        let r = row(&[("id", Value::Str(Arc::from("abc")))]);
+        // Empty cols == the unwrap_or_default() branch. Current (buggy) code
+        // returns Arc::new({}) — an empty, undefined-producing key.
+        let _ = get_row_key(&[], &r);
+    }
+
+    /// A well-formed PK column list over a row that actually carries the PK
+    /// value must produce a non-empty key containing that column.
+    #[test]
+    fn present_pk_yields_non_empty_key_with_column() {
+        let r = row(&[("id", Value::Str(Arc::from("abc")))]);
+        let key = get_row_key(&["id".to_string()], &r);
+        assert!(
+            key.contains_key("id"),
+            "row key must contain the PK column, got {key:?}",
+        );
+        assert_eq!(key.get("id"), Some(&Value::Str(Arc::from("abc"))));
+    }
+
+    /// A PK column that is present-but-null must hard-fail rather than emit a
+    /// null key value (the torn-read "Got null" variant of the same crash).
+    #[test]
+    #[should_panic(expected = "is null")]
+    fn null_pk_value_does_not_yield_null_key() {
+        let r = row(&[("id", Value::Null)]);
+        let _ = get_row_key(&["id".to_string()], &r);
+    }
+
+    /// A PK column entirely absent from the row must hard-fail (would emit an
+    /// undefined key value otherwise).
+    #[test]
+    #[should_panic(expected = "is absent")]
+    fn absent_pk_column_does_not_yield_missing_key() {
+        let r = row(&[("other", Value::Str(Arc::from("x")))]);
+        let _ = get_row_key(&["id".to_string()], &r);
     }
 }
