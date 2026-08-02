@@ -625,11 +625,15 @@ impl Engine {
         }
 
         // Diagnostic: which Join child-fetch path fired this process (cumulative).
-        let (bl, inu, ind, lazy) = crate::ivm::join::join_path_counters();
-        eprintln!(
-            "[INBATCH-DIAG] join fetches: batched_leaf={} in_list_used={} in_list_distinct_keys={} lazy_n_plus_1={}",
-            bl, inu, ind, lazy
-        );
+        // Silent by default (per-hydrate stderr would be log spam); opt in with
+        // RUST_IVM_JOIN_DIAG=1 for the IN-batch investigation.
+        if std::env::var("RUST_IVM_JOIN_DIAG").is_ok() {
+            let (bl, inu, ind, lazy) = crate::ivm::join::join_path_counters();
+            eprintln!(
+                "[INBATCH-DIAG] join fetches: batched_leaf={} in_list_used={} in_list_distinct_keys={} lazy_n_plus_1={}",
+                bl, inu, ind, lazy
+            );
+        }
 
         results
     }

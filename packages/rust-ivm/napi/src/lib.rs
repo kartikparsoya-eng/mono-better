@@ -1660,19 +1660,23 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
     match v {
         Value::Null => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::F64(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap_or_else(|| 0.into())),
+        // Match `Value::Serialize` (data.rs) AND TS `JSON.stringify`: an
+        // integer-valued f64 serializes as a JSON integer ("42", not "42.0");
+        // a non-integer as a float; NaN/Infinity (unrepresentable in JSON) as
+        // null, exactly as `JSON.stringify(NaN) === "null"`.
+        Value::F64(n) => {
+            if n.fract() == 0.0 && n.is_finite() && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
+                serde_json::Value::Number((*n as i64).into())
+            } else if let Some(num) = serde_json::Number::from_f64(*n) {
+                serde_json::Value::Number(num)
+            } else {
+                serde_json::Value::Null
+            }
+        }
         Value::Str(s) => serde_json::Value::String(s.to_string()),
+        // Json is validated at ingest (`sqlite_value_to_ivm`), so `from_str`
+        // always succeeds here; the fallback is dead defence.
         Value::Json(j) => serde_json::from_str(j).unwrap_or(serde_json::Value::String(j.to_string())),
-    }
-}
-
-fn value_to_napi(v: &Value) -> NapiValue {
-    match v {
-        Value::Null => NapiValue { kind: "null".into(), bool_val: None, f64_val: None, str_val: None, json_val: None },
-        Value::Bool(b) => NapiValue { kind: "bool".into(), bool_val: Some(*b), f64_val: None, str_val: None, json_val: None },
-        Value::F64(n) => NapiValue { kind: "f64".into(), bool_val: None, f64_val: Some(*n), str_val: None, json_val: None },
-        Value::Str(s) => NapiValue { kind: "str".into(), bool_val: None, f64_val: None, str_val: Some(s.to_string()), json_val: None },
-        Value::Json(j) => NapiValue { kind: "json".into(), bool_val: None, f64_val: None, str_val: None, json_val: Some(j.to_string()) },
     }
 }
 

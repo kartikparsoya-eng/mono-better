@@ -247,27 +247,42 @@ pub(crate) fn sqlite_value_to_ivm(
     col: &str,
 ) -> Value {
     use rusqlite::types::Value as Sv;
+    let is_bool = matches!(col_type, Some(ColumnType::Boolean { .. }));
+    let is_json = matches!(col_type, Some(ColumnType::Json { .. }));
     match val {
-        Ok(Sv::Null) | Err(_) => Value::Null,
-        // TS `boolean` => `!!v`: only 0 / 0.0 / empty are false.
-        Ok(Sv::Integer(n)) if matches!(col_type, Some(ColumnType::Boolean { .. })) => {
-            Value::Bool(n != 0)
-        }
-        Ok(Sv::Real(n)) if matches!(col_type, Some(ColumnType::Boolean { .. })) => {
-            Value::Bool(n != 0.0)
-        }
-        // TS `json` => `JSON.parse(v)`; tag as Json so the napi boundary emits a
-        // parsed object (the JS side JSON.parses the "json" kind).
-        Ok(Sv::Text(s)) if matches!(col_type, Some(ColumnType::Json { .. })) => {
+        Ok(Sv::Null) => Value::Null,
+        // TS/better-sqlite3 surfaces a read error as a thrown error; do the same
+        // (the napi catch_unwind turns this panic into a thrown JS error) instead
+        // of silently coercing a decode failure to NULL. Unreachable for a
+        // `get::<Value>` (Value is the universal storage type), but never swallow.
+        Err(e) => panic!("failed to read {table}.{col} from SQLite: {e}"),
+
+        // TS `boolean` => `!!v`. 0 / 0.0 / "" are false; a non-empty string is
+        // true; a Blob (JS Buffer) is ALWAYS truthy — match each.
+        Ok(Sv::Integer(n)) if is_bool => Value::Bool(n != 0),
+        Ok(Sv::Real(n)) if is_bool => Value::Bool(n != 0.0),
+        Ok(Sv::Text(s)) if is_bool => Value::Bool(!s.is_empty()),
+        Ok(Sv::Blob(_)) if is_bool => Value::Bool(true),
+
+        // TS `json` => `JSON.parse(v)`, which THROWS on invalid JSON. Validate at
+        // ingest (matching TS's failure point + message); the raw string is then
+        // guaranteed-valid for the wire, which re-parses it into an object on JS.
+        Ok(Sv::Text(s)) if is_json => {
+            assert_valid_json(&s, table, col);
             Value::Json(Arc::from(s.as_str()))
         }
-        Ok(Sv::Blob(b)) if matches!(col_type, Some(ColumnType::Json { .. })) => {
-            Value::Json(Arc::from(String::from_utf8_lossy(&b).as_ref()))
+        Ok(Sv::Blob(b)) if is_json => {
+            let s = String::from_utf8_lossy(&b);
+            assert_valid_json(&s, table, col);
+            Value::Json(Arc::from(s.as_ref()))
         }
+
         // number / string columns (and untyped): pass through unchanged.
         Ok(Sv::Integer(n)) => {
             // Reject integers outside ±(2^53-1) rather than silently losing
-            // precision, matching TS fromSQLiteType.
+            // precision — TS `fromSQLiteType` throws UnsupportedValueError here
+            // (same message); our panic is caught by the napi boundary and
+            // rethrown to JS, so the failure surfaces identically.
             if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&n) {
                 panic!("value {n} (in {table}.{col}) is outside of supported bounds");
             }
@@ -275,7 +290,19 @@ pub(crate) fn sqlite_value_to_ivm(
         }
         Ok(Sv::Real(n)) => Value::F64(n),
         Ok(Sv::Text(s)) => Value::Str(Arc::from(s.as_str())),
+        // Blob in a non-json/non-string column: Zero has no bytes Value type
+        // (TS returns the raw Buffer, which then breaks downstream). Best-effort
+        // lossy-string decode; documented unsupported in both engines.
         Ok(Sv::Blob(b)) => Value::Str(Arc::from(String::from_utf8_lossy(&b).as_ref())),
+    }
+}
+
+/// Validate that `s` parses as JSON, panicking with TS's exact message on
+/// failure. Matches `fromSQLiteType`'s `JSON.parse` throw for a `json` column.
+/// Uses `IgnoredAny` to validate without materializing the parsed value.
+fn assert_valid_json(s: &str, table: &str, col: &str) {
+    if let Err(e) = serde_json::from_str::<serde::de::IgnoredAny>(s) {
+        panic!("Failed to parse JSON for {table}.{col}: {e}");
     }
 }
 
@@ -1104,6 +1131,66 @@ impl InputBase for NullInputBase {
         panic!("NullInputBase has no schema");
     }
     fn destroy(&mut self) {}
+}
+
+#[cfg(test)]
+mod value_parity_tests {
+    //! `sqlite_value_to_ivm` must match TS `fromSQLiteType` (zqlite table-source.ts).
+    use super::*;
+    use rusqlite::types::Value as Sv;
+
+    fn conv(v: Sv, ct: Option<ColumnType>) -> Value {
+        sqlite_value_to_ivm(Ok(v), ct.as_ref(), "t", "c")
+    }
+
+    #[test]
+    fn boolean_matches_ts_double_bang() {
+        let b = || Some(ColumnType::Boolean { optional: false });
+        assert_eq!(conv(Sv::Integer(0), b()), Value::Bool(false));
+        assert_eq!(conv(Sv::Integer(5), b()), Value::Bool(true));
+        assert_eq!(conv(Sv::Real(0.0), b()), Value::Bool(false));
+        assert_eq!(conv(Sv::Real(1.0), b()), Value::Bool(true));
+        assert_eq!(conv(Sv::Text(String::new()), b()), Value::Bool(false)); // !!"" == false
+        assert_eq!(conv(Sv::Text("x".into()), b()), Value::Bool(true)); // !!"x" == true
+        assert_eq!(conv(Sv::Blob(vec![]), b()), Value::Bool(true)); // !!Buffer == true
+        assert_eq!(conv(Sv::Null, b()), Value::Null);
+    }
+
+    #[test]
+    fn valid_json_tagged() {
+        let j = Some(ColumnType::Json { optional: false });
+        assert_eq!(
+            conv(Sv::Text("{\"a\":1}".into()), j),
+            Value::Json(Arc::from("{\"a\":1}"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Failed to parse JSON for t.c")]
+    fn invalid_json_panics_like_ts() {
+        let _ = conv(Sv::Text("{not json".into()), Some(ColumnType::Json { optional: false }));
+    }
+
+    #[test]
+    #[should_panic(expected = "outside of supported bounds")]
+    fn integer_over_2_53_panics_like_ts() {
+        conv(Sv::Integer(9_007_199_254_740_992), None);
+    }
+
+    #[test]
+    fn read_error_panics_not_swallowed_to_null() {
+        let r = std::panic::catch_unwind(|| {
+            sqlite_value_to_ivm(Err(rusqlite::Error::InvalidQuery), None, "t", "c")
+        });
+        assert!(r.is_err(), "a read error must panic, not become NULL");
+    }
+
+    #[test]
+    fn number_string_passthrough() {
+        assert_eq!(conv(Sv::Integer(42), None), Value::F64(42.0));
+        assert_eq!(conv(Sv::Real(1.5), None), Value::F64(1.5));
+        assert_eq!(conv(Sv::Text("hi".into()), None), Value::Str(Arc::from("hi")));
+    }
 }
 
 #[cfg(test)]
