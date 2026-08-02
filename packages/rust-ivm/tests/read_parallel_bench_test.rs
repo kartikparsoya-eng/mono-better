@@ -248,3 +248,140 @@ fn bench_parallel_vs_serial() {
     let _ = std::fs::remove_file(format!("{}-wal", path));
     let _ = std::fs::remove_file(format!("{}-shm", path));
 }
+
+/// The IN-list-batched leaf fetch (RUST_IVM_EXISTS_IN_BATCH) must produce a
+/// byte-identical hydrate to the serial per-parent path — same rows, same order.
+#[test]
+fn exists_in_batch_matches_serial() {
+    let path = "/tmp/rust-ivm-in-batch-equiv.db";
+    for suf in ["", "-wal", "-wal2", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path, suf));
+    }
+    // 600 parents spans 3 IN-chunks (256 each) → validates cross-chunk bucketing,
+    // not just a single-chunk fetch.
+    create_replica(path, 600, 3);
+
+    let base = {
+        let _g = rust_ivm::ivm::join::set_exists_in_batch_for_test(false);
+        hydrate_run(path, 0).1 // serial lazy per-parent fetch = ground truth
+    };
+    let in_batch = {
+        let _g = rust_ivm::ivm::join::set_exists_in_batch_for_test(true);
+        hydrate_run(path, 2).1 // pooled + ONE `IN (...)` query, bucketed back
+    };
+
+    assert!(!base.is_empty(), "hydrate produced rows");
+    assert_eq!(
+        base, in_batch,
+        "IN-batch hydrate diverged from serial (rows or order)"
+    );
+
+    for suf in ["", "-wal", "-wal2", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path, suf));
+    }
+}
+
+/// CPU profile of the cold-hydrate hot path (EXISTS/N+1 join shape) to attribute
+/// cost between the read-lane SQL fetches vs row emission/streamer. Runs natively
+/// with symbols — no Node, no container, no signal conflict.
+///
+///   cargo test --release --test read_parallel_bench_test profile_hydrate_hotpath \
+///     -- --ignored --nocapture
+///
+/// Env: PROF_PARENTS (default 3000), PROF_KIDS (4), PROF_SECS (6),
+///      RUST_IVM_READ_LANES (2). Writes /tmp/rust-ivm-hydrate-flame.svg.
+#[test]
+#[ignore]
+fn profile_hydrate_hotpath() {
+    fn envn<T: std::str::FromStr>(k: &str, d: T) -> T {
+        std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+    }
+    let path = "/tmp/rust-ivm-profile.db";
+    for suf in ["", "-wal", "-wal2", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path, suf));
+    }
+    let parents: usize = envn("PROF_PARENTS", 3000);
+    let kids: usize = envn("PROF_KIDS", 4);
+    let lanes: usize = envn("RUST_IVM_READ_LANES", 2);
+    let secs: u64 = envn("PROF_SECS", 6);
+    create_replica(path, parents, kids);
+
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(1000)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso", "libdyld"])
+        .build()
+        .expect("start profiler");
+
+    let deadline = Instant::now() + std::time::Duration::from_secs(secs);
+    let mut iters = 0u64;
+    while Instant::now() < deadline {
+        let _ = hydrate_run(path, lanes);
+        iters += 1;
+    }
+    eprintln!(
+        "\nprofiled {} hydrate iters ({} parents x {} kids, read_lanes={}, {}s)",
+        iters, parents, kids, lanes, secs
+    );
+
+    let report = guard.report().build().expect("build report");
+    if let Ok(f) = std::fs::File::create("/tmp/rust-ivm-hydrate-flame.svg") {
+        let _ = report.flamegraph(f);
+        eprintln!("flamegraph: /tmp/rust-ivm-hydrate-flame.svg");
+    }
+
+    // Bucket every sample by the first matching keyword in its stack (checked
+    // innermost concern first) → attributes CPU to a subsystem.
+    let buckets: &[(&str, &[&str])] = &[
+        ("SQL fetch (sqlite/rusqlite)", &["sqlite", "rusqlite", "Statement", "stmt", "prepare"]),
+        ("read-lane pool / co-read", &["read_pool", "FramePinned", "pin_frame", "coread", "lane"]),
+        ("IVM operators (join/exists/fetch)", &["Join", "Exists", "flipped", "FlippedJoin", "::fetch", "operator", "Take", "Filter"]),
+        ("row emission (streamer/RowChange)", &["Streamer", "streamer", "RowChange", "make_add", "accumulate", "row_change", "canon"]),
+        ("alloc/dealloc", &["alloc", "malloc", "free", "dealloc", "drop_in_place", "Vec"]),
+        ("decode/serde", &["serde", "decode", "from_sql", "FromSql", "Value"]),
+    ];
+    let mut bcount: Vec<isize> = vec![0; buckets.len()];
+    let mut other: isize = 0;
+    let mut total: isize = 0;
+    let mut leaf: std::collections::HashMap<String, isize> = std::collections::HashMap::new();
+    for (frames, count) in report.data.iter() {
+        total += *count;
+        // stack as one string for keyword scan
+        let mut hay = String::new();
+        for lvl in frames.frames.iter() {
+            for s in lvl.iter() {
+                hay.push_str(&format!("{}\n", s));
+            }
+        }
+        let mut matched = false;
+        for (i, (_, kws)) in buckets.iter().enumerate() {
+            if kws.iter().any(|k| hay.contains(k)) {
+                bcount[i] += *count;
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            other += *count;
+        }
+        if let Some(sym) = frames.frames.first().and_then(|f| f.first()) {
+            *leaf.entry(format!("{}", sym)).or_default() += *count;
+        }
+    }
+    let pct = |c: isize| if total > 0 { 100.0 * c as f64 / total as f64 } else { 0.0 };
+    eprintln!("\n=== CPU ATTRIBUTION (total samples = {}) ===", total);
+    for (i, (name, _)) in buckets.iter().enumerate() {
+        eprintln!("  {:6.2}%  {:>7}  {}", pct(bcount[i]), bcount[i], name);
+    }
+    eprintln!("  {:6.2}%  {:>7}  other/unclassified", pct(other), other);
+
+    let mut v: Vec<_> = leaf.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    eprintln!("\n=== TOP 30 SELF (LEAF) FRAMES ===");
+    for (name, c) in v.iter().take(30) {
+        eprintln!("  {:6.2}%  {:>7}  {}", pct(*c), c, name);
+    }
+
+    for suf in ["", "-wal", "-wal2", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path, suf));
+    }
+}

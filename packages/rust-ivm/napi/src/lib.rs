@@ -74,6 +74,18 @@ fn tsfn_queue_depth() -> usize {
         .unwrap_or(1)
 }
 
+/// Rows per TSFN callback for the batched hydrate path (`RUST_IVM_TSFN_BATCH`).
+/// Each callback crosses the JS boundary once and runs ONE libuv/V8 turn on the
+/// event-loop thread, so batching K rows cuts event-loop turns per hydrate by K×
+/// (the measured 1-worker knee bottleneck). Default 1 = per-row (dark).
+fn tsfn_batch_size() -> usize {
+    std::env::var("RUST_IVM_TSFN_BATCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
+}
+
 /// Return freed heap memory to the OS after a CG teardown. glibc retains freed
 /// arena memory under reconnect churn (RSS climbs and never drops); `malloc_trim`
 /// releases it. Rate-limited to ≤1/s so a churn storm doesn't pay the heap walk
@@ -899,6 +911,31 @@ impl RustIvmEngine {
         }))
     }
 
+    /// Add queries and hydrate, streaming rows in BATCHES of `RUST_IVM_TSFN_BATCH`
+    /// via `on_rows(rows: NapiRowChange[])`. One TSFN call (one event-loop turn)
+    /// per K rows instead of per row — targets the measured 1-worker event-loop
+    /// saturation. Same per-row payload; only the crossing granularity changes.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn add_queries_streaming_rows_batched(
+        &self,
+        env: Env,
+        queries: Vec<NapiQuerySpec>,
+        #[napi(ts_arg_type = "(rows: NapiRowChange[]) => void")]
+        on_rows: JsFunction,
+    ) -> Result<AsyncTask<HydrateStreamingBatchedTask>> {
+        let tsfn = env.create_threadsafe_function(
+            &on_rows,
+            tsfn_queue_depth(),
+            |ctx| Ok(vec![ctx.value]),
+        )?;
+        Ok(AsyncTask::new(HydrateStreamingBatchedTask {
+            handle: self.handle.clone(),
+            queries,
+            tsfn,
+            batch_size: tsfn_batch_size(),
+        }))
+    }
+
     /// Advance to head, streaming rows one at a time via `on_row`.
     /// Header (changeType=-1) is emitted first, change rows in the middle,
     /// reset row (changeType=-2) last if the engine reported a reset_reason.
@@ -1390,6 +1427,69 @@ impl Task for HydrateStreamingTask {
                 // state AND emits output; read-level parallelism lives below the
                 // source, keeping the actor graph single-writer.
                 eng.add_queries_streaming(&specs, do_hydrate);
+                Ok(())
+            })?
+            .map_err(NapiError::from_reason)
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+/// Batched hydrate task: buffers rows and hands JS `RUST_IVM_TSFN_BATCH` at a time
+/// as one array per TSFN call — one event-loop turn per K rows instead of per row.
+pub struct HydrateStreamingBatchedTask {
+    handle: EngineHandle,
+    queries: Vec<NapiQuerySpec>,
+    tsfn: ThreadsafeFunction<Vec<NapiRowChange>>,
+    batch_size: usize,
+}
+
+impl Task for HydrateStreamingBatchedTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let queries = std::mem::take(&mut self.queries);
+        let tsfn = self.tsfn.clone();
+        let batch_size = self.batch_size.max(1);
+        self.handle
+            .call(move |state| -> std::result::Result<(), String> {
+                state.poisoned = false;
+                let eng = state
+                    .engine
+                    .as_mut()
+                    .ok_or_else(|| "Engine not initialized".to_string())?;
+                let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
+                for q in queries.iter() {
+                    let ast: rust_ivm::builder::ast::Ast = parse_ts_ast(&q.ast_json)
+                        .map_err(|e| format!("AST parse error for qid={}: {}", q.query_id, e))?;
+                    specs.push(QuerySpec { query_id: q.query_id.clone(), ast });
+                }
+                let cancel = eng.cancellation_token();
+                let mut buf: Vec<NapiRowChange> = Vec::with_capacity(batch_size);
+                {
+                    // Buffer K rows, then cross the boundary ONCE (one event-loop
+                    // turn). Blocking backpressure still applies per-batch.
+                    let do_hydrate = |rc: &rust_ivm::streamer::RowChange| {
+                        buf.push(row_change_to_napi(rc));
+                        if buf.len() >= batch_size {
+                            let batch = std::mem::take(&mut buf);
+                            if tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking)
+                                != Status::Ok
+                            {
+                                cancel.cancel();
+                            }
+                        }
+                    };
+                    eng.add_queries_streaming(&specs, do_hydrate);
+                }
+                // Flush the tail batch.
+                if !buf.is_empty() {
+                    let batch = std::mem::take(&mut buf);
+                    let _ = tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking);
+                }
                 Ok(())
             })?
             .map_err(NapiError::from_reason)

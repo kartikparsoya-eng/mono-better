@@ -324,8 +324,10 @@ impl Input for Join {
         let can_batch = self.inprogress_child_change.borrow().is_none()
             && self.child.borrow().supports_parallel_leaf();
         if can_batch && let Some(stream) = self.fetch_batched_leaf(req) {
+            JOIN_BATCHED_LEAF.fetch_add(1, Ordering::Relaxed);
             return stream;
         }
+        JOIN_LAZY.fetch_add(1, Ordering::Relaxed);
         self.fetch_lazy(req)
     }
 }
@@ -366,7 +368,28 @@ impl Join {
 
         // The parallel leaf batch (one SELECT per distinct constraint). A miss
         // (pool unpinned since the pre-check, etc.) → fall back to lazy.
-        let results: Vec<Vec<Node>> = self.child.borrow().parallel_leaf_fetch(&distinct)?;
+        let results: Vec<Vec<Node>> = if exists_in_batch_enabled() {
+            JOIN_IN_USED.fetch_add(1, Ordering::Relaxed);
+            JOIN_IN_DISTINCT.fetch_add(distinct.len() as u64, Ordering::Relaxed);
+            // ONE `IN (...)` query, then bucket rows back into per-distinct order.
+            // The IN result is already in the child's ORDER BY, so stable per-key
+            // extraction yields each parent's children in the same order the N
+            // single-constraint fetches would (byte-identical result set).
+            let flat = self.child.borrow().batched_in_fetch(&distinct)?;
+            let mut buckets: Vec<Vec<Node>> = vec![Vec::new(); distinct.len()];
+            for node in flat {
+                let mut key: Constraint = Constraint::default();
+                for col in self.child_key.iter() {
+                    key.insert(col.clone(), node.row.get(col).cloned().unwrap_or(Value::Null));
+                }
+                if let Some(&idx) = index_of.get(&constraint_canonical(&key)) {
+                    buckets[idx].push(node);
+                }
+            }
+            buckets
+        } else {
+            self.child.borrow().parallel_leaf_fetch(&distinct)?
+        };
         debug_assert_eq!(results.len(), distinct.len());
 
         let relationship_name = self.relationship_name.clone();
@@ -511,6 +534,52 @@ impl Output for ChildOutput {
 /// A stable canonical string for a constraint (sorted col→value pairs), used to
 /// dedup parent join keys for the parallel leaf batch. Mirrors the debug-format
 /// keying used elsewhere (e.g. `exists.rs` `get_cache_key`).
+/// Prototype flag (`RUST_IVM_EXISTS_IN_BATCH=1`, off by default): batch a Join's
+/// leaf child-fetches into ONE `... WHERE key IN (...)` query instead of N
+/// single-constraint SELECTs. Env is read once; tests may override at runtime.
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+static EXISTS_IN_BATCH_OVERRIDE: AtomicU8 = AtomicU8::new(0); // 0=env, 1=force-off, 2=force-on
+
+// Diagnostic counters (which child-fetch path actually fires). Dumped per hydrate.
+pub static JOIN_BATCHED_LEAF: AtomicU64 = AtomicU64::new(0); // related-subquery leaf batch taken
+pub static JOIN_IN_USED: AtomicU64 = AtomicU64::new(0);      // IN-list branch ran
+pub static JOIN_IN_DISTINCT: AtomicU64 = AtomicU64::new(0);  // Σ distinct keys IN-batched
+pub static JOIN_LAZY: AtomicU64 = AtomicU64::new(0);         // fell to per-parent (N+1) lazy path
+
+pub fn join_path_counters() -> (u64, u64, u64, u64) {
+    (
+        JOIN_BATCHED_LEAF.load(Ordering::Relaxed),
+        JOIN_IN_USED.load(Ordering::Relaxed),
+        JOIN_IN_DISTINCT.load(Ordering::Relaxed),
+        JOIN_LAZY.load(Ordering::Relaxed),
+    )
+}
+
+/// Test-only runtime override (env is cached, so this is how tests toggle the
+/// path in-process). Returns a guard that restores the previous state on drop.
+pub fn set_exists_in_batch_for_test(on: bool) -> impl FnOnce() {
+    let prev = EXISTS_IN_BATCH_OVERRIDE.swap(if on { 2 } else { 1 }, Ordering::SeqCst);
+    move || {
+        EXISTS_IN_BATCH_OVERRIDE.store(prev, Ordering::SeqCst);
+    }
+}
+
+fn exists_in_batch_enabled() -> bool {
+    match EXISTS_IN_BATCH_OVERRIDE.load(Ordering::SeqCst) {
+        1 => false,
+        2 => true,
+        _ => {
+            use std::sync::OnceLock;
+            static ENABLED: OnceLock<bool> = OnceLock::new();
+            *ENABLED.get_or_init(|| {
+                std::env::var("RUST_IVM_EXISTS_IN_BATCH")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+            })
+        }
+    }
+}
+
 fn constraint_canonical(c: &Constraint) -> String {
     let mut keys: Vec<&String> = c.keys().collect();
     keys.sort();

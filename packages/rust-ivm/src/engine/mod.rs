@@ -624,6 +624,13 @@ impl Engine {
             });
         }
 
+        // Diagnostic: which Join child-fetch path fired this process (cumulative).
+        let (bl, inu, ind, lazy) = crate::ivm::join::join_path_counters();
+        eprintln!(
+            "[INBATCH-DIAG] join fetches: batched_leaf={} in_list_used={} in_list_distinct_keys={} lazy_n_plus_1={}",
+            bl, inu, ind, lazy
+        );
+
         results
     }
 

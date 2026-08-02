@@ -962,6 +962,89 @@ impl Input for TableSourceInput {
                 .collect(),
         )
     }
+
+    /// IN-list batching (prototype): ONE `... WHERE key IN (?, ?, ...)` over all
+    /// distinct constraints instead of N single-constraint SELECTs. Returns every
+    /// matching row FLAT in the source's ORDER BY (union of the N fetches); the
+    /// Join caller buckets rows back per parent. Same preconditions and row/filter
+    /// mapping as `parallel_leaf_fetch`.
+    fn batched_in_fetch(&self, constraints: &[crate::ivm::constraint::Constraint]) -> Option<Vec<Node>> {
+        let pool = self.read_pool.as_ref()?;
+        let version = pool.pinned_version()?;
+        if self.overlay.borrow().is_some() {
+            return None;
+        }
+        if constraints.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let (order, filter_predicate) = {
+            let conn = self.conn.borrow();
+            let order: Vec<(String, String)> = conn
+                .sort
+                .as_ref()
+                .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
+                .unwrap_or_default();
+            (order, conn.filter_predicate.clone())
+        };
+
+        // Chunk the distinct constraints so one `key IN (?, ...)` stays within
+        // SQLITE_MAX_VARIABLE_NUMBER (and matches the FlippedJoin chunk tuning).
+        // Each chunk is a MultiConstraint → `build_select_query` emits
+        // `key IN (?, ...)` (compound: `(a,b) IN (VALUES ...)`). Chunks run in
+        // parallel across the pool; a parent's key lives in exactly ONE chunk, so
+        // per-parent child order (the ORDER BY) is preserved after flattening.
+        const IN_CHUNK: usize = 256;
+        let tasks: Vec<_> = constraints
+            .chunks(IN_CHUNK)
+            .map(|chunk| {
+                let mc: crate::ivm::constraint::MultiConstraint = chunk.to_vec();
+                let req = FetchRequest {
+                    multi_constraints: vec![mc],
+                    ..Default::default()
+                };
+                let query = build_select_query(
+                    &self.table_name,
+                    &self.column_names,
+                    &req,
+                    self.filter_condition.as_ref(),
+                    Some(&order),
+                    false,
+                );
+                let col_names = self.column_names.clone();
+                let columns = self.columns.clone();
+                let table = self.table_name.clone();
+                move |conn: &Connection| -> Result<Vec<Row>, String> {
+                    let mut stmt = conn.prepare(&query.text).map_err(|e| e.to_string())?;
+                    let param_refs: Vec<&dyn rusqlite::ToSql> =
+                        query.params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+                    let mut rows = stmt
+                        .query(params_from_iter(param_refs.iter().copied()))
+                        .map_err(|e| e.to_string())?;
+                    let mut out: Vec<Row> = Vec::new();
+                    while let Some(raw) = rows.next().map_err(|e| e.to_string())? {
+                        let mut map: FxHashMap<String, Value> = FxHashMap::default();
+                        for (i, col) in col_names.iter().enumerate() {
+                            let val = raw.get::<usize, rusqlite::types::Value>(i);
+                            map.insert(col.clone(), sqlite_value_to_ivm(val, columns.get(col), &table, col));
+                        }
+                        out.push(Arc::new(map));
+                    }
+                    Ok(out)
+                }
+            })
+            .collect();
+
+        let per_chunk_rows: Vec<Vec<Row>> = pool.parallel_read(&version, tasks).ok()?;
+        Some(
+            per_chunk_rows
+                .into_iter()
+                .flatten()
+                .filter(|r| filter_predicate.as_ref().is_none_or(|p| p(r)))
+                .map(Node::new)
+                .collect(),
+        )
+    }
 }
 
 impl Source for TableSource {

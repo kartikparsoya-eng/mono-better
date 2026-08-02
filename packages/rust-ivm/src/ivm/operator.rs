@@ -68,6 +68,21 @@ pub trait Input: InputBase {
         None
     }
 
+    /// EXISTS/child-fetch IN-list batching (prototype, flag-gated by the Join
+    /// caller). Instead of one SELECT per distinct constraint, run a SINGLE
+    /// `... WHERE key IN (?, ?, ...)` over all `constraints` and return every
+    /// matching row FLAT, in the source's ORDER BY. The caller buckets rows back
+    /// per parent (stable extraction preserves per-parent child order, since the
+    /// global order is the child order). Same preconditions as
+    /// `parallel_leaf_fetch` (leaf TableSource, pool pinned, no overlay); `None`
+    /// → caller falls back. Byte-identical result set to the N-SELECT path.
+    fn batched_in_fetch(
+        &self,
+        _constraints: &[crate::ivm::constraint::Constraint],
+    ) -> Option<Vec<crate::ivm::data::Node>> {
+        None
+    }
+
     /// Cheap pre-check: is this input a leaf source that can serve
     /// `parallel_leaf_fetch` right now (pool pinned at the read frame, no live
     /// overlay)? Lets a caller (Join) decide whether to gather constraints for a

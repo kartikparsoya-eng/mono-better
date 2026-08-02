@@ -7,6 +7,15 @@ import {assert} from '../../../../shared/src/asserts.ts';
 // fall back to the eager array path (for debugging/diffing only).
 const STREAM_ROWS = process.env['RUST_IVM_STREAM_ROWS'] !== '0';
 
+// Batched-TSFN hydrate: hand JS N rows per callback (one event-loop turn per N
+// rows) instead of one-at-a-time. Targets the measured single-worker event-loop
+// saturation. RUST_IVM_TSFN_BATCH>1 enables it (must match the addon's batch env).
+// 0 = per-row (default/off).
+const TSFN_BATCH = (() => {
+  const n = parseInt(process.env['RUST_IVM_TSFN_BATCH'] ?? '1', 10);
+  return Number.isFinite(n) && n > 1 ? n : 0;
+})();
+
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
@@ -654,25 +663,39 @@ export class RustIVMDriver {
   ): AsyncIterable<RowChange | 'yield'> {
     const queue = new AsyncQueue<RowChange | 'yield'>();
 
-    this.#engine
-      .addQueriesStreamingRows(
-        [{queryId: queryID, astJson: JSON.stringify(query)}],
-        (_err: unknown, row: NapiRowChange) => {
-          const change = napiToRowChange(row);
-          if (change.type !== ChangeType.EDIT) {
-            const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
-            const unit = rowIDSignatureUnit({
-              schema: '',
-              table: change.table,
-              rowKey: change.rowKey as RowKey,
-            });
-            this.#rowSetSignatures.set(change.queryID, cur ^ unit);
-          }
-          queue.push(change);
-        },
-      )
-      .then(() => deferClose(queue))
-      .catch((e: unknown) => queue.error(e));
+    // Per-row handling is identical whether rows arrive singly or in a batch;
+    // the batched path just loops this over the array (one event-loop turn per
+    // batch vs per row).
+    const handleRow = (row: NapiRowChange) => {
+      const change = napiToRowChange(row);
+      if (change.type !== ChangeType.EDIT) {
+        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+        const unit = rowIDSignatureUnit({
+          schema: '',
+          table: change.table,
+          rowKey: change.rowKey as RowKey,
+        });
+        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+      }
+      queue.push(change);
+    };
+
+    const spec = [{queryId: queryID, astJson: JSON.stringify(query)}];
+    const hydrated = TSFN_BATCH
+      ? this.#engine.addQueriesStreamingRowsBatched(
+          spec,
+          (_err: unknown, rows: NapiRowChange[]) => {
+            for (let i = 0; i < rows.length; i++) {
+              handleRow(rows[i]);
+            }
+          },
+        )
+      : this.#engine.addQueriesStreamingRows(
+          spec,
+          (_err: unknown, row: NapiRowChange) => handleRow(row),
+        );
+
+    hydrated.then(() => deferClose(queue)).catch((e: unknown) => queue.error(e));
 
     // If the consumer abandons this stream early (break / thrown error /
     // client teardown), cancel the engine so the actor stops producing and
