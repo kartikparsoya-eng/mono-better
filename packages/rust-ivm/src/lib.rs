@@ -14,6 +14,7 @@
 
 pub mod advance_gate;
 pub mod builder;
+pub mod credit;
 pub mod engine;
 pub mod ivm;
 pub mod planner;
