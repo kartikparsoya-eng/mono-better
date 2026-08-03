@@ -848,9 +848,11 @@ impl TableSource {
             conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
-            historical_change_count,
-            &self.primary_key,
-            conn.internal_sort.clone(),
+            crate::ivm::source::HistoricalOverlayContext {
+                change_count: historical_change_count,
+                primary_key: self.primary_key.clone(),
+                sort: conn.internal_sort.clone(),
+            },
         )
     }
 }
@@ -936,9 +938,11 @@ impl Input for TableSourceInput {
             conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
-            historical_change_count,
-            &self.schema.primary_key,
-            conn.internal_sort.clone(),
+            crate::ivm::source::HistoricalOverlayContext {
+                change_count: historical_change_count,
+                primary_key: self.schema.primary_key.clone(),
+                sort: conn.internal_sort.clone(),
+            },
         )
     }
 }

@@ -995,9 +995,7 @@ pub(crate) fn apply_source_overlays(
     index_compare: Comparator,
     filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
     req: &FetchRequest,
-    historical_change_count: usize,
-    primary_key: &[String],
-    sort: SortOrder,
+    historical: HistoricalOverlayContext,
 ) -> NodeStream {
     if overlay_changes.is_empty() {
         let nodes = Box::new(rows.map(|row| StreamItem::Data(Node::new(row))));
@@ -1006,9 +1004,9 @@ pub(crate) fn apply_source_overlays(
 
     let count = overlay_changes.len();
     for (index, change) in overlay_changes.into_iter().enumerate() {
-        let stable_edit = (index < historical_change_count).then(|| StableEdit {
-            primary_key: primary_key.to_vec(),
-            sort: sort.clone(),
+        let stable_edit = (index < historical.change_count).then(|| StableEdit {
+            primary_key: historical.primary_key.clone(),
+            sort: historical.sort.clone(),
         });
         let nodes = apply_source_overlay_impl(
             rows,
@@ -1028,6 +1026,12 @@ pub(crate) fn apply_source_overlays(
         }));
     }
     unreachable!("non-empty overlay list must return from the loop")
+}
+
+pub(crate) struct HistoricalOverlayContext {
+    pub change_count: usize,
+    pub primary_key: Vec<String>,
+    pub sort: SortOrder,
 }
 
 /// Port of zql `generateWithStart`. SQLite applies the same bound in SQL, but
@@ -1542,9 +1546,11 @@ mod overlay_tests {
             compare,
             None,
             &FetchRequest::default(),
-            1,
-            &["id".to_string()],
-            sort,
+            HistoricalOverlayContext {
+                change_count: 1,
+                primary_key: vec!["id".to_string()],
+                sort,
+            },
         )
         .filter_map(|item| match item {
             StreamItem::Data(node) => Some(node.row),
