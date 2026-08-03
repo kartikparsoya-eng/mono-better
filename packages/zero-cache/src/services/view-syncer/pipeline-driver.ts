@@ -1,5 +1,6 @@
 import type {LogContext} from '@rocicorp/logger';
 import {assert, unreachable} from '../../../../shared/src/asserts.ts';
+import type {RawJSON} from '../../../../shared/src/bigint-json.ts';
 import {deepEqual, type JSONValue} from '../../../../shared/src/json.ts';
 import {must} from '../../../../shared/src/must.ts';
 import type {AST, LiteralValue} from '../../../../zero-protocol/src/ast.ts';
@@ -71,6 +72,15 @@ type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
   readonly table: string;
   readonly rowKey: Row;
   readonly row: Row;
+  /**
+   * Set only by the Rust IVM engine, which hands rows over as already-
+   * serialized JSON with `_0_version` split out. When present, consumers
+   * should use these instead of `row`: they avoid parsing the row into an
+   * object just to re-serialize it onto the wire. This driver leaves them
+   * undefined and consumers fall back to `row`.
+   */
+  readonly rawContents?: RawJSON | undefined;
+  readonly version?: string | undefined;
 };
 
 export type RowAdd = RowOp<ChangeType.ADD>;

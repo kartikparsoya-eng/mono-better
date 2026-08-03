@@ -1514,7 +1514,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             await timer.start(),
             queryName,
           );
-          const addIterable = addResult instanceof Promise ? await addResult : addResult;
+          const addIterable =
+            addResult instanceof Promise ? await addResult : addResult;
           for await (const change of addIterable) {
             if (change === 'yield') {
               await timer.yieldProcess('yield in hydrateUnchangedQueries');
@@ -2239,7 +2240,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             await timer.yieldProcess('yield in processChanges');
             continue;
           }
-          const {type, queryID, table, rowKey, row} = change;
+          const {type, queryID, table, rowKey} = change;
           const rowID: RowID = {schema: '', table, rowKey: rowKey as RowKey};
 
           let parsedRow = rows.get(rowID);
@@ -2249,21 +2250,45 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
           parsedRow.refCounts[queryID] ??= 0;
 
-          const updateVersion = (row: Row) => {
+          const updateVersion = () => {
             // IVM can output multiple versions of a row as it goes through its
             // intermediate stages. Always update the version and contents;
             // the last version will reflect the final state.
-            const {version, contents} = contentsAndVersion(row);
+            //
+            // The Rust engine ALWAYS splits `_0_version` off while serializing
+            // and reports it as `change.version`, so its rows never carry that
+            // column and must not be run through `contentsAndVersion`. When the
+            // contents are also free of native-transport tags it supplies them
+            // ready to splice (`rawContents`) and the row is never materialized
+            // at all; otherwise we use the revived object. The TS engine sets
+            // neither field and keeps `_0_version` inline, so it splits here.
+            if (
+              change.version !== undefined ||
+              change.rawContents !== undefined
+            ) {
+              if (
+                typeof change.version !== 'string' ||
+                change.version.length === 0
+              ) {
+                throw new Error(
+                  `Invalid _0_version for ${table}:${stringify(rowKey)}`,
+                );
+              }
+              parsedRow.version = change.version;
+              parsedRow.contents = change.rawContents ?? change.row;
+              return;
+            }
+            const {version, contents} = contentsAndVersion(change.row);
             parsedRow.version = version;
             parsedRow.contents = contents;
           };
           switch (type) {
             case ChangeType.ADD:
-              updateVersion(row);
+              updateVersion();
               parsedRow.refCounts[queryID]++;
               break;
             case ChangeType.EDIT:
-              updateVersion(row);
+              updateVersion();
               // No update to refCounts.
               break;
             case ChangeType.REMOVE:
@@ -2336,7 +2361,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         await this.#processChanges(
           lc,
           await timer.start(),
-          changes as Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
+          changes as
+            | Iterable<RowChange | 'yield'>
+            | AsyncIterable<RowChange | 'yield'>,
           updater,
           pokers,
         );
@@ -2575,7 +2602,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 // Default 10000 matches Go IVM's hydrateChunkSize / advanceChunkSize so
 // the streaming chunk boundary aligns with the CVR flush boundary.
 const CURSOR_PAGE_SIZE = parseInt(
-  process.env.ZERO_CURSOR_PAGE_SIZE ?? "10000",
+  process.env.ZERO_CURSOR_PAGE_SIZE ?? '10000',
   10,
 );
 

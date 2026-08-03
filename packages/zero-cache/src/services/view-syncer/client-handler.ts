@@ -1,6 +1,10 @@
 import type {LogContext} from '@rocicorp/logger';
 import {assert, unreachable} from '../../../../shared/src/asserts.ts';
-import type {JSONObject} from '../../../../shared/src/bigint-json.ts';
+import {
+  parse as parseBigIntJSON,
+  RawJSON,
+  type JSONObject,
+} from '../../../../shared/src/bigint-json.ts';
 import {
   assertJSONValue,
   type JSONObject as SafeJSONObject,
@@ -9,7 +13,7 @@ import {promiseVoid} from '../../../../shared/src/resolved-promises.ts';
 import * as v from '../../../../shared/src/valita.ts';
 import type {Writable} from '../../../../shared/src/writable.ts';
 import type {ErroredQuery} from '../../../../zero-protocol/src/custom-queries.ts';
-import {rowSchema} from '../../../../zero-protocol/src/data.ts';
+import {rowSchema, type Row} from '../../../../zero-protocol/src/data.ts';
 import type {DeleteClientsBody} from '../../../../zero-protocol/src/delete-clients.ts';
 import type {Downstream} from '../../../../zero-protocol/src/down.ts';
 import {
@@ -50,7 +54,12 @@ export type PutRowPatch = {
   type: 'row';
   op: 'put';
   id: RowID;
-  contents: JSONObject;
+  /**
+   * A `RawJSON` when the row was produced by the Rust IVM engine, which hands
+   * contents over as already-serialized JSON. It is spliced into the poke
+   * verbatim — see {@link makeRowPatch} for why that skips validation.
+   */
+  contents: JSONObject | RawJSON;
 };
 
 export type DeleteRowPatch = {
@@ -243,7 +252,9 @@ export class ClientHandler {
             const patches = (body.mutationsPatch ??= []);
             if (op === 'put') {
               const row = v.parse(
-                normalizeMutationResult(ensureSafeJSON(patch.contents)),
+                normalizeMutationResult(
+                  ensureSafeJSON(materializeContents(patch.contents)),
+                ),
                 mutationRowSchema,
                 'passthrough',
               );
@@ -364,7 +375,7 @@ export class ClientHandler {
 
   #updateLMIDs(lmids: Record<string, number>, patch: RowPatch) {
     if (patch.op === 'put') {
-      const row = ensureSafeJSON(patch.contents);
+      const row = ensureSafeJSON(materializeContents(patch.contents));
       const {clientGroupID, clientID, lastMutationID} = v.parse(
         row,
         lmidRowSchema,
@@ -425,6 +436,21 @@ function normalizeMutationResult(row: SafeJSONObject): SafeJSONObject {
   }
 }
 
+/**
+ * Materializes patch contents into a plain object.
+ *
+ * Rows from the Rust IVM engine arrive as already-serialized JSON and are
+ * normally spliced straight to the wire. The two internal tables that use this
+ * — client lmids and mutation results — are the exception: the server actually
+ * reads their fields, so they have to be parsed. Both are low-volume control
+ * tables, so the parse here is not on the bulk row path.
+ */
+function materializeContents(contents: JSONObject | RawJSON): JSONObject {
+  return contents instanceof RawJSON
+    ? (parseBigIntJSON(contents.json) as JSONObject)
+    : contents;
+}
+
 function makeRowPatch(patch: RowPatch): RowPatchOp {
   const {
     op,
@@ -436,7 +462,17 @@ function makeRowPatch(patch: RowPatch): RowPatchOp {
       return {
         op: 'put',
         tableName,
-        value: v.parse(ensureSafeJSON(patch.contents), rowSchema),
+        // Contents from the Rust IVM engine arrive as already-serialized JSON
+        // and are spliced into the poke verbatim. The validation below is
+        // skipped for them because the engine enforces the same invariants at
+        // the source: it rejects integers outside ±(2^53-1) in
+        // `sqlite_value_to_ivm`, its `Value` type cannot represent a non-JSON
+        // value, and JSON columns are parsed and validated there. Re-checking
+        // here would mean parsing every row back into objects — the exact cost
+        // this path exists to avoid.
+        value: (patch.contents instanceof RawJSON
+          ? patch.contents
+          : v.parse(ensureSafeJSON(patch.contents), rowSchema)) as Row,
       };
 
     case 'del':

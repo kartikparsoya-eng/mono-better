@@ -181,6 +181,16 @@ RUN cp /app/mono/packages/zero-cache/src/services/litestream/config.yml /etc/lit
 # Install only the runtime dependency closure for zero-cache. Keep the root
 # package in the filter because it owns the pinned tsx runtime loader. The
 # server source imports ast-to-zql directly, outside pnpm's declared graph.
+#
+# This chain also verifies a contract zero-cache depends on: the Rust engine
+# must lift `_0_version` OUT of row contents and report it in `version`. The JS
+# side trusts that split — it splices row contents into pokes without parsing
+# them — so a regression would ship a `_0_version` field to every client and
+# deliver puts carrying no version at all. It runs during `docker build`
+# because that is the CI gate (there is no `cargo test` job), and it must run
+# inside THIS step: after the install, because it needs the wal2-linked
+# @rocicorp/zero-sqlite3 to create a wal2 replica, and before the cleanup
+# below deletes `packages/rust-ivm/agentic`.
 WORKDIR /app/mono
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --prod \
@@ -192,6 +202,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     && ldconfig \
     && ldd packages/rust-ivm/napi/rust-ivm.node | grep '/usr/local/lib/libsqlite3.so.0' \
     && ldd "$zero_sqlite/better_sqlite3.node" | grep '/usr/local/lib/libsqlite3.so.0' \
+    && node packages/rust-ivm/agentic/oracle/version-split-check.mjs \
     && rm -rf /root/.cache \
        /usr/local/lib/node_modules/npm \
        /usr/local/bin/npm /usr/local/bin/npx \

@@ -273,6 +273,8 @@ fn make_reset_row(reason: &str, msg: &str) -> NapiRowChange {
         table: String::new(),
         row_key,
         row: None,
+        version: None,
+        needs_revive: false,
         is_hidden: false,
     }
 }
@@ -287,6 +289,8 @@ fn end_sentinel() -> NapiRowChange {
         table: String::new(),
         row_key: "{}".to_string(),
         row: None,
+        version: None,
+        needs_revive: false,
         is_hidden: false,
     }
 }
@@ -348,8 +352,25 @@ pub struct NapiRowChange {
     /// Using String + JSON.parse on the JS side is ~10x faster than
     /// HashMap<String, NapiValue> (which creates 5 V8 properties per value).
     pub row_key: String,
-    /// JSON-encoded row object, or null.
+    /// JSON-encoded row CONTENTS, or null.
+    ///
+    /// This EXCLUDES the `_0_version` column, which is delivered separately in
+    /// `version`. TS used to do this split itself (`contentsAndVersion` in
+    /// view-syncer.ts), which cost a `JSON.parse` plus a destructure and
+    /// rest-spread — a fresh object and a full column copy — on every row.
+    /// Splitting here means the JS side never has to materialize the row at
+    /// all: it can forward this string straight to the wire.
     pub row: Option<String>,
+    /// The row's `_0_version`, lifted out of `row`. `None` when there is no row
+    /// (a REMOVE) or when the column is absent — the JS side treats a missing
+    /// version on a put as an error, exactly as `contentsAndVersion` did.
+    pub version: Option<String>,
+    /// True when `row` contains a native-transport tag (`__rustIvmSqliteReal`)
+    /// that must be revived into a real JS value before the row can be sent to
+    /// a client. Only NaN/±Infinity floats produce one, so this is false for
+    /// virtually every row — and when it is false the JS side can splice `row`
+    /// into the poke verbatim instead of parsing and rebuilding it.
+    pub needs_revive: bool,
     /// True when this row belongs to a hidden EXISTS/NOT-EXISTS relationship.
     pub is_hidden: bool,
 }
@@ -1514,6 +1535,8 @@ impl Task for AdvanceTask {
                                 table: String::new(),
                                 row_key: header_key,
                                 row: None,
+                                version: None,
+                                needs_revive: false,
                                 is_hidden: false,
                             });
                         },
@@ -1545,6 +1568,8 @@ impl Task for AdvanceTask {
                                         table: String::new(),
                                         row_key: reset_key,
                                         row: None,
+                                        version: None,
+                                        needs_revive: false,
                                         is_hidden: false,
                                     });
                                 }
@@ -1758,6 +1783,8 @@ impl Task for AdvanceStreamingTask {
                                 table: String::new(),
                                 row_key: header_key,
                                 row: None,
+                                version: None,
+                                needs_revive: false,
                                 is_hidden: false,
                             }), ThreadsafeFunctionCallMode::Blocking);
                         },
@@ -1795,6 +1822,8 @@ impl Task for AdvanceStreamingTask {
                                         table: String::new(),
                                         row_key: reset_key,
                                         row: None,
+                                        version: None,
+                                        needs_revive: false,
                                         is_hidden: false,
                                     }), ThreadsafeFunctionCallMode::Blocking);
                                 }
@@ -1845,14 +1874,66 @@ impl Task for AdvanceStreamingTask {
 // ---------------------------------------------------------------------------
 
 fn row_change_to_napi(rc: &rust_ivm::streamer::RowChange) -> NapiRowChange {
+    let (row, version, needs_revive) = match rc.row.as_ref() {
+        Some(r) => {
+            let (contents, version, needs_revive) = value_map_to_contents_and_version(r);
+            (Some(contents), version, needs_revive)
+        }
+        None => (None, None, false),
+    };
     NapiRowChange {
         change_type: rc.change_type as i32,
         query_id: rc.query_id.clone(),
         table: rc.table.clone(),
         row_key: value_map_to_json_string(&rc.row_key),
-        row: rc.row.as_ref().map(value_map_to_json_string),
+        row,
+        version,
+        needs_revive,
         is_hidden: rc.is_hidden,
     }
+}
+
+/// Serialize a row to JSON *contents* (every column except `_0_version`) and
+/// return the `_0_version` value alongside it.
+///
+/// This is the Rust half of what TS's `contentsAndVersion` used to do after a
+/// `JSON.parse`. Doing it here is free — we are already walking the map to
+/// serialize it — and it lets the JS side treat the contents as an opaque
+/// string that is spliced into the outgoing poke without ever being parsed.
+///
+/// The version is only reported when it is a non-empty string, matching the TS
+/// check (`typeof version !== 'string' || version.length === 0` was an error).
+/// Anything else is reported as `None` so the JS side raises the same error.
+fn value_map_to_contents_and_version(
+    map: &rust_ivm::ivm::data::Row,
+) -> (String, Option<String>, bool) {
+    const VERSION_COL: &str = rust_ivm::snapshotter::ZERO_VERSION_COLUMN_NAME;
+    let mut obj = serde_json::Map::with_capacity(map.len());
+    let mut version = None;
+    // Whether any cell was encoded as a native-transport tag
+    // (`__rustIvmSqliteReal`) that the JS side must revive before the row can
+    // go to a client. Only NaN/±Infinity floats produce one — a `Value::Json`
+    // cell that happens to contain the same key is USER data and is
+    // deliberately not counted, because `reviveNativeRow` skips json columns.
+    let mut needs_revive = false;
+    for (k, v) in map.iter() {
+        if k == VERSION_COL {
+            if let Value::Str(s) = v
+                && !s.is_empty()
+            {
+                version = Some(s.to_string());
+            }
+            continue;
+        }
+        if let Value::F64(n) = v
+            && !n.is_finite()
+        {
+            needs_revive = true;
+        }
+        obj.insert(k.to_string(), value_to_serde_json(v));
+    }
+    let contents = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
+    (contents, version, needs_revive)
 }
 
 /// Convert a Value map to a JSON object string for efficient cross-boundary
@@ -1930,5 +2011,126 @@ impl Task for DestroyTask {
 
     fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod contents_version_tests {
+    use super::*;
+    use rust_ivm::ivm::data::Row;
+    use rustc_hash::FxHashMap;
+    use std::sync::Arc;
+
+    fn row(pairs: &[(&str, Value)]) -> Row {
+        let m: FxHashMap<String, Value> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        Arc::new(m)
+    }
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("contents must be valid JSON")
+    }
+
+    #[test]
+    fn splits_version_out_of_contents() {
+        let r = row(&[
+            ("_0_version", Value::Str(Arc::from("01abc"))),
+            ("id", Value::Str(Arc::from("r1"))),
+            ("n", Value::F64(42.0)),
+        ]);
+        let (contents, version, needs_revive) = value_map_to_contents_and_version(&r);
+        assert!(!needs_revive, "plain values need no revive");
+        assert_eq!(version.as_deref(), Some("01abc"));
+        let c = parse(&contents);
+        assert!(
+            c.get("_0_version").is_none(),
+            "_0_version must not leak into contents: {contents}"
+        );
+        assert_eq!(c.get("id").unwrap(), "r1");
+        assert_eq!(c.get("n").unwrap(), 42);
+    }
+
+    /// The contents must be byte-identical to what the old path produced after
+    /// TS destructured `_0_version` off — i.e. the same object minus that one
+    /// key. This pins the wire format so the JS side can splice it verbatim.
+    #[test]
+    fn contents_match_full_serialization_minus_version() {
+        let full = row(&[
+            ("_0_version", Value::Str(Arc::from("01abc"))),
+            ("id", Value::Str(Arc::from("r1"))),
+            ("title", Value::Str(Arc::from("hi"))),
+            ("flag", Value::Bool(true)),
+            ("nothing", Value::Null),
+        ]);
+        let without = row(&[
+            ("id", Value::Str(Arc::from("r1"))),
+            ("title", Value::Str(Arc::from("hi"))),
+            ("flag", Value::Bool(true)),
+            ("nothing", Value::Null),
+        ]);
+        let (contents, _, _) = value_map_to_contents_and_version(&full);
+        assert_eq!(contents, value_map_to_json_string(&without));
+    }
+
+    /// A NaN/Infinity float is encoded as a native-transport tag
+    /// (`__rustIvmSqliteReal`) which the JS side must revive before the row can
+    /// reach a client. Such rows MUST be flagged, otherwise the opaque-splice
+    /// fast path would ship the raw tag object to clients.
+    #[test]
+    fn non_finite_floats_are_flagged_for_revive() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let r = row(&[
+                ("_0_version", Value::Str(Arc::from("01abc"))),
+                ("id", Value::Str(Arc::from("r1"))),
+                ("score", Value::F64(bad)),
+            ]);
+            let (contents, _, needs_revive) = value_map_to_contents_and_version(&r);
+            assert!(needs_revive, "{bad} must be flagged, contents={contents}");
+            assert!(
+                contents.contains("__rustIvmSqliteReal"),
+                "expected a transport tag for {bad}, got {contents}"
+            );
+        }
+    }
+
+    /// Finite floats — including integral ones — carry no tag, so they stay on
+    /// the fast path.
+    #[test]
+    fn finite_floats_are_not_flagged() {
+        let r = row(&[
+            ("_0_version", Value::Str(Arc::from("01abc"))),
+            ("a", Value::F64(42.0)),
+            ("b", Value::F64(-1.5)),
+            ("c", Value::F64(0.0)),
+        ]);
+        let (contents, _, needs_revive) = value_map_to_contents_and_version(&r);
+        assert!(!needs_revive, "finite floats must stay spliceable: {contents}");
+        assert!(!contents.contains("__rustIvmSqlite"));
+    }
+
+    /// TS treated a missing/blank/non-string `_0_version` on a put as an error.
+    /// Reporting `None` preserves that: the JS side raises on a put with no
+    /// version rather than silently shipping a versionless row.
+    #[test]
+    fn absent_or_invalid_version_reports_none() {
+        let missing = row(&[("id", Value::Str(Arc::from("r1")))]);
+        assert_eq!(value_map_to_contents_and_version(&missing).1, None);
+
+        let empty = row(&[
+            ("_0_version", Value::Str(Arc::from(""))),
+            ("id", Value::Str(Arc::from("r1"))),
+        ]);
+        assert_eq!(value_map_to_contents_and_version(&empty).1, None);
+
+        let wrong_type = row(&[
+            ("_0_version", Value::F64(7.0)),
+            ("id", Value::Str(Arc::from("r1"))),
+        ]);
+        let (contents, version, _) = value_map_to_contents_and_version(&wrong_type);
+        assert_eq!(version, None);
+        // Still stripped from contents — it is never a data column.
+        assert!(parse(&contents).get("_0_version").is_none());
     }
 }
