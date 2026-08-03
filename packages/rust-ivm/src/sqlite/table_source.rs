@@ -51,16 +51,26 @@ use crate::sqlite::query_builder::{SqlParam, SqlQuery, build_select_query};
 /// - `_guard` holds an active immutable `RefCell` borrow for the struct's
 ///   lifetime, preventing mutation or destruction of the connection.
 /// - `stmt` is boxed and pinned, so its address never changes.
-/// - Rust drops struct fields in declaration order. The dependent fields are
-///   therefore declared first: `rows`, then `_stmt`, then `_guard`, then the
-///   owning `_conn`. This order is part of the safety contract.
+/// - Fields are declared in dependency order (`rows`, `stmt`, `_guard`,
+///   `_conn`) and Rust drops them in that same declaration order, so each is
+///   released before the thing it borrows from.
 struct LazyRows {
+    // DROP ORDER IS LOAD-BEARING. Rust drops struct fields in DECLARATION
+    // order (not reverse), so the most dependent field must come first.
+    // `rusqlite::Rows` holds a `&Statement` and only clears it when the cursor
+    // runs to completion; a stream abandoned early (Take/limit, or the
+    // advance_gate bail-out below) still holds it, so `Rows::drop` calls
+    // `stmt.reset()`. If `_stmt` (a `Box`) were dropped first, that reset
+    // would touch freed memory. Order: rows -> _stmt -> _guard -> _conn.
     rows: Option<rusqlite::Rows<'static>>,
     _stmt: Pin<Box<rusqlite::Statement<'static>>>,
     _guard: Ref<'static, Connection>,
     _conn: Rc<RefCell<Connection>>,
     column_names: Vec<String>,
-    columns: HashMap<String, ColumnType>,
+    /// Column types resolved ONCE, positionally aligned with `column_names`.
+    /// This used to be a `HashMap` lookup per column per row; the schema is
+    /// fixed for the life of the cursor, so that hashing is pure waste.
+    col_types: Vec<Option<ColumnType>>,
     table_name: String,
     /// Rows produced so far — used to THROTTLE the per-fetch economic budget
     /// check (advance_gate) to every 64 rows.
@@ -97,13 +107,16 @@ impl LazyRows {
         };
         let rows_static: rusqlite::Rows<'static> = unsafe { std::mem::transmute(rows) };
 
+        let col_types: Vec<Option<ColumnType>> =
+            column_names.iter().map(|c| columns.get(c).cloned()).collect();
+
         Ok(Box::pin(LazyRows {
             rows: Some(rows_static),
             _stmt: stmt_pin,
             _guard: guard_static,
             _conn: conn,
             column_names,
-            columns,
+            col_types,
             table_name,
             fetched: 0,
             _pin: PhantomPinned,
@@ -170,16 +183,26 @@ impl Iterator for LazyRowsIter {
         if this.fetched % 64 == 1 && crate::advance_gate::should_stop_fetch() {
             return None;
         }
-        let rows = this.rows.as_mut()?;
-        let column_names = this.column_names.clone();
-        let columns = this.columns.clone();
-        let table_name = this.table_name.clone();
+        // Disjoint field borrows: `rows` mutably, the schema fields immutably.
+        // These used to be `.clone()`d to dodge the borrow conflict, which
+        // allocated a Vec<String> + a HashMap + a String on EVERY row, before
+        // touching any data.
+        let LazyRows {
+            rows,
+            column_names,
+            col_types,
+            table_name,
+            ..
+        } = this;
+        let rows = rows.as_mut()?;
         match rows.next() {
             Ok(Some(raw_row)) => {
-                let mut map: FxHashMap<String, Value> = FxHashMap::default();
-                for (i, col) in column_names.iter().enumerate() {
+                // Row width is known, so the map never rehashes while filling.
+                let mut map: FxHashMap<String, Value> =
+                    FxHashMap::with_capacity_and_hasher(column_names.len(), Default::default());
+                for (i, (col, ty)) in column_names.iter().zip(col_types.iter()).enumerate() {
                     let val = crate::sqlite::db::read_value_lossy(raw_row, i);
-                    let value = sqlite_value_to_ivm(val, columns.get(col), &table_name, col);
+                    let value = sqlite_value_to_ivm(val, ty.as_ref(), table_name, col);
                     map.insert(col.clone(), value);
                 }
                 Some(Arc::new(map))
