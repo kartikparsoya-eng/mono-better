@@ -1,0 +1,197 @@
+{
+ "name": "fuzz.seed-504340",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "number",
+    "c1": "string|null",
+    "c2": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": 123456789,
+     "c1": null,
+     "c2": "null"
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "number|null",
+    "c1": "boolean|null",
+    "c2": "boolean",
+    "fk": "string",
+    "k": "string"
+   },
+   "primaryKey": [
+    "k"
+   ],
+   "rows": [],
+   "replicaPrimaryKey": [
+    "id"
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c2",
+    "asc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "and",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ]
+        }
+       },
+       "op": "EXISTS"
+      },
+      {
+       "type": "simple",
+       "op": "NOT IN",
+       "left": {
+        "type": "column",
+        "name": "id"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         "t0-r2",
+         "t0-r1",
+         "ZZZ"
+        ]
+       }
+      },
+      {
+       "type": "correlatedSubquery",
+       "op": "EXISTS",
+       "scalar": true,
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t1",
+         "alias": "zsubq_t1",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ],
+         "where": {
+          "type": "simple",
+          "op": "=",
+          "left": {
+           "type": "column",
+           "name": "id"
+          },
+          "right": {
+           "type": "literal",
+           "value": "t1-x85"
+          }
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "type": "or",
+     "conditions": [
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         123456789,
+         2.5,
+         9007199254740991,
+         10
+        ]
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IN",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": [
+         -1,
+         1e-10,
+         0
+        ]
+       }
+      }
+     ]
+    },
+    {
+     "type": "simple",
+     "op": "!=",
+     "left": {
+      "type": "column",
+      "name": "c1"
+     },
+     "right": {
+      "type": "literal",
+      "value": "A"
+     }
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}
