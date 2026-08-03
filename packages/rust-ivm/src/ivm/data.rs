@@ -94,7 +94,10 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::F64(a), Value::F64(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Json(a), Value::Json(b)) => a == b,
+            // JSON objects/arrays are JS references in PipelineDriver. Cloning
+            // a Value preserves identity; independently parsing equal text does
+            // not make two objects `===`.
+            (Value::Json(a), Value::Json(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -112,11 +115,60 @@ pub fn compare_values(a: &Value, b: &Value) -> CmpOrdering {
         (Value::F64(x), Value::F64(y)) => x.partial_cmp(y).unwrap_or(CmpOrdering::Equal),
         (Value::Str(x), Value::Str(y)) => x.as_bytes().cmp(y.as_bytes()),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
-        (Value::Json(x), Value::Json(y)) => x.as_bytes().cmp(y.as_bytes()),
+        (Value::Json(x), Value::Json(y)) if Arc::ptr_eq(x, y) => CmpOrdering::Equal,
+        (Value::Json(_), Value::Json(_)) => {
+            panic!("Unsupported type: {}", js_value_string(a))
+        }
         _ => panic!(
-            "Cannot compare values of different types: {:?} and {:?}",
-            a, b
+            "Cannot compare values of different types: {} and {}",
+            js_typeof(a),
+            js_typeof(b)
         ),
+    }
+}
+
+fn js_typeof(value: &Value) -> &'static str {
+    match value {
+        Value::Null | Value::Json(_) => "object",
+        Value::Bool(_) => "boolean",
+        Value::F64(_) => "number",
+        Value::Str(_) => "string",
+    }
+}
+
+fn js_value_string(value: &Value) -> String {
+    match value {
+        Value::Json(raw) => serde_json::from_str(raw)
+            .map(|value| js_json_string(&value))
+            .unwrap_or_else(|_| "[object Object]".to_string()),
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::F64(value) => {
+            if value.is_finite() && value.fract() == 0.0 {
+                format!("{value:.0}")
+            } else {
+                value.to_string()
+            }
+        }
+        Value::Str(value) => value.to_string(),
+    }
+}
+
+fn js_json_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::Null => String::new(),
+                other => js_json_string(other),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        serde_json::Value::Object(_) => "[object Object]".to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
     }
 }
 
@@ -128,6 +180,49 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         return false;
     }
     a == b
+}
+
+#[cfg(test)]
+mod value_parity_tests {
+    use super::*;
+
+    #[test]
+    fn cloned_json_preserves_reference_identity() {
+        let value = Value::Json(Arc::from("{\"a\":1}"));
+        let cloned = value.clone();
+        assert!(values_equal(&value, &cloned));
+        assert_eq!(compare_values(&value, &cloned), CmpOrdering::Equal);
+    }
+
+    #[test]
+    fn independently_parsed_json_is_not_equal_or_orderable() {
+        let left = Value::Json(Arc::from("{\"a\":1}"));
+        let right = Value::Json(Arc::from("{\"a\":1}"));
+        assert!(!values_equal(&left, &right));
+        assert!(std::panic::catch_unwind(|| compare_values(&left, &right)).is_err());
+    }
+
+    #[test]
+    fn comparator_errors_match_javascript_messages() {
+        let different =
+            std::panic::catch_unwind(|| compare_values(&Value::Bool(true), &Value::F64(0.0)))
+                .unwrap_err();
+        assert_eq!(
+            different.downcast_ref::<String>().unwrap(),
+            "Cannot compare values of different types: boolean and number"
+        );
+
+        for (raw, expected) in [
+            ("{}", "Unsupported type: [object Object]"),
+            ("[null,true,\"s\"]", "Unsupported type: ,true,s"),
+            ("[]", "Unsupported type: "),
+        ] {
+            let left = Value::Json(Arc::from(raw));
+            let right = Value::Json(Arc::from(raw));
+            let panic = std::panic::catch_unwind(|| compare_values(&left, &right)).unwrap_err();
+            assert_eq!(panic.downcast_ref::<String>().unwrap(), expected);
+        }
+    }
 }
 
 /// A row of data. TS: `type Row = Record<string, Value>`.

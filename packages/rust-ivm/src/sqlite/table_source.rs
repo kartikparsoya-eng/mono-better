@@ -178,7 +178,7 @@ impl Iterator for LazyRowsIter {
             Ok(Some(raw_row)) => {
                 let mut map: FxHashMap<String, Value> = FxHashMap::default();
                 for (i, col) in column_names.iter().enumerate() {
-                    let val = raw_row.get::<usize, rusqlite::types::Value>(i);
+                    let val = crate::sqlite::db::read_value_lossy(raw_row, i);
                     let value = sqlite_value_to_ivm(val, columns.get(col), &table_name, col);
                     map.insert(col.clone(), value);
                 }
@@ -210,7 +210,6 @@ fn stream_query(
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
     table_name: String,
-    filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
 ) -> Box<dyn Iterator<Item = Row>> {
     let table_name_for_err = table_name.clone();
     let lazy = match LazyRows::try_new(
@@ -244,11 +243,11 @@ fn stream_query(
         }
     };
 
-    let iter = LazyRowsIter(lazy);
-    match filter_predicate {
-        Some(pred) => Box::new(iter.filter(move |r| pred(r))),
-        None => Box::new(iter),
-    }
+    // The SQL query has already applied the source condition. TS only applies
+    // the JS predicate inside generateWithOverlay, to overlay rows that did not
+    // pass through SQLite. Reapplying it here changes SQLite storage-class
+    // semantics (notably for JSON text compared with scalar literals).
+    Box::new(LazyRowsIter(lazy))
 }
 
 /// Convert a raw SQLite value to an IVM `Value` using the column's declared
@@ -284,14 +283,12 @@ pub(crate) fn sqlite_value_to_ivm(
         // TS `json` => `JSON.parse(v)`, which THROWS on invalid JSON. Validate at
         // ingest (matching TS's failure point + message); the raw string is then
         // guaranteed-valid for the wire, which re-parses it into an object on JS.
-        Ok(Sv::Text(s)) if is_json => {
-            assert_valid_json(&s, table, col);
-            Value::Json(Arc::from(s.as_str()))
-        }
+        Ok(Sv::Integer(n)) if is_json => json_sqlite_text_to_ivm(&n.to_string(), table, col),
+        Ok(Sv::Real(n)) if is_json => json_sqlite_text_to_ivm(&n.to_string(), table, col),
+        Ok(Sv::Text(s)) if is_json => json_sqlite_text_to_ivm(&s, table, col),
         Ok(Sv::Blob(b)) if is_json => {
             let s = String::from_utf8_lossy(&b);
-            assert_valid_json(&s, table, col);
-            Value::Json(Arc::from(s.as_ref()))
+            json_sqlite_text_to_ivm(&s, table, col)
         }
 
         // number / string columns (and untyped): pass through unchanged.
@@ -314,18 +311,29 @@ pub(crate) fn sqlite_value_to_ivm(
     }
 }
 
-/// Validate that `s` parses as JSON, panicking with TS's exact message on
-/// failure. Matches `fromSQLiteType`'s `JSON.parse` throw for a `json` column.
-/// Uses `IgnoredAny` to validate without materializing the parsed value.
-fn assert_valid_json(s: &str, table: &str, col: &str) {
-    if let Err(e) = serde_json::from_str::<serde::de::IgnoredAny>(s) {
-        panic!("Failed to parse JSON for {table}.{col}: {e}");
+/// `fromSQLiteType('json', value)` is `JSON.parse(value)` in TS. JSON.parse
+/// first stringifies non-string SQLite scalars, then returns the corresponding
+/// JS scalar; only arrays and objects remain JSON containers.
+fn json_sqlite_text_to_ivm(text: &str, table: &str, col: &str) -> Value {
+    let parsed = serde_json::from_str::<serde_json::Value>(text)
+        .unwrap_or_else(|error| panic!("Failed to parse JSON for {table}.{col}: {error}"));
+    match parsed {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(value) => Value::Bool(value),
+        serde_json::Value::Number(value) => {
+            Value::F64(value.as_f64().unwrap_or_else(|| {
+                panic!("Failed to parse JSON for {table}.{col}: invalid number")
+            }))
+        }
+        serde_json::Value::String(value) => Value::Str(Arc::from(value)),
+        value => Value::Json(Arc::from(value.to_string())),
     }
 }
 
 /// Connection: a downstream consumer of the TableSource.
 pub struct TableConnection {
     pub sort: Option<SortOrder>,
+    pub internal_sort: SortOrder,
     pub split_edit_keys: Option<Vec<String>>,
     pub compare_rows: Comparator,
     pub filter_condition: Option<Condition>,
@@ -424,6 +432,7 @@ impl TableSource {
 
         let conn = Rc::new(RefCell::new(TableConnection {
             sort: sort.clone(),
+            internal_sort,
             split_edit_keys,
             compare_rows: compare_rows.clone(),
             filter_condition: filter_condition.clone(),
@@ -814,6 +823,7 @@ impl TableSource {
 
         let mut overlay_changes =
             applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns);
+        let historical_change_count = overlay_changes.len();
         if let Some(change) = overlay_change {
             overlay_changes.push(change);
         }
@@ -824,7 +834,6 @@ impl TableSource {
             self.column_names.clone(),
             self.columns.clone(),
             self.table_name.clone(),
-            conn.filter_predicate.clone(),
         );
 
         crate::ivm::source::apply_source_overlays(
@@ -839,6 +848,9 @@ impl TableSource {
             conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
+            historical_change_count,
+            &self.primary_key,
+            conn.internal_sort.clone(),
         )
     }
 }
@@ -902,6 +914,7 @@ impl Input for TableSourceInput {
 
         let mut overlay_changes =
             applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns);
+        let historical_change_count = overlay_changes.len();
         if let Some(change) = overlay_change {
             overlay_changes.push(change);
         }
@@ -912,7 +925,6 @@ impl Input for TableSourceInput {
             self.column_names.clone(),
             self.columns.clone(),
             self.table_name.clone(),
-            conn.filter_predicate.clone(),
         );
 
         crate::ivm::source::apply_source_overlays(
@@ -924,6 +936,9 @@ impl Input for TableSourceInput {
             conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
+            historical_change_count,
+            &self.schema.primary_key,
+            conn.internal_sort.clone(),
         )
     }
 }
@@ -1038,6 +1053,20 @@ impl Source for TableSource {
         &self.primary_key
     }
 
+    fn has_active_connections(&self) -> bool {
+        self.connections
+            .iter()
+            .any(|connection| connection.borrow().output.is_some())
+    }
+
+    fn connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    fn truncate_connections(&mut self, count: usize) {
+        self.connections.truncate(count);
+    }
+
     fn set_snapshot_db(&mut self, db: Rc<RefCell<Connection>>) {
         self.set_db(db);
     }
@@ -1103,10 +1132,10 @@ mod value_parity_tests {
     #[test]
     fn valid_json_tagged() {
         let j = Some(ColumnType::Json { optional: false });
-        assert_eq!(
+        assert!(matches!(
             conv(Sv::Text("{\"a\":1}".into()), j),
-            Value::Json(Arc::from("{\"a\":1}"))
-        );
+            Value::Json(value) if value.as_ref() == "{\"a\":1}"
+        ));
     }
 
     #[test]
@@ -1220,7 +1249,6 @@ mod advance_gate_fetch_tests {
             vec!["id".to_string()],
             HashMap::new(),
             "t".to_string(),
-            None,
         )
         .count()
     }
@@ -1288,7 +1316,6 @@ mod advance_gate_fetch_tests {
             vec!["no_such_col".to_string()],
             HashMap::new(),
             "t".to_string(),
-            None,
         )
         .count();
     }
@@ -1307,7 +1334,6 @@ mod advance_gate_fetch_tests {
             vec!["id".to_string()],
             HashMap::new(),
             "t".to_string(),
-            None,
         )
         .count();
     }
@@ -1340,7 +1366,6 @@ mod advance_gate_fetch_tests {
                 vec!["id".to_string()],
                 HashMap::new(),
                 "t".to_string(),
-                None,
             )
             .count();
         }));

@@ -121,6 +121,10 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver getRow', () => {
         ('bool-text', CAST('false' AS TEXT), 0, json_object('escaped', 'quote''slash\\'),
           char(0) || 'nul-हैलो-世界', 'hidden', '${BASE}'),
         ('bool-blob', X'00FF', 0, '{}', 'blob', 'hidden', '${BASE}'),
+        ('invalid-utf8', 1, 0, '{}', CAST(X'61FF62' AS TEXT), 'hidden', '${BASE}'),
+        ('positive-infinity', 1, 9e999, '{}', 'infinity', 'hidden', '${BASE}'),
+        ('json-big-integer', 1, 0, 9007199254740993, 'json-int', 'hidden', '${BASE}'),
+        ('json-tag-collision', 1, 0, '{"__rustIvmSqliteReal":"Infinity"}', 'json-tag', 'hidden', '${BASE}'),
         ('number-high', 1, 9007199254740992, '{}', 'high', 'hidden', '${BASE}'),
         ('number-low', 1, -9007199254740992, '{}', 'low', 'hidden', '${BASE}'),
         ('invalid-json', 1, 0, '{bad', 'bad', 'hidden', '${BASE}');
@@ -251,6 +255,10 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver getRow', () => {
       'bool-text-empty',
       'bool-text',
       'bool-blob',
+      'invalid-utf8',
+      'positive-infinity',
+      'json-big-integer',
+      'json-tag-collision',
       'number-high',
       'number-low',
       'invalid-json',
@@ -275,6 +283,18 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver getRow', () => {
     expect(rust.getRow('widgets', {id: 'bool-text-empty'})?.active).toBe(false);
     expect(rust.getRow('widgets', {id: 'bool-text'})?.active).toBe(true);
     expect(rust.getRow('widgets', {id: 'bool-blob'})?.active).toBe(true);
+    expect(rust.getRow('widgets', {id: 'invalid-utf8'})?.label).toBe('a�b');
+    expect(rust.getRow('widgets', {id: 'positive-infinity'})?.count).toBe(
+      Number.POSITIVE_INFINITY,
+    );
+    expect(rust.getRow('widgets', {id: 'json-big-integer'})?.payload).toBe(
+      9_007_199_254_740_992,
+    );
+    expect(rust.getRow('widgets', {id: 'json-tag-collision'})?.payload).toEqual(
+      {
+        __rustIvmSqliteReal: 'Infinity',
+      },
+    );
     expect(rust.getRow('widgets', {id: 'bool-text'})?.label).toBe(
       '\0nul-हैलो-世界',
     );
@@ -298,6 +318,10 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver getRow', () => {
         'bool-text-empty',
         'bool-text',
         'bool-blob',
+        'invalid-utf8',
+        'positive-infinity',
+        'json-big-integer',
+        'json-tag-collision',
       ]) {
         expect(
           await observeHydrate(rust, id),

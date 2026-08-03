@@ -107,6 +107,8 @@ export declare class RustIvmEngine {
    * `PipelineDriver.totalHydrationTimeMs()`.
    */
   totalHydrationTimeMs(): number
+  /** Store the driver's pause-aware hydration duration for one query. */
+  setHydrationTimeMs(queryId: string, hydrationTimeMs: number): boolean
   /**
    * Cancel any in-progress advance or hydrate. **Out-of-band**: flips the
    * shared CancellationToken directly (does NOT queue behind the running job

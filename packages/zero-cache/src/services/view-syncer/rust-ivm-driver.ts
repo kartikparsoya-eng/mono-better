@@ -94,6 +94,31 @@ type QueryInfo = {
 // in-bounds integers cross as JSON numbers and parse to JS `number`. So there is
 // no bigint path on EITHER side — a future column that needs >2^53 (nanosecond
 // timestamps, snowflake IDs) requires a lossless int design in both engines.
+function reviveNativeSQLiteValue(_key: string, value: unknown): unknown {
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    Object.keys(value).length === 1
+  ) {
+    const tagged = value as Record<string, unknown>;
+    const integer = tagged['__rustIvmSqliteInteger'];
+    if (typeof integer === 'string') {
+      return BigInt(integer);
+    }
+    const real = tagged['__rustIvmSqliteReal'];
+    if (real === 'NaN') {
+      return Number.NaN;
+    }
+    if (real === 'Infinity') {
+      return Number.POSITIVE_INFINITY;
+    }
+    if (real === '-Infinity') {
+      return Number.NEGATIVE_INFINITY;
+    }
+  }
+  return value;
+}
+
 function parseJSONObject(json: string, label: string): Record<string, unknown> {
   const value: unknown = JSON.parse(json);
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -102,13 +127,43 @@ function parseJSONObject(json: string, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function napiToRowChange(c: NapiRowChange): RowChange {
+function reviveNativeRow(
+  value: Record<string, unknown>,
+  table: string,
+  tableSpecs: ReadonlyMap<string, LiteAndZqlSpec>,
+): Record<string, unknown> {
+  const columns = tableSpecs.get(table)?.zqlSpec;
+  for (const [column, cell] of Object.entries(value)) {
+    // JSON columns can legitimately contain an object identical to a native
+    // transport tag. Only revive top-level non-JSON cells; readQuery returns
+    // raw JSON text and uses its own reviver.
+    if (columns?.[column]?.type !== 'json') {
+      value[column] = reviveNativeSQLiteValue(column, cell);
+    }
+  }
+  return value;
+}
+
+function napiToRowChange(
+  c: NapiRowChange,
+  tableSpecs: ReadonlyMap<string, LiteAndZqlSpec>,
+): RowChange {
   return {
     type: c.changeType,
     queryID: c.queryId,
     table: c.table,
-    rowKey: parseJSONObject(c.rowKey, 'native row key') as RowKey,
-    row: c.row ? (parseJSONObject(c.row, 'native row') as Row) : undefined,
+    rowKey: reviveNativeRow(
+      parseJSONObject(c.rowKey, 'native row key'),
+      c.table,
+      tableSpecs,
+    ) as RowKey,
+    row: c.row
+      ? (reviveNativeRow(
+          parseJSONObject(c.row, 'native row'),
+          c.table,
+          tableSpecs,
+        ) as Row)
+      : undefined,
   };
 }
 
@@ -128,6 +183,13 @@ function normalizeNativeAdvanceError(error: unknown): unknown {
     return new Error(error.message.slice(ENGINE_ADVANCE_PANIC_PREFIX.length));
   }
   return error;
+}
+
+function normalizeNativeHydrateError(error: unknown): unknown {
+  // `napi::Error::from_reason` adds `code: "GenericFailure"`. PipelineDriver's
+  // corresponding builder/SQLite/comparator failures are plain Errors, and the
+  // transport code is not part of the PipelineDriver contract.
+  return error instanceof Error ? new Error(error.message) : error;
 }
 
 type NativeStatement = {
@@ -355,6 +417,7 @@ export class RustIVMDriver {
   #queryInfo = new Map<string, QueryInfo>();
   readonly #rowSetSignatures = new Map<string, bigint>();
   #initialized = false;
+  #destroyPromise: Promise<void> | undefined;
 
   constructor(
     lc: LogContext,
@@ -396,21 +459,7 @@ export class RustIVMDriver {
     ): Record<string, unknown>[] =>
       JSON.parse(
         engine.readQuery(sql, params ? JSON.stringify(params) : null),
-        (_key, value: unknown) => {
-          if (
-            value !== null &&
-            typeof value === 'object' &&
-            Object.keys(value).length === 1
-          ) {
-            const integer = (value as Record<string, unknown>)[
-              '__rustIvmSqliteInteger'
-            ];
-            if (typeof integer === 'string') {
-              return BigInt(integer);
-            }
-          }
-          return value;
-        },
+        reviveNativeSQLiteValue,
       ) as Record<string, unknown>[];
     return {
       get: (sql: string, ...args: unknown[]) => readQuery(sql, args)[0],
@@ -446,6 +495,7 @@ export class RustIVMDriver {
   }
 
   reset(clientSchema: ClientSchema) {
+    assert(this.initialized(), 'Not yet initialized');
     this.#engine.reset();
     this.#queryInfo.clear();
     this.#rowSetSignatures.clear();
@@ -558,10 +608,19 @@ export class RustIVMDriver {
   }
 
   async destroy(): Promise<void> {
+    if (this.#destroyPromise) {
+      return this.#destroyPromise;
+    }
+    this.#destroyPromise = this.#destroyOnce();
+    return this.#destroyPromise;
+  }
+
+  async #destroyOnce(): Promise<void> {
     // Single-owner teardown: the Rust engine owns every SQLite connection.
-    // Await its destroy() so the Promise only resolves once the actor thread
-    // confirms all connections are closed + engine graph freed. No TS
-    // connection exists to race with.
+    // Cancel out-of-band before queueing destroy. A producer may be parked on
+    // credit while an abandoned iterator no longer grants it; destroy itself is
+    // actor-queued and cannot release that park site.
+    this.#engine.cancel?.();
     await this.#engine.destroy();
     this.#storage.destroy();
   }
@@ -585,14 +644,9 @@ export class RustIVMDriver {
   }
 
   getRow(table: string, pk: RowKey): Row | undefined {
-    const primaryKey = this.#primaryKeys.get(table);
-    if (!primaryKey) {
-      return undefined;
-    }
-    const spec = this.#tableSpecs.get(table);
-    if (!spec) {
-      return undefined;
-    }
+    assert(this.initialized(), 'Not yet initialized');
+    must(this.#primaryKeys.get(table));
+    const spec = must(this.#tableSpecs.get(table));
     // Match the TS TableSource.getRow() value contract (zqlite/table-source.ts):
     // project ONLY the syncable columns (never `SELECT *`, which leaks the
     // replica-internal _0_version and other unsynced columns), convert the key
@@ -638,21 +692,16 @@ export class RustIVMDriver {
       return ordered;
     }
     // Ask the Rust engine for the flip decisions (cost model on the snapshot
-    // connection), then apply them to our AST in the SAME canonical order the
-    // Rust side used (WHERE pre-order, recursing into each subquery's where,
-    // then `related`). Never fail hydration on a planner hiccup — fall back to
-    // the un-flipped ordering.
-    try {
-      const flips: (boolean | null)[] = JSON.parse(
-        this.#engine.planAst(JSON.stringify(ordered)),
-      );
-      const i = {n: 0};
-      const flipped = applyFlips(ordered, flips, i);
-      return i.n === flips.length ? flipped : ordered;
-    } catch (e) {
-      this.#lc.warn?.('rust planner failed; using unplanned AST', e);
-      return ordered;
-    }
+    // connection), then apply them in the same canonical order. PipelineDriver
+    // does not swallow cost-model failures, so native planning failures must
+    // propagate rather than silently changing the physical plan.
+    const flips: (boolean | null)[] = JSON.parse(
+      this.#engine.planAst(JSON.stringify(ordered)),
+    );
+    const i = {n: 0};
+    const flipped = applyFlips(ordered, flips, i);
+    assert(i.n === flips.length, 'Native planner returned an invalid flip set');
+    return flipped;
   }
 
   async *#addQueryImpl(
@@ -674,6 +723,10 @@ export class RustIVMDriver {
     let transformedAst = queryInfoAst(query, planned);
     try {
       yield* this.#addQueryStreaming(queryID, planned, timer);
+      assert(
+        this.#engine.setHydrationTimeMs(queryID, timer.totalElapsed()),
+        `Missing hydrated query '${queryID}'`,
+      );
       const resolved = this.#engine.queryTransformedAst(queryID);
       assert(resolved, `Missing transformed AST for query '${queryID}'`);
       transformedAst = queryInfoAst(query, JSON.parse(resolved) as AST);
@@ -706,6 +759,7 @@ export class RustIVMDriver {
     timer: Timer,
   ): AsyncIterable<RowChange | 'yield'> {
     const queue = new AsyncQueue<RowChange | 'yield'>();
+    const streamId = this.#nextStreamId++;
 
     const handleRow = (row: NapiRowChange) => {
       // changeType -3 is the end-of-stream barrier sentinel (see drain_barrier in
@@ -713,21 +767,28 @@ export class RustIVMDriver {
       if (row.changeType === END_STREAM_SENTINEL) {
         return;
       }
-      const change = napiToRowChange(row);
-      if (change.type !== ChangeType.EDIT) {
-        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
-        const unit = rowIDSignatureUnit({
-          schema: '',
-          table: change.table,
-          rowKey: change.rowKey as RowKey,
-        });
-        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+      try {
+        const change = napiToRowChange(row, this.#tableSpecs);
+        if (change.type !== ChangeType.EDIT) {
+          const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
+          const unit = rowIDSignatureUnit({
+            schema: '',
+            table: change.table,
+            rowKey: change.rowKey as RowKey,
+          });
+          this.#rowSetSignatures.set(change.queryID, cur ^ unit);
+        }
+        queue.push(change);
+      } catch (error) {
+        // Exceptions thrown from a raw TSFN callback otherwise escape outside
+        // the async task promise and can terminate the whole syncer worker.
+        queue.error(error);
+        this.#engine.cancel?.();
+        this.#engine.cancelStream?.(streamId);
       }
-      queue.push(change);
     };
 
     const spec = [{queryId: queryID, astJson: JSON.stringify(query)}];
-    const streamId = this.#nextStreamId++;
     const hydrated = this.#engine.addQueriesStreamingRows(
       spec,
       (_err: unknown, row: NapiRowChange) => handleRow(row),
@@ -736,7 +797,7 @@ export class RustIVMDriver {
 
     hydrated
       .then(() => deferClose(queue))
-      .catch((e: unknown) => queue.error(e));
+      .catch((e: unknown) => queue.error(normalizeNativeHydrateError(e)));
 
     // If the consumer abandons this stream early (break / thrown error /
     // client teardown), cancel the engine so the actor stops producing and
@@ -915,7 +976,7 @@ export class RustIVMDriver {
         // credit the producer acquired for it (the header/-2 rows are not
         // credit-gated on the producer side, so we don't grant for them).
         this.#engine.grantStreamCredit?.(streamId, 1);
-        const change = napiToRowChange(row);
+        const change = napiToRowChange(row, this.#tableSpecs);
         if (change.type !== ChangeType.EDIT) {
           const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
           const unit = rowIDSignatureUnit({

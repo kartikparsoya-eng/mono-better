@@ -31,6 +31,10 @@ fn advance_fixture_replay() {
         .map(|e| e.path())
         .collect();
     inputs.sort();
+    assert!(
+        !inputs.is_empty(),
+        "advance_fixture_replay: no input fixtures discovered"
+    );
 
     let mut diverged = Vec::new();
     let mut skipped = 0;
@@ -92,6 +96,11 @@ fn advance_fixture_replay() {
             skipped
         );
     }
+
+    assert_eq!(
+        skipped, 0,
+        "advance_fixture_replay: every input must have a checked-in expected trace"
+    );
 
     println!(
         "advance_fixture_replay: {} fixtures compared, {} diverged, {} skipped",

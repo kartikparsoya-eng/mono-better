@@ -52,7 +52,7 @@ import {
   type Change,
 } from './rust-ivm-differential-harness.ts';
 import {RustIVMDriver} from './rust-ivm-driver.ts';
-import {Snapshotter} from './snapshotter.ts';
+import {ResetPipelinesSignal, Snapshotter} from './snapshotter.ts';
 
 const ADDON_PATH = process.env['RUST_IVM_ADDON_PATH'];
 const ROWS = (() => {
@@ -75,15 +75,23 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
   const clientSchema = createSchema({tables: [items]});
 
   let prevCredit: string | undefined;
+  let prevQueue: string | undefined;
   beforeAll(() => {
     prevCredit = process.env['RUST_IVM_STREAM_CREDIT'];
-    process.env['RUST_IVM_STREAM_CREDIT'] = '4'; // tiny window → force parking
+    prevQueue = process.env['RUST_IVM_TSFN_QUEUE'];
+    process.env['RUST_IVM_STREAM_CREDIT'] ??= '4';
+    process.env['RUST_IVM_TSFN_QUEUE'] ??= '4';
   });
   afterAll(() => {
     if (prevCredit === undefined) {
       delete process.env['RUST_IVM_STREAM_CREDIT'];
     } else {
       process.env['RUST_IVM_STREAM_CREDIT'] = prevCredit;
+    }
+    if (prevQueue === undefined) {
+      delete process.env['RUST_IVM_TSFN_QUEUE'];
+    } else {
+      process.env['RUST_IVM_TSFN_QUEUE'] = prevQueue;
     }
   });
 
@@ -155,7 +163,26 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
   }
 
   const NO_TIMER = {elapsedLap: () => 0, totalElapsed: () => 0} as any;
+  const TIMER_17 = {elapsedLap: () => 17, totalElapsed: () => 17} as any;
+  const TIMER_500 = {elapsedLap: () => 500, totalElapsed: () => 500} as any;
+  const LARGE_TIMER = {
+    elapsedLap: () => 0,
+    totalElapsed: () => 60_000,
+  } as any;
   const AST = {table: 'items', orderBy: [['id', 'asc']]} as any;
+
+  function editEveryItem(version: string) {
+    const changes = Array.from({length: ROWS}, (_, i) => {
+      const id = `i${String(i).padStart(3, '0')}`;
+      return `INSERT INTO "_zero.changeLog2" VALUES
+        ('${version}', ${i}, 'items', json('{"id":"${id}"}'), 's', '{}');`;
+    }).join('\n');
+    db.exec(/*sql*/ `
+      UPDATE items SET n = n + 1000, _0_version = '${version}';
+      ${changes}
+      UPDATE "_zero.replicationState" SET stateVersion = '${version}';
+    `);
+  }
 
   /** Drain, awaiting a macrotask between rows to make the consumer SLOW so the
    * native producer parks on the credit window. */
@@ -167,6 +194,20 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
       }
       out.push(c as Change);
       await new Promise(r => setTimeout(r, 1)); // slower than the producer
+    }
+    return out;
+  }
+
+  async function drainVerySlow(
+    it: AsyncIterable<unknown> | Iterable<unknown>,
+  ): Promise<Change[]> {
+    const out: Change[] = [];
+    for await (const c of it) {
+      if (c === 'yield') {
+        continue;
+      }
+      out.push(c as Change);
+      await new Promise(resolve => setTimeout(resolve, 3));
     }
     return out;
   }
@@ -252,19 +293,149 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
       expect(delivered).toBe(expected);
     };
 
-    await waitFor(4);
+    const window = Math.min(
+      Number(process.env['RUST_IVM_STREAM_CREDIT']),
+      Number(process.env['RUST_IVM_TSFN_QUEUE']),
+    );
+    await waitFor(window);
     await new Promise(resolve => setTimeout(resolve, 25));
-    expect(delivered).toBe(4);
+    expect(delivered).toBe(window);
 
     engine.grantStreamCredit(streamID, 1);
-    await waitFor(5);
+    await waitFor(window + 1);
     await new Promise(resolve => setTimeout(resolve, 25));
-    expect(delivered).toBe(5);
+    expect(delivered).toBe(window + 1);
 
     engine.cancel();
     engine.cancelStream(streamID);
     await done;
     await engine.destroy();
+    await rust.destroy();
+    ts.destroy();
+  });
+
+  test('credit is clamped to a smaller TSFN queue', async () => {
+    const {rust, ts} = setup();
+    const {RustIvmEngine} = nodeRequire(ADDON_PATH!) as {
+      RustIvmEngine: new () => {
+        init: (specs: unknown[], dbPath: string, appID: string) => void;
+        addQueriesStreamingRows: (
+          specs: unknown[],
+          callback: (error: unknown, row: {changeType: number}) => void,
+          streamID: number,
+        ) => Promise<void>;
+        cancel: () => void;
+        destroy: () => Promise<void> | void;
+      };
+    };
+
+    const configuredQueue = process.env['RUST_IVM_TSFN_QUEUE'];
+    const configuredCredit = process.env['RUST_IVM_STREAM_CREDIT'];
+    process.env['RUST_IVM_TSFN_QUEUE'] = '1';
+    process.env['RUST_IVM_STREAM_CREDIT'] = '4';
+    const engine = new RustIvmEngine();
+    engine.init(
+      [
+        {
+          table: 'items',
+          columns: {
+            id: {type: 'string', optional: false},
+            n: {type: 'number', optional: true},
+            _0_version: {type: 'string', optional: false},
+          },
+          primaryKey: ['id'],
+          minRowVersion: BASE,
+        },
+      ],
+      dbFile.path,
+      shardID.appID,
+    );
+
+    let delivered = 0;
+    const done = engine.addQueriesStreamingRows(
+      [{queryId: 'queue-clamp', astJson: JSON.stringify(AST)}],
+      (_error, row) => {
+        if (row.changeType >= 0) {
+          delivered++;
+        }
+      },
+      9_002,
+    );
+    process.env['RUST_IVM_TSFN_QUEUE'] = configuredQueue;
+    process.env['RUST_IVM_STREAM_CREDIT'] = configuredCredit;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(delivered).toBe(1);
+
+    engine.cancel();
+    await done;
+    await engine.destroy();
+    await rust.destroy();
+    ts.destroy();
+  });
+
+  test('watchdog cancellation rejects an undrained advance', async () => {
+    const {rust, ts} = setup();
+    await drain(rust.addQuery('h', 'q', AST, LARGE_TIMER));
+    editEveryItem('8500000100');
+
+    const prevWarn = process.env['RUST_IVM_WATCHDOG_WARN_MS'];
+    const prevAbort = process.env['RUST_IVM_WATCHDOG_ABORT_MS'];
+    process.env['RUST_IVM_WATCHDOG_WARN_MS'] = '10';
+    process.env['RUST_IVM_WATCHDOG_ABORT_MS'] = '10';
+    try {
+      const result = await rust.advance(LARGE_TIMER);
+      if (result instanceof ResetPipelinesSignal) {
+        throw result;
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await expect(drain(result.changes)).rejects.toThrow(
+        /advance failed|cancelled|interrupt/i,
+      );
+    } finally {
+      if (prevWarn === undefined) {
+        delete process.env['RUST_IVM_WATCHDOG_WARN_MS'];
+      } else {
+        process.env['RUST_IVM_WATCHDOG_WARN_MS'] = prevWarn;
+      }
+      if (prevAbort === undefined) {
+        delete process.env['RUST_IVM_WATCHDOG_ABORT_MS'];
+      } else {
+        process.env['RUST_IVM_WATCHDOG_ABORT_MS'] = prevAbort;
+      }
+      await rust.destroy();
+      ts.destroy();
+    }
+  });
+
+  test('destroy cancels an abandoned advance before queueing teardown', async () => {
+    const {rust, ts} = setup();
+    await drain(rust.addQuery('h', 'q', AST, LARGE_TIMER));
+    editEveryItem('8500000101');
+    await rust.advance(LARGE_TIMER);
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    await expect(
+      Promise.race([
+        rust.destroy().then(() => 'destroyed'),
+        new Promise<string>(resolve =>
+          setTimeout(() => resolve('timed-out'), 1_000),
+        ),
+      ]),
+    ).resolves.toBe('destroyed');
+    ts.destroy();
+  });
+
+  test('slow delivery time does not consume the advancement budget', async () => {
+    const {rust, ts} = setup();
+    await drain(rust.addQuery('h', 'q', AST, TIMER_500));
+    editEveryItem('8500000102');
+
+    const result = await rust.advance(TIMER_500);
+    if (result instanceof ResetPipelinesSignal) {
+      throw result;
+    }
+    expect(await drainVerySlow(result.changes)).toHaveLength(ROWS);
+
     await rust.destroy();
     ts.destroy();
   });
@@ -288,10 +459,10 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     expect(rust.rowSetSignature('q')).toBeUndefined();
 
     // The actor must be reusable: a full hydration now completes correctly.
-    const full = await drain(rust.addQuery('h2', 'q2', AST, NO_TIMER));
+    const full = await drain(rust.addQuery('h2', 'q2', AST, TIMER_17));
     expect(full.length).toBe(ROWS);
     expect(rust.queries().has('q2')).toBe(true);
-    expect(rust.totalHydrationTimeMs()).toBeGreaterThan(0);
+    expect(rust.totalHydrationTimeMs()).toBe(17);
     rust.removeQuery('q2');
     expect(rust.totalHydrationTimeMs()).toBe(0);
 

@@ -8,6 +8,25 @@ use std::rc::Rc;
 
 use rusqlite::Connection;
 
+/// Read a SQLite cell without rusqlite's infallible `ValueRef -> Value`
+/// conversion, which panics on malformed UTF-8 in a TEXT value. better-sqlite3
+/// decodes the same bytes with replacement characters, so use the identical
+/// lossy UTF-8 contract at every SQLite -> Rust boundary.
+pub fn read_value_lossy(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<rusqlite::types::Value> {
+    use rusqlite::types::{Value, ValueRef};
+
+    Ok(match row.get_ref(index)? {
+        ValueRef::Null => Value::Null,
+        ValueRef::Integer(value) => Value::Integer(value),
+        ValueRef::Real(value) => Value::Real(value),
+        ValueRef::Text(value) => Value::Text(String::from_utf8_lossy(value).into_owned()),
+        ValueRef::Blob(value) => Value::Blob(value.to_vec()),
+    })
+}
+
 /// A SQLite database connection wrapper.
 /// Port of TS `Database` (db.ts:30).
 pub struct Database {
@@ -177,7 +196,7 @@ impl Statement {
                 rustc_hash::FxHashMap::default();
             for i in 0..col_count {
                 let name = col_names[i].clone();
-                let val: rusqlite::types::Value = row.get(i)?;
+                let val = read_value_lossy(row, i)?;
                 map.insert(name, val);
             }
             Ok(Some(map))
@@ -206,7 +225,7 @@ impl Statement {
                 rustc_hash::FxHashMap::default();
             for i in 0..col_count {
                 let name = col_names[i].clone();
-                let val: rusqlite::types::Value = row.get(i)?;
+                let val = read_value_lossy(row, i)?;
                 map.insert(name, val);
             }
             result.push(map);

@@ -23,7 +23,9 @@ use crate::ivm::change::{
 use crate::ivm::constraint::{Constraint, constraint_matches_primary_key, constraint_matches_row};
 use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
 use crate::ivm::filter_push::filter_push;
-use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
+use crate::ivm::operator::{
+    Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared, Start,
+};
 use crate::ivm::schema::{SourceSchema, System};
 use crate::ivm::stream::{NodeStream, StreamItem, empty_stream, from_vec};
 
@@ -36,6 +38,16 @@ use crate::ivm::stream::{NodeStream, StreamItem, empty_stream, from_vec};
 pub trait Source {
     fn table_name(&self) -> &str;
     fn primary_key(&self) -> &[String];
+
+    /// Whether this source currently feeds at least one live pipeline. The TS
+    /// driver creates TableSources lazily, so changes for unqueried tables are
+    /// skipped entirely. Rust pre-registers schemas; this preserves the same
+    /// observable behavior without conflating schema presence with a live source.
+    fn has_active_connections(&self) -> bool;
+
+    /// Checkpoint/rollback support for failure-atomic pipeline construction.
+    fn connection_count(&self) -> usize;
+    fn truncate_connections(&mut self, count: usize);
 
     /// Connect a new downstream consumer.
     fn connect(
@@ -526,6 +538,20 @@ impl Source for MemorySource {
         &self.primary_key
     }
 
+    fn has_active_connections(&self) -> bool {
+        self.connections
+            .iter()
+            .any(|connection| connection.borrow().output.is_some())
+    }
+
+    fn connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    fn truncate_connections(&mut self, count: usize) {
+        self.connections.truncate(count);
+    }
+
     fn connect(
         &mut self,
         sort: Option<SortOrder>,
@@ -622,10 +648,9 @@ impl Input for SourceInput {
                 None => return from_vec(Vec::new()),
             };
 
-            let mut stmt = match db.prepare(&query.text) {
-                Ok(s) => s,
-                Err(_) => return from_vec(Vec::new()),
-            };
+            let mut stmt = db
+                .prepare(&query.text)
+                .unwrap_or_else(|e| panic!("failed to prepare SQLite source query: {e}"));
 
             let param_refs: Vec<&dyn rusqlite::ToSql> = query
                 .params
@@ -648,45 +673,26 @@ impl Input for SourceInput {
                 |row| {
                     let mut map: FxHashMap<String, Value> = FxHashMap::default();
                     for (i, col) in col_names.iter().enumerate() {
-                        let val = row.get::<usize, rusqlite::types::Value>(i);
-                        let col_type = column_types.get(col);
-                        let value = match val {
-                            Ok(rusqlite::types::Value::Integer(n)) => match col_type {
-                                Some(crate::ivm::schema::ColumnType::Boolean { .. }) => {
-                                    Value::Bool(n != 0)
-                                }
-                                _ => Value::F64(n as f64),
-                            },
-                            Ok(rusqlite::types::Value::Real(n)) => Value::F64(n),
-                            Ok(rusqlite::types::Value::Text(s)) => match col_type {
-                                Some(crate::ivm::schema::ColumnType::Json { .. }) => {
-                                    Value::Json(Arc::from(s.as_str()))
-                                }
-                                _ => Value::Str(Arc::from(s.as_str())),
-                            },
-                            Ok(rusqlite::types::Value::Blob(b)) => {
-                                Value::Str(Arc::from(String::from_utf8_lossy(&b).as_ref()))
-                            }
-                            Ok(rusqlite::types::Value::Null) => Value::Null,
-                            Err(_) => Value::Null,
-                        };
+                        let val = crate::sqlite::db::read_value_lossy(row, i);
+                        let value = crate::sqlite::table_source::sqlite_value_to_ivm(
+                            val,
+                            column_types.get(col),
+                            &self.table_name,
+                            col,
+                        );
                         map.insert(col.clone(), value);
                     }
                     Ok(Arc::new(map))
                 },
             );
 
-            let rows_result = match rows_result {
-                Ok(r) => r,
-                Err(_) => return from_vec(Vec::new()),
-            };
+            let rows_result = rows_result
+                .unwrap_or_else(|e| panic!("failed to bind/execute SQLite source query: {e}"));
 
             let mut rows: Vec<Row> = Vec::new();
             for row_result in rows_result {
-                let row = match row_result {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
+                let row = row_result
+                    .unwrap_or_else(|e| panic!("failed to iterate SQLite source query: {e}"));
                 if let Some(pred) = &conn.filter_predicate
                     && !pred(&row)
                 {
@@ -861,13 +867,19 @@ impl SourceInput {
         };
         let index_compare =
             compute_index_compare(conn.sort.as_ref(), req, &self.schema.primary_key);
-        apply_source_overlay(
+        let nodes = apply_source_overlay(
             Box::new(rows.into_iter()),
             overlay_change,
             conn.compare_rows.clone(),
             index_compare,
             conn.filter_predicate.clone(),
             req,
+        );
+        generate_with_start(
+            nodes,
+            req.start.clone(),
+            conn.compare_rows.clone(),
+            req.reverse,
         )
     }
 }
@@ -967,6 +979,7 @@ pub(crate) fn apply_source_overlay(
         index_compare,
         filter_predicate,
         req,
+        None,
     )
 }
 
@@ -982,49 +995,32 @@ pub(crate) fn apply_source_overlays(
     index_compare: Comparator,
     filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
     req: &FetchRequest,
+    historical_change_count: usize,
+    primary_key: &[String],
+    sort: SortOrder,
 ) -> NodeStream {
     if overlay_changes.is_empty() {
-        return Box::new(rows.map(|row| StreamItem::Data(Node::new(row))));
+        let nodes = Box::new(rows.map(|row| StreamItem::Data(Node::new(row))));
+        return generate_with_start(nodes, req.start.clone(), compare, req.reverse);
     }
 
     let count = overlay_changes.len();
     for (index, change) in overlay_changes.into_iter().enumerate() {
-        let nodes = apply_source_overlay(
+        let stable_edit = (index < historical_change_count).then(|| StableEdit {
+            primary_key: primary_key.to_vec(),
+            sort: sort.clone(),
+        });
+        let nodes = apply_source_overlay_impl(
             rows,
             Some(change),
             compare.clone(),
             index_compare.clone(),
             filter_predicate.clone(),
             req,
+            stable_edit,
         );
         if index + 1 == count {
-            // TS TableSource wraps generateWithOverlay in generateWithStart.
-            // The SQL scan already applies the bound to persisted rows, but
-            // overlay adds bypass SQL and still need the final inclusive /
-            // exclusive check. Without this, an `After` fetch can return the
-            // row equal to its start and corrupt Take's replacement boundary.
-            let Some(start) = req.start.clone() else {
-                return nodes;
-            };
-            let compare = compare.clone();
-            let reverse = req.reverse;
-            return Box::new(nodes.filter(move |item| match item {
-                StreamItem::Yield => true,
-                StreamItem::Data(node) => {
-                    let ord = compare(&node.row, &start.row);
-                    if reverse {
-                        match start.basis {
-                            Basis::At => ord != CmpOrdering::Greater,
-                            Basis::After => ord == CmpOrdering::Less,
-                        }
-                    } else {
-                        match start.basis {
-                            Basis::At => ord != CmpOrdering::Less,
-                            Basis::After => ord == CmpOrdering::Greater,
-                        }
-                    }
-                }
-            }));
+            return generate_with_start(nodes, req.start.clone(), compare, req.reverse);
         }
         rows = Box::new(nodes.filter_map(|item| match item {
             StreamItem::Data(node) => Some(node.row),
@@ -1034,6 +1030,35 @@ pub(crate) fn apply_source_overlays(
     unreachable!("non-empty overlay list must return from the loop")
 }
 
+/// Port of zql `generateWithStart`. SQLite applies the same bound in SQL, but
+/// TS deliberately performs this parsed-value pass as well. It compares only
+/// until the first row reaches the bound, then yields the rest unchanged.
+fn generate_with_start(
+    nodes: NodeStream,
+    start: Option<Start>,
+    compare: Comparator,
+    reverse: bool,
+) -> NodeStream {
+    let Some(start) = start else { return nodes };
+    let mut started = false;
+    Box::new(nodes.filter(move |item| match item {
+        StreamItem::Yield => true,
+        StreamItem::Data(node) => {
+            if !started {
+                let mut ord = compare(&node.row, &start.row);
+                if reverse {
+                    ord = ord.reverse();
+                }
+                started = match start.basis {
+                    Basis::At => ord != CmpOrdering::Less,
+                    Basis::After => ord == CmpOrdering::Greater,
+                };
+            }
+            started
+        }
+    }))
+}
+
 fn apply_source_overlay_impl(
     rows: Box<dyn Iterator<Item = Row>>,
     overlay_change: Option<SourceChange>,
@@ -1041,6 +1066,7 @@ fn apply_source_overlay_impl(
     index_compare: Comparator,
     filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
     req: &FetchRequest,
+    stable_edit: Option<StableEdit>,
 ) -> NodeStream {
     use std::cell::Cell;
     let reverse = req.reverse;
@@ -1109,6 +1135,19 @@ fn apply_source_overlay_impl(
             let add_row = add_row.filter(&filter_fn);
             let remove_row = remove_row.filter(&filter_fn);
 
+            // Historical edits have already been written to TS's private PREV
+            // database. Rust replays them over a read-only PREV snapshot. If
+            // the ordering key did not change, replace the old row at its
+            // existing position instead of comparing separately parsed JSON
+            // objects, which TS never does on the later fetch.
+            let replace_in_place = stable_edit.and_then(|stable| {
+                let add = add_row.as_ref()?;
+                let remove = remove_row.as_ref()?;
+                (rows_equal_on(add, remove, &stable.primary_key)
+                    && rows_storage_equal_on(add, remove, &stable.sort))
+                .then_some(stable.primary_key)
+            });
+
             // Stream rows, splicing add_row at correct position, skipping remove_row
             let add_yielded = Rc::new(Cell::new(false));
             let remove_skipped = Rc::new(Cell::new(false));
@@ -1117,10 +1156,23 @@ fn apply_source_overlay_impl(
             let remove_row2 = remove_row.clone();
             let ay = add_yielded.clone();
             let rs = remove_skipped.clone();
+            let replace_in_place2 = replace_in_place.clone();
 
             let inner = rows
                 .flat_map(move |row| {
                     let mut out: Vec<Row> = Vec::new();
+
+                    if !ay.get()
+                        && !rs.get()
+                        && let (Some(add), Some(remove), Some(primary_key)) =
+                            (&add_row2, &remove_row2, &replace_in_place2)
+                        && rows_equal_on(&row, remove, primary_key)
+                    {
+                        out.push(add.clone());
+                        ay.set(true);
+                        rs.set(true);
+                        return out;
+                    }
 
                     if !ay.get()
                         && let Some(ref add) = add_row2
@@ -1170,6 +1222,32 @@ fn apply_source_overlay_impl(
                     .map(|r| StreamItem::Data(Node::new(r)))
             })))
         }
+    }
+}
+
+#[derive(Clone)]
+struct StableEdit {
+    primary_key: Vec<String>,
+    sort: SortOrder,
+}
+
+fn rows_equal_on(left: &Row, right: &Row, columns: &[String]) -> bool {
+    columns
+        .iter()
+        .all(|column| storage_values_equal(left.get(column), right.get(column)))
+}
+
+fn rows_storage_equal_on(left: &Row, right: &Row, sort: &SortOrder) -> bool {
+    sort.iter()
+        .all(|part| storage_values_equal(left.get(&part[0]), right.get(&part[0])))
+}
+
+fn storage_values_equal(left: Option<&Value>, right: Option<&Value>) -> bool {
+    match (left, right) {
+        (Some(Value::Json(left)), Some(Value::Json(right))) => left == right,
+        (Some(left), Some(right)) => left == right,
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -1430,4 +1508,51 @@ fn pk_key(row: &Row, pk: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\x1f")
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    fn row(id: f64, label: &str, json: &str) -> Row {
+        Arc::new(FxHashMap::from_iter([
+            ("id".to_string(), Value::F64(id)),
+            ("label".to_string(), Value::Str(Arc::from(label))),
+            ("ordered_json".to_string(), Value::Json(Arc::from(json))),
+        ]))
+    }
+
+    #[test]
+    fn historical_edit_with_unchanged_json_sort_key_replaces_in_place() {
+        let old = row(1.0, "before", "{}");
+        let updated = row(1.0, "after", "{}");
+        let sort = Arc::new(vec![
+            ["ordered_json".to_string(), "asc".to_string()],
+            ["id".to_string(), "asc".to_string()],
+        ]);
+        let compare = make_comparator(sort.clone(), false);
+
+        let result = apply_source_overlays(
+            Box::new(vec![old.clone()].into_iter()),
+            vec![SourceChange::Edit {
+                row: updated.clone(),
+                old_row: old,
+            }],
+            compare.clone(),
+            compare,
+            None,
+            &FetchRequest::default(),
+            1,
+            &["id".to_string()],
+            sort,
+        )
+        .filter_map(|item| match item {
+            StreamItem::Data(node) => Some(node.row),
+            StreamItem::Yield => None,
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].get("label"), updated.get("label"));
+    }
 }

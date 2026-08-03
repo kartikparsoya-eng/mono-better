@@ -137,8 +137,7 @@ fn get_row(
     if let Some(row) = rows.next().map_err(|e| format!("get_row next: {}", e))? {
         let mut result = HashMap::new();
         for (i, col) in cols.iter().enumerate() {
-            let val: rusqlite::types::Value = row
-                .get(i)
+            let val: rusqlite::types::Value = crate::sqlite::db::read_value_lossy(row, i)
                 .map_err(|e| format!("get_row get {}: {}", col, e))?;
             result.insert(col.clone(), val);
         }
@@ -215,8 +214,7 @@ fn get_rows(
     while let Some(row) = rows.next().map_err(|e| format!("get_rows next: {}", e))? {
         let mut map = HashMap::new();
         for (i, col) in cols.iter().enumerate() {
-            let val: rusqlite::types::Value = row
-                .get(i)
+            let val: rusqlite::types::Value = crate::sqlite::db::read_value_lossy(row, i)
                 .map_err(|e| format!("get_rows get {}: {}", col, e))?;
             map.insert(col.clone(), val);
         }

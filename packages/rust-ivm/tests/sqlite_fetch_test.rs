@@ -435,6 +435,7 @@ fn test_sqlite_fetch_empty_table() {
 }
 
 #[test]
+#[should_panic(expected = "failed to prepare SQLite source query")]
 fn test_sqlite_fetch_nonexistent_table() {
     let db_path = "/tmp/rust-ivm-test-nonexistent.db";
     clean_db(db_path);
@@ -450,16 +451,11 @@ fn test_sqlite_fetch_nonexistent_table() {
     );
     source.borrow_mut().set_db_path(db_path);
 
-    // Should not panic — should return empty stream
+    // Match PipelineDriver: SQLite prepare failures propagate; they must never
+    // masquerade as an empty result set.
     let input = source.borrow_mut().connect(None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
-    let rows: Vec<_> = stream.collect();
-
-    assert_eq!(
-        rows.len(),
-        0,
-        "Nonexistent table should return 0 rows, not panic"
-    );
+    let _: Vec<_> = stream.collect();
 }
 
 #[test]

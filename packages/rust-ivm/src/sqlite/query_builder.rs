@@ -251,6 +251,7 @@ fn gather_start_constraints(
                 group.push(nullable_aware_range_comparison(
                     i_field,
                     &val,
+                    column_types.get(i_field),
                     operator,
                     optional,
                     &mut params,
@@ -262,6 +263,7 @@ fn gather_start_constraints(
                 group.push(nullable_aware_equality(
                     j_field,
                     &val,
+                    column_types.get(j_field),
                     optional,
                     &mut params,
                 ));
@@ -276,7 +278,13 @@ fn gather_start_constraints(
         for (field, _) in order {
             let val = from.get(field).cloned().unwrap_or(Value::Null);
             let optional = column_is_optional(column_types, field);
-            group.push(nullable_aware_equality(field, &val, optional, &mut params));
+            group.push(nullable_aware_equality(
+                field,
+                &val,
+                column_types.get(field),
+                optional,
+                &mut params,
+            ));
         }
         constraints.push(format!("({})", group.join(" AND ")));
     }
@@ -297,10 +305,11 @@ fn column_is_optional(column_types: &HashMap<String, ColumnType>, field: &str) -
 fn nullable_aware_equality(
     field: &str,
     value: &Value,
+    column_type: Option<&ColumnType>,
     optional: bool,
     params: &mut Vec<SqlParam>,
 ) -> String {
-    params.push(SqlParam::from(value));
+    params.push(to_sqlite_column_value(value, column_type));
     format!(
         "{} {} ?",
         quote_ident(field),
@@ -311,27 +320,42 @@ fn nullable_aware_equality(
 fn nullable_aware_range_comparison(
     field: &str,
     value: &Value,
+    column_type: Option<&ColumnType>,
     operator: &str,
     optional: bool,
     params: &mut Vec<SqlParam>,
 ) -> String {
+    let param = || to_sqlite_column_value(value, column_type);
     if !optional {
-        params.push(SqlParam::from(value));
+        params.push(param());
         return format!("{} {} ?", quote_ident(field), operator);
     }
 
     if operator == ">" {
-        params.push(SqlParam::from(value));
-        params.push(SqlParam::from(value));
+        params.push(param());
+        params.push(param());
         format!("(? IS NULL OR {} > ?)", quote_ident(field))
     } else {
-        params.push(SqlParam::from(value));
+        params.push(param());
         format!(
             "({} IS NULL OR {} < ?)",
             quote_ident(field),
             quote_ident(field)
         )
     }
+}
+
+/// Port of zqlite `toSQLiteType(value, column.type)` for values whose declared
+/// column type is known. JSON is stored as JSON text even when the parsed JS
+/// value is a scalar, so cursors must bind `"x"`, `true`, and `1` as text.
+fn to_sqlite_column_value(value: &Value, column_type: Option<&ColumnType>) -> SqlParam {
+    if matches!(column_type, Some(ColumnType::Json { .. })) {
+        return SqlParam::Text(
+            serde_json::to_string(value)
+                .expect("IVM values must be serializable for a JSON SQLite column"),
+        );
+    }
+    SqlParam::from(value)
 }
 
 /// Convert a Condition (with CSQ stripped) to a SQL WHERE clause.
@@ -664,5 +688,24 @@ mod literal_left_tests {
         );
         assert_eq!(required_sql, "((\"required\" > ?) OR (\"required\" = ?))");
         assert_eq!(required_params.len(), 2);
+    }
+
+    #[test]
+    fn json_start_values_are_stringified_like_typescript() {
+        let json = ColumnType::Json { optional: false };
+        let cases = [
+            (Value::Null, "null"),
+            (Value::Bool(true), "true"),
+            (Value::F64(1.0), "1"),
+            (Value::Str("x".into()), "\"x\""),
+            (Value::Json("{\"x\":1}".into()), "{\"x\":1}"),
+        ];
+
+        for (value, expected) in cases {
+            match to_sqlite_column_value(&value, Some(&json)) {
+                SqlParam::Text(actual) => assert_eq!(actual, expected),
+                actual => panic!("expected JSON text parameter, got {actual:?}"),
+            }
+        }
     }
 }

@@ -9,7 +9,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::rc::Rc;
 
 use crate::ivm::change::{Change, ChangeType};
-use crate::ivm::data::{Row, make_partial_bound_comparator};
+use crate::ivm::data::Row;
 use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::stream::NodeStream;
@@ -27,8 +27,8 @@ pub struct Skip {
 impl Skip {
     pub fn new(input: Shared<dyn Input>, start: crate::builder::ast::Bound) -> Shared<Skip> {
         let schema = input.borrow().get_schema();
-        let sort = schema.sort.clone().expect("Skip requires sorted input");
-        let compare = make_partial_bound_comparator(sort, false);
+        schema.sort.as_ref().expect("Skip requires sorted input");
+        let compare = schema.compare_rows.clone();
 
         let start_row = start.row.clone();
         let exclusive = start.exclusive;
@@ -51,12 +51,8 @@ impl Skip {
     }
 
     fn should_be_present(&self, row: &Row) -> bool {
-        let cmp = (self.compare)(row, &self.start_row);
-        if self.exclusive {
-            cmp == CmpOrdering::Greater
-        } else {
-            cmp != CmpOrdering::Less
-        }
+        let cmp = (self.compare)(&self.start_row, row);
+        cmp == CmpOrdering::Less || (cmp == CmpOrdering::Equal && !self.exclusive)
     }
 }
 
@@ -143,21 +139,23 @@ impl Input for Skip {
         upstream_req.start = effective_start;
         let stream = input.fetch(&upstream_req);
 
-        // Post-hoc filter by the Skip's own bound — redundant when the upstream
-        // honors `req.start` (the source does), but kept for operators that do
-        // not, and to mirror TS's reverse-path `#shouldBePresent` re-check.
-        Box::new(
-            crate::ivm::stream::skip_yields(stream)
-                .filter(move |n| {
-                    let cmp = compare(&n.row, &start_row);
-                    if exclusive {
-                        cmp == CmpOrdering::Greater
-                    } else {
-                        cmp != CmpOrdering::Less
-                    }
-                })
-                .map(crate::ivm::stream::StreamItem::Data),
-        )
+        // TS forwards normal scans unchanged: the source has already applied
+        // the start in SQLite. Comparing parsed rows again is observably wrong
+        // for JSON columns, whose SQLite ordering is over stored JSON text.
+        if !req.reverse {
+            return stream;
+        }
+
+        // The TS reverse path stops at the first row outside the bound while
+        // preserving yield markers. `take_while` expresses that exact shape;
+        // a regular filter would incorrectly keep scanning later rows.
+        Box::new(stream.take_while(move |item| match item {
+            crate::ivm::stream::StreamItem::Yield => true,
+            crate::ivm::stream::StreamItem::Data(node) => {
+                let cmp = compare(&start_row, &node.row);
+                cmp == CmpOrdering::Less || (cmp == CmpOrdering::Equal && !exclusive)
+            }
+        }))
     }
 }
 

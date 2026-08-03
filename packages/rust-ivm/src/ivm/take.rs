@@ -44,8 +44,14 @@ impl TakeStorage {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&TakeState> {
-        self.states.get(key)
+    pub fn get(&self, key: &str) -> Option<TakeState> {
+        self.states.get(key).map(|state| TakeState {
+            size: state.size,
+            // PipelineDriver's DatabaseStorage JSON-serializes every value.
+            // Each read therefore recreates object/array identities even when
+            // the stored row is otherwise unchanged.
+            bound: state.bound.as_ref().map(storage_round_trip_row),
+        })
     }
 
     pub fn set(&mut self, key: String, state: TakeState) {
@@ -55,6 +61,20 @@ impl TakeStorage {
     pub fn del(&mut self, key: &str) {
         self.states.remove(key);
     }
+}
+
+fn storage_round_trip_row(row: &Row) -> Row {
+    Arc::new(
+        row.iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    Value::Json(raw) => Value::Json(Arc::from(raw.to_string())),
+                    other => other.clone(),
+                };
+                (key.clone(), value)
+            })
+            .collect(),
+    )
 }
 
 /// Partition key — same as PrimaryKey.
@@ -216,7 +236,7 @@ impl Take {
     ) -> Option<(TakeState, String, Option<Row>, Option<Constraint>)> {
         let take_state_key = self.take_state_key_for_row(row);
 
-        let take_state = self.storage.borrow().get(&take_state_key).cloned()?;
+        let take_state = self.storage.borrow().get(&take_state_key)?;
         let max_bound = self
             .storage
             .borrow()
@@ -873,7 +893,7 @@ impl Input for Take {
             )
         {
             let take_state_key = self.take_state_key_for_constraint(req.constraint.as_ref());
-            let take_state = self.storage.borrow().get(&take_state_key).cloned();
+            let take_state = self.storage.borrow().get(&take_state_key);
             let Some(take_state) = take_state else {
                 return self.initial_fetch(req, &take_state_key);
             };

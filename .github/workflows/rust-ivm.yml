@@ -151,6 +151,8 @@ jobs:
         env:
           RUST_IVM_ADDON_PATH: ${{ github.workspace }}/packages/rust-ivm/napi/rust-ivm.node
           RUST_IVM_SOAK_ROWS: 1000
+          RUST_IVM_TSFN_QUEUE: 64
+          RUST_IVM_STREAM_CREDIT: 64
         run: >-
           pnpm exec vitest run
           packages/zero-cache/src/services/view-syncer/rust-ivm-driver.getrow.test.ts
@@ -159,6 +161,8 @@ jobs:
           packages/zero-cache/src/services/view-syncer/rust-ivm-driver.error-propagation.test.ts
           packages/zero-cache/src/services/view-syncer/rust-ivm-driver.async-queue.test.ts
           packages/zero-cache/src/services/view-syncer/rust-ivm-driver.planner.test.ts
+          packages/zero-cache/src/services/view-syncer/rust-ivm-driver.rowkey-pk.test.ts
+          packages/zero-cache/src/services/view-syncer/rust-ivm-driver.replica-version.test.ts
 
       - name: Exact NAPI advance fixture corpus
         env:
@@ -218,9 +222,14 @@ jobs:
           size=$(docker image inspect "$IMAGE_REF" --format '{{.Size}}')
           test "$size" -le $((600 * 1024 * 1024))
           docker run --rm --entrypoint sh "$IMAGE_REF" -lc '
+            test "$USE_RUST_IVM" = true
+            test "$RUST_IVM_ADDON_PATH" = /app/mono/packages/rust-ivm/napi/rust-ivm.node
             test "$RUST_IVM_TSFN_QUEUE" = 64
             test "$RUST_IVM_STREAM_CREDIT" = 64
             test "$ZERO_NUM_SYNC_WORKERS" = 4
+            test "$ZERO_ROUND_ROBIN_ROUTING" = 1
+            test "$ZERO_CURSOR_PAGE_SIZE" = 100
+            test "$UV_THREADPOOL_SIZE" = 16
             test -z "${RUST_IVM_TSFN_BATCH:-}"
             litestream version | grep -Fx "0.3.13+z0.0.9"
             litestream-v5 version | grep -Fx "0.5.11"

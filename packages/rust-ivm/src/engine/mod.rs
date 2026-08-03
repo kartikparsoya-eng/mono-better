@@ -386,6 +386,24 @@ impl Engine {
         self.sources.insert(table_name, source);
     }
 
+    /// Capture source connection lengths before building a pipeline. A failed
+    /// build must remove every partially wired connection, just as TS drops its
+    /// unregistered TableSource graph on an exception.
+    pub fn source_connection_checkpoint(&self) -> HashMap<String, usize> {
+        self.sources
+            .iter()
+            .map(|(table, source)| (table.clone(), source.borrow().connection_count()))
+            .collect()
+    }
+
+    pub fn rollback_source_connections(&mut self, checkpoint: &HashMap<String, usize>) {
+        for (table, source) in &self.sources {
+            source
+                .borrow_mut()
+                .truncate_connections(checkpoint.get(table).copied().unwrap_or_default());
+        }
+    }
+
     /// TEST-ONLY: drop a table's entry from the top-level `primary_keys` map,
     /// leaving its source (and thus its pipeline schema's `primary_key`) intact.
     /// Used to simulate the (normally impossible) asymmetry where a scalar-EXISTS
@@ -411,6 +429,17 @@ impl Engine {
         // JavaScript observes that distinction through `Object.is`, while the
         // TS driver returns ordinary positive zero when no pipelines exist.
         if total == 0.0 { 0.0 } else { total }
+    }
+
+    /// Replace the native wall-clock measurement with the caller's
+    /// pause-aware hydration timer.
+    pub fn set_hydration_time_ms(&mut self, query_id: &str, hydration_time_ms: f64) -> bool {
+        if let Some(entry) = self.pipelines.iter_mut().find(|p| p.query_id == query_id) {
+            entry.hydration_time_ms = hydration_time_ms;
+            true
+        } else {
+            false
+        }
     }
 
     /// Remove a query's pipeline.
@@ -803,76 +832,130 @@ impl Engine {
             .iter()
             .map(|(t, s)| (t.clone(), s.borrow().column_types()))
             .collect();
-        let result = crate::snapshotter::diff::iterate_diff(&diff, &prev_conn, &curr_conn, |sc| {
-            let col_types = table_columns.get(&sc.table);
-            // Publish current progress to the per-fetch gate so its budget check
-            // (run inside the row-read loop during this change's push) uses the
-            // same `pos` as the per-change check below.
-            advance_gate.set_pos(pos);
-            // Economic abort check per-change (TS parity).
-            let elapsed_ms = advance_start.elapsed().as_secs_f64() * 1000.0;
-            if elapsed_ms > MIN_ADVANCEMENT_TIME_LIMIT_MS {
-                // Budget is the total original hydration time — no floor, to
-                // match TS (pipeline-driver.ts:855) and `should_abort` above.
-                let budget = total_hydration_time_ms;
-                if elapsed_ms > budget {
-                    return Err(crate::snapshotter::DiffError::Reset(
-                        crate::snapshotter::ResetPipelinesSignal {
-                            reason: "advancement-timeout",
-                            msg: format!(
-                                "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
-                                elapsed_ms, budget, pos, num_changes
-                            ),
-                        },
+        let cancellation_token = self.cancellation_token.clone();
+        let mut result = crate::snapshotter::diff::iterate_diff(
+            &diff,
+            &prev_conn,
+            &curr_conn,
+            |sc| {
+                // A watchdog/consumer cancel is not a successful short stream. In
+                // particular, the boundary callback can cancel after failing to
+                // acquire credit; continuing would mutate the graph to head while
+                // silently dropping the undelivered tail. Fail the advance so the
+                // view-syncer cannot commit a partial CVR.
+                if cancellation_token.is_cancelled() {
+                    return Err(crate::snapshotter::DiffError::Other(
+                        "advance cancelled before all changes were delivered".to_string(),
                     ));
                 }
-                if elapsed_ms > budget / 2.0 && pos <= num_changes / 2 {
-                    return Err(crate::snapshotter::DiffError::Reset(
-                        crate::snapshotter::ResetPipelinesSignal {
-                            reason: "advancement-timeout",
-                            msg: format!(
-                                "Advancement timed out at half-budget ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
-                                elapsed_ms, budget, pos, num_changes
-                            ),
-                        },
-                    ));
+                let col_types = table_columns.get(&sc.table);
+                // Publish current progress to the per-fetch gate so its budget check
+                // (run inside the row-read loop during this change's push) uses the
+                // same `pos` as the per-change check below.
+                advance_gate.set_pos(pos);
+                // Economic abort check per-change (TS parity).
+                let elapsed_ms = advance_gate.elapsed_ms();
+                if elapsed_ms > MIN_ADVANCEMENT_TIME_LIMIT_MS {
+                    // Budget is the total original hydration time — no floor, to
+                    // match TS (pipeline-driver.ts:855) and `should_abort` above.
+                    let budget = total_hydration_time_ms;
+                    if elapsed_ms > budget {
+                        return Err(crate::snapshotter::DiffError::Reset(
+                            crate::snapshotter::ResetPipelinesSignal {
+                                reason: "advancement-timeout",
+                                msg: format!(
+                                    "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
+                                    elapsed_ms, budget, pos, num_changes
+                                ),
+                            },
+                        ));
+                    }
+                    if elapsed_ms > budget / 2.0 && pos <= num_changes / 2 {
+                        return Err(crate::snapshotter::DiffError::Reset(
+                            crate::snapshotter::ResetPipelinesSignal {
+                                reason: "advancement-timeout",
+                                msg: format!(
+                                    "Advancement timed out at half-budget ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
+                                    elapsed_ms, budget, pos, num_changes
+                                ),
+                            },
+                        ));
+                    }
                 }
-            }
-            pos += 1;
+                pos += 1;
 
-            // Port of TS pipeline-driver.ts #advance (744-776): the prev_value
-            // whose PK equals next's PK becomes the EDIT old-row and is NOT
-            // removed; every OTHER prev_value (a different-PK unique conflict) is
-            // removed. Then next → EDIT(that old-row) or ADD. (Previously we
-            // removed ALL prev_values including the same-PK one and used
-            // prev_values[0] as the edit-old — an extra REMOVE + wrong old-row
-            // pick for an in-place update, diverging from TS.)
-            let pk_cols = self
-                .primary_keys
-                .get(&sc.table)
-                .cloned()
-                .unwrap_or_default();
-            let same_pk = |pv: &std::collections::HashMap<String, rusqlite::types::Value>| -> bool {
-                match &sc.next_value {
-                    Some(next) if !pk_cols.is_empty() => pk_cols.iter().all(|col| {
-                        pv.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
-                            == next
-                                .get(col)
-                                .cloned()
-                                .unwrap_or(rusqlite::types::Value::Null)
-                    }),
-                    _ => false,
+                // PipelineDriver creates TableSources lazily and skips a diff entry
+                // when no live pipeline reads that table. Rust keeps schema sources
+                // registered up front, so explicitly distinguish an inactive source
+                // from a live one before validation/push mutates it.
+                if self
+                    .sources
+                    .get(&sc.table)
+                    .is_none_or(|source| !source.borrow().has_active_connections())
+                {
+                    return Ok(());
                 }
-            };
 
-            let mut edit_old_row = None;
-            for prev_row in &sc.prev_values {
-                if same_pk(prev_row) {
-                    edit_old_row = Some(sqlite_value_to_row(prev_row, col_types));
-                } else {
-                    let change = crate::ivm::change::make_source_change_remove(
-                        sqlite_value_to_row(prev_row, col_types),
-                    );
+                // Port of TS pipeline-driver.ts #advance (744-776): the prev_value
+                // whose PK equals next's PK becomes the EDIT old-row and is NOT
+                // removed; every OTHER prev_value (a different-PK unique conflict) is
+                // removed. Then next → EDIT(that old-row) or ADD. (Previously we
+                // removed ALL prev_values including the same-PK one and used
+                // prev_values[0] as the edit-old — an extra REMOVE + wrong old-row
+                // pick for an in-place update, diverging from TS.)
+                let pk_cols = self
+                    .primary_keys
+                    .get(&sc.table)
+                    .cloned()
+                    .unwrap_or_default();
+                let same_pk =
+                    |pv: &std::collections::HashMap<String, rusqlite::types::Value>| -> bool {
+                        match &sc.next_value {
+                            Some(next) if !pk_cols.is_empty() => pk_cols.iter().all(|col| {
+                                pv.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
+                                    == next
+                                        .get(col)
+                                        .cloned()
+                                        .unwrap_or(rusqlite::types::Value::Null)
+                            }),
+                            _ => false,
+                        }
+                    };
+
+                let mut edit_old_row = None;
+                for prev_row in &sc.prev_values {
+                    if same_pk(prev_row) {
+                        edit_old_row = Some(sqlite_value_to_row(prev_row, col_types));
+                    } else {
+                        let change = crate::ivm::change::make_source_change_remove(
+                            sqlite_value_to_row(prev_row, col_types),
+                        );
+                        if let Some(reset) = push_source_change(
+                            &self.sources,
+                            &self.pipelines,
+                            &sc.table,
+                            change,
+                            &self.primary_keys,
+                            &self.table_specs,
+                            &mut on_row_change,
+                        ) {
+                            return Err(crate::snapshotter::DiffError::Reset(
+                                crate::snapshotter::ResetPipelinesSignal {
+                                    reason: "scalar-subquery",
+                                    msg: reset.to_string(),
+                                },
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(next) = &sc.next_value {
+                    let row = sqlite_value_to_row(next, col_types);
+                    let change = if let Some(old_row) = edit_old_row {
+                        crate::ivm::change::make_source_change_edit(row, old_row)
+                    } else {
+                        crate::ivm::change::make_source_change_add(row)
+                    };
                     if let Some(reset) = push_source_change(
                         &self.sources,
                         &self.pipelines,
@@ -890,60 +973,49 @@ impl Engine {
                         ));
                     }
                 }
-            }
 
-            if let Some(next) = &sc.next_value {
-                let row = sqlite_value_to_row(next, col_types);
-                let change = if let Some(old_row) = edit_old_row {
-                    crate::ivm::change::make_source_change_edit(row, old_row)
-                } else {
-                    crate::ivm::change::make_source_change_add(row)
-                };
-                if let Some(reset) = push_source_change(
-                    &self.sources,
-                    &self.pipelines,
-                    &sc.table,
-                    change,
-                    &self.primary_keys,
-                    &self.table_specs,
-                    &mut on_row_change,
-                ) {
+                // Per-fetch arm: a fetch during this change's push blew the budget
+                // and ended its stream early (truncated — discarded on rehydrate).
+                // Surface it as the same advancement-timeout reset the per-change
+                // arm produces, so we rehydrate at head rather than emit a partial.
+                if advance_gate.tripped() {
                     return Err(crate::snapshotter::DiffError::Reset(
                         crate::snapshotter::ResetPipelinesSignal {
-                            reason: "scalar-subquery",
-                            msg: reset.to_string(),
+                            reason: "advancement-timeout",
+                            msg: format!(
+                                "Advancement timed out mid-fetch ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
+                                advance_gate.elapsed_ms(),
+                                advance_gate.budget_ms(),
+                                pos,
+                                num_changes
+                            ),
                         },
                     ));
                 }
-            }
 
-            // Per-fetch arm: a fetch during this change's push blew the budget
-            // and ended its stream early (truncated — discarded on rehydrate).
-            // Surface it as the same advancement-timeout reset the per-change
-            // arm produces, so we rehydrate at head rather than emit a partial.
-            if advance_gate.tripped() {
-                return Err(crate::snapshotter::DiffError::Reset(
-                    crate::snapshotter::ResetPipelinesSignal {
-                        reason: "advancement-timeout",
-                        msg: format!(
-                            "Advancement timed out mid-fetch ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
-                            advance_gate.elapsed_ms(),
-                            advance_gate.budget_ms(),
-                            pos,
-                            num_changes
-                        ),
-                    },
-                ));
-            }
+                if cancellation_token.is_cancelled() {
+                    return Err(crate::snapshotter::DiffError::Other(
+                        "advance cancelled before all changes were delivered".to_string(),
+                    ));
+                }
 
-            Ok(())
-        });
+                Ok(())
+            },
+        );
 
         // Restore every TableSource to the CURR (head) snapshot for subsequent
         // reads (incremental fetches + next hydration), on every path — matches
         // TS `table.setDB(curr.db.db)` after the change loop.
         for source in self.sources.values() {
             source.borrow_mut().set_snapshot_db(curr_conn.clone());
+        }
+
+        // Cancellation can land after the final diff callback (or while its
+        // final TSFN delivery is blocked). Never translate that race into Ok.
+        if result.is_ok() && cancellation_token.is_cancelled() {
+            result = Err(crate::snapshotter::DiffError::Other(
+                "advance cancelled before all changes were delivered".to_string(),
+            ));
         }
 
         match result {
@@ -1238,6 +1310,9 @@ fn push_source_change(
     on_row_change: &mut impl FnMut(&RowChange),
 ) -> Option<ScalarResetError> {
     if let Some(source) = sources.get(table) {
+        if !source.borrow().has_active_connections() {
+            return None;
+        }
         // Clear collectors (and companion monitors) for this push.
         for entry in pipelines {
             entry.collector.borrow_mut().changes.clear();
@@ -1266,7 +1341,9 @@ fn push_source_change(
         for entry in pipelines {
             let row_changes = std::mem::take(&mut entry.collector.borrow_mut().row_changes);
             for rc in row_changes {
+                let delivery_start = Instant::now();
                 on_row_change(&rc);
+                crate::advance_gate::exclude_current(delivery_start.elapsed());
             }
             // Surviving companion changes (resolved value unchanged) stream
             // under the owning query, per TS companion accumulation.
@@ -1276,7 +1353,9 @@ fn push_source_change(
                     let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
                     streamer.accumulate(&entry.query_id, &c.schema, &cc);
                     for rc in streamer.stream() {
+                        let delivery_start = Instant::now();
                         on_row_change(&rc);
+                        crate::advance_gate::exclude_current(delivery_start.elapsed());
                     }
                 }
             }
@@ -1339,6 +1418,8 @@ impl Default for CancellationToken {
 mod scalar_reset_tests {
     use super::*;
     use crate::ivm::data::Node;
+    use crate::ivm::schema::ColumnType;
+    use crate::ivm::source::MemorySource;
 
     struct UnusedPusher;
 
@@ -1376,5 +1457,35 @@ mod scalar_reset_tests {
         assert_eq!(reset.resolved, "Alice");
         assert_eq!(reset.new, "Alicia");
         assert!(output.changes.is_empty());
+    }
+
+    #[test]
+    fn inactive_source_skips_invalid_change() {
+        let source: Shared<dyn Source> = Rc::new(RefCell::new(MemorySource::new(
+            "unqueried",
+            HashMap::from([("id".to_string(), ColumnType::String { optional: false })]),
+            vec!["id".to_string()],
+        )));
+        let sources = HashMap::from([("unqueried".to_string(), source)]);
+        let missing_row = Arc::new(
+            [("id".to_string(), Value::Str(Arc::from("missing")))]
+                .into_iter()
+                .collect(),
+        );
+
+        // MemorySource would panic on removal of a missing row if pushed. TS
+        // has no TableSource for this table, so the change must be skipped.
+        assert!(
+            push_source_change(
+                &sources,
+                &[],
+                "unqueried",
+                crate::ivm::change::make_source_change_remove(missing_row),
+                &HashMap::new(),
+                &HashMap::new(),
+                &mut |_| {},
+            )
+            .is_none()
+        );
     }
 }

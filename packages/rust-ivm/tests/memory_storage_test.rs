@@ -69,7 +69,10 @@ fn test_other_types() {
     assert_eq!(ms.get("foo"), Some(Value::F64(1.0)));
     assert_eq!(ms.get("bar"), Some(Value::Bool(true)));
     assert_eq!(ms.get("baz"), Some(Value::Null));
-    assert_eq!(ms.get("qux"), Some(Value::Json("{\"a\":1}".into())));
+    assert!(matches!(
+        ms.get("qux"),
+        Some(Value::Json(value)) if value.as_ref() == "{\"a\":1}"
+    ));
     assert_eq!(ms.get("quux"), Some(Value::Str("[1,2,3]".into())));
 }
 

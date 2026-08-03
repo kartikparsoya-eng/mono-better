@@ -55,7 +55,7 @@ use rust_ivm::sqlite::table_source::TableSource;
 /// Raising to K lets the actor enqueue up to K rows without parking, so it stops
 /// blocking per-row on a contended event loop (rows drain K-per-turn). Trade:
 /// O(K) buffered NapiRowChanges (bounded); delivery stays incremental. Env
-/// `RUST_IVM_TSFN_QUEUE` (default 1 — ships dark until the rig A/B is cleared).
+/// `RUST_IVM_TSFN_QUEUE` (local default 1; the production image pins 64).
 fn tsfn_queue_depth() -> usize {
     std::env::var("RUST_IVM_TSFN_QUEUE")
         .ok()
@@ -75,6 +75,15 @@ fn stream_credit_capacity() -> i64 {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(256) as i64
+}
+
+/// A producer must exhaust its interruptible credit gate before it can fill the
+/// TSFN queue. Otherwise `credit > queue` lets it acquire another permit and
+/// block inside an uninterruptible `tsfn.call(Blocking)`, beyond the reach of
+/// cancel/watchdog. Clamping preserves the configured bound and makes every
+/// park site cancellation-safe.
+fn effective_stream_credit_capacity(queue_depth: usize) -> i64 {
+    stream_credit_capacity().min(queue_depth as i64)
 }
 
 /// Return freed heap memory to the OS after a CG teardown. glibc retains freed
@@ -632,8 +641,7 @@ fn json_to_rusqlite(v: &serde_json::Value) -> std::result::Result<rusqlite::type
 
 /// The engine state held directly on the JS thread.
 fn row_to_json(row: &rusqlite::Row, i: usize) -> std::result::Result<serde_json::Value, String> {
-    let v = row
-        .get::<_, rusqlite::types::Value>(i)
+    let v = rust_ivm::sqlite::read_value_lossy(row, i)
         .map_err(|e| format!("col {}: {}", i, e))?;
     Ok(match v {
         rusqlite::types::Value::Null => serde_json::Value::Null,
@@ -648,14 +656,27 @@ fn row_to_json(row: &rusqlite::Row, i: usize) -> std::result::Result<serde_json:
                 serde_json::Value::Number(i.into())
             }
         }
-        rusqlite::types::Value::Real(f) => {
-            serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or_else(|| 0.into()))
-        }
+        rusqlite::types::Value::Real(f) => sqlite_real_to_json(f),
         rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
         rusqlite::types::Value::Blob(b) => {
             serde_json::Value::String(String::from_utf8_lossy(&b).into_owned())
         }
     })
+}
+
+fn sqlite_real_to_json(value: f64) -> serde_json::Value {
+    serde_json::Number::from_f64(value)
+        .map(serde_json::Value::Number)
+        .unwrap_or_else(|| {
+            let encoded = if value.is_nan() {
+                "NaN"
+            } else if value.is_sign_negative() {
+                "-Infinity"
+            } else {
+                "Infinity"
+            };
+            serde_json::json!({"__rustIvmSqliteReal": encoded})
+        })
 }
 
 fn ast_to_ts_json(ast: &rust_ivm::builder::ast::Ast) -> serde_json::Value {
@@ -1051,9 +1072,10 @@ impl RustIvmEngine {
         // exact stream. See StreamCreditGate.
         stream_id: f64,
     ) -> Result<AsyncTask<HydrateStreamingTask>> {
+        let queue_depth = tsfn_queue_depth();
         let tsfn = env.create_threadsafe_function(
             &on_row,
-            tsfn_queue_depth(), // default 1 (park per row); RUST_IVM_TSFN_QUEUE raises it
+            queue_depth,
             |ctx| Ok(vec![ctx.value]),
         )?;
         Ok(AsyncTask::new(HydrateStreamingTask {
@@ -1061,6 +1083,7 @@ impl RustIvmEngine {
             queries,
             tsfn,
             stream_id: stream_id as u64,
+            credit_capacity: effective_stream_credit_capacity(queue_depth),
         }))
     }
 
@@ -1075,15 +1098,17 @@ impl RustIvmEngine {
         #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")] on_row: JsFunction,
         stream_id: f64,
     ) -> Result<AsyncTask<AdvanceStreamingTask>> {
+        let queue_depth = tsfn_queue_depth();
         let tsfn = env.create_threadsafe_function(
             &on_row,
-            tsfn_queue_depth(), // default 1 (park per row); RUST_IVM_TSFN_QUEUE raises it
+            queue_depth,
             |ctx| Ok(vec![ctx.value]),
         )?;
         Ok(AsyncTask::new(AdvanceStreamingTask {
             handle: self.handle.clone(),
             tsfn,
             stream_id: stream_id as u64,
+            credit_capacity: effective_stream_credit_capacity(queue_depth),
         }))
     }
 
@@ -1117,6 +1142,22 @@ impl RustIvmEngine {
                 .engine
                 .as_ref()
                 .map_or(0.0, Engine::total_hydration_time_ms)
+        })
+    }
+
+    /// Store the driver's pause-aware hydration duration for one query.
+    #[napi]
+    pub fn set_hydration_time_ms(&self, query_id: String, hydration_time_ms: f64) -> Result<bool> {
+        if !hydration_time_ms.is_finite() || hydration_time_ms < 0.0 {
+            return Err(NapiError::from_reason(
+                "hydration time must be a finite nonnegative number",
+            ));
+        }
+        self.handle.call(move |state| {
+            state
+                .engine
+                .as_mut()
+                .is_some_and(|engine| engine.set_hydration_time_ms(&query_id, hydration_time_ms))
         })
     }
 
@@ -1367,6 +1408,9 @@ impl RustIvmEngine {
     /// before the Promise resolves.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn destroy(&self) -> AsyncTask<DestroyTask> {
+        // Destroy is actor-queued, while a producer may be parked waiting for
+        // credit on that same actor. Cancel out-of-band before queueing it.
+        let _ = self.cancel();
         AsyncTask::new(DestroyTask {
             handle: self.handle.clone(),
         })
@@ -1584,6 +1628,7 @@ pub struct HydrateStreamingTask {
     queries: Vec<NapiQuerySpec>,
     tsfn: ThreadsafeFunction<NapiRowChange>,
     stream_id: u64,
+    credit_capacity: i64,
 }
 
 impl Task for HydrateStreamingTask {
@@ -1595,7 +1640,7 @@ impl Task for HydrateStreamingTask {
         let tsfn = self.tsfn.clone();
         let credit = self.handle.credit.clone();
         let stream_id = self.stream_id;
-        let capacity = stream_credit_capacity();
+        let capacity = self.credit_capacity;
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
@@ -1636,7 +1681,14 @@ impl Task for HydrateStreamingTask {
                 // (blocking backpressure). One fetch per pipeline warms operator
                 // state and emits output while the actor graph remains
                 // single-writer.
-                eng.add_queries_streaming(&specs, do_hydrate);
+                let checkpoint = eng.source_connection_checkpoint();
+                let hydrated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    eng.add_queries_streaming(&specs, do_hydrate);
+                }));
+                if let Err(payload) = hydrated {
+                    eng.rollback_source_connections(&checkpoint);
+                    std::panic::resume_unwind(payload);
+                }
                 // Barrier: don't resolve the promise (→ driver closes its row
                 // queue) until every streamed row has landed in JS. See
                 // drain_barrier for the seed-308 last-row-drop it closes. SKIP it
@@ -1662,6 +1714,7 @@ pub struct AdvanceStreamingTask {
     handle: EngineHandle,
     tsfn: ThreadsafeFunction<NapiRowChange>,
     stream_id: u64,
+    credit_capacity: i64,
 }
 
 impl Task for AdvanceStreamingTask {
@@ -1672,7 +1725,7 @@ impl Task for AdvanceStreamingTask {
         let tsfn = self.tsfn.clone();
         let credit = self.handle.credit.clone();
         let stream_id = self.stream_id;
-        let capacity = stream_credit_capacity();
+        let capacity = self.credit_capacity;
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // A prior panic left the engine possibly half-mutated. Refuse to
@@ -1850,7 +1903,7 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
             } else if let Some(num) = serde_json::Number::from_f64(*n) {
                 serde_json::Value::Number(num)
             } else {
-                serde_json::Value::Null
+                sqlite_real_to_json(*n)
             }
         }
         Value::Str(s) => serde_json::Value::String(s.to_string()),

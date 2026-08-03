@@ -22,8 +22,8 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Minimum advancement time before an abort is considered (ms). MUST match
 /// engine::MIN_ADVANCEMENT_TIME_LIMIT_MS (the per-change check) so the per-row
@@ -40,6 +40,7 @@ pub struct AdvanceGate {
     num_changes: usize,
     pos: AtomicUsize,
     tripped: AtomicBool,
+    excluded_nanos: AtomicU64,
 }
 
 impl AdvanceGate {
@@ -52,7 +53,21 @@ impl AdvanceGate {
             num_changes,
             pos: AtomicUsize::new(0),
             tripped: AtomicBool::new(false),
+            excluded_nanos: AtomicU64::new(0),
         })
+    }
+
+    /// Exclude time spent synchronously delivering rows across the NAPI
+    /// boundary. TS pauses its timer while the consumer is yielded.
+    pub fn exclude(&self, duration: Duration) {
+        let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
+        self.excluded_nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.start.elapsed().saturating_sub(Duration::from_nanos(
+            self.excluded_nanos.load(Ordering::Relaxed),
+        ))
     }
 
     /// Update progress (the number of changes emitted so far).
@@ -70,7 +85,7 @@ impl AdvanceGate {
         if self.tripped.load(Ordering::Relaxed) {
             return true;
         }
-        let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
+        let elapsed = self.elapsed_ms();
         if elapsed > MIN_ADVANCEMENT_TIME_LIMIT_MS
             && (elapsed > self.budget_ms
                 || (elapsed > self.budget_ms / 2.0
@@ -83,7 +98,7 @@ impl AdvanceGate {
     }
 
     pub fn elapsed_ms(&self) -> f64 {
-        self.start.elapsed().as_secs_f64() * 1000.0
+        self.elapsed().as_secs_f64() * 1000.0
     }
 
     pub fn budget_ms(&self) -> f64 {
@@ -119,6 +134,16 @@ pub fn arm(gate: Arc<AdvanceGate>) -> GateGuard {
 /// thread-local read; the caller throttles how often it asks.
 pub fn should_stop_fetch() -> bool {
     ADVANCE_GATE.with(|g| g.borrow().as_ref().is_some_and(|g| g.over_budget()))
+}
+
+/// Exclude a synchronous row-delivery wait from the currently armed advance.
+/// This is a no-op outside production advance.
+pub fn exclude_current(duration: Duration) {
+    ADVANCE_GATE.with(|g| {
+        if let Some(gate) = g.borrow().as_ref() {
+            gate.exclude(duration);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -167,6 +192,14 @@ mod tests {
         assert!(g.tripped());
         g.set_pos(3); // even "rewinding" progress stays tripped
         assert!(g.over_budget());
+    }
+
+    #[test]
+    fn delivery_wait_is_excluded_from_budget() {
+        let g = gate(200, 100.0, 4, 0);
+        g.exclude(Duration::from_millis(175));
+        assert!(g.elapsed_ms() < 50.0);
+        assert!(!g.over_budget());
     }
 
     #[test]

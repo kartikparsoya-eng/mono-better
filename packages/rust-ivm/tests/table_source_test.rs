@@ -8,6 +8,7 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use rustc_hash::FxHashMap;
 
+use rust_ivm::builder::ast::{Condition, SimpleCondition, ValuePosition};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::operator::OutputHandle;
 use rust_ivm::ivm::schema::ColumnType;
@@ -125,7 +126,16 @@ fn test_table_source_fetch_with_filter() {
             row.get("age").cloned().unwrap_or(Value::Null) == Value::F64(25.0)
         });
 
-    let input = source.connect(None, None, Some(predicate), None);
+    let condition = Condition::Simple(SimpleCondition {
+        op: "=".to_string(),
+        left: ValuePosition::Column {
+            name: "age".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::F64(25.0),
+        },
+    });
+    let input = source.connect(None, Some(condition), Some(predicate), None);
 
     let stream = input.borrow().fetch(&Default::default());
     let nodes: Vec<_> = rust_ivm::ivm::stream::skip_yields(stream).collect();

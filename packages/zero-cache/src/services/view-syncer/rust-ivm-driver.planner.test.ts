@@ -271,7 +271,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     expect(await nativeFlips(ISSUES_WITH_OR_EXISTS)).toEqual([true]);
   });
 
-  test('enablePlanner=true: planning failure falls back gracefully', async () => {
+  test('enablePlanner=true: sparse statistics still produce a valid plan', async () => {
     const warnLc = new LogContext('warn', undefined, logSink);
     const storage = new Database(warnLc, ':memory:');
     storage.prepare(CREATE_STORAGE_TABLE).run();

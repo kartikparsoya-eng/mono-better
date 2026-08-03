@@ -13,7 +13,8 @@ import {writeFileSync} from 'node:fs';
 function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {
-    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
@@ -41,17 +42,84 @@ export function makeRng(seed) {
 // Nasty value pools. -0 is intentionally absent: JSON.stringify(-0) === "0",
 // so it cannot survive the fixture file round-trip (canonicalization equates
 // them anyway).
-const STRINGS = ['', 'a', 'A', 'b', 'abc', 'ZZZ', 'héllo', '🦀rust', '%', '_', '0', 'null', 'a b', 'ﬀ', 'true', 'false', 'null', '{}', '[]', 'x'.repeat(1000), '🎉🎊', 'café', '日本語', '\t\n', '"quoted"', "'apos'"];
-const NUMBERS = [0, 1, -1, 2, 10, -10, 2.5, -3.75, 0.1, 1e6, -1e6, 123456789, 0.30000000000000004, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, -0, 3.14159265358979, 1e-10, 1e10, 1e100, -1e100, 0.5, -0.5];
-const JSON_VALUES = [null, true, false, 0, '', [], {}, [1, 'a'], {x: 1}, {nested: {deep: true}}, [null, true, 's']];
+const STRINGS = [
+  '',
+  'a',
+  'A',
+  'b',
+  'abc',
+  'ZZZ',
+  'héllo',
+  '🦀rust',
+  '%',
+  '_',
+  '0',
+  'null',
+  'a b',
+  'ﬀ',
+  'true',
+  'false',
+  'null',
+  '{}',
+  '[]',
+  'x'.repeat(1000),
+  '🎉🎊',
+  'café',
+  '日本語',
+  '\t\n',
+  '"quoted"',
+  "'apos'",
+];
+const NUMBERS = [
+  0,
+  1,
+  -1,
+  2,
+  10,
+  -10,
+  2.5,
+  -3.75,
+  0.1,
+  1e6,
+  -1e6,
+  123456789,
+  0.30000000000000004,
+  Number.MAX_SAFE_INTEGER,
+  Number.MIN_SAFE_INTEGER,
+  -0,
+  3.14159265358979,
+  1e-10,
+  1e10,
+  1e100,
+  -1e100,
+  0.5,
+  -0.5,
+];
+const JSON_VALUES = [
+  null,
+  true,
+  false,
+  0,
+  '',
+  [],
+  {},
+  [1, 'a'],
+  {x: 1},
+  {nested: {deep: true}},
+  [null, true, 's'],
+];
 
 function randValue(rng, type, optional) {
   if (optional && rng.chance(0.25)) return null;
   switch (type) {
-    case 'number': return rng.pick(NUMBERS);
-    case 'boolean': return rng.chance(0.5);
-    case 'json': return rng.pick(JSON_VALUES);
-    default: return rng.pick(STRINGS);
+    case 'number':
+      return rng.pick(NUMBERS);
+    case 'boolean':
+      return rng.chance(0.5);
+    case 'json':
+      return rng.pick(JSON_VALUES);
+    default:
+      return rng.pick(STRINGS);
   }
 }
 
@@ -65,16 +133,29 @@ export function genTables(rng) {
     const compoundPK = ti > 0 && rng.chance(0.1);
     const columns = {id: 'string'};
     const colTypes = {id: ['string', false]};
-    if (compoundPK) { columns.id2 = 'string'; colTypes.id2 = ['string', false]; }
+    if (compoundPK) {
+      columns.id2 = 'string';
+      colTypes.id2 = ['string', false];
+    }
     const nCols = rng.int(2, 4);
     for (let c = 0; c < nCols; c++) {
       const cname = `c${c}`;
-      const base = rng.pick(['number', 'string', 'boolean', 'number', 'string']);
+      const base = rng.pick([
+        'number',
+        'string',
+        'boolean',
+        'number',
+        'string',
+        'json',
+      ]);
       const optional = rng.chance(0.4);
       columns[cname] = optional ? `${base}|null` : base;
       colTypes[cname] = [base, optional];
     }
-    if (ti > 0) { columns.fk = 'string'; colTypes.fk = ['string', false]; }
+    if (ti > 0) {
+      columns.fk = 'string';
+      colTypes.fk = ['string', false];
+    }
     // PK divergence: 25% of simple-PK tables get a CLIENT-schema PK column ('k')
     // distinct from the replica surrogate 'id' — modelling real tables like
     // messages->messageId, conversations->conversationId. The SQLite replica is
@@ -82,8 +163,15 @@ export function genTables(rng) {
     // 'k' (primaryKey). Exercises the driver/engine keying seam where shipping the
     // replica PK emits rowKeys missing the client PK column → client "Got undefined".
     const pkDivergence = !compoundPK && rng.chance(0.25);
-    if (pkDivergence) { columns.k = 'string'; colTypes.k = ['string', false]; }
-    const primaryKey = pkDivergence ? ['k'] : (compoundPK ? ['id', 'id2'] : ['id']);
+    if (pkDivergence) {
+      columns.k = 'string';
+      colTypes.k = ['string', false];
+    }
+    const primaryKey = pkDivergence
+      ? ['k']
+      : compoundPK
+        ? ['id', 'id2']
+        : ['id'];
     const replicaPrimaryKey = compoundPK ? ['id', 'id2'] : ['id'];
     const nRows = rng.chance(0.1) ? 0 : rng.int(5, 50);
     const rows = [];
@@ -93,20 +181,33 @@ export function genTables(rng) {
       if (pkDivergence) row.k = `${name}-k${r}`; // unique client PK value
       for (const [cname, [base, optional]] of Object.entries(colTypes)) {
         if (cname === 'id' || cname === 'id2' || cname === 'k') continue;
-        if (cname === 'fk') { row.fk = `t0-r${rng.int(0, 60)}`; continue; }
+        if (cname === 'fk') {
+          row.fk = `t0-r${rng.int(0, 60)}`;
+          continue;
+        }
         row[cname] = randValue(rng, base, optional);
       }
       rows.push(row);
     }
-    tables[name] = {columns, primaryKey, replicaPrimaryKey, rows, _colTypes: colTypes};
+    tables[name] = {
+      columns,
+      primaryKey,
+      replicaPrimaryKey,
+      rows,
+      _colTypes: colTypes,
+    };
   }
   return tables;
 }
 
 const CMP_OPS = ['=', '!=', '<', '<=', '>', '>='];
 
-function colRef(name) { return {type: 'column', name}; }
-function lit(value) { return {type: 'literal', value}; }
+function colRef(name) {
+  return {type: 'column', name};
+}
+function lit(value) {
+  return {type: 'literal', value};
+}
 
 function randLiteralFor(rng, table, cname) {
   // Bias toward values that actually occur (boundary ties), else random pool.
@@ -124,10 +225,14 @@ function genSimpleCondition(rng, table) {
   const cname = rng.pick(cols);
   const [base] = table._colTypes[cname];
   const roll = rng.rand();
-  if (roll < 0.10) {
+  if (roll < 0.1) {
     // IS / IS NOT NULL (safe on all types)
-    return {type: 'simple', op: rng.chance(0.5) ? 'IS' : 'IS NOT',
-            left: colRef(cname), right: lit(null)};
+    return {
+      type: 'simple',
+      op: rng.chance(0.5) ? 'IS' : 'IS NOT',
+      left: colRef(cname),
+      right: lit(null),
+    };
   }
   if (roll < 0.16) {
     // Literal vs literal comparison (1=1, 'a'='a', etc.) — exercises the
@@ -135,28 +240,65 @@ function genSimpleCondition(rng, table) {
     // found where 1=1 returned 0 rows). Only = and != are safe here.
     const val1 = randLiteralFor(rng, table, cname);
     const val2 = rng.chance(0.5) ? val1 : randLiteralFor(rng, table, cname);
-    return {type: 'simple', op: rng.pick(['=', '!=']),
-            left: lit(val1), right: lit(val2)};
+    return {
+      type: 'simple',
+      op: rng.pick(['=', '!=']),
+      left: lit(val1),
+      right: lit(val2),
+    };
   }
   if (roll < 0.3 && base === 'string') {
-    const pat = rng.pick(['a%', '%b%', '_', '%', 'h_llo', 'A%', '%🦀%', 'a b', '', '%null%', '_%', '___', '%_%', 'a%c', 'Z%', '%Z', 'a_b_c']);
+    const pat = rng.pick([
+      'a%',
+      '%b%',
+      '_',
+      '%',
+      'h_llo',
+      'A%',
+      '%🦀%',
+      'a b',
+      '',
+      '%null%',
+      '_%',
+      '___',
+      '%_%',
+      'a%c',
+      'Z%',
+      '%Z',
+      'a_b_c',
+    ]);
     const likeOps = ['LIKE', 'ILIKE', 'NOT LIKE', 'NOT ILIKE'];
-    return {type: 'simple', op: rng.pick(likeOps),
-            left: colRef(cname), right: lit(pat)};
+    return {
+      type: 'simple',
+      op: rng.pick(likeOps),
+      left: colRef(cname),
+      right: lit(pat),
+    };
   }
   if (roll < 0.45) {
     // 5% chance: empty IN list (matches nothing)
     const n = rng.chance(0.05) ? 0 : rng.int(1, 4);
     const vals = [];
     for (let i = 0; i < n; i++) vals.push(randLiteralFor(rng, table, cname));
-    return {type: 'simple', op: rng.chance(0.3) ? 'NOT IN' : 'IN', left: colRef(cname), right: lit(vals)};
+    return {
+      type: 'simple',
+      op: rng.chance(0.3) ? 'NOT IN' : 'IN',
+      left: colRef(cname),
+      right: lit(vals),
+    };
   }
-  return {type: 'simple', op: rng.pick(CMP_OPS),
-          left: colRef(cname), right: lit(randLiteralFor(rng, table, cname))};
+  return {
+    type: 'simple',
+    op: rng.pick(CMP_OPS),
+    left: colRef(cname),
+    right: lit(randLiteralFor(rng, table, cname)),
+  };
 }
 
 function genExistsCondition(rng, rootName, tables, allowNotExists) {
-  const others = Object.keys(tables).filter(t => t !== rootName && tables[t].columns.fk);
+  const others = Object.keys(tables).filter(
+    t => t !== rootName && tables[t].columns.fk,
+  );
   if (rootName !== 't0' || others.length === 0) return null;
   const child = rng.pick(others);
   const op = allowNotExists && rng.chance(0.35) ? 'NOT EXISTS' : 'EXISTS';
@@ -184,24 +326,32 @@ function genExistsCondition(rng, rootName, tables, allowNotExists) {
 // matched row as a companion. Correlation parentField is the root PK so at
 // most one parent matches (a clean 1:1 with the companion).
 function genScalarExistsCondition(rng, rootName, tables) {
-  const others = Object.keys(tables).filter(t => t !== rootName && tables[t].columns.fk);
+  const others = Object.keys(tables).filter(
+    t => t !== rootName && tables[t].columns.fk,
+  );
   if (others.length === 0) return null;
   const child = rng.pick(others);
   const rows = tables[child].rows;
   // Bias toward an existing child row (→ match + companion); sometimes a
   // missing id (→ resolved undefined → ALWAYS_FALSE, no companion).
-  const pinId = (rows.length > 0 && rng.chance(0.8))
-    ? rng.pick(rows).id
-    : `${child}-x${rng.int(0, 99)}`;
+  const pinId =
+    rows.length > 0 && rng.chance(0.8)
+      ? rng.pick(rows).id
+      : `${child}-x${rng.int(0, 99)}`;
   const sub = {
-    table: child, alias: `zsubq_${child}`, orderBy: [['id', 'asc']],
+    table: child,
+    alias: `zsubq_${child}`,
+    orderBy: [['id', 'asc']],
     where: {type: 'simple', op: '=', left: colRef('id'), right: lit(pinId)},
   };
   return {
     type: 'correlatedSubquery',
     op: 'EXISTS',
     scalar: true,
-    related: {correlation: {parentField: ['id'], childField: ['fk']}, subquery: sub},
+    related: {
+      correlation: {parentField: ['id'], childField: ['fk']},
+      subquery: sub,
+    },
   };
 }
 
@@ -213,7 +363,9 @@ function genCondition(rng, rootName, tables, depth, allowNotExists) {
     const n = rng.int(2, 3);
     const conditions = [];
     for (let i = 0; i < n; i++) {
-      conditions.push(genCondition(rng, rootName, tables, depth + 1, allowNotExists));
+      conditions.push(
+        genCondition(rng, rootName, tables, depth + 1, allowNotExists),
+      );
     }
     return {type: kind, conditions};
   }
@@ -255,18 +407,26 @@ export function genFixture(seed) {
 
   const ast = {table: rootName};
   // orderBy: 0-2 non-PK columns asc/desc, always ending in the PK tiebreaker.
-  const allSortCols = Object.keys(root._colTypes).filter(c => c !== 'id' && c !== 'id2');
-  const sortCols = rng.shuffle(allSortCols)
+  const allSortCols = Object.keys(root._colTypes).filter(
+    c => c !== 'id' && c !== 'id2',
+  );
+  const sortCols = rng
+    .shuffle(allSortCols)
     .slice(0, rng.int(0, Math.min(allSortCols.length, 3)));
-  ast.orderBy = [...sortCols.map(c => [c, rng.chance(0.5) ? 'asc' : 'desc']),
-                 ['id', rng.chance(0.85) ? 'asc' : 'desc']];
-  if (rng.chance(0.55)) ast.where = genCondition(rng, rootName, tables, 0, enableNotExists);
+  ast.orderBy = [
+    ...sortCols.map(c => [c, rng.chance(0.5) ? 'asc' : 'desc']),
+    ['id', rng.chance(0.85) ? 'asc' : 'desc'],
+  ];
+  if (rng.chance(0.55))
+    ast.where = genCondition(rng, rootName, tables, 0, enableNotExists);
   if (rng.chance(0.5)) ast.limit = rng.int(1, 12);
   if (rng.chance(0.25) && root.rows.length > 0) {
     // start: use a real row from the table (ensures the PK columns match)
     ast.start = {row: rng.pick(root.rows), exclusive: rng.chance(0.5)};
   }
-  const relatedTargets = Object.keys(tables).filter(t => t !== rootName && tables[t].columns.fk);
+  const relatedTargets = Object.keys(tables).filter(
+    t => t !== rootName && tables[t].columns.fk,
+  );
   if (rootName === 't0' && relatedTargets.length > 0 && rng.chance(0.55)) {
     ast.related = [];
     const nRelated = rng.int(1, Math.min(2, relatedTargets.length));
@@ -277,20 +437,34 @@ export function genFixture(seed) {
       if (rng.chance(0.35)) sub.where = genSimpleCondition(rng, tables[child]);
       // 10% chance: nested related in the subquery (2-level deep join)
       if (rng.chance(0.1) && rootName === 't0' && child !== 't0' && tables.t0) {
-        const nestedSub = {table: 't0', alias: `nested${ri}`, orderBy: [['id', 'asc']]};
+        const nestedSub = {
+          table: 't0',
+          alias: `nested${ri}`,
+          orderBy: [['id', 'asc']],
+        };
         if (rng.chance(0.3)) nestedSub.limit = rng.int(1, 3);
-        sub.related = [{correlation: {parentField: ['fk'], childField: ['id']}, subquery: nestedSub}];
+        sub.related = [
+          {
+            correlation: {parentField: ['fk'], childField: ['id']},
+            subquery: nestedSub,
+          },
+        ];
       }
       // 15% chance of a hidden junction edge (invisible to client but children visible)
       const hidden = rng.chance(0.15);
-      ast.related.push({correlation: {parentField: ['id'], childField: ['fk']}, subquery: sub, ...(hidden && {hidden: true})});
+      ast.related.push({
+        correlation: {parentField: ['id'], childField: ['fk']},
+        subquery: sub,
+        ...(hidden && {hidden: true}),
+      });
     }
   }
 
   // Pushes: maintain shadow state so edit/remove always reference live rows.
   // Scalar-subquery fixtures carry no pushes (see astHasScalar).
   const shadow = {};
-  for (const [name, spec] of Object.entries(tables)) shadow[name] = spec.rows.map(r => ({...r}));
+  for (const [name, spec] of Object.entries(tables))
+    shadow[name] = spec.rows.map(r => ({...r}));
   const pushes = [];
   const nPushes = astHasScalar(ast) ? 0 : rng.int(0, 25);
   let nextId = rng.int(1, 1000);
@@ -298,13 +472,18 @@ export function genFixture(seed) {
     const tname = rng.pick(Object.keys(tables));
     const t = tables[tname];
     const live = shadow[tname];
-    const kind = rng.pick(live.length > 0 ? ['add', 'edit', 'edit', 'remove'] : ['add']);
+    const kind = rng.pick(
+      live.length > 0 ? ['add', 'edit', 'edit', 'remove'] : ['add'],
+    );
     if (kind === 'add') {
       const row = {id: `${tname}-p${nextId++}`};
       if (t._colTypes.k) row.k = `${tname}-pk${nextId}`; // unique client PK (never random)
       for (const [cname, [base, optional]] of Object.entries(t._colTypes)) {
         if (cname === 'id' || cname === 'k') continue;
-        if (cname === 'fk') { row.fk = `t0-r${rng.int(0, 60)}`; continue; }
+        if (cname === 'fk') {
+          row.fk = `t0-r${rng.int(0, 60)}`;
+          continue;
+        }
         row[cname] = randValue(rng, base, optional);
       }
       live.push(row);
@@ -314,8 +493,11 @@ export function genFixture(seed) {
       const oldRow = {...live[idx]};
       const row = {...oldRow};
       // Never edit a PK column ('k' is the client PK for divergent tables).
-      const editable = Object.keys(t._colTypes).filter(c => c !== 'id' && c !== 'id2' && c !== 'fk' && c !== 'k');
-      const cname = editable.length > 0 && rng.chance(0.85) ? rng.pick(editable) : null;
+      const editable = Object.keys(t._colTypes).filter(
+        c => c !== 'id' && c !== 'id2' && c !== 'fk' && c !== 'k',
+      );
+      const cname =
+        editable.length > 0 && rng.chance(0.85) ? rng.pick(editable) : null;
       if (cname) {
         const [base, optional] = t._colTypes[cname];
         row[cname] = randValue(rng, base, optional);
@@ -334,7 +516,9 @@ export function genFixture(seed) {
       // Skip no-op edits (oldRow === row). Production change-streams never
       // emit them, and they create false-positive advance divergences.
       const cols = Object.keys(t._colTypes);
-      const changed = cols.some(c => JSON.stringify(oldRow[c]) !== JSON.stringify(row[c]));
+      const changed = cols.some(
+        c => JSON.stringify(oldRow[c]) !== JSON.stringify(row[c]),
+      );
       if (changed) {
         live[idx] = {...row};
         pushes.push({type: 'edit', table: tname, oldRow, row});
@@ -349,7 +533,11 @@ export function genFixture(seed) {
 
   const cleanTables = {};
   for (const [name, spec] of Object.entries(tables)) {
-    cleanTables[name] = {columns: spec.columns, primaryKey: spec.primaryKey, rows: spec.rows};
+    cleanTables[name] = {
+      columns: spec.columns,
+      primaryKey: spec.primaryKey,
+      rows: spec.rows,
+    };
     // Carry the replica PK through when it diverges from the client PK, so the
     // napi/SQLite harness can key the replica differently from the engine/client.
     if (
@@ -373,7 +561,8 @@ export function genFixture(seed) {
 
 // CLI
 if (import.meta.url === `file://${process.argv[1]}`) {
-  let seed = null, out = null;
+  let seed = null,
+    out = null;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--seed') seed = Number(args[++i]);
@@ -385,6 +574,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
   const fixture = genFixture(seed);
   const json = JSON.stringify(fixture, null, 1) + '\n';
-  if (out) { writeFileSync(out, json); console.log(`wrote ${out}`); }
-  else process.stdout.write(json);
+  if (out) {
+    writeFileSync(out, json);
+    console.log(`wrote ${out}`);
+  } else process.stdout.write(json);
 }
