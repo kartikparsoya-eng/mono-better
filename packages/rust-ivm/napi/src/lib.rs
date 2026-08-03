@@ -680,11 +680,123 @@ fn row_to_json(row: &rusqlite::Row, i: usize) -> std::result::Result<serde_json:
         .map_err(|e| format!("col {}: {}", i, e))?;
     Ok(match v {
         rusqlite::types::Value::Null => serde_json::Value::Null,
-        rusqlite::types::Value::Integer(i) => serde_json::Value::Number(i.into()),
+        rusqlite::types::Value::Integer(i) => {
+            // JSON numbers cannot carry SQLite i64 values losslessly through
+            // `readQuery`. Tag unsafe integers so the TS runner revives them to
+            // bigint and the shared `fromSQLiteTypes` path raises the same
+            // UnsupportedValueError as PipelineDriver's safeIntegers(true).
+            if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&i) {
+                serde_json::json!({"__rustIvmSqliteInteger": i.to_string()})
+            } else {
+                serde_json::Value::Number(i.into())
+            }
+        }
         rusqlite::types::Value::Real(f) => serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or_else(|| 0.into())),
         rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
         rusqlite::types::Value::Blob(b) => serde_json::Value::String(String::from_utf8_lossy(&b).into_owned()),
     })
+}
+
+fn ast_to_ts_json(ast: &rust_ivm::builder::ast::Ast) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(schema) = &ast.schema {
+        out.insert("schema".into(), schema.clone().into());
+    }
+    out.insert("table".into(), ast.table.clone().into());
+    if let Some(alias) = &ast.alias {
+        out.insert("alias".into(), alias.clone().into());
+    }
+    if let Some(condition) = &ast.where_clause {
+        out.insert("where".into(), condition_to_ts_json(condition));
+    }
+    if !ast.related.is_empty() {
+        out.insert(
+            "related".into(),
+            ast.related.iter().map(related_to_ts_json).collect(),
+        );
+    }
+    if let Some(limit) = ast.limit {
+        out.insert("limit".into(), limit.into());
+    }
+    if let Some(order) = &ast.order_by {
+        out.insert(
+            "orderBy".into(),
+            order
+                .iter()
+                .map(|part| serde_json::json!([part.column, part.direction]))
+                .collect(),
+        );
+    }
+    if let Some(start) = &ast.start {
+        out.insert(
+            "start".into(),
+            serde_json::json!({
+                "row": value_map_to_json_value(&start.row),
+                "exclusive": start.exclusive,
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
+}
+
+fn related_to_ts_json(related: &rust_ivm::builder::ast::RelatedSubquery) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    out.insert("subquery".into(), ast_to_ts_json(&related.subquery));
+    out.insert(
+        "correlation".into(),
+        serde_json::json!({
+            "parentField": related.parent_key,
+            "childField": related.child_key,
+        }),
+    );
+    serde_json::Value::Object(out)
+}
+
+fn condition_to_ts_json(condition: &rust_ivm::builder::ast::Condition) -> serde_json::Value {
+    use rust_ivm::builder::ast::{Condition, ValuePosition};
+    let position = |value: &ValuePosition| match value {
+        ValuePosition::Column { name } => serde_json::json!({"type": "column", "name": name}),
+        ValuePosition::Literal { value } => {
+            serde_json::json!({"type": "literal", "value": value_to_serde_json(value)})
+        }
+    };
+    match condition {
+        Condition::Simple(simple) => serde_json::json!({
+            "type": "simple",
+            "op": simple.op,
+            "left": position(&simple.left),
+            "right": position(&simple.right),
+        }),
+        Condition::And(conditions) => serde_json::json!({
+            "type": "and",
+            "conditions": conditions.iter().map(condition_to_ts_json).collect::<Vec<_>>(),
+        }),
+        Condition::Or(conditions) => serde_json::json!({
+            "type": "or",
+            "conditions": conditions.iter().map(condition_to_ts_json).collect::<Vec<_>>(),
+        }),
+        Condition::CorrelatedSubquery(csq) => {
+            let mut out = serde_json::Map::new();
+            out.insert("type".into(), "correlatedSubquery".into());
+            out.insert("op".into(), csq.op.clone().into());
+            out.insert("related".into(), related_to_ts_json(&csq.related));
+            if csq.scalar {
+                out.insert("scalar".into(), true.into());
+            }
+            if let Some(flip) = csq.flip {
+                out.insert("flip".into(), flip.into());
+            }
+            serde_json::Value::Object(out)
+        }
+    }
+}
+
+fn value_map_to_json_value(map: &rust_ivm::ivm::data::Row) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for (key, value) in map.iter() {
+        out.insert(key.to_string(), value_to_serde_json(value));
+    }
+    serde_json::Value::Object(out)
 }
 
 struct EngineState {
@@ -1039,6 +1151,18 @@ impl RustIvmEngine {
             if let Some(ref mut eng) = state.engine {
                 eng.remove_query(&query_id);
             }
+        })
+    }
+
+    /// Scalar-resolved logical AST for public PipelineDriver query metadata.
+    #[napi]
+    pub fn query_transformed_ast(&self, query_id: String) -> Result<Option<String>> {
+        self.handle.call(move |state| {
+            state.engine.as_ref().and_then(|engine| {
+                engine
+                    .transformed_ast(&query_id)
+                    .map(|ast| ast_to_ts_json(&ast).to_string())
+            })
         })
     }
 

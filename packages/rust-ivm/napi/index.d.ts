@@ -69,7 +69,7 @@ export declare class RustIvmEngine {
    * When db_path is provided, creates TableSource instances backed by SQLite.
    * When no db_path, creates MemorySource instances (test/dev mode).
    * If `init_snapshotter` was called first, the existing snapshotter is
-   * reused (its interrupt handle is still registered below).
+   * reused (its live interrupt registry remains attached).
    */
   init(tables: Array<NapiTableSpec>, dbPath: string | undefined | null, appId: string): void
   /**
@@ -112,6 +112,8 @@ export declare class RustIvmEngine {
    */
   advanceToHeadStreamingRows(onRow: (err: Error | null, row: NapiRowChange) => void, streamId: number): Promise<void>
   removeQuery(queryId: string): void
+  /** Scalar-resolved logical AST for public PipelineDriver query metadata. */
+  queryTransformedAst(queryId: string): string | null
   /**
    * Sum of successful pipeline hydration times, matching
    * `PipelineDriver.totalHydrationTimeMs()`.

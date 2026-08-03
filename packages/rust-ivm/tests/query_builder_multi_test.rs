@@ -4,11 +4,20 @@
 use rust_ivm::ivm::constraint::{Constraint, MultiConstraint};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::operator::{Basis, FetchRequest, Start};
+use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::sqlite::query_builder::build_select_query;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn str_val(s: &str) -> Value {
     Value::Str(std::sync::Arc::from(s))
+}
+
+fn required_columns(columns: &[String]) -> HashMap<String, ColumnType> {
+    columns
+        .iter()
+        .map(|column| (column.clone(), ColumnType::String { optional: false }))
+        .collect()
 }
 
 #[test]
@@ -30,7 +39,15 @@ fn test_multi_constraints_single_column_in_list() {
     let columns = vec!["id".to_string(), "name".to_string()];
     let order: Vec<(String, String)> = vec![("id".to_string(), "asc".to_string())];
 
-    let query = build_select_query("issues", &columns, &req, None, Some(&order), false);
+    let query = build_select_query(
+        "issues",
+        &columns,
+        &required_columns(&columns),
+        &req,
+        None,
+        Some(&order),
+        false,
+    );
 
     assert!(query.text.contains("\"id\" IN ("));
     assert!(query.text.contains("?, ?, ?"));
@@ -56,7 +73,15 @@ fn test_multi_constraints_compound_key_values() {
     let columns = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     let order: Vec<(String, String)> = vec![("a".to_string(), "asc".to_string())];
 
-    let query = build_select_query("pairs", &columns, &req, None, Some(&order), false);
+    let query = build_select_query(
+        "pairs",
+        &columns,
+        &required_columns(&columns),
+        &req,
+        None,
+        Some(&order),
+        false,
+    );
 
     assert!(
         query.text.contains("(\"a\", \"b\") IN (VALUES"),
@@ -98,7 +123,15 @@ fn test_multi_constraints_with_constraint_and_start_and_reverse() {
     let columns = vec!["id".to_string(), "org".to_string(), "rank".to_string()];
     let order: Vec<(String, String)> = vec![("rank".to_string(), "asc".to_string())];
 
-    let query = build_select_query("issues", &columns, &req, None, Some(&order), true);
+    let query = build_select_query(
+        "issues",
+        &columns,
+        &required_columns(&columns),
+        &req,
+        None,
+        Some(&order),
+        true,
+    );
 
     assert!(
         query.text.contains("\"org\" = ?"),
@@ -142,7 +175,15 @@ fn test_multi_constraints_multiple_independent_lists() {
     let columns = vec!["id".to_string(), "org".to_string()];
     let order: Vec<(String, String)> = vec![("id".to_string(), "asc".to_string())];
 
-    let query = build_select_query("issues", &columns, &req, None, Some(&order), false);
+    let query = build_select_query(
+        "issues",
+        &columns,
+        &required_columns(&columns),
+        &req,
+        None,
+        Some(&order),
+        false,
+    );
 
     assert!(
         query.text.contains("\"id\" IN (") && query.text.contains("\"org\" IN ("),
@@ -166,7 +207,15 @@ fn test_multi_constraints_empty_skipped() {
     let columns = vec!["id".to_string()];
     let order: Vec<(String, String)> = vec![("id".to_string(), "asc".to_string())];
 
-    let query = build_select_query("issues", &columns, &req, None, Some(&order), false);
+    let query = build_select_query(
+        "issues",
+        &columns,
+        &required_columns(&columns),
+        &req,
+        None,
+        Some(&order),
+        false,
+    );
 
     assert!(
         !query.text.contains("IN"),
@@ -189,7 +238,15 @@ fn test_multi_constraints_no_order() {
 
     let columns = vec!["id".to_string(), "name".to_string()];
 
-    let query = build_select_query("issues", &columns, &req, None, None, false);
+    let query = build_select_query(
+        "issues",
+        &columns,
+        &required_columns(&columns),
+        &req,
+        None,
+        None,
+        false,
+    );
 
     assert!(
         query.text.contains("\"id\" IN ("),

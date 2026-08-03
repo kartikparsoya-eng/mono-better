@@ -34,7 +34,7 @@ const TSFN_BATCH = (() => {
 })();
 
 import {must} from '../../../../shared/src/must.ts';
-import type {AST} from '../../../../zero-protocol/src/ast.ts';
+import type {AST, Condition} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
 import type {Row} from '../../../../zero-protocol/src/data.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
@@ -386,6 +386,21 @@ export class RustIVMDriver {
     ): Record<string, unknown>[] =>
       JSON.parse(
         engine.readQuery(sql, params ? JSON.stringify(params) : null),
+        (_key, value: unknown) => {
+          if (
+            value !== null &&
+            typeof value === 'object' &&
+            Object.keys(value).length === 1
+          ) {
+            const integer = (value as Record<string, unknown>)[
+              '__rustIvmSqliteInteger'
+            ];
+            if (typeof integer === 'string') {
+              return BigInt(integer);
+            }
+          }
+          return value;
+        },
       ) as Record<string, unknown>[];
     return {
       get: (sql: string, ...args: unknown[]) => readQuery(sql, args)[0],
@@ -638,22 +653,28 @@ export class RustIVMDriver {
 
     const planned = this.#planAst(query);
 
-    this.#rowSetSignatures.set(queryID, 0n);
-
     let hydrated = false;
+    let transformedAst = queryInfoAst(query, planned);
     try {
       if (STREAM_ROWS) {
         yield* this.#addQueryStreaming(queryID, planned);
       } else {
         yield* this.#addQueryEager(queryID, planned);
       }
+      const resolved = this.#engine.queryTransformedAst(queryID);
+      assert(resolved, `Missing transformed AST for query '${queryID}'`);
+      transformedAst = queryInfoAst(query, JSON.parse(resolved) as AST);
       hydrated = true;
     } finally {
       if (hydrated) {
         // TS registers query metadata only after the hydrate generator has
         // completed. Failed or abandoned hydrations must never appear active.
         this.#queryInfo.set(queryID, {
-          transformedAst: planned,
+          // `planned` is an engine-only AST (completeOrdering plus optional
+          // Rust planner flips). PipelineDriver exposes the transformed query,
+          // not its internal physical ordering, through queries(). Keep the
+          // caller-visible AST here so planning does not leak into public state.
+          transformedAst,
           transformationHash,
           ...(queryName !== undefined && {queryName}),
         });
@@ -1053,6 +1074,63 @@ export class RustIVMDriver {
       );
     }
   }
+}
+
+// Match the object shape produced by resolveSimpleScalarSubqueries for normal
+// related/non-scalar queries. That resolver recursively rebuilds every AST with
+// a `related` array and materializes `where: undefined` on the rebuilt parent.
+// The Rust engine performs the equivalent graph transformation internally, so
+// keep its public QueryInfo shape aligned without leaking the physical plan.
+function queryInfoAst(original: AST, resolved: AST): AST {
+  const where =
+    original.where && resolved.where
+      ? queryInfoCondition(original.where, resolved.where)
+      : original.where;
+  const related = original.related?.map((r, i) => ({
+    ...r,
+    subquery: queryInfoAst(
+      r.subquery,
+      resolved.related?.[i]?.subquery ?? r.subquery,
+    ),
+  }));
+  return where !== original.where || related !== original.related
+    ? {...original, where, related}
+    : original;
+}
+
+function queryInfoCondition(
+  original: Condition,
+  resolved: Condition,
+): Condition {
+  if (original.type === 'correlatedSubquery') {
+    // A simple scalar is replaced by a literal condition. This is the actual
+    // native resolution result, including the resolved value/ALWAYS_FALSE.
+    if (resolved.type !== 'correlatedSubquery') {
+      return resolved;
+    }
+    const subquery = queryInfoAst(
+      original.related.subquery,
+      resolved.related.subquery,
+    );
+    return subquery === original.related.subquery
+      ? original
+      : {
+          ...original,
+          related: {...original.related, subquery},
+        };
+  }
+  if (
+    (original.type === 'and' || original.type === 'or') &&
+    resolved.type === original.type
+  ) {
+    const conditions = original.conditions.map((condition, i) =>
+      queryInfoCondition(condition, resolved.conditions[i] ?? condition),
+    );
+    return conditions.every((value, i) => value === original.conditions[i])
+      ? original
+      : {type: original.type, conditions};
+  }
+  return original;
 }
 
 // -- Rust planner flip application -----------------------------------------

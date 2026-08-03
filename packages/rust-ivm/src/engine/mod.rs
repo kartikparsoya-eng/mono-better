@@ -58,7 +58,7 @@ pub struct QueryResult {
 /// hydrate, register). Used by both the serial and parallel hydrate paths.
 pub(crate) struct Built {
     pub query_id: String,
-    pub ast: Ast,
+    pub transformed_ast: Ast,
     pub pipeline: Shared<dyn Input>,
     pub collector: Shared<CollectOutput>,
     pub schema: SourceSchema,
@@ -74,7 +74,7 @@ struct PipelineEntry {
     schema: SourceSchema,
     query_id: String,
     hydration_time_ms: f64,
-    _transformed_ast: Ast,
+    transformed_ast: Ast,
     /// Live companion pipelines monitoring resolved scalar subqueries for this
     /// query (empty for queries with no scalar subqueries).
     companions: Vec<CompanionPipeline>,
@@ -477,7 +477,7 @@ impl Engine {
             let schema = pipeline.borrow().get_schema();
             built.push(Built {
                 query_id: q.query_id.clone(),
-                ast,
+                transformed_ast: resolved.ast,
                 pipeline,
                 collector,
                 schema,
@@ -627,7 +627,7 @@ impl Engine {
                 schema: b.schema,
                 query_id: b.query_id,
                 hydration_time_ms,
-                _transformed_ast: b.ast,
+                transformed_ast: b.transformed_ast,
                 companions: live_companions,
             });
         }
@@ -1111,6 +1111,15 @@ impl Engine {
     /// List active query IDs.
     pub fn pipeline_query_ids(&self) -> Vec<String> {
         self.pipelines.iter().map(|p| p.query_id.clone()).collect()
+    }
+
+    /// The scalar-resolved logical AST exposed by PipelineDriver. This is kept
+    /// separate from the completed physical ordering used to build the graph.
+    pub fn transformed_ast(&self, query_id: &str) -> Option<Ast> {
+        self.pipelines
+            .iter()
+            .find(|pipeline| pipeline.query_id == query_id)
+            .map(|pipeline| pipeline.transformed_ast.clone())
     }
 
     /// Check if the engine has been initialized (has sources registered).

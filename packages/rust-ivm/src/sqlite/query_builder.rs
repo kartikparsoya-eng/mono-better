@@ -4,10 +4,13 @@
 //! Supports: constraints, multiConstraints (batched IN), filters,
 //! ORDER BY (with reverse), start (pagination).
 
+use std::collections::HashMap;
+
 use crate::builder::ast::{Condition, SimpleCondition, ValuePosition};
 use crate::ivm::constraint::MultiConstraint;
 use crate::ivm::data::Value;
 use crate::ivm::operator::{Basis, FetchRequest, Start};
+use crate::ivm::schema::ColumnType;
 
 /// A compiled SQL query — text + parameter values.
 #[derive(Clone, Debug)]
@@ -53,6 +56,7 @@ impl From<&Value> for SqlParam {
 pub fn build_select_query(
     table_name: &str,
     columns: &[String],
+    column_types: &HashMap<String, ColumnType>,
     req: &FetchRequest,
     filters: Option<&Condition>,
     order: Option<&[(String, String)]>,
@@ -101,7 +105,8 @@ pub fn build_select_query(
     if let Some(start) = &req.start
         && let Some(order) = order
     {
-        let (start_sql, start_params) = gather_start_constraints(start, reverse, order);
+        let (start_sql, start_params) =
+            gather_start_constraints(start, reverse, order, column_types);
         where_clauses.push(start_sql);
         params.extend(start_params);
     }
@@ -222,6 +227,7 @@ fn gather_start_constraints(
     start: &Start,
     reverse: bool,
     order: &[(String, String)],
+    column_types: &HashMap<String, ColumnType>,
 ) -> (String, Vec<SqlParam>) {
     let mut params: Vec<SqlParam> = Vec::new();
     let mut constraints: Vec<String> = Vec::new();
@@ -233,61 +239,32 @@ fn gather_start_constraints(
 
         for j in 0..=i {
             if j == i {
-                // Range comparison
                 let val = from.get(i_field).cloned().unwrap_or(Value::Null);
-                if val.is_null() {
-                    // The IVM comparator treats Null as less than any non-null
-                    // value. For a NULL boundary:
-                    //   - operator '>' means "after NULL": every non-null value
-                    //     qualifies → use IS NOT NULL.
-                    //   - operator '<' means "before NULL": nothing qualifies.
-                    let operator = if i_dir == "asc" {
-                        if reverse { "<" } else { ">" }
-                    } else if reverse {
-                        ">"
-                    } else {
-                        "<"
-                    };
-                    if operator == ">" {
-                        group.push(format!("{} IS NOT NULL", quote_ident(i_field)));
-                    } else {
-                        group.push("FALSE".to_string());
-                    }
+                let operator = if i_dir == "asc" {
+                    if reverse { "<" } else { ">" }
+                } else if reverse {
+                    ">"
                 } else {
-                    let operator = if i_dir == "asc" {
-                        if reverse { "<" } else { ">" }
-                    } else if reverse {
-                        ">"
-                    } else {
-                        "<"
-                    };
-                    // The IVM comparator treats Null as less than any non-null
-                    // value (TS compareValues). When the range operator is '<',
-                    // rows with NULL in this column must be included because
-                    // they sort before the start value. SQLite's `NULL < x`
-                    // evaluates to UNKNOWN, so add an explicit IS NULL clause.
-                    if operator == "<" {
-                        group.push(format!(
-                            "({} {} ? OR {} IS NULL)",
-                            quote_ident(i_field),
-                            operator,
-                            quote_ident(i_field)
-                        ));
-                    } else {
-                        group.push(format!("{} {} ?", quote_ident(i_field), operator));
-                    }
-                    params.push(SqlParam::from(&val));
-                }
+                    "<"
+                };
+                let optional = column_is_optional(column_types, i_field);
+                group.push(nullable_aware_range_comparison(
+                    i_field,
+                    &val,
+                    operator,
+                    optional,
+                    &mut params,
+                ));
             } else {
-                // Equality on previous columns
                 let (j_field, _) = &order[j];
                 let val = from.get(j_field).cloned().unwrap_or(Value::Null);
-                if val.is_null() {
-                    group.push(format!("{} IS NULL", quote_ident(j_field)));
-                } else {
-                    group.push(format!("{} = ?", quote_ident(j_field)));
-                    params.push(SqlParam::from(&val));
-                }
+                let optional = column_is_optional(column_types, j_field);
+                group.push(nullable_aware_equality(
+                    j_field,
+                    &val,
+                    optional,
+                    &mut params,
+                ));
             }
         }
         constraints.push(format!("({})", group.join(" AND ")));
@@ -298,17 +275,64 @@ fn gather_start_constraints(
         let mut group: Vec<String> = Vec::new();
         for (field, _) in order {
             let val = from.get(field).cloned().unwrap_or(Value::Null);
-            if val.is_null() {
-                group.push(format!("{} IS NULL", quote_ident(field)));
-            } else {
-                group.push(format!("{} = ?", quote_ident(field)));
-                params.push(SqlParam::from(&val));
-            }
+            let optional = column_is_optional(column_types, field);
+            group.push(nullable_aware_equality(
+                field,
+                &val,
+                optional,
+                &mut params,
+            ));
         }
         constraints.push(format!("({})", group.join(" AND ")));
     }
 
     (format!("({})", constraints.join(" OR ")), params)
+}
+
+fn column_is_optional(column_types: &HashMap<String, ColumnType>, field: &str) -> bool {
+    match column_types.get(field) {
+        Some(ColumnType::Boolean { optional })
+        | Some(ColumnType::Number { optional })
+        | Some(ColumnType::String { optional })
+        | Some(ColumnType::Json { optional }) => *optional,
+        None => false,
+    }
+}
+
+fn nullable_aware_equality(
+    field: &str,
+    value: &Value,
+    optional: bool,
+    params: &mut Vec<SqlParam>,
+) -> String {
+    params.push(SqlParam::from(value));
+    format!(
+        "{} {} ?",
+        quote_ident(field),
+        if optional { "IS" } else { "=" }
+    )
+}
+
+fn nullable_aware_range_comparison(
+    field: &str,
+    value: &Value,
+    operator: &str,
+    optional: bool,
+    params: &mut Vec<SqlParam>,
+) -> String {
+    if !optional {
+        params.push(SqlParam::from(value));
+        return format!("{} {} ?", quote_ident(field), operator);
+    }
+
+    if operator == ">" {
+        params.push(SqlParam::from(value));
+        params.push(SqlParam::from(value));
+        format!("(? IS NULL OR {} > ?)", quote_ident(field))
+    } else {
+        params.push(SqlParam::from(value));
+        format!("({} IS NULL OR {} < ?)", quote_ident(field), quote_ident(field))
+    }
 }
 
 /// Convert a Condition (with CSQ stripped) to a SQL WHERE clause.
@@ -486,6 +510,10 @@ mod literal_left_tests {
     use super::*;
     use crate::builder::ast::{SimpleCondition, ValuePosition};
     use crate::ivm::data::Value;
+    use crate::ivm::operator::{Basis, Start};
+    use crate::ivm::schema::ColumnType;
+    use rustc_hash::FxHashMap;
+    use std::sync::Arc;
 
     fn lit(v: Value) -> ValuePosition {
         ValuePosition::Literal { value: v }
@@ -553,5 +581,86 @@ mod literal_left_tests {
         };
         let (sql, params) = simple_condition_to_sql(&in_cond);
         assert_eq!(placeholders(&sql), params.len(), "IN: {sql} / {params:?}");
+    }
+
+    #[test]
+    fn start_constraints_match_typescript_nullable_rules() {
+        let mut row = FxHashMap::default();
+        row.insert("optional".to_string(), Value::F64(0.0));
+        row.insert("required".to_string(), Value::F64(0.0));
+        let start = Start {
+            row: Arc::new(row),
+            basis: Basis::After,
+        };
+        let columns = HashMap::from([
+            (
+                "optional".to_string(),
+                ColumnType::Number { optional: true },
+            ),
+            (
+                "required".to_string(),
+                ColumnType::Number { optional: false },
+            ),
+        ]);
+
+        let (optional_sql, optional_params) = gather_start_constraints(
+            &start,
+            false,
+            &[("optional".to_string(), "desc".to_string())],
+            &columns,
+        );
+        assert_eq!(optional_sql, "(((\"optional\" IS NULL OR \"optional\" < ?)))");
+        assert_eq!(optional_params.len(), 1);
+
+        let (required_sql, required_params) = gather_start_constraints(
+            &start,
+            false,
+            &[("required".to_string(), "desc".to_string())],
+            &columns,
+        );
+        assert_eq!(required_sql, "((\"required\" < ?))");
+        assert_eq!(required_params.len(), 1);
+    }
+
+    #[test]
+    fn null_start_constraints_match_typescript_nullable_rules() {
+        let mut row = FxHashMap::default();
+        row.insert("optional".to_string(), Value::Null);
+        row.insert("required".to_string(), Value::Null);
+        let start = Start {
+            row: Arc::new(row),
+            basis: Basis::At,
+        };
+        let columns = HashMap::from([
+            (
+                "optional".to_string(),
+                ColumnType::Number { optional: true },
+            ),
+            (
+                "required".to_string(),
+                ColumnType::Number { optional: false },
+            ),
+        ]);
+
+        let (optional_sql, optional_params) = gather_start_constraints(
+            &start,
+            false,
+            &[("optional".to_string(), "asc".to_string())],
+            &columns,
+        );
+        assert_eq!(
+            optional_sql,
+            "(((? IS NULL OR \"optional\" > ?)) OR (\"optional\" IS ?))"
+        );
+        assert_eq!(optional_params.len(), 3);
+
+        let (required_sql, required_params) = gather_start_constraints(
+            &start,
+            false,
+            &[("required".to_string(), "asc".to_string())],
+            &columns,
+        );
+        assert_eq!(required_sql, "((\"required\" > ?) OR (\"required\" = ?))");
+        assert_eq!(required_params.len(), 2);
     }
 }

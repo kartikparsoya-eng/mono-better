@@ -684,6 +684,7 @@ impl Input for SourceInput {
             let query = crate::sqlite::query_builder::build_select_query(
                 &table_name,
                 &column_names,
+                &schema_columns,
                 req,
                 filter_condition.as_ref(),
                 if order.is_empty() { None } else { Some(&order) },

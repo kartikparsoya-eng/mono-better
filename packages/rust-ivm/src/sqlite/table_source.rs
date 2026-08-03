@@ -779,6 +779,7 @@ impl TableSource {
         let query = build_select_query(
             &self.table_name,
             &self.column_names,
+            &self.columns,
             req,
             None,
             Some(&order),
@@ -856,6 +857,7 @@ impl Input for TableSourceInput {
         let query = build_select_query(
             &self.table_name,
             &self.column_names,
+            &self.columns,
             req,
             self.filter_condition.as_ref(),
             Some(&order),
@@ -947,6 +949,7 @@ impl Input for TableSourceInput {
                 let query = build_select_query(
                     &self.table_name,
                     &self.column_names,
+                    &self.columns,
                     &req,
                     self.filter_condition.as_ref(),
                     Some(&order),
@@ -1043,6 +1046,7 @@ impl Input for TableSourceInput {
                 let query = build_select_query(
                     &self.table_name,
                     &self.column_names,
+                    &self.columns,
                     &req,
                     self.filter_condition.as_ref(),
                     Some(&order),
