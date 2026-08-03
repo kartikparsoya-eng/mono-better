@@ -27,6 +27,10 @@ import {must} from '../../../../shared/src/must.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
 import type {Row} from '../../../../zero-protocol/src/data.ts';
+import {
+  fromSQLiteTypes,
+  toSQLiteTypes,
+} from '../../../../zqlite/src/table-source.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
 import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
 import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
@@ -603,12 +607,26 @@ export class RustIVMDriver {
     if (!primaryKey) {
       return undefined;
     }
-    const cols = Object.keys(pk);
-    const where = cols.map(c => `${quoteIdent(c)} = ?`).join(' AND ');
-    const sql = `SELECT * FROM ${quoteIdent(table)} WHERE ${where}`;
-    const params = cols.map(c => pk[c]);
-    const row = (this.#runner() as any).get(sql, ...params);
-    return row as Row | undefined;
+    const spec = this.#tableSpecs.get(table);
+    if (!spec) {
+      return undefined;
+    }
+    // Match the TS TableSource.getRow() value contract (zqlite/table-source.ts):
+    // project ONLY the syncable columns (never `SELECT *`, which leaks the
+    // replica-internal _0_version and other unsynced columns), convert the key
+    // params via toSQLiteTypes, and run the result through fromSQLiteTypes so
+    // booleans (0/1 -> true/false) and json (string -> parsed) match the
+    // pipeline's value semantics instead of the raw SQLite serialization.
+    const columns = spec.zqlSpec;
+    const keyCols = Object.keys(pk);
+    const selectCols = Object.keys(columns)
+      .map(c => quoteIdent(c))
+      .join(', ');
+    const where = keyCols.map(c => `${quoteIdent(c)} = ?`).join(' AND ');
+    const sql = `SELECT ${selectCols} FROM ${quoteIdent(table)} WHERE ${where}`;
+    const params = toSQLiteTypes(keyCols, pk as Row, columns);
+    const row = (this.#runner() as any).get(sql, ...params) as Row | undefined;
+    return row ? fromSQLiteTypes(columns, row, table) : undefined;
   }
 
   addQuery(

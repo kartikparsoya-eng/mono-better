@@ -219,11 +219,16 @@ fn stream_query(
     ) {
         Ok(lazy) => lazy,
         Err(e) => {
-            eprintln!(
-                "[rust-ivm] query prepare error for {}: {}",
+            // Propagate, never swallow. A prepare/bind failure (schema drift,
+            // missing column, malformed SQL) must NOT masquerade as an empty
+            // result — that silently corrupts hydration/removals. Panic here is
+            // caught by EngineHandle::call's catch_unwind → thrown error →
+            // view-syncer teardown/reset, mirroring TS which lets the error
+            // propagate out of `#fetch` (zqlite/table-source.ts:283).
+            panic!(
+                "[rust-ivm] query prepare/bind error for {}: {}",
                 table_name_for_err, e
             );
-            return Box::new(std::iter::empty());
         }
     };
 
@@ -577,20 +582,25 @@ impl TableSource {
             .map(|k| SqlParam::from(&row.get(k).cloned().unwrap_or(Value::Null)))
             .collect();
 
-        let mut stmt = match db.prepare(&sql) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "[rust-ivm] check_exists prepare error for {}: {}",
-                    self.table_name, e
-                );
-                return false;
-            }
-        };
-        let result = stmt.exists(params_from_iter(
+        // Propagate, never swallow. A prepare/execution failure must NOT be
+        // read as "row does not exist" — that misclassifies edit/remove input
+        // and can wrongly accept an add. Panic is caught upstream (catch_unwind)
+        // → teardown/reset, matching TS which lets the error propagate.
+        let mut stmt = db.prepare(&sql).unwrap_or_else(|e| {
+            panic!(
+                "[rust-ivm] check_exists prepare error for {}: {}",
+                self.table_name, e
+            )
+        });
+        stmt.exists(params_from_iter(
             params.iter().map(|p| p as &dyn rusqlite::ToSql),
-        ));
-        result.unwrap_or(false)
+        ))
+        .unwrap_or_else(|e| {
+            panic!(
+                "[rust-ivm] check_exists query error for {}: {}",
+                self.table_name, e
+            )
+        })
     }
 
     fn write_change(&self, _change: &SourceChange) -> Result<(), rusqlite::Error> {
@@ -1239,6 +1249,30 @@ mod advance_gate_fetch_tests {
     fn fetch_returns_all_rows_when_no_gate_armed() {
         // Hydrate / worker path: no advance gate → every row is produced.
         assert_eq!(fetch_count(conn_with_rows(300)), 300);
+    }
+
+    #[test]
+    #[should_panic(expected = "prepare/bind error")]
+    fn stream_query_prepare_failure_propagates_not_empty() {
+        // Review finding #2: a prepare/bind failure (here a non-existent column,
+        // standing in for schema drift / malformed SQL) must PROPAGATE, not be
+        // silently converted into an empty result set. Pre-fix this returned
+        // std::iter::empty() (count()==0, no panic) → this test fails; post-fix
+        // it panics (→ caught upstream → teardown/reset), matching TS.
+        let db = conn_with_rows(3);
+        let q = SqlQuery {
+            text: "SELECT no_such_col FROM t".to_string(),
+            params: vec![],
+        };
+        let _ = stream_query(
+            db,
+            q,
+            vec!["no_such_col".to_string()],
+            HashMap::new(),
+            "t".to_string(),
+            None,
+        )
+        .count();
     }
 
     #[test]
