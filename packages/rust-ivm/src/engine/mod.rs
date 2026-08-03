@@ -409,7 +409,15 @@ impl Engine {
     /// Total hydration time across all pipelines.
     /// Port of TS `totalHydrationTimeMs()`.
     pub fn total_hydration_time_ms(&self) -> f64 {
-        self.pipelines.iter().map(|p| p.hydration_time_ms).sum()
+        let total: f64 = self.pipelines.iter().map(|p| p.hydration_time_ms).sum();
+        // `Iterator::sum::<f64>()` uses negative zero for an empty iterator.
+        // JavaScript observes that distinction through `Object.is`, while the
+        // TS driver returns ordinary positive zero when no pipelines exist.
+        if total == 0.0 {
+            0.0
+        } else {
+            total
+        }
     }
 
     /// Remove a query's pipeline.

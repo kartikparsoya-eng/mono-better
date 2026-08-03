@@ -12,5 +12,8 @@
   "scripts": {
     "build": "napi build --release",
     "build:debug": "napi build"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "2.18.4"
   }
 }

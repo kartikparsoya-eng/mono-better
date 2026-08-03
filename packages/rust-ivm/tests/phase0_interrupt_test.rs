@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rust_ivm::engine::CancellationToken;
+use rust_ivm::snapshotter::Snapshotter;
 use rust_ivm::sqlite::{JobWatchdog, install_interrupt};
 
 /// A slow SQLite query: `SELECT ... FROM generate_series` wrapped in a busy
@@ -222,4 +223,63 @@ fn watchdog_warn_bound_is_non_aborting() {
         !cancel.is_cancelled(),
         "warn bound must be non-aborting — a job past warn but before abort must not be cancelled"
     );
+}
+
+#[test]
+fn snapshotter_registry_interrupts_the_live_current_connection() {
+    let path = format!(
+        "/tmp/rust-ivm-snapshot-interrupt-{}-{:?}.db",
+        std::process::id(),
+        std::thread::current().id()
+    );
+    let _ = std::fs::remove_file(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "_zero.replicationState" (
+          lock TEXT PRIMARY KEY,
+          stateVersion TEXT NOT NULL
+        );
+        INSERT INTO "_zero.replicationState" VALUES ('singleton', 'v1');
+        CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
+        WITH RECURSIVE seq(x) AS (
+          SELECT 1 UNION ALL SELECT x + 1 FROM seq WHERE x < 100000
+        ) INSERT INTO t SELECT x, printf('row%d', x) FROM seq;
+        "#,
+    )
+    .unwrap();
+    drop(conn);
+
+    let registry = Arc::new(Mutex::new(Vec::new()));
+    let mut snapshotter = Snapshotter::new(&path, "app", None);
+    snapshotter.set_snapshot_interrupt_registry(registry.clone());
+    snapshotter.init().unwrap();
+    assert_eq!(registry.lock().unwrap().len(), 1);
+    snapshotter.advance_without_diff().unwrap();
+    assert_eq!(
+        registry.lock().unwrap().len(),
+        2,
+        "snapshot swap must publish both the live prev and curr connections"
+    );
+
+    let interrupt_registry = registry.clone();
+    let interrupter = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        for handle in interrupt_registry.lock().unwrap().iter() {
+            handle.interrupt();
+        }
+    });
+    let current = snapshotter.current_conn().unwrap();
+    let result = run_slow_query(&current.borrow());
+    interrupter.join().unwrap();
+
+    match result {
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.extended_code == rusqlite::ffi::SQLITE_INTERRUPT => {}
+        Err(e) => panic!("expected SQLITE_INTERRUPT on live snapshot, got: {e}"),
+        Ok(()) => panic!("live snapshot query should have been interrupted"),
+    }
+    snapshotter.destroy();
+    assert!(registry.lock().unwrap().is_empty());
+    let _ = std::fs::remove_file(&path);
 }

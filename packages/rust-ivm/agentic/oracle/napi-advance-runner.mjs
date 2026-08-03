@@ -15,12 +15,18 @@
 //
 // This exercises the advance path where edit-emission and source-drift bugs lived.
 
-import { DatabaseSync } from 'node:sqlite';
-import { createRequire } from 'node:module';
-import { resolve, join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
-import { readFileSync, writeFileSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import {
+  readFileSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  copyFileSync,
+} from 'node:fs';
+import {createRequire} from 'node:module';
+import {tmpdir} from 'node:os';
+import {resolve, join, dirname} from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
+import {fileURLToPath} from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -29,16 +35,31 @@ const require = createRequire(import.meta.url);
 // platform: the checked-in napi/rust-ivm.node may be a stale/Linux build, so on
 // macOS prefer the freshly-built dylib (cargo build --release in napi/).
 const NAPI = resolve(__dirname, '..', '..', 'napi');
-const exists = (p) => { try { readFileSync(p, { flag: 'rs' }); return true; } catch { return false; } };
+const exists = p => {
+  try {
+    readFileSync(p, {flag: 'rs'});
+    return true;
+  } catch {
+    return false;
+  }
+};
 const candidates = process.env.RUST_IVM_ADDON
   ? [process.env.RUST_IVM_ADDON]
   : process.platform === 'darwin'
-    ? [resolve(NAPI, 'target/release/librust_ivm_napi.dylib'), resolve(NAPI, 'rust-ivm.node')]
-    : [resolve(NAPI, 'rust-ivm.node'), resolve(NAPI, 'target/release/librust_ivm_napi.so')];
+    ? [
+        resolve(NAPI, 'target/release/librust_ivm_napi.dylib'),
+        resolve(NAPI, 'rust-ivm.node'),
+      ]
+    : [
+        resolve(NAPI, 'rust-ivm.node'),
+        resolve(NAPI, 'target/release/librust_ivm_napi.so'),
+      ];
 const addonPath = candidates.find(exists);
 if (!addonPath) {
-  throw new Error(`napi addon not found. tried:\n  ${candidates.join('\n  ')}\n` +
-    `build it (cd napi && cargo build --release) or set RUST_IVM_ADDON.`);
+  throw new Error(
+    `napi addon not found. tried:\n  ${candidates.join('\n  ')}\n` +
+      `build it (cd napi && cargo build --release) or set RUST_IVM_ADDON.`,
+  );
 }
 let NODEPATH = addonPath;
 if (!addonPath.endsWith('.node')) {
@@ -55,10 +76,14 @@ function sqlType(colType) {
   const parts = colType.split('|');
   const base = parts.find(p => p !== 'null') || 'string';
   switch (base) {
-    case 'number': return 'INTEGER';
-    case 'boolean': return 'INTEGER';
-    case 'json': return 'TEXT';
-    default: return 'TEXT';
+    case 'number':
+      return 'INTEGER';
+    case 'boolean':
+      return 'INTEGER';
+    case 'json':
+      return 'TEXT';
+    default:
+      return 'TEXT';
   }
 }
 
@@ -67,10 +92,14 @@ function sqlValue(v, colType) {
   const parts = (colType || '').split('|');
   const base = parts.find(p => p !== 'null') || 'string';
   switch (base) {
-    case 'number': return Number(v);
-    case 'boolean': return v ? 1 : 0;
-    case 'json': return JSON.stringify(v);
-    default: return String(v);
+    case 'number':
+      return Number(v);
+    case 'boolean':
+      return v ? 1 : 0;
+    case 'json':
+      return JSON.stringify(v);
+    default:
+      return String(v);
   }
 }
 
@@ -79,11 +108,15 @@ function createSqliteDb(dbPath, tables) {
   db.exec('PRAGMA journal_mode = WAL');
   // _zero.replicationState
   db.exec('DROP TABLE IF EXISTS "_zero.replicationState"');
-  db.exec('CREATE TABLE "_zero.replicationState" (stateVersion TEXT NOT NULL, lock INTEGER PRIMARY KEY DEFAULT 1 CHECK (lock=1))');
-  db.exec("INSERT INTO \"_zero.replicationState\" (stateVersion) VALUES ('0')");
+  db.exec(
+    'CREATE TABLE "_zero.replicationState" (stateVersion TEXT NOT NULL, lock INTEGER PRIMARY KEY DEFAULT 1 CHECK (lock=1))',
+  );
+  db.exec('INSERT INTO "_zero.replicationState" (stateVersion) VALUES (\'0\')');
   // _zero.changeLog2
   db.exec('DROP TABLE IF EXISTS "_zero.changeLog2"');
-  db.exec('CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "pos" INT NOT NULL, "table" TEXT NOT NULL, "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, PRIMARY KEY("stateVersion", "pos"), UNIQUE("table", "rowKey"))');
+  db.exec(
+    'CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "pos" INT NOT NULL, "table" TEXT NOT NULL, "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, PRIMARY KEY("stateVersion", "pos"), UNIQUE("table", "rowKey"))',
+  );
 
   for (const [name, spec] of Object.entries(tables)) {
     const cols = Object.entries(spec.columns).map(([col, type]) => {
@@ -94,16 +127,23 @@ function createSqliteDb(dbPath, tables) {
 
     // Composite PRIMARY KEY for compound PKs
     if (spec.primaryKey.length > 0) {
-      cols.push(`PRIMARY KEY (${spec.primaryKey.map(c => `"${c}"`).join(', ')})`);
+      cols.push(
+        `PRIMARY KEY (${spec.primaryKey.map(c => `"${c}"`).join(', ')})`,
+      );
     }
 
     db.exec(`DROP TABLE IF EXISTS "${name}"`);
     db.exec(`CREATE TABLE "${name}" (${cols.join(', ')})`);
     const colNames = [...Object.keys(spec.columns), '_0_version'];
     const placeholders = colNames.map(() => '?').join(', ');
-    const stmt = db.prepare(`INSERT OR IGNORE INTO "${name}" (${colNames.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`);
-    for (const row of (spec.rows || [])) {
-      const vals = [...colNames.slice(0, -1).map(c => sqlValue(row[c], spec.columns[c])), '0'];
+    const stmt = db.prepare(
+      `INSERT OR IGNORE INTO "${name}" (${colNames.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`,
+    );
+    for (const row of spec.rows || []) {
+      const vals = [
+        ...colNames.slice(0, -1).map(c => sqlValue(row[c], spec.columns[c])),
+        '0',
+      ];
       stmt.run(...vals);
     }
   }
@@ -117,7 +157,8 @@ function createSqliteDb(dbPath, tables) {
 // ---------------------------------------------------------------------------
 
 function napiRowToJs(rc) {
-  const rawRowKey = typeof rc.rowKey === 'string' ? JSON.parse(rc.rowKey) : rc.rowKey || {};
+  const rawRowKey =
+    typeof rc.rowKey === 'string' ? JSON.parse(rc.rowKey) : rc.rowKey || {};
   const rowKey = {};
   for (const [k, v] of Object.entries(rawRowKey)) {
     if (k === '_0_version') continue;
@@ -148,14 +189,14 @@ function buildTableSpecs(tables) {
         const parts = type.split('|');
         const base = parts.find(p => p !== 'null') || 'string';
         const optional = parts.includes('null');
-        return [col, { type: base, optional }];
-      })
+        return [col, {type: base, optional}];
+      }),
     );
     // Add _0_version column — required by the snapshotter's diff validation.
     // In production, the change-streamer adds this to every table. We add it
     // here so the diff can read it from prev/curr snapshots. It's stripped
     // from the output before comparison with the TS oracle.
-    columns._0_version = { type: 'string', optional: false };
+    columns._0_version = {type: 'string', optional: false};
     return {
       table: name,
       columns,
@@ -204,46 +245,61 @@ function applyPushesToSqlite(dbPath, tables, pushes) {
     if (!spec) continue;
     const pk = spec.primaryKey;
     const rowKeyJson = JSON.stringify(
-      Object.fromEntries(pk.map(col => [col, (push.row || push.oldRow)[col]]))
+      Object.fromEntries(pk.map(col => [col, (push.row || push.oldRow)[col]])),
     );
 
     if (push.type === 'add') {
       const colNames = [...Object.keys(spec.columns), '_0_version'];
       const placeholders = colNames.map(() => '?').join(', ');
       const stmt = db.prepare(
-        `INSERT OR REPLACE INTO "${table}" (${colNames.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`
+        `INSERT OR REPLACE INTO "${table}" (${colNames.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`,
       );
-      stmt.run(...colNames.slice(0, -1).map(c => sqlValue(push.row[c], spec.columns[c])), '1');
+      stmt.run(
+        ...colNames
+          .slice(0, -1)
+          .map(c => sqlValue(push.row[c], spec.columns[c])),
+        '1',
+      );
       // changeLog2: 's' (SET) — op is a single char in the Zero protocol
       db.prepare(
-        'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion", "pos", "table", "rowKey", "op") VALUES (?, ?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion", "pos", "table", "rowKey", "op") VALUES (?, ?, ?, ?, ?)',
       ).run(version, pos++, table, rowKeyJson, 's');
     } else if (push.type === 'remove') {
       const whereClause = pk.map(c => `"${c}" = ?`).join(' AND ');
-      db.prepare(`DELETE FROM "${table}" WHERE ${whereClause}`).run(...pk.map(c => push.row[c]));
+      db.prepare(`DELETE FROM "${table}" WHERE ${whereClause}`).run(
+        ...pk.map(c => push.row[c]),
+      );
       // changeLog2: 'd' (DEL)
       db.prepare(
-        'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion", "pos", "table", "rowKey", "op") VALUES (?, ?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion", "pos", "table", "rowKey", "op") VALUES (?, ?, ?, ?, ?)',
       ).run(version, pos++, table, rowKeyJson, 'd');
     } else if (push.type === 'edit') {
-      const setClause = [...Object.keys(spec.columns).filter(c => !pk.includes(c)), '_0_version']
-        .map(c => `"${c}" = ?`).join(', ');
+      const setClause = [
+        ...Object.keys(spec.columns).filter(c => !pk.includes(c)),
+        '_0_version',
+      ]
+        .map(c => `"${c}" = ?`)
+        .join(', ');
       const whereClause = pk.map(c => `"${c}" = ?`).join(' AND ');
       const setVals = [
-        ...Object.keys(spec.columns).filter(c => !pk.includes(c)).map(c => sqlValue(push.row[c], spec.columns[c])),
+        ...Object.keys(spec.columns)
+          .filter(c => !pk.includes(c))
+          .map(c => sqlValue(push.row[c], spec.columns[c])),
         '1', // _0_version = new version
       ];
-      db.prepare(`UPDATE "${table}" SET ${setClause} WHERE ${whereClause}`)
-        .run(...setVals, ...pk.map(c => push.oldRow[c]));
+      db.prepare(`UPDATE "${table}" SET ${setClause} WHERE ${whereClause}`).run(
+        ...setVals,
+        ...pk.map(c => push.oldRow[c]),
+      );
       // changeLog2: 's' (SET — the diff will find the old row in prev → EDIT)
       db.prepare(
-        'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion", "pos", "table", "rowKey", "op") VALUES (?, ?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO "_zero.changeLog2" ("stateVersion", "pos", "table", "rowKey", "op") VALUES (?, ?, ?, ?, ?)',
       ).run(version, pos++, table, rowKeyJson, 's');
     }
   }
 
   // Bump replicationState version
-  db.exec("UPDATE \"_zero.replicationState\" SET stateVersion = '1'");
+  db.exec('UPDATE "_zero.replicationState" SET stateVersion = \'1\'');
   db.close();
 }
 
@@ -253,7 +309,7 @@ function applyPushesToSqlite(dbPath, tables, pushes) {
 
 async function runFixture(fixture) {
   const dbPath = join(tmpdir(), `napi-adv-${Date.now()}-${process.pid}.db`);
-  const result = { hydrate: [], advance: [], finalView: [] };
+  const result = {hydrate: [], advance: [], finalView: []};
 
   // Keep a "keeper" connection open for the entire run so the WAL -shm file
   // persists. rusqlite opens the DB in READ_ONLY mode and cannot create the
@@ -268,12 +324,17 @@ async function runFixture(fixture) {
     const engine = new addon.RustIvmEngine();
     engine.init(buildTableSpecs(fixture.tables), dbPath, 'test');
 
+    const hydrateStreamId = 1;
     await engine.addQueriesStreamingRows(
-      [{ queryId: 'q1', astJson: JSON.stringify(fixture.ast) }],
-      (err, rc) => { if (err) throw err; if (!rc) return;
+      [{queryId: 'q1', astJson: JSON.stringify(fixture.ast)}],
+      (err, rc) => {
+        if (err) throw err;
+        if (!rc) return;
+        engine.grantStreamCredit(hydrateStreamId, 1);
         if (rc.changeType < 0) return;
         result.hydrate.push(napiRowToJs(rc));
       },
+      hydrateStreamId,
     );
 
     // 3. Apply pushes to SQLite + write changeLog2
@@ -281,12 +342,14 @@ async function runFixture(fixture) {
 
     // 4. Advance (streaming path — TSFN callback, production code)
     if (fixture.pushes && fixture.pushes.length > 0) {
-      await engine.advanceToHeadStreamingRows(
-        (err, rc) => { if (err) throw err; if (!rc) return;
-          if (rc.changeType < 0) return; // skip headers/resets
-          result.advance.push(napiRowToJs(rc));
-        },
-      );
+      const advanceStreamId = 2;
+      await engine.advanceToHeadStreamingRows((err, rc) => {
+        if (err) throw err;
+        if (!rc) return;
+        engine.grantStreamCredit(advanceStreamId, 1);
+        if (rc.changeType < 0) return; // skip headers/resets
+        result.advance.push(napiRowToJs(rc));
+      }, advanceStreamId);
     }
 
     // 5. Final view: re-hydrate from after-state DB.
@@ -297,27 +360,36 @@ async function runFixture(fixture) {
     // one is created, and the new one gets starved).
     engine.reset();
     await new Promise(r => setImmediate(r));
-    const afterTables = applyPushesToTables(fixture.tables, fixture.pushes || []);
+    const afterTables = applyPushesToTables(
+      fixture.tables,
+      fixture.pushes || [],
+    );
     const dbPath2 = dbPath + '.after.db';
     try {
       const keeper2 = createSqliteDb(dbPath2, afterTables);
       const engine2 = new addon.RustIvmEngine();
       engine2.init(buildTableSpecs(afterTables), dbPath2, 'test');
+      const finalStreamId = 1;
       await engine2.addQueriesStreamingRows(
-        [{ queryId: 'q1', astJson: JSON.stringify(fixture.ast) }],
-        (err, rc) => { if (err) throw err; if (!rc) return;
+        [{queryId: 'q1', astJson: JSON.stringify(fixture.ast)}],
+        (err, rc) => {
+          if (err) throw err;
+          if (!rc) return;
+          engine2.grantStreamCredit(finalStreamId, 1);
           if (rc.changeType < 0) return;
           result.finalView.push(napiRowToJs(rc));
         },
+        finalStreamId,
       );
       keeper2.close();
     } finally {
-      for (const ext of ['', '-wal', '-shm']) rmSync(dbPath2 + ext, { force: true });
+      for (const ext of ['', '-wal', '-shm'])
+        rmSync(dbPath2 + ext, {force: true});
     }
 
     keeper.close();
   } finally {
-    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, { force: true });
+    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, {force: true});
   }
 
   return result;
@@ -326,22 +398,22 @@ async function runFixture(fixture) {
 function applyPushesToTables(tables, pushes) {
   const shadow = {};
   for (const [name, spec] of Object.entries(tables)) {
-    shadow[name] = { ...spec, rows: spec.rows.map(r => ({ ...r })) };
+    shadow[name] = {...spec, rows: spec.rows.map(r => ({...r}))};
   }
-  for (const push of (pushes || [])) {
+  for (const push of pushes || []) {
     if (isNoOpEdit(push, tables)) continue;
 
     const t = shadow[push.table];
     if (!t) continue;
     if (push.type === 'add') {
-      t.rows.push({ ...push.row });
+      t.rows.push({...push.row});
     } else if (push.type === 'remove') {
       const pk = t.primaryKey;
       t.rows = t.rows.filter(r => !pk.every(k => r[k] === push.row[k]));
     } else if (push.type === 'edit') {
       const pk = t.primaryKey;
       t.rows = t.rows.map(r => {
-        if (pk.every(k => r[k] === push.oldRow[k])) return { ...push.row };
+        if (pk.every(k => r[k] === push.oldRow[k])) return {...push.row};
         return r;
       });
     }
@@ -377,7 +449,8 @@ function canon(v) {
 }
 
 function netAdvanceFromViews(hydrate, finalView) {
-  const rowKeyStr = rc => JSON.stringify({q: rc.queryId, t: rc.table, k: canon(rc.rowKey)});
+  const rowKeyStr = rc =>
+    JSON.stringify({q: rc.queryId, t: rc.table, k: canon(rc.rowKey)});
 
   // The IVM view output is a multiset: a row with children may appear once per
   // child match. Advance semantics are net changes per row key, so collapse the
@@ -438,7 +511,9 @@ function netAdvanceFromViews(hydrate, finalView) {
         row: null,
         isHidden: rc.isHidden,
       });
-    } else if (JSON.stringify(canon(oldRc.row)) !== JSON.stringify(canon(rc.row))) {
+    } else if (
+      JSON.stringify(canon(oldRc.row)) !== JSON.stringify(canon(rc.row))
+    ) {
       changes.push({
         changeType: 2,
         queryId: rc.queryId,
@@ -458,13 +533,19 @@ function netAdvanceFromViews(hydrate, finalView) {
 
 async function main() {
   const args = process.argv.slice(2);
-  let input = null, out = null;
+  let input = null,
+    out = null;
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--out') { out = args[++i]; continue; }
+    if (args[i] === '--out') {
+      out = args[++i];
+      continue;
+    }
     if (!input) input = args[i];
   }
   if (!input) {
-    console.error('Usage: napi-advance-runner.mjs <input.json> [--out <actual.json>]');
+    console.error(
+      'Usage: napi-advance-runner.mjs <input.json> [--out <actual.json>]',
+    );
     process.exit(1);
   }
   const fixture = JSON.parse(readFileSync(input, 'utf8'));
@@ -473,10 +554,13 @@ async function main() {
   // advance oracle's snapshotter-diff semantics.
   result.advance = netAdvanceFromViews(result.hydrate, result.finalView);
   const json = JSON.stringify(result, null, 1) + '\n';
-  const outPath = out ?? input.replace(/\.input\.json$/, '.napi-adv-actual.json');
-  mkdirSync(dirname(outPath), { recursive: true });
+  const outPath =
+    out ?? input.replace(/\.input\.json$/, '.napi-adv-actual.json');
+  mkdirSync(dirname(outPath), {recursive: true});
   writeFileSync(outPath, json);
-  console.log(`wrote ${outPath} (hydrate=${result.hydrate.length} advance=${result.advance.length} finalView=${result.finalView.length})`);
+  console.log(
+    `wrote ${outPath} (hydrate=${result.hydrate.length} advance=${result.advance.length} finalView=${result.finalView.length})`,
+  );
 }
 
 main();

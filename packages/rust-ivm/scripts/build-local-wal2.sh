@@ -43,6 +43,12 @@ cargo build --release --features rust-ivm/wal2_coread
 
 # 3. Publish + verify it is NOT dynamically linking system sqlite.
 cp target/release/librust_ivm_napi.dylib rust-ivm.node
+# Copying a Mach-O dylib can leave a signature that `codesign -v` accepts but
+# macOS kills when Node maps it as an addon. Re-sign the published artifact,
+# not only Cargo's source dylib.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  codesign --force --sign - rust-ivm.node
+fi
 echo "[3/3] verifying static link…"
 if otool -L rust-ivm.node 2>/dev/null | grep -qi 'libsqlite3.dylib'; then
   echo "ERROR: addon still dynamically links system libsqlite3 — wal2 NOT active." >&2

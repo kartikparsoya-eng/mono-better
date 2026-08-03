@@ -48,6 +48,10 @@ pub struct Snapshotter {
     read_pool: Arc<FramePinnedPool>,
     /// How many connections to co-pin (≤ pool capacity).
     pool_pin_count: usize,
+    /// Interrupt handles for the live snapshot connections (`prev` + `curr`).
+    /// Kept separate from the read-pool registry because the pool tracks a
+    /// contiguous range that it owns and drains on unpin.
+    snapshot_interrupt_registry: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
 }
 
 impl Snapshotter {
@@ -78,7 +82,33 @@ impl Snapshotter {
                 interrupt_registry,
             )),
             pool_pin_count: pool_capacity,
+            snapshot_interrupt_registry: None,
         }
+    }
+
+    /// Install the out-of-band interrupt registry used by the NAPI owner.
+    /// The registry is republished after every snapshot swap so cancel always
+    /// targets the connections that TableSource and diff iteration actually use.
+    pub fn set_snapshot_interrupt_registry(
+        &mut self,
+        registry: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
+    ) {
+        self.snapshot_interrupt_registry = Some(registry);
+        self.publish_snapshot_interrupt_handles();
+    }
+
+    fn publish_snapshot_interrupt_handles(&self) {
+        let Some(registry) = &self.snapshot_interrupt_registry else {
+            return;
+        };
+        let mut handles = Vec::with_capacity(2);
+        if let Some(prev) = &self.prev {
+            handles.push(crate::sqlite::install_interrupt(&prev.conn.borrow()));
+        }
+        if let Some(curr) = &self.curr {
+            handles.push(crate::sqlite::install_interrupt(&curr.conn.borrow()));
+        }
+        *registry.lock().unwrap() = handles;
     }
 
     /// The frame-pinned parallel-read pool (shared with the TableSources).
@@ -96,6 +126,7 @@ impl Snapshotter {
         let snap = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
         let version = snap.version.clone();
         self.curr = Some(snap);
+        self.publish_snapshot_interrupt_handles();
         self.pin_read_pool(&version);
         Ok(())
     }
@@ -113,9 +144,9 @@ impl Snapshotter {
         // Safe to borrow: pin_read_pool runs at init / refresh_current_to_head,
         // i.e. PipelineCount==0, when no source is borrowing curr.
         let anchor = self.curr.as_ref().map(|s| s.conn.borrow());
-        if let Err(e) =
-            self.read_pool
-                .pin_frame(anchor.as_deref(), version, self.pool_pin_count)
+        if let Err(e) = self
+            .read_pool
+            .pin_frame(anchor.as_deref(), version, self.pool_pin_count)
         {
             eprintln!(
                 "[rust-ivm] read pool co-pin at {} failed (serial hydrate): {}",
@@ -233,6 +264,7 @@ impl Snapshotter {
             interrupt_handle: curr_interrupt_handle,
         };
         self.curr = Some(curr_snapshot);
+        self.publish_snapshot_interrupt_handles();
 
         Ok(DiffOwned {
             app_id: self.app_id.clone(),
@@ -259,6 +291,7 @@ impl Snapshotter {
         // Commit the swap: prev = old curr, curr = next at head.
         self.prev = self.curr.take();
         self.curr = Some(next);
+        self.publish_snapshot_interrupt_handles();
         Ok(&self.curr.as_ref().unwrap().version)
     }
 
@@ -280,6 +313,7 @@ impl Snapshotter {
             let fresh = Snapshot::create(&self.db_file, self.page_cache_size_kib)?;
             let version = fresh.version.clone();
             self.curr = Some(fresh);
+            self.publish_snapshot_interrupt_handles();
             self.pin_read_pool(&version);
             Ok(())
         } else {
@@ -293,6 +327,9 @@ impl Snapshotter {
         self.read_pool.unpin_frame();
         self.curr.take();
         self.prev.take();
+        if let Some(registry) = &self.snapshot_interrupt_registry {
+            registry.lock().unwrap().clear();
+        }
     }
 }
 

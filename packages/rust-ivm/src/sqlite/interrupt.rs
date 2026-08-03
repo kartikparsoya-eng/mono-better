@@ -62,6 +62,9 @@ pub(crate) struct WatchEntry {
     /// live in one shared bag reused across all jobs; a parallel job in Phase
     /// 1+ passes a per-job bag with the worker handles.
     handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
+    /// Optional second handle-bag for snapshot connections. Kept separate from
+    /// the frame-pinned pool bag because that pool owns/drains indexed ranges.
+    additional_handles: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
     /// Monotonic id assigned at registration; used to unregister on return.
     id: u64,
 }
@@ -154,6 +157,20 @@ impl JobWatchdog {
         cancel: CancellationToken,
         handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
     ) -> WatchGuard {
+        self.register_with_additional_handles(warn_at, abort_at, cancel, handles, None)
+    }
+
+    /// Register a job with an additional independently-owned handle registry.
+    /// NAPI uses this for the live snapshot (`prev` + `curr`) connections while
+    /// `handles` remains the read-pool registry.
+    pub fn register_with_additional_handles(
+        &self,
+        warn_at: Instant,
+        abort_at: Instant,
+        cancel: CancellationToken,
+        handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
+        additional_handles: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
+    ) -> WatchGuard {
         let (lock, cv) = &*self.inner;
         let id = {
             let mut s = lock.lock().unwrap();
@@ -164,6 +181,7 @@ impl JobWatchdog {
                 abort_at,
                 cancel,
                 handles,
+                additional_handles,
                 id,
             });
             id
@@ -245,6 +263,12 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
                     h.interrupt();
                 }
                 drop(handles);
+                if let Some(additional) = &e.additional_handles {
+                    let handles = additional.lock().unwrap();
+                    for h in handles.iter() {
+                        h.interrupt();
+                    }
+                }
                 aborted.push(e.id);
                 eprintln!(
                     "[rust-ivm-watchdog] stuck-actor abort: job {} overran abort bound {:?} ago — cancel flipped + handles interrupted",

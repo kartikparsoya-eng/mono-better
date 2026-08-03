@@ -1,5 +1,15 @@
 import type {LogContext} from '@rocicorp/logger';
+import type {
+  NapiRowChange,
+  NapiTableSpec,
+  RustIvmEngine,
+} from '../../../../rust-ivm/napi/index.js';
 import {assert} from '../../../../shared/src/asserts.ts';
+export type {
+  NapiQuerySpec,
+  NapiRowChange,
+  NapiTableSpec,
+} from '../../../../rust-ivm/napi/index.js';
 
 // Stream rows one-at-a-time via ThreadsafeFunction instead of materializing
 // the full result array. O(1) JS objects in flight vs O(result). Default ON
@@ -27,15 +37,15 @@ import {must} from '../../../../shared/src/must.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
 import type {Row} from '../../../../zero-protocol/src/data.ts';
-import {
-  fromSQLiteTypes,
-  toSQLiteTypes,
-} from '../../../../zqlite/src/table-source.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
 import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
 import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
 import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
 import type {Database} from '../../../../zqlite/src/db.ts';
+import {
+  fromSQLiteTypes,
+  toSQLiteTypes,
+} from '../../../../zqlite/src/table-source.ts';
 import {
   reloadPermissionsIfChanged,
   type LoadedPermissions,
@@ -52,70 +62,16 @@ import {checkClientSchema} from './client-schema.ts';
 import {rowIDSignatureUnit} from './row-set-signature.ts';
 import {ResetPipelinesSignal} from './snapshotter.ts';
 
-// NAPI addon types
-// NapiValue interface retained for NapiTableSpec columns that still use it.
-export interface NapiValue {
-  kind: string;
-  boolVal?: boolean;
-  f64Val?: number;
-  strVal?: string;
-  jsonVal?: string;
-}
-
-export interface NapiRowChange {
-  changeType: number;
-  queryId: string;
-  table: string;
-  rowKey: string;
-  row?: string;
-  isHidden: boolean;
-}
-
-export interface NapiQuerySpec {
-  queryId: string;
-  astJson: string;
-}
-
-export interface NapiQueryResult {
-  queryId: string;
-  changes: NapiRowChange[];
-}
-
-export interface NapiSourceChange {
-  table: string;
-  changeType: string;
-  row: Record<string, NapiValue>;
-  oldRow?: Record<string, NapiValue>;
-}
-
-export interface NapiTableSchema {
-  columns: Record<string, {type: string; optional: boolean}>;
-  primaryKey: string[];
-  uniqueKeys?: string[][];
-  minRowVersion?: string;
-}
-
-export interface NapiTableSpec {
-  table: string;
-  columns: Record<string, {type: string; optional: boolean}>;
-  primaryKey: string[];
-  // All unique keys (PK plus secondary unique indexes). Drives scalar-EXISTS
-  // subquery resolution in the engine; omitting them degrades scalar subqueries
-  // keyed on a non-PK unique index to a live per-parent Exists (see G8 gap).
-  uniqueKeys?: string[][];
-  minRowVersion?: string;
-}
-
 // Try to load the native addon (use createRequire for ESM compatibility with tsx)
 import {createRequire} from 'node:module';
 const nodeRequire = createRequire(import.meta.url);
-let RustIvmEngineClass: unknown = null;
+let RustIvmEngineClass: (new () => RustIvmEngine) | null = null;
 const addonPath =
   process.env['RUST_IVM_ADDON_PATH'] ??
   '../../../../packages/rust-ivm/napi/rust-ivm.node';
 try {
   RustIvmEngineClass = (
-    nodeRequire(addonPath) as {RustIvmEngine: new () => unknown}
+    nodeRequire(addonPath) as {RustIvmEngine: new () => RustIvmEngine}
   ).RustIvmEngine;
 } catch (e) {
   console.error(
@@ -364,8 +320,11 @@ export function deferClose<T>(queue: AsyncQueue<T>): void {
 // ---------------------------------------------------------------------------
 
 export class RustIVMDriver {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  readonly #engine: any;
+  readonly #engine: RustIvmEngine;
+  // Monotonic per-driver stream id (#3 backpressure). Each streaming hydrate/
+  // advance mints the next id and passes it to the native call + every
+  // grant/cancel so credit is always tagged to the exact stream it belongs to.
+  #nextStreamId = 1;
   readonly #lc: LogContext;
   readonly #shardID: ShardID;
   readonly #storage: ClientGroupStorage;
@@ -384,7 +343,6 @@ export class RustIVMDriver {
   #permissionsVersion: string | null = null;
   #queryInfo = new Map<string, QueryInfo>();
   readonly #rowSetSignatures = new Map<string, bigint>();
-  #totalHydrationTimeMs = 0;
   #initialized = false;
 
   constructor(
@@ -401,8 +359,7 @@ export class RustIVMDriver {
   ) {
     assert(RustIvmEngineClass, 'Rust IVM NAPI addon not loaded');
     this.#lc = lc.withContext('clientGroupID', clientGroupID);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    this.#engine = new (RustIvmEngineClass as any)();
+    this.#engine = new RustIvmEngineClass();
     this.#shardID = shardID;
     this.#storage = storage;
     this.#config = config;
@@ -589,7 +546,7 @@ export class RustIVMDriver {
   }
 
   totalHydrationTimeMs(): number {
-    return this.#totalHydrationTimeMs;
+    return this.#engine.totalHydrationTimeMs();
   }
 
   removeQuery(queryID: string) {
@@ -681,17 +638,31 @@ export class RustIVMDriver {
 
     const planned = this.#planAst(query);
 
-    this.#queryInfo.set(queryID, {
-      transformedAst: planned,
-      transformationHash,
-      ...(queryName !== undefined && {queryName}),
-    });
     this.#rowSetSignatures.set(queryID, 0n);
 
-    if (STREAM_ROWS) {
-      yield* this.#addQueryStreaming(queryID, planned);
-    } else {
-      yield* this.#addQueryEager(queryID, planned);
+    let hydrated = false;
+    try {
+      if (STREAM_ROWS) {
+        yield* this.#addQueryStreaming(queryID, planned);
+      } else {
+        yield* this.#addQueryEager(queryID, planned);
+      }
+      hydrated = true;
+    } finally {
+      if (hydrated) {
+        // TS registers query metadata only after the hydrate generator has
+        // completed. Failed or abandoned hydrations must never appear active.
+        this.#queryInfo.set(queryID, {
+          transformedAst: planned,
+          transformationHash,
+          ...(queryName !== undefined && {queryName}),
+        });
+      } else {
+        // The streaming generator waits for its native task before returning
+        // here, so this synchronous cleanup cannot race a blocking TSFN call.
+        this.#engine.removeQuery(queryID);
+        this.#rowSetSignatures.delete(queryID);
+      }
     }
   }
 
@@ -752,6 +723,7 @@ export class RustIVMDriver {
     };
 
     const spec = [{queryId: queryID, astJson: JSON.stringify(query)}];
+    const streamId = this.#nextStreamId++;
     const hydrated = TSFN_BATCH
       ? this.#engine.addQueriesStreamingRowsBatched(
           spec,
@@ -760,10 +732,12 @@ export class RustIVMDriver {
               handleRow(rows[i]);
             }
           },
+          streamId,
         )
       : this.#engine.addQueriesStreamingRows(
           spec,
           (_err: unknown, row: NapiRowChange) => handleRow(row),
+          streamId,
         );
 
     hydrated
@@ -780,6 +754,10 @@ export class RustIVMDriver {
     let completed = false;
     try {
       for await (const change of queue) {
+        // #3 backpressure: this row has left the buffer, so return one credit
+        // to the producer BEFORE we hand it downstream — the producer may be
+        // parked waiting for exactly this credit.
+        this.#engine.grantStreamCredit?.(streamId, 1);
         yield change;
         count++;
         if (count % 100 === 0) {
@@ -792,15 +770,27 @@ export class RustIVMDriver {
       // finished and the token resets at the next op anyway. close() is
       // idempotent (deferClose already ran on success).
       if (!completed) {
+        // Hard-cancel FIRST: flips the cancel token (so the producer sees
+        // cancellation and skips the drain barrier) and closes the current
+        // credit gate — then cancelStream closes THIS stream precisely. Order
+        // matters: the token must be set before the unparked producer reaches
+        // the barrier, else it blocks on the barrier's timeout (#3).
         this.#engine.cancel?.();
+        this.#engine.cancelStream?.(streamId);
       }
       queue.close();
+      if (!completed) {
+        // Cancellation can race with a producer that already acquired credit
+        // and entered a blocking TSFN call. Keep the JS event loop available
+        // until that native task settles; otherwise the next synchronous actor
+        // call (notably removeQuery during a re-add) can deadlock with the TSFN
+        // callback that only this event loop can dispatch.
+        await hydrated.catch(() => {});
+      }
     }
   }
 
-  async advance(
-    _timer: Timer,
-  ): Promise<
+  async advance(_timer: Timer): Promise<
     | {
         version: string;
         numChanges: number;
@@ -836,8 +826,9 @@ export class RustIVMDriver {
       throw new Error('advanceToHeadStreaming returned no rows');
     }
     if (headerRow.changeType === -2) {
-      const reason = headerRow.rowKey['reason']?.strVal ?? 'schema-change';
-      const msg = headerRow.rowKey['msg']?.strVal ?? 'advance reset';
+      const reset = JSON.parse(headerRow.rowKey) as Record<string, unknown>;
+      const reason = String(reset['reason'] ?? 'schema-change');
+      const msg = String(reset['msg'] ?? 'advance reset');
       return new ResetPipelinesSignal(
         msg,
         reason as ResetPipelinesSignal['reason'],
@@ -848,9 +839,10 @@ export class RustIVMDriver {
         'advanceToHeadStreaming expected header row (changeType=-1) as first row',
       );
     }
-    const version = headerRow.rowKey['version']?.strVal ?? '';
-    const numChanges = headerRow.rowKey['numChanges']?.f64Val ?? 0;
-    const aborted = headerRow.rowKey['aborted']?.boolVal ?? false;
+    const header = JSON.parse(headerRow.rowKey) as Record<string, unknown>;
+    const version = String(header['version'] ?? '');
+    const numChanges = Number(header['numChanges'] ?? 0);
+    const aborted = Boolean(header['aborted'] ?? false);
     this.#lc.debug?.(
       `advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`,
     );
@@ -882,7 +874,8 @@ export class RustIVMDriver {
       headerReject = reject;
     });
 
-    this.#engine
+    const streamId = this.#nextStreamId++;
+    const advancing = this.#engine
       .advanceToHeadStreamingRows((_err: unknown, row: NapiRowChange) => {
         if (headerResolve) {
           headerResolve(row);
@@ -891,7 +884,7 @@ export class RustIVMDriver {
         } else {
           queue.push(row);
         }
-      })
+      }, streamId)
       .then(() => deferClose(queue))
       .catch((e: unknown) => {
         // The engine can fail BEFORE emitting the header (snapshotter advance
@@ -933,7 +926,12 @@ export class RustIVMDriver {
     return {
       version,
       numChanges,
-      changes: this.#advanceToHeadRowsStreaming(queue, aborted),
+      changes: this.#advanceToHeadRowsStreaming(
+        queue,
+        aborted,
+        streamId,
+        advancing,
+      ),
     };
   }
 
@@ -987,6 +985,8 @@ export class RustIVMDriver {
   async *#advanceToHeadRowsStreaming(
     queue: AsyncQueue<NapiRowChange>,
     aborted: boolean,
+    streamId: number,
+    advancing: Promise<unknown>,
   ): AsyncIterable<RowChange | 'yield'> {
     let count = 0;
     let completed = false;
@@ -1011,6 +1011,10 @@ export class RustIVMDriver {
           );
         }
 
+        // #3 backpressure: this DATA row left the buffer — return the one
+        // credit the producer acquired for it (the header/-2 rows are not
+        // credit-gated on the producer side, so we don't grant for them).
+        this.#engine.grantStreamCredit?.(streamId, 1);
         const change = napiToRowChange(row);
         if (change.type !== ChangeType.EDIT) {
           const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
@@ -1030,9 +1034,17 @@ export class RustIVMDriver {
       completed = true;
     } finally {
       if (!completed) {
+        // See #addQueryStreaming: cancel() (token + gate) before cancelStream.
         this.#engine.cancel?.();
+        this.#engine.cancelStream?.(streamId);
       }
       queue.close();
+      if (!completed) {
+        // See #addQueryStreaming: do not let a subsequent synchronous actor
+        // call block the event loop while an already-credited TSFN delivery is
+        // still completing.
+        await advancing.catch(() => {});
+      }
     }
 
     if (aborted) {

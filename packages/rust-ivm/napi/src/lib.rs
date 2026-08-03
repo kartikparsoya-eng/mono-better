@@ -23,15 +23,16 @@ use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::AsyncTask;
 use napi::{bindgen_prelude::*, Env, Error as NapiError, Status, Task, JsFunction};
-use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, ErrorStrategy};
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use rust_ivm::credit::{StreamCreditGate, StreamCreditGuard};
 use rust_ivm::engine::{CancellationToken, Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::source::{MemorySource, Source};
 use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::snapshotter::Snapshotter;
 use rust_ivm::sqlite::table_source::TableSource;
-use rust_ivm::sqlite::{install_interrupt, JobWatchdog};
+use rust_ivm::sqlite::{JobWatchdog, install_interrupt};
 
 /// Watchdog warn/abort bounds for a single `EngineHandle::call`. The warn
 /// bound logs a slow-job signal (NON-aborting — a legit cold hydrate under load
@@ -84,6 +85,22 @@ fn tsfn_batch_size() -> usize {
         .and_then(|v| v.parse().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(1)
+}
+
+/// Streaming-backpressure credit window (#3): the max rows the producer may run
+/// ahead of the JS consumer's AsyncQueue drain. Matches the driver's AsyncQueue
+/// `#maxBuffer` (256) so the credit gate throttles at the same depth the JS
+/// buffer would, bounding in-flight rows to ~capacity regardless of TSFN queue
+/// depth or batch size. Configurable via `RUST_IVM_STREAM_CREDIT`. The floor is
+/// raised to `at_least` so a batched call whose batch exceeds the window still
+/// has a full window to acquire against (no deadlock, exact per-row accounting).
+fn stream_credit_capacity(at_least: usize) -> i64 {
+    let base = std::env::var("RUST_IVM_STREAM_CREDIT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(256);
+    base.max(at_least).max(1) as i64
 }
 
 /// Return freed heap memory to the OS after a CG teardown. glibc retains freed
@@ -142,18 +159,26 @@ struct EngineHandle {
     tx: Sender<Job>,
     /// Populated by `init` once the engine exists; read by out-of-band `cancel`.
     cancel_slot: Arc<Mutex<Option<CancellationToken>>>,
-    /// Persistent interrupt handles for every SQLite connection the actor owns
-    /// (the actor's own connection today; every pooled worker connection in
-    /// Phase 1+). `cancel()` calls `.interrupt()` on each to abort a query
-    /// running on that connection in-flight — closing the wedge where cancel
-    /// is only checked *between* rows (N1). The handles are `Send + Sync`, so
-    /// this registry is the cross-thread hard-abort path; the actor thread is
-    /// the only connection *opener*, so only it writes here.
+    /// Interrupt handles for frame-pinned read-pool connections. The pool owns
+    /// indexed ranges in this bag and drains them on unpin, so snapshot handles
+    /// must remain in the separate registry below.
     interrupt_handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
+    /// Interrupt handles for Snapshotter's live `prev` and `curr` connections.
+    /// Separate from `interrupt_handles`, whose indexed ranges are owned by the
+    /// frame-pinned read pool.
+    snapshot_interrupt_handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
     /// Single monitor thread + deadline registry (N2). One per actor; the same
     /// monitor supervises serial jobs (one handle) today and parallel jobs
     /// (N handles) in Phase 1+. `call` registers each job with a deadline.
     watchdog: Arc<JobWatchdog>,
+    /// Streaming backpressure gate (#3). The streaming producer on the actor
+    /// thread `acquire`s credit before crossing the TSFN boundary; the JS
+    /// consumer `grant`s it back out-of-band (`grant_stream_credit`) as it
+    /// drains rows, and closes it on early exit (`cancel_stream`). Shared here
+    /// so the out-of-band napi methods reach it WITHOUT queueing on the actor
+    /// (which is parked inside the stream) — the same reason `cancel` uses
+    /// `cancel_slot` directly.
+    credit: Arc<StreamCreditGate>,
 }
 
 impl EngineHandle {
@@ -181,7 +206,9 @@ impl EngineHandle {
             tx,
             cancel_slot: Arc::new(Mutex::new(None)),
             interrupt_handles: Arc::new(Mutex::new(Vec::new())),
+            snapshot_interrupt_handles: Arc::new(Mutex::new(Vec::new())),
             watchdog: Arc::new(JobWatchdog::new()),
+            credit: Arc::new(StreamCreditGate::new()),
         }
     }
 
@@ -190,21 +217,19 @@ impl EngineHandle {
     /// so they do not block the JS event loop.
     ///
     /// N2: registers the job with the watchdog for the duration of the call.
-    /// On the soft deadline the monitor flips the cancel token AND `.interrupt()`s
-    /// the actor's persistent SQLite handles — so a runaway query that the
-    /// between-rows cancel check never reaches (the current wedge, N1) is
-    /// hard-aborted mid-flight. Past the hard bound the monitor logs a
-    /// stuck-actor signal. The guard unregisters on return (even on panic).
+    /// The soft deadline only logs. At the hard deadline the monitor flips the
+    /// cancel token and interrupts both live SQLite registries, aborting a query
+    /// that cannot reach its between-row cancellation check. The guard
+    /// unregisters on return (even on panic).
     fn call<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut EngineState) -> T + Send + 'static,
     {
         let (rtx, rrx) = channel::<std::thread::Result<T>>();
-        // Arm the watchdog for this job. The handles are the actor's persistent
-        // SQLite connections, shared via Arc<Mutex<_>> (InterruptHandle is not
-        // Clone). A job with no live connection yet (e.g. init) still benefits
-        // from the cancel-token flip on deadline.
+        // Arm the watchdog for this job with both the read-pool and snapshot
+        // registries. A job with no live connection yet (e.g. init) still
+        // benefits from the cancel-token flip at the hard deadline.
         let cancel = self
             .cancel_slot
             .lock()
@@ -214,11 +239,12 @@ impl EngineHandle {
         let handles = self.interrupt_handles.clone();
         let (warn, abort) = watchdog_bounds();
         let now = std::time::Instant::now();
-        let _guard = self.watchdog.register(
+        let _guard = self.watchdog.register_with_additional_handles(
             now + warn,
             now + abort,
             cancel.clone(),
             handles,
+            Some(self.snapshot_interrupt_handles.clone()),
         );
         self.tx
             .send(Job(Box::new(move |s| {
@@ -240,22 +266,6 @@ impl EngineHandle {
             Ok(Err(panic)) => Err(NapiError::from_reason(panic_message(&panic))),
             Err(_) => Err(NapiError::from_reason("engine actor dropped the reply")),
         }
-    }
-
-    /// Queue `f` on the actor thread and return IMMEDIATELY without waiting for
-    /// it to run. Used by `destroy()`: a blocking `call` would park the JS event
-    /// loop on `recv()` until the actor is free, and if the actor is momentarily
-    /// parked inside a streaming `tsfn.call` (waiting on the same event loop to
-    /// drain the TSFN), that is a deadlock. Fire-and-forget can never block the
-    /// loop; the teardown job runs as soon as the actor finishes its current op.
-    fn call_detached<F>(&self, f: F)
-    where
-        F: FnOnce(&mut EngineState) + Send + 'static,
-    {
-        // Contain panics so a detached job can't unwind out of the actor thread.
-        let _ = self.tx.send(Job(Box::new(move |s| {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
-        })));
     }
 }
 
@@ -749,11 +759,13 @@ impl RustIvmEngine {
         app_id: String,
     ) -> Result<()> {
         let reg = self.handle.interrupt_handles.clone();
+        let snapshot_reg = self.handle.snapshot_interrupt_handles.clone();
         self.handle.call(move |state| -> std::result::Result<(), String> {
             if state.snapshotter.is_some() {
                 return Ok(()); // already initialized
             }
             let mut snap = Snapshotter::with_read_pool(&db_path, &app_id, None, read_pool_lanes(), Some(reg));
+            snap.set_snapshot_interrupt_registry(snapshot_reg);
             snap.init().map_err(|e| format!("snapshotter init: {}", e))?;
             eprintln!("[rust-ivm] snapshotter pre-initialized at version {}", snap.current_version().unwrap_or("?"));
             state.snapshotter = Some(snap);
@@ -765,7 +777,7 @@ impl RustIvmEngine {
     /// When db_path is provided, creates TableSource instances backed by SQLite.
     /// When no db_path, creates MemorySource instances (test/dev mode).
     /// If `init_snapshotter` was called first, the existing snapshotter is
-    /// reused (its interrupt handle is still registered below).
+    /// reused (its live interrupt registry remains attached).
     #[napi]
     pub fn init(
         &self,
@@ -775,6 +787,7 @@ impl RustIvmEngine {
     ) -> Result<()> {
         let cancel_slot = self.handle.cancel_slot.clone();
         let interrupt_handles = self.handle.interrupt_handles.clone();
+        let snapshot_interrupt_handles = self.handle.snapshot_interrupt_handles.clone();
         self.handle.call(move |state| -> std::result::Result<(), String> {
         // Clear any previous state.
         if let Some(ref mut eng) = state.engine {
@@ -784,17 +797,8 @@ impl RustIvmEngine {
         let preserved_snap = state.snapshotter.take();
         *state = EngineState::default();
         state.snapshotter = preserved_snap;
-        // N1: clear the interrupt-handle registry on (re)init — the old
-        // connections are gone (cleared by EngineState::default above). New
-        // connections push fresh handles below.
-        // But preserve the snapshotter's interrupt handle if it was pre-initialized.
-        let preserved_handles: Vec<_> = interrupt_handles.lock().unwrap().drain(..).collect();
-        // Re-add handles that belong to the preserved snapshotter (if any).
-        // The snapshotter's handle was already taken by init_snapshotter, so
-        // we just clear here; init() will re-register it below.
-        let _ = preserved_handles;
-
         let mut primary_keys = HashMap::new();
+        let mut fallback_source_interrupt_handles = Vec::new();
 
         for spec in &tables {
             let mut columns = HashMap::new();
@@ -818,13 +822,7 @@ impl RustIvmEngine {
                 ).map_err(|e| format!("Failed to open SQLite for {}: {}", spec.table, e))?;
                 let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
                 let _ = conn.execute_batch("PRAGMA case_sensitive_like = ON; PRAGMA query_only = ON;");
-                // N1: install a cross-thread interrupt handle on this connection
-                // and register it so cancel()/watchdog can hard-abort a runaway
-                // query in-flight (closing the between-rows-only cancel wedge).
-                // The handle is Send+Sync; the actor is the only opener so only
-                // it writes the registry, but any thread (cancel/watchdog) reads.
-                let handle = install_interrupt(&conn);
-                interrupt_handles.lock().unwrap().push(handle);
+                fallback_source_interrupt_handles.push(install_interrupt(&conn));
                 let table_source = TableSource::new(
                     std::rc::Rc::new(RefCell::new(conn)),
                     &spec.table,
@@ -884,8 +882,10 @@ impl RustIvmEngine {
         state.primary_keys = primary_keys;
 
         if let Some(ref path) = db_path {
+            let mut using_snapshot_connections = false;
             if state.snapshotter.is_none() {
                 let mut snap = Snapshotter::with_read_pool(path, &app_id, None, read_pool_lanes(), Some(interrupt_handles.clone()));
+                snap.set_snapshot_interrupt_registry(snapshot_interrupt_handles.clone());
                 match snap.init() {
                     Ok(()) => {
                         eprintln!("[rust-ivm] snapshotter initialized at version {}", snap.current_version().unwrap_or("?"));
@@ -911,17 +911,18 @@ impl RustIvmEngine {
                         // whenever the pool isn't pinned at the read frame.
                         src.set_read_pool(pool.clone());
                     }
+                    using_snapshot_connections = true;
                 }
-                // The snapshot connection's interrupt handle is deliberately NOT
-                // registered for cancel/watchdog. The pin-race fix replaces the
-                // snapshot connection on every advance, so a once-registered
-                // handle goes stale (a harmless no-op after the old conn closes).
-                // It isn't needed anyway: snapshot diff reads run BEGIN CONCURRENT
-                // on the local wal2 replica — they return SQLITE_BUSY/error rather
-                // than blocking, and advance is already cancelled BETWEEN changes
-                // via the cancellation_token + economic abort. Only the source
-                // FETCH connections (long correlated-EXISTS scans) are registered
-                // above — those genuinely need mid-query hard-abort.
+                // Snapshotter republishes handles for the live prev/curr pair on
+                // every swap. TableSource now points at curr, so cancel/watchdog
+                // always reaches the same connection used by hydration reads.
+            }
+            if !using_snapshot_connections {
+                // Snapshot initialization is intentionally non-fatal. In that
+                // fallback mode TableSource retains its per-table connection,
+                // so publish those handles instead of leaving cancel powerless.
+                *snapshot_interrupt_handles.lock().unwrap() =
+                    fallback_source_interrupt_handles;
             }
             eprintln!("[rust-ivm] sources initialized (db_path={})", path);
         }
@@ -961,8 +962,12 @@ impl RustIvmEngine {
         &self,
         env: Env,
         queries: Vec<NapiQuerySpec>,
-        #[napi(ts_arg_type = "(row: NapiRowChange) => void")]
+        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")]
         on_row: JsFunction,
+        // Caller-minted monotonic stream id (#3): the driver passes the same id
+        // to `grant_stream_credit`/`cancel_stream` so grants are tagged to this
+        // exact stream. See StreamCreditGate.
+        stream_id: f64,
     ) -> Result<AsyncTask<HydrateStreamingTask>> {
         let tsfn = env.create_threadsafe_function(
             &on_row,
@@ -973,6 +978,7 @@ impl RustIvmEngine {
             handle: self.handle.clone(),
             queries,
             tsfn,
+            stream_id: stream_id as u64,
         }))
     }
 
@@ -985,8 +991,9 @@ impl RustIvmEngine {
         &self,
         env: Env,
         queries: Vec<NapiQuerySpec>,
-        #[napi(ts_arg_type = "(rows: NapiRowChange[]) => void")]
+        #[napi(ts_arg_type = "(err: Error | null, rows: NapiRowChange[]) => void")]
         on_rows: JsFunction,
+        stream_id: f64,
     ) -> Result<AsyncTask<HydrateStreamingBatchedTask>> {
         let tsfn = env.create_threadsafe_function(
             &on_rows,
@@ -998,6 +1005,7 @@ impl RustIvmEngine {
             queries,
             tsfn,
             batch_size: tsfn_batch_size(),
+            stream_id: stream_id as u64,
         }))
     }
 
@@ -1009,8 +1017,9 @@ impl RustIvmEngine {
     pub fn advance_to_head_streaming_rows(
         &self,
         env: Env,
-        #[napi(ts_arg_type = "(row: NapiRowChange) => void")]
+        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")]
         on_row: JsFunction,
+        stream_id: f64,
     ) -> Result<AsyncTask<AdvanceStreamingTask>> {
         let tsfn = env.create_threadsafe_function(
             &on_row,
@@ -1020,6 +1029,7 @@ impl RustIvmEngine {
         Ok(AsyncTask::new(AdvanceStreamingTask {
             handle: self.handle.clone(),
             tsfn,
+            stream_id: stream_id as u64,
         }))
     }
 
@@ -1029,6 +1039,18 @@ impl RustIvmEngine {
             if let Some(ref mut eng) = state.engine {
                 eng.remove_query(&query_id);
             }
+        })
+    }
+
+    /// Sum of successful pipeline hydration times, matching
+    /// `PipelineDriver.totalHydrationTimeMs()`.
+    #[napi]
+    pub fn total_hydration_time_ms(&self) -> Result<f64> {
+        self.handle.call(|state| {
+            state
+                .engine
+                .as_ref()
+                .map_or(0.0, Engine::total_hydration_time_ms)
         })
     }
 
@@ -1050,6 +1072,38 @@ impl RustIvmEngine {
         for h in handles.iter() {
             h.interrupt();
         }
+        drop(handles);
+        let handles = self.handle.snapshot_interrupt_handles.lock().unwrap();
+        for h in handles.iter() {
+            h.interrupt();
+        }
+        // A hard cancel also releases a producer parked on stream credit.
+        self.handle.credit.cancel_current();
+        Ok(())
+    }
+
+    /// Grant `permits` streaming-credit back to stream `stream_id` (#3).
+    /// **Out-of-band**: mutates the shared credit gate directly WITHOUT queueing
+    /// on the actor thread — which is exactly the point, since the actor is
+    /// parked inside the stream waiting for these credits. The driver calls this
+    /// as it drains rows out of its AsyncQueue. A grant tagged to a finished or
+    /// superseded stream is ignored by the gate, and credit is capped at the
+    /// window, so a late/duplicate grant can never break the bound.
+    #[napi]
+    pub fn grant_stream_credit(&self, stream_id: f64, permits: f64) -> Result<()> {
+        self.handle
+            .credit
+            .grant(stream_id as u64, permits as i64);
+        Ok(())
+    }
+
+    /// Close stream `stream_id`'s credit gate (#3). **Out-of-band**. The driver
+    /// calls this when the consumer stops early (generator `return`/`throw`) so
+    /// the parked producer unparks promptly instead of relying on the fallback
+    /// poll. Ignored if `stream_id` is not the current stream.
+    #[napi]
+    pub fn cancel_stream(&self, stream_id: f64) -> Result<()> {
+        self.handle.credit.close(stream_id as u64);
         Ok(())
     }
 
@@ -1457,6 +1511,7 @@ pub struct HydrateStreamingTask {
     handle: EngineHandle,
     queries: Vec<NapiQuerySpec>,
     tsfn: ThreadsafeFunction<NapiRowChange>,
+    stream_id: u64,
 }
 
 impl Task for HydrateStreamingTask {
@@ -1466,6 +1521,9 @@ impl Task for HydrateStreamingTask {
     fn compute(&mut self) -> Result<Self::Output> {
         let queries = std::mem::take(&mut self.queries);
         let tsfn = self.tsfn.clone();
+        let credit = self.handle.credit.clone();
+        let stream_id = self.stream_id;
+        let capacity = stream_credit_capacity(0);
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
@@ -1481,7 +1539,20 @@ impl Task for HydrateStreamingTask {
                     specs.push(QuerySpec { query_id: q.query_id.clone(), ast });
                 }
                 let cancel = eng.cancellation_token();
+                // #3 backpressure: open this stream's credit window. The guard
+                // closes it on EVERY exit (return, panic-unwind, cancel) so a
+                // parked-nowhere consumer never leaks an open generation.
+                let _credit_guard =
+                    StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
                 let do_hydrate = |rc: &rust_ivm::streamer::RowChange| {
+                    // Wait for one credit before crossing the boundary; the
+                    // consumer grants as it drains its AsyncQueue. `false` =
+                    // gate closed/cancelled (consumer gone or watchdog abort) →
+                    // stop; the engine's between-rows cancel check ends the fetch.
+                    if !credit.acquire(stream_id, 1, &cancel) {
+                        cancel.cancel();
+                        return;
+                    }
                     let napi_rc = row_change_to_napi(rc);
                     if tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking) != Status::Ok {
                         cancel.cancel();
@@ -1494,8 +1565,14 @@ impl Task for HydrateStreamingTask {
                 eng.add_queries_streaming(&specs, do_hydrate);
                 // Barrier: don't resolve the promise (→ driver closes its row
                 // queue) until every streamed row has landed in JS. See
-                // drain_barrier for the seed-308 last-row-drop it closes.
-                drain_barrier(&tsfn);
+                // drain_barrier for the seed-308 last-row-drop it closes. SKIP it
+                // when cancelled: on early abandonment the consumer is discarding
+                // rows, so there is no last row to guarantee — blocking on the
+                // barrier would stall this job (and everything queued behind it
+                // on the actor) until the barrier's 30s timeout (#3).
+                if !cancel.is_cancelled() {
+                    drain_barrier(&tsfn);
+                }
                 Ok(())
             })?
             .map_err(NapiError::from_reason)
@@ -1513,6 +1590,7 @@ pub struct HydrateStreamingBatchedTask {
     queries: Vec<NapiQuerySpec>,
     tsfn: ThreadsafeFunction<Vec<NapiRowChange>>,
     batch_size: usize,
+    stream_id: u64,
 }
 
 impl Task for HydrateStreamingBatchedTask {
@@ -1523,6 +1601,11 @@ impl Task for HydrateStreamingBatchedTask {
         let queries = std::mem::take(&mut self.queries);
         let tsfn = self.tsfn.clone();
         let batch_size = self.batch_size.max(1);
+        let credit = self.handle.credit.clone();
+        let stream_id = self.stream_id;
+        // Window >= batch_size so a full batch always has credit to acquire
+        // (row-based accounting, no deadlock — reviewer gap #2).
+        let capacity = stream_credit_capacity(batch_size);
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 state.poisoned = false;
@@ -1537,14 +1620,22 @@ impl Task for HydrateStreamingBatchedTask {
                     specs.push(QuerySpec { query_id: q.query_id.clone(), ast });
                 }
                 let cancel = eng.cancellation_token();
+                let _credit_guard =
+                    StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
                 let mut buf: Vec<NapiRowChange> = Vec::with_capacity(batch_size);
                 {
                     // Buffer K rows, then cross the boundary ONCE (one event-loop
-                    // turn). Blocking backpressure still applies per-batch.
+                    // turn). Backpressure acquires ONE credit PER ROW in the
+                    // batch (not per callback), so the bound is in rows.
                     let do_hydrate = |rc: &rust_ivm::streamer::RowChange| {
                         buf.push(row_change_to_napi(rc));
                         if buf.len() >= batch_size {
                             let batch = std::mem::take(&mut buf);
+                            let permits = batch.len() as i64;
+                            if !credit.acquire(stream_id, permits, &cancel) {
+                                cancel.cancel();
+                                return;
+                            }
                             if tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking)
                                 != Status::Ok
                             {
@@ -1554,14 +1645,20 @@ impl Task for HydrateStreamingBatchedTask {
                     };
                     eng.add_queries_streaming(&specs, do_hydrate);
                 }
-                // Flush the tail batch.
+                // Flush the tail batch (also credit-gated on its row count).
                 if !buf.is_empty() {
                     let batch = std::mem::take(&mut buf);
-                    let _ = tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking);
+                    let permits = batch.len() as i64;
+                    if credit.acquire(stream_id, permits, &cancel) {
+                        let _ = tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking);
+                    }
                 }
                 // Barrier: block until the tail batch has landed in JS before
-                // the promise resolves and the driver closes its queue.
-                drain_barrier_batched(&tsfn);
+                // the promise resolves and the driver closes its queue. Skip
+                // when cancelled (early abandonment — see the per-row task).
+                if !cancel.is_cancelled() {
+                    drain_barrier_batched(&tsfn);
+                }
                 Ok(())
             })?
             .map_err(NapiError::from_reason)
@@ -1576,6 +1673,7 @@ impl Task for HydrateStreamingBatchedTask {
 pub struct AdvanceStreamingTask {
     handle: EngineHandle,
     tsfn: ThreadsafeFunction<NapiRowChange>,
+    stream_id: u64,
 }
 
 impl Task for AdvanceStreamingTask {
@@ -1584,6 +1682,9 @@ impl Task for AdvanceStreamingTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         let tsfn = self.tsfn.clone();
+        let credit = self.handle.credit.clone();
+        let stream_id = self.stream_id;
+        let capacity = stream_credit_capacity(0);
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // A prior panic left the engine possibly half-mutated. Refuse to
@@ -1615,6 +1716,12 @@ impl Task for AdvanceStreamingTask {
                 };
 
                 let cancel = eng.cancellation_token();
+                // #3 backpressure window for this advance stream. Closed on
+                // every exit by the guard (data rows below are credit-gated;
+                // the O(1) header/reset rows are not — extra consumer grants for
+                // them are capped at the window, so the bound still holds).
+                let _credit_guard =
+                    StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
 
                 let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let result = eng.advance_to_head_stream(
@@ -1637,6 +1744,13 @@ impl Task for AdvanceStreamingTask {
                             }), ThreadsafeFunctionCallMode::Blocking);
                         },
                         |rc| {
+                            // Credit-gate each data row (#3). `false` = gate
+                            // closed/cancelled → stop; the between-rows cancel
+                            // check ends the advance.
+                            if !credit.acquire(stream_id, 1, &cancel) {
+                                cancel.cancel();
+                                return;
+                            }
                             let napi_rc = row_change_to_napi(rc);
                             if tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking) != Status::Ok {
                                 cancel.cancel();
@@ -1667,7 +1781,11 @@ impl Task for AdvanceStreamingTask {
                                         is_hidden: false,
                                     }), ThreadsafeFunctionCallMode::Blocking);
                                 }
-                                drain_barrier(&tsfn);
+                                // Skip the barrier on early abandonment (#3): a
+                                // discarding consumer has no last row to await.
+                                if !cancel.is_cancelled() {
+                                    drain_barrier(&tsfn);
+                                }
                                 Ok(())
                             }
                             Err(e) => Err(format!("advance failed: {}", e)),

@@ -25,9 +25,11 @@
 //! producer is unparked uniformly by: the consumer draining (grant), the
 //! consumer going away ([`cancel_current`](StreamCreditGate::cancel_current) /
 //! [`close`](StreamCreditGate::close)), or the watchdog aborting a truly-stuck
-//! job. Credit-wait therefore inherits the existing blocking-TSFN watchdog
-//! semantics — it introduces no new false-kill path — and the short poll below
-//! is only a belt-and-suspenders fallback; close/cancel are the primary unpark.
+//! job. The watchdog therefore also acts as the explicit upper bound for a
+//! consumer that stops granting credit without closing its stream. This is a
+//! wider wait than the old TSFN queue-space wait, but it fails closed instead
+//! of leaving the actor parked forever. The short poll below is only a fallback;
+//! close/cancel are the primary unpark paths.
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -68,21 +70,22 @@ impl StreamCreditGate {
         }
     }
 
-    /// Begin a new stream generation with `capacity` credits (min 1). Returns
-    /// the new generation id to tag subsequent `acquire`/`grant`/`close` calls.
-    /// Prefer [`StreamCreditGuard::begin`] so the generation is always closed.
-    pub fn begin(&self, capacity: i64) -> u64 {
+    /// Begin the stream identified by `stream_id` with `capacity` credits (min
+    /// 1). The id is CALLER-SUPPLIED (the TS driver mints a monotonic id and
+    /// passes the same id into the streaming napi call and every `grant`), so a
+    /// grant is always tagged to the exact stream it belongs to. `stream_id`
+    /// must be non-zero (0 is the "no active stream" sentinel) and unique per
+    /// process (a monotonic counter). Prefer [`StreamCreditGuard::begin`] so the
+    /// generation is always closed on every exit path.
+    pub fn begin(&self, stream_id: u64, capacity: i64) {
+        debug_assert_ne!(stream_id, 0, "stream_id 0 is the no-stream sentinel");
         let cap = capacity.max(1);
         let mut g = self.inner.lock().unwrap();
-        g.generation = g.generation.wrapping_add(1);
-        if g.generation == 0 {
-            g.generation = 1; // never hand out the "no active stream" sentinel
-        }
+        g.generation = stream_id;
         g.capacity = cap;
         g.credit = cap;
         g.closed = false;
         self.cv.notify_all();
-        g.generation
     }
 
     /// Block until `permits` credits are available for `generation`, then
@@ -90,8 +93,9 @@ impl StreamCreditGate {
     /// producer should stop: the generation was superseded, the stream was
     /// closed/cancelled, or `cancel` was flipped (watchdog/consumer abort).
     ///
-    /// `permits` is clamped to the generation's capacity so a batch larger than
-    /// capacity can never deadlock (it simply waits for a full window).
+    /// A request larger than the configured capacity is rejected. Callers must
+    /// size the window to at least their largest batch; silently clamping would
+    /// under-account rows and violate the memory bound.
     #[must_use]
     pub fn acquire(&self, generation: u64, permits: i64, cancel: &CancellationToken) -> bool {
         let mut g = self.inner.lock().unwrap();
@@ -99,7 +103,10 @@ impl StreamCreditGate {
             if g.generation != generation || g.closed || cancel.is_cancelled() {
                 return false;
             }
-            let want = permits.clamp(0, g.capacity);
+            let want = permits.max(0);
+            if want > g.capacity {
+                return false;
+            }
             if g.credit >= want {
                 g.credit -= want;
                 return true;
@@ -170,9 +177,12 @@ pub struct StreamCreditGuard {
 }
 
 impl StreamCreditGuard {
-    pub fn begin(gate: std::sync::Arc<StreamCreditGate>, capacity: i64) -> Self {
-        let generation = gate.begin(capacity);
-        Self { gate, generation }
+    pub fn begin(gate: std::sync::Arc<StreamCreditGate>, stream_id: u64, capacity: i64) -> Self {
+        gate.begin(stream_id, capacity);
+        Self {
+            gate,
+            generation: stream_id,
+        }
     }
 
     pub fn generation(&self) -> u64 {
@@ -204,7 +214,8 @@ mod tests {
     #[test]
     fn parks_exactly_at_capacity_then_grant_unparks() {
         let gate = Arc::new(StreamCreditGate::new());
-        let gen_id = gate.begin(2);
+        let gen_id = 1u64;
+        gate.begin(gen_id, 2);
         let c = tok();
         assert!(gate.acquire(gen_id, 1, &c)); // 2 -> 1
         assert!(gate.acquire(gen_id, 1, &c)); // 1 -> 0
@@ -219,7 +230,8 @@ mod tests {
     #[test]
     fn one_grant_permits_exactly_one_row() {
         let gate = Arc::new(StreamCreditGate::new());
-        let gen_id = gate.begin(1);
+        let gen_id = 1u64;
+        gate.begin(gen_id, 1);
         let c = tok();
         assert!(gate.acquire(gen_id, 1, &c)); // drain to 0
         let (a, b) = (gate.clone(), gate.clone());
@@ -243,19 +255,26 @@ mod tests {
     #[test]
     fn stale_grant_ignored_and_credit_capped() {
         let gate = StreamCreditGate::new();
-        let g1 = gate.begin(4);
+        let g1 = 1u64;
+        gate.begin(g1, 4);
         gate.close(g1);
-        let g2 = gate.begin(4); // fresh generation: credit == 4
+        let g2 = 2u64;
+        gate.begin(g2, 4); // fresh generation: credit == 4
         gate.grant(g1, 100); // stale generation → ignored
         assert_eq!(gate.credit_snapshot(), 4, "stale grant must not credit g2");
         gate.grant(g2, 100); // current gen but over capacity → capped
-        assert_eq!(gate.credit_snapshot(), 4, "credit must be capped at capacity");
+        assert_eq!(
+            gate.credit_snapshot(),
+            4,
+            "credit must be capped at capacity"
+        );
     }
 
     #[test]
     fn cancel_token_unparks_zero_credit_producer() {
         let gate = Arc::new(StreamCreditGate::new());
-        let gen_id = gate.begin(1);
+        let gen_id = 1u64;
+        gate.begin(gen_id, 1);
         let c = tok();
         assert!(gate.acquire(gen_id, 1, &c)); // drain to 0
         let (g2, c2) = (gate.clone(), c.clone());
@@ -272,7 +291,8 @@ mod tests {
     #[test]
     fn close_unparks_and_superseded_generation_stops() {
         let gate = Arc::new(StreamCreditGate::new());
-        let gen_id = gate.begin(1);
+        let gen_id = 1u64;
+        gate.begin(gen_id, 1);
         let c = tok();
         assert!(gate.acquire(gen_id, 1, &c));
         let (g2, c2) = (gate.clone(), c.clone());
@@ -281,7 +301,7 @@ mod tests {
         gate.cancel_current(); // consumer gone
         assert!(!h.join().unwrap());
         // A later generation makes the old-gen acquire return false at once.
-        let _g3 = gate.begin(1);
+        gate.begin(2u64, 1);
         assert!(!gate.acquire(gen_id, 1, &c), "superseded generation stops");
     }
 
@@ -290,7 +310,7 @@ mod tests {
         let gate = Arc::new(StreamCreditGate::new());
         let c = tok();
         let gen_id = {
-            let guard = StreamCreditGuard::begin(gate.clone(), 1);
+            let guard = StreamCreditGuard::begin(gate.clone(), 7u64, 1);
             let g = guard.generation();
             assert_eq!(gate.current_generation(), g);
             g
@@ -302,12 +322,15 @@ mod tests {
     }
 
     #[test]
-    fn batch_larger_than_capacity_does_not_deadlock() {
+    fn request_larger_than_capacity_is_rejected() {
         let gate = Arc::new(StreamCreditGate::new());
-        let gen_id = gate.begin(2); // capacity 2
+        let gen_id = 1u64;
+        gate.begin(gen_id, 2); // capacity 2
         let c = tok();
-        // Acquiring 5 (> capacity) clamps to 2 and succeeds against a full window.
-        assert!(gate.acquire(gen_id, 5, &c), "over-capacity acquire clamps, no deadlock");
-        assert_eq!(gate.credit_snapshot(), 0);
+        assert!(
+            !gate.acquire(gen_id, 5, &c),
+            "under-accounting an oversized batch would violate the bound",
+        );
+        assert_eq!(gate.credit_snapshot(), 2);
     }
 }
