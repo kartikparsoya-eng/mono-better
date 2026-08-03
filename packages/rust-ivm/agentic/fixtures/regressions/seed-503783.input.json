@@ -1,0 +1,216 @@
+{
+ "name": "fuzz.seed-503783",
+ "sourceKind": "memory",
+ "tables": {
+  "t0": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "boolean",
+    "c2": "string",
+    "c3": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": [
+    {
+     "id": "t0-r0",
+     "c0": true,
+     "c1": true,
+     "c2": "日本語",
+     "c3": "ZZZ"
+    }
+   ]
+  },
+  "t1": {
+   "columns": {
+    "id": "string",
+    "c0": "string",
+    "c1": "number",
+    "fk": "string"
+   },
+   "primaryKey": [
+    "id"
+   ],
+   "rows": []
+  },
+  "t2": {
+   "columns": {
+    "id": "string",
+    "c0": "boolean",
+    "c1": "boolean",
+    "fk": "string",
+    "k": "string"
+   },
+   "primaryKey": [
+    "k"
+   ],
+   "rows": [
+    {
+     "id": "t2-r10",
+     "k": "t2-k10",
+     "c0": false,
+     "c1": true,
+     "fk": "t0-r0"
+    }
+   ],
+   "replicaPrimaryKey": [
+    "id"
+   ]
+  }
+ },
+ "ast": {
+  "table": "t0",
+  "orderBy": [
+   [
+    "c1",
+    "desc"
+   ],
+   [
+    "id",
+    "asc"
+   ]
+  ],
+  "where": {
+   "type": "or",
+   "conditions": [
+    {
+     "type": "correlatedSubquery",
+     "related": {
+      "correlation": {
+       "parentField": [
+        "id"
+       ],
+       "childField": [
+        "fk"
+       ]
+      },
+      "subquery": {
+       "table": "t1",
+       "alias": "zsubq_t1",
+       "orderBy": [
+        [
+         "id",
+         "asc"
+        ]
+       ]
+      }
+     },
+     "op": "EXISTS",
+     "flip": true
+    },
+    {
+     "type": "correlatedSubquery",
+     "op": "EXISTS",
+     "scalar": true,
+     "related": {
+      "correlation": {
+       "parentField": [
+        "id"
+       ],
+       "childField": [
+        "fk"
+       ]
+      },
+      "subquery": {
+       "table": "t2",
+       "alias": "zsubq_t2",
+       "orderBy": [
+        [
+         "id",
+         "asc"
+        ]
+       ],
+       "where": {
+        "type": "simple",
+        "op": "=",
+        "left": {
+         "type": "column",
+         "name": "id"
+        },
+        "right": {
+         "type": "literal",
+         "value": "t2-x66"
+        }
+       }
+      }
+     }
+    },
+    {
+     "type": "and",
+     "conditions": [
+      {
+       "type": "correlatedSubquery",
+       "related": {
+        "correlation": {
+         "parentField": [
+          "id"
+         ],
+         "childField": [
+          "fk"
+         ]
+        },
+        "subquery": {
+         "table": "t2",
+         "alias": "zsubq_t2",
+         "orderBy": [
+          [
+           "id",
+           "asc"
+          ]
+         ],
+         "where": {
+          "type": "simple",
+          "op": "IN",
+          "left": {
+           "type": "column",
+           "name": "c1"
+          },
+          "right": {
+           "type": "literal",
+           "value": [
+            true
+           ]
+          }
+         }
+        }
+       },
+       "op": "EXISTS",
+       "flip": true
+      },
+      {
+       "type": "simple",
+       "op": "IS NOT",
+       "left": {
+        "type": "column",
+        "name": "c0"
+       },
+       "right": {
+        "type": "literal",
+        "value": null
+       }
+      },
+      {
+       "type": "simple",
+       "op": "IS NOT",
+       "left": {
+        "type": "column",
+        "name": "c2"
+       },
+       "right": {
+        "type": "literal",
+        "value": null
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "format": {
+  "singular": false,
+  "relationships": {}
+ },
+ "pushes": []
+}
