@@ -31,9 +31,11 @@ Send Shivral **exactly one message** containing: image tag, target env, one-pod 
 - [ ] `USER=zero-cache` is set in env.
 - [ ] `ZERO_LITESTREAM_EXECUTABLE=/usr/local/bin/litestream` is set.
 - [ ] `OTEL_EXPORTER_OTLP_ENDPOINT` is set to the actual collector (or left empty for sandbox).
-- [ ] `ZERO_NUM_SYNC_WORKERS` is ≤ target pod CPU core limit (default 8).
-- [ ] `RUST_IVM_READ_LANES=2` is set.
-- [ ] `RUST_IVM_PLANNER=1` is set.
+- [ ] `ZERO_NUM_SYNC_WORKERS` is ≤ target pod CPU core limit (image default 4).
+- [ ] No `RUST_IVM_READ_LANES` override is present; hydration is serial.
+- [ ] `RUST_IVM_TSFN_QUEUE=64` and `RUST_IVM_STREAM_CREDIT=64` are both set.
+- [ ] No `RUST_IVM_TSFN_BATCH` override is present; batch hydration is removed.
+- [ ] Planner enablement matches the `PipelineDriver` constructor flag.
 
 ## Local / sandbox validation
 
@@ -50,5 +52,5 @@ Send Shivral **exactly one message** containing: image tag, target env, one-pod 
 Env: <sandbox|pre-prod>
 Image: ghcr.io/<repo>/zero-cache-rust-ivm:rust-ivm-v1.7.0-<sha>
 Rollout: one pod first, compare against existing pods, scale if healthy.
-Checks: schema v<>, sync protocol v<>, syncer=replicator v<>, workers=<>, heap=4Gi, read_lanes=2, planner=1.
+Checks: schema v<>, sync protocol v<>, syncer=replicator v<>, workers=<>, heap=4Gi, serial hydration, planner parity.
 ```

@@ -383,7 +383,7 @@ fn test_advance_edit() {
 }
 
 #[test]
-fn test_multiple_queries_parallel_hydrate() {
+fn test_multiple_queries_hydrate() {
     let source = make_source("users", &["id"]);
     for i in 1..=10 {
         source.borrow_mut().add_row(

@@ -85,7 +85,9 @@ export function diffChanges(
   for (const [k, rv] of rm) {
     const tv = tm.get(k);
     if (!tv || stable(rv) !== stable(tv)) {
-      onlyInRust.push(`${k} => ${JSON.stringify(rv)} (ts: ${JSON.stringify(tv)})`);
+      onlyInRust.push(
+        `${k} => ${JSON.stringify(rv)} (ts: ${JSON.stringify(tv)})`,
+      );
     }
   }
   for (const [k, tv] of tm) {
@@ -175,7 +177,9 @@ export function fixtureReplicaDDL(
     const clientPK = spec.primaryKey;
     const replicaPK = spec.replicaPrimaryKey ?? spec.primaryKey;
     if (replicaPK.length === 0) {
-      throw new UntranslatableFixture(`table ${name} has no replica primary key`);
+      throw new UntranslatableFixture(
+        `table ${name} has no replica primary key`,
+      );
     }
     const pkCols = new Set([...clientPK, ...replicaPK]);
     const colDefs = Object.entries(spec.columns).map(([col, type]) => {
@@ -222,6 +226,15 @@ export function fixturePushesDML(
   version: string,
 ): string {
   const stmts: string[] = [];
+  let position = 0;
+  const log = (table: string, op: 's' | 'd', key: Record<string, unknown>) => {
+    stmts.push(
+      `INSERT OR REPLACE INTO "_zero.changeLog2" ` +
+        `(stateVersion, pos, "table", rowKey, op) VALUES (` +
+        `${sqlLiteral(version)}, ${position++}, ${sqlLiteral(table)}, ` +
+        `JSON(${sqlLiteral(JSON.stringify(key))}), ${sqlLiteral(op)});`,
+    );
+  };
   for (const push of pushes ?? []) {
     const spec = tables[push.table];
     if (!spec) {
@@ -231,8 +244,13 @@ export function fixturePushesDML(
     const replicaPK = spec.replicaPrimaryKey ?? spec.primaryKey;
     const whereFor = (r: Record<string, unknown>) =>
       replicaPK
-        .map(c => `"${c}" = ${sqlLiteral(sqlValue(r[c], baseType(spec.columns[c])))}`)
+        .map(
+          c =>
+            `"${c}" = ${sqlLiteral(sqlValue(r[c], baseType(spec.columns[c])))}`,
+        )
         .join(' AND ');
+    const keyFor = (r: Record<string, unknown>) =>
+      Object.fromEntries(replicaPK.map(column => [column, r[column]]));
     if (push.type === 'add') {
       const vals = cols.map(c =>
         sqlLiteral(sqlValue(push.row[c], baseType(spec.columns[c]))),
@@ -244,8 +262,10 @@ export function fixturePushesDML(
           .concat('"_0_version"')
           .join(', ')}) VALUES (${vals.join(', ')});`,
       );
+      log(push.table, 's', keyFor(push.row));
     } else if (push.type === 'remove') {
       stmts.push(`DELETE FROM "${push.table}" WHERE ${whereFor(push.row)};`);
+      log(push.table, 'd', keyFor(push.row));
     } else if (push.type === 'edit') {
       const set = cols
         .map(
@@ -257,6 +277,12 @@ export function fixturePushesDML(
       stmts.push(
         `UPDATE "${push.table}" SET ${set} WHERE ${whereFor(push.oldRow ?? push.row)};`,
       );
+      const oldKey = keyFor(push.oldRow ?? push.row);
+      const newKey = keyFor(push.row);
+      if (stable(oldKey) !== stable(newKey)) {
+        log(push.table, 'd', oldKey);
+      }
+      log(push.table, 's', newKey);
     }
   }
   return stmts.join('\n');

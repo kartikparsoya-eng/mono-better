@@ -49,9 +49,6 @@ pub trait Source {
     /// Push a source change through all connections.
     fn push(&mut self, change: SourceChange) -> Vec<Change>;
 
-    /// Push with parallel fan-out across connection groups (inter-CG).
-    fn push_parallel(&mut self, change: SourceChange) -> Vec<Change>;
-
     /// Gen push — yields per-connection results.
     fn gen_push(&mut self, change: SourceChange) -> Vec<Change>;
 
@@ -73,22 +70,6 @@ pub trait Source {
     fn column_types(&self) -> HashMap<String, crate::ivm::schema::ColumnType> {
         HashMap::new()
     }
-
-    /// Set the next connect group (for parallel push grouping).
-    fn set_next_connect_group(&mut self, _group: &str) {}
-
-    /// Set parallel push mode.
-    fn set_parallel(&mut self, _enabled: bool, _threshold: usize) {}
-
-    /// Attach the frame-pinned parallel-read pool (read-level parallelism).
-    /// The source uses it to fan multi-constraint hydrate reads out across the
-    /// co-pinned connections; `MemorySource` has no SQLite reads → no-op.
-    /// See DESIGN-read-parallelism.md.
-    fn set_read_pool(
-        &mut self,
-        _pool: std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>,
-    ) {
-    }
 }
 
 /// Connection: a downstream consumer of the source.
@@ -99,7 +80,6 @@ pub struct Connection {
     pub filter_condition: Option<Condition>,
     pub filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
     pub last_pushed_epoch: usize,
-    pub group: String,
     pub output: Option<OutputHandle>,
 }
 
@@ -128,9 +108,6 @@ pub struct MemorySource {
     connections: Vec<Shared<Connection>>,
     overlay: SharedOverlay,
     push_epoch: usize,
-    next_connect_group: String,
-    parallel: bool,
-    parallel_threshold: usize,
     db_path: Option<String>,
     db_conn: Rc<RefCell<Option<rusqlite::Connection>>>,
     /// Cross-thread interrupt handle for `db_conn` (seam 1). Installed at open
@@ -175,9 +152,6 @@ impl MemorySource {
             connections: Vec::new(),
             overlay: Rc::new(RefCell::new(None)),
             push_epoch: 0,
-            next_connect_group: "default".to_string(),
-            parallel: false,
-            parallel_threshold: 2,
             db_path: None,
             db_conn: Rc::new(RefCell::new(None)),
             interrupt_handle: None,
@@ -197,15 +171,6 @@ impl MemorySource {
         &self.column_names
     }
 
-    pub fn set_next_connect_group(&mut self, group: &str) {
-        self.next_connect_group = group.to_string();
-    }
-
-    pub fn set_parallel(&mut self, enabled: bool, threshold: usize) {
-        self.parallel = enabled;
-        self.parallel_threshold = threshold;
-    }
-
     /// Set the SQLite database path and open a dedicated read-only connection.
     /// One connection per source, opened once and reused for all fetches.
     /// Matches TS (one better-sqlite3 Database per syncer) and Go (one *sql.Conn per Source).
@@ -220,9 +185,8 @@ impl MemorySource {
             Ok(c) => {
                 let _ = c.busy_timeout(std::time::Duration::from_millis(5000));
                 let _ = c.execute_batch("PRAGMA case_sensitive_like = ON; PRAGMA query_only = ON;");
-                // Seam 1: install a cross-thread interrupt handle at every
-                // connection open so the source's fetch connection is
-                // interruptible. Phase 1's worker pool reuses this chokepoint.
+                // Install a cross-thread interrupt handle so an in-flight fetch
+                // can be cancelled out-of-band.
                 let handle = crate::sqlite::install_interrupt(&c);
                 self.interrupt_handle = Some(handle);
                 *self.db_conn.borrow_mut() = Some(c);
@@ -305,8 +269,6 @@ impl MemorySource {
             .clone()
             .unwrap_or_else(|| self.primary_index_sort.clone());
         let compare_rows = make_comparator(internal_sort.clone(), false);
-        let group = self.next_connect_group.clone();
-
         let conn = Rc::new(RefCell::new(Connection {
             sort: sort.clone(),
             split_edit_keys,
@@ -314,7 +276,6 @@ impl MemorySource {
             filter_condition,
             filter_predicate,
             last_pushed_epoch: 0,
-            group,
             output: None,
         }));
 
@@ -357,12 +318,7 @@ impl MemorySource {
 
     /// Push a source change through all connections.
     pub fn push(&mut self, change: SourceChange) -> Vec<Change> {
-        self.push_internal(change, false)
-    }
-
-    /// Push with parallel fan-out across connection groups (inter-CG).
-    pub fn push_parallel(&mut self, change: SourceChange) -> Vec<Change> {
-        self.push_internal(change, self.parallel)
+        self.push_internal(change)
     }
 
     /// Push a change through all connected outputs, one connection at a time.
@@ -370,11 +326,10 @@ impl MemorySource {
     /// Port of TS `genPush()` — yields per-connection results (no yield
     /// cooperative scheduling token in Rust).
     pub fn gen_push(&mut self, change: SourceChange) -> Vec<Change> {
-        self.push_internal(change, false)
+        self.push_internal(change)
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn push_internal(&mut self, change: SourceChange, force_parallel: bool) -> Vec<Change> {
+    fn push_internal(&mut self, change: SourceChange) -> Vec<Change> {
         // Split-edit: if any connection has split_edit_keys and this Edit
         // changes one of them, split into Remove(OldRow) + Add(Row) BEFORE
         // pushing. This prevents Join panics on key-changing edits.
@@ -399,8 +354,8 @@ impl MemorySource {
             if should_split {
                 let old_row = old_row.clone();
                 let new_row = row.clone();
-                self.push_internal(SourceChange::Remove { row: old_row }, force_parallel);
-                return self.push_internal(SourceChange::Add { row: new_row }, force_parallel);
+                self.push_internal(SourceChange::Remove { row: old_row });
+                return self.push_internal(SourceChange::Add { row: new_row });
             }
         }
 
@@ -444,7 +399,6 @@ impl MemorySource {
             .cloned()
             .collect();
 
-        let groups = group_connections(&active);
         let all_changes = Vec::new();
 
         // A pusher standing in for this source (TS passes `this`). Carries the
@@ -465,22 +419,18 @@ impl MemorySource {
             },
         };
 
-        // Sequential or parallel push
-        // For the initial port, sequential. Parallel is wired in engine.
-        for group in &groups {
-            for conn in group {
-                // Extract what we need and release the borrow before pushing.
-                // During push, downstream operators may call fetch on this
-                // source, which needs to borrow the connection immutably.
-                let (output, predicate) = {
-                    let mut conn_ref = conn.borrow_mut();
-                    conn_ref.last_pushed_epoch = epoch;
-                    (conn_ref.output.clone(), conn_ref.filter_predicate.clone())
-                };
-                if let Some(output) = output {
-                    let output_change = self.source_change_to_change(&change);
-                    filter_push(output_change, output, &pusher, predicate.as_ref());
-                }
+        for conn in &active {
+            // Extract what we need and release the borrow before pushing.
+            // During push, downstream operators may call fetch on this source,
+            // which needs to borrow the connection immutably.
+            let (output, predicate) = {
+                let mut conn_ref = conn.borrow_mut();
+                conn_ref.last_pushed_epoch = epoch;
+                (conn_ref.output.clone(), conn_ref.filter_predicate.clone())
+            };
+            if let Some(output) = output {
+                let output_change = self.source_change_to_change(&change);
+                filter_push(output_change, output, &pusher, predicate.as_ref());
             }
         }
 
@@ -590,10 +540,6 @@ impl Source for MemorySource {
         self.push(change)
     }
 
-    fn push_parallel(&mut self, change: SourceChange) -> Vec<Change> {
-        self.push_parallel(change)
-    }
-
     fn gen_push(&mut self, change: SourceChange) -> Vec<Change> {
         self.gen_push(change)
     }
@@ -605,30 +551,6 @@ impl Source for MemorySource {
     fn set_db_path(&mut self, path: &str) {
         self.set_db_path(path);
     }
-
-    fn set_next_connect_group(&mut self, group: &str) {
-        self.set_next_connect_group(group);
-    }
-
-    fn set_parallel(&mut self, enabled: bool, threshold: usize) {
-        self.set_parallel(enabled, threshold);
-    }
-}
-
-fn group_connections(connections: &[Shared<Connection>]) -> Vec<Vec<Shared<Connection>>> {
-    let mut groups: HashMap<String, Vec<Shared<Connection>>> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
-    for conn in connections {
-        let g = conn.borrow().group.clone();
-        if !groups.contains_key(&g) {
-            order.push(g.clone());
-        }
-        groups.entry(g).or_default().push(conn.clone());
-    }
-    order
-        .into_iter()
-        .map(|g| groups.remove(&g).unwrap())
-        .collect()
 }
 
 /// SourceInput — implements the Input trait for a connection.
@@ -1048,6 +970,70 @@ pub(crate) fn apply_source_overlay(
     )
 }
 
+/// Apply every source change already written during the current advance, then
+/// the optional in-flight change. TS writes each pushed change into its private
+/// PREV snapshot transaction, so later fetches observe the whole advance so
+/// far. Rust's snapshot is read-only; layering the changes here is the exact
+/// read-side equivalent.
+pub(crate) fn apply_source_overlays(
+    mut rows: Box<dyn Iterator<Item = Row>>,
+    overlay_changes: Vec<SourceChange>,
+    compare: Comparator,
+    index_compare: Comparator,
+    filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
+    req: &FetchRequest,
+) -> NodeStream {
+    if overlay_changes.is_empty() {
+        return Box::new(rows.map(|row| StreamItem::Data(Node::new(row))));
+    }
+
+    let count = overlay_changes.len();
+    for (index, change) in overlay_changes.into_iter().enumerate() {
+        let nodes = apply_source_overlay(
+            rows,
+            Some(change),
+            compare.clone(),
+            index_compare.clone(),
+            filter_predicate.clone(),
+            req,
+        );
+        if index + 1 == count {
+            // TS TableSource wraps generateWithOverlay in generateWithStart.
+            // The SQL scan already applies the bound to persisted rows, but
+            // overlay adds bypass SQL and still need the final inclusive /
+            // exclusive check. Without this, an `After` fetch can return the
+            // row equal to its start and corrupt Take's replacement boundary.
+            let Some(start) = req.start.clone() else {
+                return nodes;
+            };
+            let compare = compare.clone();
+            let reverse = req.reverse;
+            return Box::new(nodes.filter(move |item| match item {
+                StreamItem::Yield => true,
+                StreamItem::Data(node) => {
+                    let ord = compare(&node.row, &start.row);
+                    if reverse {
+                        match start.basis {
+                            Basis::At => ord != CmpOrdering::Greater,
+                            Basis::After => ord == CmpOrdering::Less,
+                        }
+                    } else {
+                        match start.basis {
+                            Basis::At => ord != CmpOrdering::Less,
+                            Basis::After => ord == CmpOrdering::Greater,
+                        }
+                    }
+                }
+            }));
+        }
+        rows = Box::new(nodes.filter_map(|item| match item {
+            StreamItem::Data(node) => Some(node.row),
+            StreamItem::Yield => None,
+        }));
+    }
+    unreachable!("non-empty overlay list must return from the loop")
+}
+
 fn apply_source_overlay_impl(
     rows: Box<dyn Iterator<Item = Row>>,
     overlay_change: Option<SourceChange>,
@@ -1248,20 +1234,63 @@ impl Input for EmptyInput {
 /// Collecting output — terminal sink for pushed changes.
 pub struct CollectOutput {
     pub changes: Vec<Change>,
+    pub row_changes: Vec<crate::streamer::RowChange>,
+    stream_config: Option<CollectStreamConfig>,
+}
+
+#[derive(Clone)]
+struct CollectStreamConfig {
+    query_id: String,
+    schema: SourceSchema,
+    primary_keys: HashMap<String, Vec<String>>,
+    table_specs: HashMap<String, crate::streamer::TableSpecInfo>,
 }
 
 impl CollectOutput {
     pub fn new() -> Self {
         CollectOutput {
             changes: Vec::new(),
+            row_changes: Vec::new(),
+            stream_config: None,
         }
+    }
+
+    /// Flatten pushed changes at the collector boundary. This is the point at
+    /// which PipelineDriver drains its accumulator: the source overlay is
+    /// still active, so lazy relationship fetches observe the correct frame.
+    pub fn configure_streaming(
+        &mut self,
+        query_id: String,
+        schema: SourceSchema,
+        primary_keys: HashMap<String, Vec<String>>,
+        table_specs: HashMap<String, crate::streamer::TableSpecInfo>,
+    ) {
+        self.stream_config = Some(CollectStreamConfig {
+            query_id,
+            schema,
+            primary_keys,
+            table_specs,
+        });
     }
 }
 
 impl Output for CollectOutput {
     fn push(&mut self, change: Change, _pusher: &dyn InputBase) {
         crate::ivm::trace::recv("source#1", &change);
-        self.changes.push(change);
+        if let Some(config) = &self.stream_config {
+            let mut streamer = crate::streamer::Streamer::new(
+                config.primary_keys.clone(),
+                config.table_specs.clone(),
+            );
+            streamer.accumulate(
+                &config.query_id,
+                &config.schema,
+                std::slice::from_ref(&change),
+            );
+            self.row_changes.extend(streamer.stream());
+        } else {
+            self.changes.push(change);
+        }
     }
 }
 

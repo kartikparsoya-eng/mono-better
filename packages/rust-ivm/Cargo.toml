@@ -7,6 +7,12 @@ edition = "2024"
 name = "rust_ivm"
 path = "src/lib.rs"
 
+[features]
+# macOS/system-SQLite unit tests cannot create wal2 databases. Production NAPI
+# disables this feature and requires wal2 exactly like the TS Snapshotter.
+default = ["non-wal2-test-support"]
+non-wal2-test-support = []
+
 [[bin]]
 name = "rust-ivm-server"
 path = "src/bin/server.rs"
@@ -15,19 +21,8 @@ path = "src/bin/server.rs"
 name = "replay"
 path = "src/bin/replay.rs"
 
-[features]
-# Enables the wal2 co-located-read pool path (sqlite3_wal2_coread_* FFI). These
-# symbols exist only in the SQLITE_ENABLE_WAL2_COREAD fork linked as system
-# SQLite (the Dockerfile); the local macOS build has no such symbols, so the
-# feature is OFF by default and the coread module is compiled out. Mirrors the
-# Go port's `//go:build libsqlite3` tag (go-ivm coread.go / coread_stub.go).
-wal2_coread = []
-
 [dependencies]
-rayon = "1"
 parking_lot = "0.12"
-crossbeam = "0.8"
-smallvec = "1"
 rustc-hash = "2"
 rusqlite = { version = "0.32" }
 regex-lite = "0.1"

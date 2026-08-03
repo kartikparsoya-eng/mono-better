@@ -1,4 +1,4 @@
-//! tests/advance_stale_diff_reset_test.rs — BUG 4 regression gate.
+//! Invalid-diff propagation and WAL2 snapshot regression gates.
 //!
 //! A stale-snapshot diff (the pinned prev/curr BEGIN CONCURRENT read view slips
 //! forward under wal2 frame recycling) trips `check_valid`'s prev-version guard
@@ -12,32 +12,16 @@
 //! the pinned snapshot → the prev/curr read view slipped → InvalidDiff fired far
 //! more often than it ever does in TS (which has no read-only fallback).
 //!
-//! FIX (part B, the real one): remove the read-only fallback — retry the rw open,
-//! never serve an unmarked read-only wal2 snapshot. PART (B) below gates this.
-//!
-//! PART (A) gates the RECOVERY semantics. A stale-snapshot slip is NOT
-//! corruption — the replica is intact; the diff simply can't be computed against
-//! a moved snapshot, and rehydrating at head fully recovers. So the engine now
-//! surfaces it as a RECOVERABLE reset (`DiffError::Reset`, reason
-//! `stale-snapshot`) → the view-syncer rehydrates in place, NOT a fatal teardown.
-//!
-//! This DELIBERATELY reverses the earlier "match TS's InvalidDiff teardown"
-//! choice, on empirical grounds: a differential lifecycle-churn load test drove
-//! 64 of these slips on rust vs 0 on TS (TS reuses two persistent connections via
-//! resetToHead, so its wal2 read-marks never slip). Tearing the client down
-//! cascaded into reconnect churn + latency. TS never REACHES this path, so there
-//! is no observable TS behavior to match; treating it as a reset mirrors how
-//! every other recoverable snapshot-move (schema-change/truncation/permissions)
-//! is already handled. Genuine hard errors (corrupt reads, missing rows) still
-//! propagate as `Err` → teardown (engine mod.rs). Reducing the slip RATE
-//! (read-pool frame-pin + fresh-connection isolation) is a separate follow-up.
+//! The fix removes the read-only fallback: retry the read-write open and never
+//! serve an unmarked wal2 snapshot. If validation still detects a moved
+//! snapshot, Rust must propagate InvalidDiff exactly like TypeScript.
 
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 use rust_ivm::engine::Engine;
 use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
-use rust_ivm::snapshotter::Snapshotter;
+use rust_ivm::snapshotter::{DiffError, Snapshotter};
 
 fn clean_db(path: &str) {
     for p in [
@@ -133,15 +117,10 @@ fn users_spec() -> LiteAndZqlSpec {
     }
 }
 
-/// PART (A): a stale prev/curr snapshot surfaces as a RECOVERABLE reset
-/// (`aborted=true`, reason `stale-snapshot`), NOT a fatal teardown. The
-/// view-syncer rehydrates in place on this signal. This guards against
-/// regressing back to the fatal-teardown behavior that cascaded into reconnect
-/// churn under lifecycle load (64 slips on rust vs 0 on TS). Genuine hard errors
-/// are covered separately (they still propagate as `Err`).
+/// A stale prev/curr snapshot propagates InvalidDiff exactly like TS.
 #[test]
-fn stale_snapshot_surfaces_as_recoverable_reset() {
-    let db_path = "/tmp/rust-ivm-stale-diff-reset.db";
+fn stale_snapshot_propagates_invalid_diff() {
+    let db_path = "/tmp/rust-ivm-invalid-diff-propagation.db";
     create_stale_diff_replica(db_path);
 
     let mut snapshotter = Snapshotter::new(db_path, "", None);
@@ -167,40 +146,23 @@ fn stale_snapshot_surfaces_as_recoverable_reset() {
     );
 
     match result {
-        Ok(res) => {
-            // Recoverable: the engine aborts the advance and asks the caller to
-            // rehydrate, carrying the stale-snapshot reason — exactly how a
-            // schema-change / truncation / permissions-change reset is surfaced.
-            assert!(
-                res.aborted,
-                "stale snapshot must abort the advance (aborted=true), got aborted={}",
-                res.aborted
-            );
-            assert_eq!(
-                res.reset_reason.as_deref(),
-                Some("stale-snapshot"),
-                "stale snapshot must carry the recoverable reason, got {:?}",
-                res.reset_reason
-            );
-            assert!(
-                res.reset_msg
-                    .as_deref()
-                    .is_some_and(|m| m.contains("no longer valid")),
-                "reset msg must identify the stale-diff guard, got {:?}",
-                res.reset_msg
-            );
-        }
-        Err(e) => panic!(
-            "stale snapshot must be a RECOVERABLE reset (rehydrate), NOT a fatal \
-             teardown Err (that cascaded into reconnect churn: 64 rust vs 0 TS); got Err({e})"
+        Err(DiffError::InvalidDiff(e)) => assert!(
+            e.msg.contains("no longer valid"),
+            "InvalidDiff must identify the moved snapshot, got {}",
+            e.msg
         ),
+        Ok(res) => panic!(
+            "stale snapshot must not become reset/success: aborted={}, reason={:?}",
+            res.aborted, res.reset_reason
+        ),
+        Err(e) => panic!("expected InvalidDiff, got {e:?}"),
     }
 
     snapshotter.destroy();
     clean_db(db_path);
 }
 
-/// PART (B): under wal2, the pinned snapshot connection must be READ-WRITE (able
+/// Under wal2, the pinned snapshot connection must be READ-WRITE (able
 /// to register the -shm read-mark). The old code silently fell back to a
 /// read-only connection on rw-open failure, which cannot write -shm — the
 /// checkpointer then recycles frames under the pinned snapshot → torn read → the
@@ -221,9 +183,7 @@ fn snapshot_connection_is_read_write_under_wal2() {
     // pinned snapshot's read view.
     let write_ok = {
         let c = conn.borrow();
-        c.execute_batch(
-            "CREATE TEMP TABLE rw_probe (x INTEGER); INSERT INTO rw_probe VALUES (1);",
-        )
+        c.execute_batch("CREATE TEMP TABLE rw_probe (x INTEGER); INSERT INTO rw_probe VALUES (1);")
     };
     assert!(
         write_ok.is_ok(),

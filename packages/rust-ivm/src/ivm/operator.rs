@@ -49,47 +49,6 @@ pub trait InputBase {
 pub trait Input: InputBase {
     fn set_output(&self, output: OutputHandle);
     fn fetch(&self, req: &FetchRequest) -> NodeStream;
-
-    /// Read-level parallelism (DESIGN-read-parallelism.md §2c): fetch this
-    /// input's rows for each of `constraints` **in parallel** across the
-    /// frame-pinned pool, returning one materialised `Vec<Node>` per constraint
-    /// in input order — byte-identical to calling `fetch(constraint=c)` serially
-    /// for each `c`.
-    ///
-    /// Only a **leaf `TableSource`** can honour this (its read is one SELECT that
-    /// can run on a pooled `Send` connection). Every other operator returns
-    /// `None` → the caller keeps the serial lazy path. `None` is also returned
-    /// when the pool isn't pinned at the read frame (→ serial, never wrong
-    /// frame). Used only on the hydrate path (no in-flight overlay).
-    fn parallel_leaf_fetch(
-        &self,
-        _constraints: &[crate::ivm::constraint::Constraint],
-    ) -> Option<Vec<Vec<crate::ivm::data::Node>>> {
-        None
-    }
-
-    /// EXISTS/child-fetch IN-list batching (prototype, flag-gated by the Join
-    /// caller). Instead of one SELECT per distinct constraint, run a SINGLE
-    /// `... WHERE key IN (?, ?, ...)` over all `constraints` and return every
-    /// matching row FLAT, in the source's ORDER BY. The caller buckets rows back
-    /// per parent (stable extraction preserves per-parent child order, since the
-    /// global order is the child order). Same preconditions as
-    /// `parallel_leaf_fetch` (leaf TableSource, pool pinned, no overlay); `None`
-    /// → caller falls back. Byte-identical result set to the N-SELECT path.
-    fn batched_in_fetch(
-        &self,
-        _constraints: &[crate::ivm::constraint::Constraint],
-    ) -> Option<Vec<crate::ivm::data::Node>> {
-        None
-    }
-
-    /// Cheap pre-check: is this input a leaf source that can serve
-    /// `parallel_leaf_fetch` right now (pool pinned at the read frame, no live
-    /// overlay)? Lets a caller (Join) decide whether to gather constraints for a
-    /// parallel batch before doing the work. Default `false`.
-    fn supports_parallel_leaf(&self) -> bool {
-        false
-    }
 }
 
 pub trait Output {

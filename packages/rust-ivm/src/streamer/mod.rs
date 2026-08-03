@@ -259,7 +259,11 @@ pub(crate) fn get_row_key(cols: &[String], row: &Row) -> Row {
                 "get_row_key: primary-key column {col:?} is {} in the row — a \
                  primary key is never legitimately null/absent (would emit a \
                  null/undefined rowKey and crash the client)",
-                if row.contains_key(col) { "null" } else { "absent" },
+                if row.contains_key(col) {
+                    "null"
+                } else {
+                    "absent"
+                },
             ),
             Some(v) => v.clone(),
         };

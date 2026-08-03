@@ -161,6 +161,92 @@ describe.skipIf(!ADDON_PATH)(
         });
     }
 
+    function changeKeyDelta(
+      rustEvents: StreamTraceEvent[] | undefined,
+      tsEvents: StreamTraceEvent[] | undefined,
+    ): Record<string, number> {
+      const counts = new Map<string, number>();
+      for (const key of changeKeys(rustEvents)) {
+        const encoded = JSON.stringify(key);
+        counts.set(encoded, (counts.get(encoded) ?? 0) + 1);
+      }
+      for (const key of changeKeys(tsEvents)) {
+        const encoded = JSON.stringify(key);
+        counts.set(encoded, (counts.get(encoded) ?? 0) - 1);
+      }
+      return Object.fromEntries([...counts].filter(([, count]) => count !== 0));
+    }
+
+    type MaterializedRow = {
+      count: number;
+      row: CanonicalValue | undefined;
+    };
+    type MaterializedRows = Map<string, MaterializedRow>;
+
+    function canonicalField(
+      value: CanonicalValue,
+      field: string,
+    ): CanonicalValue | undefined {
+      if (value.type !== 'object') {
+        return undefined;
+      }
+      return value.value.find(([key]) => key === field)?.[1];
+    }
+
+    function applyEvents(
+      rows: MaterializedRows,
+      events: StreamTraceEvent[] | undefined,
+    ): void {
+      for (const event of events ?? []) {
+        if (event.kind !== 'change') {
+          continue;
+        }
+        const queryID = canonicalField(event.change, 'queryID');
+        const table = canonicalField(event.change, 'table');
+        const rowKey = canonicalField(event.change, 'rowKey');
+        const type = canonicalField(event.change, 'type');
+        const row = canonicalField(event.change, 'row');
+        if (
+          queryID === undefined ||
+          table === undefined ||
+          rowKey === undefined ||
+          type?.type !== 'number' ||
+          typeof type.value !== 'number'
+        ) {
+          throw new Error('invalid canonical RowChange in parity trace');
+        }
+        const key = JSON.stringify([queryID, table, rowKey]);
+        const current = rows.get(key) ?? {count: 0, row: undefined};
+        switch (type.value) {
+          case 0: // ChangeType.ADD
+            rows.set(key, {count: current.count + 1, row});
+            break;
+          case 1: // ChangeType.REMOVE
+            rows.set(key, {count: current.count - 1, row: current.row});
+            break;
+          case 2: // ChangeType.EDIT
+            rows.set(key, {count: current.count, row});
+            break;
+          default:
+            throw new Error(`unexpected RowChange type ${type.value}`);
+        }
+      }
+    }
+
+    function materialize(events: StreamTraceEvent[] | undefined) {
+      const rows: MaterializedRows = new Map();
+      applyEvents(rows, events);
+      return rows;
+    }
+
+    function materializedTrace(rows: MaterializedRows): string {
+      return JSON.stringify(
+        [...rows]
+          .filter(([, value]) => value.count !== 0)
+          .sort(([a], [b]) => a.localeCompare(b)),
+      );
+    }
+
     test('fuzz corpus parity across the driver path', async () => {
       const findings: string[] = [];
       const skipped: Record<string, number> = {};
@@ -263,7 +349,8 @@ describe.skipIf(!ADDON_PATH)(
           const tsHydrate = tsTrace.events().at(-1);
           if (!sameTrace(rustHydrate, tsHydrate)) {
             findings.push(
-              `seed ${seed} HYDRATE trace mismatch: ${traceDiff(rustHydrate, tsHydrate)}\n  rustKeys=${JSON.stringify(changeKeys(rustHydrateEvents))}\n  tsKeys=${JSON.stringify(changeKeys(tsHydrateEvents))}`,
+              `seed ${seed} HYDRATE trace mismatch: ${traceDiff(rustHydrate, tsHydrate)}` +
+                `\n  keyDelta=${JSON.stringify(changeKeyDelta(rustHydrateEvents, tsHydrateEvents))}`,
             );
           }
           const hydrationSucceeded =
@@ -275,6 +362,12 @@ describe.skipIf(!ADDON_PATH)(
             tested++;
             continue;
           }
+
+          const rustPostAdvanceRows = materialize(rustHydrateEvents);
+          const tsPostAdvanceRows = materialize(tsHydrateEvents);
+          let advanceMismatch: string | undefined;
+          let rustAdvance: unknown;
+          let tsAdvance: unknown;
 
           // --- advance (only if the fixture has pushes) ---
           if (fixture.pushes?.length) {
@@ -289,14 +382,19 @@ describe.skipIf(!ADDON_PATH)(
               tested++;
               continue;
             }
-            await rustTrace.advance(NO_TIMER);
-            await tsTrace.advance(NO_TIMER);
-            const rustAdvance = rustTrace.events().at(-1);
-            const tsAdvance = tsTrace.events().at(-1);
+            const rustAdvanceEvents = await rustTrace.advance(NO_TIMER);
+            const tsAdvanceEvents = await tsTrace.advance(NO_TIMER);
+            rustAdvance = rustTrace.events().at(-1);
+            tsAdvance = tsTrace.events().at(-1);
+            applyEvents(rustPostAdvanceRows, rustAdvanceEvents);
+            applyEvents(tsPostAdvanceRows, tsAdvanceEvents);
             if (!sameTrace(rustAdvance, tsAdvance)) {
-              findings.push(
-                `seed ${seed} ADVANCE trace mismatch: ${traceDiff(rustAdvance, tsAdvance)}\n  rust=${traceSummary(rustAdvance)}\n  ts=${traceSummary(tsAdvance)}`,
-              );
+              advanceMismatch =
+                `seed ${seed} ADVANCE trace mismatch: ${traceDiff(rustAdvance, tsAdvance)}` +
+                `\n  rustKeys=${JSON.stringify(changeKeys(rustAdvanceEvents))}` +
+                `\n  tsKeys=${JSON.stringify(changeKeys(tsAdvanceEvents))}` +
+                `\n  keyDelta=${JSON.stringify(changeKeyDelta(rustAdvanceEvents, tsAdvanceEvents))}` +
+                `\n  rust=${traceSummary(rustAdvance)}\n  ts=${traceSummary(tsAdvance)}`;
             }
           }
           await rustTrace.removeQuery('q');
@@ -306,6 +404,93 @@ describe.skipIf(!ADDON_PATH)(
           if (!sameTrace(rustRemove, tsRemove)) {
             findings.push(
               `seed ${seed} REMOVE trace mismatch: ${traceDiff(rustRemove, tsRemove)}\n  rust=${traceSummary(rustRemove)}\n  ts=${traceSummary(tsRemove)}`,
+            );
+          }
+
+          // --- lifecycle: reset -> rehydrate -> duplicate-ID replacement ---
+          const clientSchema = cs as ReturnType<typeof fixtureClientSchema>;
+          await rustTrace.reset(clientSchema);
+          await tsTrace.reset(clientSchema);
+          const rustReset = rustTrace.events().at(-1);
+          const tsReset = tsTrace.events().at(-1);
+          if (!sameTrace(rustReset, tsReset)) {
+            findings.push(
+              `seed ${seed} RESET trace mismatch: ${traceDiff(rustReset, tsReset)}\n  rust=${traceSummary(rustReset)}\n  ts=${traceSummary(tsReset)}`,
+            );
+          }
+
+          const rustRehydrateEvents = await rustTrace.addQuery(
+            'rehydrate',
+            'q',
+            ast,
+            NO_TIMER,
+            'after-reset',
+          );
+          const tsRehydrateEvents = await tsTrace.addQuery(
+            'rehydrate',
+            'q',
+            ast,
+            NO_TIMER,
+            'after-reset',
+          );
+          const rustRehydrate = rustTrace.events().at(-1);
+          const tsRehydrate = tsTrace.events().at(-1);
+          if (!sameTrace(rustRehydrate, tsRehydrate)) {
+            findings.push(
+              `seed ${seed} REHYDRATE trace mismatch: ${traceDiff(rustRehydrate, tsRehydrate)}`,
+            );
+          }
+
+          if (advanceMismatch !== undefined) {
+            const rustFresh = materializedTrace(
+              materialize(rustRehydrateEvents),
+            );
+            const tsFresh = materializedTrace(materialize(tsRehydrateEvents));
+            const rustMatchesFresh =
+              materializedTrace(rustPostAdvanceRows) === rustFresh;
+            const tsMatchesFresh =
+              materializedTrace(tsPostAdvanceRows) === tsFresh;
+            const freshDriversMatch = rustFresh === tsFresh;
+            findings.push(
+              advanceMismatch +
+                `\n  freshOracle=${JSON.stringify({rustMatchesFresh, tsMatchesFresh, freshDriversMatch})}`,
+            );
+          }
+
+          if (
+            rustRehydrate?.outcome.status === 'ok' &&
+            tsRehydrate?.outcome.status === 'ok'
+          ) {
+            await rustTrace.addQuery(
+              'replacement',
+              'q',
+              ast,
+              NO_TIMER,
+              'replacement',
+            );
+            await tsTrace.addQuery(
+              'replacement',
+              'q',
+              ast,
+              NO_TIMER,
+              'replacement',
+            );
+            const rustReplacement = rustTrace.events().at(-1);
+            const tsReplacement = tsTrace.events().at(-1);
+            if (!sameTrace(rustReplacement, tsReplacement)) {
+              findings.push(
+                `seed ${seed} REPLACE trace mismatch: ${traceDiff(rustReplacement, tsReplacement)}`,
+              );
+            }
+          }
+
+          await rustTrace.removeQuery('q');
+          await tsTrace.removeQuery('q');
+          const rustFinalRemove = rustTrace.events().at(-1);
+          const tsFinalRemove = tsTrace.events().at(-1);
+          if (!sameTrace(rustFinalRemove, tsFinalRemove)) {
+            findings.push(
+              `seed ${seed} FINAL REMOVE trace mismatch: ${traceDiff(rustFinalRemove, tsFinalRemove)}`,
             );
           }
           tested++;

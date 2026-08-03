@@ -276,12 +276,7 @@ fn gather_start_constraints(
         for (field, _) in order {
             let val = from.get(field).cloned().unwrap_or(Value::Null);
             let optional = column_is_optional(column_types, field);
-            group.push(nullable_aware_equality(
-                field,
-                &val,
-                optional,
-                &mut params,
-            ));
+            group.push(nullable_aware_equality(field, &val, optional, &mut params));
         }
         constraints.push(format!("({})", group.join(" AND ")));
     }
@@ -331,7 +326,11 @@ fn nullable_aware_range_comparison(
         format!("(? IS NULL OR {} > ?)", quote_ident(field))
     } else {
         params.push(SqlParam::from(value));
-        format!("({} IS NULL OR {} < ?)", quote_ident(field), quote_ident(field))
+        format!(
+            "({} IS NULL OR {} < ?)",
+            quote_ident(field),
+            quote_ident(field)
+        )
     }
 }
 
@@ -609,7 +608,10 @@ mod literal_left_tests {
             &[("optional".to_string(), "desc".to_string())],
             &columns,
         );
-        assert_eq!(optional_sql, "(((\"optional\" IS NULL OR \"optional\" < ?)))");
+        assert_eq!(
+            optional_sql,
+            "(((\"optional\" IS NULL OR \"optional\" < ?)))"
+        );
         assert_eq!(optional_params.len(), 1);
 
         let (required_sql, required_params) = gather_start_constraints(

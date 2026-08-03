@@ -73,10 +73,8 @@ export declare class RustIvmEngine {
    */
   init(tables: Array<NapiTableSpec>, dbPath: string | undefined | null, appId: string): void
   /**
-   * Add queries and hydrate them. **Async**: the hydration runs on this
-   * engine's actor thread (off the JS event loop), so hydrations for
-   * different client groups execute in parallel. Resolves to the full row
-   * list (the previous pull-iterator walked an eagerly-built Vec anyway).
+   * Add queries and hydrate them on the engine actor, off the JS event loop.
+   * Resolves to the full row list.
    */
   addQueriesStreaming(queries: Array<NapiQuerySpec>): Promise<NapiRowChange[]>
   /**
@@ -84,26 +82,16 @@ export declare class RustIvmEngine {
    * pushes through pipelines, streams RowChanges.
    * The first row from the iterator is a header (changeType=-1) with
    * version, numChanges, aborted in the row_key field.
-   * Advance to head. **Async**: runs on this engine's actor thread (off the
-   * JS event loop) so advances for different client groups run in parallel.
+   * Advance to head on the engine actor, off the JS event loop.
    * Resolves to `[header, ...rows]` (header changeType=-1; -2 = reset row).
    */
   advanceToHeadStreaming(): Promise<NapiRowChange[]>
   /**
    * Add queries and hydrate them, streaming rows one at a time via `on_row`.
-   * Each RowChange is handed to JS the instant it is produced, with
-   * backpressure via a bounded TSFN (max_queue_size=1, Blocking mode).
-   * The actor thread parks when the queue is full, so at most 1 row is
-   * in flight at any time — O(1) JS objects vs O(result) for the eager path.
+   * Each RowChange is handed to JS as it is produced. A row-credit gate and
+   * bounded TSFN queue cap in-flight rows independently of result size.
    */
   addQueriesStreamingRows(queries: Array<NapiQuerySpec>, onRow: (err: Error | null, row: NapiRowChange) => void, streamId: number): Promise<void>
-  /**
-   * Add queries and hydrate, streaming rows in BATCHES of `RUST_IVM_TSFN_BATCH`
-   * via `on_rows(rows: NapiRowChange[])`. One TSFN call (one event-loop turn)
-   * per K rows instead of per row — targets the measured 1-worker event-loop
-   * saturation. Same per-row payload; only the crossing granularity changes.
-   */
-  addQueriesStreamingRowsBatched(queries: Array<NapiQuerySpec>, onRows: (err: Error | null, rows: NapiRowChange[]) => void, streamId: number): Promise<void>
   /**
    * Advance to head, streaming rows one at a time via `on_row`.
    * Header (changeType=-1) is emitted first, change rows in the middle,
@@ -154,9 +142,9 @@ export declare class RustIvmEngine {
    * model backed by the pinned snapshot connection, and return the ordered
    * `flip` decisions as a JSON array (`true`/`false`/`null`). The TS driver
    * walks its own AST in the same order (WHERE pre-order then `related`) and
-   * sets `flip` per position. Reaching parity with zero 1.7's default-on
-   * planner (which is disabled on the Rust single-owner path); ships behind
-   * the driver's `enablePlanner` flag. Returns `[]` if no snapshot yet.
+   * sets `flip` per position. The driver invokes this when the same
+   * `enablePlanner` flag used by PipelineDriver is enabled. Returns `[]` if no
+   * snapshot exists yet.
    */
   planAst(astJson: string): string
   /**

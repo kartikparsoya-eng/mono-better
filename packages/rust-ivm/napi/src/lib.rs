@@ -18,21 +18,21 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{bindgen_prelude::*, Env, Error as NapiError, Status, Task, JsFunction};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Env, Error as NapiError, JsFunction, Status, Task, bindgen_prelude::*};
 use napi_derive::napi;
 use rust_ivm::credit::{StreamCreditGate, StreamCreditGuard};
 use rust_ivm::engine::{CancellationToken, Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::source::{MemorySource, Source};
-use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::snapshotter::Snapshotter;
+use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
+use rust_ivm::sqlite::JobWatchdog;
 use rust_ivm::sqlite::table_source::TableSource;
-use rust_ivm::sqlite::{JobWatchdog, install_interrupt};
 
 /// Watchdog warn/abort bounds for a single `EngineHandle::call`. The warn
 /// bound logs a slow-job signal (NON-aborting — a legit cold hydrate under load
@@ -47,17 +47,6 @@ use rust_ivm::sqlite::{JobWatchdog, install_interrupt};
 /// query. Override via env for soak/stress tuning:
 ///   RUST_IVM_WATCHDOG_WARN_MS   (default 120000)
 ///   RUST_IVM_WATCHDOG_ABORT_MS  (default 600000)
-/// Number of connections the frame-pinned read pool co-pins for parallel cold
-/// hydrate (read-level parallelism). `0` disables it (serial hydrate). Env
-/// `RUST_IVM_READ_LANES` (default 0 — ships dark until the fuzzer + microbench
-/// gate in DESIGN-read-parallelism.md is cleared).
-fn read_pool_lanes() -> usize {
-    std::env::var("RUST_IVM_READ_LANES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-}
-
 /// Bounded TSFN queue depth for the per-row streaming callbacks. `1` (default)
 /// = the actor parks after every row until JS drains it — O(1) rows in flight,
 /// but each row's delivery waits on a full event-loop turn, so a busy main
@@ -75,32 +64,17 @@ fn tsfn_queue_depth() -> usize {
         .unwrap_or(1)
 }
 
-/// Rows per TSFN callback for the batched hydrate path (`RUST_IVM_TSFN_BATCH`).
-/// Each callback crosses the JS boundary once and runs ONE libuv/V8 turn on the
-/// event-loop thread, so batching K rows cuts event-loop turns per hydrate by K×
-/// (the measured 1-worker knee bottleneck). Default 1 = per-row (dark).
-fn tsfn_batch_size() -> usize {
-    std::env::var("RUST_IVM_TSFN_BATCH")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(1)
-}
-
 /// Streaming-backpressure credit window (#3): the max rows the producer may run
 /// ahead of the JS consumer's AsyncQueue drain. Matches the driver's AsyncQueue
 /// `#maxBuffer` (256) so the credit gate throttles at the same depth the JS
 /// buffer would, bounding in-flight rows to ~capacity regardless of TSFN queue
-/// depth or batch size. Configurable via `RUST_IVM_STREAM_CREDIT`. The floor is
-/// raised to `at_least` so a batched call whose batch exceeds the window still
-/// has a full window to acquire against (no deadlock, exact per-row accounting).
-fn stream_credit_capacity(at_least: usize) -> i64 {
-    let base = std::env::var("RUST_IVM_STREAM_CREDIT")
+/// depth. Configurable via `RUST_IVM_STREAM_CREDIT`.
+fn stream_credit_capacity() -> i64 {
+    std::env::var("RUST_IVM_STREAM_CREDIT")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(256);
-    base.max(at_least).max(1) as i64
+        .unwrap_or(256) as i64
 }
 
 /// Return freed heap memory to the OS after a CG teardown. glibc retains freed
@@ -141,7 +115,10 @@ fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
     }
     let warn = env_ms("RUST_IVM_WATCHDOG_WARN_MS", 120_000);
     let abort = env_ms("RUST_IVM_WATCHDOG_ABORT_MS", 600_000).max(warn);
-    (std::time::Duration::from_millis(warn), std::time::Duration::from_millis(abort))
+    (
+        std::time::Duration::from_millis(warn),
+        std::time::Duration::from_millis(abort),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -159,17 +136,11 @@ struct EngineHandle {
     tx: Sender<Job>,
     /// Populated by `init` once the engine exists; read by out-of-band `cancel`.
     cancel_slot: Arc<Mutex<Option<CancellationToken>>>,
-    /// Interrupt handles for frame-pinned read-pool connections. The pool owns
-    /// indexed ranges in this bag and drains them on unpin, so snapshot handles
-    /// must remain in the separate registry below.
-    interrupt_handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
     /// Interrupt handles for Snapshotter's live `prev` and `curr` connections.
-    /// Separate from `interrupt_handles`, whose indexed ranges are owned by the
-    /// frame-pinned read pool.
     snapshot_interrupt_handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
     /// Single monitor thread + deadline registry (N2). One per actor; the same
-    /// monitor supervises serial jobs (one handle) today and parallel jobs
-    /// (N handles) in Phase 1+. `call` registers each job with a deadline.
+    /// monitor supervises each serial engine job. `call` registers each job with
+    /// a deadline.
     watchdog: Arc<JobWatchdog>,
     /// Streaming backpressure gate (#3). The streaming producer on the actor
     /// thread `acquire`s credit before crossing the TSFN boundary; the JS
@@ -205,7 +176,6 @@ impl EngineHandle {
         EngineHandle {
             tx,
             cancel_slot: Arc::new(Mutex::new(None)),
-            interrupt_handles: Arc::new(Mutex::new(Vec::new())),
             snapshot_interrupt_handles: Arc::new(Mutex::new(Vec::new())),
             watchdog: Arc::new(JobWatchdog::new()),
             credit: Arc::new(StreamCreditGate::new()),
@@ -227,25 +197,15 @@ impl EngineHandle {
         F: FnOnce(&mut EngineState) -> T + Send + 'static,
     {
         let (rtx, rrx) = channel::<std::thread::Result<T>>();
-        // Arm the watchdog for this job with both the read-pool and snapshot
-        // registries. A job with no live connection yet (e.g. init) still
-        // benefits from the cancel-token flip at the hard deadline.
-        let cancel = self
-            .cancel_slot
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or_else(CancellationToken::new);
-        let handles = self.interrupt_handles.clone();
+        // A job with no live connection yet (e.g. init) still benefits from the
+        // cancel-token flip at the hard deadline.
+        let cancel = self.cancel_slot.lock().unwrap().clone().unwrap_or_default();
+        let handles = self.snapshot_interrupt_handles.clone();
         let (warn, abort) = watchdog_bounds();
         let now = std::time::Instant::now();
-        let _guard = self.watchdog.register_with_additional_handles(
-            now + warn,
-            now + abort,
-            cancel.clone(),
-            handles,
-            Some(self.snapshot_interrupt_handles.clone()),
-        );
+        let _guard = self
+            .watchdog
+            .register(now + warn, now + abort, cancel.clone(), handles);
         self.tx
             .send(Job(Box::new(move |s| {
                 // Contain any panic so it (a) does NOT unwind out of and kill the
@@ -296,7 +256,8 @@ fn make_reset_row(reason: &str, msg: &str) -> NapiRowChange {
     let row_key = serde_json::json!({
         "reason": reason,
         "msg": msg,
-    }).to_string();
+    })
+    .to_string();
     NapiRowChange {
         change_type: -2,
         query_id: String::new(),
@@ -324,8 +285,8 @@ fn end_sentinel() -> NapiRowChange {
 /// Block the actor thread until JS has actually *executed* the callback for a
 /// terminal END sentinel — a true drain barrier.
 ///
-/// WHY: the streaming tasks fire rows via `tsfn.call(.., Blocking)` (queue depth
-/// 1) and then return from `compute()`, which resolves the async-task promise.
+/// WHY: the streaming tasks fire rows via `tsfn.call(.., Blocking)` with a queue
+/// depth of one and then return from `compute()`, resolving the async-task promise.
 /// The driver closes its row queue on that promise (`hydrated.then(deferClose)`).
 /// But `call(Blocking)` only blocks until the queue has *space* (the prior item
 /// was popped), NOT until its JS callback finished running. So the final row's
@@ -345,22 +306,6 @@ fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) {
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
     let status = tsfn.call_with_return_value(
         Ok(end_sentinel()),
-        ThreadsafeFunctionCallMode::Blocking,
-        move |_ret: napi::JsUnknown| {
-            let _ = tx.send(());
-            Ok(())
-        },
-    );
-    if status == Status::Ok {
-        let _ = rx.recv_timeout(std::time::Duration::from_secs(30));
-    }
-}
-
-/// Batched variant: same barrier semantics for a `Vec<NapiRowChange>` TSFN.
-fn drain_barrier_batched(tsfn: &ThreadsafeFunction<Vec<NapiRowChange>>) {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let status = tsfn.call_with_return_value(
-        Ok(vec![end_sentinel()]),
         ThreadsafeFunctionCallMode::Blocking,
         move |_ret: napi::JsUnknown| {
             let _ = tx.send(());
@@ -448,7 +393,8 @@ impl NapiStreamIterator {
     /// Cancel the iterator — subsequent next() calls return None.
     #[napi]
     pub fn cancel(&self) {
-        self.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -491,8 +437,12 @@ enum TsCondition {
 #[derive(serde::Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum TsValuePosition {
-    Column { name: String },
-    Literal { value: serde_json::Value },
+    Column {
+        name: String,
+    },
+    Literal {
+        value: serde_json::Value,
+    },
     Static {
         anchor: String,
         field: serde_json::Value,
@@ -552,9 +502,13 @@ fn convert_ast(ts: TsAst) -> rust_ivm::builder::ast::Ast {
         related: ts.related.iter().map(convert_csq).collect(),
         limit: ts.limit,
         order_by: ts.order_by.map(|parts| {
-            parts.into_iter().map(|(col, dir)| {
-                rust_ivm::builder::ast::OrderPart { column: col, direction: dir }
-            }).collect()
+            parts
+                .into_iter()
+                .map(|(col, dir)| rust_ivm::builder::ast::OrderPart {
+                    column: col,
+                    direction: dir,
+                })
+                .collect()
         }),
         start: ts.start.map(|b| rust_ivm::builder::ast::Bound {
             row: b.row,
@@ -566,28 +520,29 @@ fn convert_ast(ts: TsAst) -> rust_ivm::builder::ast::Ast {
 fn convert_condition(c: TsCondition) -> rust_ivm::builder::ast::Condition {
     use rust_ivm::builder::ast::*;
     match c {
-        TsCondition::Simple { op, left, right } => {
-            Condition::Simple(SimpleCondition {
-                op,
-                left: convert_value_position(left),
-                right: convert_value_position(right),
-            })
-        }
+        TsCondition::Simple { op, left, right } => Condition::Simple(SimpleCondition {
+            op,
+            left: convert_value_position(left),
+            right: convert_value_position(right),
+        }),
         TsCondition::And { conditions } => {
             Condition::And(conditions.into_iter().map(convert_condition).collect())
         }
         TsCondition::Or { conditions } => {
             Condition::Or(conditions.into_iter().map(convert_condition).collect())
         }
-        TsCondition::CorrelatedSubquery { related, op, flip, scalar } => {
-            Condition::CorrelatedSubquery(CorrelatedSubqueryCondition {
-                related: convert_csq(&related),
-                op,
-                flip,
-                scalar,
-                plan_id: None,
-            })
-        }
+        TsCondition::CorrelatedSubquery {
+            related,
+            op,
+            flip,
+            scalar,
+        } => Condition::CorrelatedSubquery(CorrelatedSubqueryCondition {
+            related: convert_csq(&related),
+            op,
+            flip,
+            scalar,
+            plan_id: None,
+        }),
     }
 }
 
@@ -595,12 +550,14 @@ fn convert_value_position(vp: TsValuePosition) -> rust_ivm::builder::ast::ValueP
     use rust_ivm::builder::ast::ValuePosition;
     match vp {
         TsValuePosition::Column { name } => ValuePosition::Column { name },
-        TsValuePosition::Literal { value } => {
-            ValuePosition::Literal { value: json_to_value(value) }
-        }
+        TsValuePosition::Literal { value } => ValuePosition::Literal {
+            value: json_to_value(value),
+        },
         TsValuePosition::Static { anchor, field } => {
             let _ = (anchor, field);
-            ValuePosition::Literal { value: rust_ivm::ivm::data::Value::Null }
+            ValuePosition::Literal {
+                value: rust_ivm::ivm::data::Value::Null,
+            }
         }
     }
 }
@@ -629,7 +586,7 @@ fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value {
             if let Some(i) = n.as_i64() {
                 // Match TS: integers beyond ±(2^53-1) are unsupported (would
                 // silently lose precision as f64).
-                if i > 9_007_199_254_740_991 || i < -9_007_199_254_740_991 {
+                if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&i) {
                     panic!("integer {i} is outside of supported bounds");
                 }
                 rust_ivm::ivm::data::Value::F64(i as f64)
@@ -691,9 +648,13 @@ fn row_to_json(row: &rusqlite::Row, i: usize) -> std::result::Result<serde_json:
                 serde_json::Value::Number(i.into())
             }
         }
-        rusqlite::types::Value::Real(f) => serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or_else(|| 0.into())),
+        rusqlite::types::Value::Real(f) => {
+            serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap_or_else(|| 0.into()))
+        }
         rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
-        rusqlite::types::Value::Blob(b) => serde_json::Value::String(String::from_utf8_lossy(&b).into_owned()),
+        rusqlite::types::Value::Blob(b) => {
+            serde_json::Value::String(String::from_utf8_lossy(&b).into_owned())
+        }
     })
 }
 
@@ -865,24 +826,25 @@ impl RustIvmEngine {
     /// Call this FIRST, then `computeZqlSpecs` via `read_query`, then `init`.
     /// `init` will skip snapshotter creation if this already did it.
     #[napi]
-    pub fn init_snapshotter(
-        &self,
-        db_path: String,
-        app_id: String,
-    ) -> Result<()> {
-        let reg = self.handle.interrupt_handles.clone();
+    pub fn init_snapshotter(&self, db_path: String, app_id: String) -> Result<()> {
         let snapshot_reg = self.handle.snapshot_interrupt_handles.clone();
-        self.handle.call(move |state| -> std::result::Result<(), String> {
-            if state.snapshotter.is_some() {
-                return Ok(()); // already initialized
-            }
-            let mut snap = Snapshotter::with_read_pool(&db_path, &app_id, None, read_pool_lanes(), Some(reg));
-            snap.set_snapshot_interrupt_registry(snapshot_reg);
-            snap.init().map_err(|e| format!("snapshotter init: {}", e))?;
-            eprintln!("[rust-ivm] snapshotter pre-initialized at version {}", snap.current_version().unwrap_or("?"));
-            state.snapshotter = Some(snap);
-            Ok(())
-        })?.map_err(NapiError::from_reason)
+        self.handle
+            .call(move |state| -> std::result::Result<(), String> {
+                if state.snapshotter.is_some() {
+                    return Ok(()); // already initialized
+                }
+                let mut snap = Snapshotter::new(&db_path, &app_id, None);
+                snap.set_snapshot_interrupt_registry(snapshot_reg);
+                snap.init()
+                    .map_err(|e| format!("snapshotter init: {}", e))?;
+                eprintln!(
+                    "[rust-ivm] snapshotter pre-initialized at version {}",
+                    snap.current_version().unwrap_or("?")
+                );
+                state.snapshotter = Some(snap);
+                Ok(())
+            })?
+            .map_err(NapiError::from_reason)
     }
 
     /// Initialize the engine with table schemas and optional SQLite db_path.
@@ -898,184 +860,192 @@ impl RustIvmEngine {
         app_id: String,
     ) -> Result<()> {
         let cancel_slot = self.handle.cancel_slot.clone();
-        let interrupt_handles = self.handle.interrupt_handles.clone();
         let snapshot_interrupt_handles = self.handle.snapshot_interrupt_handles.clone();
-        self.handle.call(move |state| -> std::result::Result<(), String> {
-        // Clear any previous state.
-        if let Some(ref mut eng) = state.engine {
-            eng.destroy();
-        }
-        // Preserve the snapshotter if init_snapshotter was called first.
-        let preserved_snap = state.snapshotter.take();
-        *state = EngineState::default();
-        state.snapshotter = preserved_snap;
-        let mut primary_keys = HashMap::new();
-        let mut fallback_source_interrupt_handles = Vec::new();
+        self.handle
+            .call(move |state| -> std::result::Result<(), String> {
+                // Clear any previous state.
+                if let Some(ref mut eng) = state.engine {
+                    eng.destroy();
+                }
+                // Preserve the snapshotter if init_snapshotter was called first.
+                let preserved_snap = state.snapshotter.take();
+                *state = EngineState::default();
+                state.snapshotter = preserved_snap;
 
-        for spec in &tables {
-            let mut columns = HashMap::new();
-            for (col, schema) in &spec.columns {
-                let col_type = match schema.r#type.as_str() {
-                    "boolean" => rust_ivm::ivm::schema::ColumnType::Boolean { optional: schema.optional },
-                    "number" => rust_ivm::ivm::schema::ColumnType::Number { optional: schema.optional },
-                    "json" => rust_ivm::ivm::schema::ColumnType::Json { optional: schema.optional },
-                    _ => rust_ivm::ivm::schema::ColumnType::String { optional: schema.optional },
-                };
-                columns.insert(col.clone(), col_type);
-            }
-
-            let rc_source: std::rc::Rc<RefCell<dyn Source>> = if db_path.is_some() {
-                let path = db_path.as_ref().unwrap();
-                let conn = rusqlite::Connection::open_with_flags(
-                    path,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-                        | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-                ).map_err(|e| format!("Failed to open SQLite for {}: {}", spec.table, e))?;
-                let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
-                let _ = conn.execute_batch("PRAGMA case_sensitive_like = ON; PRAGMA query_only = ON;");
-                fallback_source_interrupt_handles.push(install_interrupt(&conn));
-                let table_source = TableSource::new(
-                    std::rc::Rc::new(RefCell::new(conn)),
-                    &spec.table,
-                    columns,
-                    spec.primary_key.clone(),
-                );
-                std::rc::Rc::new(RefCell::new(table_source))
-            } else {
-                let source = MemorySource::new(&spec.table, columns, spec.primary_key.clone());
-                std::rc::Rc::new(RefCell::new(source))
-            };
-            state.sources.insert(spec.table.clone(), rc_source);
-            primary_keys.insert(spec.table.clone(), spec.primary_key.clone());
-
-            // Build syncable table spec for snapshotter diff.
-            let table_spec = TableSpec {
-                name: spec.table.clone(),
-                columns: spec.columns.iter().map(|(k, v)| {
-                    (k.clone(), ColumnSchema {
-                        r#type: v.r#type.clone(),
-                        optional: v.optional,
-                    })
-                }).collect(),
-                unique_keys: spec.unique_keys.clone().unwrap_or_else(|| vec![spec.primary_key.clone()]),
-                min_row_version: spec.min_row_version.clone(),
-            };
-            let zql_spec: HashMap<String, ColumnSchema> = spec.columns.iter().map(|(k, v)| {
-                (k.clone(), ColumnSchema {
-                    r#type: v.r#type.clone(),
-                    optional: v.optional,
-                })
-            }).collect();
-            state.syncable_tables.insert(spec.table.clone(), LiteAndZqlSpec { table_spec, zql_spec });
-            state.all_table_names.insert(spec.table.clone());
-        }
-
-        let mut eng = Engine::new(primary_keys.clone());
-        for (_, source) in &state.sources {
-            eng.register_source(source.clone());
-        }
-        for spec in &tables {
-            if let Some(ref mrv) = spec.min_row_version {
-                eng.set_table_spec(&spec.table, Some(mrv.clone()));
-            }
-            // Unique keys (PK plus any unique indexes) drive scalar-subquery
-            // resolution. Default to the primary key when none are provided.
-            let unique_keys = spec
-                .unique_keys
-                .clone()
-                .unwrap_or_else(|| vec![spec.primary_key.clone()]);
-            eng.set_unique_keys(&spec.table, unique_keys);
-        }
-        // Publish the cancellation token so the JS thread's out-of-band
-        // `cancel()` can interrupt an advance running on this actor thread.
-        *cancel_slot.lock().unwrap() = Some(eng.cancellation_token());
-        state.engine = Some(eng);
-        state.primary_keys = primary_keys;
-
-        if let Some(ref path) = db_path {
-            let mut using_snapshot_connections = false;
-            if state.snapshotter.is_none() {
-                let mut snap = Snapshotter::with_read_pool(path, &app_id, None, read_pool_lanes(), Some(interrupt_handles.clone()));
-                snap.set_snapshot_interrupt_registry(snapshot_interrupt_handles.clone());
-                match snap.init() {
-                    Ok(()) => {
-                        eprintln!("[rust-ivm] snapshotter initialized at version {}", snap.current_version().unwrap_or("?"));
+                // TS Snapshotter initialization is mandatory. A per-table connection
+                // fallback would serve rows outside the pinned snapshot and can mix
+                // database versions within one hydrate, so propagate every failure.
+                let snapshot_conn = if let Some(ref path) = db_path {
+                    if state.snapshotter.is_none() {
+                        let mut snap = Snapshotter::new(path, &app_id, None);
+                        snap.set_snapshot_interrupt_registry(snapshot_interrupt_handles.clone());
+                        snap.init()
+                            .map_err(|e| format!("snapshotter init: {}", e))?;
+                        eprintln!(
+                            "[rust-ivm] snapshotter initialized at version {}",
+                            snap.current_version().unwrap_or("?")
+                        );
                         state.snapshotter = Some(snap);
                     }
-                    Err(e) => {
-                        eprintln!("[rust-ivm] snapshotter init failed (non-fatal): {}", e);
-                    }
-                }
-            }
-            // Point every TableSource at the snapshotter's CURR (pinned
-            // at head) connection, so all reads share the snapshot the
-            // engine advances over.
-            if let Some(ref snap) = state.snapshotter {
-                if let Ok(curr) = snap.current_conn() {
-                    let pool = snap.read_pool();
-                    for source in state.sources.values() {
-                        let mut src = source.borrow_mut();
-                        src.set_snapshot_db(curr.clone());
-                        // Read-level parallelism: the source fans its leaf child
-                        // reads out across this frame-pinned pool during cold
-                        // hydrate (co-pinned at curr's frame). Serial fallback
-                        // whenever the pool isn't pinned at the read frame.
-                        src.set_read_pool(pool.clone());
-                    }
-                    using_snapshot_connections = true;
-                }
-                // Snapshotter republishes handles for the live prev/curr pair on
-                // every swap. TableSource now points at curr, so cancel/watchdog
-                // always reaches the same connection used by hydration reads.
-            }
-            if !using_snapshot_connections {
-                // Snapshot initialization is intentionally non-fatal. In that
-                // fallback mode TableSource retains its per-table connection,
-                // so publish those handles instead of leaving cancel powerless.
-                *snapshot_interrupt_handles.lock().unwrap() =
-                    fallback_source_interrupt_handles;
-            }
-            eprintln!("[rust-ivm] sources initialized (db_path={})", path);
-        }
+                    Some(
+                        state
+                            .snapshotter
+                            .as_ref()
+                            .unwrap()
+                            .current_conn()
+                            .map_err(|e| format!("snapshotter current connection: {}", e))?,
+                    )
+                } else {
+                    None
+                };
 
-        Ok(())
-        })?.map_err(NapiError::from_reason)
+                let mut primary_keys = HashMap::new();
+
+                for spec in &tables {
+                    let mut columns = HashMap::new();
+                    for (col, schema) in &spec.columns {
+                        let col_type = match schema.r#type.as_str() {
+                            "boolean" => rust_ivm::ivm::schema::ColumnType::Boolean {
+                                optional: schema.optional,
+                            },
+                            "number" => rust_ivm::ivm::schema::ColumnType::Number {
+                                optional: schema.optional,
+                            },
+                            "json" => rust_ivm::ivm::schema::ColumnType::Json {
+                                optional: schema.optional,
+                            },
+                            _ => rust_ivm::ivm::schema::ColumnType::String {
+                                optional: schema.optional,
+                            },
+                        };
+                        columns.insert(col.clone(), col_type);
+                    }
+
+                    let rc_source: std::rc::Rc<RefCell<dyn Source>> =
+                        if let Some(conn) = &snapshot_conn {
+                            let table_source = TableSource::new(
+                                conn.clone(),
+                                &spec.table,
+                                columns,
+                                spec.primary_key.clone(),
+                            );
+                            std::rc::Rc::new(RefCell::new(table_source))
+                        } else {
+                            let source =
+                                MemorySource::new(&spec.table, columns, spec.primary_key.clone());
+                            std::rc::Rc::new(RefCell::new(source))
+                        };
+                    state.sources.insert(spec.table.clone(), rc_source);
+                    primary_keys.insert(spec.table.clone(), spec.primary_key.clone());
+
+                    // Build syncable table spec for snapshotter diff.
+                    let table_spec = TableSpec {
+                        name: spec.table.clone(),
+                        columns: spec
+                            .columns
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    ColumnSchema {
+                                        r#type: v.r#type.clone(),
+                                        optional: v.optional,
+                                    },
+                                )
+                            })
+                            .collect(),
+                        unique_keys: spec
+                            .unique_keys
+                            .clone()
+                            .unwrap_or_else(|| vec![spec.primary_key.clone()]),
+                        min_row_version: spec.min_row_version.clone(),
+                    };
+                    let zql_spec: HashMap<String, ColumnSchema> = spec
+                        .columns
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                ColumnSchema {
+                                    r#type: v.r#type.clone(),
+                                    optional: v.optional,
+                                },
+                            )
+                        })
+                        .collect();
+                    state.syncable_tables.insert(
+                        spec.table.clone(),
+                        LiteAndZqlSpec {
+                            table_spec,
+                            zql_spec,
+                        },
+                    );
+                    state.all_table_names.insert(spec.table.clone());
+                }
+
+                let mut eng = Engine::new(primary_keys.clone());
+                for source in state.sources.values() {
+                    eng.register_source(source.clone());
+                }
+                for spec in &tables {
+                    if let Some(ref mrv) = spec.min_row_version {
+                        eng.set_table_spec(&spec.table, Some(mrv.clone()));
+                    }
+                    // Unique keys (PK plus any unique indexes) drive scalar-subquery
+                    // resolution. Default to the primary key when none are provided.
+                    let unique_keys = spec
+                        .unique_keys
+                        .clone()
+                        .unwrap_or_else(|| vec![spec.primary_key.clone()]);
+                    eng.set_unique_keys(&spec.table, unique_keys);
+                }
+                // Publish the cancellation token so the JS thread's out-of-band
+                // `cancel()` can interrupt an advance running on this actor thread.
+                *cancel_slot.lock().unwrap() = Some(eng.cancellation_token());
+                state.engine = Some(eng);
+                state.primary_keys = primary_keys;
+
+                if let Some(ref path) = db_path {
+                    eprintln!("[rust-ivm] sources initialized (db_path={})", path);
+                }
+
+                Ok(())
+            })?
+            .map_err(NapiError::from_reason)
     }
 
-    /// Add queries and hydrate them. **Async**: the hydration runs on this
-    /// engine's actor thread (off the JS event loop), so hydrations for
-    /// different client groups execute in parallel. Resolves to the full row
-    /// list (the previous pull-iterator walked an eagerly-built Vec anyway).
+    /// Add queries and hydrate them on the engine actor, off the JS event loop.
+    /// Resolves to the full row list.
     #[napi(ts_return_type = "Promise<NapiRowChange[]>")]
     pub fn add_queries_streaming(&self, queries: Vec<NapiQuerySpec>) -> AsyncTask<HydrateTask> {
-        AsyncTask::new(HydrateTask { handle: self.handle.clone(), queries })
+        AsyncTask::new(HydrateTask {
+            handle: self.handle.clone(),
+            queries,
+        })
     }
 
     /// Advance to head: Rust derives its own diff from the snapshotter,
     /// pushes through pipelines, streams RowChanges.
     /// The first row from the iterator is a header (changeType=-1) with
     /// version, numChanges, aborted in the row_key field.
-    /// Advance to head. **Async**: runs on this engine's actor thread (off the
-    /// JS event loop) so advances for different client groups run in parallel.
+    /// Advance to head on the engine actor, off the JS event loop.
     /// Resolves to `[header, ...rows]` (header changeType=-1; -2 = reset row).
     #[napi(ts_return_type = "Promise<NapiRowChange[]>")]
     pub fn advance_to_head_streaming(&self) -> AsyncTask<AdvanceTask> {
-        AsyncTask::new(AdvanceTask { handle: self.handle.clone() })
+        AsyncTask::new(AdvanceTask {
+            handle: self.handle.clone(),
+        })
     }
 
     /// Add queries and hydrate them, streaming rows one at a time via `on_row`.
-    /// Each RowChange is handed to JS the instant it is produced, with
-    /// backpressure via a bounded TSFN (max_queue_size=1, Blocking mode).
-    /// The actor thread parks when the queue is full, so at most 1 row is
-    /// in flight at any time — O(1) JS objects vs O(result) for the eager path.
+    /// Each RowChange is handed to JS as it is produced. A row-credit gate and
+    /// bounded TSFN queue cap in-flight rows independently of result size.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn add_queries_streaming_rows(
         &self,
         env: Env,
         queries: Vec<NapiQuerySpec>,
-        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")]
-        on_row: JsFunction,
+        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")] on_row: JsFunction,
         // Caller-minted monotonic stream id (#3): the driver passes the same id
         // to `grant_stream_credit`/`cancel_stream` so grants are tagged to this
         // exact stream. See StreamCreditGate.
@@ -1094,33 +1064,6 @@ impl RustIvmEngine {
         }))
     }
 
-    /// Add queries and hydrate, streaming rows in BATCHES of `RUST_IVM_TSFN_BATCH`
-    /// via `on_rows(rows: NapiRowChange[])`. One TSFN call (one event-loop turn)
-    /// per K rows instead of per row — targets the measured 1-worker event-loop
-    /// saturation. Same per-row payload; only the crossing granularity changes.
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn add_queries_streaming_rows_batched(
-        &self,
-        env: Env,
-        queries: Vec<NapiQuerySpec>,
-        #[napi(ts_arg_type = "(err: Error | null, rows: NapiRowChange[]) => void")]
-        on_rows: JsFunction,
-        stream_id: f64,
-    ) -> Result<AsyncTask<HydrateStreamingBatchedTask>> {
-        let tsfn = env.create_threadsafe_function(
-            &on_rows,
-            tsfn_queue_depth(),
-            |ctx| Ok(vec![ctx.value]),
-        )?;
-        Ok(AsyncTask::new(HydrateStreamingBatchedTask {
-            handle: self.handle.clone(),
-            queries,
-            tsfn,
-            batch_size: tsfn_batch_size(),
-            stream_id: stream_id as u64,
-        }))
-    }
-
     /// Advance to head, streaming rows one at a time via `on_row`.
     /// Header (changeType=-1) is emitted first, change rows in the middle,
     /// reset row (changeType=-2) last if the engine reported a reset_reason.
@@ -1129,8 +1072,7 @@ impl RustIvmEngine {
     pub fn advance_to_head_streaming_rows(
         &self,
         env: Env,
-        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")]
-        on_row: JsFunction,
+        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")] on_row: JsFunction,
         stream_id: f64,
     ) -> Result<AsyncTask<AdvanceStreamingTask>> {
         let tsfn = env.create_threadsafe_function(
@@ -1191,12 +1133,7 @@ impl RustIvmEngine {
         if let Some(token) = self.handle.cancel_slot.lock().unwrap().as_ref() {
             token.cancel();
         }
-        // Hard-abort any in-flight SQLite query on every actor connection.
-        let handles = self.handle.interrupt_handles.lock().unwrap();
-        for h in handles.iter() {
-            h.interrupt();
-        }
-        drop(handles);
+        // Hard-abort any in-flight SQLite query on every live snapshot connection.
         let handles = self.handle.snapshot_interrupt_handles.lock().unwrap();
         for h in handles.iter() {
             h.interrupt();
@@ -1215,9 +1152,7 @@ impl RustIvmEngine {
     /// window, so a late/duplicate grant can never break the bound.
     #[napi]
     pub fn grant_stream_credit(&self, stream_id: f64, permits: f64) -> Result<()> {
-        self.handle
-            .credit
-            .grant(stream_id as u64, permits as i64);
+        self.handle.credit.grant(stream_id as u64, permits as i64);
         Ok(())
     }
 
@@ -1258,9 +1193,9 @@ impl RustIvmEngine {
     /// model backed by the pinned snapshot connection, and return the ordered
     /// `flip` decisions as a JSON array (`true`/`false`/`null`). The TS driver
     /// walks its own AST in the same order (WHERE pre-order then `related`) and
-    /// sets `flip` per position. Reaching parity with zero 1.7's default-on
-    /// planner (which is disabled on the Rust single-owner path); ships behind
-    /// the driver's `enablePlanner` flag. Returns `[]` if no snapshot yet.
+    /// sets `flip` per position. The driver invokes this when the same
+    /// `enablePlanner` flag used by PipelineDriver is enabled. Returns `[]` if no
+    /// snapshot exists yet.
     #[napi]
     pub fn plan_ast(&self, ast_json: String) -> Result<String> {
         self.handle
@@ -1305,51 +1240,50 @@ impl RustIvmEngine {
     /// Errors if the snapshotter isn't initialized or the query fails.
     #[napi]
     pub fn read_query(&self, sql: String, params: Option<String>) -> Result<String> {
-        self.handle.call(move |state| -> std::result::Result<String, String> {
-            let snap = state
-                .snapshotter
-                .as_ref()
-                .ok_or_else(|| "Snapshotter not initialized".to_string())?;
-            let conn = snap
-                .current_conn()
-                .map_err(|e| format!("No current snapshot: {}", e))?;
-            let conn = conn.borrow();
-            let mut stmt = conn
-                .prepare(&sql)
-                .map_err(|e| format!("prepare: {}", e))?;
-            let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        self.handle
+            .call(move |state| -> std::result::Result<String, String> {
+                let snap = state
+                    .snapshotter
+                    .as_ref()
+                    .ok_or_else(|| "Snapshotter not initialized".to_string())?;
+                let conn = snap
+                    .current_conn()
+                    .map_err(|e| format!("No current snapshot: {}", e))?;
+                let conn = conn.borrow();
+                let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {}", e))?;
+                let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
-            // Parse bind params from JSON array string.
-            let bind_values: Vec<rusqlite::types::Value> = if let Some(ref p) = params {
-                let arr: serde_json::Value = serde_json::from_str(p)
-                    .map_err(|e| format!("params parse: {}", e))?;
-                match arr {
-                    serde_json::Value::Array(a) => {
-                        a.iter().map(json_to_rusqlite).collect::<std::result::Result<Vec<_>, _>>()?
+                // Parse bind params from JSON array string.
+                let bind_values: Vec<rusqlite::types::Value> = if let Some(ref p) = params {
+                    let arr: serde_json::Value =
+                        serde_json::from_str(p).map_err(|e| format!("params parse: {}", e))?;
+                    match arr {
+                        serde_json::Value::Array(a) => {
+                            a.iter()
+                                .map(json_to_rusqlite)
+                                .collect::<std::result::Result<Vec<_>, _>>()?
+                        }
+                        _ => return Err("params must be a JSON array".to_string()),
                     }
-                    _ => return Err("params must be a JSON array".to_string()),
-                }
-            } else {
-                Vec::new()
-            };
+                } else {
+                    Vec::new()
+                };
 
-            let mut rows: Vec<serde_json::Value> = Vec::new();
-            let mut raw_rows = stmt
-                .query(rusqlite::params_from_iter(bind_values.iter()))
-                .map_err(|e| format!("query: {}", e))?;
-            while let Some(row) = raw_rows
-                .next()
-                .map_err(|e| format!("row: {}", e))?
-            {
-                let mut obj = serde_json::Map::with_capacity(cols.len());
-                for (i, name) in cols.iter().enumerate() {
-                    let v = row_to_json(row, i)?;
-                    obj.insert(name.clone(), v);
+                let mut rows: Vec<serde_json::Value> = Vec::new();
+                let mut raw_rows = stmt
+                    .query(rusqlite::params_from_iter(bind_values.iter()))
+                    .map_err(|e| format!("query: {}", e))?;
+                while let Some(row) = raw_rows.next().map_err(|e| format!("row: {}", e))? {
+                    let mut obj = serde_json::Map::with_capacity(cols.len());
+                    for (i, name) in cols.iter().enumerate() {
+                        let v = row_to_json(row, i)?;
+                        obj.insert(name.clone(), v);
+                    }
+                    rows.push(serde_json::Value::Object(obj));
                 }
-                rows.push(serde_json::Value::Object(obj));
-            }
-            Ok(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()))
-        })?.map_err(NapiError::from_reason)
+                Ok(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()))
+            })?
+            .map_err(NapiError::from_reason)
     }
 
     /// Advance the Rust snapshotter to head WITHOUT computing a diff
@@ -1359,22 +1293,26 @@ impl RustIvmEngine {
     /// CVR invalidation check. No engine work is triggered.
     #[napi]
     pub fn advance_without_diff(&self) -> Result<String> {
-        self.handle.call(|state| -> std::result::Result<String, String> {
-            let snap = state
-                .snapshotter
-                .as_mut()
-                .ok_or_else(|| "Snapshotter not initialized".to_string())?;
-            snap.advance_without_diff()
-                .map_err(|e| format!("advance_without_diff: {}", e))?;
-            // Re-point every TableSource at the new curr connection.
-            // advance_without_diff swaps prev/curr, so sources that were
-            // pointing at the old curr (now prev) would read stale data.
-            let curr = snap.current_conn().map_err(|e| format!("advance_without_diff: {}", e))?;
-            for source in state.sources.values() {
-                source.borrow_mut().set_snapshot_db(curr.clone());
-            }
-            Ok(snap.current_version().unwrap_or_default().to_string())
-        })?.map_err(NapiError::from_reason)
+        self.handle
+            .call(|state| -> std::result::Result<String, String> {
+                let snap = state
+                    .snapshotter
+                    .as_mut()
+                    .ok_or_else(|| "Snapshotter not initialized".to_string())?;
+                snap.advance_without_diff()
+                    .map_err(|e| format!("advance_without_diff: {}", e))?;
+                // Re-point every TableSource at the new curr connection.
+                // advance_without_diff swaps prev/curr, so sources that were
+                // pointing at the old curr (now prev) would read stale data.
+                let curr = snap
+                    .current_conn()
+                    .map_err(|e| format!("advance_without_diff: {}", e))?;
+                for source in state.sources.values() {
+                    source.borrow_mut().set_snapshot_db(curr.clone());
+                }
+                Ok(snap.current_version().unwrap_or_default().to_string())
+            })?
+            .map_err(NapiError::from_reason)
     }
 
     /// Read the subscription state (replicaVersion + watermark) from replica.db
@@ -1390,24 +1328,28 @@ impl RustIvmEngine {
         let sql = "SELECT c.replicaVersion, s.stateVersion as watermark \
              FROM \"_zero.replicationConfig\" as c \
              JOIN \"_zero.replicationState\" as s ON c.lock = s.lock";
-        self.handle.call(move |state| -> std::result::Result<String, String> {
-            let snap = state
-                .snapshotter
-                .as_ref()
-                .ok_or_else(|| "Snapshotter not initialized".to_string())?;
-            let conn = snap
-                .current_conn()
-                .map_err(|e| format!("No current snapshot: {}", e))?;
-            let conn = conn.borrow();
-            let (replica_version, watermark) = conn.query_row(&sql, [], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            }).map_err(|e| format!("subscription state: {}", e))?;
-            let obj = serde_json::json!({
-                "replicaVersion": replica_version,
-                "watermark": watermark,
-            });
-            Ok(obj.to_string())
-        })?.map_err(NapiError::from_reason)
+        self.handle
+            .call(move |state| -> std::result::Result<String, String> {
+                let snap = state
+                    .snapshotter
+                    .as_ref()
+                    .ok_or_else(|| "Snapshotter not initialized".to_string())?;
+                let conn = snap
+                    .current_conn()
+                    .map_err(|e| format!("No current snapshot: {}", e))?;
+                let conn = conn.borrow();
+                let (replica_version, watermark) = conn
+                    .query_row(sql, [], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .map_err(|e| format!("subscription state: {}", e))?;
+                let obj = serde_json::json!({
+                    "replicaVersion": replica_version,
+                    "watermark": watermark,
+                });
+                Ok(obj.to_string())
+            })?
+            .map_err(NapiError::from_reason)
     }
 
     /// Explicit teardown on client-group drop (rust-ivm-driver.destroy()).
@@ -1457,27 +1399,33 @@ impl Task for HydrateTask {
     fn compute(&mut self) -> Result<Self::Output> {
         let queries = std::mem::take(&mut self.queries);
         self.handle
-            .call(move |state| -> std::result::Result<Vec<NapiRowChange>, String> {
-                // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
-                state.poisoned = false;
-                let eng = state
-                    .engine
-                    .as_mut()
-                    .ok_or_else(|| "Engine not initialized".to_string())?;
-                let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
-                for q in queries.iter() {
-                    let ast: rust_ivm::builder::ast::Ast = parse_ts_ast(&q.ast_json)
-                        .map_err(|e| format!("AST parse error for qid={}: {}", q.query_id, e))?;
-                    specs.push(QuerySpec { query_id: q.query_id.clone(), ast });
-                }
-                let mut rows: Vec<NapiRowChange> = Vec::new();
-                // Single-fetch hydrate: one fetch per pipeline warms operator
-                // state AND emits output in the same pass, on the actor's pinned
-                // snapshot connection. Read-level parallelism lives below the
-                // source; the actor graph stays single-writer.
-                eng.add_queries_streaming(&specs, |rc| rows.push(row_change_to_napi(rc)));
-                Ok(rows)
-            })?
+            .call(
+                move |state| -> std::result::Result<Vec<NapiRowChange>, String> {
+                    // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
+                    state.poisoned = false;
+                    let eng = state
+                        .engine
+                        .as_mut()
+                        .ok_or_else(|| "Engine not initialized".to_string())?;
+                    let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
+                    for q in queries.iter() {
+                        let ast: rust_ivm::builder::ast::Ast =
+                            parse_ts_ast(&q.ast_json).map_err(|e| {
+                                format!("AST parse error for qid={}: {}", q.query_id, e)
+                            })?;
+                        specs.push(QuerySpec {
+                            query_id: q.query_id.clone(),
+                            ast,
+                        });
+                    }
+                    let mut rows: Vec<NapiRowChange> = Vec::new();
+                    // Single-fetch hydrate: one fetch per pipeline warms operator
+                    // state and emits output in the same pass, on the actor's pinned
+                    // snapshot connection.
+                    eng.add_queries_streaming(&specs, |rc| rows.push(row_change_to_napi(rc)));
+                    Ok(rows)
+                },
+            )?
             .map_err(NapiError::from_reason)
     }
 
@@ -1647,7 +1595,7 @@ impl Task for HydrateStreamingTask {
         let tsfn = self.tsfn.clone();
         let credit = self.handle.credit.clone();
         let stream_id = self.stream_id;
-        let capacity = stream_credit_capacity(0);
+        let capacity = stream_credit_capacity();
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
@@ -1660,14 +1608,16 @@ impl Task for HydrateStreamingTask {
                 for q in queries.iter() {
                     let ast: rust_ivm::builder::ast::Ast = parse_ts_ast(&q.ast_json)
                         .map_err(|e| format!("AST parse error for qid={}: {}", q.query_id, e))?;
-                    specs.push(QuerySpec { query_id: q.query_id.clone(), ast });
+                    specs.push(QuerySpec {
+                        query_id: q.query_id.clone(),
+                        ast,
+                    });
                 }
                 let cancel = eng.cancellation_token();
                 // #3 backpressure: open this stream's credit window. The guard
                 // closes it on EVERY exit (return, panic-unwind, cancel) so a
                 // parked-nowhere consumer never leaks an open generation.
-                let _credit_guard =
-                    StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
+                let _credit_guard = StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
                 let do_hydrate = |rc: &rust_ivm::streamer::RowChange| {
                     // Wait for one credit before crossing the boundary; the
                     // consumer grants as it drains its AsyncQueue. `false` =
@@ -1684,8 +1634,8 @@ impl Task for HydrateStreamingTask {
                 };
                 // Single-fetch hydrate, streaming row-by-row to JS via the TSFN
                 // (blocking backpressure). One fetch per pipeline warms operator
-                // state AND emits output; read-level parallelism lives below the
-                // source, keeping the actor graph single-writer.
+                // state and emits output while the actor graph remains
+                // single-writer.
                 eng.add_queries_streaming(&specs, do_hydrate);
                 // Barrier: don't resolve the promise (→ driver closes its row
                 // queue) until every streamed row has landed in JS. See
@@ -1696,92 +1646,6 @@ impl Task for HydrateStreamingTask {
                 // on the actor) until the barrier's 30s timeout (#3).
                 if !cancel.is_cancelled() {
                     drain_barrier(&tsfn);
-                }
-                Ok(())
-            })?
-            .map_err(NapiError::from_reason)
-    }
-
-    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
-        Ok(())
-    }
-}
-
-/// Batched hydrate task: buffers rows and hands JS `RUST_IVM_TSFN_BATCH` at a time
-/// as one array per TSFN call — one event-loop turn per K rows instead of per row.
-pub struct HydrateStreamingBatchedTask {
-    handle: EngineHandle,
-    queries: Vec<NapiQuerySpec>,
-    tsfn: ThreadsafeFunction<Vec<NapiRowChange>>,
-    batch_size: usize,
-    stream_id: u64,
-}
-
-impl Task for HydrateStreamingBatchedTask {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let queries = std::mem::take(&mut self.queries);
-        let tsfn = self.tsfn.clone();
-        let batch_size = self.batch_size.max(1);
-        let credit = self.handle.credit.clone();
-        let stream_id = self.stream_id;
-        // Window >= batch_size so a full batch always has credit to acquire
-        // (row-based accounting, no deadlock — reviewer gap #2).
-        let capacity = stream_credit_capacity(batch_size);
-        self.handle
-            .call(move |state| -> std::result::Result<(), String> {
-                state.poisoned = false;
-                let eng = state
-                    .engine
-                    .as_mut()
-                    .ok_or_else(|| "Engine not initialized".to_string())?;
-                let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
-                for q in queries.iter() {
-                    let ast: rust_ivm::builder::ast::Ast = parse_ts_ast(&q.ast_json)
-                        .map_err(|e| format!("AST parse error for qid={}: {}", q.query_id, e))?;
-                    specs.push(QuerySpec { query_id: q.query_id.clone(), ast });
-                }
-                let cancel = eng.cancellation_token();
-                let _credit_guard =
-                    StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
-                let mut buf: Vec<NapiRowChange> = Vec::with_capacity(batch_size);
-                {
-                    // Buffer K rows, then cross the boundary ONCE (one event-loop
-                    // turn). Backpressure acquires ONE credit PER ROW in the
-                    // batch (not per callback), so the bound is in rows.
-                    let do_hydrate = |rc: &rust_ivm::streamer::RowChange| {
-                        buf.push(row_change_to_napi(rc));
-                        if buf.len() >= batch_size {
-                            let batch = std::mem::take(&mut buf);
-                            let permits = batch.len() as i64;
-                            if !credit.acquire(stream_id, permits, &cancel) {
-                                cancel.cancel();
-                                return;
-                            }
-                            if tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking)
-                                != Status::Ok
-                            {
-                                cancel.cancel();
-                            }
-                        }
-                    };
-                    eng.add_queries_streaming(&specs, do_hydrate);
-                }
-                // Flush the tail batch (also credit-gated on its row count).
-                if !buf.is_empty() {
-                    let batch = std::mem::take(&mut buf);
-                    let permits = batch.len() as i64;
-                    if credit.acquire(stream_id, permits, &cancel) {
-                        let _ = tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking);
-                    }
-                }
-                // Barrier: block until the tail batch has landed in JS before
-                // the promise resolves and the driver closes its queue. Skip
-                // when cancelled (early abandonment — see the per-row task).
-                if !cancel.is_cancelled() {
-                    drain_barrier_batched(&tsfn);
                 }
                 Ok(())
             })?
@@ -1808,7 +1672,7 @@ impl Task for AdvanceStreamingTask {
         let tsfn = self.tsfn.clone();
         let credit = self.handle.credit.clone();
         let stream_id = self.stream_id;
-        let capacity = stream_credit_capacity(0);
+        let capacity = stream_credit_capacity();
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // A prior panic left the engine possibly half-mutated. Refuse to
@@ -1848,7 +1712,7 @@ impl Task for AdvanceStreamingTask {
                     StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
 
                 let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let result = eng.advance_to_head_stream(
+                    eng.advance_to_head_stream(
                         &mut snapshotter,
                         &syncable_tables,
                         &all_table_names,
@@ -1880,8 +1744,7 @@ impl Task for AdvanceStreamingTask {
                                 cancel.cancel();
                             }
                         },
-                    );
-                    result
+                    )
                 }));
 
                 state.engine = Some(eng);
@@ -1957,7 +1820,7 @@ fn row_change_to_napi(rc: &rust_ivm::streamer::RowChange) -> NapiRowChange {
         query_id: rc.query_id.clone(),
         table: rc.table.clone(),
         row_key: value_map_to_json_string(&rc.row_key),
-        row: rc.row.as_ref().map(|r| value_map_to_json_string(r)),
+        row: rc.row.as_ref().map(value_map_to_json_string),
         is_hidden: rc.is_hidden,
     }
 }
@@ -1993,7 +1856,9 @@ fn value_to_serde_json(v: &Value) -> serde_json::Value {
         Value::Str(s) => serde_json::Value::String(s.to_string()),
         // Json is validated at ingest (`sqlite_value_to_ivm`), so `from_str`
         // always succeeds here; the fallback is dead defence.
-        Value::Json(j) => serde_json::from_str(j).unwrap_or(serde_json::Value::String(j.to_string())),
+        Value::Json(j) => {
+            serde_json::from_str(j).unwrap_or(serde_json::Value::String(j.to_string()))
+        }
     }
 }
 

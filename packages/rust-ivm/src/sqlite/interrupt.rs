@@ -1,7 +1,6 @@
 //! Cross-thread SQLite interrupt + job-scoped watchdog (DESIGN §1a, N1/N2).
 //!
-//! The composability decision: every connection — the actor's today, every
-//! pooled worker's later — is opened with [`install_interrupt`] so it carries
+//! Every live snapshot connection is opened with [`install_interrupt`] so it carries
 //! a `Send + Sync` [`rusqlite::InterruptHandle`]. A cancel/timeout from any
 //! thread calls `.interrupt()` to abort a query running on that connection
 //! in-flight (returns `SQLITE_INTERRUPT`), closing the "cancel only checked
@@ -13,13 +12,6 @@
 //! in-flight `EngineHandle::call`. On deadline it flips the token AND
 //! `.interrupt()`s every handle; past a hard bound it logs a stuck-actor
 //! signal (the actor is wedged past recovery; the caller will surface it).
-//! A single thread — not thread-per-job — is the doc's explicit choice (§1a
-//! seam 3): the same loop serves serial jobs (one handle) today and parallel
-//! jobs (N handles) in Phase 1+ verbatim.
-//!
-//! This module is deliberately connection-generic and job-scoped (seams 1–3)
-//! so Phase 1's worker pool reuses it without rework. Nothing here touches the
-//! engine graph; the interrupt handle is the only graph-agnostic abort path.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -29,8 +21,7 @@ use rusqlite::Connection;
 
 /// Install a cross-thread interrupt handle on a connection.
 ///
-/// Call this at EVERY connection open (actor connection today, every pooled
-/// worker connection in Phase 1+). The returned handle is `Send + Sync`; hold
+/// Call this at every snapshot connection open. The returned handle is `Send + Sync`; hold
 /// it on the actor and call `.interrupt()` from any thread to abort a query
 /// running on `conn` in-flight. Never special-case "the actor's connection" —
 /// seam 1 is connection-generic by construction.
@@ -59,12 +50,8 @@ pub(crate) struct WatchEntry {
     /// Shared handle-bag: the monitor reads from it under the lock when firing.
     /// `InterruptHandle` is not `Clone`, so we share the Vec via Arc<Mutex<_>>
     /// rather than cloning handles out per job. The actor's persistent handles
-    /// live in one shared bag reused across all jobs; a parallel job in Phase
-    /// 1+ passes a per-job bag with the worker handles.
+    /// live in one shared bag reused across all jobs.
     handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
-    /// Optional second handle-bag for snapshot connections. Kept separate from
-    /// the frame-pinned pool bag because that pool owns/drains indexed ranges.
-    additional_handles: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
     /// Monotonic id assigned at registration; used to unregister on return.
     id: u64,
 }
@@ -157,20 +144,6 @@ impl JobWatchdog {
         cancel: CancellationToken,
         handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
     ) -> WatchGuard {
-        self.register_with_additional_handles(warn_at, abort_at, cancel, handles, None)
-    }
-
-    /// Register a job with an additional independently-owned handle registry.
-    /// NAPI uses this for the live snapshot (`prev` + `curr`) connections while
-    /// `handles` remains the read-pool registry.
-    pub fn register_with_additional_handles(
-        &self,
-        warn_at: Instant,
-        abort_at: Instant,
-        cancel: CancellationToken,
-        handles: Arc<Mutex<Vec<rusqlite::InterruptHandle>>>,
-        additional_handles: Option<Arc<Mutex<Vec<rusqlite::InterruptHandle>>>>,
-    ) -> WatchGuard {
         let (lock, cv) = &*self.inner;
         let id = {
             let mut s = lock.lock().unwrap();
@@ -181,7 +154,6 @@ impl JobWatchdog {
                 abort_at,
                 cancel,
                 handles,
-                additional_handles,
                 id,
             });
             id
@@ -263,12 +235,6 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
                     h.interrupt();
                 }
                 drop(handles);
-                if let Some(additional) = &e.additional_handles {
-                    let handles = additional.lock().unwrap();
-                    for h in handles.iter() {
-                        h.interrupt();
-                    }
-                }
                 aborted.push(e.id);
                 eprintln!(
                     "[rust-ivm-watchdog] stuck-actor abort: job {} overran abort bound {:?} ago — cancel flipped + handles interrupted",

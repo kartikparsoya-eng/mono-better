@@ -91,7 +91,7 @@ The TS driver (`rust-ivm-driver.ts`) loads `rust-ivm/napi/rust-ivm.node` via
 
 Each `RustIvmEngine` = one worker thread = one client group. Multiple CGs
 run on separate threads, giving cross-CG parallelism. Measured 3.78x speedup
-with 4 CGs (vs sequential) on the parallel hydrate benchmark.
+with 4 CGs (vs sequential) on the cross-CG benchmark.
 
 ## Phase 4 — Cancellation
 

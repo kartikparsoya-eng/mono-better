@@ -186,43 +186,35 @@ impl Take {
         &self.schema.compare_rows
     }
 
-    #[allow(dead_code)]
-    fn get_take_state_key(&self, row_or_constraint: Option<(&Row, &Constraint)>) -> String {
-        match (&self.partition_key, row_or_constraint) {
-            (Some(pk), Some((row, c))) => {
-                // Prefer constraint values; fall back to row values
-                let mut key = String::new();
-                for col in pk {
-                    let v = c
-                        .get(col)
-                        .cloned()
-                        .or_else(|| row.get(col).cloned())
-                        .unwrap_or(Value::Null);
-                    key.push_str(&format!("{}={:?};", col, v));
-                }
-                key
-            }
-            (None, _) => "global".to_string(),
-            (Some(_), None) => "global".to_string(),
+    fn take_state_key_for_row(&self, row: &Row) -> String {
+        let Some(partition_key) = &self.partition_key else {
+            return "global".to_string();
+        };
+        let mut key = String::new();
+        for col in partition_key {
+            let value = row.get(col).cloned().unwrap_or(Value::Null);
+            key.push_str(&format!("{}={:?};", col, value));
         }
+        key
+    }
+
+    fn take_state_key_for_constraint(&self, constraint: Option<&Constraint>) -> String {
+        let (Some(partition_key), Some(constraint)) = (&self.partition_key, constraint) else {
+            return "global".to_string();
+        };
+        let mut key = String::new();
+        for col in partition_key {
+            let value = constraint.get(col).cloned().unwrap_or(Value::Null);
+            key.push_str(&format!("{}={:?};", col, value));
+        }
+        key
     }
 
     fn get_state_and_constraint(
         &self,
         row: &Row,
     ) -> Option<(TakeState, String, Option<Row>, Option<Constraint>)> {
-        let take_state_key = match &self.partition_key {
-            Some(pk) => {
-                let mut key = String::new();
-                for col in pk {
-                    if let Some(v) = row.get(col) {
-                        key.push_str(&format!("{}={:?};", col, v));
-                    }
-                }
-                key
-            }
-            None => "global".to_string(),
-        };
+        let take_state_key = self.take_state_key_for_row(row);
 
         let take_state = self.storage.borrow().get(&take_state_key).cloned()?;
         let max_bound = self
@@ -244,7 +236,7 @@ impl Take {
         take_state_key: &str,
         size: usize,
         bound: Option<Row>,
-        _max_bound: Option<Row>,
+        max_bound: Option<Row>,
     ) {
         self.storage.borrow_mut().set(
             take_state_key.to_string(),
@@ -254,12 +246,7 @@ impl Take {
             },
         );
         if let Some(ref b) = bound {
-            let current_max = self
-                .storage
-                .borrow()
-                .get(MAX_BOUND_KEY)
-                .and_then(|s| s.bound.clone());
-            let should_update = current_max
+            let should_update = max_bound
                 .as_ref()
                 .is_none_or(|m| (self.compare_rows())(b, m) == CmpOrdering::Greater);
             if should_update {
@@ -275,10 +262,24 @@ impl Take {
     }
 
     fn initial_fetch(&self, req: &FetchRequest, take_state_key: &str) -> NodeStream {
+        assert!(req.start.is_none(), "Start should be undefined");
+        assert!(!req.reverse, "Reverse should be false");
+
         if self.limit == 0 {
-            self.set_take_state(take_state_key, 0, None, None);
             return from_vec(Vec::new());
         }
+
+        assert!(
+            optional_constraint_matches_partition_key(
+                req.constraint.as_ref(),
+                self.partition_key.as_ref(),
+            ),
+            "Constraint should match partition key"
+        );
+        assert!(
+            self.storage.borrow().get(take_state_key).is_none(),
+            "Take state should be undefined"
+        );
 
         let mut stream = self.input.borrow().fetch(req);
         let limit = self.limit;
@@ -503,34 +504,27 @@ impl Take {
         if self.limit > 1 {
             // For limit > 1, we already set the state in the else branch above
             // Just need to do the remove-before-add with row hiding
-            if let Some(bn) = bound_node {
-                // Remove before add to maintain invariant output size <= limit
-                self.push_with_row_hidden_from_fetch(
-                    &node.row,
-                    make_remove_change(bn),
-                    output,
-                    pusher,
-                );
-                output
-                    .borrow_mut()
-                    .push(make_add_change(node.clone()), pusher);
-            }
-            return;
-        }
-
-        // limit == 1
-        if let Some(bn) = bound_node {
-            self.set_take_state(
-                &take_state_key,
-                take_state.size,
-                Some(node.row.clone()),
-                max_bound.clone(),
-            );
+            let bn = bound_node.expect("Take: boundNode must be found during fetch");
+            // Remove before add to maintain invariant output size <= limit
             self.push_with_row_hidden_from_fetch(&node.row, make_remove_change(bn), output, pusher);
             output
                 .borrow_mut()
                 .push(make_add_change(node.clone()), pusher);
+            return;
         }
+
+        // limit == 1
+        let bn = bound_node.expect("Take: boundNode must be found during fetch");
+        self.set_take_state(
+            &take_state_key,
+            take_state.size,
+            Some(node.row.clone()),
+            max_bound.clone(),
+        );
+        self.push_with_row_hidden_from_fetch(&node.row, make_remove_change(bn), output, pusher);
+        output
+            .borrow_mut()
+            .push(make_add_change(node.clone()), pusher);
     }
 
     fn push_remove_change(&self, node: &Node, output: &OutputHandle, pusher: &dyn InputBase) {
@@ -628,7 +622,7 @@ impl Take {
         if take_state
             .bound
             .as_ref()
-            .is_none_or(|b| compare(&node.row, b) != CmpOrdering::Greater)
+            .is_some_and(|b| compare(&node.row, b) != CmpOrdering::Greater)
         {
             output.borrow_mut().push(change.clone(), pusher);
         }
@@ -653,9 +647,7 @@ impl Take {
         else {
             return;
         };
-        let Some(bound) = &take_state.bound else {
-            return;
-        };
+        let bound = take_state.bound.as_ref().expect("Bound should be set");
         let compare = self.compare_rows().clone();
 
         let old_cmp = compare(&old_node.row, bound);
@@ -689,14 +681,14 @@ impl Take {
                     reverse: true,
                     ..Default::default()
                 };
-                if let Some(before_bound) = stream_first(self.input.borrow().fetch(&req)) {
-                    self.set_take_state(
-                        &take_state_key,
-                        take_state.size,
-                        Some(before_bound.row.clone()),
-                        max_bound,
-                    );
-                }
+                let before_bound = stream_first(self.input.borrow().fetch(&req))
+                    .expect("Take: beforeBoundNode must be found during fetch");
+                self.set_take_state(
+                    &take_state_key,
+                    take_state.size,
+                    Some(before_bound.row.clone()),
+                    max_bound,
+                );
                 output.borrow_mut().push(change.clone(), pusher);
                 return;
             }
@@ -714,35 +706,35 @@ impl Take {
                 constraint: constraint.clone(),
                 ..Default::default()
             };
-            if let Some(new_bound_node) = stream_first(self.input.borrow().fetch(&req)) {
-                if compare(&new_bound_node.row, &node.row) == CmpOrdering::Equal {
-                    // The new row is the next row — replace bound and keep the edit
-                    self.set_take_state(
-                        &take_state_key,
-                        take_state.size,
-                        Some(node.row.clone()),
-                        max_bound,
-                    );
-                    output.borrow_mut().push(change.clone(), pusher);
-                    return;
-                }
-                // The new row is outside bounds — remove old row, add new bound
+            let new_bound_node = stream_first(self.input.borrow().fetch(&req))
+                .expect("Take: newBoundNode must be found during fetch");
+            if compare(&new_bound_node.row, &node.row) == CmpOrdering::Equal {
+                // The new row is the next row — replace bound and keep the edit
                 self.set_take_state(
                     &take_state_key,
                     take_state.size,
-                    Some(new_bound_node.row.clone()),
+                    Some(node.row.clone()),
                     max_bound,
                 );
-                self.push_with_row_hidden_from_fetch(
-                    &new_bound_node.row,
-                    make_remove_change(old_node.clone()),
-                    output,
-                    pusher,
-                );
-                output
-                    .borrow_mut()
-                    .push(make_add_change(new_bound_node), pusher);
+                output.borrow_mut().push(change.clone(), pusher);
+                return;
             }
+            // The new row is outside bounds — remove old row, add new bound
+            self.set_take_state(
+                &take_state_key,
+                take_state.size,
+                Some(new_bound_node.row.clone()),
+                max_bound,
+            );
+            self.push_with_row_hidden_from_fetch(
+                &new_bound_node.row,
+                make_remove_change(old_node.clone()),
+                output,
+                pusher,
+            );
+            output
+                .borrow_mut()
+                .push(make_add_change(new_bound_node), pusher);
             return;
         }
 
@@ -771,21 +763,23 @@ impl Take {
             let mut iter = skip_yields(self.input.borrow().fetch(&req));
             let old_bound_node = iter.next();
             let new_bound_node = iter.next();
-            if let (Some(obn), Some(nbn)) = (old_bound_node, new_bound_node) {
-                self.set_take_state(
-                    &take_state_key,
-                    take_state.size,
-                    Some(nbn.row.clone()),
-                    max_bound,
-                );
-                self.push_with_row_hidden_from_fetch(
-                    &node.row,
-                    make_remove_change(obn),
-                    output,
-                    pusher,
-                );
-                output.borrow_mut().push(make_add_change(node), pusher);
-            }
+            let old_bound_node =
+                old_bound_node.expect("Take: oldBoundNode must be found during fetch");
+            let new_bound_node =
+                new_bound_node.expect("Take: newBoundNode must be found during fetch");
+            self.set_take_state(
+                &take_state_key,
+                take_state.size,
+                Some(new_bound_node.row.clone()),
+                max_bound,
+            );
+            self.push_with_row_hidden_from_fetch(
+                &node.row,
+                make_remove_change(old_bound_node),
+                output,
+                pusher,
+            );
+            output.borrow_mut().push(make_add_change(node), pusher);
             return;
         }
 
@@ -813,31 +807,31 @@ impl Take {
             constraint: constraint.clone(),
             ..Default::default()
         };
-        if let Some(after_bound) = stream_first(self.input.borrow().fetch(&req)) {
-            if compare(&after_bound.row, &node.row) == CmpOrdering::Equal {
-                // New row is the new bound — use edit change
-                self.set_take_state(
-                    &take_state_key,
-                    take_state.size,
-                    Some(node.row.clone()),
-                    max_bound,
-                );
-                output.borrow_mut().push(change.clone(), pusher);
-                return;
-            }
-            output
-                .borrow_mut()
-                .push(make_remove_change(old_node.clone()), pusher);
+        let after_bound = stream_first(self.input.borrow().fetch(&req))
+            .expect("Take: afterBoundNode must be found during fetch");
+        if compare(&after_bound.row, &node.row) == CmpOrdering::Equal {
+            // New row is the new bound — use edit change
             self.set_take_state(
                 &take_state_key,
                 take_state.size,
-                Some(after_bound.row.clone()),
+                Some(node.row.clone()),
                 max_bound,
             );
-            output
-                .borrow_mut()
-                .push(make_add_change(after_bound), pusher);
+            output.borrow_mut().push(change.clone(), pusher);
+            return;
         }
+        output
+            .borrow_mut()
+            .push(make_remove_change(old_node.clone()), pusher);
+        self.set_take_state(
+            &take_state_key,
+            take_state.size,
+            Some(after_bound.row.clone()),
+            max_bound,
+        );
+        output
+            .borrow_mut()
+            .push(make_add_change(after_bound), pusher);
     }
 
     fn push_with_row_hidden_from_fetch(
@@ -872,52 +866,99 @@ impl Input for Take {
     }
 
     fn fetch(&self, req: &FetchRequest) -> NodeStream {
-        // Check for existing take state
-        let take_state_key = match (&self.partition_key, req.constraint.as_ref()) {
-            (Some(pk), Some(c)) => {
-                let mut key = String::new();
-                for col in pk {
-                    if let Some(v) = c.get(col) {
-                        key.push_str(&format!("{}={:?};", col, v));
+        if self.partition_key.is_none()
+            || optional_constraint_matches_partition_key(
+                req.constraint.as_ref(),
+                self.partition_key.as_ref(),
+            )
+        {
+            let take_state_key = self.take_state_key_for_constraint(req.constraint.as_ref());
+            let take_state = self.storage.borrow().get(&take_state_key).cloned();
+            let Some(take_state) = take_state else {
+                return self.initial_fetch(req, &take_state_key);
+            };
+            let Some(bound) = take_state.bound else {
+                return from_vec(Vec::new());
+            };
+            let compare = self.compare_rows().clone();
+            let hidden = self.row_hidden_from_fetch.clone();
+            let mut stream = self.input.borrow().fetch(req);
+            return Box::new(std::iter::from_fn(move || {
+                loop {
+                    match stream.next() {
+                        Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                        Some(StreamItem::Data(node)) => {
+                            if compare(&bound, &node.row) == CmpOrdering::Less {
+                                return None;
+                            }
+                            if hidden
+                                .borrow()
+                                .as_ref()
+                                .is_some_and(|row| compare(row, &node.row) == CmpOrdering::Equal)
+                            {
+                                continue;
+                            }
+                            return Some(StreamItem::Data(node));
+                        }
+                        None => return None,
                     }
                 }
-                key
-            }
-            (None, _) => "global".to_string(),
-            (Some(_), None) => "global".to_string(),
-        };
-
-        let take_state = self.storage.borrow().get(&take_state_key).cloned();
-
-        match take_state {
-            None => self.initial_fetch(req, &take_state_key),
-            Some(ts) => {
-                if self.limit == 0 || ts.bound.is_none() {
-                    return from_vec(Vec::new());
-                }
-                let bound = ts.bound.unwrap();
-                let compare = self.compare_rows().clone();
-                let hidden = self.row_hidden_from_fetch.borrow().clone();
-                let input = self.input.borrow();
-                let stream = input.fetch(req);
-                Box::new(stream.filter_map(move |item| match item {
-                    crate::ivm::stream::StreamItem::Data(n) => {
-                        if compare(&n.row, &bound) == CmpOrdering::Greater {
-                            return None;
-                        }
-                        if let Some(ref h) = hidden
-                            && compare(&n.row, h) == CmpOrdering::Equal
-                        {
-                            return None;
-                        }
-                        Some(crate::ivm::stream::StreamItem::Data(n))
-                    }
-                    crate::ivm::stream::StreamItem::Yield => {
-                        Some(crate::ivm::stream::StreamItem::Yield)
-                    }
-                }))
-            }
+            }));
         }
+
+        let Some(max_bound) = self
+            .storage
+            .borrow()
+            .get(MAX_BOUND_KEY)
+            .and_then(|state| state.bound.clone())
+        else {
+            return from_vec(Vec::new());
+        };
+        let compare = self.compare_rows().clone();
+        let partition_key = self.partition_key.clone().expect("partition key is set");
+        let storage = self.storage.clone();
+        let mut stream = self.input.borrow().fetch(req);
+        Box::new(std::iter::from_fn(move || {
+            loop {
+                match stream.next() {
+                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                    Some(StreamItem::Data(node)) => {
+                        if compare(&node.row, &max_bound) == CmpOrdering::Greater {
+                            return None;
+                        }
+                        let mut key = String::new();
+                        for col in &partition_key {
+                            let value = node.row.get(col).cloned().unwrap_or(Value::Null);
+                            key.push_str(&format!("{}={:?};", col, value));
+                        }
+                        let bound = storage
+                            .borrow()
+                            .get(&key)
+                            .and_then(|state| state.bound.clone());
+                        if bound
+                            .as_ref()
+                            .is_some_and(|bound| compare(bound, &node.row) != CmpOrdering::Less)
+                        {
+                            return Some(StreamItem::Data(node));
+                        }
+                    }
+                    None => return None,
+                }
+            }
+        }))
+    }
+}
+
+fn optional_constraint_matches_partition_key(
+    constraint: Option<&Constraint>,
+    partition_key: Option<&PartitionKey>,
+) -> bool {
+    match (constraint, partition_key) {
+        (None, None) => true,
+        (Some(constraint), Some(partition_key)) => {
+            constraint_matches_primary_key(constraint, partition_key)
+        }
+        _ => false,
     }
 }
 

@@ -10,6 +10,13 @@ use std::process::Command;
 
 #[test]
 fn advance_fixture_replay() {
+    if std::env::var_os("RUST_IVM_RUN_NAPI_ADVANCE_FIXTURES").is_none() {
+        eprintln!(
+            "advance_fixture_replay: skipped; set RUST_IVM_RUN_NAPI_ADVANCE_FIXTURES=1 after building the NAPI addon"
+        );
+        return;
+    }
+
     let advance_dir =
         std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR")).join("agentic/fixtures/advance");
 

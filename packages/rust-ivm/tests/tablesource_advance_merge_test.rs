@@ -4,9 +4,9 @@
 //! path (db_conn set), reading the PREV snapshot. A MemorySource fetch reads
 //! the in-memory Vec directly and can't exercise it.
 //!
-//! During advance the SQLite snapshot is PREV; same-advance changes live only
-//! in the in-memory `data` (+ removed-PK set). A re-entrant fetch must reflect
-//! the current state: adds appear, edits show the NEW value, removes disappear.
+//! During advance the SQLite snapshot is PREV and is read-only. A re-entrant
+//! fetch must still reflect every prior push in the same advance: adds appear,
+//! edits show the NEW value, and removes disappear.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,10 +19,10 @@ use rust_ivm::ivm::change::{
     make_source_change_add, make_source_change_edit, make_source_change_remove,
 };
 use rust_ivm::ivm::data::Value;
-use rust_ivm::ivm::operator::Input;
+use rust_ivm::ivm::operator::{Basis, FetchRequest, Input, Start};
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::ivm::stream::StreamItem;
+use rust_ivm::sqlite::table_source::TableSource;
 
 fn clean_db(path: &str) {
     for p in [
@@ -50,7 +50,11 @@ fn columns() -> HashMap<String, ColumnType> {
 
 /// (id, name) pairs from a fetch stream, sorted by id.
 fn fetched(input: &Rc<RefCell<dyn Input>>) -> Vec<(i64, String)> {
-    let stream = input.borrow().fetch(&Default::default());
+    fetched_with(input, &Default::default())
+}
+
+fn fetched_with(input: &Rc<RefCell<dyn Input>>, request: &FetchRequest) -> Vec<(i64, String)> {
+    let stream = input.borrow().fetch(request);
     let mut out: Vec<(i64, String)> = stream
         .filter_map(|item| match item {
             StreamItem::Data(n) => {
@@ -87,15 +91,18 @@ fn tablesource_advance_fetch_reflects_add_edit_remove() {
         )
         .unwrap();
     }
-    drop(conn);
-
-    let source = Rc::new(RefCell::new(MemorySource::new(
+    let source = Rc::new(RefCell::new(TableSource::new(
+        Rc::new(RefCell::new(conn)),
         "users",
         columns(),
         vec!["id".to_string()],
     )));
-    source.borrow_mut().set_db_path(db_path);
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(
+        Some(Arc::new(vec![["id".to_string(), "asc".to_string()]])),
+        None,
+        None,
+        None,
+    );
 
     // Baseline: fetch reads PREV.
     assert_eq!(
@@ -118,6 +125,9 @@ fn tablesource_advance_fetch_reflects_add_edit_remove() {
     source
         .borrow_mut()
         .push(make_source_change_remove(row(2, "Bob")));
+    source
+        .borrow_mut()
+        .push(make_source_change_add(row(4, "Dana")));
 
     // A re-entrant fetch must now reflect the current state:
     //   - Frank added, Bob gone, Alice shows the NEW value "Alicia".
@@ -126,10 +136,26 @@ fn tablesource_advance_fetch_reflects_add_edit_remove() {
         vec![
             (1, "Alicia".into()),
             (3, "Charlie".into()),
+            (4, "Dana".into()),
             (6, "Frank".into())
         ],
         "TableSource fetch during advance must reflect same-advance add/edit/remove \
          (not the stale PREV snapshot)",
+    );
+
+    assert_eq!(
+        fetched_with(
+            &input,
+            &FetchRequest {
+                start: Some(Start {
+                    row: row(4, "Dana"),
+                    basis: Basis::After,
+                }),
+                ..Default::default()
+            },
+        ),
+        vec![(6, "Frank".into())],
+        "an accumulated overlay equal to an exclusive start must be filtered",
     );
 
     clean_db(db_path);

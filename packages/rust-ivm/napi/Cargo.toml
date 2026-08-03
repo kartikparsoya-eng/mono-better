@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-rust-ivm = { path = ".." }
+rust-ivm = { path = "..", default-features = false }
 napi = { version = "2", features = ["napi8", "serde-json"] }
 napi-derive = { version = "2", features = ["type-def"] }
 serde = { version = "1", features = ["derive"] }

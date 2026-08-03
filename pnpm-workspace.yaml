@@ -1,6 +1,7 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+  - 'packages/rust-ivm/napi'
   - 'prod/sst'
   - 'scripts'
   - 'tools/*'

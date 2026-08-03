@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use crate::snapshotter::snapshotter::{
     DiffOwned, InvalidDiffError, REASON_PERMISSIONS_CHANGE, REASON_SCHEMA_CHANGE,
-    REASON_STALE_SNAPSHOT, REASON_TRUNCATION, ResetPipelinesSignal, SnapshotChange,
+    REASON_TRUNCATION, ResetPipelinesSignal, SnapshotChange,
 };
 use crate::snapshotter::spec::{TableSpec, quote_ident, sorted_keys};
 use crate::snapshotter::{RESET_OP, SET_OP, TRUNCATE_OP, ZERO_VERSION_COLUMN_NAME};
@@ -336,21 +336,12 @@ where
 
         // Catch-up invariant: every change-log op has stateVersion strictly
         // greater than the table's minRowVersion.
-        if !spec
-            .min_row_version
-            .as_deref()
-            .unwrap_or("")
-            .lt(&e.state_version)
-        {
-            // Actually we need lexicographic comparison. In Rust, String comparison
-            // IS lexicographic, matching TS's `<`.
-            let min = spec.min_row_version.as_deref().unwrap_or("");
-            if min >= e.state_version.as_str() {
-                return Err(DiffError::Other(format!(
-                    "unexpected change @{} for table {} with minRowVersion {:?}: {}({})",
-                    e.state_version, e.table, spec.min_row_version, e.op, e.row_key
-                )));
-            }
+        let min = spec.min_row_version.as_deref().unwrap_or("");
+        if min >= e.state_version.as_str() {
+            return Err(DiffError::Other(format!(
+                "unexpected change @{} for table {} with minRowVersion {:?}: {}({})",
+                e.state_version, e.table, spec.min_row_version, e.op, e.row_key
+            )));
         }
 
         let row_key = parse_row_key(&e.row_key)?;
@@ -378,40 +369,17 @@ where
             )));
         }
 
-        // Stale-diff detection. A prev/curr snapshot that has advanced past its
-        // pinned version is RECOVERABLE staleness (the replica is intact; the
-        // diff simply cannot be computed against a moved snapshot) — NOT
-        // corruption. Rehydrating at head fully recovers, exactly as for the
-        // schema-change / truncation / permissions-change resets above/below.
-        // So surface a ResetPipelinesSignal (self-heal → rehydrate) rather than
-        // a fatal InvalidDiff that tears down the client connection.
-        //
-        // DIVERGENCE FROM TS (deliberate, flagged): TS throws InvalidDiffError
-        // here → the view-syncer's outer catch tears down the connection. TS
-        // never REACHES this in practice — its snapshotter reuses two
-        // persistent connections via resetToHead, so their wal2 read-marks are
-        // held continuously and the prev snapshot never slips. rust's
-        // fresh-connection-per-advance (adopted to avoid the malformed torn
-        // read, snapshotter.rs:174-182) lets the prev snapshot slip under
-        // reconnect/lifecycle churn — a rust-only condition. Treating it as a
-        // reset matches how every OTHER recoverable snapshot-move is handled
-        // and converts client teardowns (→ reconnect-churn cascade + latency)
-        // into self-healing rehydrates. Validated: lifecycle-churn load drove
-        // 64 such teardowns; TS drove 0. (Reducing the slip RATE — read-pool
-        // frame-pin + fresh-connection isolation — is a separate follow-up.)
-        if let Err(stale) = check_valid(
+        // Match TS exactly: consuming a diff after either snapshot has moved is
+        // an InvalidDiffError, not a recoverable pipeline-reset signal.
+        check_valid(
             &e.state_version,
             &e.op,
             &prev_values,
             next_raw.as_ref(),
             &diff.prev_version,
             &diff.curr_version,
-        ) {
-            return Err(DiffError::Reset(ResetPipelinesSignal {
-                reason: REASON_STALE_SNAPSHOT,
-                msg: stale.msg,
-            }));
-        }
+        )
+        .map_err(DiffError::InvalidDiff)?;
 
         // No-op filter: delete of a row absent in prev.
         if prev_values.is_empty() && next_raw.is_none() {

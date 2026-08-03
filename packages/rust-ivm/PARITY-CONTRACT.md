@@ -47,7 +47,7 @@ are never normalized.
 | `totalHydrationTimeMs()`                             | Semantically equivalent                  | Sum only successful active-query hydration durations; replace on re-add; delete on remove; clear on reset. Values are finite, nonnegative, and positive zero for an empty set. Wall-clock values need not be numerically equal. |
 | cooperative scheduling latency                       | Semantically equivalent                  | Yield/callback scheduling may take different wall time, but recorded `yield` positions remain part of the exact stream trace while the API exposes them.                                                                        |
 | planner choice                                       | Semantically equivalent                  | Plans and internal tree shapes may differ; public rows, ordering, changes, versions, state, and errors may not.                                                                                                                 |
-| stale pinned Rust snapshot                           | Intentional divergence                   | Rust may emit `stale-snapshot`, a Rust-only recoverable reset required by its connection model. The test must prove no output/CVR state is committed and rehydration matches TS at the new valid snapshot.                      |
+| stale/invalid snapshot diff                         | Must match exactly                       | Propagate `InvalidDiffError` like TS. Do not convert it into a Rust-only reset reason or silently retry against a different snapshot.                                                                                         |
 
 ## No Accepted Waivers
 

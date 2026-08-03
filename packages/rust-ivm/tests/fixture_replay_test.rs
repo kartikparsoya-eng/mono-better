@@ -3,13 +3,28 @@
 // (after canonicalization). A mismatch = Rust-vs-TS divergence; never "fix"
 // by editing the fixture or the expected file.
 //
-// fixtures/regressions/ is deliberately NOT scanned here: those are pending
-// divergences owned by divergence-fix tasks; once fixed, the pair is promoted
-// into fixtures/ and becomes a permanent regression test.
-
 use rust_ivm::replay::{assert_matches, run_fixture_file};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+fn collect_inputs(dir: &Path, inputs: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).expect("read fixtures dir") {
+        let path = entry.expect("read fixture entry").path();
+        if path.is_dir() {
+            // Advance fixtures use a driver-level schema and are covered by
+            // advance_fixture_replay_test through the real NAPI addon.
+            if path.file_name().is_some_and(|name| name == "advance") {
+                continue;
+            }
+            collect_inputs(&path, inputs);
+        } else if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".input.json"))
+        {
+            inputs.push(path);
+        }
+    }
+}
 
 #[test]
 fn fixture_replay() {
@@ -18,15 +33,8 @@ fn fixture_replay() {
         eprintln!("fixture_replay: no fixtures dir at {}", dir.display());
         return;
     }
-    let mut inputs: Vec<PathBuf> = fs::read_dir(&dir)
-        .expect("read fixtures dir")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().ends_with(".input.json"))
-                .unwrap_or(false)
-        })
-        .collect();
+    let mut inputs = Vec::new();
+    collect_inputs(&dir, &mut inputs);
     inputs.sort();
 
     let mut failures: Vec<String> = Vec::new();

@@ -1,4 +1,5 @@
 import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
+import {createRequire} from 'node:module';
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
@@ -24,14 +25,18 @@ import {populateFromExistingTables} from '../replicator/schema/column-metadata.t
 import {initReplicationState} from '../replicator/schema/replication-state.ts';
 import {RustIVMDriver} from './rust-ivm-driver.ts';
 
-// Tests for the #planAst feature: verifies the driver runs completeOrdering +
-// planQuery (cost-model planner) before sending the AST to the Rust engine.
-//
-// The key assertion is that the stored transformedAst (accessible via queries())
-// has flip:true on correlated subqueries when the cost model determines
-// flipping is cheaper, and flip:undefined when the planner is disabled.
+// Tests for the native cost-model planner and its driver boundary. Physical
+// flip decisions must affect the engine plan without leaking through the public
+// queries() metadata, matching PipelineDriver.
 
 const ADDON_PATH = process.env['RUST_IVM_ADDON_PATH'];
+const require = createRequire(import.meta.url);
+
+type NativePlannerEngine = {
+  initSnapshotter(dbPath: string, appID: string): void;
+  planAst(astJSON: string): string;
+  destroy(): Promise<void>;
+};
 
 describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
   const shardID: ShardID = {appID: 'zeroz', shardNum: 1};
@@ -41,11 +46,8 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
   let lc: LogContext;
   let logSink: TestLogSink;
 
-  // The Rust planner is gated behind BOTH enablePlanner (constructor arg) AND
-  // RUST_IVM_PLANNER=1 (a dark-ship opt-in kept until validated in ART). The
-  // enablePlanner=true tests exercise the real planned path, so set the env here
-  // (restored in afterEach). enablePlanner=false stays correct — #planEnabled
-  // also requires enablePlanner===true, so flip is still undefined there.
+  // The planner must match PipelineDriver and depend only on enablePlanner.
+  // Keep the former dark-ship env explicitly disabled to guard that contract.
   let priorPlannerEnv: string | undefined;
   beforeEach(() => {
     logSink = new TestLogSink();
@@ -53,7 +55,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     dbFile = new DbFile('rust_ivm_planner_test');
     dbFile.connect(lc).pragma('journal_mode = wal2');
     priorPlannerEnv = process.env['RUST_IVM_PLANNER'];
-    process.env['RUST_IVM_PLANNER'] = '1';
+    process.env['RUST_IVM_PLANNER'] = '0';
   });
 
   afterEach(() => {
@@ -220,15 +222,30 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     return driver.queries().get('q1')?.transformedAst;
   }
 
-  test('enablePlanner=true: planAst sets flip flag (true or false)', async () => {
+  async function nativeFlips(ast: AST): Promise<(boolean | null)[]> {
+    const {RustIvmEngine} = require(ADDON_PATH!) as {
+      RustIvmEngine: new () => NativePlannerEngine;
+    };
+    const engine = new RustIvmEngine();
+    try {
+      engine.initSnapshotter(dbFile.path, shardID.appID);
+      return JSON.parse(engine.planAst(JSON.stringify(ast))) as (
+        | boolean
+        | null
+      )[];
+    } finally {
+      await engine.destroy();
+    }
+  }
+
+  test('enablePlanner=true: physical plan stays out of public query metadata', async () => {
     const driver = setupDriver(true);
     const ast = await drainAddQuery(driver, ISSUES_WITH_EXISTS);
 
     expect(ast).toBeDefined();
     expect(ast!.where).toBeDefined();
     expect(ast!.where!.type).toBe('correlatedSubquery');
-    // After planQuery, flip is always set (true or false), never undefined.
-    expect((ast!.where as any).flip).toBeDefined();
+    expect((ast!.where as any).flip).toBeUndefined();
   });
 
   test('enablePlanner=false: planAst does NOT add flip', async () => {
@@ -242,25 +259,16 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
     expect((ast!.where as any).flip).toBeUndefined();
   });
 
-  test('enablePlanner=true: cost model flips when inner table is small', async () => {
-    const driver = setupDriver(true);
-    const ast = await drainAddQuery(driver, ISSUES_WITH_EXISTS);
-
-    expect(ast).toBeDefined();
+  test('native cost model flips when inner table is small', async () => {
+    setupDriver(true);
     // With 200 issues and 5 comments + ANALYZE, the cost model should
     // estimate flipping (scan 5 comments, lookup issues by PK) is cheaper.
-    expect((ast!.where as any).flip).toBe(true);
+    expect(await nativeFlips(ISSUES_WITH_EXISTS)).toEqual([true]);
   });
 
-  test('enablePlanner=true: OR + flipped subquery gets flip:true', async () => {
-    const driver = setupDriver(true);
-    const ast = await drainAddQuery(driver, ISSUES_WITH_OR_EXISTS);
-
-    expect(ast).toBeDefined();
-    expect(ast!.where!.type).toBe('or');
-    const csq = (ast!.where as any).conditions[1];
-    expect(csq.type).toBe('correlatedSubquery');
-    expect(csq.flip).toBe(true);
+  test('native cost model plans OR correlated subquery', async () => {
+    setupDriver(true);
+    expect(await nativeFlips(ISSUES_WITH_OR_EXISTS)).toEqual([true]);
   });
 
   test('enablePlanner=true: planning failure falls back gracefully', async () => {

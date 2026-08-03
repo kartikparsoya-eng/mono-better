@@ -25,6 +25,7 @@ import {populateFromExistingTables} from '../replicator/schema/column-metadata.t
 import {initReplicationState} from '../replicator/schema/replication-state.ts';
 import {canonicalValue, errorTrace} from './driver-parity-trace.ts';
 import {PipelineDriver} from './pipeline-driver.ts';
+import {drain} from './rust-ivm-differential-harness.ts';
 import {RustIVMDriver} from './rust-ivm-driver.ts';
 import {Snapshotter} from './snapshotter.ts';
 
@@ -132,6 +133,55 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver getRow', () => {
 
   const NO_TIMER = {elapsedLap: () => 0, totalElapsed: () => 0} as any;
 
+  const astForID = (id: string) =>
+    ({
+      table: 'widgets',
+      orderBy: [['id', 'asc']],
+      where: {
+        type: 'simple',
+        op: '=',
+        left: {type: 'column', name: 'id'},
+        right: {type: 'literal', value: id},
+      },
+    }) as any;
+
+  async function observeHydrate(
+    driver: RustIVMDriver | PipelineDriver,
+    id: string,
+  ) {
+    try {
+      return {
+        status: 'ok',
+        value: canonicalValue(
+          await drain(
+            driver.addQuery(`hydrate-${id}`, 'q', astForID(id), NO_TIMER),
+          ),
+        ),
+      } as const;
+    } catch (error) {
+      return {status: 'error', error: errorTrace(error)} as const;
+    }
+  }
+
+  async function observeAdvance(driver: RustIVMDriver | PipelineDriver) {
+    try {
+      const result = await driver.advance(NO_TIMER);
+      if (result instanceof Error) {
+        return {status: 'reset', error: errorTrace(result)} as const;
+      }
+      return {
+        status: 'ok',
+        value: canonicalValue({
+          version: result.version,
+          numChanges: result.numChanges,
+          changes: await drain(result.changes),
+        }),
+      } as const;
+    } catch (error) {
+      return {status: 'error', error: errorTrace(error)} as const;
+    }
+  }
+
   test('getRow matches PipelineDriver (projection + fromSQLiteType)', async () => {
     const {rust, ts} = setup();
     // getRow requires the table's source to exist — add+drain a query first.
@@ -235,5 +285,100 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver getRow', () => {
     expect(rust.getRow('widgets', {id: 'bool-text'})).not.toHaveProperty(
       'unsynced_blob',
     );
+  });
+
+  test('hydration boundary matrix matches TS values and failure state', async () => {
+    const {rust, ts} = setup();
+    try {
+      for (const id of [
+        'nulls',
+        'bool-zero',
+        'bool-other',
+        'bool-real',
+        'bool-text-empty',
+        'bool-text',
+        'bool-blob',
+      ]) {
+        expect(
+          await observeHydrate(rust, id),
+          `hydrate boundary mismatch for ${id}`,
+        ).toEqual(await observeHydrate(ts, id));
+      }
+
+      for (const id of ['number-high', 'number-low', 'invalid-json']) {
+        const rustResult = await observeHydrate(rust, id);
+        const tsResult = await observeHydrate(ts, id);
+        expect(rustResult.status, `Rust must reject ${id}`).toBe('error');
+        expect(tsResult.status, `TS must reject ${id}`).toBe('error');
+        expect(rust.queries().has('q')).toBe(false);
+        expect(ts.queries().has('q')).toBe(false);
+        expect(rust.rowSetSignature('q')).toBeUndefined();
+        expect(ts.rowSetSignature('q')).toBeUndefined();
+      }
+    } finally {
+      await rust.destroy();
+      ts.destroy();
+    }
+  });
+
+  test('advance converts edited boundary values identically', async () => {
+    const {rust, ts} = setup();
+    try {
+      expect(await observeHydrate(rust, 'w1')).toEqual(
+        await observeHydrate(ts, 'w1'),
+      );
+
+      const version = '8500000001';
+      db.exec(/*sql*/ `
+        UPDATE widgets SET
+          active = 2,
+          count = 9007199254740991,
+          payload = json_object('array', json_array(1, 'two', NULL)),
+          label = char(0) || 'advance-हैलो-世界',
+          _0_version = '${version}'
+        WHERE id = 'w1';
+        INSERT INTO "_zero.changeLog2" VALUES
+          ('${version}', 0, 'widgets', json('{"id":"w1"}'), 's', '{}');
+        UPDATE "_zero.replicationState" SET stateVersion = '${version}';
+      `);
+
+      expect(await observeAdvance(rust)).toEqual(await observeAdvance(ts));
+      expect(rust.getRow('widgets', {id: 'w1'})).toEqual(
+        ts.getRow('widgets', {id: 'w1'}),
+      );
+    } finally {
+      await rust.destroy();
+      ts.destroy();
+    }
+  });
+
+  test('advance conversion failure rejects without partial query state', async () => {
+    const {rust, ts} = setup();
+    try {
+      expect(await observeHydrate(rust, 'w1')).toEqual(
+        await observeHydrate(ts, 'w1'),
+      );
+      const beforeSignature = rust.rowSetSignature('q');
+      expect(beforeSignature).toBe(ts.rowSetSignature('q'));
+
+      const version = '8500000002';
+      db.exec(/*sql*/ `
+        UPDATE widgets SET payload = '{bad', _0_version = '${version}'
+        WHERE id = 'w1';
+        INSERT INTO "_zero.changeLog2" VALUES
+          ('${version}', 0, 'widgets', json('{"id":"w1"}'), 's', '{}');
+        UPDATE "_zero.replicationState" SET stateVersion = '${version}';
+      `);
+
+      expect((await observeAdvance(rust)).status).toBe('error');
+      expect((await observeAdvance(ts)).status).toBe('error');
+      expect(rust.queries().has('q')).toBe(ts.queries().has('q'));
+      expect(rust.rowSetSignature('q')).toBe(beforeSignature);
+      expect(ts.rowSetSignature('q')).toBe(beforeSignature);
+      expect(rust.currentVersion()).toBe(ts.currentVersion());
+    } finally {
+      await rust.destroy();
+      ts.destroy();
+    }
   });
 });

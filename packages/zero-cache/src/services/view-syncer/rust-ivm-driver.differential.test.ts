@@ -450,6 +450,9 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
         /*sql*/ `
         INSERT INTO issues VALUES ('i4','public','${V1}');
         DELETE FROM issues WHERE id = 'i2';
+        INSERT INTO "_zero.changeLog2" VALUES
+          ('${V1}', 0, 'issues', json('{"id":"i4"}'), 's', '{}'),
+          ('${V1}', 1, 'issues', json('{"id":"i2"}'), 'd', '{}');
       `,
       );
 
@@ -458,6 +461,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
 
       expect(r.reset, 'reset agreement').toBe(t.reset);
       if (!r.reset) {
+        expect(r.changes.length).toBeGreaterThan(0);
         expectSameChanges(r.changes, t.changes, 'advance-insert-delete');
       }
       expect(rust.rowSetSignature('q'), 'post-advance rowSetSignature').toBe(
@@ -487,6 +491,9 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
         /*sql*/ `
         INSERT INTO messages VALUES ('row-4','m-400','d','${V1}');
         DELETE FROM messages WHERE id = 'row-2';
+        INSERT INTO "_zero.changeLog2" VALUES
+          ('${V1}', 0, 'messages', json('{"id":"row-4"}'), 's', '{}'),
+          ('${V1}', 1, 'messages', json('{"id":"row-2"}'), 'd', '{}');
       `,
       );
 
@@ -495,6 +502,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
 
       expect(r.reset).toBe(t.reset);
       if (!r.reset) {
+        expect(r.changes.length).toBeGreaterThan(0);
         expectSameChanges(r.changes, t.changes, 'advance-pk-divergence');
         // Every emitted rowKey must be a messageId, never an id.
         for (const c of r.changes) {
@@ -536,6 +544,9 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
         /*sql*/ `
         INSERT INTO messages VALUES ('row-4','m-400','d','${V1}');
         DELETE FROM messages WHERE id = 'row-2';
+        INSERT INTO "_zero.changeLog2" VALUES
+          ('${V1}', 0, 'messages', json('{"id":"row-4"}'), 's', '{}'),
+          ('${V1}', 1, 'messages', json('{"id":"row-2"}'), 'd', '{}');
       `,
       );
       await rustTrace.advance(NO_TIMER);
@@ -554,6 +565,32 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
         'messages-v2',
       );
       await tsTrace.addQuery('transform-v2', 'q', ast, NO_TIMER, 'messages-v2');
+
+      // Adding the same query ID is a replacement, including its metadata,
+      // row-set signature, native pipeline, and hydration-time contribution.
+      await rustTrace.addQuery(
+        'transform-v3',
+        'q',
+        ast,
+        NO_TIMER,
+        'messages-v3',
+      );
+      await tsTrace.addQuery('transform-v3', 'q', ast, NO_TIMER, 'messages-v3');
+
+      await rustTrace.reset(messagesCS);
+      await tsTrace.reset(messagesCS);
+      expect(rustTrace.hydrationTimeMs()).toBe(0);
+      expect(tsTrace.hydrationTimeMs()).toBe(0);
+      expect(Object.is(rustTrace.hydrationTimeMs(), -0)).toBe(false);
+
+      await rustTrace.addQuery(
+        'transform-v4',
+        'q',
+        ast,
+        NO_TIMER,
+        'after-reset',
+      );
+      await tsTrace.addQuery('transform-v4', 'q', ast, NO_TIMER, 'after-reset');
       await rustTrace.removeQuery('q');
       await tsTrace.removeQuery('q');
 

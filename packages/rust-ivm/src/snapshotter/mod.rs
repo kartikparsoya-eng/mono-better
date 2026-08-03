@@ -16,7 +16,6 @@
 //! "changes in (prev, curr]" is deterministic regardless of who reads or when.
 
 pub mod diff;
-pub mod read_pool;
 #[allow(clippy::module_inception)]
 pub mod snapshotter;
 pub mod spec;

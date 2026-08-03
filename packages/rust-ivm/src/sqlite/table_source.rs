@@ -11,6 +11,7 @@
 //! - Values are converted between IVM types and SQLite types
 
 use std::cell::{Ref, RefCell};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::HashMap;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
@@ -25,9 +26,11 @@ use crate::builder::ast::Condition;
 use crate::ivm::change::{
     Change, SourceChange, make_add_change, make_edit_change, make_remove_change,
 };
-use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
+use crate::ivm::data::{
+    Comparator, Node, Row, SortOrder, Value, compare_values, make_comparator, values_equal,
+};
 use crate::ivm::filter_push::filter_push;
-use crate::ivm::operator::{FetchRequest, Input, InputBase, OutputHandle, Shared};
+use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, OutputHandle, Shared, Start};
 use crate::ivm::schema::{ColumnType, SourceSchema, System};
 use crate::ivm::source::Source;
 use crate::ivm::stream::NodeStream;
@@ -48,13 +51,14 @@ use crate::sqlite::query_builder::{SqlParam, SqlQuery, build_select_query};
 /// - `_guard` holds an active immutable `RefCell` borrow for the struct's
 ///   lifetime, preventing mutation or destruction of the connection.
 /// - `stmt` is boxed and pinned, so its address never changes.
-/// - Fields are dropped in reverse declaration order (`rows`, `stmt`, `_guard`,
-///   `_conn`), respecting the dependency chain.
+/// - Rust drops struct fields in declaration order. The dependent fields are
+///   therefore declared first: `rows`, then `_stmt`, then `_guard`, then the
+///   owning `_conn`. This order is part of the safety contract.
 struct LazyRows {
-    _conn: Rc<RefCell<Connection>>,
-    _guard: Ref<'static, Connection>,
-    _stmt: Pin<Box<rusqlite::Statement<'static>>>,
     rows: Option<rusqlite::Rows<'static>>,
+    _stmt: Pin<Box<rusqlite::Statement<'static>>>,
+    _guard: Ref<'static, Connection>,
+    _conn: Rc<RefCell<Connection>>,
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
     table_name: String,
@@ -94,10 +98,10 @@ impl LazyRows {
         let rows_static: rusqlite::Rows<'static> = unsafe { std::mem::transmute(rows) };
 
         Ok(Box::pin(LazyRows {
-            _conn: conn,
-            _guard: guard_static,
-            _stmt: stmt_pin,
             rows: Some(rows_static),
+            _stmt: stmt_pin,
+            _guard: guard_static,
+            _conn: conn,
             column_names,
             columns,
             table_name,
@@ -219,6 +223,14 @@ fn stream_query(
     ) {
         Ok(lazy) => lazy,
         Err(e) => {
+            if matches!(classify_row_error(&e), RowErr::Interrupt) {
+                // An out-of-band interrupt can race any SQLite phase. Treat it
+                // as the same clean cancellation whether it lands in prepare,
+                // bind/query setup, or rows.next(). The previous phase-specific
+                // handling made cancellation nondeterministically panic when
+                // the interrupt arrived just before the first step.
+                return Box::new(std::iter::empty());
+            }
             // Propagate, never swallow. A prepare/bind failure (schema drift,
             // missing column, malformed SQL) must NOT masquerade as an empty
             // result — that silently corrupts hydration/removals. Panic here is
@@ -324,6 +336,7 @@ pub struct TableConnection {
 
 /// Shared overlay — accessible by both TableSource (writer) and TableSourceInput (reader)
 type SharedOverlay = Rc<RefCell<Option<(usize, SourceChange)>>>;
+type SharedSnapshotDb = Rc<RefCell<Rc<RefCell<Connection>>>>;
 
 /// RAII guard that clears the overlay on drop, even if a panic occurs.
 struct OverlayGuard(SharedOverlay);
@@ -341,14 +354,14 @@ pub struct TableSource {
     column_names: Vec<String>,
     primary_key: Vec<String>,
     primary_index_sort: SortOrder,
-    db: Rc<RefCell<Connection>>,
+    db: SharedSnapshotDb,
     connections: Vec<Shared<TableConnection>>,
     overlay: SharedOverlay,
+    /// Changes already pushed during the current advance. TS persists these
+    /// into its private PREV transaction; Rust layers them over the read-only
+    /// PREV snapshot on every fetch and clears them when the snapshot changes.
+    applied_changes: Rc<RefCell<Vec<SourceChange>>>,
     push_epoch: usize,
-    /// Frame-pinned parallel-read pool (read-level parallelism). Shared with
-    /// every `TableSourceInput` this source connects. `None` until set by the
-    /// engine at cold hydrate. See DESIGN-read-parallelism.md.
-    read_pool: Option<std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>>,
 }
 
 impl TableSource {
@@ -372,11 +385,11 @@ impl TableSource {
             column_names,
             primary_key: primary_key.clone(),
             primary_index_sort,
-            db,
+            db: Rc::new(RefCell::new(db)),
             connections: Vec::new(),
             overlay: Rc::new(RefCell::new(None)),
+            applied_changes: Rc::new(RefCell::new(Vec::new())),
             push_epoch: 0,
-            read_pool: None,
         }
     }
 
@@ -391,7 +404,8 @@ impl TableSource {
     /// Set the SQLite connection (for Snapshotter leapfrog).
     /// Port of TS `setDB` (table-source.ts:103).
     pub fn set_db(&mut self, db: Rc<RefCell<Connection>>) {
-        self.db = db;
+        *self.db.borrow_mut() = db;
+        self.applied_changes.borrow_mut().clear();
     }
 
     /// Connect a new downstream consumer.
@@ -443,10 +457,9 @@ impl TableSource {
             columns,
             conn: conn.clone(),
             schema,
-            primary_key: self.primary_key.clone(),
             filter_condition: filter_condition.clone(),
             overlay: self.overlay.clone(),
-            read_pool: self.read_pool.clone(),
+            applied_changes: self.applied_changes.clone(),
         }));
 
         self.connections.push(conn.clone());
@@ -481,7 +494,7 @@ impl TableSource {
                 // already-valid edit; push them WITHOUT re-validating. TS gets
                 // away with validating each piece because its writeChange
                 // mutates the db between Remove and Add (so exists() reflects
-                // the removal); our snapshot connection is READ-ONLY, so a
+                // the removal); our pinned snapshot transaction is not mutated, so a
                 // re-validate of the Add would spuriously see the same-PK row
                 // still present. Skipping validate here is the equivalent net
                 // effect (the assert would pass in TS's writable-db world).
@@ -534,6 +547,7 @@ impl TableSource {
                 self.table_name, e
             );
         }
+        self.applied_changes.borrow_mut().push(change);
 
         // Overlay cleared by _overlay_guard Drop
 
@@ -541,7 +555,8 @@ impl TableSource {
     }
 
     fn validate_change(&self, change: &SourceChange) {
-        let db = self.db.borrow();
+        let snapshot_db = self.db.borrow();
+        let db = snapshot_db.borrow();
         match change {
             SourceChange::Add { row } => {
                 if self.check_exists(&db, row) {
@@ -612,7 +627,8 @@ impl TableSource {
     }
 
     fn _write_change_unused(&self, change: &SourceChange) -> Result<(), rusqlite::Error> {
-        let mut db = self.db.borrow_mut();
+        let snapshot_db = self.db.borrow().clone();
+        let mut db = snapshot_db.borrow_mut();
         let tx = db.transaction()?;
 
         match change {
@@ -796,8 +812,14 @@ impl TableSource {
             }
         };
 
+        let mut overlay_changes =
+            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns);
+        if let Some(change) = overlay_change {
+            overlay_changes.push(change);
+        }
+
         let stream = stream_query(
-            self.db.clone(),
+            self.db.borrow().clone(),
             query,
             self.column_names.clone(),
             self.columns.clone(),
@@ -805,11 +827,16 @@ impl TableSource {
             conn.filter_predicate.clone(),
         );
 
-        crate::ivm::source::apply_source_overlay(
+        crate::ivm::source::apply_source_overlays(
             stream,
-            overlay_change,
+            overlay_changes,
             conn.compare_rows.clone(),
-            crate::ivm::source::compute_index_compare(conn.sort.as_ref(), req, &self.primary_key),
+            // TS TableSource passes the connection/query comparator to
+            // generateWithOverlay (zqlite/src/table-source.ts #fetch). The
+            // constraint-first index comparator belongs to MemorySource's
+            // internal indexes and changes start/limit replacement behavior
+            // when used at this SQLite boundary.
+            conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
         )
@@ -818,16 +845,15 @@ impl TableSource {
 
 /// TableSourceInput — implements the Input trait for a TableSource connection.
 pub struct TableSourceInput {
-    db: Rc<RefCell<Connection>>,
+    db: SharedSnapshotDb,
     table_name: String,
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
     conn: Shared<TableConnection>,
     schema: SourceSchema,
-    primary_key: Vec<String>,
     filter_condition: Option<Condition>,
     overlay: SharedOverlay,
-    read_pool: Option<std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>>,
+    applied_changes: Rc<RefCell<Vec<SourceChange>>>,
 }
 
 impl InputBase for TableSourceInput {
@@ -874,8 +900,14 @@ impl Input for TableSourceInput {
             }
         };
 
+        let mut overlay_changes =
+            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns);
+        if let Some(change) = overlay_change {
+            overlay_changes.push(change);
+        }
+
         let stream = stream_query(
-            self.db.clone(),
+            self.db.borrow().clone(),
             query,
             self.column_names.clone(),
             self.columns.clone(),
@@ -883,209 +915,118 @@ impl Input for TableSourceInput {
             conn.filter_predicate.clone(),
         );
 
-        crate::ivm::source::apply_source_overlay(
+        crate::ivm::source::apply_source_overlays(
             stream,
-            overlay_change,
+            overlay_changes,
             conn.compare_rows.clone(),
-            crate::ivm::source::compute_index_compare(conn.sort.as_ref(), req, &self.primary_key),
+            // See TableSource::fetch: production TS uses the query comparator
+            // for both splice ordering and overlaysForStartAt.
+            conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
         )
     }
+}
 
-    /// Read-level parallelism: run one single-constraint SELECT per constraint
-    /// across the frame-pinned pool, returning `Vec<Node>` per constraint in
-    /// input order. Byte-identical to `fetch(constraint=c)` for each `c` on the
-    /// hydrate path: the SQL (incl. ORDER BY + filter_condition) is built the
-    /// same way, rows are mapped identically, `filter_predicate` is applied, and
-    /// (overlay is `None` during hydrate, so `apply_source_overlay` is a
-    /// pass-through — we assert that and bail otherwise).
-    ///
-    /// Returns `None` (→ serial) when: no pool, pool not pinned at the read
-    /// frame, or a push overlay is in flight (not the hydrate path).
-    fn supports_parallel_leaf(&self) -> bool {
-        self.read_pool
-            .as_ref()
-            .and_then(|p| p.pinned_version())
-            .is_some()
-            && self.overlay.borrow().is_none()
-    }
+fn applied_changes_for_request(
+    changes: &[SourceChange],
+    req: &FetchRequest,
+    order: &[(String, String)],
+    columns: &HashMap<String, ColumnType>,
+) -> Vec<SourceChange> {
+    let Some(start) = &req.start else {
+        return changes.to_vec();
+    };
 
-    fn parallel_leaf_fetch(
-        &self,
-        constraints: &[crate::ivm::constraint::Constraint],
-    ) -> Option<Vec<Vec<Node>>> {
-        let pool = self.read_pool.as_ref()?;
-        let version = pool.pinned_version()?;
-        // Hydrate-only: never parallelize while a push overlay is live (the
-        // serial path folds the overlay in; we must not diverge).
-        if self.overlay.borrow().is_some() {
-            return None;
-        }
-        if constraints.is_empty() {
-            return Some(Vec::new());
-        }
+    changes
+        .iter()
+        .filter_map(|change| match change {
+            SourceChange::Add { row } => {
+                sql_start_matches(row, start, req.reverse, order, columns).then(|| change.clone())
+            }
+            SourceChange::Remove { row } => {
+                sql_start_matches(row, start, req.reverse, order, columns).then(|| change.clone())
+            }
+            SourceChange::Edit { row, old_row } => {
+                let old_matches = sql_start_matches(old_row, start, req.reverse, order, columns);
+                let new_matches = sql_start_matches(row, start, req.reverse, order, columns);
+                match (old_matches, new_matches) {
+                    (true, true) => Some(change.clone()),
+                    (true, false) => Some(SourceChange::Remove {
+                        row: old_row.clone(),
+                    }),
+                    (false, true) => Some(SourceChange::Add { row: row.clone() }),
+                    (false, false) => None,
+                }
+            }
+        })
+        .collect()
+}
 
-        let (order, filter_predicate) = {
-            let conn = self.conn.borrow();
-            let order: Vec<(String, String)> = conn
-                .sort
-                .as_ref()
-                .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
-                .unwrap_or_default();
-            (order, conn.filter_predicate.clone())
+fn sql_start_matches(
+    row: &Row,
+    start: &Start,
+    reverse: bool,
+    order: &[(String, String)],
+    columns: &HashMap<String, ColumnType>,
+) -> bool {
+    let is_optional = |field: &str| {
+        matches!(
+            columns.get(field),
+            Some(ColumnType::Boolean { optional: true })
+                | Some(ColumnType::Number { optional: true })
+                | Some(ColumnType::String { optional: true })
+                | Some(ColumnType::Json { optional: true })
+        )
+    };
+    let range_matches = |field: &str, direction: &str| {
+        let row_value = row.get(field).cloned().unwrap_or(Value::Null);
+        let start_value = start.row.get(field).cloned().unwrap_or(Value::Null);
+        let greater = if direction == "asc" {
+            !reverse
+        } else {
+            reverse
         };
+        let optional = is_optional(field);
 
-        // One `Send` SELECT task per constraint (same SQL the serial fetch
-        // builds). Workers return `Vec<Row>` (Send) — `Node` and `filter_predicate`
-        // are `!Send`, so Node construction + the post-filter run on the actor.
-        let tasks: Vec<_> = constraints
+        if optional {
+            if greater && start_value.is_null() {
+                return true;
+            }
+            if !greater && row_value.is_null() {
+                return true;
+            }
+        }
+        if row_value.is_null() || start_value.is_null() {
+            return false;
+        }
+        let ordering = compare_values(&row_value, &start_value);
+        if greater {
+            ordering == CmpOrdering::Greater
+        } else {
+            ordering == CmpOrdering::Less
+        }
+    };
+    let equality_matches = |field: &str| {
+        let row_value = row.get(field).cloned().unwrap_or(Value::Null);
+        let start_value = start.row.get(field).cloned().unwrap_or(Value::Null);
+        let optional = is_optional(field);
+        if row_value.is_null() || start_value.is_null() {
+            return optional && row_value.is_null() && start_value.is_null();
+        }
+        compare_values(&row_value, &start_value) == CmpOrdering::Equal
+    };
+
+    for (index, (field, direction)) in order.iter().enumerate() {
+        if order[..index]
             .iter()
-            .map(|c| {
-                let req = FetchRequest {
-                    constraint: Some(c.clone()),
-                    ..Default::default()
-                };
-                let query = build_select_query(
-                    &self.table_name,
-                    &self.column_names,
-                    &self.columns,
-                    &req,
-                    self.filter_condition.as_ref(),
-                    Some(&order),
-                    false,
-                );
-                let col_names = self.column_names.clone();
-                let columns = self.columns.clone();
-                let table = self.table_name.clone();
-                move |conn: &Connection| -> Result<Vec<Row>, String> {
-                    let mut stmt = conn.prepare(&query.text).map_err(|e| e.to_string())?;
-                    let param_refs: Vec<&dyn rusqlite::ToSql> = query
-                        .params
-                        .iter()
-                        .map(|p| p as &dyn rusqlite::ToSql)
-                        .collect();
-                    let mut rows = stmt
-                        .query(params_from_iter(param_refs.iter().copied()))
-                        .map_err(|e| e.to_string())?;
-                    let mut out: Vec<Row> = Vec::new();
-                    while let Some(raw) = rows.next().map_err(|e| e.to_string())? {
-                        let mut map: FxHashMap<String, Value> = FxHashMap::default();
-                        for (i, col) in col_names.iter().enumerate() {
-                            let val = raw.get::<usize, rusqlite::types::Value>(i);
-                            map.insert(
-                                col.clone(),
-                                sqlite_value_to_ivm(val, columns.get(col), &table, col),
-                            );
-                        }
-                        out.push(Arc::new(map));
-                    }
-                    Ok(out)
-                }
-            })
-            .collect();
-
-        // Any pin/version failure → None → the caller keeps the serial path.
-        let per_constraint_rows: Vec<Vec<Row>> = pool.parallel_read(&version, tasks).ok()?;
-
-        // On the actor thread: apply `filter_predicate` (the same post-filter
-        // `stream_query` applies) and build leaf Nodes (empty relationships).
-        Some(
-            per_constraint_rows
-                .into_iter()
-                .map(|rows| {
-                    rows.into_iter()
-                        .filter(|r| filter_predicate.as_ref().is_none_or(|p| p(r)))
-                        .map(Node::new)
-                        .collect()
-                })
-                .collect(),
-        )
-    }
-
-    /// IN-list batching (prototype): ONE `... WHERE key IN (?, ?, ...)` over all
-    /// distinct constraints instead of N single-constraint SELECTs. Returns every
-    /// matching row FLAT in the source's ORDER BY (union of the N fetches); the
-    /// Join caller buckets rows back per parent. Same preconditions and row/filter
-    /// mapping as `parallel_leaf_fetch`.
-    fn batched_in_fetch(&self, constraints: &[crate::ivm::constraint::Constraint]) -> Option<Vec<Node>> {
-        let pool = self.read_pool.as_ref()?;
-        let version = pool.pinned_version()?;
-        if self.overlay.borrow().is_some() {
-            return None;
+            .all(|(prefix, _)| equality_matches(prefix))
+            && range_matches(field, direction)
+        {
+            return true;
         }
-        if constraints.is_empty() {
-            return Some(Vec::new());
-        }
-
-        let (order, filter_predicate) = {
-            let conn = self.conn.borrow();
-            let order: Vec<(String, String)> = conn
-                .sort
-                .as_ref()
-                .map(|s| s.iter().map(|p| (p[0].clone(), p[1].clone())).collect())
-                .unwrap_or_default();
-            (order, conn.filter_predicate.clone())
-        };
-
-        // Chunk the distinct constraints so one `key IN (?, ...)` stays within
-        // SQLITE_MAX_VARIABLE_NUMBER (and matches the FlippedJoin chunk tuning).
-        // Each chunk is a MultiConstraint → `build_select_query` emits
-        // `key IN (?, ...)` (compound: `(a,b) IN (VALUES ...)`). Chunks run in
-        // parallel across the pool; a parent's key lives in exactly ONE chunk, so
-        // per-parent child order (the ORDER BY) is preserved after flattening.
-        const IN_CHUNK: usize = 256;
-        let tasks: Vec<_> = constraints
-            .chunks(IN_CHUNK)
-            .map(|chunk| {
-                let mc: crate::ivm::constraint::MultiConstraint = chunk.to_vec();
-                let req = FetchRequest {
-                    multi_constraints: vec![mc],
-                    ..Default::default()
-                };
-                let query = build_select_query(
-                    &self.table_name,
-                    &self.column_names,
-                    &self.columns,
-                    &req,
-                    self.filter_condition.as_ref(),
-                    Some(&order),
-                    false,
-                );
-                let col_names = self.column_names.clone();
-                let columns = self.columns.clone();
-                let table = self.table_name.clone();
-                move |conn: &Connection| -> Result<Vec<Row>, String> {
-                    let mut stmt = conn.prepare(&query.text).map_err(|e| e.to_string())?;
-                    let param_refs: Vec<&dyn rusqlite::ToSql> =
-                        query.params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
-                    let mut rows = stmt
-                        .query(params_from_iter(param_refs.iter().copied()))
-                        .map_err(|e| e.to_string())?;
-                    let mut out: Vec<Row> = Vec::new();
-                    while let Some(raw) = rows.next().map_err(|e| e.to_string())? {
-                        let mut map: FxHashMap<String, Value> = FxHashMap::default();
-                        for (i, col) in col_names.iter().enumerate() {
-                            let val = raw.get::<usize, rusqlite::types::Value>(i);
-                            map.insert(col.clone(), sqlite_value_to_ivm(val, columns.get(col), &table, col));
-                        }
-                        out.push(Arc::new(map));
-                    }
-                    Ok(out)
-                }
-            })
-            .collect();
-
-        let per_chunk_rows: Vec<Vec<Row>> = pool.parallel_read(&version, tasks).ok()?;
-        Some(
-            per_chunk_rows
-                .into_iter()
-                .flatten()
-                .filter(|r| filter_predicate.as_ref().is_none_or(|p| p(r)))
-                .map(Node::new)
-                .collect(),
-        )
     }
+    start.basis == Basis::At && order.iter().all(|(field, _)| equality_matches(field))
 }
 
 impl Source for TableSource {
@@ -1119,23 +1060,12 @@ impl Source for TableSource {
         self.push(change)
     }
 
-    fn push_parallel(&mut self, change: SourceChange) -> Vec<Change> {
-        self.push(change)
-    }
-
     fn gen_push(&mut self, change: SourceChange) -> Vec<Change> {
         self.push(change)
     }
 
     fn get_row(&self, _pk: &[(String, Value)]) -> Option<Row> {
         None
-    }
-
-    fn set_read_pool(
-        &mut self,
-        pool: std::sync::Arc<crate::snapshotter::read_pool::FramePinnedPool>,
-    ) {
-        self.read_pool = Some(pool);
     }
 }
 
@@ -1182,7 +1112,10 @@ mod value_parity_tests {
     #[test]
     #[should_panic(expected = "Failed to parse JSON for t.c")]
     fn invalid_json_panics_like_ts() {
-        let _ = conv(Sv::Text("{not json".into()), Some(ColumnType::Json { optional: false }));
+        let _ = conv(
+            Sv::Text("{not json".into()),
+            Some(ColumnType::Json { optional: false }),
+        );
     }
 
     #[test]
@@ -1203,7 +1136,48 @@ mod value_parity_tests {
     fn number_string_passthrough() {
         assert_eq!(conv(Sv::Integer(42), None), Value::F64(42.0));
         assert_eq!(conv(Sv::Real(1.5), None), Value::F64(1.5));
-        assert_eq!(conv(Sv::Text("hi".into()), None), Value::Str(Arc::from("hi")));
+        assert_eq!(
+            conv(Sv::Text("hi".into()), None),
+            Value::Str(Arc::from("hi"))
+        );
+    }
+
+    #[test]
+    fn applied_change_obeys_ts_sql_null_start_semantics() {
+        let row = Arc::new(FxHashMap::from_iter([
+            ("c".to_string(), Value::Null),
+            ("id".to_string(), Value::Str("r35".into())),
+        ]));
+        let start = Start {
+            row: Arc::new(FxHashMap::from_iter([
+                ("c".to_string(), Value::Null),
+                ("id".to_string(), Value::Str("r23".into())),
+            ])),
+            basis: Basis::At,
+        };
+        let columns = HashMap::from([
+            ("c".to_string(), ColumnType::String { optional: false }),
+            ("id".to_string(), ColumnType::String { optional: false }),
+        ]);
+        let order = vec![
+            ("c".to_string(), "asc".to_string()),
+            ("id".to_string(), "asc".to_string()),
+        ];
+
+        assert!(!sql_start_matches(&row, &start, false, &order, &columns));
+        assert!(
+            applied_changes_for_request(
+                &[SourceChange::Add { row }],
+                &FetchRequest {
+                    start: Some(start),
+                    ..Default::default()
+                },
+                &order,
+                &columns,
+            )
+            .is_empty(),
+            "a prior write is read through SQL in TS and cannot bypass `> NULL` as an overlay",
+        );
     }
 }
 
@@ -1223,6 +1197,15 @@ mod advance_gate_fetch_tests {
         for i in 0..n {
             conn.execute("INSERT INTO t(id) VALUES (?1)", [i]).unwrap();
         }
+        Rc::new(RefCell::new(conn))
+    }
+
+    fn conn_with_value(value: i64) -> Rc<RefCell<Connection>> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY)")
+            .unwrap();
+        conn.execute("INSERT INTO t(id) VALUES (?1)", [value])
+            .unwrap();
         Rc::new(RefCell::new(conn))
     }
 
@@ -1256,6 +1239,37 @@ mod advance_gate_fetch_tests {
     }
 
     #[test]
+    fn existing_input_uses_replacement_snapshot_connection() {
+        let first = conn_with_value(1);
+        let first_weak = Rc::downgrade(&first);
+        let second = conn_with_value(2);
+        let columns = HashMap::from([("id".to_string(), ColumnType::Number { optional: false })]);
+        let mut source = TableSource::new(first, "t", columns, vec!["id".to_string()]);
+        let input = source.connect(None, None, None, None);
+
+        let fetch_id = || {
+            let rows: Vec<Row> =
+                crate::ivm::stream::skip_yields(input.borrow().fetch(&FetchRequest::default()))
+                    .map(|node| node.row)
+                    .collect();
+            assert_eq!(rows.len(), 1);
+            rows[0].get("id").cloned()
+        };
+
+        assert_eq!(fetch_id(), Some(Value::F64(1.0)));
+        source.set_db(second);
+        assert!(
+            first_weak.upgrade().is_none(),
+            "replacing the snapshot must release the obsolete SQLite connection and its WAL2 read mark",
+        );
+        assert_eq!(
+            fetch_id(),
+            Some(Value::F64(2.0)),
+            "pipeline inputs must follow TableSource::set_db like TS setDB; retaining the old Rc keeps stale WAL2 read marks alive",
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "prepare/bind error")]
     fn stream_query_prepare_failure_propagates_not_empty() {
         // Review finding #2: a prepare/bind failure (here a non-existent column,
@@ -1280,13 +1294,97 @@ mod advance_gate_fetch_tests {
     }
 
     #[test]
+    #[should_panic(expected = "prepare/bind error")]
+    fn stream_query_bind_failure_propagates_not_empty() {
+        let db = conn_with_rows(3);
+        let q = SqlQuery {
+            text: "SELECT id FROM t WHERE id = ?".to_string(),
+            params: vec![],
+        };
+        let _ = stream_query(
+            db,
+            q,
+            vec!["id".to_string()],
+            HashMap::new(),
+            "t".to_string(),
+            None,
+        )
+        .count();
+    }
+
+    #[test]
+    fn stream_query_busy_propagates_not_empty() {
+        let path = std::env::temp_dir().join(format!(
+            "rust-ivm-busy-{}-{:?}.db",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE; CREATE TABLE t(id INTEGER); INSERT INTO t VALUES (1);",
+            )
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.busy_timeout(Duration::ZERO).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let q = SqlQuery {
+                text: "SELECT id FROM t".to_string(),
+                params: vec![],
+            };
+            let _ = stream_query(
+                Rc::new(RefCell::new(reader)),
+                q,
+                vec!["id".to_string()],
+                HashMap::new(),
+                "t".to_string(),
+                None,
+            )
+            .count();
+        }));
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            result.is_err(),
+            "SQLITE_BUSY must propagate, not return empty"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "check_exists prepare error")]
+    fn check_exists_failure_propagates_not_false() {
+        let db = Rc::new(RefCell::new(Connection::open_in_memory().unwrap()));
+        let source = TableSource::new(
+            db.clone(),
+            "missing_table",
+            HashMap::from([("id".to_string(), ColumnType::Number { optional: false })]),
+            vec!["id".to_string()],
+        );
+        let mut values = FxHashMap::default();
+        values.insert("id".to_string(), Value::F64(1.0));
+        let row = Arc::new(values);
+        let conn = db.borrow();
+        let _ = source.check_exists(&conn, &row);
+    }
+
+    #[test]
     fn fetch_stops_when_gate_over_budget() {
         let db = conn_with_rows(300);
         let gate = past_gate(1000, 1.0); // 1s elapsed, 1ms budget → immediately over
         let _guard = crate::advance_gate::arm(gate.clone());
         let got = fetch_count(db);
-        assert!(got < 300, "expected the breaker to stop the fetch, got {got}/300");
-        assert!(gate.tripped(), "gate must latch tripped after stopping a fetch");
+        assert!(
+            got < 300,
+            "expected the breaker to stop the fetch, got {got}/300"
+        );
+        assert!(
+            gate.tripped(),
+            "gate must latch tripped after stopping a fetch"
+        );
         // _guard drops here → thread-local disarmed
     }
 

@@ -5,10 +5,6 @@
 //! incremental advances, tracks row-set signatures, and supports
 //! advance abort (economic circuit breaker).
 //!
-//! Parallel hydration via std::thread::scope (mirrors Go IVM goroutine model).
-
-pub mod worker;
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -55,7 +51,7 @@ pub struct QueryResult {
 }
 
 /// Per-query build products carried across the three hydrate phases (build,
-/// hydrate, register). Used by both the serial and parallel hydrate paths.
+/// hydrate, register).
 pub(crate) struct Built {
     pub query_id: String,
     pub transformed_ast: Ast,
@@ -71,7 +67,6 @@ pub(crate) struct Built {
 struct PipelineEntry {
     pipeline: Shared<dyn Input>,
     collector: Shared<CollectOutput>,
-    schema: SourceSchema,
     query_id: String,
     hydration_time_ms: f64,
     transformed_ast: Ast,
@@ -127,13 +122,13 @@ impl std::error::Error for ResetPipelinesSignal {}
 // scalar subquery is baked into the main query as a literal, and a live
 // companion pipeline watches the subquery table. If the resolved value
 // changes on advance, the whole query must reset+rehydrate (the baked literal
-// is stale) — TS throws ResetPipelinesSignal('scalar-subquery'); we raise
-// ScalarResetError, which the napi boundary maps to its own RPC code (a
-// RESET, not a teardown), unlike source/operator asserts.
+// is stale) — TS throws ResetPipelinesSignal('scalar-subquery'). Production
+// advance returns ScalarResetError explicitly and maps it to a reset; the
+// legacy in-memory advance API preserves its historical panic contract.
 // ---------------------------------------------------------------------------
 
-/// Raised (via `panic_any`) by a companion output when a resolved scalar
-/// subquery's value changes mid-advance. The twin of TS's
+/// Recorded by a companion output when a resolved scalar subquery's value
+/// changes mid-advance. The twin of TS's
 /// `ResetPipelinesSignal('scalar-subquery')`. Message mirrors the TS signal.
 #[derive(Debug, Clone)]
 pub struct ScalarResetError {
@@ -252,16 +247,17 @@ struct CompanionPipeline {
 }
 
 /// The monitoring output for a companion pipeline. On each push it recomputes
-/// the scalar value and raises `ScalarResetError` (via `panic_any`) if it
-/// differs from the resolved (baked) value; otherwise it collects the change
-/// so the advance loop can stream it under the owning query. Port of TS's
-/// companion `setOutput({push})` handler.
+/// the scalar value and records `ScalarResetError` if it differs from the
+/// resolved (baked) value; otherwise it collects the change so the advance loop
+/// can stream it under the owning query. Port of TS's companion
+/// `setOutput({push})` handler.
 pub struct CompanionOutput {
     table: String,
     child_field: String,
     resolved_value: Option<Value>,
     resolved_undefined: bool,
     changes: Vec<Change>,
+    reset: Option<ScalarResetError>,
 }
 
 impl Output for CompanionOutput {
@@ -289,11 +285,12 @@ impl Output for CompanionOutput {
             &self.resolved_value,
             self.resolved_undefined,
         ) {
-            std::panic::panic_any(ScalarResetError {
+            self.reset.get_or_insert_with(|| ScalarResetError {
                 table: self.table.clone(),
                 resolved: js_scalar_string(&self.resolved_value, self.resolved_undefined),
                 new: js_scalar_string(&new_value, new_undefined),
             });
+            return;
         }
         self.changes.push(change);
     }
@@ -413,11 +410,7 @@ impl Engine {
         // `Iterator::sum::<f64>()` uses negative zero for an empty iterator.
         // JavaScript observes that distinction through `Object.is`, while the
         // TS driver returns ordinary positive zero when no pipelines exist.
-        if total == 0.0 {
-            0.0
-        } else {
-            total
-        }
+        if total == 0.0 { 0.0 } else { total }
     }
 
     /// Remove a query's pipeline.
@@ -612,6 +605,7 @@ impl Engine {
                     resolved_value: cb.resolved_value,
                     resolved_undefined: cb.resolved_undefined,
                     changes: Vec::new(),
+                    reset: None,
                 }));
                 cb.input.borrow().set_output(output.clone() as OutputHandle);
                 live_companions.push(CompanionPipeline {
@@ -621,26 +615,20 @@ impl Engine {
                 });
             }
 
+            b.collector.borrow_mut().configure_streaming(
+                b.query_id.clone(),
+                b.schema.clone(),
+                self.primary_keys.clone(),
+                self.table_specs.clone(),
+            );
             self.pipelines.push(PipelineEntry {
                 pipeline: b.pipeline,
                 collector: b.collector,
-                schema: b.schema,
                 query_id: b.query_id,
                 hydration_time_ms,
                 transformed_ast: b.transformed_ast,
                 companions: live_companions,
             });
-        }
-
-        // Diagnostic: which Join child-fetch path fired this process (cumulative).
-        // Silent by default (per-hydrate stderr would be log spam); opt in with
-        // RUST_IVM_JOIN_DIAG=1 for the IN-batch investigation.
-        if std::env::var("RUST_IVM_JOIN_DIAG").is_ok() {
-            let (bl, inu, ind, lazy) = crate::ivm::join::join_path_counters();
-            eprintln!(
-                "[INBATCH-DIAG] join fetches: batched_leaf={} in_list_used={} in_list_distinct_keys={} lazy_n_plus_1={}",
-                bl, inu, ind, lazy
-            );
         }
 
         results
@@ -663,7 +651,6 @@ impl Engine {
             num_changes: changes.len(),
             pos: 0,
         };
-
         for (table, change) in changes {
             if advance_ctx.should_abort() || self.cancellation_token.is_cancelled() {
                 break;
@@ -672,26 +659,25 @@ impl Engine {
             if let Some(source) = self.sources.get(table) {
                 for entry in &self.pipelines {
                     clear_and_cap(&mut entry.collector.borrow_mut().changes);
+                    clear_and_cap(&mut entry.collector.borrow_mut().row_changes);
                     for c in &entry.companions {
-                        clear_and_cap(&mut c.output.borrow_mut().changes);
+                        let mut output = c.output.borrow_mut();
+                        clear_and_cap(&mut output.changes);
+                        output.reset = None;
                     }
                 }
 
-                // A scalar-subquery value change panics (ScalarResetError)
-                // inside a companion output during this push — propagating out
-                // of advance to the napi boundary as a reset.
-                let _pipeline_changes = source.borrow_mut().push_parallel(change.clone());
+                let _pipeline_changes = source.borrow_mut().push(change.clone());
+                // Preserve the legacy in-memory API contract. Production
+                // advance_to_head_stream returns this condition explicitly.
+                if let Some(reset) = take_scalar_reset(&self.pipelines) {
+                    std::panic::panic_any(reset);
+                }
 
                 for entry in &self.pipelines {
-                    let collected: Vec<Change> =
-                        std::mem::take(&mut entry.collector.borrow_mut().changes);
-                    if !collected.is_empty() {
-                        let mut streamer =
-                            Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
-                        streamer.accumulate(&entry.query_id, &entry.schema, &collected);
-                        for rc in streamer.stream() {
-                            on_row_change(&rc);
-                        }
+                    let row_changes = std::mem::take(&mut entry.collector.borrow_mut().row_changes);
+                    for rc in row_changes {
+                        on_row_change(&rc);
                     }
                     // Stream surviving companion changes (the resolved value was
                     // unchanged) under the owning query, like TS's companion
@@ -787,8 +773,11 @@ impl Engine {
         // rows, so a single fat change (e.g. a big correlated-EXISTS re-fetch) is
         // abandoned mid-fetch instead of grinding to the change boundary. The
         // per-change check below is the other arm. Disarmed on every exit path.
-        let advance_gate =
-            crate::advance_gate::AdvanceGate::new(advance_start, total_hydration_time_ms, num_changes);
+        let advance_gate = crate::advance_gate::AdvanceGate::new(
+            advance_start,
+            total_hydration_time_ms,
+            num_changes,
+        );
         // Guard disarms the thread-local on scope exit (incl. panic unwind).
         let _gate_guard = crate::advance_gate::arm(advance_gate.clone());
 
@@ -814,7 +803,6 @@ impl Engine {
             .iter()
             .map(|(t, s)| (t.clone(), s.borrow().column_types()))
             .collect();
-
         let result = crate::snapshotter::diff::iterate_diff(&diff, &prev_conn, &curr_conn, |sc| {
             let col_types = table_columns.get(&sc.table);
             // Publish current progress to the per-fetch gate so its budget check
@@ -885,7 +873,7 @@ impl Engine {
                     let change = crate::ivm::change::make_source_change_remove(
                         sqlite_value_to_row(prev_row, col_types),
                     );
-                    push_source_change(
+                    if let Some(reset) = push_source_change(
                         &self.sources,
                         &self.pipelines,
                         &sc.table,
@@ -893,7 +881,14 @@ impl Engine {
                         &self.primary_keys,
                         &self.table_specs,
                         &mut on_row_change,
-                    );
+                    ) {
+                        return Err(crate::snapshotter::DiffError::Reset(
+                            crate::snapshotter::ResetPipelinesSignal {
+                                reason: "scalar-subquery",
+                                msg: reset.to_string(),
+                            },
+                        ));
+                    }
                 }
             }
 
@@ -904,7 +899,7 @@ impl Engine {
                 } else {
                     crate::ivm::change::make_source_change_add(row)
                 };
-                push_source_change(
+                if let Some(reset) = push_source_change(
                     &self.sources,
                     &self.pipelines,
                     &sc.table,
@@ -912,7 +907,14 @@ impl Engine {
                     &self.primary_keys,
                     &self.table_specs,
                     &mut on_row_change,
-                );
+                ) {
+                    return Err(crate::snapshotter::DiffError::Reset(
+                        crate::snapshotter::ResetPipelinesSignal {
+                            reason: "scalar-subquery",
+                            msg: reset.to_string(),
+                        },
+                    ));
+                }
             }
 
             // Per-fetch arm: a fetch during this change's push blew the budget
@@ -959,21 +961,9 @@ impl Engine {
                 reset_reason: Some(sig.reason.to_string()),
                 reset_msg: Some(sig.msg),
             }),
-            // Genuine hard errors (DiffError::Other: corrupt get_rows, a SET
-            // whose row is missing in curr, a change for an unknown table)
-            // propagate → teardown, MATCHING TS (an unrecoverable error there
-            // also tears the connection down). These are NOT recoverable by a
-            // rehydrate, so they must NOT be smoothed into a reset.
-            //
-            // NOTE: the stale-snapshot case ("prev/curr db has advanced past")
-            // is NO LONGER routed here — diff.rs now surfaces it as
-            // DiffError::Reset(REASON_STALE_SNAPSHOT) (handled above), because
-            // it is RECOVERABLE staleness, not corruption. Under lifecycle/
-            // reconnect churn rust's fresh-connection-per-advance lets the prev
-            // snapshot slip (a rust-only condition TS never hits: 64 vs 0 in a
-            // differential load test); tearing the client down cascaded into
-            // reconnect churn + latency. Rehydrating self-heals with no data
-            // loss. See diff.rs check_valid for the full rationale.
+            // Hard errors, including InvalidDiff, propagate to teardown exactly
+            // as they do in PipelineDriver. They must not be smoothed into a
+            // recoverable reset.
             Err(e) => Err(e),
         }
     }
@@ -1246,30 +1236,37 @@ fn push_source_change(
     primary_keys: &HashMap<String, Vec<String>>,
     table_specs: &HashMap<String, crate::streamer::TableSpecInfo>,
     on_row_change: &mut impl FnMut(&RowChange),
-) {
+) -> Option<ScalarResetError> {
     if let Some(source) = sources.get(table) {
         // Clear collectors (and companion monitors) for this push.
         for entry in pipelines {
             entry.collector.borrow_mut().changes.clear();
+            entry.collector.borrow_mut().row_changes.clear();
             for c in &entry.companions {
-                c.output.borrow_mut().changes.clear();
+                let mut output = c.output.borrow_mut();
+                output.changes.clear();
+                output.reset = None;
             }
         }
 
-        // Push the change through the source's pipeline. A scalar-subquery
-        // value change panics (ScalarResetError) inside a companion output
-        // here, propagating out as a reset.
-        let _pipeline_changes = source.borrow_mut().push_parallel(change);
+        let _pipeline_changes = source.borrow_mut().push(change);
+        if let Some(reset) = take_scalar_reset(pipelines) {
+            // A reset invalidates every row produced by this push. Do not leak
+            // a partial change before the reset sentinel.
+            for entry in pipelines {
+                entry.collector.borrow_mut().row_changes.clear();
+                for c in &entry.companions {
+                    c.output.borrow_mut().changes.clear();
+                }
+            }
+            return Some(reset);
+        }
 
         // Collect and stream RowChanges from each pipeline.
         for entry in pipelines {
-            let collected: Vec<Change> = std::mem::take(&mut entry.collector.borrow_mut().changes);
-            if !collected.is_empty() {
-                let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
-                streamer.accumulate(&entry.query_id, &entry.schema, &collected);
-                for rc in streamer.stream() {
-                    on_row_change(&rc);
-                }
+            let row_changes = std::mem::take(&mut entry.collector.borrow_mut().row_changes);
+            for rc in row_changes {
+                on_row_change(&rc);
             }
             // Surviving companion changes (resolved value unchanged) stream
             // under the owning query, per TS companion accumulation.
@@ -1285,6 +1282,18 @@ fn push_source_change(
             }
         }
     }
+    None
+}
+
+fn take_scalar_reset(pipelines: &[PipelineEntry]) -> Option<ScalarResetError> {
+    for entry in pipelines {
+        for companion in &entry.companions {
+            if let Some(reset) = companion.output.borrow_mut().reset.take() {
+                return Some(reset);
+            }
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1323,5 +1332,49 @@ impl CancellationToken {
 impl Default for CancellationToken {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod scalar_reset_tests {
+    use super::*;
+    use crate::ivm::data::Node;
+
+    struct UnusedPusher;
+
+    impl InputBase for UnusedPusher {
+        fn get_schema(&self) -> SourceSchema {
+            panic!("schema is not used by CompanionOutput")
+        }
+
+        fn destroy(&mut self) {}
+    }
+
+    #[test]
+    fn companion_value_change_records_reset_without_unwinding() {
+        let mut output = CompanionOutput {
+            table: "users".to_string(),
+            child_field: "name".to_string(),
+            resolved_value: Some(Value::Str(Arc::from("Alice"))),
+            resolved_undefined: false,
+            changes: Vec::new(),
+            reset: None,
+        };
+        let row: Row = Arc::new(
+            [
+                ("id".to_string(), Value::Str(Arc::from("u1"))),
+                ("name".to_string(), Value::Str(Arc::from("Alicia"))),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        output.push(Change::Add(Node::new(row)), &UnusedPusher);
+
+        let reset = output.reset.expect("changed scalar must request a reset");
+        assert_eq!(reset.table, "users");
+        assert_eq!(reset.resolved, "Alice");
+        assert_eq!(reset.new, "Alicia");
+        assert!(output.changes.is_empty());
     }
 }

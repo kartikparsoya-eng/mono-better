@@ -23,8 +23,8 @@
 //!  - `interrupt_is_clean_stop_not_panic`: a cross-thread `.interrupt()` mid
 //!    drain stops the stream WITHOUT panicking (clean cancellation).
 
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -195,19 +195,19 @@ fn interrupt_is_clean_stop_not_panic() {
         }
     });
 
-    // Draining an interrupted scan must NOT panic — it is a clean cancellation
-    // that quietly stops the stream (partial or empty result is fine here; the
-    // real cancel path in the engine owns teardown).
+    // Exercise the race repeatedly. The interrupter can land during prepare,
+    // bind/query setup, or stepping; every phase must classify it as the same
+    // clean cancellation instead of occasionally panicking.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let inp = input.borrow();
-        let stream = inp.fetch(&FetchRequest::default());
-        let mut count = 0usize;
-        for item in stream {
-            if let StreamItem::Data(_) = item {
-                count += 1;
+        for _ in 0..32 {
+            let inp = input.borrow();
+            let stream = inp.fetch(&FetchRequest::default());
+            for item in stream {
+                if let StreamItem::Data(_) = item {
+                    // Keep pulling until SQLite observes an interrupt.
+                }
             }
         }
-        count
     }));
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);

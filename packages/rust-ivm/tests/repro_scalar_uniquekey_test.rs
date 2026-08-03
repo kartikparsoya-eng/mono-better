@@ -139,7 +139,7 @@ fn hydrate(path: &str, unique_keys_for_cp: Vec<Vec<String>>) -> (Vec<String>, us
     .into_iter()
     .collect();
 
-    let mut snap = Snapshotter::with_read_pool(path, "repro", None, 0, None);
+    let mut snap = Snapshotter::new(path, "repro", None);
     snap.init().unwrap();
     let curr = snap.current_conn().unwrap();
 

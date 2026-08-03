@@ -37,9 +37,7 @@ impl Database {
     /// Open a database at `path`.
     pub fn new(path: &str) -> Result<Self, DatabaseInitError> {
         let conn = Connection::open(path).map_err(|e| DatabaseInitError(e.to_string()))?;
-        // Seam 1: every connection-open goes through install_interrupt so the
-        // handle exists for cross-thread abort. Phase 1's worker pool reuses
-        // this chokepoint.
+        // Install a handle so an in-flight query can be cancelled out-of-band.
         let interrupt_handle = crate::sqlite::install_interrupt(&conn);
 
         // Match Postgres LIKE/ILIKE semantics: case-sensitive LIKE.

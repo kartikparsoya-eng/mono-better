@@ -51,7 +51,7 @@ they read head instead of prev.
    snapshot during advance, matching TS's invariant check.
 
 ## Validation
-- Differential fuzzers (serial, parallel-equiv, advance) and the 1775-fixture
+- Differential fuzzers (serial and advance) and the 1832-fixture
   replay suite stay green.
 - ART `--oracle --mutation-matrix` is the final gate: expect **0 source-drift**
   resets (parity with TS reference), G8 still ≤1 benign.

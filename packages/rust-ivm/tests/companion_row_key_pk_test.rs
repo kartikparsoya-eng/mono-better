@@ -141,7 +141,7 @@ fn build_engine(path: &str) -> Engine {
     .into_iter()
     .collect();
 
-    let mut snap = Snapshotter::with_read_pool(path, "companion", None, 0, None);
+    let mut snap = Snapshotter::new(path, "companion", None);
     snap.init().unwrap();
     let curr = snap.current_conn().unwrap();
 

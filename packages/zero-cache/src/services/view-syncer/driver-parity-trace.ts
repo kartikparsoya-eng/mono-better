@@ -297,19 +297,22 @@ export class DriverParityTrace {
     return events;
   }
 
-  async advance(timer: Timer): Promise<void> {
+  async advance(timer: Timer): Promise<StreamTraceEvent[] | undefined> {
+    let events: StreamTraceEvent[] | undefined;
     await this.#record('advance', {}, async () => {
       const result = await this.#driver.advance(timer);
       if (isReset(result)) {
         return {kind: 'reset', reset: errorTrace(result)};
       }
+      events = await streamTrace(result.changes);
       return {
         kind: 'changes',
         version: result.version,
         numChanges: result.numChanges,
-        events: await streamTrace(result.changes),
+        events,
       };
     });
+    return events;
   }
 
   async getRow(table: string, pk: RowKey): Promise<void> {

@@ -4,10 +4,11 @@
 # Build context: root of the mono-v1.7 repo (i.e. this directory).
 #
 # Multi-stage:
-#   1. Build WAL2 SQLite static library
+#   1. Build the WAL2 SQLite shared library used by every in-process client
 #   2. Build Litestream executables (rocicorp fork + v5)
 #   3. Build the Rust IVM NAPI addon
-#   4. Runtime — zero-cache from source via tsx + .node addon baked in
+#   4. Rebuild zero-sqlite3 against the same WAL2 shared library
+#   5. Runtime — zero-cache from source via tsx + both .node addons baked in
 #
 # Deployment-hardened checklist (learned from sandbox incidents):
 #   * Schema/protocol version matches target env (handled outside image).
@@ -19,27 +20,54 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: WAL2 SQLite static library
+# Stage 1: WAL2 SQLite shared library
 # ---------------------------------------------------------------------------
-FROM rust:1-slim-bookworm AS sqlite-builder
+FROM rust:1-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS sqlite-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY packages/rust-ivm/wal2-sqlite/ ./sqlite3/
 
-RUN gcc -O2 -ffp-contract=off -fPIC -c sqlite3/sqlite3.c -o /tmp/sqlite3.o \
+RUN gcc -O2 -ffp-contract=off -fPIC -shared sqlite3/sqlite3.c \
+        -Wl,-soname,libsqlite3.so.0 -o /usr/local/lib/libsqlite3.so.0 \
+        -DHAVE_INT16_T=1 -DHAVE_INT32_T=1 -DHAVE_INT8_T=1 \
+        -DHAVE_STDINT_H=1 -DHAVE_UINT16_T=1 -DHAVE_UINT32_T=1 \
+        -DHAVE_UINT8_T=1 -DHAVE_USLEEP=1 \
+        -DSQLITE_DEFAULT_CACHE_SIZE=-16000 \
+        -DSQLITE_DEFAULT_FOREIGN_KEYS=1 \
+        -DSQLITE_DEFAULT_MEMSTATUS=0 \
+        -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
+        -DSQLITE_DQS=0 \
         -DSQLITE_THREADSAFE=2 \
+        -DSQLITE_ENABLE_COLUMN_METADATA \
+        -DSQLITE_ENABLE_DBSTAT_VTAB \
+        -DSQLITE_ENABLE_DESERIALIZE \
+        -DSQLITE_ENABLE_FTS3 \
+        -DSQLITE_ENABLE_FTS3_PARENTHESIS \
+        -DSQLITE_ENABLE_FTS4 \
         -DSQLITE_ENABLE_FTS5 \
+        -DSQLITE_ENABLE_GEOPOLY \
         -DSQLITE_ENABLE_JSON1 \
+        -DSQLITE_ENABLE_MATH_FUNCTIONS \
+        -DSQLITE_ENABLE_PERCENTILE \
         -DSQLITE_ENABLE_RTREE \
-        -DSQLITE_OMIT_LOAD_EXTENSION \
-        -DSQLITE_ENABLE_SNAPSHOT \
-        -DSQLITE_ENABLE_WAL2_COREAD \
+        -DSQLITE_ENABLE_STAT4 \
         -DSQLITE_ENABLE_STMT_SCANSTATUS \
-    && ar rcs /usr/lib/libsqlite3.a /tmp/sqlite3.o \
-    && cp sqlite3/sqlite3.h /usr/include/sqlite3.h \
-    && cp sqlite3/sqlite3ext.h /usr/include/sqlite3ext.h
+        -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT \
+        -DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
+        -DSQLITE_OMIT_DEPRECATED \
+        -DSQLITE_OMIT_PROGRESS_CALLBACK \
+        -DSQLITE_OMIT_SHARED_CACHE \
+        -DSQLITE_OMIT_TCL_VARIABLE \
+        -DSQLITE_SOUNDEX \
+        -DSQLITE_STAT4_SAMPLES=128 \
+        -DSQLITE_TRACE_SIZE_LIMIT=32 \
+        -DSQLITE_USE_URI=1 \
+        -lpthread -ldl -lm \
+    && ln -s libsqlite3.so.0 /usr/local/lib/libsqlite3.so \
+    && cp sqlite3/sqlite3.h /usr/local/include/sqlite3.h \
+    && cp sqlite3/sqlite3ext.h /usr/local/include/sqlite3ext.h
 
 # ---------------------------------------------------------------------------
 # Stage 2: Litestream executables (matches packages/zero/Dockerfile)
@@ -53,46 +81,83 @@ WORKDIR /src/litestream/
 ARG LITESTREAM_VERSION=0.3.13+z0.0.9
 ENV GOTOOLCHAIN=local
 
+RUN go get google.golang.org/grpc@v1.82.1 google.golang.org/api@v0.291.0 \
+    && go mod tidy
+
 RUN --mount=type=cache,target=/root/.cache/go-build \
 	--mount=type=cache,target=/go/pkg \
 	go build -ldflags "-s -w -X 'main.Version=${LITESTREAM_VERSION}' -extldflags '-static'" -tags osusergo,netgo,sqlite_omit_load_extension -o /usr/local/bin/litestream ./cmd/litestream
 
-FROM litestream/litestream:0.5.11 AS litestream-v5
+FROM golang:1.25.10@sha256:cd05a378aaf011e8056745363e5c40f4f2bef0fa4d9bf19b9c38316079c332ff AS litestream-v5-builder
+
+WORKDIR /src/
+RUN git clone --depth 1 --branch v0.5.11 https://github.com/benbjohnson/litestream.git
+WORKDIR /src/litestream/
+RUN go get google.golang.org/grpc@v1.82.1 google.golang.org/api@v0.291.0 \
+    && go mod tidy
+ARG LITESTREAM_V5_VERSION=0.5.11
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg \
+    go build -ldflags "-s -w -X 'main.Version=${LITESTREAM_V5_VERSION}'" \
+      -o /usr/local/bin/litestream ./cmd/litestream
 
 # ---------------------------------------------------------------------------
 # Stage 3: Build the Rust IVM NAPI addon
 # ---------------------------------------------------------------------------
-FROM rust:1-slim-bookworm AS napi-builder
+FROM rust:1-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS napi-builder
 
-COPY --from=sqlite-builder /usr/lib/libsqlite3.a /usr/lib/libsqlite3.a
-COPY --from=sqlite-builder /usr/include/sqlite3.h /usr/include/sqlite3.h
-COPY --from=sqlite-builder /usr/include/sqlite3ext.h /usr/include/sqlite3ext.h
+COPY --from=sqlite-builder /usr/local/lib/libsqlite3.so* /usr/local/lib/
+COPY --from=sqlite-builder /usr/local/include/sqlite3*.h /usr/local/include/
 
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && rm -rf /var/lib/apt/lists/*
+
+ENV SQLITE3_LIB_DIR=/usr/local/lib \
+    SQLITE3_INCLUDE_DIR=/usr/local/include \
+    SQLITE3_STATIC=0
 
 WORKDIR /build
 COPY packages/rust-ivm/ ./rust-ivm/
 
 WORKDIR /build/rust-ivm/napi
-# --features rust-ivm/wal2_coread: this system SQLite is the SQLITE_ENABLE_WAL2_COREAD
-# fork, so the sqlite3_wal2_coread_* symbols are present. The feature makes the
-# parallel read pool CO-READ at curr's frame (sharing its read-mark) instead of
-# each pool conn claiming its own — the fix that lets the pool stay enabled under
-# churn without exhausting wal2's read-mark slots (see read_pool.rs).
-RUN cargo build --release --features rust-ivm/wal2_coread
+RUN cargo build --release
 RUN cp target/release/librust_ivm_napi.so rust-ivm.node
 
 # ---------------------------------------------------------------------------
-# Stage 4: Runtime
+# Stage 4: Build zero-sqlite3 against the SAME shared WAL2 library
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim
+FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS zero-sqlite-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=sqlite-builder /usr/local/lib/libsqlite3.so* /usr/local/lib/
+COPY --from=sqlite-builder /usr/local/include/sqlite3*.h /usr/local/include/
+COPY packages/rust-ivm/zero-sqlite3-shared.binding.gyp /tmp/binding.gyp
+
+WORKDIR /build
+RUN npm install --ignore-scripts @rocicorp/zero-sqlite3@1.1.2 node-gyp@11 \
+    && cp /tmp/binding.gyp node_modules/@rocicorp/zero-sqlite3/binding.gyp \
+    && node node_modules/@rocicorp/zero-sqlite3/deps/gen-unicode-case.mjs \
+         > node_modules/@rocicorp/zero-sqlite3/src/util/unicode_case_data.h \
+    && npx node-gyp rebuild --release \
+         --directory node_modules/@rocicorp/zero-sqlite3 \
+    && cp node_modules/@rocicorp/zero-sqlite3/build/Release/better_sqlite3.node /tmp/better_sqlite3.node \
+    && ldd /tmp/better_sqlite3.node | grep '/usr/local/lib/libsqlite3.so.0'
+
+# ---------------------------------------------------------------------------
+# Stage 5: Runtime
+# ---------------------------------------------------------------------------
+FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 ARG ZERO_VERSION=1.7.0
+
+LABEL org.opencontainers.image.base.name="node:22-bookworm-slim" \
+      org.opencontainers.image.base.digest="sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
-    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN corepack enable && corepack prepare pnpm@11.5.3 --activate
@@ -105,16 +170,33 @@ COPY . ./mono/
 # Copy the built NAPI addon into the package tree so the driver default
 # fallback resolves it.
 COPY --from=napi-builder /build/rust-ivm/napi/rust-ivm.node ./mono/packages/rust-ivm/napi/rust-ivm.node
+COPY --from=sqlite-builder /usr/local/lib/libsqlite3.so* /usr/local/lib/
+COPY --from=zero-sqlite-builder /tmp/better_sqlite3.node /tmp/better_sqlite3.node
 
 # Copy Litestream executables and config
 COPY --from=litestream-builder /usr/local/bin/litestream /usr/local/bin/litestream
-COPY --from=litestream-v5 /usr/local/bin/litestream /usr/local/bin/litestream-v5
+COPY --from=litestream-v5-builder /usr/local/bin/litestream /usr/local/bin/litestream-v5
 RUN cp /app/mono/packages/zero-cache/src/services/litestream/config.yml /etc/litestream.yml
 
-# Install dependencies
+# Install only the runtime dependency closure for zero-cache. Keep the root
+# package in the filter because it owns the pinned tsx runtime loader. The
+# server source imports ast-to-zql directly, outside pnpm's declared graph.
 WORKDIR /app/mono
-RUN pnpm install --frozen-lockfile
-RUN pnpm add -w tsx@4
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --prod \
+      --filter @rocicorp/mono --filter zero-cache... --filter ast-to-zql... \
+    && zero_sqlite=$(find node_modules/.pnpm -path '*/@rocicorp/zero-sqlite3/build/Release' -type d -print -quit) \
+    && test -n "$zero_sqlite" \
+    && cp /tmp/better_sqlite3.node "$zero_sqlite/better_sqlite3.node" \
+    && rm /tmp/better_sqlite3.node \
+    && ldconfig \
+    && ldd packages/rust-ivm/napi/rust-ivm.node | grep '/usr/local/lib/libsqlite3.so.0' \
+    && ldd "$zero_sqlite/better_sqlite3.node" | grep '/usr/local/lib/libsqlite3.so.0' \
+    && rm -rf /root/.cache \
+       /usr/local/lib/node_modules/npm \
+       /usr/local/bin/npm /usr/local/bin/npx \
+       packages/rust-ivm/agentic packages/rust-ivm/wal2-sqlite \
+       packages/rust-ivm/src packages/rust-ivm/tests
 
 # Required/sane defaults — DO NOT ask Shivral to remember these.
 ENV USE_RUST_IVM=true
@@ -123,21 +205,6 @@ ENV USE_RUST_IVM=true
 # this layout (doubled 'packages') and silently falls back to TS — so without
 # this env the rust engine never loads. Must match the COPY destination.
 ENV RUST_IVM_ADDON_PATH=/app/mono/packages/rust-ivm/napi/rust-ivm.node
-# Read-level parallelism (frame-pinned pool). RE-ENABLED (4) now that the pool
-# CO-READS at curr's frame via the wal2_coread feature (built above): the K pool
-# connections share curr's single -shm read-mark instead of each claiming its
-# own, so they no longer exhaust wal2's fixed read-mark slots under churn (the
-# cause of the "prev db has advanced past X" slips). Before coread, LANES=4 drove
-# 33 stale-snapshot slips per 50c churn load vs 2 at LANES=0; with coread the
-# pool is expected at ~0 like the Go port (which uses the same coread API).
-# Guarded: if coread capture/arm ever fails at runtime, the pool falls back to
-# the old independent BEGIN CONCURRENT pin (read_pool.rs), and the self-heal
-# reset (diff.rs) still absorbs any residual slip.
-ENV RUST_IVM_READ_LANES=4
-# Native query planner (cost model + flip decision). Dark behind this flag;
-# when enabled, Rust runs the planner on its own DB connection instead of
-# round-tripping to JS for planQuery.
-ENV RUST_IVM_PLANNER=1
 # Bounded TSFN queue depth for per-row streaming delivery. 1 = actor parks after
 # every row until JS drains it; a busy main thread then stalls delivery per-row
 # (microbench: 0.5–5ms bursts inflate per-row 180–750×). K=64 lets the actor run
@@ -145,6 +212,9 @@ ENV RUST_IVM_PLANNER=1
 # output byte-identical (FIFO queue preserves order). O(64) NapiRowChanges in
 # flight per stream (bounded). Enabled here; set to 1 to revert instantly.
 ENV RUST_IVM_TSFN_QUEUE=64
+# Keep the producer credit window aligned with the callback queue so a slow JS
+# consumer cannot accumulate a second, larger buffer behind the native bound.
+ENV RUST_IVM_STREAM_CREDIT=64
 # Distribute client groups across sync workers by count (round-robin) instead
 # of by CG-id hash. Sticky per CG within a process lifetime; evens out load
 # when hash bucketing leaves workers lopsided.
@@ -165,7 +235,7 @@ ENV USER=zero-cache
 # exists. Leaving unset avoids ECONNREFUSED on 127.0.0.1:4318.
 ENV OTEL_EXPORTER_OTLP_ENDPOINT=
 # Set a safe cap on sync workers. Override per env if cores differ.
-ENV ZERO_NUM_SYNC_WORKERS=8
+ENV ZERO_NUM_SYNC_WORKERS=4
 # Bound JS heap to avoid OOM death spirals on unbounded hydration paths.
 ENV NODE_OPTIONS="--import tsx --no-warnings --max-old-space-size=4096"
 ENV PATH="/app/mono/node_modules/.bin:${PATH}"

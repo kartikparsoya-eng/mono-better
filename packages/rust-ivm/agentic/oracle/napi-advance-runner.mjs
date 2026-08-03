@@ -25,11 +25,14 @@ import {
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {resolve, join, dirname} from 'node:path';
-import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
+const zqliteRequire = createRequire(
+  resolve(__dirname, '..', '..', '..', 'zqlite', 'package.json'),
+);
+const SQLiteDatabase = zqliteRequire('@rocicorp/zero-sqlite3');
 
 // Resolve the addon. $RUST_IVM_ADDON overrides; otherwise auto-detect by
 // platform: the checked-in napi/rust-ivm.node may be a stale/Linux build, so on
@@ -104,8 +107,8 @@ function sqlValue(v, colType) {
 }
 
 function createSqliteDb(dbPath, tables) {
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL');
+  const db = new SQLiteDatabase(dbPath);
+  db.pragma('journal_mode = wal2');
   // _zero.replicationState
   db.exec('DROP TABLE IF EXISTS "_zero.replicationState"');
   db.exec(
@@ -147,8 +150,8 @@ function createSqliteDb(dbPath, tables) {
       stmt.run(...vals);
     }
   }
-  // Do NOT close — return the connection so the WAL -shm file persists
-  // for rusqlite's READ_ONLY connections. Caller must close.
+  // Keep the writer connection open through hydrate so the wal2 shared-memory
+  // state remains live. The Rust snapshot connections are read-write too.
   return db;
 }
 
@@ -233,7 +236,7 @@ function isNoOpEdit(push, tables) {
 
 function applyPushesToSqlite(dbPath, tables, pushes) {
   if (!pushes || pushes.length === 0) return;
-  const db = new DatabaseSync(dbPath);
+  const db = new SQLiteDatabase(dbPath);
   let pos = 0;
   const version = '1'; // all pushes in one version bump
 
@@ -311,11 +314,8 @@ async function runFixture(fixture) {
   const dbPath = join(tmpdir(), `napi-adv-${Date.now()}-${process.pid}.db`);
   const result = {hydrate: [], advance: [], finalView: []};
 
-  // Keep a "keeper" connection open for the entire run so the WAL -shm file
-  // persists. rusqlite opens the DB in READ_ONLY mode and cannot create the
-  // -shm file; if node:sqlite deletes it on close, every rusqlite query fails
-  // with "unable to open database file". The keeper stays open until we're
-  // done with the napi engine.
+  // Keep a writer connection open for the entire run so the wal2 shared-memory
+  // state persists until the NAPI engine is destroyed.
   try {
     // 1. Create initial DB (returns the keeper connection — kept open)
     const keeper = createSqliteDb(dbPath, fixture.tables);

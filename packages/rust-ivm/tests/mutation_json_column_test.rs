@@ -25,8 +25,7 @@ use rust_ivm::sqlite::table_source::TableSource;
 
 /// A `MutationACLError` result exactly as the custom-mutation backend returns
 /// it — a lawful failed-mutation result stored as a JSON string in SQLite.
-const RESULT_JSON: &str =
-    r#"{"error":"app","message":"Acl not defined for upsert on table X","details":{"name":"MutationACLError"}}"#;
+const RESULT_JSON: &str = r#"{"error":"app","message":"Acl not defined for upsert on table X","details":{"name":"MutationACLError"}}"#;
 
 fn mutations_source() -> TableSource {
     let conn = Connection::open_in_memory().unwrap();
@@ -56,8 +55,14 @@ fn mutations_source() -> TableSource {
         "clientGroupID".to_string(),
         ColumnType::String { optional: false },
     );
-    columns.insert("clientID".to_string(), ColumnType::String { optional: false });
-    columns.insert("mutationID".to_string(), ColumnType::Number { optional: false });
+    columns.insert(
+        "clientID".to_string(),
+        ColumnType::String { optional: false },
+    );
+    columns.insert(
+        "mutationID".to_string(),
+        ColumnType::Number { optional: false },
+    );
     columns.insert("result".to_string(), ColumnType::Json { optional: false });
 
     TableSource::new(
@@ -82,11 +87,7 @@ fn mutations_result_json_column_is_parsed_object_on_fetch() {
     let nodes: Vec<_> = rust_ivm::ivm::stream::skip_yields(stream).collect();
 
     assert_eq!(nodes.len(), 1, "expected one mutation row");
-    let result = nodes[0]
-        .row
-        .get("result")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let result = nodes[0].row.get("result").cloned().unwrap_or(Value::Null);
 
     match &result {
         Value::Json(j) => {

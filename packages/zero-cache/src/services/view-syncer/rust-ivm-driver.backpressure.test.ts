@@ -55,7 +55,10 @@ import {RustIVMDriver} from './rust-ivm-driver.ts';
 import {Snapshotter} from './snapshotter.ts';
 
 const ADDON_PATH = process.env['RUST_IVM_ADDON_PATH'];
-const ROWS = 40; // >> the credit window (4) so the producer parks repeatedly
+const ROWS = (() => {
+  const configured = Number(process.env['RUST_IVM_SOAK_ROWS'] ?? '40');
+  return Number.isSafeInteger(configured) && configured >= 8 ? configured : 40;
+})(); // >> the credit window (4) so the producer parks repeatedly
 const nodeRequire = createRequire(import.meta.url);
 
 describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
@@ -168,26 +171,32 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     return out;
   }
 
-  test('slow consumer preserves rows/order and matches TS', async () => {
-    const {rust, ts} = setup();
+  test(
+    'slow consumer preserves rows/order and matches TS',
+    async () => {
+      const {rust, ts} = setup();
 
-    const slow = await drainSlow(rust.addQuery('h', 'q', AST, NO_TIMER));
-    // A fresh driver, fast consumer — order must be byte-identical to the slow
-    // run (backpressure must not drop/dup/reorder).
-    const rustFast = newRust('bp-rust-fast');
-    rustFast.init(clientSchema);
-    const fast = await drain(rustFast.addQuery('h', 'q', AST, NO_TIMER));
-    const tsRows = await drain(ts.addQuery('h', 'q', AST, NO_TIMER));
+      const slow = await drainSlow(rust.addQuery('h', 'q', AST, NO_TIMER));
+      // A fresh driver, fast consumer — order must be byte-identical to the slow
+      // run (backpressure must not drop/dup/reorder).
+      const rustFast = newRust('bp-rust-fast');
+      rustFast.init(clientSchema);
+      const fast = await drain(rustFast.addQuery('h', 'q', AST, NO_TIMER));
+      const tsRows = await drain(ts.addQuery('h', 'q', AST, NO_TIMER));
 
-    expect(slow.length).toBe(ROWS);
-    // Exact ordered equality slow-vs-fast (same engine, credit must be transparent).
-    expect(slow.map(c => stable(c.row))).toEqual(fast.map(c => stable(c.row)));
-    // Multiset parity vs the TS executable spec.
-    expect(multiset(slow)).toEqual(multiset(tsRows));
+      expect(slow.length).toBe(ROWS);
+      // Exact ordered equality slow-vs-fast (same engine, credit must be transparent).
+      expect(slow.map(c => stable(c.row))).toEqual(
+        fast.map(c => stable(c.row)),
+      );
+      // Multiset parity vs the TS executable spec.
+      expect(multiset(slow)).toEqual(multiset(tsRows));
 
-    await rust.destroy();
-    await rustFast.destroy();
-  });
+      await rust.destroy();
+      await rustFast.destroy();
+    },
+    Math.max(10_000, ROWS * 10),
+  );
 
   test('native producer cannot run past the credit window', async () => {
     const {rust, ts} = setup();

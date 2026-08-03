@@ -11,27 +11,12 @@ export type {
   NapiTableSpec,
 } from '../../../../rust-ivm/napi/index.js';
 
-// Stream rows one-at-a-time via ThreadsafeFunction instead of materializing
-// the full result array. O(1) JS objects in flight vs O(result). Default ON
-// — matches TS's per-row streaming invariant. Set RUST_IVM_STREAM_ROWS=0 to
-// fall back to the eager array path (for debugging/diffing only).
-const STREAM_ROWS = process.env['RUST_IVM_STREAM_ROWS'] !== '0';
-
 // Terminal sentinel changeType streamed as the final TSFN call by the addon's
 // drain_barrier (napi/src/lib.rs). It carries no data; consumers skip it. Its
 // only purpose is to keep the addon's actor thread blocked until every real row
 // has been delivered to JS before the hydrate/advance promise resolves — so the
 // driver's queue-close cannot race ahead and drop the last row (seed 308).
 const END_STREAM_SENTINEL = -3;
-
-// Batched-TSFN hydrate: hand JS N rows per callback (one event-loop turn per N
-// rows) instead of one-at-a-time. Targets the measured single-worker event-loop
-// saturation. RUST_IVM_TSFN_BATCH>1 enables it (must match the addon's batch env).
-// 0 = per-row (default/off).
-const TSFN_BATCH = (() => {
-  const n = parseInt(process.env['RUST_IVM_TSFN_BATCH'] ?? '1', 10);
-  return Number.isFinite(n) && n > 1 ? n : 0;
-})();
 
 import {must} from '../../../../shared/src/must.ts';
 import type {AST, Condition} from '../../../../zero-protocol/src/ast.ts';
@@ -52,7 +37,7 @@ import {
 } from '../../auth/load-permissions.ts';
 import type {LogConfig, ZeroConfig} from '../../config/zero-config.ts';
 import {computeZqlSpecs} from '../../db/lite-tables.ts';
-import type {LiteAndZqlSpec} from '../../db/specs.ts';
+import type {LiteAndZqlSpec, LiteTableSpec} from '../../db/specs.ts';
 import type {StatementRunner} from '../../db/statements.ts';
 import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
 import {type RowKey} from '../../types/row-key.ts';
@@ -89,7 +74,7 @@ export type RowChange = {
   readonly type: number;
   readonly queryID: string;
   readonly table: string;
-  readonly rowKey: Row;
+  readonly rowKey: RowKey;
   readonly row: Row | undefined;
 };
 
@@ -109,15 +94,55 @@ type QueryInfo = {
 // in-bounds integers cross as JSON numbers and parse to JS `number`. So there is
 // no bigint path on EITHER side — a future column that needs >2^53 (nanosecond
 // timestamps, snowflake IDs) requires a lossless int design in both engines.
+function parseJSONObject(json: string, label: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(json);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be a JSON object`);
+  }
+  return value as Record<string, unknown>;
+}
+
 function napiToRowChange(c: NapiRowChange): RowChange {
   return {
     type: c.changeType,
     queryID: c.queryId,
     table: c.table,
-    rowKey: JSON.parse(c.rowKey) as any,
-    row: c.row ? (JSON.parse(c.row) as any) : undefined,
+    rowKey: parseJSONObject(c.rowKey, 'native row key') as RowKey,
+    row: c.row ? (parseJSONObject(c.row, 'native row') as Row) : undefined,
   };
 }
+
+const ENGINE_ADVANCE_PANIC_PREFIX = 'engine advance panic: ';
+
+/** Remove the napi transport wrapper around an engine error.
+ *
+ * PipelineDriver exposes IVM/SQLite failures as ordinary Errors. The native
+ * worker catches the same panic so it can cross the napi boundary, which adds
+ * a prefix and a GenericFailure code. Neither is part of the driver contract.
+ */
+function normalizeNativeAdvanceError(error: unknown): unknown {
+  if (
+    error instanceof Error &&
+    error.message.startsWith(ENGINE_ADVANCE_PANIC_PREFIX)
+  ) {
+    return new Error(error.message.slice(ENGINE_ADVANCE_PANIC_PREFIX.length));
+  }
+  return error;
+}
+
+type NativeStatement = {
+  all: (...args: unknown[]) => Record<string, unknown>[];
+  get: (...args: unknown[]) => Record<string, unknown> | undefined;
+  iterate: (...args: unknown[]) => Generator<Record<string, unknown>>;
+  raw: (...args: unknown[]) => Generator<unknown[]>;
+};
+
+type NativeStatementRunner = {
+  get: (sql: string, ...args: unknown[]) => Record<string, unknown> | undefined;
+  all: (sql: string, ...args: unknown[]) => Record<string, unknown>[];
+  prepare: (sql: string) => NativeStatement;
+  modify: () => never;
+};
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
@@ -185,11 +210,6 @@ export function buildNapiTableSpecs(
 // ---------------------------------------------------------------------------
 
 /**
- * A simple async queue that bridges the napi ThreadsafeFunction (push model)
- * with the view-syncer's `for await` consumption (pull model).
- *
- * The TSFN callback calls `push()` synchronously; the async generator drains
- * via `for await`. With TSFN Blocking mode + the actor thread parking on a
  * Bounded bridge between TSFN callbacks and async generators.
  *
  * The TSFN callback calls `push()` synchronously; the async generator drains
@@ -217,9 +237,8 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   /**
    * Push an item. Returns true if the queue has room for more, false if the
    * buffer is full (producer should pause). The TSFN callback can check this
-   * to apply backpressure — though with max_queue_size=1 the TSFN itself
-   * already blocks the actor thread, so this is a second safety net for the
-   * JS-side buffer.
+   * to apply backpressure. Production backpressure is enforced by the native
+   * credit gate; this return value remains useful to direct queue users.
    */
   push(item: T): boolean {
     if (this.#done) return false;
@@ -301,15 +320,9 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
  * microtask), `#done` would be set before that callback ran and its `push()`
  * would silently drop the row.
  *
- * `setImmediate` defers close to the check phase, which libuv runs AFTER the
- * poll phase where the TSFN callback is dispatched. Because the TSFN is bounded
- * (`max_queue_size=1`, Blocking) there is at most one undelivered row when the
- * Promise resolves, and no row is ever enqueued after it — so one deferral is
- * sufficient for the queue to drain before it closes.
- *
- * NOTE: this correctness argument depends on the TSFN staying small-bounded. If
- * `max_queue_size` is ever raised for throughput, prefer an explicit
- * end-of-stream sentinel over event-loop-phase timing.
+ * The addon also emits an explicit end-of-stream sentinel and waits for its JS
+ * callback, which is the correctness barrier. Deferring close remains a small
+ * ordering cushion between that callback and the native Promise continuation.
  */
 export function deferClose<T>(queue: AsyncQueue<T>): void {
   setImmediate(() => queue.close());
@@ -330,13 +343,11 @@ export class RustIVMDriver {
   readonly #storage: ClientGroupStorage;
   readonly #config: ZeroConfig | undefined;
   readonly #replicaFile: string;
+  readonly #yieldThresholdMs: () => number;
   readonly #planEnabled: boolean = false;
   readonly #tableSpecs = new Map<string, LiteAndZqlSpec>();
   readonly #allTableNames = new Set<string>();
   readonly #primaryKeys = new Map<string, PrimaryKey>();
-  // Cost model disabled for single-owner: no TS Database to prepare
-  // statements against. completeOrdering alone is correct (slower on
-  // OR-with-CSQ). TODO: expose cost model via Rust NAPI.
   #replicaVersion: string | null = null;
   #currentVersion: string | null = null;
   #permissions: LoadedPermissions | null = null;
@@ -352,7 +363,7 @@ export class RustIVMDriver {
     storage: ClientGroupStorage,
     clientGroupID: string,
     _inspectorDelegate: InspectorDelegate,
-    _yieldThresholdMs: () => number,
+    yieldThresholdMs: () => number,
     enablePlanner?: boolean,
     config?: ZeroConfig,
     replicaFile?: string,
@@ -364,13 +375,12 @@ export class RustIVMDriver {
     this.#storage = storage;
     this.#config = config;
     this.#replicaFile = replicaFile ?? '';
-    // Query planner (#planAstForRust): runs the Rust-ported plan graph over a
+    this.#yieldThresholdMs = yieldThresholdMs;
+    // Query planner: runs the Rust-ported plan graph over a
     // cost model backed by the Rust-owned snapshot connection, annotating
     // `flip` on OR-with-CSQ conditions (parity with zero 1.7's default-on
-    // planner). Ships DARK: requires config.enableQueryPlanner AND an explicit
-    // env opt-in until validated in ART.
-    this.#planEnabled =
-      enablePlanner === true && process.env.RUST_IVM_PLANNER === '1';
+    // planner). Match PipelineDriver: the constructor flag is the only gate.
+    this.#planEnabled = enablePlanner === true;
   }
 
   // Single-owner design: the Rust engine exclusively owns replica.db's
@@ -378,7 +388,7 @@ export class RustIVMDriver {
   // This minimal StatementRunner adapter lets computeZqlSpecs and
   // getSubscriptionState run unchanged against the Rust-owned connection.
   // Bind params are passed as a JSON array to engine.readQuery.
-  #runner(): object {
+  #runner(): NativeStatementRunner {
     const engine = this.#engine;
     const readQuery = (
       sql: string,
@@ -452,19 +462,19 @@ export class RustIVMDriver {
     }
 
     const runner = this.#runner();
-    const fullTables = new Map<string, unknown>();
+    const fullTables = new Map<string, LiteTableSpec>();
     computeZqlSpecs(
       this.#lc,
       runner as unknown as Database,
       {includeBackfillingColumns: false},
       this.#tableSpecs,
-      fullTables as any,
+      fullTables,
     );
     checkClientSchema(
       this.#shardID,
       clientSchema,
       this.#tableSpecs,
-      fullTables as any,
+      fullTables,
     );
     this.#allTableNames.clear();
     for (const table of fullTables.keys()) {
@@ -597,7 +607,7 @@ export class RustIVMDriver {
     const where = keyCols.map(c => `${quoteIdent(c)} = ?`).join(' AND ');
     const sql = `SELECT ${selectCols} FROM ${quoteIdent(table)} WHERE ${where}`;
     const params = toSQLiteTypes(keyCols, pk as Row, columns);
-    const row = (this.#runner() as any).get(sql, ...params) as Row | undefined;
+    const row = this.#runner().get(sql, ...params) as Row | undefined;
     return row ? fromSQLiteTypes(columns, row, table) : undefined;
   }
 
@@ -605,10 +615,16 @@ export class RustIVMDriver {
     transformationHash: string,
     queryID: string,
     query: AST,
-    _timer: Timer,
+    timer: Timer,
     queryName?: string,
   ): AsyncIterable<RowChange | 'yield'> {
-    return this.#addQueryImpl(transformationHash, queryID, query, queryName);
+    return this.#addQueryImpl(
+      transformationHash,
+      queryID,
+      query,
+      timer,
+      queryName,
+    );
   }
 
   #planAst(ast: AST): AST {
@@ -643,6 +659,7 @@ export class RustIVMDriver {
     transformationHash: string,
     queryID: string,
     query: AST,
+    timer: Timer,
     queryName?: string,
   ): AsyncIterable<RowChange | 'yield'> {
     assert(
@@ -656,11 +673,7 @@ export class RustIVMDriver {
     let hydrated = false;
     let transformedAst = queryInfoAst(query, planned);
     try {
-      if (STREAM_ROWS) {
-        yield* this.#addQueryStreaming(queryID, planned);
-      } else {
-        yield* this.#addQueryEager(queryID, planned);
-      }
+      yield* this.#addQueryStreaming(queryID, planned, timer);
       const resolved = this.#engine.queryTransformedAst(queryID);
       assert(resolved, `Missing transformed AST for query '${queryID}'`);
       transformedAst = queryInfoAst(query, JSON.parse(resolved) as AST);
@@ -687,43 +700,13 @@ export class RustIVMDriver {
     }
   }
 
-  async *#addQueryEager(
-    queryID: string,
-    query: AST,
-  ): AsyncIterable<RowChange | 'yield'> {
-    const out = await this.#engine.addQueriesStreaming([
-      {queryId: queryID, astJson: JSON.stringify(query)},
-    ]);
-
-    let count = 0;
-    for (const row of out) {
-      const change = napiToRowChange(row);
-      if (change.type !== ChangeType.EDIT) {
-        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
-        const unit = rowIDSignatureUnit({
-          schema: '',
-          table: change.table,
-          rowKey: change.rowKey as RowKey,
-        });
-        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
-      }
-      yield change;
-      count++;
-      if (count % 100 === 0) {
-        yield 'yield';
-      }
-    }
-  }
-
   async *#addQueryStreaming(
     queryID: string,
     query: AST,
+    timer: Timer,
   ): AsyncIterable<RowChange | 'yield'> {
     const queue = new AsyncQueue<RowChange | 'yield'>();
 
-    // Per-row handling is identical whether rows arrive singly or in a batch;
-    // the batched path just loops this over the array (one event-loop turn per
-    // batch vs per row).
     const handleRow = (row: NapiRowChange) => {
       // changeType -3 is the end-of-stream barrier sentinel (see drain_barrier in
       // napi/src/lib.rs); it carries no data and must not be pushed as a row.
@@ -745,21 +728,11 @@ export class RustIVMDriver {
 
     const spec = [{queryId: queryID, astJson: JSON.stringify(query)}];
     const streamId = this.#nextStreamId++;
-    const hydrated = TSFN_BATCH
-      ? this.#engine.addQueriesStreamingRowsBatched(
-          spec,
-          (_err: unknown, rows: NapiRowChange[]) => {
-            for (let i = 0; i < rows.length; i++) {
-              handleRow(rows[i]);
-            }
-          },
-          streamId,
-        )
-      : this.#engine.addQueriesStreamingRows(
-          spec,
-          (_err: unknown, row: NapiRowChange) => handleRow(row),
-          streamId,
-        );
+    const hydrated = this.#engine.addQueriesStreamingRows(
+      spec,
+      (_err: unknown, row: NapiRowChange) => handleRow(row),
+      streamId,
+    );
 
     hydrated
       .then(() => deferClose(queue))
@@ -781,7 +754,7 @@ export class RustIVMDriver {
         this.#engine.grantStreamCredit?.(streamId, 1);
         yield change;
         count++;
-        if (count % 100 === 0) {
+        if (timer.elapsedLap() > this.#yieldThresholdMs()) {
           yield 'yield';
         }
       }
@@ -811,7 +784,7 @@ export class RustIVMDriver {
     }
   }
 
-  async advance(_timer: Timer): Promise<
+  async advance(timer: Timer): Promise<
     | {
         version: string;
         numChanges: number;
@@ -826,60 +799,10 @@ export class RustIVMDriver {
       'Pipeline driver must be initialized before advancing',
     );
 
-    if (STREAM_ROWS) {
-      return this.#advanceStreaming();
-    }
-    return this.#advanceEager();
+    return this.#advanceStreaming(timer);
   }
 
-  async #advanceEager(): Promise<
-    | {
-        version: string;
-        numChanges: number;
-        changes: Iterable<RowChange | 'yield'>;
-      }
-    | ResetPipelinesSignal
-  > {
-    const rows = await this.#engine.advanceToHeadStreaming();
-
-    const headerRow = rows[0];
-    if (headerRow === null || headerRow === undefined) {
-      throw new Error('advanceToHeadStreaming returned no rows');
-    }
-    if (headerRow.changeType === -2) {
-      const reset = JSON.parse(headerRow.rowKey) as Record<string, unknown>;
-      const reason = String(reset['reason'] ?? 'schema-change');
-      const msg = String(reset['msg'] ?? 'advance reset');
-      return new ResetPipelinesSignal(
-        msg,
-        reason as ResetPipelinesSignal['reason'],
-      );
-    }
-    if (headerRow.changeType !== -1) {
-      throw new Error(
-        'advanceToHeadStreaming expected header row (changeType=-1) as first row',
-      );
-    }
-    const header = JSON.parse(headerRow.rowKey) as Record<string, unknown>;
-    const version = String(header['version'] ?? '');
-    const numChanges = Number(header['numChanges'] ?? 0);
-    const aborted = Boolean(header['aborted'] ?? false);
-    this.#lc.debug?.(
-      `advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`,
-    );
-
-    if (version) {
-      this.#currentVersion = version;
-    }
-
-    return {
-      version,
-      numChanges,
-      changes: this.#advanceToHeadRows(rows, aborted),
-    };
-  }
-
-  async #advanceStreaming(): Promise<
+  async #advanceStreaming(timer: Timer): Promise<
     | {
         version: string;
         numChanges: number;
@@ -913,8 +836,9 @@ export class RustIVMDriver {
         // `await headerPromise` below would hang forever. Reject it as well as
         // erroring the queue, so the failure propagates as a teardown like TS.
         // If the header already arrived, headerReject is null (no-op).
-        queue.error(e);
-        headerReject?.(e);
+        const error = normalizeNativeAdvanceError(e);
+        queue.error(error);
+        headerReject?.(error);
       });
 
     const header = await headerPromise;
@@ -952,55 +876,9 @@ export class RustIVMDriver {
         aborted,
         streamId,
         advancing,
+        timer,
       ),
     };
-  }
-
-  *#advanceToHeadRows(
-    rows: NapiRowChange[],
-    aborted: boolean,
-  ): Iterable<RowChange | 'yield'> {
-    let count = 0;
-
-    // Skip index 0 (the header row consumed by advance()).
-    for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
-
-      if (row.changeType === END_STREAM_SENTINEL) {
-        continue;
-      }
-      if (row.changeType === -2) {
-        const rk = JSON.parse(row.rowKey);
-        const reason = rk['reason'] ?? 'schema-change';
-        const msg = rk['msg'] ?? 'advance reset';
-        throw new ResetPipelinesSignal(
-          msg,
-          reason as ResetPipelinesSignal['reason'],
-        );
-      }
-
-      const change = napiToRowChange(row);
-      if (change.type !== ChangeType.EDIT) {
-        const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
-        const unit = rowIDSignatureUnit({
-          schema: '',
-          table: change.table,
-          rowKey: change.rowKey as RowKey,
-        });
-        this.#rowSetSignatures.set(change.queryID, cur ^ unit);
-      }
-      yield change;
-      count++;
-      if (count % 100 === 0) {
-        yield 'yield';
-      }
-    }
-
-    if (aborted) {
-      this.#lc.warn?.(
-        `advanceToHead: aborted after ${count} changes (budget exceeded)`,
-      );
-    }
   }
 
   async *#advanceToHeadRowsStreaming(
@@ -1008,6 +886,7 @@ export class RustIVMDriver {
     aborted: boolean,
     streamId: number,
     advancing: Promise<unknown>,
+    timer: Timer,
   ): AsyncIterable<RowChange | 'yield'> {
     let count = 0;
     let completed = false;
@@ -1048,7 +927,7 @@ export class RustIVMDriver {
         }
         yield change;
         count++;
-        if (count % 100 === 0) {
+        if (timer.elapsedLap() > this.#yieldThresholdMs()) {
           yield 'yield';
         }
       }

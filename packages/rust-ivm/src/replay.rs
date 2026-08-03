@@ -385,6 +385,7 @@ pub fn caught_change_to_json(change: &CaughtChange) -> JsonValue {
 pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
     let mut sources: HashMap<String, Shared<dyn Source>> = HashMap::new();
     let mut pks: HashMap<String, Vec<String>> = HashMap::new();
+    let mut replica_pks: HashMap<String, Vec<String>> = HashMap::new();
     let tables = fixture
         .get("tables")
         .and_then(|t| t.as_object())
@@ -407,6 +408,15 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
                     .collect()
             })
             .unwrap_or_default();
+        let replica_pk: Vec<String> = spec
+            .get("replicaPrimaryKey")
+            .and_then(|p| p.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_else(|| pk.clone());
         let source: Shared<MemorySource> = std::rc::Rc::new(std::cell::RefCell::new(
             MemorySource::new(name, columns, pk.clone()),
         ));
@@ -422,6 +432,7 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
             }
         }
         pks.insert(name.clone(), pk);
+        replica_pks.insert(name.clone(), replica_pk);
         sources.insert(name.clone(), source as Shared<dyn Source>);
     }
 
@@ -436,19 +447,20 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
     // replace each with a literal condition and capture the matched row as a
     // companion. Without this, replay hardcoded companionRows to empty and every
     // scalar-match fixture falsely diverged from the oracle. Unique keys for a
-    // fixture table are its primary key (matches the generator, which pins `id`).
+    // fixture table are its client primary key plus its replica primary key when
+    // they differ, matching the TS oracle and the production engine table specs.
     use crate::sqlite::resolve_scalar_subqueries::{
         ScalarExecutor, TableSpecWithUniqueKeys, resolve_simple_scalar_subqueries,
     };
     let table_specs: HashMap<String, TableSpecWithUniqueKeys> = pks
         .iter()
         .map(|(t, pk)| {
-            (
-                t.clone(),
-                TableSpecWithUniqueKeys {
-                    unique_keys: vec![pk.clone()],
-                },
-            )
+            let replica_pk = replica_pks.get(t).cloned().unwrap_or_else(|| pk.clone());
+            let mut unique_keys = vec![pk.clone()];
+            if replica_pk != *pk {
+                unique_keys.push(replica_pk);
+            }
+            (t.clone(), TableSpecWithUniqueKeys { unique_keys })
         })
         .collect();
     let companion_rows: std::cell::RefCell<Vec<(String, Row)>> =
@@ -499,13 +511,8 @@ pub fn run_fixture(fixture: &JsonValue) -> JsonValue {
 
     let catch = Catch::new(pipeline, false);
 
-    // Single-fetch: one fetch on the actor's Catch warms operator state (join
-    // caches, cap counters, etc.) AND produces the hydrate rows in the same
-    // pass — identical to the production single-fetch hydrate path. (The prior
-    // throwaway-worker "parallel hydrate" was removed: it fetched twice — once
-    // in a transient worker pipeline for output, then again here to warm state
-    // — which was net-additive work, and its worker connections bypassed the
-    // pinned-snapshot version guarantee. Read-level parallelism replaces it.)
+    // One fetch warms operator state and produces hydrate rows in the same pass,
+    // identical to the production hydrate path.
     let hydrate: Vec<CaughtNode> = catch.borrow().fetch(&FetchRequest::default());
 
     let hydrate_json = JsonValue::Array(hydrate.iter().map(caught_node_to_json).collect());

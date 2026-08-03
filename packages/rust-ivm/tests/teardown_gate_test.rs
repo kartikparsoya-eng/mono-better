@@ -61,9 +61,13 @@ fn teardown_integrity_after_repeated_cycles() {
     let _ = std::fs::create_dir_all(&dir);
     let db_path = create_test_replica(&dir);
 
-    const CYCLES: usize = 20;
+    let cycles = std::env::var("RUST_IVM_SOAK_CYCLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|cycles| *cycles > 0)
+        .unwrap_or(20);
 
-    for i in 0..CYCLES {
+    for i in 0..cycles {
         let mut snap = Snapshotter::new(&db_path, "test-app", None);
         snap.init().expect("init snapshotter");
 
@@ -80,7 +84,7 @@ fn teardown_integrity_after_repeated_cycles() {
         .expect("integrity_check");
     assert_eq!(
         result, "ok",
-        "replica.db corrupted after {CYCLES} teardown cycles: {result}"
+        "replica.db corrupted after {cycles} teardown cycles: {result}"
     );
 
     let _ = std::fs::remove_file(&db_path);
@@ -102,6 +106,38 @@ fn advance_without_diff_returns_version() {
     let _v0 = snap.current_version().expect("current version").to_string();
     let v1 = snap.advance_without_diff().expect("advance").to_string();
     assert!(!v1.is_empty());
+
+    snap.destroy();
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn snapshot_connections_leapfrog_like_typescript() {
+    let dir = std::env::temp_dir()
+        .join(format!("snapshot-leapfrog-{}", std::process::id()))
+        .to_string_lossy()
+        .to_string();
+    let _ = std::fs::create_dir_all(&dir);
+    let db_path = create_test_replica(&dir);
+
+    let mut snap = Snapshotter::new(&db_path, "test-app", None);
+    snap.init().expect("init");
+    let first = snap.current_conn().expect("initial current connection");
+
+    snap.advance_without_diff().expect("first advance");
+    let second = snap.current_conn().expect("second current connection");
+    assert!(
+        !std::rc::Rc::ptr_eq(&first, &second),
+        "the first advance must create the second snapshot connection"
+    );
+
+    snap.advance_without_diff().expect("second advance");
+    let third = snap.current_conn().expect("third current connection");
+    assert!(
+        std::rc::Rc::ptr_eq(&first, &third),
+        "snapshot connections must leapfrog exactly like TS resetToHead()"
+    );
 
     snap.destroy();
     let _ = std::fs::remove_file(&db_path);

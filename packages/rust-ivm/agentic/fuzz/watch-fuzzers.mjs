@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // agentic/fuzz/watch-fuzzers.mjs
-// Monitors the four background fuzzers by tailing their logs. When any one
+// Monitors the three background fuzzers by tailing their logs. When any one
 // reports it hit --max-findings ("maxFindings reached" or "fuzz done"), stop
-// the other three, run triage, and write trigger files so the next assistant
+// the other two, run triage, and write trigger files so the next assistant
 // turn can start root-cause fixing immediately.
 
 import { execFileSync } from 'node:child_process';
@@ -14,7 +14,6 @@ const FUZZERS = [
   { name: 'm-fuzz-serial', script: 'agentic/fuzz/fuzz-loop.mjs' },
   { name: 'm-fuzz-napi', script: 'agentic/fuzz/fuzz-napi-loop.mjs' },
   { name: 'm-fuzz-adv', script: 'agentic/fuzz/fuzz-adv-loop.mjs' },
-  { name: 'm-fuzz-par-equiv', script: 'agentic/fuzz/fuzz-parallel-equiv-loop.mjs' },
 ];
 
 const LOG_DIR = '/Users/kartik.parsoya/.xyne/agent/background/global';

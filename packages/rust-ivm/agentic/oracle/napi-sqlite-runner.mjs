@@ -193,8 +193,8 @@ function buildTableSpecs(tables) {
 async function runHydration(dbPath, tables, ast, queryId = 'q1') {
   const engine = new addon.RustIvmEngine();
   engine.init(buildTableSpecs(tables), dbPath, 'test');
-  // Use the streaming path (addQueriesStreamingRows + TSFN callback) — this
-  // is the production code path now that RUST_IVM_STREAM_ROWS is default ON.
+  // Use the streaming path (addQueriesStreamingRows + TSFN callback), which is
+  // the production driver's only hydration path.
   const rows = [];
   const streamId = 1;
   await engine.addQueriesStreamingRows(
