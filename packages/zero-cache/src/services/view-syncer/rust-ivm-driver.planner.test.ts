@@ -1,3 +1,4 @@
+import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
@@ -9,6 +10,10 @@ import {
   string,
   table,
 } from '../../../../zero-schema/src/builder/table-builder.ts';
+import {
+  CREATE_STORAGE_TABLE,
+  DatabaseStorage,
+} from '../../../../zqlite/src/database-storage.ts';
 import type {Database as DB} from '../../../../zqlite/src/db.ts';
 import {Database} from '../../../../zqlite/src/db.ts';
 import {listTables} from '../../db/lite-tables.ts';
@@ -17,10 +22,6 @@ import {DbFile} from '../../test/lite.ts';
 import {upstreamSchema, type ShardID} from '../../types/shards.ts';
 import {populateFromExistingTables} from '../replicator/schema/column-metadata.ts';
 import {initReplicationState} from '../replicator/schema/replication-state.ts';
-import {
-  CREATE_STORAGE_TABLE,
-  DatabaseStorage,
-} from '../../../../zqlite/src/database-storage.ts';
 import {RustIVMDriver} from './rust-ivm-driver.ts';
 
 // Tests for the #planAst feature: verifies the driver runs completeOrdering +
@@ -40,15 +41,28 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
   let lc: LogContext;
   let logSink: TestLogSink;
 
+  // The Rust planner is gated behind BOTH enablePlanner (constructor arg) AND
+  // RUST_IVM_PLANNER=1 (a dark-ship opt-in kept until validated in ART). The
+  // enablePlanner=true tests exercise the real planned path, so set the env here
+  // (restored in afterEach). enablePlanner=false stays correct — #planEnabled
+  // also requires enablePlanner===true, so flip is still undefined there.
+  let priorPlannerEnv: string | undefined;
   beforeEach(() => {
     logSink = new TestLogSink();
     lc = new LogContext('error', undefined, logSink);
     dbFile = new DbFile('rust_ivm_planner_test');
     dbFile.connect(lc).pragma('journal_mode = wal2');
+    priorPlannerEnv = process.env['RUST_IVM_PLANNER'];
+    process.env['RUST_IVM_PLANNER'] = '1';
   });
 
   afterEach(() => {
     dbFile.delete();
+    if (priorPlannerEnv === undefined) {
+      delete process.env['RUST_IVM_PLANNER'];
+    } else {
+      process.env['RUST_IVM_PLANNER'] = priorPlannerEnv;
+    }
   });
 
   const issues = table('issues')
@@ -258,7 +272,9 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver planner', () => {
       warnLc,
       testLogConfig,
       shardID,
-      new DatabaseStorage(storage).createClientGroupStorage('planner-fallback-cg'),
+      new DatabaseStorage(storage).createClientGroupStorage(
+        'planner-fallback-cg',
+      ),
       'planner-fallback-cg',
       new InspectorDelegate(undefined),
       () => 200,

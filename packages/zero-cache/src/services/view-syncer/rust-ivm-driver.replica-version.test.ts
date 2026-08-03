@@ -1,3 +1,4 @@
+import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';

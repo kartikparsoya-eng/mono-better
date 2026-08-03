@@ -133,10 +133,16 @@ async function main() {
   // with scalar subqueries carry no pushes, so this runs once for hydrate ==
   // finalView.
   const tableSpecs = new Map(
-    Object.entries(fixture.tables).map(([name, spec]) => [
-      name,
-      {tableSpec: {uniqueKeys: [spec.primaryKey]}},
-    ]),
+    Object.entries(fixture.tables).map(([name, spec]) => {
+      // Match the engine's uniqueKeys (client PK + replica PK when they diverge)
+      // so scalar-EXISTS resolution keys identically on both sides.
+      const uniqueKeys = [spec.primaryKey];
+      const replicaPK = spec.replicaPrimaryKey ?? spec.primaryKey;
+      if (JSON.stringify(replicaPK) !== JSON.stringify(spec.primaryKey)) {
+        uniqueKeys.push(replicaPK);
+      }
+      return [name, {tableSpec: {uniqueKeys}}];
+    }),
   );
   const companionRows = [];
   const executor = (subqueryAST, childField) => {

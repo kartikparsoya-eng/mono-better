@@ -86,9 +86,13 @@ function createSqliteDb(dbPath, tables) {
     const cols = Object.entries(spec.columns).map(([col, type]) => {
       return `"${col}" ${sqlType(type)}`;
     });
-    // Composite PRIMARY KEY for compound PKs
-    if (spec.primaryKey.length > 0) {
-      cols.push(`PRIMARY KEY (${spec.primaryKey.map(c => `"${c}"`).join(', ')})`);
+    // The SQLite REPLICA is keyed by replicaPrimaryKey (defaults to primaryKey).
+    // For PK-divergent tables this differs from the client/engine primaryKey, so
+    // the engine must emit rowKeys by the client PK while reading a table whose
+    // SQLite PK is different — the exact seam that was untested.
+    const replicaPK = spec.replicaPrimaryKey ?? spec.primaryKey;
+    if (replicaPK.length > 0) {
+      cols.push(`PRIMARY KEY (${replicaPK.map(c => `"${c}"`).join(', ')})`);
     }
     db.exec(`CREATE TABLE "${name}" (${cols.join(', ')})`);
     const placeholders = Object.keys(spec.columns).map(() => '?').join(', ');
@@ -124,18 +128,32 @@ function napiRowToJs(rc) {
 // ---------------------------------------------------------------------------
 
 function buildTableSpecs(tables) {
-  return Object.entries(tables).map(([name, spec]) => ({
-    table: name,
-    columns: Object.fromEntries(
-      Object.entries(spec.columns).map(([col, type]) => {
-        const parts = type.split('|');
-        const base = parts.find(p => p !== 'null') || 'string';
-        const optional = parts.includes('null');
-        return [col, { type: base, optional }];
-      })
-    ),
-    primaryKey: spec.primaryKey,
-  }));
+  return Object.entries(tables).map(([name, spec]) => {
+    // Mirror rust-ivm-driver.buildNapiTableSpecs: the engine is keyed by the
+    // CLIENT primaryKey (spec.primaryKey), and uniqueKeys carries BOTH the client
+    // PK and the replica PK (they drive scalar-EXISTS resolution). A wrong emitted
+    // rowKey (keyed by the replica PK instead of the client PK) then diverges from
+    // the TS oracle, which keys its MemorySource by spec.primaryKey.
+    const clientPK = spec.primaryKey;
+    const replicaPK = spec.replicaPrimaryKey ?? spec.primaryKey;
+    const uniqueKeys = [clientPK];
+    if (JSON.stringify(replicaPK) !== JSON.stringify(clientPK)) {
+      uniqueKeys.push(replicaPK);
+    }
+    return {
+      table: name,
+      columns: Object.fromEntries(
+        Object.entries(spec.columns).map(([col, type]) => {
+          const parts = type.split('|');
+          const base = parts.find(p => p !== 'null') || 'string';
+          const optional = parts.includes('null');
+          return [col, { type: base, optional }];
+        })
+      ),
+      primaryKey: clientPK,
+      uniqueKeys,
+    };
+  });
 }
 
 async function runHydration(dbPath, tables, ast, queryId = 'q1') {

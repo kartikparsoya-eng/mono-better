@@ -1,3 +1,4 @@
+import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
 import {describe, expect, test} from 'vitest';
 import {AsyncQueue, deferClose} from './rust-ivm-driver.ts';
 

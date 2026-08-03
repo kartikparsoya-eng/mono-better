@@ -7,6 +7,13 @@ import {assert} from '../../../../shared/src/asserts.ts';
 // fall back to the eager array path (for debugging/diffing only).
 const STREAM_ROWS = process.env['RUST_IVM_STREAM_ROWS'] !== '0';
 
+// Terminal sentinel changeType streamed as the final TSFN call by the addon's
+// drain_barrier (napi/src/lib.rs). It carries no data; consumers skip it. Its
+// only purpose is to keep the addon's actor thread blocked until every real row
+// has been delivered to JS before the hydrate/advance promise resolves — so the
+// driver's queue-close cannot race ahead and drop the last row (seed 308).
+const END_STREAM_SENTINEL = -3;
+
 // Batched-TSFN hydrate: hand JS N rows per callback (one event-loop turn per N
 // rows) instead of one-at-a-time. Targets the measured single-worker event-loop
 // saturation. RUST_IVM_TSFN_BATCH>1 enables it (must match the addon's batch env).
@@ -16,34 +23,30 @@ const TSFN_BATCH = (() => {
   return Number.isFinite(n) && n > 1 ? n : 0;
 })();
 
+import {must} from '../../../../shared/src/must.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import type {ClientSchema} from '../../../../zero-protocol/src/client-schema.ts';
-import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
-import {must} from '../../../../shared/src/must.ts';
-import {type RowKey} from '../../types/row-key.ts';
 import type {Row} from '../../../../zero-protocol/src/data.ts';
-import type {LogConfig, ZeroConfig} from '../../config/zero-config.ts';
-import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
+import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
+import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
 import {completeOrdering} from '../../../../zql/src/query/complete-ordering.ts';
+import type {ClientGroupStorage} from '../../../../zqlite/src/database-storage.ts';
 import type {Database} from '../../../../zqlite/src/db.ts';
-import {computeZqlSpecs} from '../../db/lite-tables.ts';
-import type {LiteAndZqlSpec} from '../../db/specs.ts';
-import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
-import {type ShardID} from '../../types/shards.ts';
-import {
-  getSubscriptionState,
-} from '../replicator/schema/replication-state.ts';
-import {checkClientSchema} from './client-schema.ts';
-import {ResetPipelinesSignal} from './snapshotter.ts';
 import {
   reloadPermissionsIfChanged,
   type LoadedPermissions,
 } from '../../auth/load-permissions.ts';
-import {ChangeType} from '../../../../zql/src/ivm/change-type.ts';
-import {
-  rowIDSignatureUnit,
-} from './row-set-signature.ts';
+import type {LogConfig, ZeroConfig} from '../../config/zero-config.ts';
+import {computeZqlSpecs} from '../../db/lite-tables.ts';
+import type {LiteAndZqlSpec} from '../../db/specs.ts';
 import type {StatementRunner} from '../../db/statements.ts';
+import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
+import {type RowKey} from '../../types/row-key.ts';
+import {type ShardID} from '../../types/shards.ts';
+import {getSubscriptionState} from '../replicator/schema/replication-state.ts';
+import {checkClientSchema} from './client-schema.ts';
+import {rowIDSignatureUnit} from './row-set-signature.ts';
+import {ResetPipelinesSignal} from './snapshotter.ts';
 
 // NAPI addon types
 // NapiValue interface retained for NapiTableSpec columns that still use it.
@@ -103,11 +106,20 @@ export interface NapiTableSpec {
 import {createRequire} from 'node:module';
 const nodeRequire = createRequire(import.meta.url);
 let RustIvmEngineClass: unknown = null;
-const addonPath = process.env['RUST_IVM_ADDON_PATH'] ?? '../../../../packages/rust-ivm/napi/rust-ivm.node';
+const addonPath =
+  process.env['RUST_IVM_ADDON_PATH'] ??
+  '../../../../packages/rust-ivm/napi/rust-ivm.node';
 try {
-  RustIvmEngineClass = (nodeRequire(addonPath) as {RustIvmEngine: new () => unknown}).RustIvmEngine;
+  RustIvmEngineClass = (
+    nodeRequire(addonPath) as {RustIvmEngine: new () => unknown}
+  ).RustIvmEngine;
 } catch (e) {
-  console.error('[rust-ivm-driver] Failed to load addon from', addonPath, ':', (e as Error).message);
+  console.error(
+    '[rust-ivm-driver] Failed to load addon from',
+    addonPath,
+    ':',
+    (e as Error).message,
+  );
 }
 
 export type {Timer} from './pipeline-driver.ts';
@@ -158,6 +170,54 @@ function buildPrimaryKeys(
     primaryKeys.set(tableName, primaryKey as unknown as PrimaryKey);
   }
   return primaryKeys;
+}
+
+/**
+ * Build the per-table specs handed to the napi engine.
+ *
+ * Extracted as a pure function so both the driver and tests/fuzzers exercise the
+ * exact same derivation — the class of bug where the engine is keyed differently
+ * from the client (rowKey missing the client PK column → toPrimaryKeyString "Got
+ * undefined") only manifests HERE, in the glue between the LiteSpec and the
+ * client schema, so this is the seam the differential harness must drive.
+ *
+ * Invariant this encodes (matching TS): a table's rowKey is keyed by its
+ * CLIENT-schema primaryKey (from `primaryKeys`, populated by buildPrimaryKeys),
+ * NOT the raw LiteSpec/replica primaryKey. `uniqueKeys` still come from the
+ * LiteSpec (they drive scalar-EXISTS resolution, not the emitted rowKey).
+ */
+export function buildNapiTableSpecs(
+  tableSpecs: ReadonlyMap<string, LiteAndZqlSpec>,
+  primaryKeys: ReadonlyMap<string, PrimaryKey>,
+): NapiTableSpec[] {
+  const out: NapiTableSpec[] = [];
+  for (const [table, spec] of tableSpecs.entries()) {
+    const columns: Record<string, {type: string; optional: boolean}> = {};
+    for (const [col, schemaValue] of Object.entries(spec.zqlSpec)) {
+      columns[col] = {
+        type: schemaValue.type,
+        optional: schemaValue.optional ?? false,
+      };
+    }
+    out.push({
+      table,
+      columns,
+      // CLIENT-schema PK (what the client uses in toPrimaryKeyString), not the
+      // raw LiteSpec/replica PK. These differ for tables whose Zero primaryKey
+      // column != the replica PK column (messages -> messageId, conversations ->
+      // conversationId); shipping the LiteSpec PK emits rowKeys missing the
+      // client PK column and crashes the client with "Got undefined".
+      primaryKey: [...(primaryKeys.get(table) ?? spec.tableSpec.primaryKey)],
+      // All unique keys (PK plus secondary unique indexes) — drives scalar-EXISTS
+      // resolution keyed on a non-PK unique index (e.g. channel_participants
+      // (channelId,userId) in the conversation ACL); see the G8 diff-oracle gap.
+      uniqueKeys: spec.tableSpec.uniqueKeys.map(key => [...key]),
+      ...(spec.tableSpec.minRowVersion && {
+        minRowVersion: spec.tableSpec.minRowVersion,
+      }),
+    });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +408,8 @@ export class RustIVMDriver {
     // `flip` on OR-with-CSQ conditions (parity with zero 1.7's default-on
     // planner). Ships DARK: requires config.enableQueryPlanner AND an explicit
     // env opt-in until validated in ART.
-    this.#planEnabled = enablePlanner === true && process.env.RUST_IVM_PLANNER === '1';
+    this.#planEnabled =
+      enablePlanner === true && process.env.RUST_IVM_PLANNER === '1';
   }
 
   // Single-owner design: the Rust engine exclusively owns replica.db's
@@ -358,7 +419,10 @@ export class RustIVMDriver {
   // Bind params are passed as a JSON array to engine.readQuery.
   #runner(): object {
     const engine = this.#engine;
-    const readQuery = (sql: string, params?: unknown[]): Record<string, unknown>[] =>
+    const readQuery = (
+      sql: string,
+      params?: unknown[],
+    ): Record<string, unknown>[] =>
       JSON.parse(
         engine.readQuery(sql, params ? JSON.stringify(params) : null),
       ) as Record<string, unknown>[];
@@ -369,7 +433,9 @@ export class RustIVMDriver {
         return {
           all: (...args: unknown[]) => readQuery(sql, args),
           get: (...args: unknown[]) => readQuery(sql, args)[0],
-          iterate: function* (...args: unknown[]): Generator<Record<string, unknown>> {
+          iterate: function* (
+            ...args: unknown[]
+          ): Generator<Record<string, unknown>> {
             yield* readQuery(sql, args);
           },
           raw: function* (...args: unknown[]): Generator<unknown[]> {
@@ -434,30 +500,7 @@ export class RustIVMDriver {
     }
     buildPrimaryKeys(clientSchema, this.#primaryKeys);
 
-    const tableSpecs: NapiTableSpec[] = [];
-    for (const [table, spec] of this.#tableSpecs.entries()) {
-      const columns: Record<string, {type: string; optional: boolean}> = {};
-      for (const [col, schemaValue] of Object.entries(spec.zqlSpec)) {
-        columns[col] = {
-          type: schemaValue.type,
-          optional: schemaValue.optional ?? false,
-        };
-      }
-      tableSpecs.push({
-        table,
-        columns,
-        primaryKey: [...spec.tableSpec.primaryKey],
-        // Pass ALL unique keys (PK plus secondary unique indexes), not just the
-        // PK. The engine uses these to resolve scalar EXISTS subqueries keyed on
-        // a non-PK unique index (e.g. channel_participants(channelId,userId) in
-        // the conversation ACL). Without them the scalar can't be pre-resolved,
-        // degrades to a live per-parent Exists, and the matched row is only
-        // streamed as a hidden companion — diverging from TS (missing rows in
-        // the client store; see the G8 diff-oracle gap).
-        uniqueKeys: spec.tableSpec.uniqueKeys.map(key => [...key]),
-        ...(spec.tableSpec.minRowVersion && {minRowVersion: spec.tableSpec.minRowVersion}),
-      });
-    }
+    const tableSpecs = buildNapiTableSpecs(this.#tableSpecs, this.#primaryKeys);
     // Pass db_path to init() so sources + SQLite path are set atomically on
     // the worker thread (avoids race where setDatabasePath runs before Init).
     this.#engine.init(
@@ -501,7 +544,10 @@ export class RustIVMDriver {
     // (synchronous NAPI call). Without caching, this fires on every
     // query batch — blocking the JS event loop dozens of times per
     // hydration cycle.
-    if (this.#permissions !== null && this.#permissionsVersion === this.#currentVersion) {
+    if (
+      this.#permissions !== null &&
+      this.#permissionsVersion === this.#currentVersion
+    ) {
       return this.#permissions;
     }
     const res = reloadPermissionsIfChanged(
@@ -576,10 +622,11 @@ export class RustIVMDriver {
   }
 
   #planAst(ast: AST): AST {
-    const ordered = completeOrdering(
-      ast,
-      tableName =>
-        must(this.#primaryKeys.get(tableName), `no primary key for table '${tableName}'`),
+    const ordered = completeOrdering(ast, tableName =>
+      must(
+        this.#primaryKeys.get(tableName),
+        `no primary key for table '${tableName}'`,
+      ),
     );
     if (!this.#planEnabled) {
       return ordered;
@@ -608,7 +655,10 @@ export class RustIVMDriver {
     query: AST,
     queryName?: string,
   ): AsyncIterable<RowChange | 'yield'> {
-    assert(this.initialized(), 'Pipeline driver must be initialized before adding queries');
+    assert(
+      this.initialized(),
+      'Pipeline driver must be initialized before adding queries',
+    );
     this.removeQuery(queryID);
 
     const planned = this.#planAst(query);
@@ -665,6 +715,11 @@ export class RustIVMDriver {
     // the batched path just loops this over the array (one event-loop turn per
     // batch vs per row).
     const handleRow = (row: NapiRowChange) => {
+      // changeType -3 is the end-of-stream barrier sentinel (see drain_barrier in
+      // napi/src/lib.rs); it carries no data and must not be pushed as a row.
+      if (row.changeType === END_STREAM_SENTINEL) {
+        return;
+      }
       const change = napiToRowChange(row);
       if (change.type !== ChangeType.EDIT) {
         const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
@@ -693,7 +748,9 @@ export class RustIVMDriver {
           (_err: unknown, row: NapiRowChange) => handleRow(row),
         );
 
-    hydrated.then(() => deferClose(queue)).catch((e: unknown) => queue.error(e));
+    hydrated
+      .then(() => deferClose(queue))
+      .catch((e: unknown) => queue.error(e));
 
     // If the consumer abandons this stream early (break / thrown error /
     // client teardown), cancel the engine so the actor stops producing and
@@ -723,11 +780,22 @@ export class RustIVMDriver {
     }
   }
 
-  async advance(_timer: Timer): Promise<
-    | {version: string; numChanges: number; changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>}
+  async advance(
+    _timer: Timer,
+  ): Promise<
+    | {
+        version: string;
+        numChanges: number;
+        changes:
+          | Iterable<RowChange | 'yield'>
+          | AsyncIterable<RowChange | 'yield'>;
+      }
     | ResetPipelinesSignal
   > {
-    assert(this.initialized(), 'Pipeline driver must be initialized before advancing');
+    assert(
+      this.initialized(),
+      'Pipeline driver must be initialized before advancing',
+    );
 
     if (STREAM_ROWS) {
       return this.#advanceStreaming();
@@ -736,7 +804,11 @@ export class RustIVMDriver {
   }
 
   async #advanceEager(): Promise<
-    | {version: string; numChanges: number; changes: Iterable<RowChange | 'yield'>}
+    | {
+        version: string;
+        numChanges: number;
+        changes: Iterable<RowChange | 'yield'>;
+      }
     | ResetPipelinesSignal
   > {
     const rows = await this.#engine.advanceToHeadStreaming();
@@ -748,15 +820,22 @@ export class RustIVMDriver {
     if (headerRow.changeType === -2) {
       const reason = headerRow.rowKey['reason']?.strVal ?? 'schema-change';
       const msg = headerRow.rowKey['msg']?.strVal ?? 'advance reset';
-      return new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
+      return new ResetPipelinesSignal(
+        msg,
+        reason as ResetPipelinesSignal['reason'],
+      );
     }
     if (headerRow.changeType !== -1) {
-      throw new Error('advanceToHeadStreaming expected header row (changeType=-1) as first row');
+      throw new Error(
+        'advanceToHeadStreaming expected header row (changeType=-1) as first row',
+      );
     }
     const version = headerRow.rowKey['version']?.strVal ?? '';
     const numChanges = headerRow.rowKey['numChanges']?.f64Val ?? 0;
     const aborted = headerRow.rowKey['aborted']?.boolVal ?? false;
-    this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
+    this.#lc.debug?.(
+      `advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`,
+    );
 
     if (version) {
       this.#currentVersion = version;
@@ -770,7 +849,11 @@ export class RustIVMDriver {
   }
 
   async #advanceStreaming(): Promise<
-    | {version: string; numChanges: number; changes: AsyncIterable<RowChange | 'yield'>}
+    | {
+        version: string;
+        numChanges: number;
+        changes: AsyncIterable<RowChange | 'yield'>;
+      }
     | ResetPipelinesSignal
   > {
     const queue = new AsyncQueue<NapiRowChange>();
@@ -807,16 +890,23 @@ export class RustIVMDriver {
       const hk = JSON.parse(header.rowKey);
       const reason = hk['reason'] ?? 'schema-change';
       const msg = hk['msg'] ?? 'advance reset';
-      return new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
+      return new ResetPipelinesSignal(
+        msg,
+        reason as ResetPipelinesSignal['reason'],
+      );
     }
     if (header.changeType !== -1) {
-      throw new Error('advanceToHeadStreaming expected header row (changeType=-1) as first row');
+      throw new Error(
+        'advanceToHeadStreaming expected header row (changeType=-1) as first row',
+      );
     }
     const hk = JSON.parse(header.rowKey);
     const version = hk['version'] ?? '';
     const numChanges = hk['numChanges'] ?? 0;
     const aborted = hk['aborted'] ?? false;
-    this.#lc.debug?.(`advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`);
+    this.#lc.debug?.(
+      `advanceToHead: version=${version} numChanges=${numChanges} aborted=${aborted}`,
+    );
 
     if (version) {
       this.#currentVersion = version;
@@ -839,10 +929,17 @@ export class RustIVMDriver {
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
 
+      if (row.changeType === END_STREAM_SENTINEL) {
+        continue;
+      }
       if (row.changeType === -2) {
-        const rk = JSON.parse(row.rowKey); const reason = rk['reason'] ?? 'schema-change';
+        const rk = JSON.parse(row.rowKey);
+        const reason = rk['reason'] ?? 'schema-change';
         const msg = rk['msg'] ?? 'advance reset';
-        throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
+        throw new ResetPipelinesSignal(
+          msg,
+          reason as ResetPipelinesSignal['reason'],
+        );
       }
 
       const change = napiToRowChange(row);
@@ -863,7 +960,9 @@ export class RustIVMDriver {
     }
 
     if (aborted) {
-      this.#lc.warn?.(`advanceToHead: aborted after ${count} changes (budget exceeded)`);
+      this.#lc.warn?.(
+        `advanceToHead: aborted after ${count} changes (budget exceeded)`,
+      );
     }
   }
 
@@ -880,10 +979,18 @@ export class RustIVMDriver {
     // than materializing the remaining changes into an undrained queue.
     try {
       for await (const row of queue) {
+        // End-of-stream barrier sentinel — carries no change (see drain_barrier).
+        if (row.changeType === END_STREAM_SENTINEL) {
+          continue;
+        }
         if (row.changeType === -2) {
-          const rk = JSON.parse(row.rowKey); const reason = rk['reason'] ?? 'schema-change';
+          const rk = JSON.parse(row.rowKey);
+          const reason = rk['reason'] ?? 'schema-change';
           const msg = rk['msg'] ?? 'advance reset';
-          throw new ResetPipelinesSignal(msg, reason as ResetPipelinesSignal['reason']);
+          throw new ResetPipelinesSignal(
+            msg,
+            reason as ResetPipelinesSignal['reason'],
+          );
         }
 
         const change = napiToRowChange(row);
@@ -911,7 +1018,9 @@ export class RustIVMDriver {
     }
 
     if (aborted) {
-      this.#lc.warn?.(`advanceToHead: aborted after ${count} changes (budget exceeded)`);
+      this.#lc.warn?.(
+        `advanceToHead: aborted after ${count} changes (budget exceeded)`,
+      );
     }
   }
 }

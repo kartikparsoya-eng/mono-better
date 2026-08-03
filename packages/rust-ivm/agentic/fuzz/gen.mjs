@@ -75,19 +75,30 @@ export function genTables(rng) {
       colTypes[cname] = [base, optional];
     }
     if (ti > 0) { columns.fk = 'string'; colTypes.fk = ['string', false]; }
+    // PK divergence: 25% of simple-PK tables get a CLIENT-schema PK column ('k')
+    // distinct from the replica surrogate 'id' — modelling real tables like
+    // messages->messageId, conversations->conversationId. The SQLite replica is
+    // keyed by 'id' (replicaPrimaryKey) but the engine/client must key rowKeys by
+    // 'k' (primaryKey). Exercises the driver/engine keying seam where shipping the
+    // replica PK emits rowKeys missing the client PK column → client "Got undefined".
+    const pkDivergence = !compoundPK && rng.chance(0.25);
+    if (pkDivergence) { columns.k = 'string'; colTypes.k = ['string', false]; }
+    const primaryKey = pkDivergence ? ['k'] : (compoundPK ? ['id', 'id2'] : ['id']);
+    const replicaPrimaryKey = compoundPK ? ['id', 'id2'] : ['id'];
     const nRows = rng.chance(0.1) ? 0 : rng.int(5, 50);
     const rows = [];
     for (let r = 0; r < nRows; r++) {
       const row = {id: `${name}-r${r}`};
       if (compoundPK) row.id2 = `v${r % 3}`;
+      if (pkDivergence) row.k = `${name}-k${r}`; // unique client PK value
       for (const [cname, [base, optional]] of Object.entries(colTypes)) {
-        if (cname === 'id' || cname === 'id2') continue;
+        if (cname === 'id' || cname === 'id2' || cname === 'k') continue;
         if (cname === 'fk') { row.fk = `t0-r${rng.int(0, 60)}`; continue; }
         row[cname] = randValue(rng, base, optional);
       }
       rows.push(row);
     }
-    tables[name] = {columns, primaryKey: compoundPK ? ['id', 'id2'] : ['id'], rows, _colTypes: colTypes};
+    tables[name] = {columns, primaryKey, replicaPrimaryKey, rows, _colTypes: colTypes};
   }
   return tables;
 }
@@ -290,8 +301,9 @@ export function genFixture(seed) {
     const kind = rng.pick(live.length > 0 ? ['add', 'edit', 'edit', 'remove'] : ['add']);
     if (kind === 'add') {
       const row = {id: `${tname}-p${nextId++}`};
+      if (t._colTypes.k) row.k = `${tname}-pk${nextId}`; // unique client PK (never random)
       for (const [cname, [base, optional]] of Object.entries(t._colTypes)) {
-        if (cname === 'id') continue;
+        if (cname === 'id' || cname === 'k') continue;
         if (cname === 'fk') { row.fk = `t0-r${rng.int(0, 60)}`; continue; }
         row[cname] = randValue(rng, base, optional);
       }
@@ -301,7 +313,8 @@ export function genFixture(seed) {
       const idx = rng.int(0, live.length - 1);
       const oldRow = {...live[idx]};
       const row = {...oldRow};
-      const editable = Object.keys(t._colTypes).filter(c => c !== 'id' && c !== 'id2' && c !== 'fk');
+      // Never edit a PK column ('k' is the client PK for divergent tables).
+      const editable = Object.keys(t._colTypes).filter(c => c !== 'id' && c !== 'id2' && c !== 'fk' && c !== 'k');
       const cname = editable.length > 0 && rng.chance(0.85) ? rng.pick(editable) : null;
       if (cname) {
         const [base, optional] = t._colTypes[cname];
@@ -337,6 +350,14 @@ export function genFixture(seed) {
   const cleanTables = {};
   for (const [name, spec] of Object.entries(tables)) {
     cleanTables[name] = {columns: spec.columns, primaryKey: spec.primaryKey, rows: spec.rows};
+    // Carry the replica PK through when it diverges from the client PK, so the
+    // napi/SQLite harness can key the replica differently from the engine/client.
+    if (
+      spec.replicaPrimaryKey &&
+      JSON.stringify(spec.replicaPrimaryKey) !== JSON.stringify(spec.primaryKey)
+    ) {
+      cleanTables[name].replicaPrimaryKey = spec.replicaPrimaryKey;
+    }
   }
   const fixture = {
     name: `fuzz.seed-${seed}`,

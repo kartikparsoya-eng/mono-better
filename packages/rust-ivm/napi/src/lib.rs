@@ -297,6 +297,71 @@ fn make_reset_row(reason: &str, msg: &str) -> NapiRowChange {
     }
 }
 
+/// End-of-stream barrier sentinel (changeType = -3). Streamed as the final TSFN
+/// call after every real row. The driver's streaming consumers skip changeType
+/// == -3 (it is not a data row); it exists purely to anchor `drain_barrier`.
+fn end_sentinel() -> NapiRowChange {
+    NapiRowChange {
+        change_type: -3,
+        query_id: String::new(),
+        table: String::new(),
+        row_key: "{}".to_string(),
+        row: None,
+        is_hidden: false,
+    }
+}
+
+/// Block the actor thread until JS has actually *executed* the callback for a
+/// terminal END sentinel — a true drain barrier.
+///
+/// WHY: the streaming tasks fire rows via `tsfn.call(.., Blocking)` (queue depth
+/// 1) and then return from `compute()`, which resolves the async-task promise.
+/// The driver closes its row queue on that promise (`hydrated.then(deferClose)`).
+/// But `call(Blocking)` only blocks until the queue has *space* (the prior item
+/// was popped), NOT until its JS callback finished running. So the final row's
+/// callback could still be in flight when the promise resolves and the queue is
+/// closed → the last row is silently dropped (differential fuzzer seed 308,
+/// worst-case on a fat trailing row). Raising the queue depth only perturbs the
+/// timing; it does not fix the race.
+///
+/// `call_with_return_value` invokes `cb` on the main JS thread *after* the JS
+/// callback returns. Because the TSFN queue is FIFO and the main thread is
+/// single-threaded, the sentinel's callback runs strictly after every prior
+/// row's callback has completed. We block the actor thread on a channel that the
+/// `cb` signals, so `compute()` cannot return (→ promise resolve → queue close)
+/// until every row has been delivered to the driver. Bounded by a generous
+/// timeout so a torn-down/aborted TSFN can never wedge the actor thread.
+fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let status = tsfn.call_with_return_value(
+        Ok(end_sentinel()),
+        ThreadsafeFunctionCallMode::Blocking,
+        move |_ret: napi::JsUnknown| {
+            let _ = tx.send(());
+            Ok(())
+        },
+    );
+    if status == Status::Ok {
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(30));
+    }
+}
+
+/// Batched variant: same barrier semantics for a `Vec<NapiRowChange>` TSFN.
+fn drain_barrier_batched(tsfn: &ThreadsafeFunction<Vec<NapiRowChange>>) {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let status = tsfn.call_with_return_value(
+        Ok(vec![end_sentinel()]),
+        ThreadsafeFunctionCallMode::Blocking,
+        move |_ret: napi::JsUnknown| {
+            let _ = tx.send(());
+            Ok(())
+        },
+    );
+    if status == Status::Ok {
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(30));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // NAPI types (cross-boundary value representations)
 // ---------------------------------------------------------------------------
@@ -1427,6 +1492,10 @@ impl Task for HydrateStreamingTask {
                 // state AND emits output; read-level parallelism lives below the
                 // source, keeping the actor graph single-writer.
                 eng.add_queries_streaming(&specs, do_hydrate);
+                // Barrier: don't resolve the promise (→ driver closes its row
+                // queue) until every streamed row has landed in JS. See
+                // drain_barrier for the seed-308 last-row-drop it closes.
+                drain_barrier(&tsfn);
                 Ok(())
             })?
             .map_err(NapiError::from_reason)
@@ -1490,6 +1559,9 @@ impl Task for HydrateStreamingBatchedTask {
                     let batch = std::mem::take(&mut buf);
                     let _ = tsfn.call(Ok(batch), ThreadsafeFunctionCallMode::Blocking);
                 }
+                // Barrier: block until the tail batch has landed in JS before
+                // the promise resolves and the driver closes its queue.
+                drain_barrier_batched(&tsfn);
                 Ok(())
             })?
             .map_err(NapiError::from_reason)
@@ -1525,6 +1597,7 @@ impl Task for AdvanceStreamingTask {
                         )),
                         ThreadsafeFunctionCallMode::Blocking,
                     );
+                    drain_barrier(&tsfn);
                     return Ok(());
                 }
                 let syncable_tables = state.syncable_tables.clone();
@@ -1594,6 +1667,7 @@ impl Task for AdvanceStreamingTask {
                                         is_hidden: false,
                                     }), ThreadsafeFunctionCallMode::Blocking);
                                 }
+                                drain_barrier(&tsfn);
                                 Ok(())
                             }
                             Err(e) => Err(format!("advance failed: {}", e)),
@@ -1608,6 +1682,7 @@ impl Task for AdvanceStreamingTask {
                                 Ok(make_reset_row("scalar-subquery", &msg)),
                                 ThreadsafeFunctionCallMode::Blocking,
                             );
+                            drain_barrier(&tsfn);
                             Ok(())
                         } else {
                             // Poison the engine: half-mutated graph must reset+
