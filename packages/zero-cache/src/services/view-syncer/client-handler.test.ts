@@ -123,6 +123,58 @@ describe('view-syncer/client-handler', () => {
     ]);
   });
 
+  // Regression: the client (zero-poke-handler.ts) permits only ONE in-flight
+  // poke — a `pokeStart` arriving while another poke is still streaming makes
+  // it clear state and reconnect ("Connection Lost"). When hydration streams
+  // rows across async boundaries (the rust-ivm driver), a follow-up poke can be
+  // driven while a prior poke is still open. The ClientHandler must serialize
+  // them so their frames never interleave on the wire.
+  test('a poke started while another is open does not interleave frames', async () => {
+    const {subscription, close} = createSubscription();
+    const handler = new ClientHandler(
+      lc,
+      'g1',
+      'id1',
+      'ws1',
+      SHARD,
+      '121',
+      subscription,
+    );
+
+    // Poke A opens and sends a part, but is NOT yet ended (rows still
+    // "draining" across an async boundary).
+    const a = handler.startPoke({stateVersion: '123'});
+    await a.addPatch({
+      toVersion: {stateVersion: '123'},
+      patch: {type: 'query', op: 'put', id: 'ahash'},
+    });
+
+    // Poke B is started and driven to completion while A is still open.
+    const b = handler.startPoke({stateVersion: '125'});
+    const bEnded = b.end({stateVersion: '125'});
+
+    // Spin the event loop: B must be blocked behind A, so none of its frames
+    // may reach the wire yet.
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    // Finishing A releases B.
+    await a.end({stateVersion: '123'});
+    await bEnded;
+
+    const {received, err} = await close();
+    expect(err).toBeUndefined();
+
+    // A's start/part/end must all precede B's start/end — no interleaving.
+    const seq = received.map(m => [m[0], (m[1] as {pokeID: string}).pokeID]);
+    expect(seq).toEqual([
+      ['pokeStart', '123'],
+      ['pokePart', '123'],
+      ['pokeEnd', '123'],
+      ['pokeStart', '125'],
+      ['pokeEnd', '125'],
+    ]);
+  });
+
   test('poke handler for multiple clients', async () => {
     const poke1Version = {stateVersion: '121'};
     const poke2Version = {stateVersion: '123'};

@@ -120,6 +120,10 @@ export class ClientHandler {
   readonly #lc: LogContext;
   readonly #downstream: Subscription<Downstream>;
   #baseVersion: NullableCVRVersion;
+  // Tail of the per-connection poke chain. Each poke transaction gates its
+  // first frame on the previous transaction's completion so that pokes to this
+  // connection never interleave. See startPoke() for why.
+  #pokeTail: Promise<void> = Promise.resolve();
 
   readonly #pokeTime = getOrCreateLatencyHistogram(
     'sync',
@@ -198,11 +202,42 @@ export class ClientHandler {
 
     const pokeStart: PokeStartBody = {pokeID, baseCookie};
 
+    // Serialize poke transactions to this connection. The client
+    // (zero-poke-handler.ts) permits only ONE in-flight poke: a `pokeStart`
+    // arriving while another poke is still streaming makes it clear its state
+    // and reconnect (surfaced to users as "Connection Lost"). Stock TS upheld
+    // this implicitly because hydration was a *synchronous* generator, so a
+    // poke opened and closed without yielding. The rust-ivm driver streams
+    // rows across async TSFN macrotask boundaries
+    // (rust-ivm-driver.ts#addQueryStreaming), so a following poke's frames can
+    // otherwise interleave with a hydrate poke still draining. Gate this poke's
+    // first frame on the previous poke's completion, and chain the tail so the
+    // next poke waits for us — even if we send nothing.
+    const priorPoke = this.#pokeTail;
+    let releasePoke!: () => void;
+    const pokeDone = new Promise<void>(resolve => (releasePoke = resolve));
+    this.#pokeTail = priorPoke.then(() => pokeDone);
+    let pokeReleased = false;
+    const endPoke = () => {
+      if (!pokeReleased) {
+        pokeReleased = true;
+        releasePoke();
+      }
+    };
+    let awaitedPrior = false;
+    const awaitPrior = async () => {
+      if (!awaitedPrior) {
+        awaitedPrior = true;
+        await priorPoke;
+      }
+    };
+
     let pokeStarted = false;
     let body: PokePartBody | undefined;
     let partCount = 0;
     const ensureBody = async () => {
       if (!pokeStarted) {
+        await awaitPrior();
         await this.#push(['pokeStart', pokeStart]);
         pokeStarted = true;
       }
@@ -302,33 +337,42 @@ export class ClientHandler {
       },
 
       cancel: async () => {
-        if (pokeStarted) {
-          await this.#push(['pokeEnd', {pokeID, cookie: '', cancel: true}]);
+        try {
+          if (pokeStarted) {
+            await this.#push(['pokeEnd', {pokeID, cookie: '', cancel: true}]);
+          }
+        } finally {
+          endPoke();
         }
       },
 
       end: async (finalVersion: CVRVersion) => {
-        const cookie = versionToCookie(finalVersion);
-        if (!pokeStarted) {
-          if (cmpVersions(this.#baseVersion, finalVersion) === 0) {
-            return; // Nothing changed and nothing was sent.
+        try {
+          const cookie = versionToCookie(finalVersion);
+          if (!pokeStarted) {
+            if (cmpVersions(this.#baseVersion, finalVersion) === 0) {
+              return; // Nothing changed and nothing was sent.
+            }
+            await awaitPrior();
+            await this.#push(['pokeStart', pokeStart]);
+          } else if (cmpVersions(this.#baseVersion, finalVersion) >= 0) {
+            // Sanity check: If the poke was started, the finalVersion
+            // must be > #baseVersion.
+            throw new Error(
+              `Patches were sent but finalVersion ${finalVersion} is ` +
+                `not greater than baseVersion ${this.#baseVersion}`,
+            );
           }
-          await this.#push(['pokeStart', pokeStart]);
-        } else if (cmpVersions(this.#baseVersion, finalVersion) >= 0) {
-          // Sanity check: If the poke was started, the finalVersion
-          // must be > #baseVersion.
-          throw new Error(
-            `Patches were sent but finalVersion ${finalVersion} is ` +
-              `not greater than baseVersion ${this.#baseVersion}`,
-          );
-        }
-        await flushBody();
-        await this.#push(['pokeEnd', {pokeID, cookie}]);
-        this.#baseVersion = finalVersion;
+          await flushBody();
+          await this.#push(['pokeEnd', {pokeID, cookie}]);
+          this.#baseVersion = finalVersion;
 
-        const elapsed = performance.now() - start;
-        this.#pokeTransactions.add(1);
-        this.#pokeTime.recordMs(elapsed);
+          const elapsed = performance.now() - start;
+          this.#pokeTransactions.add(1);
+          this.#pokeTime.recordMs(elapsed);
+        } finally {
+          endPoke();
+        }
       },
     };
   }
