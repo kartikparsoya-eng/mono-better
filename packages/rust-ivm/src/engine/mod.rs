@@ -783,6 +783,16 @@ impl Engine {
         F: FnMut(&RowChange),
         H: FnMut(&str, usize),
     {
+        // Reset cancellation at the start of each advance, exactly as
+        // `add_queries_streaming` and `advance_streaming` do. This makes the
+        // method LOCALLY correct instead of relying on the cross-call invariant
+        // that a rehydrate (which resets the token) always runs between an
+        // early-abandoned advance and the next one. Without it, a leftover
+        // cancel from a prior aborted advance would trip the very first diff
+        // callback below ("advance cancelled before all changes were
+        // delivered") if that flow were ever reordered.
+        self.cancellation_token.reset();
+
         // 1. Advance the snapshotter — get the diff between prev and curr.
         let diff = snapshotter
             .advance(syncable_tables, all_table_names)

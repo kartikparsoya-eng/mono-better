@@ -961,6 +961,16 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   }
 
   #getTTLClock(now: number): TTLClock {
+    // INVARIANT: this must stay fully SYNCHRONOUS (no `await`). It is called
+    // out-of-lock by the TTL-clock interval timer (#updateTTLClockInCVRWithoutLock)
+    // as well as from locked paths, and it does a read-modify-write of
+    // #ttlClock/#ttlClockBase. With the rust-ivm async (TSFN-streamed) hydrate,
+    // the timer can now fire during a macrotask yield in the middle of an
+    // in-flight hydrate/advance — a window that barely existed under the old
+    // synchronous generator. Because this function has no yield point, the
+    // read-modify-write is atomic w.r.t. the event loop, so the two callers
+    // cannot tear the value (both only advance the clock monotonically by real
+    // elapsed wall-time). Adding an `await` here would reopen that race.
     // We will update ttlClock with delta from the ttlClockBase to the current time.
     const delta = now - this.#ttlClockBase;
     assert(this.#ttlClock !== undefined, 'ttlClock should be defined');

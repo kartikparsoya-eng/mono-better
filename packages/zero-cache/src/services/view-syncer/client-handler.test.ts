@@ -54,6 +54,32 @@ describe('view-syncer/client-handler', () => {
     };
   }
 
+  // Asserts a client's downstream frames never interleave two pokes: no
+  // pokeStart arrives while another poke is still open, and every part/end
+  // matches the currently-open pokeID. This is exactly the invariant the client
+  // (zero-poke-handler.ts) enforces and drops the connection over.
+  function assertNonInterleaved(frames: Downstream[]) {
+    let open: string | undefined;
+    for (const [type, body] of frames as [
+      string,
+      {pokeID: string},
+    ][]) {
+      if (type === 'pokeStart') {
+        expect(
+          open,
+          `pokeStart ${body.pokeID} arrived while ${open} still open`,
+        ).toBeUndefined();
+        open = body.pokeID;
+      } else if (type === 'pokePart') {
+        expect(body.pokeID).toBe(open);
+      } else if (type === 'pokeEnd') {
+        expect(body.pokeID).toBe(open);
+        open = undefined;
+      }
+    }
+    expect(open, 'a poke was left open (no pokeEnd)').toBeUndefined();
+  }
+
   test('no-op and canceled pokes', async () => {
     const poke1Version = {stateVersion: '123'};
     const poke2Version = {stateVersion: '125'};
@@ -165,6 +191,7 @@ describe('view-syncer/client-handler', () => {
     expect(err).toBeUndefined();
 
     // A's start/part/end must all precede B's start/end — no interleaving.
+    assertNonInterleaved(received);
     const seq = received.map(m => [m[0], (m[1] as {pokeID: string}).pokeID]);
     expect(seq).toEqual([
       ['pokeStart', '123'],
@@ -173,6 +200,43 @@ describe('view-syncer/client-handler', () => {
       ['pokeStart', '125'],
       ['pokeEnd', '125'],
     ]);
+  });
+
+  // Finding A (async-hydration audit): a client that connects DURING another
+  // client's in-flight hydrate must get its own, independently-serialized poke
+  // stream. The per-connection guard must NOT serialize across connections —
+  // otherwise a freshly-connected client would stall behind an unrelated slow
+  // hydrate on someone else's socket. This pins that the guard is per-#pokeTail.
+  test('the poke guard is per-connection: one open poke does not block another client', async () => {
+    const subA = createSubscription();
+    const subB = createSubscription();
+    const hA = new ClientHandler(lc, 'g1', 'idA', 'wsA', SHARD, '121', subA.subscription);
+    const hB = new ClientHandler(lc, 'g1', 'idB', 'wsB', SHARD, '121', subB.subscription);
+
+    // Client A opens a poke and leaves it mid-stream (rows still "draining").
+    const a = hA.startPoke({stateVersion: '123'});
+    await a.addPatch({
+      toVersion: {stateVersion: '123'},
+      patch: {type: 'query', op: 'put', id: 'ahash'},
+    });
+
+    // Client B (e.g. just connected) drives its own poke to completion. It must
+    // finish WITHOUT waiting for A — the guard is scoped to B's own connection.
+    const b = hB.startPoke({stateVersion: '123'});
+    await b.end({stateVersion: '123'});
+
+    const rB = await subB.close();
+    expect(rB.err).toBeUndefined();
+    assertNonInterleaved(rB.received);
+    // B's stream is fully complete (last frame is its pokeEnd) while A is still
+    // open — proving no cross-connection head-of-line blocking.
+    expect(rB.received.at(-1)?.[0]).toBe('pokeEnd');
+
+    // A can still finish cleanly afterward.
+    await a.end({stateVersion: '123'});
+    const rA = await subA.close();
+    expect(rA.err).toBeUndefined();
+    assertNonInterleaved(rA.received);
   });
 
   test('poke handler for multiple clients', async () => {
