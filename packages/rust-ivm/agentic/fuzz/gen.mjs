@@ -224,6 +224,21 @@ function genSimpleCondition(rng, table) {
   const cols = Object.keys(table._colTypes).filter(c => c !== 'fk');
   const cname = rng.pick(cols);
   const [base] = table._colTypes[cname];
+  // Production parity: a json column is an opaque payload — never a
+  // relational/equality comparand or a literal on either side. The app filters
+  // *extracted scalar fields* (json_extract), never a whole json blob, and
+  // whole-blob comparison is undefined across engines (TS parses + throws on
+  // object/array; SQLite compares raw text) — comparing them is not a
+  // representative scenario, only an ill-defined one. The one production-real
+  // predicate on a json column is a null check on a nullable payload.
+  if (base === 'json') {
+    return {
+      type: 'simple',
+      op: rng.chance(0.5) ? 'IS' : 'IS NOT',
+      left: colRef(cname),
+      right: lit(null),
+    };
+  }
   const roll = rng.rand();
   if (roll < 0.1) {
     // IS / IS NOT NULL (safe on all types)
@@ -407,8 +422,12 @@ export function genFixture(seed) {
 
   const ast = {table: rootName};
   // orderBy: 0-2 non-PK columns asc/desc, always ending in the PK tiebreaker.
+  // json columns are excluded: production never sorts (or cursor-paginates, since
+  // the cursor bound compares only orderBy columns) on an opaque json payload,
+  // and a json column holds heterogeneously-typed values (bool, number, object)
+  // whose cross-type comparison is undefined on both engines.
   const allSortCols = Object.keys(root._colTypes).filter(
-    c => c !== 'id' && c !== 'id2',
+    c => c !== 'id' && c !== 'id2' && root._colTypes[c][0] !== 'json',
   );
   const sortCols = rng
     .shuffle(allSortCols)
