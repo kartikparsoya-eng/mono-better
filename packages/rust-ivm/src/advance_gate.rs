@@ -25,9 +25,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Minimum advancement time before an abort is considered (ms). MUST match
-/// engine::MIN_ADVANCEMENT_TIME_LIMIT_MS (the per-change check) so the per-row
-/// and per-change arms trip on the same threshold.
+/// Minimum advancement time before an abort is considered (ms).
+///
+/// SINGLE source of truth (review #7): `engine::mod` imports this exact value
+/// for its per-change check, so the per-row and per-change economic arms can
+/// never trip on different thresholds (a TS-parity hazard when it was two
+/// independent `const`s).
 pub const MIN_ADVANCEMENT_TIME_LIMIT_MS: f64 = 50.0;
 
 /// Shared, thread-safe economic budget for one in-flight advance. `start`,

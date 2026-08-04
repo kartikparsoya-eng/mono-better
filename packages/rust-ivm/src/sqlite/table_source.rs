@@ -170,16 +170,22 @@ impl Iterator for LazyRowsIter {
         if this.fetched % 64 == 1 && crate::advance_gate::should_stop_fetch() {
             return None;
         }
+        // Borrow the shared per-source fields instead of cloning them on every
+        // row (review #1). `rows` is a disjoint field, so it can be borrowed
+        // mutably alongside these immutable borrows — this avoids three heap
+        // allocations (Vec<String> + HashMap + String) per fetched row, which at
+        // 100K rows is 300K needless allocations on the hot read path. The
+        // clones only ever fed `&str` args and the cold panic! path.
         let rows = this.rows.as_mut()?;
-        let column_names = this.column_names.clone();
-        let columns = this.columns.clone();
-        let table_name = this.table_name.clone();
+        let column_names = &this.column_names;
+        let columns = &this.columns;
+        let table_name = &this.table_name;
         match rows.next() {
             Ok(Some(raw_row)) => {
                 let mut map: FxHashMap<String, Value> = FxHashMap::default();
                 for (i, col) in column_names.iter().enumerate() {
                     let val = crate::sqlite::db::read_value_lossy(raw_row, i);
-                    let value = sqlite_value_to_ivm(val, columns.get(col), &table_name, col);
+                    let value = sqlite_value_to_ivm(val, columns.get(col), table_name, col);
                     map.insert(col.clone(), value);
                 }
                 Some(Arc::new(map))
@@ -1268,6 +1274,54 @@ mod advance_gate_fetch_tests {
     fn fetch_returns_all_rows_when_no_gate_armed() {
         // Hydrate / worker path: no advance gate → every row is produced.
         assert_eq!(fetch_count(conn_with_rows(300)), 300);
+    }
+
+    #[test]
+    fn fetch_reads_all_columns_and_values() {
+        // Regression for the hot-path allocation fix (review #1): next() now
+        // BORROWS column_names/columns/table_name instead of cloning them per
+        // row. Prove multi-column rows still map correctly across many rows —
+        // right keys, and values coerced per the column's declared type.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE u(id INTEGER, name TEXT, flag INTEGER);")
+            .unwrap();
+        for i in 0..200i64 {
+            conn.execute(
+                "INSERT INTO u(id, name, flag) VALUES (?1, ?2, ?3)",
+                rusqlite::params![i, format!("n{i}"), i % 2],
+            )
+            .unwrap();
+        }
+        let db = Rc::new(RefCell::new(conn));
+        let columns = HashMap::from([
+            ("id".to_string(), ColumnType::Number { optional: false }),
+            ("name".to_string(), ColumnType::String { optional: true }),
+            ("flag".to_string(), ColumnType::Boolean { optional: false }),
+        ]);
+        let q = SqlQuery {
+            text: "SELECT id, name, flag FROM u ORDER BY id".to_string(),
+            params: vec![],
+        };
+        let rows: Vec<Row> = stream_query(
+            db,
+            q,
+            vec!["id".to_string(), "name".to_string(), "flag".to_string()],
+            columns,
+            "u".to_string(),
+        )
+        .collect();
+
+        assert_eq!(rows.len(), 200);
+        // Number column coerces to F64, String passes through, Boolean maps 0/1.
+        assert_eq!(rows[0].get("id").cloned(), Some(Value::F64(0.0)));
+        assert_eq!(rows[0].get("name").cloned(), Some(Value::Str("n0".into())));
+        assert_eq!(rows[0].get("flag").cloned(), Some(Value::Bool(false)));
+        assert_eq!(rows[199].get("id").cloned(), Some(Value::F64(199.0)));
+        assert_eq!(
+            rows[199].get("name").cloned(),
+            Some(Value::Str("n199".into())),
+        );
+        assert_eq!(rows[199].get("flag").cloned(), Some(Value::Bool(true)));
     }
 
     #[test]

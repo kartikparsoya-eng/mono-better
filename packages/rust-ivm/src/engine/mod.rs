@@ -99,7 +99,12 @@ fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Minimum advancement time before an abort is considered (ms).
-const MIN_ADVANCEMENT_TIME_LIMIT_MS: f64 = 50.0;
+///
+/// Single source of truth, shared with the per-row economic breaker in
+/// `advance_gate` (review #7). Previously this was a second `const 50.0` here
+/// with a comment warning it MUST match `advance_gate`'s — importing the one
+/// canonical value makes divergence (a TS-parity hazard) impossible.
+use crate::advance_gate::MIN_ADVANCEMENT_TIME_LIMIT_MS;
 
 /// Error thrown when advancement exceeds the economic time limit.
 #[derive(Debug)]
