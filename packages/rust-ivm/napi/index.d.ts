@@ -40,17 +40,6 @@ export interface NapiColumnSchema {
   type: string
   optional: boolean
 }
-/**
- * A synchronous iterator that JS drains in a loop, exactly like TS drains
- * a generator. The iterator holds a boxed closure that produces the next
- * NapiRowChange (or None when done).
- */
-export declare class NapiStreamIterator {
-  /** Synchronous next — returns the next row, or null when done. */
-  next(): NapiRowChange | null
-  /** Cancel the iterator — subsequent next() calls return None. */
-  cancel(): void
-}
 export declare class RustIvmEngine {
   constructor()
   /**
@@ -73,17 +62,19 @@ export declare class RustIvmEngine {
    */
   init(tables: Array<NapiTableSpec>, dbPath: string | undefined | null, appId: string): void
   /**
-   * Add queries and hydrate them on the engine actor, off the JS event loop.
-   * Resolves to the full row list.
+   * ORACLE/FIXTURE-REPLAY ONLY — not used by the production `RustIVMDriver`.
+   * Add queries and hydrate them on the engine actor, off the JS event loop,
+   * resolving to the FULL row list buffered into one `Vec`. This is
+   * unbounded by design and safe only for the bounded fixture corpora that
+   * `agentic/oracle/*` drives; production hydration must use the credit-gated
+   * `add_queries_streaming_rows` below, which is the only backpressured path.
    */
   addQueriesStreaming(queries: Array<NapiQuerySpec>): Promise<NapiRowChange[]>
   /**
-   * Advance to head: Rust derives its own diff from the snapshotter,
-   * pushes through pipelines, streams RowChanges.
-   * The first row from the iterator is a header (changeType=-1) with
-   * version, numChanges, aborted in the row_key field.
-   * Advance to head on the engine actor, off the JS event loop.
-   * Resolves to `[header, ...rows]` (header changeType=-1; -2 = reset row).
+   * ORACLE/FIXTURE-REPLAY ONLY — not used by the production `RustIVMDriver`.
+   * Advance to head, buffering `[header, ...rows]` into one `Vec` (header
+   * changeType=-1; -2 = reset row). Unbounded by design; production advance
+   * must use the credit-gated `advance_to_head_streaming_rows` below.
    */
   advanceToHeadStreaming(): Promise<NapiRowChange[]>
   /**

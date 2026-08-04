@@ -379,34 +379,6 @@ pub struct NapiColumnSchema {
 // Synchronous pull-iterator — holds a Rust Iterator, JS drains via next()
 // ---------------------------------------------------------------------------
 
-/// A synchronous iterator that JS drains in a loop, exactly like TS drains
-/// a generator. The iterator holds a boxed closure that produces the next
-/// NapiRowChange (or None when done).
-#[napi]
-pub struct NapiStreamIterator {
-    next_fn: RefCell<Box<dyn FnMut() -> Option<NapiRowChange>>>,
-    cancelled: std::sync::atomic::AtomicBool,
-}
-
-#[napi]
-impl NapiStreamIterator {
-    /// Synchronous next — returns the next row, or null when done.
-    #[napi]
-    pub fn next(&self) -> Option<NapiRowChange> {
-        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            return None;
-        }
-        (self.next_fn.borrow_mut())()
-    }
-
-    /// Cancel the iterator — subsequent next() calls return None.
-    #[napi]
-    pub fn cancel(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // TS AST deserialization adapter
 // ---------------------------------------------------------------------------
@@ -1035,8 +1007,12 @@ impl RustIvmEngine {
             .map_err(NapiError::from_reason)
     }
 
-    /// Add queries and hydrate them on the engine actor, off the JS event loop.
-    /// Resolves to the full row list.
+    /// ORACLE/FIXTURE-REPLAY ONLY — not used by the production `RustIVMDriver`.
+    /// Add queries and hydrate them on the engine actor, off the JS event loop,
+    /// resolving to the FULL row list buffered into one `Vec`. This is
+    /// unbounded by design and safe only for the bounded fixture corpora that
+    /// `agentic/oracle/*` drives; production hydration must use the credit-gated
+    /// `add_queries_streaming_rows` below, which is the only backpressured path.
     #[napi(ts_return_type = "Promise<NapiRowChange[]>")]
     pub fn add_queries_streaming(&self, queries: Vec<NapiQuerySpec>) -> AsyncTask<HydrateTask> {
         AsyncTask::new(HydrateTask {
@@ -1045,12 +1021,10 @@ impl RustIvmEngine {
         })
     }
 
-    /// Advance to head: Rust derives its own diff from the snapshotter,
-    /// pushes through pipelines, streams RowChanges.
-    /// The first row from the iterator is a header (changeType=-1) with
-    /// version, numChanges, aborted in the row_key field.
-    /// Advance to head on the engine actor, off the JS event loop.
-    /// Resolves to `[header, ...rows]` (header changeType=-1; -2 = reset row).
+    /// ORACLE/FIXTURE-REPLAY ONLY — not used by the production `RustIVMDriver`.
+    /// Advance to head, buffering `[header, ...rows]` into one `Vec` (header
+    /// changeType=-1; -2 = reset row). Unbounded by design; production advance
+    /// must use the credit-gated `advance_to_head_streaming_rows` below.
     #[napi(ts_return_type = "Promise<NapiRowChange[]>")]
     pub fn advance_to_head_streaming(&self) -> AsyncTask<AdvanceTask> {
         AsyncTask::new(AdvanceTask {
@@ -1322,7 +1296,10 @@ impl RustIvmEngine {
                     }
                     rows.push(serde_json::Value::Object(obj));
                 }
-                Ok(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()))
+                // Propagate a serialization failure — never fall back to an
+                // empty "[]", which would silently turn a read error into a
+                // no-rows result on the getRow/init/permissions paths.
+                serde_json::to_string(&rows).map_err(|e| format!("serialize rows: {}", e))
             })?
             .map_err(NapiError::from_reason)
     }

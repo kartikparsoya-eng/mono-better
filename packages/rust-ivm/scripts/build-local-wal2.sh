@@ -19,8 +19,12 @@ RUST_IVM_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$RUST_IVM_DIR/wal2-sqlite/build"
 mkdir -p "$BUILD"
 
-# 1. Compile the wal2 fork into a static lib. Defines match Dockerfile stage 1,
-#    plus SQLITE_ENABLE_STMT_SCANSTATUS so the planner cost model can link.
+# 1. Compile the wal2 fork into a static lib. This is a LEAN local build — the
+#    minimum defines for wal2 + JSON1 + snapshot + the planner's SCANSTATUS. It
+#    is NOT define-identical to Dockerfile stage 1, which adds perf/robustness
+#    flags (e.g. STAT4, DQS=0) for the shipped image; cost-model realism can
+#    therefore differ slightly locally. Correctness (wal2 file format, value
+#    semantics) is unaffected — that is what the differential suite checks.
 echo "[1/3] compiling wal2 SQLite (static)…"
 cc -O2 -ffp-contract=off -fPIC -c "$RUST_IVM_DIR/wal2-sqlite/sqlite3.c" -o "$BUILD/sqlite3.o" \
    -DSQLITE_THREADSAFE=2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE \

@@ -434,6 +434,21 @@ export class RustIVMDriver {
     assert(RustIvmEngineClass, 'Rust IVM NAPI addon not loaded');
     this.#lc = lc.withContext('clientGroupID', clientGroupID);
     this.#engine = new RustIvmEngineClass();
+    // Fail loud on an addon that predates the backpressure/cancel wiring. These
+    // are called out-of-band while a producer is parked on stream credit; if the
+    // loaded addon lacks them, an optional-chained no-op would silently wedge the
+    // stream until the 600s watchdog instead of surfacing the version skew here.
+    for (const method of [
+      'grantStreamCredit',
+      'cancelStream',
+      'cancel',
+    ] as const) {
+      assert(
+        typeof (this.#engine as unknown as Record<string, unknown>)[method] ===
+          'function',
+        `Rust IVM NAPI addon is missing '${method}' — rebuild the addon (version skew)`,
+      );
+    }
     this.#shardID = shardID;
     this.#storage = storage;
     this.#config = config;

@@ -195,9 +195,19 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
     loop {
         let now = Instant::now();
         let sleep_until = {
-            let s = lock.lock().unwrap();
+            // Poison-safe: if a job thread panicked while holding this lock, the
+            // watchdog is the last line of defence and MUST keep running — recover
+            // the guard rather than propagating the poison and killing the monitor.
+            let s = lock.lock().unwrap_or_else(|e| e.into_inner());
             if s.shutdown {
                 return;
+            }
+            // Bound the seen-id sets to live entries so a long-lived engine that
+            // has processed many jobs doesn't accumulate ids forever.
+            if warned.len() + aborted.len() > s.entries.len() {
+                let live: std::collections::HashSet<u64> = s.entries.iter().map(|e| e.id).collect();
+                warned.retain(|id| live.contains(id));
+                aborted.retain(|id| live.contains(id));
             }
             // WARN: log a slow-job signal for entries past `warn_at` that we
             // haven't warned yet. This is NON-ABORTING — a legit cold hydrate
@@ -230,7 +240,7 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
                 // Interrupt every handle in the shared bag. The bag is locked
                 // briefly here; the actor never holds this lock during a query
                 // (it only pushes at connection open), so this can't wedge.
-                let handles = e.handles.lock().unwrap();
+                let handles = e.handles.lock().unwrap_or_else(|e| e.into_inner());
                 for h in handles.iter() {
                     h.interrupt();
                 }
@@ -261,7 +271,7 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
         match sleep_until {
             // No pending entries → sleep until woken (registration/shutdown).
             None => {
-                let s = lock.lock().unwrap();
+                let s = lock.lock().unwrap_or_else(|e| e.into_inner());
                 if s.shutdown {
                     return;
                 }
@@ -269,7 +279,7 @@ fn monitor_loop(inner: Arc<(Mutex<WatchState>, Condvar)>) {
             }
             Some(d) => {
                 let sleep_dur = d.saturating_duration_since(now);
-                let s = lock.lock().unwrap();
+                let s = lock.lock().unwrap_or_else(|e| e.into_inner());
                 if s.shutdown {
                     return;
                 }
