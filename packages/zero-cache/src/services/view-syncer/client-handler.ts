@@ -243,7 +243,9 @@ export class ClientHandler {
             const patches = (body.mutationsPatch ??= []);
             if (op === 'put') {
               const row = v.parse(
-                normalizeMutationResult(ensureSafeJSON(patch.contents)),
+                normalizeMutationResult(
+                  ensureSafeJSON(patch.contents),
+                ),
                 mutationRowSchema,
                 'passthrough',
               );

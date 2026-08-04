@@ -71,6 +71,15 @@ type RowOp<Op extends Omit<ChangeType, ChangeType.CHILD>> = {
   readonly table: string;
   readonly rowKey: Row;
   readonly row: Row;
+  /**
+   * Set only by the Rust IVM engine, which hands rows over as already-
+   * serialized JSON with `_0_version` split out. When present, consumers
+   * should use these instead of `row`: they avoid parsing the row into an
+   * object just to re-serialize it onto the wire. This driver leaves them
+   * undefined and consumers fall back to `row`.
+   */
+  readonly contents?: Row | undefined;
+  readonly version?: string | undefined;
 };
 
 export type RowAdd = RowOp<ChangeType.ADD>;

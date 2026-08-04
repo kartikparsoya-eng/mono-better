@@ -1,6 +1,9 @@
 import {resolver} from '@rocicorp/resolver';
 import {beforeEach, describe, expect, test} from 'vitest';
-import type {JSONObject} from '../../../../shared/src/bigint-json.ts';
+import {
+  stringify,
+  type JSONObject,
+} from '../../../../shared/src/bigint-json.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import type {Downstream} from '../../../../zero-protocol/src/down.ts';
 import type {
@@ -53,6 +56,58 @@ describe('view-syncer/client-handler', () => {
       },
     };
   }
+
+  /**
+   * Downstream messages cross a process boundary (`serialization: 'advanced'`
+   * in types/processes.ts = structured clone) before they are serialized to
+   * the socket. Structured clone strips class prototypes, so anything in a
+   * poke that relies on `instanceof` at serialization time silently changes
+   * shape on the wire.
+   *
+   * This is not hypothetical: a `RawJSON` wrapper used to carry pre-serialized
+   * row contents here. In-process it spliced correctly and every differential
+   * test passed; across the real worker topology it arrived as a plain object
+   * and every Rust-produced row went out as `{"json":"..."}`, so clients could
+   * not key them and dropped ~12k rows. Assert the whole poke survives the hop
+   * byte-for-byte.
+   */
+  test('poke payloads survive the structured-clone process hop', async () => {
+    const {subscription, close} = createSubscription();
+    const handler = new ClientHandler(
+      lc,
+      'g1',
+      'id1',
+      'ws1',
+      SHARD,
+      '100',
+      subscription,
+    );
+    const poker = handler.startPoke({stateVersion: '120'});
+    await poker.addPatch({
+      toVersion: {stateVersion: '120'},
+      patch: {
+        type: 'row',
+        op: 'put',
+        id: {schema: 'public', table: 'issues', rowKey: {id: 'bar'}},
+        contents: {
+          id: 'bar',
+          name: 'hello',
+          num: 123,
+          open: true,
+          nothing: null,
+          nested: {a: [1, 2], b: 'c'},
+        },
+      },
+    });
+    await poker.end({stateVersion: '120'});
+    const {received} = await close();
+
+    const cloned = structuredClone(received);
+    expect(stringify(cloned)).toBe(stringify(received));
+    expect(cloned).toEqual(received);
+    // No wrapper object may reach the wire in place of the row itself.
+    expect(stringify(received)).not.toContain('"json":');
+  });
 
   test('no-op and canceled pokes', async () => {
     const poke1Version = {stateVersion: '123'};

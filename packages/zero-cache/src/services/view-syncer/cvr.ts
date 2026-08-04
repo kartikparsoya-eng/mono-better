@@ -1,7 +1,7 @@
 import type {LogContext} from '@rocicorp/logger';
 import {startAsyncSpan, startSpan} from '../../../../otel/src/span.ts';
 import {assert} from '../../../../shared/src/asserts.ts';
-import {type JSONObject} from '../../../../shared/src/bigint-json.ts';
+import type {JSONObject} from '../../../../shared/src/bigint-json.ts';
 import {CustomKeyMap} from '../../../../shared/src/custom-key-map.ts';
 import {toSorted} from '../../../../shared/src/iterables.ts';
 import {

@@ -20,8 +20,23 @@ export interface NapiRowChange {
    * HashMap<String, NapiValue> (which creates 5 V8 properties per value).
    */
   rowKey: string
-  /** JSON-encoded row object, or null. */
+  /**
+   * JSON-encoded row CONTENTS, or null.
+   *
+   * This EXCLUDES the `_0_version` column, which is delivered separately in
+   * `version`. TS used to do this split itself (`contentsAndVersion` in
+   * view-syncer.ts), which cost a `JSON.parse` plus a destructure and
+   * rest-spread — a fresh object and a full column copy — on every row.
+   * Splitting here means the JS side never has to materialize the row at
+   * all: it can forward this string straight to the wire.
+   */
   row?: string
+  /**
+   * The row's `_0_version`, lifted out of `row`. `None` when there is no row
+   * (a REMOVE) or when the column is absent — the JS side treats a missing
+   * version on a put as an error, exactly as `contentsAndVersion` did.
+   */
+  version?: string
   /** True when this row belongs to a hidden EXISTS/NOT-EXISTS relationship. */
   isHidden: boolean
 }
