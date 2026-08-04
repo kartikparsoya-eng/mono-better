@@ -2257,15 +2257,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             //
             // The Rust engine ALWAYS splits `_0_version` off while serializing
             // and reports it as `change.version`, so its rows never carry that
-            // column and must not be run through `contentsAndVersion`. When the
-            // contents are also free of native-transport tags it supplies them
-            // ready to splice (`rawContents`) and the row is never materialized
-            // at all; otherwise we use the revived object. The TS engine sets
-            // neither field and keeps `_0_version` inline, so it splits here.
-            if (
-              change.version !== undefined ||
-              change.rawContents !== undefined
-            ) {
+            // column and must not be run through `contentsAndVersion`; its
+            // `contents` view is the wire form. The TS engine sets neither
+            // field and keeps `_0_version` inline, so it splits here.
+            if (change.version !== undefined || change.contents !== undefined) {
               if (
                 typeof change.version !== 'string' ||
                 change.version.length === 0
@@ -2274,8 +2269,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
                   `Invalid _0_version for ${table}:${stringify(rowKey)}`,
                 );
               }
+              if (change.contents === undefined) {
+                throw new Error(
+                  `Missing contents for ${table}:${stringify(rowKey)}`,
+                );
+              }
               parsedRow.version = change.version;
-              parsedRow.contents = change.rawContents ?? change.row;
+              parsedRow.contents = change.contents;
               return;
             }
             const {version, contents} = contentsAndVersion(change.row);

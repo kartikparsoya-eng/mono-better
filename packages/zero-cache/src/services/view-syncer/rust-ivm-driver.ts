@@ -10,7 +10,6 @@ export type {
   NapiRowChange,
   NapiTableSpec,
 } from '../../../../rust-ivm/napi/index.js';
-import {RawJSON} from '../../../../shared/src/bigint-json.ts';
 
 // Terminal sentinel changeType streamed as the final TSFN call by the addon's
 // drain_barrier (napi/src/lib.rs). It carries no data; consumers skip it. Its
@@ -80,16 +79,17 @@ export type RowChange = {
   readonly table: string;
   readonly rowKey: RowKey;
   /**
-   * The row as a parsed and revived object. This is a LAZY, memoized getter —
-   * reading it costs a `JSON.parse` plus a revive walk. Prefer
-   * {@link rawContents} plus {@link version} when `rawContents` is set.
+   * The row as a parsed and revived object, WITH `_0_version` re-attached so
+   * it matches what the TS PipelineDriver produces. Lazy and memoized; shares
+   * one parse with {@link contents}. Prefer {@link contents} for anything
+   * headed to the wire.
    */
   readonly row: Row | undefined;
   /**
-   * Row contents (every column except `_0_version`) as already-serialized
-   * JSON, ready to be spliced into a poke without ever being parsed.
+   * The row's wire contents: every column except `_0_version`, parsed and
+   * revived. Shares one parse with {@link row}.
    */
-  readonly rawContents: RawJSON | undefined;
+  readonly contents: Row | undefined;
   /** The row's `_0_version`, lifted out by the engine. */
   readonly version: string | undefined;
 };
@@ -164,14 +164,37 @@ function napiToRowChange(
   c: NapiRowChange,
   tableSpecs: ReadonlyMap<string, LiteAndZqlSpec>,
 ): RowChange {
-  const contents = c.row;
-  // A row carrying a native-transport tag (`__rustIvmSqliteReal`) must be
-  // revived into real JS values before it can reach a client, so it cannot be
-  // spliced verbatim. Only NaN/±Infinity floats produce one, so in practice
-  // virtually every row takes the splice path.
-  const spliceable = contents !== undefined && !c.needsRevive;
-  let parsed: Row | undefined;
+  const rawRow = c.row;
+  let parsedContents: Row | undefined;
   let didParse = false;
+  let rowWithVersion: Row | undefined;
+
+  // Parse + revive ONCE, memoized, and serve both views from it:
+  //  - `contents` is what goes to the wire: no `_0_version`.
+  //  - `row` is the exact-parity view the TS PipelineDriver produces, which
+  //    carries `_0_version` inline.
+  // An earlier version handed the JSON string across as a `RawJSON` wrapper so
+  // it could be spliced without parsing. That was wrong: the wrapper is a class
+  // instance and loses its prototype when the downstream crosses a process
+  // boundary (`serialization: 'advanced'` = structured clone), after which the
+  // `instanceof` check fails and every Rust-produced row serializes as
+  // `{"json":"..."}` — corrupting the wire. Do not reintroduce a marker object
+  // here; any future splice must happen without crossing a boundary.
+  const materialize = () => {
+    if (!didParse) {
+      parsedContents =
+        rawRow === undefined
+          ? undefined
+          : (reviveNativeRow(
+              parseJSONObject(rawRow, 'native row'),
+              c.table,
+              tableSpecs,
+            ) as Row);
+      didParse = true;
+    }
+    return parsedContents;
+  };
+
   const change = {
     type: c.changeType,
     queryID: c.queryId,
@@ -181,47 +204,40 @@ function napiToRowChange(
       c.table,
       tableSpecs,
     ) as RowKey,
-    // Lazy: parsing and reviving happen only if something actually reads the
-    // row as an object. Memoized so repeated reads cost one parse, not one per
-    // access.
     get row(): Row | undefined {
-      if (!didParse) {
-        if (contents === undefined) {
-          parsed = undefined;
-        } else {
-          const obj = reviveNativeRow(
-            parseJSONObject(contents, 'native row'),
-            c.table,
-            tableSpecs,
-          );
-          // `row` is the EXACT-PARITY view: the TS PipelineDriver carries
-          // `_0_version` inline, so re-attach the column the engine split out.
-          // Diverging here would change what `row` means depending on which
-          // engine produced it. The fast path (`rawContents` + `version`) is
-          // what avoids this work; this getter is the compatibility fallback.
-          if (c.version !== undefined) {
-            obj[ZERO_VERSION_COLUMN_NAME] = c.version;
-          }
-          parsed = obj as Row;
-        }
-        didParse = true;
+      const contents = materialize();
+      if (contents === undefined) {
+        return undefined;
       }
-      return parsed;
+      if (rowWithVersion === undefined) {
+        // Re-attach the column the engine split out so `row` means the same
+        // thing on both drivers. Build a COPY: `contents` is handed out by
+        // reference and stored by the CVR, so mutating the shared object here
+        // would retroactively put `_0_version` into rows already queued for
+        // the wire.
+        rowWithVersion =
+          c.version === undefined
+            ? contents
+            : ({...contents, [ZERO_VERSION_COLUMN_NAME]: c.version} as Row);
+      }
+      return rowWithVersion;
     },
   };
 
-  // `rawContents` and `version` are a faster ENCODING of data already present
-  // in `row`, not extra data — so they are defined non-enumerable. That keeps
-  // the enumerable shape byte-identical to the TS PipelineDriver's RowChange,
-  // which is what `driver-parity-trace` walks via `Object.keys`: the parity
-  // gate keeps full teeth over the shared contract while consumers that know
-  // about the fast path can still read these directly.
+  // Non-enumerable so the enumerable shape stays byte-identical to the TS
+  // PipelineDriver's RowChange, which `driver-parity-trace` walks via
+  // `Object.keys`. These are derived views / cheaper encodings of data already
+  // in `row`, not extra data.
   Object.defineProperties(change, {
-    rawContents: {
-      value: spliceable ? new RawJSON(contents) : undefined,
-      enumerable: false,
-    },
     version: {value: c.version ?? undefined, enumerable: false},
+    contents: {
+      enumerable: false,
+      get(): Row | undefined {
+        // Always the engine's contents as parsed: `_0_version` was split off
+        // before serialization and `row` never writes it back onto this object.
+        return materialize();
+      },
+    },
   });
   return change as RowChange;
 }

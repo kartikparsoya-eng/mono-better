@@ -1,7 +1,7 @@
 import type {LogContext} from '@rocicorp/logger';
 import {startAsyncSpan, startSpan} from '../../../../otel/src/span.ts';
 import {assert} from '../../../../shared/src/asserts.ts';
-import type {JSONObject, RawJSON} from '../../../../shared/src/bigint-json.ts';
+import type {JSONObject} from '../../../../shared/src/bigint-json.ts';
 import {CustomKeyMap} from '../../../../shared/src/custom-key-map.ts';
 import {toSorted} from '../../../../shared/src/iterables.ts';
 import {
@@ -50,11 +50,7 @@ import {ttlClockAsNumber, type TTLClock} from './ttl-clock.ts';
 
 export type RowUpdate = {
   version?: string; // Undefined for an unref.
-  // Undefined for an unref. A `RawJSON` when the row came from the Rust IVM
-  // engine, which hands over contents as already-serialized JSON; it is
-  // spliced into the poke verbatim and never parsed here. The CVR itself does
-  // not read contents — they only travel to the wire.
-  contents?: JSONObject | RawJSON; // Undefined for an unref.
+  contents?: JSONObject; // Undefined for an unref.
   refCounts: {[hash: string]: number}; // Counts are negative when a row is unrefed.
 };
 

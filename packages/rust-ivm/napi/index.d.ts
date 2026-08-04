@@ -37,14 +37,6 @@ export interface NapiRowChange {
    * version on a put as an error, exactly as `contentsAndVersion` did.
    */
   version?: string
-  /**
-   * True when `row` contains a native-transport tag (`__rustIvmSqliteReal`)
-   * that must be revived into a real JS value before the row can be sent to
-   * a client. Only NaN/±Infinity floats produce one, so this is false for
-   * virtually every row — and when it is false the JS side can splice `row`
-   * into the poke verbatim instead of parsing and rebuilding it.
-   */
-  needsRevive: boolean
   /** True when this row belongs to a hidden EXISTS/NOT-EXISTS relationship. */
   isHidden: boolean
 }

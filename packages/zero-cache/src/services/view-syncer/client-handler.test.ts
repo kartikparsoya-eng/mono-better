@@ -1,7 +1,6 @@
 import {resolver} from '@rocicorp/resolver';
 import {beforeEach, describe, expect, test} from 'vitest';
 import {
-  RawJSON,
   stringify,
   type JSONObject,
 } from '../../../../shared/src/bigint-json.ts';
@@ -59,12 +58,20 @@ describe('view-syncer/client-handler', () => {
   }
 
   /**
-   * Rows produced by the Rust IVM engine arrive as already-serialized JSON and
-   * are spliced into the poke without being parsed. The wire output must be
-   * indistinguishable from the same row supplied as a plain object — otherwise
-   * clients would see a different document depending on which engine ran.
+   * Downstream messages cross a process boundary (`serialization: 'advanced'`
+   * in types/processes.ts = structured clone) before they are serialized to
+   * the socket. Structured clone strips class prototypes, so anything in a
+   * poke that relies on `instanceof` at serialization time silently changes
+   * shape on the wire.
+   *
+   * This is not hypothetical: a `RawJSON` wrapper used to carry pre-serialized
+   * row contents here. In-process it spliced correctly and every differential
+   * test passed; across the real worker topology it arrived as a plain object
+   * and every Rust-produced row went out as `{"json":"..."}`, so clients could
+   * not key them and dropped ~12k rows. Assert the whole poke survives the hop
+   * byte-for-byte.
    */
-  async function pokeWithContents(contents: JSONObject | RawJSON) {
+  test('poke payloads survive the structured-clone process hop', async () => {
     const {subscription, close} = createSubscription();
     const handler = new ClientHandler(
       lc,
@@ -82,67 +89,24 @@ describe('view-syncer/client-handler', () => {
         type: 'row',
         op: 'put',
         id: {schema: 'public', table: 'issues', rowKey: {id: 'bar'}},
-        contents,
-      },
-    });
-    await poker.end({stateVersion: '120'});
-    const {received} = await close();
-    return received;
-  }
-
-  test('RawJSON contents produce the same poke as plain contents', async () => {
-    const asObject = await pokeWithContents({
-      id: 'bar',
-      name: 'hello',
-      num: 123,
-      open: true,
-      nothing: null,
-    });
-    const asRaw = await pokeWithContents(
-      new RawJSON(
-        '{"id":"bar","name":"hello","num":123,"open":true,"nothing":null}',
-      ),
-    );
-
-    // The in-memory shapes differ by design (a RawJSON wrapper vs a plain
-    // object); what must match is the bytes on the wire, which is where the
-    // splice happens — so compare the serialized form the outbound stream uses.
-    expect(stringify(asRaw)).toEqual(stringify(asObject));
-    expect(stringify(asRaw)).toContain(
-      '"value":{"id":"bar","name":"hello","num":123,"open":true,"nothing":null}',
-    );
-  });
-
-  test('RawJSON lmid rows are still parsed and applied', async () => {
-    // The clients table is one of the two internal tables the server actually
-    // reads, so a RawJSON row here must be materialized rather than spliced.
-    const {subscription, close} = createSubscription();
-    const handler = new ClientHandler(
-      lc,
-      'g1',
-      'id1',
-      'ws1',
-      SHARD,
-      '100',
-      subscription,
-    );
-    const poker = handler.startPoke({stateVersion: '120'});
-    await poker.addPatch({
-      toVersion: {stateVersion: '120'},
-      patch: {
-        type: 'row',
-        op: 'put',
-        id: {schema: '', table: 'zapp_6.clients', rowKey: {clientID: 'bar'}},
-        contents: new RawJSON(
-          '{"clientGroupID":"g1","clientID":"bar","lastMutationID":321,"userID":"ignored"}',
-        ),
+        contents: {
+          id: 'bar',
+          name: 'hello',
+          num: 123,
+          open: true,
+          nothing: null,
+          nested: {a: [1, 2], b: 'c'},
+        },
       },
     });
     await poker.end({stateVersion: '120'});
     const {received} = await close();
 
-    const part = received.find(m => m[0] === 'pokePart');
-    expect(part?.[1].lastMutationIDChanges).toEqual({bar: 321});
+    const cloned = structuredClone(received);
+    expect(stringify(cloned)).toBe(stringify(received));
+    expect(cloned).toEqual(received);
+    // No wrapper object may reach the wire in place of the row itself.
+    expect(stringify(received)).not.toContain('"json":');
   });
 
   test('no-op and canceled pokes', async () => {

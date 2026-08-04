@@ -57,38 +57,9 @@ export function parse(
   return customParse(str, reviver, numberParser);
 }
 
-/**
- * A string that is ALREADY valid JSON and should be spliced into the output of
- * {@link stringify} verbatim, rather than being escaped as a JSON string.
- *
- * This exists so that JSON produced somewhere else — notably rows serialized by
- * the Rust IVM engine — can reach the wire without a parse/re-encode round
- * trip. Without it, handing JS a JSON string and then stringifying it again
- * costs a `JSON.parse` to turn it into objects and a full re-serialization to
- * turn it back, per row.
- *
- * The contents are NOT validated. Splicing invalid JSON produces a malformed
- * document, so only wrap output from a serializer you trust.
- */
-export class RawJSON {
-  readonly json: string;
-
-  constructor(json: string) {
-    this.json = json;
-  }
-
-  toString(): string {
-    return this.json;
-  }
-}
-
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any
 function customSerializer(_: string, v: any, type: string) {
   if (type === 'bigint') return v.toString();
-  // A serializer that returns a string has its return value emitted as raw
-  // JSON text (unquoted) — the same mechanism the bigint case above relies on
-  // to emit `10` rather than `"10"`.
-  if (v instanceof RawJSON) return v.json;
 }
 
 /**
