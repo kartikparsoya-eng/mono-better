@@ -58,7 +58,9 @@ impl ClientGroupStorage {
     pub fn destroy(&self) {
         let sql = "DELETE FROM storage WHERE clientGroupID = ?";
         let conn = self.db.borrow().conn();
-        let _ = conn.borrow().execute(sql, [&self.cg_id]);
+        conn.borrow()
+            .execute(sql, [&self.cg_id])
+            .expect("DatabaseStorage destroy failed");
     }
 }
 
@@ -75,16 +77,16 @@ impl Storage for DatabaseStorage {
         let sql = "SELECT val FROM storage WHERE clientGroupID = ? AND op = ? AND key = ?";
         let conn = self.db.borrow().conn();
         let conn = conn.borrow();
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
-        let mut rows = match stmt.query(rusqlite::params![&self.cg_id, self.op_id as i64, key]) {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
-        if let Some(row) = rows.next().ok().flatten() {
-            let val: String = row.get(0).ok()?;
+        // Storage errors are never demoted to "no state": returning None for a
+        // failed read would present missing operator state (e.g. a Take
+        // partition with no bound) and silently corrupt the pipeline. TS
+        // better-sqlite3 THROWS here -> view-syncer teardown; panic = parity.
+        let mut stmt = conn.prepare(sql).expect("DatabaseStorage get prepare failed");
+        let mut rows = stmt
+            .query(rusqlite::params![&self.cg_id, self.op_id as i64, key])
+            .expect("DatabaseStorage get query failed");
+        if let Some(row) = rows.next().expect("DatabaseStorage get step failed") {
+            let val: String = row.get(0).expect("DatabaseStorage get column failed");
             Some(parse_json_value(&val))
         } else {
             None
@@ -96,18 +98,23 @@ impl Storage for DatabaseStorage {
                    ON CONFLICT(clientGroupID, op, key) DO UPDATE SET val = excluded.val";
         let json = value_to_json_string(&value);
         let conn = self.db.borrow().conn();
-        let _ = conn.borrow().execute(
-            sql,
-            rusqlite::params![&self.cg_id, self.op_id as i64, key, json],
-        );
+        // A swallowed write here would diverge persisted operator state from
+        // the in-memory view with no signal (the take bound=None class). TS
+        // better-sqlite3 .run() THROWS -> teardown; panic = parity.
+        conn.borrow()
+            .execute(
+                sql,
+                rusqlite::params![&self.cg_id, self.op_id as i64, key, json],
+            )
+            .expect("DatabaseStorage set failed");
     }
 
     fn del(&mut self, key: &str) {
         let sql = "DELETE FROM storage WHERE clientGroupID = ? AND op = ? AND key = ?";
         let conn = self.db.borrow().conn();
-        let _ = conn
-            .borrow()
-            .execute(sql, rusqlite::params![&self.cg_id, self.op_id as i64, key]);
+        conn.borrow()
+            .execute(sql, rusqlite::params![&self.cg_id, self.op_id as i64, key])
+            .expect("DatabaseStorage del failed");
     }
 
     fn scan(&self, prefix: Option<&str>) -> Vec<(String, Value)> {
@@ -115,24 +122,15 @@ impl Storage for DatabaseStorage {
         let sql = "SELECT key, val FROM storage WHERE clientGroupID = ? AND op = ? AND key >= ?";
         let conn = self.db.borrow().conn();
         let conn = conn.borrow();
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let mut rows = match stmt.query(rusqlite::params![&self.cg_id, self.op_id as i64, pfx]) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
+        // Same contract as get(): a failed scan must not read as "empty state".
+        let mut stmt = conn.prepare(sql).expect("DatabaseStorage scan prepare failed");
+        let mut rows = stmt
+            .query(rusqlite::params![&self.cg_id, self.op_id as i64, pfx])
+            .expect("DatabaseStorage scan query failed");
         let mut result = Vec::new();
-        while let Some(row) = rows.next().ok().flatten() {
-            let key: String = match row.get(0) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let val: String = match row.get(1) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+        while let Some(row) = rows.next().expect("DatabaseStorage scan step failed") {
+            let key: String = row.get(0).expect("DatabaseStorage scan key failed");
+            let val: String = row.get(1).expect("DatabaseStorage scan val failed");
             if !pfx.is_empty() && !key.starts_with(pfx) {
                 break;
             }
