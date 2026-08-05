@@ -5,6 +5,7 @@ import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
 // The corpus generator shared with the engine-level fuzzer (agentic gen.mjs).
 // Same schemas/queries/pushes — incl. PK divergence — now driven through the
 // FULL prod driver path instead of the raw engine.
+import {readFileSync} from 'node:fs';
 import {genFixture} from '../../../../rust-ivm/agentic/fuzz/gen.mjs';
 import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
 import {
@@ -57,6 +58,9 @@ const ADDON_PATH = process.env['RUST_IVM_ADDON_PATH'];
 const NO_TIMER = {elapsedLap: () => 0, totalElapsed: () => 0} as any;
 const START = Number(process.env['DRIVER_FUZZ_START'] ?? '0');
 const COUNT = Number(process.env['DRIVER_FUZZ_SEEDS'] ?? '80');
+// Repro/minimization hook: bypass genFixture and load a single fixture from a
+// JSON file (used by agentic/fuzz/minimize-fixture.mjs). Runs exactly once.
+const FIXTURE_PATH = process.env['DRIVER_FUZZ_FIXTURE'];
 
 describe.skipIf(!ADDON_PATH)(
   'view-syncer/rust-ivm-driver fuzz differential',
@@ -253,8 +257,11 @@ describe.skipIf(!ADDON_PATH)(
       const bump = (k: string) => (skipped[k] = (skipped[k] ?? 0) + 1);
       let tested = 0;
 
-      for (let seed = START; seed < START + COUNT; seed++) {
-        const fixture = genFixture(seed) as unknown as Fixture;
+      const end = FIXTURE_PATH ? START + 1 : START + COUNT;
+      for (let seed = START; seed < end; seed++) {
+        const fixture = FIXTURE_PATH
+          ? (JSON.parse(readFileSync(FIXTURE_PATH, 'utf8')) as Fixture)
+          : (genFixture(seed) as unknown as Fixture);
         // Translate once; used to seed the shared replica + both drivers.
         let ddl: string;
         let cs: unknown;
