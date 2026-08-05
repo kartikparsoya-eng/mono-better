@@ -122,8 +122,10 @@ fn get_row(
         conds.join(" AND ")
     );
 
+    // Cached: one SELECT shape per table, executed once per change-log entry —
+    // the advance hot path the advancement-timeout budget measures.
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|e| format!("get_row prepare: {}", e))?;
     let params: Vec<&dyn rusqlite::ToSql> = key_cols
         .iter()
@@ -203,8 +205,9 @@ fn get_rows(
         }
     }
 
+    // Cached: same rationale as get_row above.
     let mut stmt = conn
-        .prepare(&sql)
+        .prepare_cached(&sql)
         .map_err(|e| format!("get_rows prepare: {}", e))?;
     let mut rows = stmt
         .query(rusqlite::params_from_iter(binds.iter()))
