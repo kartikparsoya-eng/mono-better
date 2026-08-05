@@ -92,8 +92,7 @@ impl LazyRows {
         // by SQL text; re-preparing per fetch costs ~25% of a correlated-EXISTS
         // hydrate (one child SELECT per parent row, same SQL every time).
         let stmt: rusqlite::CachedStatement<'_> = guard_static.prepare_cached(&sql)?;
-        let stmt_static: rusqlite::CachedStatement<'static> =
-            unsafe { std::mem::transmute(stmt) };
+        let stmt_static: rusqlite::CachedStatement<'static> = unsafe { std::mem::transmute(stmt) };
         let mut stmt_pin = Box::pin(stmt_static);
 
         // Bind parameters and create the rows cursor. The statement's heap

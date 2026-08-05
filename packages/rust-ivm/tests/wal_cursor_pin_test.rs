@@ -81,7 +81,12 @@ fn lazyrows_cursor_pins_wal_and_blocks_checkpoint_until_dropped() {
     // finalized) — this is exactly what a streaming hydrate does while relaying
     // rows to JS across macrotasks. The cursor keeps a read transaction open. ---
     let read_conn = Rc::new(RefCell::new(Connection::open(db_path).unwrap()));
-    let mut ts = TableSource::new(read_conn.clone(), "users", columns(), vec!["id".to_string()]);
+    let mut ts = TableSource::new(
+        read_conn.clone(),
+        "users",
+        columns(),
+        vec!["id".to_string()],
+    );
     let input = ts.connect(None, None, None, None);
     let mut held_stream = input.borrow().fetch(&Default::default());
     // Step exactly one row: begins the read txn, does NOT finalize the cursor.

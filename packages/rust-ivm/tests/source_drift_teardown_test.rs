@@ -21,7 +21,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -66,7 +66,10 @@ fn seeded_source() -> Rc<RefCell<MemorySource>> {
 /// Push `change` and return the panic message, or `None` if it did not panic.
 /// Uses `catch_unwind` exactly like the napi advance boundary (lib.rs:1511) so
 /// this proves the panic never crosses an FFI boundary / SIGABRTs the process.
-fn push_expecting_drift(source: &Rc<RefCell<MemorySource>>, change: SourceChange) -> Option<String> {
+fn push_expecting_drift(
+    source: &Rc<RefCell<MemorySource>>,
+    change: SourceChange,
+) -> Option<String> {
     let result = catch_unwind(AssertUnwindSafe(|| {
         source.borrow_mut().push(change);
     }));
@@ -150,5 +153,8 @@ fn source_survives_a_caught_drift_panic() {
             row: make_row(&[("id", num(2.0))]),
         });
     }));
-    assert!(ok.is_ok(), "source must remain usable after a caught drift panic");
+    assert!(
+        ok.is_ok(),
+        "source must remain usable after a caught drift panic"
+    );
 }

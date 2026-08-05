@@ -96,8 +96,7 @@ fn leak_busy_statement(conn: &std::rc::Rc<std::cell::RefCell<Connection>>) {
     let guard = conn.borrow();
     // Erase the Ref lifetime so stmt/rows can be forgotten independently of
     // the scope — the same transmute pattern LazyRows uses in table_source.rs.
-    let guard_static: std::cell::Ref<'static, Connection> =
-        unsafe { std::mem::transmute(guard) };
+    let guard_static: std::cell::Ref<'static, Connection> = unsafe { std::mem::transmute(guard) };
     let stmt = guard_static.prepare("SELECT id, name FROM users").unwrap();
     let mut stmt_static: rusqlite::Statement<'static> = unsafe { std::mem::transmute(stmt) };
     let stmt_ptr: *mut rusqlite::Statement<'static> = &mut stmt_static;

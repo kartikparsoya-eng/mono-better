@@ -3,7 +3,7 @@ import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
 import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
-import type {AST} from '../../../../zero-protocol/src/ast.ts';
+import type {AST, CompoundKey} from '../../../../zero-protocol/src/ast.ts';
 import {createSchema} from '../../../../zero-schema/src/builder/schema-builder.ts';
 import {
   string,
@@ -374,7 +374,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
         op: 'EXISTS',
         related: {
           system: 'client',
-          correlation: {parentField: ['id'], childField: ['issueID']},
+          correlation: {parentField: ['id'] as CompoundKey, childField: ['issueID'] as CompoundKey},
           subquery: {
             table: 'comments',
             alias: 'comments',
@@ -459,7 +459,10 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
         op: 'EXISTS' as const,
         related: {
           system: 'client' as const,
-          correlation: {parentField: ['userId'], childField: ['userId']},
+          correlation: {
+            parentField: ['userId'] as CompoundKey,
+            childField: ['userId'] as CompoundKey,
+          },
           subquery: {
             table: 'memberships',
             alias: 'm',
@@ -475,7 +478,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
           op: 'EXISTS',
           related: {
             system: 'client',
-            correlation: {parentField: ['id'], childField: ['channelId']},
+            correlation: {parentField: ['id'] as CompoundKey, childField: ['channelId'] as CompoundKey},
             subquery: {
               table: 'channel_participants',
               alias: 'p',
@@ -602,7 +605,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
           op: 'EXISTS',
           related: {
             system: 'client',
-            correlation: {parentField: ['id'], childField: ['channelId']},
+            correlation: {parentField: ['id'] as CompoundKey, childField: ['channelId'] as CompoundKey},
             subquery: {
               table: 'channel_participants',
               alias: 'p',
@@ -794,7 +797,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver differential', () => {
       related: [
         {
           system: 'client',
-          correlation: {parentField: ['id'], childField: ['issueID']},
+          correlation: {parentField: ['id'] as CompoundKey, childField: ['issueID'] as CompoundKey},
           subquery: {
             table: 'comments',
             alias: 'comments',

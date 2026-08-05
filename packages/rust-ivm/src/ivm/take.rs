@@ -1101,9 +1101,13 @@ mod bound_none_edit_tests {
             .set_output(Rc::new(RefCell::new(NoopOutput)) as OutputHandle);
 
         // Simulate a partition that hydrated EMPTY: size 0, no bound row.
-        storage
-            .borrow_mut()
-            .set("global".to_string(), TakeState { size: 0, bound: None });
+        storage.borrow_mut().set(
+            "global".to_string(),
+            TakeState {
+                size: 0,
+                bound: None,
+            },
+        );
 
         // An advance carries an Edit for a row in that (empty) partition.
         let edit = Change::Edit {
