@@ -207,6 +207,75 @@ pub struct Snapshot {
     is_wal2: bool,
 }
 
+/// Reset every live statement on `conn` (an `sqlite3_next_stmt` walk), returning
+/// how many were BUSY (stepped, un-reset — i.e. holding an open cursor).
+///
+/// This is the better-sqlite3 close contract: statements are settled before the
+/// connection's transaction state is touched. Without it, a stray cursor makes
+/// `sqlite3_close` fail with SQLITE_BUSY — an error rusqlite's `Drop` silently
+/// swallows (`InnerConnection::drop`, `#[allow(unused_must_use)]`), leaking the
+/// connection at the C level **with its read transaction still open**. On wal2
+/// that orphaned read-mark is a permanent checkpoint pin: the CG recovers on a
+/// fresh connection and logs healthily while the WAL grows at the write rate
+/// (the unbounded prod WAL-growth mechanism; see zombie_pin_repro_test.rs).
+///
+/// Statements are only reset, never finalized: their Rust owners (if any still
+/// exist) hold the `sqlite3_stmt` and will finalize on their own drop —
+/// finalizing here would double-free. A reset is sufficient to release the
+/// cursor so ROLLBACK fully settles the connection.
+fn settle_statements(conn: &rusqlite::Connection) -> usize {
+    let mut busy = 0usize;
+    unsafe {
+        let db = conn.handle();
+        let mut stmt = rusqlite::ffi::sqlite3_next_stmt(db, std::ptr::null_mut());
+        while !stmt.is_null() {
+            if rusqlite::ffi::sqlite3_stmt_busy(stmt) != 0 {
+                busy += 1;
+                rusqlite::ffi::sqlite3_reset(stmt);
+            }
+            stmt = rusqlite::ffi::sqlite3_next_stmt(db, stmt);
+        }
+    }
+    busy
+}
+
+impl Drop for Snapshot {
+    /// Every drop path — leapfrog-failure orphan, `Snapshotter::destroy()`,
+    /// error unwind — must release the read-mark. The pin is the open
+    /// transaction, not the connection handle: even if `sqlite3_close` later
+    /// fails on an unfinalized statement and rusqlite leaks the handle, a
+    /// rolled-back connection holds no read-mark and cannot block checkpoints.
+    fn drop(&mut self) {
+        let conn = self.conn.borrow();
+        // Finalize cached statements FIRST: rusqlite's `Connection` drops its
+        // InnerConnection (close) BEFORE its StatementCache, so un-flushed
+        // cached statements would make sqlite3_close fail and leak the handle.
+        conn.flush_prepared_statement_cache();
+        let busy = settle_statements(&conn);
+        if busy > 0 {
+            eprintln!(
+                "[rust-ivm] snapshot drop: settled {} busy statement(s) that outlived \
+                 snapshot version {:?} — the connection handle may leak on close, but \
+                 the read-mark is released (no checkpoint pin)",
+                busy, self.version,
+            );
+        }
+        if let Err(e) = conn.execute_batch("ROLLBACK") {
+            let msg = e.to_string();
+            // "no transaction is active" is the normal case for a snapshot that
+            // was never pinned (create-failure unwind) — not worth logging.
+            if !msg.contains("no transaction is active") {
+                eprintln!(
+                    "[rust-ivm] snapshot drop: ROLLBACK failed for version {:?}: {} — \
+                     if the close below also fails, this connection is a zombie \
+                     checkpoint pin (unbounded WAL growth)",
+                    self.version, msg,
+                );
+            }
+        }
+    }
+}
+
 impl Snapshot {
     /// Open a fresh connection and pin it at the current head.
     fn create(db_file: &str, page_cache_size_kib: Option<i64>) -> Result<Self, String> {
@@ -221,6 +290,11 @@ impl Snapshot {
         // file), matching the native TS driver's default open mode.
         let conn = rusqlite::Connection::open(db_file)
             .map_err(|e| format!("Snapshot::create open: {}", e))?;
+
+        // Statement cache for the fetch hot path (TS parity: zqlite's
+        // StatementCache). Sized above rusqlite's default 16 so a multi-query
+        // CG's distinct fetch shapes don't thrash it.
+        conn.set_prepared_statement_cache_capacity(64);
 
         conn.pragma_update(None, "synchronous", "OFF")
             .map_err(|e| format!("pragma synchronous: {}", e))?;
@@ -309,6 +383,17 @@ impl Snapshot {
     /// Roll this connection's snapshot back and re-pin it at the current head.
     /// This is the Rust equivalent of TS `Snapshot.resetToHead()`.
     fn reset_to_head(&mut self) -> Result<(), String> {
+        // A busy statement here means a cursor outlived the advance that
+        // created it — a bug in whoever stashed it, but never a reason to
+        // orphan this connection (the zombie-pin class). Settle it, loudly.
+        let busy = settle_statements(&self.conn.borrow());
+        if busy > 0 {
+            eprintln!(
+                "[rust-ivm] snapshot leapfrog: settled {} busy statement(s) still \
+                 open on snapshot version {:?} — a cursor outlived its advance",
+                busy, self.version,
+            );
+        }
         self.conn
             .borrow()
             .execute_batch("ROLLBACK")
