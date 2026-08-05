@@ -56,7 +56,13 @@ use crate::sqlite::query_builder::{SqlParam, SqlQuery, build_select_query};
 ///   owning `_conn`. This order is part of the safety contract.
 struct LazyRows {
     rows: Option<rusqlite::Rows<'static>>,
-    _stmt: Pin<Box<rusqlite::Statement<'static>>>,
+    /// Cached statement (TS parity: zqlite's `StatementCache` keyed by SQL
+    /// text, table-source.ts:289). Dropping a `CachedStatement` RESETS it and
+    /// returns it to the connection's cache instead of finalizing — the next
+    /// fetch with the same SQL skips the prepare. A reset statement is not
+    /// busy, so it can never block the snapshotter's ROLLBACK; the cache is
+    /// flushed (statements finalized) in `Snapshot::drop` before close.
+    _stmt: Pin<Box<rusqlite::CachedStatement<'static>>>,
     _guard: Ref<'static, Connection>,
     _conn: Rc<RefCell<Connection>>,
     column_names: Vec<String>,
@@ -81,15 +87,19 @@ impl LazyRows {
         let guard: Ref<'_, Connection> = conn.borrow();
         let guard_static: Ref<'static, Connection> = unsafe { std::mem::transmute(guard) };
 
-        // Prepare the statement while the connection is borrowed.
-        let stmt: rusqlite::Statement<'_> = guard_static.prepare(&sql)?;
-        let stmt_static: rusqlite::Statement<'static> = unsafe { std::mem::transmute(stmt) };
+        // Prepare (or fetch from the per-connection statement cache) while the
+        // connection is borrowed. TS parity: zqlite caches prepared statements
+        // by SQL text; re-preparing per fetch costs ~25% of a correlated-EXISTS
+        // hydrate (one child SELECT per parent row, same SQL every time).
+        let stmt: rusqlite::CachedStatement<'_> = guard_static.prepare_cached(&sql)?;
+        let stmt_static: rusqlite::CachedStatement<'static> =
+            unsafe { std::mem::transmute(stmt) };
         let mut stmt_pin = Box::pin(stmt_static);
 
         // Bind parameters and create the rows cursor. The statement's heap
         // address is stable because it is pinned.
         let rows: rusqlite::Rows<'_> = {
-            let stmt_mut: &mut rusqlite::Statement<'static> =
+            let stmt_mut: &mut rusqlite::CachedStatement<'static> =
                 unsafe { Pin::get_unchecked_mut(Pin::as_mut(&mut stmt_pin)) };
             let param_refs: Vec<&dyn rusqlite::ToSql> =
                 params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
