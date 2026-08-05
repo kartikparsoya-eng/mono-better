@@ -311,7 +311,12 @@ fn end_sentinel() -> NapiRowChange {
 /// `cb` signals, so `compute()` cannot return (→ promise resolve → queue close)
 /// until every row has been delivered to the driver. Bounded by a generous
 /// timeout so a torn-down/aborted TSFN can never wedge the actor thread.
-fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) {
+/// Returns Err when delivery could NOT be confirmed — a torn-down TSFN or a
+/// 30s timeout. Callers MUST propagate it (fail the task → promise rejects →
+/// driver tears down/retries). Swallowing it would resolve the promise with
+/// rows possibly undelivered — a silent incomplete hydrate/advance, the exact
+/// row-drop class this barrier exists to close.
+fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) -> std::result::Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
     let status = tsfn.call_with_return_value(
         Ok(end_sentinel()),
@@ -321,9 +326,19 @@ fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) {
             Ok(())
         },
     );
-    if status == Status::Ok {
-        let _ = rx.recv_timeout(std::time::Duration::from_secs(30));
+    if status != Status::Ok {
+        return Err(format!(
+            "drain barrier: TSFN closed before the END sentinel could be queued \
+             (status {:?}) — stream completeness cannot be confirmed",
+            status
+        ));
     }
+    rx.recv_timeout(std::time::Duration::from_secs(30)).map_err(|_| {
+        "drain barrier: END sentinel callback did not execute within 30s — \
+         stream completeness cannot be confirmed (JS thread wedged or TSFN torn \
+         down mid-drain)"
+            .to_string()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,7 +1692,7 @@ impl Task for HydrateStreamingTask {
                 // barrier would stall this job (and everything queued behind it
                 // on the actor) until the barrier's 30s timeout (#3).
                 if !cancel.is_cancelled() {
-                    drain_barrier(&tsfn);
+                    drain_barrier(&tsfn)?;
                 }
                 Ok(())
             })?
@@ -1719,7 +1734,7 @@ impl Task for AdvanceStreamingTask {
                         )),
                         ThreadsafeFunctionCallMode::Blocking,
                     );
-                    drain_barrier(&tsfn);
+                    drain_barrier(&tsfn)?;
                     return Ok(());
                 }
                 let syncable_tables = state.syncable_tables.clone();
@@ -1804,7 +1819,7 @@ impl Task for AdvanceStreamingTask {
                                 // Skip the barrier on early abandonment (#3): a
                                 // discarding consumer has no last row to await.
                                 if !cancel.is_cancelled() {
-                                    drain_barrier(&tsfn);
+                                    drain_barrier(&tsfn)?;
                                 }
                                 Ok(())
                             }
@@ -1820,7 +1835,7 @@ impl Task for AdvanceStreamingTask {
                                 Ok(make_reset_row("scalar-subquery", &msg)),
                                 ThreadsafeFunctionCallMode::Blocking,
                             );
-                            drain_barrier(&tsfn);
+                            drain_barrier(&tsfn)?;
                             Ok(())
                         } else {
                             // Poison the engine: half-mutated graph must reset+
