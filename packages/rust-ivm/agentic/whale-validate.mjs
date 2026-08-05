@@ -10,12 +10,18 @@
 import {rmSync, copyFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {resolve, join, dirname} from 'node:path';
-import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 import {tmpdir} from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
+// wal2 build of SQLite — the snapshotter hard-requires wal2; node:sqlite's
+// DatabaseSync (no wal2) makes engine.init reject the replica ("must be in wal2
+// mode"), which silently disabled this whole validation harness.
+const zqliteRequire = createRequire(
+  resolve(__dirname, '..', '..', 'zqlite', 'package.json'),
+);
+const SQLiteDatabase = zqliteRequire('@rocicorp/zero-sqlite3');
 
 const NAPI = resolve(__dirname, '..', 'napi');
 const candidates = [
@@ -43,8 +49,8 @@ const addon = require(NODEPATH);
 const NUM_ROWS = 13_000;
 
 function createWhaleDb(dbPath) {
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL');
+  const db = new SQLiteDatabase(dbPath);
+  db.pragma('journal_mode = wal2');
   db.exec('DROP TABLE IF EXISTS "_zero.replicationState"');
   db.exec(
     'CREATE TABLE "_zero.replicationState" (stateVersion TEXT NOT NULL, lock INTEGER PRIMARY KEY DEFAULT 1 CHECK (lock=1))',
