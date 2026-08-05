@@ -342,12 +342,13 @@ fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) -> std::result::Resul
             status
         ));
     }
-    rx.recv_timeout(std::time::Duration::from_secs(30)).map_err(|_| {
-        "drain barrier: END sentinel callback did not execute within 30s — \
+    rx.recv_timeout(std::time::Duration::from_secs(30))
+        .map_err(|_| {
+            "drain barrier: END sentinel callback did not execute within 30s — \
          stream completeness cannot be confirmed (JS thread wedged or TSFN torn \
          down mid-drain)"
-            .to_string()
-    })
+                .to_string()
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -637,8 +638,7 @@ fn json_to_rusqlite(v: &serde_json::Value) -> std::result::Result<rusqlite::type
 
 /// The engine state held directly on the JS thread.
 fn row_to_json(row: &rusqlite::Row, i: usize) -> std::result::Result<serde_json::Value, String> {
-    let v = rust_ivm::sqlite::read_value_lossy(row, i)
-        .map_err(|e| format!("col {}: {}", i, e))?;
+    let v = rust_ivm::sqlite::read_value_lossy(row, i).map_err(|e| format!("col {}: {}", i, e))?;
     Ok(match v {
         rusqlite::types::Value::Null => serde_json::Value::Null,
         rusqlite::types::Value::Integer(i) => {
@@ -1073,11 +1073,8 @@ impl RustIvmEngine {
         stream_id: f64,
     ) -> Result<AsyncTask<HydrateStreamingTask>> {
         let queue_depth = tsfn_queue_depth();
-        let tsfn = env.create_threadsafe_function(
-            &on_row,
-            queue_depth,
-            |ctx| Ok(vec![ctx.value]),
-        )?;
+        let tsfn =
+            env.create_threadsafe_function(&on_row, queue_depth, |ctx| Ok(vec![ctx.value]))?;
         Ok(AsyncTask::new(HydrateStreamingTask {
             handle: self.handle.clone(),
             queries,
@@ -1099,11 +1096,8 @@ impl RustIvmEngine {
         stream_id: f64,
     ) -> Result<AsyncTask<AdvanceStreamingTask>> {
         let queue_depth = tsfn_queue_depth();
-        let tsfn = env.create_threadsafe_function(
-            &on_row,
-            queue_depth,
-            |ctx| Ok(vec![ctx.value]),
-        )?;
+        let tsfn =
+            env.create_threadsafe_function(&on_row, queue_depth, |ctx| Ok(vec![ctx.value]))?;
         Ok(AsyncTask::new(AdvanceStreamingTask {
             handle: self.handle.clone(),
             tsfn,
@@ -2109,8 +2103,7 @@ mod reset_mapping_tests {
     fn only_scalar_maps_to_reset_others_stay_on_teardown() {
         let drift: Box<dyn std::any::Any + Send> =
             Box::new(String::from("source drift: Remove missing row from users"));
-        let take: Box<dyn std::any::Any + Send> =
-            Box::new(String::from("Bound should be set"));
+        let take: Box<dyn std::any::Any + Send> = Box::new(String::from("Bound should be set"));
 
         assert!(
             scalar_reset_message(&drift).is_none(),

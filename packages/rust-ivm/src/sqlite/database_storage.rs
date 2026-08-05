@@ -81,7 +81,9 @@ impl Storage for DatabaseStorage {
         // failed read would present missing operator state (e.g. a Take
         // partition with no bound) and silently corrupt the pipeline. TS
         // better-sqlite3 THROWS here -> view-syncer teardown; panic = parity.
-        let mut stmt = conn.prepare(sql).expect("DatabaseStorage get prepare failed");
+        let mut stmt = conn
+            .prepare(sql)
+            .expect("DatabaseStorage get prepare failed");
         let mut rows = stmt
             .query(rusqlite::params![&self.cg_id, self.op_id as i64, key])
             .expect("DatabaseStorage get query failed");
@@ -123,7 +125,9 @@ impl Storage for DatabaseStorage {
         let conn = self.db.borrow().conn();
         let conn = conn.borrow();
         // Same contract as get(): a failed scan must not read as "empty state".
-        let mut stmt = conn.prepare(sql).expect("DatabaseStorage scan prepare failed");
+        let mut stmt = conn
+            .prepare(sql)
+            .expect("DatabaseStorage scan prepare failed");
         let mut rows = stmt
             .query(rusqlite::params![&self.cg_id, self.op_id as i64, pfx])
             .expect("DatabaseStorage scan query failed");
