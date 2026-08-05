@@ -368,6 +368,58 @@ function main() {
     }
   }
 
+  // #2 wedge/divergence detector: an unexpected in-place `-2` reset means the
+  // engine hit a state the production-representative fixtures should never
+  // reach. Correctness diffing SKIPS reset rows, so surface them as failures.
+  if (Array.isArray(actual.resets) && actual.resets.length > 0) {
+    console.error(`UNEXPECTED RESET(S): ${JSON.stringify(actual.resets)}`);
+    process.exit(1);
+  }
+
+  // #1 WAL-growth detector: a BUSY checkpoint after the engine is destroyed
+  // means a snapshot connection leaked / a lagging snapshot was never released.
+  if (actual.checkpointBusyAfterDestroy === 1) {
+    console.error(
+      'CHECKPOINT BUSY AFTER DESTROY: a snapshot connection leaked ' +
+        '(lagging-snapshot / WAL-growth class)',
+    );
+    process.exit(1);
+  }
+  if (actual.checkpointBusyAfterDestroy === -1) {
+    console.error(
+      'CHECKPOINT PROBE DIED AFTER DESTROY (must never pass silently): ' +
+        String(actual.checkpointProbeError || 'unknown'),
+    );
+    process.exit(1);
+  }
+
+  // #1b per-phase probes are telemetry (busy is structurally 0 on wal2 —
+  // see wal2-probe-matrix.mjs); busy=1 only fires on plain-wal harnesses.
+  for (const probe of actual.phaseCheckpointProbes || []) {
+    if (probe.busy === 1) {
+      console.error(
+        `CHECKPOINT BUSY AFTER ${String(probe.phase).toUpperCase()}: ` +
+          'a stale read-mark is pinned below the live snapshots ' +
+          `(zombie/lagging-snapshot WAL-growth class): ${JSON.stringify(probe)}`,
+      );
+      process.exit(1);
+    }
+  }
+
+  // #1c the STRONG zombie detector: after destroy there are no live read-marks,
+  // so a write+PASSIVE-checkpoint loop must reclaim the whole wal2 log. A
+  // frozen `checkpointed` means a connection was torn down with its read txn
+  // open (zombie pin — the unbounded WAL-growth mechanism). TRUNCATE-busy (#1)
+  // is blind to this on wal2; this probe is not.
+  const reclaim = actual.walReclaimAfterDestroy;
+  if (reclaim && reclaim.reclaimed === false) {
+    console.error(
+      'WAL NOT RECLAIMABLE AFTER DESTROY: a zombie read-mark survives teardown ' +
+        `(leaked pinned connection / WAL-growth class): ${JSON.stringify(reclaim)}`,
+    );
+    process.exit(1);
+  }
+
   console.log('EQUAL');
   process.exit(0);
 }

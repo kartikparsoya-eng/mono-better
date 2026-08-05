@@ -28,11 +28,18 @@ import {
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {resolve, join, dirname} from 'node:path';
-import {DatabaseSync} from 'node:sqlite';
 import {fileURLToPath} from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
+// Use the wal2 build of SQLite (@rocicorp/zero-sqlite3), NOT node:sqlite's
+// DatabaseSync: the snapshotter hard-requires wal2, and node:sqlite has no wal2
+// support, so a DatabaseSync-created replica is rejected ("must be in wal2 mode
+// (current: delete)") — which had silently disabled this entire hydrate fuzzer.
+const zqliteRequire = createRequire(
+  resolve(__dirname, '..', '..', '..', 'zqlite', 'package.json'),
+);
+const SQLiteDatabase = zqliteRequire('@rocicorp/zero-sqlite3');
 
 // Resolve the addon. $RUST_IVM_ADDON overrides; otherwise auto-detect by
 // platform: the checked-in napi/rust-ivm.node is a LINUX build, so on macOS
@@ -108,13 +115,28 @@ function sqlValue(v, colType) {
   }
 }
 
+// Create a wal2 replica the snapshotter accepts. Mirrors the advance runner:
+// wal2 journal mode + _zero.replicationState + _zero.changeLog2 + a _0_version
+// column on every table (all required by the snapshotter's diff validation).
+// Returns the keeper connection — it MUST stay open through hydration so the
+// wal2 shared-memory (-shm) state stays live.
 function createSqliteDb(dbPath, tables) {
-  const db = new DatabaseSync(dbPath);
-  db.exec(`PRAGMA journal_mode = DELETE`);
+  const db = new SQLiteDatabase(dbPath);
+  db.pragma('journal_mode = wal2');
+  db.exec('DROP TABLE IF EXISTS "_zero.replicationState"');
+  db.exec(
+    'CREATE TABLE "_zero.replicationState" (stateVersion TEXT NOT NULL, lock INTEGER PRIMARY KEY DEFAULT 1 CHECK (lock=1))',
+  );
+  db.exec('INSERT INTO "_zero.replicationState" (stateVersion) VALUES (\'0\')');
+  db.exec('DROP TABLE IF EXISTS "_zero.changeLog2"');
+  db.exec(
+    'CREATE TABLE "_zero.changeLog2" ("stateVersion" TEXT NOT NULL, "pos" INT NOT NULL, "table" TEXT NOT NULL, "rowKey" TEXT NOT NULL, "op" TEXT NOT NULL, PRIMARY KEY("stateVersion", "pos"), UNIQUE("table", "rowKey"))',
+  );
   for (const [name, spec] of Object.entries(tables)) {
     const cols = Object.entries(spec.columns).map(([col, type]) => {
       return `"${col}" ${sqlType(type)}`;
     });
+    cols.push('"_0_version" TEXT NOT NULL DEFAULT \'0\'');
     // The SQLite REPLICA is keyed by replicaPrimaryKey (defaults to primaryKey).
     // For PK-divergent tables this differs from the client/engine primaryKey, so
     // the engine must emit rowKeys by the client PK while reading a table whose
@@ -123,20 +145,22 @@ function createSqliteDb(dbPath, tables) {
     if (replicaPK.length > 0) {
       cols.push(`PRIMARY KEY (${replicaPK.map(c => `"${c}"`).join(', ')})`);
     }
+    db.exec(`DROP TABLE IF EXISTS "${name}"`);
     db.exec(`CREATE TABLE "${name}" (${cols.join(', ')})`);
-    const placeholders = Object.keys(spec.columns)
-      .map(() => '?')
-      .join(', ');
-    const colNames = Object.keys(spec.columns);
+    const colNames = [...Object.keys(spec.columns), '_0_version'];
+    const placeholders = colNames.map(() => '?').join(', ');
     const stmt = db.prepare(
       `INSERT OR IGNORE INTO "${name}" (${colNames.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`,
     );
     for (const row of spec.rows || []) {
-      const vals = colNames.map(c => sqlValue(row[c], spec.columns[c]));
+      const vals = [
+        ...Object.keys(spec.columns).map(c => sqlValue(row[c], spec.columns[c])),
+        '0',
+      ];
       stmt.run(...vals);
     }
   }
-  db.close();
+  return db;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,11 +215,23 @@ function buildTableSpecs(tables) {
 }
 
 async function runHydration(dbPath, tables, ast, queryId = 'q1') {
+  const keeper = createSqliteDb(dbPath, tables);
+  // Validation-only fault injection: a pinned BEGIN CONCURRENT reader held past
+  // destroy proves the #1c reclaim probe detects a zombie read-mark.
+  let injectedStalePin = null;
+  if (process.env.ART_INJECT_STALE_PIN === '1') {
+    injectedStalePin = new SQLiteDatabase(dbPath);
+    injectedStalePin.exec('BEGIN CONCURRENT');
+    injectedStalePin
+      .prepare('SELECT stateVersion FROM "_zero.replicationState"')
+      .get();
+  }
   const engine = new addon.RustIvmEngine();
   engine.init(buildTableSpecs(tables), dbPath, 'test');
   // Use the streaming path (addQueriesStreamingRows + TSFN callback), which is
   // the production driver's only hydration path.
   const rows = [];
+  const resets = [];
   const streamId = 1;
   await engine.addQueriesStreamingRows(
     [{queryId, astJson: JSON.stringify(ast)}],
@@ -203,12 +239,76 @@ async function runHydration(dbPath, tables, ast, queryId = 'q1') {
       if (err) throw err;
       if (!rc) return;
       engine.grantStreamCredit(streamId, 1);
-      if (rc.changeType < 0) return; // skip control rows (headers, resets)
+      if (rc.changeType === -2) {
+        // Unexpected in-place reset — capture (correctness diffing skips these).
+        resets.push({phase: 'hydrate', rowKey: rc.rowKey});
+        return;
+      }
+      if (rc.changeType < 0) return; // skip control rows (headers, sentinels)
       rows.push(napiRowToJs(rc));
     },
     streamId,
   );
-  return rows;
+
+  // #1 idle-checkpoint invariant: after the engine is destroyed, a checkpoint
+  // from a fresh connection must NOT be BUSY — else a snapshot connection leaked
+  // (lagging-snapshot / WAL-growth class).
+  // Close the writer BEFORE the checkpoint probe so only the engine's snapshot
+  // connections (if leaked) can hold a read-mark.
+  keeper.close();
+  let checkpointBusy = 0;
+  try {
+    await engine.destroy();
+    await new Promise(r => setImmediate(r));
+    const probe = new SQLiteDatabase(dbPath);
+    const ck = probe.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    checkpointBusy = ck && typeof ck.busy === 'number' ? ck.busy : -1;
+    probe.close();
+  } catch {
+    checkpointBusy = -1;
+  }
+  // #1c the STRONG zombie detector: TRUNCATE-busy is blind to a stale pin in
+  // the non-active wal2 file (wal2 only checkpoints the inactive file; a pin
+  // blocks the SWITCH, not the pragma — empirically wal2-probe-matrix.mjs).
+  // With no live read-marks, a write+PASSIVE loop must reclaim the whole log;
+  // a zombie freezes `checkpointed` below `log` forever.
+  const walReclaim = probeWalReclaim(dbPath);
+  if (injectedStalePin) {
+    try {
+      injectedStalePin.exec('ROLLBACK');
+      injectedStalePin.close();
+    } catch {
+      /* validation-only */
+    }
+  }
+  return {rows, resets, checkpointBusy, walReclaim};
+}
+
+function probeWalReclaim(dbPath) {
+  try {
+    const c = new SQLiteDatabase(dbPath);
+    // MUST be >0: wal2's walRestartLog ignores 0/-1 (falls back to 1000 frames)
+    c.pragma('journal_size_limit = 4096');
+    c.exec('CREATE TABLE IF NOT EXISTS "_art_probe" (k INTEGER PRIMARY KEY, v)');
+    let log = -1;
+    let checkpointed = -1;
+    for (let round = 0; round < 3; round++) {
+      c.exec(`INSERT INTO "_art_probe" (v) VALUES (${round})`);
+      const ck = c.prepare('PRAGMA wal_checkpoint(PASSIVE)').get();
+      log = ck ? ck.log : -1;
+      checkpointed = ck ? ck.checkpointed : -1;
+    }
+    c.close();
+    const reclaimed = checkpointed >= 0 && log >= 0 && checkpointed >= log - 4;
+    return {log, checkpointed, reclaimed};
+  } catch (e) {
+    return {
+      log: -1,
+      checkpointed: -1,
+      reclaimed: false,
+      error: String((e && e.message) || e),
+    };
+  }
 }
 
 function applyPushesToTables(tables, pushes) {
@@ -239,12 +339,33 @@ function applyPushesToTables(tables, pushes) {
 async function runFixture(fixture) {
   const phase = process.env.NAPI_DIFF_PHASE || 'both';
   const dbPath = join(tmpdir(), `napi-diff-${Date.now()}-${process.pid}.db`);
-  const result = {hydrate: [], finalView: []};
+  const result = {
+    hydrate: [],
+    finalView: [],
+    resets: [],
+    checkpointBusyAfterDestroy: 0,
+  };
+  const absorb = h => {
+    result.resets.push(...h.resets);
+    if (h.checkpointBusy === 1) {
+      result.checkpointBusyAfterDestroy = 1;
+    }
+    // Worst-case wins: any engine run leaving an unreclaimable wal is a FAIL.
+    if (
+      h.walReclaim &&
+      (!result.walReclaimAfterDestroy ||
+        result.walReclaimAfterDestroy.reclaimed !== false)
+    ) {
+      result.walReclaimAfterDestroy = h.walReclaim;
+    }
+    return h.rows;
+  };
 
   try {
-    // Phase 1: hydration from initial data
-    createSqliteDb(dbPath, fixture.tables);
-    result.hydrate = await runHydration(dbPath, fixture.tables, fixture.ast);
+    // Phase 1: hydration (runHydration builds the wal2 replica + keeper)
+    result.hydrate = absorb(
+      await runHydration(dbPath, fixture.tables, fixture.ast),
+    );
 
     if (phase === 'both' || phase === 'final') {
       // Yield to the event loop before creating a second engine — the TSFN
@@ -259,19 +380,16 @@ async function runFixture(fixture) {
       );
       const dbPath2 = dbPath + '.after.db';
       try {
-        createSqliteDb(dbPath2, afterTables);
-        result.finalView = await runHydration(
-          dbPath2,
-          afterTables,
-          fixture.ast,
+        result.finalView = absorb(
+          await runHydration(dbPath2, afterTables, fixture.ast),
         );
       } finally {
-        for (const ext of ['', '-wal', '-shm'])
+        for (const ext of ['', '-wal', '-wal2', '-shm'])
           rmSync(dbPath2 + ext, {force: true});
       }
     }
   } finally {
-    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, {force: true});
+    for (const ext of ['', '-wal', '-wal2', '-shm']) rmSync(dbPath + ext, {force: true});
   }
 
   return result;

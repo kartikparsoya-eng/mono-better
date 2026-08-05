@@ -310,15 +310,102 @@ function applyPushesToSqlite(dbPath, tables, pushes) {
 // Run fixture through the napi addon with advance
 // ---------------------------------------------------------------------------
 
+// #1b per-phase checkpoint probe: a PASSIVE checkpoint from a fresh connection
+// at a QUIESCENT point (right after hydrate / advance / reset, when the
+// engine's two read-marks are at head and nothing has written since) must
+// complete (busy=0). busy=1 means a read-mark is pinned at an OLDER frame than
+// the engine's live snapshots — a zombie connection (leaked with its read txn
+// open) or a frozen/lagging snapshot. The after-destroy TRUNCATE probe (#1)
+// catches zombies that survive teardown; this catches the alive classes and
+// localizes WHICH phase created the pin.
+function probeCheckpointPassive(dbPath, phase) {
+  try {
+    const probe = new SQLiteDatabase(dbPath);
+    const ck = probe.prepare('PRAGMA wal_checkpoint(PASSIVE)').get();
+    probe.close();
+    return {
+      phase,
+      busy: ck && typeof ck.busy === 'number' ? ck.busy : -1,
+      log: ck ? ck.log : -1,
+      checkpointed: ck ? ck.checkpointed : -1,
+    };
+  } catch (e) {
+    return {phase, busy: -1, error: String((e && e.message) || e)};
+  }
+}
+
+// #1c WAL-RECLAIM probe (the STRONG zombie detector, run after destroy).
+//
+// On wal2, `wal_checkpoint(TRUNCATE)` is BLIND to a stale pin sitting in the
+// non-active file: it reports busy=0/does nothing because wal2 only ever
+// checkpoints the inactive file, and switching files is what a pin actually
+// blocks (empirically established in wal2-probe-matrix.mjs: stale pin, healthy
+// pins, and no pins ALL read busy=0). The reliable discriminator is RECLAIM:
+// with NO live read-marks, a tiny write (journal_size_limit>0 forces the file
+// switch — wal2's walRestartLog ignores 0/-1) followed by a PASSIVE checkpoint
+// reclaims the whole log within 2 rounds; a zombie read-mark freezes
+// `checkpointed` below `log` forever.
+function probeWalReclaim(dbPath) {
+  try {
+    const c = new SQLiteDatabase(dbPath);
+    c.pragma('journal_size_limit = 4096');
+    c.exec('CREATE TABLE IF NOT EXISTS "_art_probe" (k INTEGER PRIMARY KEY, v)');
+    let log = -1;
+    let checkpointed = -1;
+    for (let round = 0; round < 3; round++) {
+      c.exec(`INSERT INTO "_art_probe" (v) VALUES (${round})`);
+      const ck = c.prepare('PRAGMA wal_checkpoint(PASSIVE)').get();
+      log = ck ? ck.log : -1;
+      checkpointed = ck ? ck.checkpointed : -1;
+    }
+    c.close();
+    // Healthy margin: the final round's own frames may not be reclaimed yet.
+    const reclaimed = checkpointed >= 0 && log >= 0 && checkpointed >= log - 4;
+    return {log, checkpointed, reclaimed};
+  } catch (e) {
+    return {
+      log: -1,
+      checkpointed: -1,
+      reclaimed: false,
+      error: String((e && e.message) || e),
+    };
+  }
+}
+
 async function runFixture(fixture) {
   const dbPath = join(tmpdir(), `napi-adv-${Date.now()}-${process.pid}.db`);
-  const result = {hydrate: [], advance: [], finalView: []};
+  // resets: unexpected in-place `-2` reset rows (e.g. take-bound-divergence,
+  // scalar-subquery) — correctness diffing skips these, so capture them so the
+  // fuzzer can treat a wedge/divergence as a FAILURE.
+  // checkpointBusyAfterDestroy: 1 => after the engine is destroyed a checkpoint
+  // is still BUSY => a snapshot connection leaked (the WAL-growth class).
+  // phaseCheckpointProbes: per-phase quiescent PASSIVE probes (see #1b above).
+  const result = {
+    hydrate: [],
+    advance: [],
+    finalView: [],
+    resets: [],
+    checkpointBusyAfterDestroy: 0,
+    phaseCheckpointProbes: [],
+  };
+
+  // Validation-only fault injection: hold a pinned BEGIN CONCURRENT reader for
+  // the whole run to prove the per-phase probes detect a stale pin.
+  let injectedStalePin = null;
 
   // Keep a writer connection open for the entire run so the wal2 shared-memory
   // state persists until the NAPI engine is destroyed.
   try {
     // 1. Create initial DB (returns the keeper connection — kept open)
     const keeper = createSqliteDb(dbPath, fixture.tables);
+
+    if (process.env.ART_INJECT_STALE_PIN === '1') {
+      injectedStalePin = new SQLiteDatabase(dbPath);
+      injectedStalePin.exec('BEGIN CONCURRENT');
+      injectedStalePin
+        .prepare('SELECT stateVersion FROM "_zero.replicationState"')
+        .get();
+    }
 
     // 2. Init engine + hydrate (streaming path — TSFN callback, production code)
     const engine = new addon.RustIvmEngine();
@@ -331,11 +418,17 @@ async function runFixture(fixture) {
         if (err) throw err;
         if (!rc) return;
         engine.grantStreamCredit(hydrateStreamId, 1);
+        if (rc.changeType === -2) {
+          result.resets.push({phase: 'hydrate', rowKey: rc.rowKey});
+          return;
+        }
         if (rc.changeType < 0) return;
         result.hydrate.push(napiRowToJs(rc));
       },
       hydrateStreamId,
     );
+
+    result.phaseCheckpointProbes.push(probeCheckpointPassive(dbPath, 'hydrate'));
 
     // 3. Apply pushes to SQLite + write changeLog2
     applyPushesToSqlite(dbPath, fixture.tables, fixture.pushes || []);
@@ -347,9 +440,16 @@ async function runFixture(fixture) {
         if (err) throw err;
         if (!rc) return;
         engine.grantStreamCredit(advanceStreamId, 1);
-        if (rc.changeType < 0) return; // skip headers/resets
+        if (rc.changeType === -2) {
+          result.resets.push({phase: 'advance', rowKey: rc.rowKey});
+          return;
+        }
+        if (rc.changeType < 0) return; // skip headers/sentinels
         result.advance.push(napiRowToJs(rc));
       }, advanceStreamId);
+      result.phaseCheckpointProbes.push(
+        probeCheckpointPassive(dbPath, 'advance'),
+      );
     }
 
     // 5. Final view: re-hydrate from after-state DB.
@@ -360,6 +460,7 @@ async function runFixture(fixture) {
     // one is created, and the new one gets starved).
     engine.reset();
     await new Promise(r => setImmediate(r));
+    result.phaseCheckpointProbes.push(probeCheckpointPassive(dbPath, 'reset'));
     const afterTables = applyPushesToTables(
       fixture.tables,
       fixture.pushes || [],
@@ -388,8 +489,39 @@ async function runFixture(fixture) {
     }
 
     keeper.close();
+
+    // #1 idle-checkpoint invariant: once the engine is DESTROYED, no read-mark
+    // may remain on the wal2 replica. A BUSY checkpoint from a fresh connection
+    // means a snapshot connection leaked / a lagging snapshot was never released
+    // — the WAL-growth class that correctness diffing cannot see.
+    try {
+      await engine.destroy();
+      await new Promise(r => setImmediate(r));
+      const probe = new SQLiteDatabase(dbPath);
+      const ck = probe.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      result.checkpointBusyAfterDestroy =
+        ck && typeof ck.busy === 'number' ? ck.busy : -1;
+      probe.close();
+    } catch (e) {
+      result.checkpointBusyAfterDestroy = -1;
+      result.checkpointProbeError = String((e && e.message) || e);
+    }
+    // #1c: TRUNCATE-busy is blind to wal2 non-active-file pins (and can even
+    // die with a disk I/O error while one exists); the reclaim probe is the
+    // strong detector (see probeWalReclaim). Run it UNCONDITIONALLY — it
+    // carries its own error handling and reports reclaimed=false on failure.
+    result.walReclaimAfterDestroy = probeWalReclaim(dbPath);
   } finally {
-    for (const ext of ['', '-wal', '-shm']) rmSync(dbPath + ext, {force: true});
+    if (injectedStalePin) {
+      try {
+        injectedStalePin.exec('ROLLBACK');
+        injectedStalePin.close();
+      } catch {
+        /* validation-only */
+      }
+    }
+    for (const ext of ['', '-wal', '-wal2', '-shm'])
+      rmSync(dbPath + ext, {force: true});
   }
 
   return result;
