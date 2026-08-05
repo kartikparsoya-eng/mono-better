@@ -1699,10 +1699,13 @@ impl Task for AdvanceTask {
                         if let Some(msg) = scalar_reset_message(&payload) {
                             Ok(vec![make_reset_row("scalar-subquery", &msg)])
                         } else {
-                            // An engine PANIC (e.g. a source-drift assert: "Add
-                            // duplicate row"/"Remove missing row"). catch_unwind here
-                            // keeps it from crossing the napi FFI and SIGABRT-ing the
-                            // process, and restores engine+snapshotter above. We then
+                            // An engine PANIC — a source-drift assert ("Add
+                            // duplicate row"/"Remove missing row") OR a Take
+                            // boundary assert ("Bound should be set" /
+                            // "…BoundNode must be found during fetch").
+                            // catch_unwind here keeps it from crossing the napi FFI
+                            // and SIGABRT-ing the process, and restores
+                            // engine+snapshotter above. We then
                             // surface it as a THROWN error (Err), NOT a -2 reset row —
                             // matching TS, where these asserts throw a raw Error that
                             // #advancePipelines re-throws → view-syncer teardown →
@@ -2071,478 +2074,42 @@ impl Task for DestroyTask {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Unified CVR architecture: hydrate_and_sync / advance_and_sync
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod reset_mapping_tests {
+    use super::*;
 
-/// NapiWebSocketSink — proxies WS push/fail/cancel to JS via ThreadsafeFunction.
-/// `push` uses `Blocking` mode so the actor thread blocks until JS processes
-/// the frame — identical backpressure to TS's #pokeTail promise chain.
-struct NapiWebSocketSink {
-    push_fn: ThreadsafeFunction<serde_json::Value, ErrorStrategy::CalleeHandled>,
-    fail_fn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>,
-    cancel_fn: ThreadsafeFunction<bool, ErrorStrategy::CalleeHandled>,
-}
+    /// DECISION LOCK (2026-08-05): the ONLY advance panic that maps to a `-2`
+    /// in-place reset is a scalar-subquery value change (TS's own
+    /// `ResetPipelinesSignal('scalar-subquery')`). Everything else — source
+    /// drift ("Add duplicate row" / "Remove missing row" / "Edit missing old
+    /// row") AND the Take boundary asserts ("Bound should be set" /
+    /// "…BoundNode must be found during fetch") — stays on the THROW → teardown
+    /// path, matching TS EXACTLY (a `-2` reset re-hydrates anyway, so it renews
+    /// the reader pin identically to a teardown — no WAL benefit — and diverging
+    /// adds masking + loop-safety risk). This asserts a source-drift AND a Take
+    /// payload each match the scalar mapper NOT (→ they can only reach the Err
+    /// teardown arm). If a future change makes either recoverable, wire a new
+    /// mapper and update this test deliberately — never silently.
+    #[test]
+    fn only_scalar_maps_to_reset_others_stay_on_teardown() {
+        let drift: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("source drift: Remove missing row from users"));
+        let take: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("Bound should be set"));
 
-impl WebSocketSink for NapiWebSocketSink {
-    fn push(&self, msg: serde_json::Value) -> std::result::Result<(), String> {
-        let status = self.push_fn.call(Ok(msg), ThreadsafeFunctionCallMode::Blocking);
-        if status == Status::Ok || status == Status::Closing {
-            Ok(())
-        } else {
-            Err(format!("TSFN push failed: {:?}", status))
-        }
-    }
-    fn fail(&self, e: String) {
-        let _ = self.fail_fn.call(Ok(e), ThreadsafeFunctionCallMode::NonBlocking);
-    }
-    fn cancel(&self) {
-        let _ = self.cancel_fn.call(Ok(true), ThreadsafeFunctionCallMode::NonBlocking);
-    }
-}
-
-/// Result of hydrate_and_sync / advance_and_sync.
-#[napi(object)]
-pub struct SyncResult {
-    /// JSON-encoded updated CVR snapshot.
-    pub cvr_json: String,
-    /// New CVR version string.
-    pub version: String,
-    /// JSON-encoded CVRFlushStats or null.
-    pub flushed_json: Option<String>,
-    /// JSON-encoded query patches (config patches for catchup).
-    pub query_patches_json: String,
-    /// Number of row changes processed.
-    pub num_changes: i32,
-    /// Reset reason if the engine triggered a reset (e.g. "advancement-timeout").
-    pub reset_reason: Option<String>,
-    /// Reset message if the engine triggered a reset.
-    pub reset_msg: Option<String>,
-}
-
-/// Convert a `rust_ivm::streamer::RowChange` to the serde_json Map format
-/// that `ChangeProcessor::on_row_change` expects.
-fn row_change_to_maps(
-    rc: &rust_ivm::streamer::RowChange,
-) -> (
-    u8,
-    String,
-    String,
-    serde_json::Map<String, serde_json::Value>,
-    Option<serde_json::Map<String, serde_json::Value>>,
-) {
-    let row_key = {
-        let mut m = serde_json::Map::with_capacity(rc.row_key.len());
-        for (k, v) in rc.row_key.iter() {
-            m.insert(k.to_string(), value_to_serde_json(v));
-        }
-        m
-    };
-    let row = rc.row.as_ref().map(|r| {
-        let mut m = serde_json::Map::with_capacity(r.len());
-        for (k, v) in r.iter() {
-            m.insert(k.to_string(), value_to_serde_json(v));
-        }
-        m
-    });
-    (
-        rc.change_type as u8,
-        rc.query_id.clone(),
-        rc.table.clone(),
-        row_key,
-        row,
-    )
-}
-
-/// Shared CVR state held by `RustIvmEngine`.
-struct CVRState {
-    store: Option<Arc<std::sync::Mutex<CVRStoreHandle>>>,
-    clients: HashMap<String, Arc<ClientHandler>>,
-}
-
-impl Default for CVRState {
-    fn default() -> Self {
-        Self {
-            store: None,
-            clients: HashMap::new(),
-        }
+        assert!(
+            scalar_reset_message(&drift).is_none(),
+            "source drift must NOT be classified as a scalar-subquery reset",
+        );
+        assert!(
+            scalar_reset_message(&take).is_none(),
+            "a Take boundary assert must NOT be classified as a reset — TS tears down",
+        );
+        // Both still yield a readable message for the thrown teardown Err.
+        assert!(
+            panic_message(&drift).contains("source drift")
+                && panic_message(&take).contains("Bound should be set"),
+            "the thrown teardown error must carry the panic message",
+        );
     }
 }
-
-/// Hydrate + sync task. Runs the entire pipeline on the actor thread:
-/// engine produces RowChange → ChangeProcessor → updater.received() →
-/// pokers.add_patch() → WS push. Returns only the summary.
-pub struct HydrateAndSyncTask {
-    handle: EngineHandle,
-    queries: Vec<NapiQuerySpec>,
-    cvr_json: String,
-    state_version: String,
-    replica_version: String,
-    add_queries: Vec<(String, String)>,
-    remove_queries: Vec<String>,
-    client_ids: Vec<String>,
-    cvr_state: Arc<std::sync::Mutex<CVRState>>,
-    existing_rows_json: String,
-    last_connect_time: f64,
-    last_active: f64,
-    ttl_clock: i64,
-}
-
-impl Task for HydrateAndSyncTask {
-    type Output = SyncResult;
-    type JsValue = SyncResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let queries = std::mem::take(&mut self.queries);
-        let cvr_json = std::mem::take(&mut self.cvr_json);
-        let state_version = std::mem::take(&mut self.state_version);
-        let replica_version = std::mem::take(&mut self.replica_version);
-        let add_queries = std::mem::take(&mut self.add_queries);
-        let remove_queries = std::mem::take(&mut self.remove_queries);
-        let client_ids = std::mem::take(&mut self.client_ids);
-        let existing_rows_json = std::mem::take(&mut self.existing_rows_json);
-        let cvr_state = self.cvr_state.clone();
-        let last_connect_time = self.last_connect_time;
-        let last_active = self.last_active;
-        let ttl_clock = self.ttl_clock;
-
-        let tokio_handle = tokio::runtime::Handle::try_current()
-            .map_err(|e| NapiError::from_reason(format!("Failed to get tokio handle: {}", e)))?;
-
-        self.handle
-            .call(move |state| -> std::result::Result<SyncResult, String> {
-                let eng = state.engine
-                    .as_mut()
-                    .ok_or_else(|| "Engine not initialized".to_string())?;
-
-                let cvr: CVR = serde_json::from_str(&cvr_json)
-                    .map_err(|e| format!("invalid cvr: {}", e))?;
-
-                let existing_rows: RowRecordMap = if existing_rows_json.is_empty() || existing_rows_json == "null" {
-                    HashMap::new()
-                } else {
-                    let records: Vec<RowRecord> = serde_json::from_str(&existing_rows_json)
-                        .map_err(|e| format!("invalid existing_rows: {}", e))?;
-                    records.into_iter()
-                        .map(|r| (row_id_string(&r.id), r))
-                        .collect()
-                };
-
-                let mut updater = CVRQueryDrivenUpdater::new(
-                    cvr,
-                    state_version,
-                    replica_version,
-                    None,
-                );
-
-                let executed_refs: Vec<(&str, &str)> = add_queries
-                    .iter()
-                    .map(|(a, b)| (a.as_str(), b.as_str()))
-                    .collect();
-                let removed_refs: Vec<&str> = remove_queries
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect();
-                let (new_version, query_patches) =
-                    updater.track_queries(&executed_refs, &removed_refs);
-
-                let cvr_guard = cvr_state.lock().unwrap();
-                let clients: Vec<Arc<ClientHandler>> = client_ids
-                    .iter()
-                    .filter_map(|id| cvr_guard.clients.get(id).cloned())
-                    .collect();
-                drop(cvr_guard);
-
-                let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-                let pokers = MultiPoker::new(&client_refs, new_version.clone());
-
-                for patch in &query_patches {
-                    pokers.add_patch(patch);
-                }
-
-                let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
-                for q in queries.iter() {
-                    let ast: rust_ivm::builder::ast::Ast = parse_ts_ast(&q.ast_json)
-                        .map_err(|e| format!("AST parse error for qid={}: {}", q.query_id, e))?;
-                    specs.push(QuerySpec {
-                        query_id: q.query_id.clone(),
-                        ast,
-                    });
-                }
-
-                // Remove queries from the engine before hydrating new ones.
-                // This matches the TS path which calls `this.#pipelines.removeQuery(q.id)`
-                // before the hydrate generator runs.
-                for qid in &remove_queries {
-                    eng.remove_query(qid);
-                }
-
-                let mut processor = ChangeProcessor::new(&mut updater, &pokers);
-
-                let checkpoint = eng.source_connection_checkpoint();
-                let hydrated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    eng.add_queries_streaming(&specs, |rc| {
-                        let (ct, qid, table, rk, row) = row_change_to_maps(rc);
-                        processor.on_row_change(ct, &qid, &table, &rk, row.as_ref(), &existing_rows);
-                    });
-                }));
-
-                if let Err(payload) = hydrated {
-                    eng.rollback_source_connections(&checkpoint);
-                    std::panic::resume_unwind(payload);
-                }
-
-                processor.finish(&existing_rows);
-                let total_processed = processor.total_processed();
-                drop(processor);
-
-                let (flushed_cvr, _flush_stats) = updater.flush(last_connect_time as i64, last_active as i64, ttl_clock);
-
-                let ops = updater.base.drain_store_ops();
-                if !ops.is_empty() {
-                    let store_arc = cvr_state.lock().unwrap().store.clone();
-                    if let Some(ref store_arc) = store_arc {
-                        store_arc.lock().unwrap().apply_store_ops(ops);
-                    }
-                }
-
-                let flushed = {
-                    let store_arc = cvr_state.lock().unwrap().store.clone();
-                    if let Some(ref store_arc) = store_arc {
-                        let mut store = store_arc.lock().unwrap();
-                        tokio_handle.block_on(async {
-                            store.flush(&flushed_cvr.version, &flushed_cvr, last_connect_time).await
-                        })
-                    } else {
-                        Ok(None)
-                    }
-                }.map_err(|e| format!("store flush: {}", e))?;
-
-                pokers.end(flushed_cvr.version.clone());
-
-                let version_str = version_string(&flushed_cvr.version);
-                let cvr_json = serde_json::to_string(&flushed_cvr)
-                    .map_err(|e| format!("serialize cvr: {}", e))?;
-                let query_patches_json = serde_json::to_string(&query_patches)
-                    .map_err(|e| format!("serialize patches: {}", e))?;
-                let flushed_json = match flushed {
-                    Some(s) => Some(serde_json::to_string(&s)
-                        .map_err(|e| format!("serialize stats: {}", e))?),
-                    None => None,
-                };
-
-                Ok(SyncResult {
-                    cvr_json,
-                    version: version_str,
-                    flushed_json,
-                    query_patches_json,
-                    num_changes: total_processed as i32,
-                    reset_reason: None,
-                    reset_msg: None,
-                })
-            })?
-            .map_err(NapiError::from_reason)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-/// Advance + sync task.
-pub struct AdvanceAndSyncTask {
-    handle: EngineHandle,
-    cvr_json: String,
-    replica_version: String,
-    client_ids: Vec<String>,
-    cvr_state: Arc<std::sync::Mutex<CVRState>>,
-    existing_rows_json: String,
-    last_connect_time: f64,
-    last_active: f64,
-    ttl_clock: i64,
-}
-
-impl Task for AdvanceAndSyncTask {
-    type Output = SyncResult;
-    type JsValue = SyncResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let cvr_json = std::mem::take(&mut self.cvr_json);
-        let replica_version = std::mem::take(&mut self.replica_version);
-        let client_ids = std::mem::take(&mut self.client_ids);
-        let existing_rows_json = std::mem::take(&mut self.existing_rows_json);
-        let cvr_state = self.cvr_state.clone();
-        let last_connect_time = self.last_connect_time;
-        let last_active = self.last_active;
-        let ttl_clock = self.ttl_clock;
-
-        let tokio_handle = tokio::runtime::Handle::try_current()
-            .map_err(|e| NapiError::from_reason(format!("Failed to get tokio handle: {}", e)))?;
-
-        self.handle
-            .call(move |state| -> std::result::Result<SyncResult, String> {
-                if state.poisoned {
-                    state.poisoned = false;
-                    return Ok(SyncResult {
-                        cvr_json,
-                        version: String::new(),
-                        flushed_json: None,
-                        query_patches_json: "[]".to_string(),
-                        num_changes: 0,
-                        reset_reason: Some("schema-change".to_string()),
-                        reset_msg: Some("engine reset after a prior advance panic; rehydrating".to_string()),
-                    });
-                }
-
-                let syncable_tables = state.syncable_tables.clone();
-                let all_table_names = state.all_table_names.clone();
-                let mut eng = state.engine
-                    .take()
-                    .ok_or_else(|| "Engine not initialized".to_string())?;
-                let mut snapshotter = match state.snapshotter.take() {
-                    Some(s) => s,
-                    None => {
-                        state.engine = Some(eng);
-                        return Err("Snapshotter not initialized".to_string());
-                    }
-                };
-
-                let cvr: CVR = serde_json::from_str(&cvr_json)
-                    .map_err(|e| format!("invalid cvr: {}", e))?;
-
-                let existing_rows: RowRecordMap = if existing_rows_json.is_empty() || existing_rows_json == "null" {
-                    HashMap::new()
-                } else {
-                    let records: Vec<RowRecord> = serde_json::from_str(&existing_rows_json)
-                        .map_err(|e| format!("invalid existing_rows: {}", e))?;
-                    records.into_iter()
-                        .map(|r| (row_id_string(&r.id), r))
-                        .collect()
-                };
-
-                let mut updater = CVRQueryDrivenUpdater::new(
-                    cvr,
-                    String::new(),
-                    replica_version,
-                    None,
-                );
-
-                let mut num_changes = 0usize;
-                let mut reset_reason: Option<String> = None;
-                let mut reset_msg: Option<String> = None;
-                let mut pokers_version = updater.updated_version();
-
-                let cvr_guard = cvr_state.lock().unwrap();
-                let clients: Vec<Arc<ClientHandler>> = client_ids
-                    .iter()
-                    .filter_map(|id| cvr_guard.clients.get(id).cloned())
-                    .collect();
-                drop(cvr_guard);
-
-                let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-                let pokers = MultiPoker::new(&client_refs, pokers_version.clone());
-                let mut processor = ChangeProcessor::new(&mut updater, &pokers);
-
-                let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    eng.advance_to_head_stream(
-                        &mut snapshotter,
-                        &syncable_tables,
-                        &all_table_names,
-                        |version, n_changes| {
-                            num_changes = n_changes;
-                        },
-                        |rc| {
-                            let (ct, qid, table, rk, row) = row_change_to_maps(rc);
-                            processor.on_row_change(ct, &qid, &table, &rk, row.as_ref(), &existing_rows);
-                        },
-                    )
-                }));
-
-                state.engine = Some(eng);
-                state.snapshotter = Some(snapshotter);
-
-                match advance {
-                    Ok(Ok(advance_result)) => {
-                        if let Some(reason) = &advance_result.reset_reason {
-                            reset_reason = Some(reason.clone());
-                            reset_msg = advance_result.reset_msg.clone();
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        return Err(format!("advance failed: {}", e));
-                    }
-                    Err(payload) => {
-                        state.poisoned = true;
-                        let msg = panic_message(&payload);
-                        return Err(format!("engine advance panic: {msg}"));
-                    }
-                }
-
-                if reset_reason.is_some() {
-                    pokers.cancel();
-                    return Ok(SyncResult {
-                        cvr_json,
-                        version: String::new(),
-                        flushed_json: None,
-                        query_patches_json: "[]".to_string(),
-                        num_changes: num_changes as i32,
-                        reset_reason,
-                        reset_msg,
-                    });
-                }
-
-                processor.finish(&existing_rows);
-                let total_processed = processor.total_processed();
-                drop(processor);
-
-                let (flushed_cvr, _flush_stats) = updater.flush(last_connect_time as i64, last_active as i64, ttl_clock);
-
-                let ops = updater.base.drain_store_ops();
-                if !ops.is_empty() {
-                    let store_arc = cvr_state.lock().unwrap().store.clone();
-                    if let Some(ref store_arc) = store_arc {
-                        store_arc.lock().unwrap().apply_store_ops(ops);
-                    }
-                }
-
-                let flushed = {
-                    let store_arc = cvr_state.lock().unwrap().store.clone();
-                    if let Some(ref store_arc) = store_arc {
-                        let mut store = store_arc.lock().unwrap();
-                        tokio_handle.block_on(async {
-                            store.flush(&flushed_cvr.version, &flushed_cvr, last_connect_time).await
-                        })
-                    } else {
-                        Ok(None)
-                    }
-                }.map_err(|e| format!("store flush: {}", e))?;;
-
-                pokers.end(flushed_cvr.version.clone());
-
-                let version_str = version_string(&flushed_cvr.version);
-                let cvr_json_out = serde_json::to_string(&flushed_cvr)
-                    .map_err(|e| format!("serialize cvr: {}", e))?;
-                let flushed_json = match flushed {
-                    Some(s) => Some(serde_json::to_string(&s)
-                        .map_err(|e| format!("serialize stats: {}", e))?),
-                    None => None,
-                };
-
-                Ok(SyncResult {
-                    cvr_json: cvr_json_out,
-                    version: version_str,
-                    flushed_json,
-                    query_patches_json: "[]".to_string(),
-                    num_changes: num_changes as i32,
-                    reset_reason: None,
-                    reset_msg: None,
-                })
-            })?
-            .map_err(NapiError::from_reason)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
