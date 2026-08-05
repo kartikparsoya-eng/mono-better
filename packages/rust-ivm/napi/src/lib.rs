@@ -1561,10 +1561,13 @@ impl Task for AdvanceTask {
                         if let Some(msg) = scalar_reset_message(&payload) {
                             Ok(vec![make_reset_row("scalar-subquery", &msg)])
                         } else {
-                            // An engine PANIC (e.g. a source-drift assert: "Add
-                            // duplicate row"/"Remove missing row"). catch_unwind here
-                            // keeps it from crossing the napi FFI and SIGABRT-ing the
-                            // process, and restores engine+snapshotter above. We then
+                            // An engine PANIC — a source-drift assert ("Add
+                            // duplicate row"/"Remove missing row") OR a Take
+                            // boundary assert ("Bound should be set" /
+                            // "…BoundNode must be found during fetch").
+                            // catch_unwind here keeps it from crossing the napi FFI
+                            // and SIGABRT-ing the process, and restores
+                            // engine+snapshotter above. We then
                             // surface it as a THROWN error (Err), NOT a -2 reset row —
                             // matching TS, where these asserts throw a raw Error that
                             // #advancePipelines re-throws → view-syncer teardown →
@@ -1930,5 +1933,45 @@ impl Task for DestroyTask {
 
     fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod reset_mapping_tests {
+    use super::*;
+
+    /// DECISION LOCK (2026-08-05): the ONLY advance panic that maps to a `-2`
+    /// in-place reset is a scalar-subquery value change (TS's own
+    /// `ResetPipelinesSignal('scalar-subquery')`). Everything else — source
+    /// drift ("Add duplicate row" / "Remove missing row" / "Edit missing old
+    /// row") AND the Take boundary asserts ("Bound should be set" /
+    /// "…BoundNode must be found during fetch") — stays on the THROW → teardown
+    /// path, matching TS EXACTLY (a `-2` reset re-hydrates anyway, so it renews
+    /// the reader pin identically to a teardown — no WAL benefit — and diverging
+    /// adds masking + loop-safety risk). This asserts a source-drift AND a Take
+    /// payload each match the scalar mapper NOT (→ they can only reach the Err
+    /// teardown arm). If a future change makes either recoverable, wire a new
+    /// mapper and update this test deliberately — never silently.
+    #[test]
+    fn only_scalar_maps_to_reset_others_stay_on_teardown() {
+        let drift: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("source drift: Remove missing row from users"));
+        let take: Box<dyn std::any::Any + Send> =
+            Box::new(String::from("Bound should be set"));
+
+        assert!(
+            scalar_reset_message(&drift).is_none(),
+            "source drift must NOT be classified as a scalar-subquery reset",
+        );
+        assert!(
+            scalar_reset_message(&take).is_none(),
+            "a Take boundary assert must NOT be classified as a reset — TS tears down",
+        );
+        // Both still yield a readable message for the thrown teardown Err.
+        assert!(
+            panic_message(&drift).contains("source drift")
+                && panic_message(&take).contains("Bound should be set"),
+            "the thrown teardown error must carry the panic message",
+        );
     }
 }

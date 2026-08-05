@@ -31,6 +31,19 @@ pub struct TakeState {
     bound: Option<Row>,
 }
 
+// NOTE (2026-08-05): the Take operator's boundary asserts — `'Bound should be
+// set'` (take.ts:445 / take.rs:670) and the `'…BoundNode must be found during
+// fetch'` family — are kept as raw panics that THROW → view-syncer teardown,
+// matching TS EXACTLY. We deliberately do NOT convert them to `-2` in-place
+// resets: TS reserves resets (ResetPipelinesSignal) for scalar-subquery /
+// permissions / schema-change / truncation, and a `-2` reset re-hydrates anyway
+// (so it renews the reader pin identically to a teardown — no WAL benefit). The
+// WAL fix is keeping the hydrate/fetch-vs-advance divergence RARE (streaming
+// hydrate completeness — see agentic/oracle/streaming-hydrate-completeness.mjs),
+// not cheapening the recovery. Both panics were observed on preprod hf2cg
+// (CG udog2taq51jh7eagf8): take.rs:670 "Bound should be set" and take.rs:517
+// "Take: boundNode must be found during fetch".
+
 /// Storage for Take state — tracks size/bound per partition key.
 #[derive(Default)]
 pub struct TakeStorage {
@@ -667,6 +680,16 @@ impl Take {
         else {
             return;
         };
+        // Port of TS `assert(takeState.bound, 'Bound should be set')`
+        // (take.ts:445). A partition that hydrated EMPTY (size 0 -> bound None)
+        // receiving an incremental Edit is a hydrate-vs-changestream snapshot
+        // divergence. Like TS, we THROW here -> view-syncer teardown (we do NOT
+        // convert to a `-2` in-place reset: TS uses a reset only for its own
+        // ResetPipelinesSignal cases (scalar-subquery / permissions / schema /
+        // truncation), and a reset re-hydrates anyway so it gives no WAL benefit
+        // over teardown — the WAL fix is keeping this divergence RARE (streaming
+        // hydrate completeness), not cheapening the recovery). The panic is
+        // caught at the napi boundary and surfaced as a thrown error.
         let bound = take_state.bound.as_ref().expect("Bound should be set");
         let compare = self.compare_rows().clone();
 
@@ -1019,4 +1042,93 @@ pub fn constraint_matches_partition_key(
     partition_key: &PartitionKey,
 ) -> bool {
     constraint_matches_primary_key(constraint, partition_key)
+}
+
+#[cfg(test)]
+mod bound_none_edit_tests {
+    //! Deterministic repro for the live `take.rs:670` panic ("Bound should be
+    //! set") observed on preprod (pod hf2cg).
+    //!
+    //! `bound == None` is the LEGAL state of a partition that hydrated with
+    //! size 0 (`initial_fetch` persists `bound = last-row-seen`, which stays
+    //! `None` when the partition is empty). `push_edit_change` then does
+    //! `take_state.bound.as_ref().expect("Bound should be set")` (take.rs:670).
+    //! TS carries the IDENTICAL `assert(takeState.bound, 'Bound should be set')`
+    //! (take.ts:445) — so this is a faithful port, not a port defect.
+    //!
+    //! It fires when a streaming hydrate reads a snapshot in which a take
+    //! partition looks EMPTY, and a later advance carries an Edit for a row in
+    //! that partition — a hydrate-vs-changestream snapshot divergence unique to
+    //! the async/streaming Rust hydrate. TS's synchronous hydrate reads the
+    //! same frame the stream advances from, so it never diverges in practice.
+    //!
+    //! We inject the diverged state directly: seed `TakeState{size:0,
+    //! bound:None}` for the partition, then push an Edit for a row in it.
+
+    use super::*;
+    use crate::ivm::change::Change;
+    use crate::ivm::data::Node;
+    use crate::ivm::source::EmptyInput;
+    use rustc_hash::FxHashMap;
+
+    struct NoopOutput;
+    impl Output for NoopOutput {
+        fn push(&mut self, _change: Change, _pusher: &dyn InputBase) {}
+    }
+
+    fn mk_row(id: f64, v: f64) -> Row {
+        let mut m = FxHashMap::default();
+        m.insert("id".to_string(), Value::F64(id));
+        m.insert("v".to_string(), Value::F64(v));
+        Arc::new(m)
+    }
+
+    /// An Edit into an empty-hydrated partition (bound=None) PANICS with
+    /// "Bound should be set" — matching TS's identical `assert(takeState.bound,
+    /// ...)` (take.ts:445), which throws → view-syncer teardown. We deliberately
+    /// keep TS parity here (no `-2` in-place reset): a reset re-hydrates anyway,
+    /// so it renews the snapshot pin identically to a teardown and buys no WAL
+    /// benefit; the WAL fix is keeping this divergence RARE (streaming-hydrate
+    /// completeness). The panic must be `catch_unwind`-safe so the napi boundary
+    /// surfaces it as a thrown error (teardown) rather than SIGABRT-ing the
+    /// process. Prod-observed on hf2cg (CG udog2taq51jh7eagf8, take.rs:670).
+    #[test]
+    fn edit_on_empty_partition_panics_bound_should_be_set() {
+        let input: Shared<dyn Input> = Rc::new(RefCell::new(EmptyInput::new()));
+        let storage = Rc::new(RefCell::new(TakeStorage::new()));
+        let take = Take::new(input, storage.clone(), 40, None);
+        take.borrow()
+            .set_output(Rc::new(RefCell::new(NoopOutput)) as OutputHandle);
+
+        // Simulate a partition that hydrated EMPTY: size 0, no bound row.
+        storage
+            .borrow_mut()
+            .set("global".to_string(), TakeState { size: 0, bound: None });
+
+        // An advance carries an Edit for a row in that (empty) partition.
+        let edit = Change::Edit {
+            node: Node::new(mk_row(1.0, 6.0)),
+            old_node: Node::new(mk_row(1.0, 5.0)),
+        };
+
+        let pusher = EmptyInput::new();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            take.borrow().push_change(&edit, &pusher);
+        }));
+
+        // TS parity: a raw "Bound should be set" panic (→ thrown error →
+        // teardown), catch_unwind-safe (no process abort).
+        let msg = res
+            .err()
+            .and_then(|e| {
+                e.downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| e.downcast_ref::<String>().cloned())
+            })
+            .expect("empty-partition edit must panic (TS-parity teardown)");
+        assert!(
+            msg.contains("Bound should be set"),
+            "expected the TS-identical 'Bound should be set' assert, got: {msg}",
+        );
+    }
 }
