@@ -1,0 +1,162 @@
+{
+  "hashes": [
+    {
+      "input": "",
+      "h32": "46947589",
+      "h64": "201638359568529298",
+      "h128": "3719571214403283497883493104908516086"
+    },
+    {
+      "input": "a",
+      "h32": "1426945110",
+      "h64": "6128682584748879983",
+      "h128": "113054239149863338656013733210046359280"
+    },
+    {
+      "input": "hello",
+      "h32": "4211111929",
+      "h64": "18086588019095108521",
+      "h128": "333638660354868871707927099881671776527"
+    },
+    {
+      "input": "world",
+      "h32": "413819571",
+      "h64": "1777341524092179646",
+      "h128": "32786164226505317156460434005555940849"
+    },
+    {
+      "input": "foo bar baz",
+      "h32": "2597416926",
+      "h64": "11155820755497771880",
+      "h128": "205788570408844536248323441292954395731"
+    },
+    {
+      "input": "unicode-émoji-🚀",
+      "h32": "3398896586",
+      "h64": "14598149679385043074",
+      "h128": "269288331085321034313899586787274015889"
+    },
+    {
+      "input": "multi\nline\nstring",
+      "h32": "3018220152",
+      "h64": "12963156847192781547",
+      "h128": "239128036747520838591199439291612746662"
+    },
+    {
+      "input": "larger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some paddinglarger test string with some padding",
+      "h32": "1644765623",
+      "h64": "7064214561501252302",
+      "h128": "130311758097785944757515786660276755691"
+    }
+  ],
+  "rowIds": [
+    {
+      "input": {
+        "schema": "public",
+        "table": "users",
+        "rowKey": {
+          "id": 42
+        }
+      },
+      "rowIDString": "[\"public\",\"users\",\"id\",42]",
+      "rowIDHash": "3zl7b3mxo6044byjgjfiut22i",
+      "rowIDSignatureUnit": "4854660712987311282"
+    },
+    {
+      "input": {
+        "schema": "public",
+        "table": "users",
+        "rowKey": {
+          "id": "user-abc"
+        }
+      },
+      "rowIDString": "[\"public\",\"users\",\"id\",\"user-abc\"]",
+      "rowIDHash": "1wzuttsn02s1450bkvyq3ygzp",
+      "rowIDSignatureUnit": "2332715470509474692"
+    },
+    {
+      "input": {
+        "schema": "public",
+        "table": "orders",
+        "rowKey": {
+          "id": 1,
+          "userId": "u1"
+        }
+      },
+      "rowIDString": "[\"public\",\"orders\",\"id\",1,\"userId\",\"u1\"]",
+      "rowIDHash": "2wkk16x43bolpxgrkoxo83364",
+      "rowIDSignatureUnit": "3535485912967677880"
+    },
+    {
+      "input": {
+        "schema": "zero_0",
+        "table": "__zero_internal",
+        "rowKey": {
+          "mutationID": 5,
+          "clientID": "client-123"
+        }
+      },
+      "rowIDString": "[\"zero_0\",\"__zero_internal\",\"clientID\",\"client-123\",\"mutationID\",5]",
+      "rowIDHash": "9yldu0x3gbrm1eqt7yr9th31e",
+      "rowIDSignatureUnit": "12123857501058609290"
+    },
+    {
+      "input": {
+        "schema": "app",
+        "table": "items",
+        "rowKey": {
+          "b": true,
+          "a": null,
+          "c": 3.14
+        }
+      },
+      "rowIDString": "[\"app\",\"items\",\"a\",null,\"b\",true,\"c\",3.14]",
+      "rowIDHash": "abxyaoxi1x20t72oernz0f2lk",
+      "rowIDSignatureUnit": "12575183673378422410"
+    },
+    {
+      "input": {
+        "schema": "public",
+        "table": "compound",
+        "rowKey": {
+          "id": {
+            "nested": {
+              "x": 1,
+              "y": "text"
+            }
+          },
+          "tag": "z"
+        }
+      },
+      "rowIDString": "[\"public\",\"compound\",\"id\",{\"nested\":{\"x\":1,\"y\":\"text\"}},\"tag\",\"z\"]",
+      "rowIDHash": "d2haffakoyqs2xsrssooiy0eq",
+      "rowIDSignatureUnit": "15906667745946868397"
+    }
+  ],
+  "signatures": [
+    {
+      "sig": "0",
+      "hex": "0"
+    },
+    {
+      "sig": "1",
+      "hex": "1"
+    },
+    {
+      "sig": "255",
+      "hex": "ff"
+    },
+    {
+      "sig": "2147483647",
+      "hex": "7fffffff"
+    },
+    {
+      "sig": "281474976710655",
+      "hex": "ffffffffffff"
+    },
+    {
+      "sig": "18446744073709551615",
+      "hex": "ffffffffffffffff"
+    }
+  ]
+}

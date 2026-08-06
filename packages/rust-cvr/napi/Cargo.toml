@@ -1,0 +1,17 @@
+[package]
+name = "rust-cvr-napi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rust-cvr = { path = ".." }
+napi = { version = "2", features = ["napi8", "serde-json"] }
+napi-derive = { version = "2", features = ["type-def"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[build-dependencies]
+napi-build = "2"

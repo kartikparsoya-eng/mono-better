@@ -1,0 +1,18 @@
+[package]
+name = "rust-cvr"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rust_cvr"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rustc-hash = "2"
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+parking_lot = "0.12"
+
+[dev-dependencies]
+proptest = "1"
