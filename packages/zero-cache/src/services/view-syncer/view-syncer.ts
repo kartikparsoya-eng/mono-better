@@ -89,7 +89,8 @@ import {
 import type {DrainCoordinator} from './drain-coordinator.ts';
 import {handleInspect} from './inspect-handler.ts';
 import type {PipelineDriver} from './pipeline-driver.ts';
-import type {RustIVMDriver} from './rust-ivm-driver.ts';
+import {RustIVMDriver} from './rust-ivm-driver.ts';
+import {isRustCvrEnabled} from './rust-cvr-addon.ts';
 
 type PipelineDriverLike = PipelineDriver | RustIVMDriver;
 import {type RowChange} from './pipeline-driver.ts';
@@ -108,7 +109,7 @@ import {
   type QueryRecord,
   type RowID,
 } from './schema/types.ts';
-import {ResetPipelinesSignal} from './snapshotter.ts';
+import {ResetPipelinesSignal, type ResetPipelinesReason} from './snapshotter.ts';
 import {tracer} from './tracer.ts';
 import {
   ttlClockAsNumber,
@@ -1973,6 +1974,49 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       lc = lc.withContext('stateVersion', stateVersion);
       lc.info?.(`hydrating ${addQueries.length} queries`);
 
+      // ─── Unified Rust CVR path ─────────────────────────────────────
+      // When RUST_CVR=1 and the driver is RustIVMDriver, the entire pipeline
+      // (hydrate → CVR → poke) runs on the engine actor thread. Row data
+      // never crosses the napi boundary.
+      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
+        const engine = this.#pipelines.engine;
+        const cvrJson = JSON.stringify(cvr);
+        const addQueriesFlat = addQueries.flatMap(q => [q.id, q.transformationHash]);
+        const removeQueryIds = removeQueries.map(q => q.id);
+        const clientIds = this.#getClients().map(c => c.wsID);
+        const existingRowsJson = JSON.stringify(
+          await this.#cvrStore.getRowRecords(),
+        );
+        const result = await engine.hydrateAndSync(
+          addQueries.map(q => ({
+            queryId: q.id,
+            astJson: JSON.stringify(q.ast),
+          })),
+          cvrJson,
+          stateVersion,
+          this.#pipelines.replicaVersion,
+          addQueriesFlat,
+          removeQueryIds,
+          clientIds,
+          existingRowsJson,
+          this.#lastConnectTime,
+          Date.now(),
+          ttlClockAsNumber(this.#getTTLClock(Date.now())),
+        );
+
+        if (result.resetReason) {
+          throw new ResetPipelinesSignal(result.resetMsg ?? '', result.resetReason as ResetPipelinesReason);
+        }
+
+        this.#cvr = JSON.parse(result.cvrJson);
+        lc.debug?.(
+          `hydrate_and_sync: ${result.numChanges} changes, version ${result.version}`,
+        );
+        return;
+      }
+
+      // ─── TS fallback path ───────────────────────────────────────────
+
       const updater = new CVRQueryDrivenUpdater(
         this.#cvrStore,
         cvr,
@@ -2321,6 +2365,37 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       );
       const start = performance.now();
 
+      // ─── Unified Rust CVR path ─────────────────────────────────────
+      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
+        const engine = this.#pipelines.engine;
+        const cvrJson = JSON.stringify(cvr);
+        const clientIds = this.#getClients(cvr.version).map(c => c.wsID);
+        const existingRowsJson = JSON.stringify(
+          await this.#cvrStore.getRowRecords(),
+        );
+        const result = await engine.advanceAndSync(
+          cvrJson,
+          this.#pipelines.replicaVersion,
+          clientIds,
+          existingRowsJson,
+          this.#lastConnectTime,
+          Date.now(),
+          ttlClockAsNumber(this.#getTTLClock(Date.now())),
+        );
+
+        if (result.resetReason) {
+          return new ResetPipelinesSignal(result.resetMsg ?? '', result.resetReason as ResetPipelinesReason);
+        }
+
+        this.#cvr = JSON.parse(result.cvrJson);
+        span.setAttribute('numChanges', result.numChanges);
+        lc.debug?.(
+          `advance_and_sync: ${result.numChanges} changes, version ${result.version}`,
+        );
+        return 'success';
+      }
+
+      // ─── TS fallback path ───────────────────────────────────────────
       const timer = new TimeSliceTimer(lc);
       // await: RustIVMDriver.advance is async (runs on the engine actor thread);
       // the TS PipelineDriver.advance is sync — await handles both.

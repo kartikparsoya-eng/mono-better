@@ -29,6 +29,7 @@ regex-lite = "0.1"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tiny_http = "0.12"
+rust-cvr = { path = "../rust-cvr" }
 
 [dev-dependencies]
 proptest = "1"

@@ -396,6 +396,8 @@ export function deferClose<T>(queue: AsyncQueue<T>): void {
 
 export class RustIVMDriver {
   readonly #engine: RustIvmEngine;
+  /** Exposed for unified CVR path (hydrateAndSync / advanceAndSync). */
+  get engine(): RustIvmEngine { return this.#engine; }
   // Monotonic per-driver stream id (#3 backpressure). Each streaming hydrate/
   // advance mints the next id and passes it to the native call + every
   // grant/cancel so credit is always tagged to the exact stream it belongs to.

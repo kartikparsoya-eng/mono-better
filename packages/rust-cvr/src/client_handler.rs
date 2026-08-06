@@ -3,15 +3,21 @@
 //! The ClientHandler is the bridge between CVR state changes and a WebSocket.
 //! It serializes pokes per-connection and assembles poke bodies with
 //! special handling for the clients and mutations tables.
+//!
+//! ## Threading
+//!
+//! All methods are **synchronous**. The ClientHandler runs on the engine's
+//! actor thread (a dedicated OS thread, not a tokio runtime). The only
+//! async edge is `WebSocketSink::push`, which uses a TSFN `Blocking` call
+//! that blocks the OS thread until JS processes the frame — identical
+//! backpressure to TS's `#pokeTail` promise chain.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
-use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use tokio::sync::Mutex;
 
 use crate::types::*;
 use crate::version::{cmp_versions, version_string, CVRVersion, NullableCVRVersion};
@@ -19,10 +25,10 @@ use std::cmp::Ordering;
 
 const PART_COUNT_FLUSH_THRESHOLD: usize = 100;
 
-/// Abstract WebSocket sink. The napi implementation proxies to TS's WS.
-#[async_trait]
+/// Abstract WebSocket sink. The napi implementation proxies to TS's WS via
+/// a ThreadsafeFunction with `Blocking` call mode.
 pub trait WebSocketSink: Send + Sync {
-    async fn push(&self, msg: Value) -> Result<(), String>;
+    fn push(&self, msg: Value) -> Result<(), String>;
     fn fail(&self, e: String);
     fn cancel(&self);
 }
@@ -114,9 +120,9 @@ impl PokeState {
 
 /// Returned by `start_poke()`. Serializes patches into poke frames.
 pub struct PokeHandler {
-    state: Arc<Mutex<PokeState>>,
+    state: Arc<StdMutex<PokeState>>,
     downstream: Arc<dyn WebSocketSink>,
-    base_version: Arc<Mutex<NullableCVRVersion>>,
+    base_version: Arc<StdMutex<NullableCVRVersion>>,
     poke_chain: Arc<AtomicBool>,
     zero_clients_table: String,
     zero_mutations_table: String,
@@ -124,17 +130,17 @@ pub struct PokeHandler {
 }
 
 impl PokeHandler {
-    pub async fn add_patch(&self, patch_to_version: &PatchToVersion) -> Result<(), String> {
+    pub fn add_patch(&self, patch_to_version: &PatchToVersion) -> Result<(), String> {
         let to_version = &patch_to_version.to_version;
-        let base = self.base_version.lock().await;
+        let base = self.base_version.lock().unwrap();
 
         if cmp_versions(&Some(to_version.clone()), &*base) != Ordering::Greater {
             return Ok(());
         }
         drop(base);
 
-        let mut state = self.state.lock().await;
-        self.ensure_body(&mut state).await?;
+        let mut state = self.state.lock().unwrap();
+        self.ensure_body(&mut state)?;
 
         match &patch_to_version.patch {
             Patch::Query(qp) => {
@@ -197,47 +203,45 @@ impl PokeHandler {
 
         state.part_count += 1;
         if state.part_count >= PART_COUNT_FLUSH_THRESHOLD {
-            self.flush_body(&mut state).await?;
+            self.flush_body(&mut state)?;
         }
 
         Ok(())
     }
 
-    pub async fn cancel(&self) -> Result<(), String> {
-        let mut state = self.state.lock().await;
+    pub fn cancel(&self) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
         if state.started {
             self.downstream
                 .push(serde_json::json!([
                     "pokeEnd",
                     {"pokeID": state.poke_id, "cookie": "", "cancel": true}
-                ]))
-                .await?;
+                ]))?;
         }
-        self.release_chain(&mut state).await;
+        self.release_chain(&mut state);
         Ok(())
     }
 
-    pub async fn end(&self, final_version: CVRVersion) -> Result<(), String> {
-        let mut state = self.state.lock().await;
+    pub fn end(&self, final_version: CVRVersion) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
         let cookie = version_string(&final_version);
 
         if !state.started {
-            let base = self.base_version.lock().await;
+            let base = self.base_version.lock().unwrap();
             if cmp_versions(&*base, &Some(final_version.clone())) == Ordering::Equal {
-                self.release_chain(&mut state).await;
+                self.release_chain(&mut state);
                 return Ok(());
             }
             drop(base);
-            self.acquire_chain(&mut state).await;
+            self.acquire_chain(&mut state);
             self.downstream
                 .push(serde_json::json!([
                     "pokeStart",
                     {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
-                ]))
-                .await?;
+                ]))?;
             state.started = true;
         } else {
-            let base = self.base_version.lock().await;
+            let base = self.base_version.lock().unwrap();
             if cmp_versions(&*base, &Some(final_version.clone())) != Ordering::Less {
                 return Err(format!(
                     "Patches were sent but finalVersion {:?} is not greater than baseVersion {:?}",
@@ -247,31 +251,29 @@ impl PokeHandler {
             drop(base);
         }
 
-        self.flush_body(&mut state).await?;
+        self.flush_body(&mut state)?;
         self.downstream
             .push(serde_json::json!([
                 "pokeEnd",
                 {"pokeID": state.poke_id, "cookie": cookie}
-            ]))
-            .await?;
+            ]))?;
 
-        let mut base = self.base_version.lock().await;
+        let mut base = self.base_version.lock().unwrap();
         *base = Some(final_version);
         drop(base);
 
-        self.release_chain(&mut state).await;
+        self.release_chain(&mut state);
         Ok(())
     }
 
-    async fn ensure_body(&self, state: &mut PokeState) -> Result<(), String> {
+    fn ensure_body(&self, state: &mut PokeState) -> Result<(), String> {
         if !state.started {
-            self.acquire_chain(state).await;
+            self.acquire_chain(state);
             self.downstream
                 .push(serde_json::json!([
                     "pokeStart",
                     {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
-                ]))
-                .await?;
+                ]))?;
             state.started = true;
         }
         if state.body.is_none() {
@@ -283,28 +285,27 @@ impl PokeHandler {
         Ok(())
     }
 
-    async fn flush_body(&self, state: &mut PokeState) -> Result<(), String> {
+    fn flush_body(&self, state: &mut PokeState) -> Result<(), String> {
         if let Some(body) = state.body.take() {
             self.downstream
-                .push(serde_json::json!(["pokePart", body]))
-                .await?;
+                .push(serde_json::json!(["pokePart", body]))?;
             state.part_count = 0;
         }
         Ok(())
     }
 
-    async fn acquire_chain(&self, state: &mut PokeState) {
+    fn acquire_chain(&self, state: &mut PokeState) {
         while self
             .poke_chain
             .compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst)
             .is_err()
         {
-            tokio::task::yield_now().await;
+            std::thread::yield_now();
         }
         state.poke_in_progress = true;
     }
 
-    async fn release_chain(&self, state: &mut PokeState) {
+    fn release_chain(&self, state: &mut PokeState) {
         if state.poke_in_progress {
             state.poke_in_progress = false;
             self.poke_chain.store(false, AtomicOrdering::SeqCst);
@@ -432,7 +433,7 @@ pub struct ClientHandler {
     zero_clients_table: String,
     zero_mutations_table: String,
     downstream: Arc<dyn WebSocketSink>,
-    base_version: Arc<Mutex<NullableCVRVersion>>,
+    base_version: Arc<StdMutex<NullableCVRVersion>>,
     poke_chain: Arc<AtomicBool>,
 }
 
@@ -453,15 +454,15 @@ impl ClientHandler {
             zero_clients_table: format!("{}.clients", us),
             zero_mutations_table: format!("{}.mutations", us),
             downstream,
-            base_version: Arc::new(Mutex::new(
+            base_version: Arc::new(StdMutex::new(
                 base_cookie.map(|c| crate::version::version_from_string(c)),
             )),
             poke_chain: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub async fn version(&self) -> NullableCVRVersion {
-        self.base_version.lock().await.clone()
+    pub fn version(&self) -> NullableCVRVersion {
+        self.base_version.lock().unwrap().clone()
     }
 
     pub fn fail(&self, e: &str) {
@@ -477,22 +478,13 @@ impl ClientHandler {
         let poke_id = version_string(&tentative_version);
 
         let base = self.base_version.clone();
-        // We check synchronously — if base >= tentative, return noop.
-        // The actual check happens in a blocking manner since startPoke is sync in TS.
-        // In Rust, we check via try_lock; if it fails, we proceed (the ensureBody
-        // will do the proper async check).
-        let base_val = self
-            .base_version
-            .try_lock()
-            .map(|g| g.clone())
-            .unwrap_or(None);
+        let base_val = self.base_version.lock().unwrap().clone();
 
         if cmp_versions(&base_val, &Some(tentative_version.clone())) != Ordering::Less {
-            // NOOP handler — but we still need to return a PokeHandler.
-            // The NOOP handler's add_patch will skip everything because
+            // NOOP handler — add_patch will skip everything because
             // to_version <= base_version.
             return PokeHandler {
-                state: Arc::new(Mutex::new(PokeState::new(
+                state: Arc::new(StdMutex::new(PokeState::new(
                     poke_id,
                     None,
                     version_string(&tentative_version),
@@ -512,7 +504,7 @@ impl ClientHandler {
         };
 
         PokeHandler {
-            state: Arc::new(Mutex::new(PokeState::new(
+            state: Arc::new(StdMutex::new(PokeState::new(
                 poke_id.clone(),
                 base_cookie,
                 version_string(&tentative_version),
@@ -526,7 +518,7 @@ impl ClientHandler {
         }
     }
 
-    pub async fn send_delete_clients(
+    pub fn send_delete_clients(
         &self,
         client_ids: Vec<String>,
         client_group_ids: Vec<String>,
@@ -544,25 +536,69 @@ impl ClientHandler {
         }
         self.downstream
             .push(serde_json::json!(["deleteClients", body]))
-            .await
     }
 
-    pub async fn send_query_transform_application_errors(
+    pub fn send_query_transform_application_errors(
         &self,
         errors: Vec<Value>,
     ) -> Result<(), String> {
         self.downstream
             .push(serde_json::json!(["transformError", errors]))
-            .await
     }
 
     pub fn send_inspect_response(&self, response: Value) {
-        // Fire-and-forget like TS
-        let downstream = self.downstream.clone();
-        tokio::spawn(async move {
-            let _ = downstream.push(serde_json::json!(["inspect", response])).await;
-        });
+        // Fire-and-forget like TS. On the actor thread, push is sync.
+        // If push fails, there's nothing to do — the WS is already broken.
+        let _ = self.downstream.push(serde_json::json!(["inspect", response]));
     }
+}
+
+// ─── Multi-client poke fanout ──────────────────────────────────────────────
+
+/// Wraps PokeHandlers for multiple clients, mirroring TS `startPoke()`.
+/// Unlike TS's `Promise.allSettled`, on the actor thread each poke is
+/// sequential. A failed client's error is logged but does not stop
+/// the remaining clients — matching TS's allSettled semantics.
+pub struct MultiPoker {
+    pokers: Vec<PokeHandler>,
+}
+
+impl MultiPoker {
+    pub fn new(clients: &[&ClientHandler], tentative_version: CVRVersion) -> Self {
+        let pokers = clients
+            .iter()
+            .map(|c| c.start_poke(tentative_version.clone()))
+            .collect();
+        Self { pokers }
+    }
+
+    pub fn add_patch(&self, patch: &PatchToVersion) {
+        for poker in &self.pokers {
+            if let Err(e) = poker.add_patch(patch) {
+                eprintln!("Poke add_patch failed for client: {}", e);
+            }
+        }
+    }
+
+    pub fn cancel(&self) {
+        for poker in &self.pokers {
+            if let Err(e) = poker.cancel() {
+                eprintln!("Poke cancel failed: {}", e);
+            }
+        }
+    }
+
+    pub fn end(&self, final_version: CVRVersion) {
+        for poker in &self.pokers {
+            if let Err(e) = poker.end(final_version.clone()) {
+                eprintln!("Poke end failed: {}", e);
+            }
+        }
+    }
+}
+
+fn upstream_schema(shard: &ShardID) -> String {
+    format!("{}_{}", shard.app_id, shard.shard_num)
 }
 
 #[cfg(test)]
@@ -588,9 +624,8 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl WebSocketSink for MockSink {
-        async fn push(&self, msg: Value) -> Result<(), String> {
+        fn push(&self, msg: Value) -> Result<(), String> {
             self.messages.lock().unwrap().push(msg);
             Ok(())
         }
@@ -632,12 +667,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_noop_poke_sends_nothing() {
+    #[test]
+    fn test_noop_poke_sends_nothing() {
         let (handler, messages) = make_handler();
         // Set base version to v2
         {
-            let mut bv = handler.base_version.lock().await;
+            let mut bv = handler.base_version.lock().unwrap();
             *bv = Some(CVRVersion {
                 state_version: "v2".to_string(),
                 config_version: None,
@@ -651,13 +686,12 @@ mod tests {
             state_version: "v2".to_string(),
             config_version: None,
         })
-        .await
         .unwrap();
         assert!(messages.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_empty_poke_sends_start_and_end() {
+    #[test]
+    fn test_empty_poke_sends_start_and_end() {
         let (handler, messages) = make_handler();
         let poke = handler.start_poke(CVRVersion {
             state_version: "v2".to_string(),
@@ -667,7 +701,6 @@ mod tests {
             state_version: "v2".to_string(),
             config_version: Some(1),
         })
-        .await
         .unwrap();
         let msgs = messages.lock().unwrap();
         assert_eq!(msgs.len(), 2);
@@ -675,8 +708,8 @@ mod tests {
         assert_eq!(msgs[1][0], "pokeEnd");
     }
 
-    #[tokio::test]
-    async fn test_poke_flushes_at_100_parts() {
+    #[test]
+    fn test_poke_flushes_at_100_parts() {
         let (handler, messages) = make_handler();
         let poke = handler.start_poke(CVRVersion {
             state_version: "v2".to_string(),
@@ -685,14 +718,12 @@ mod tests {
         // Add 101 row patches
         for _ in 0..101 {
             poke.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})))
-                .await
                 .unwrap();
         }
         poke.end(CVRVersion {
             state_version: "v2".to_string(),
             config_version: Some(1),
         })
-        .await
         .unwrap();
         let msgs = messages.lock().unwrap();
         // pokeStart + 1 pokePart (at 100) + 1 pokePart (remaining 1) + pokeEnd
@@ -703,8 +734,8 @@ mod tests {
         assert_eq!(msgs[3][0], "pokeEnd");
     }
 
-    #[tokio::test]
-    async fn test_poke_lmids_interception() {
+    #[test]
+    fn test_poke_lmids_interception() {
         let (handler, messages) = make_handler();
         let poke = handler.start_poke(CVRVersion {
             state_version: "v2".to_string(),
@@ -718,13 +749,11 @@ mod tests {
                 "lastMutationID": 42,
             }),
         ))
-        .await
         .unwrap();
         poke.end(CVRVersion {
             state_version: "v2".to_string(),
             config_version: Some(1),
         })
-        .await
         .unwrap();
         let msgs = messages.lock().unwrap();
         // pokeStart + pokePart (with lastMutationIDChanges) + pokeEnd
@@ -734,8 +763,8 @@ mod tests {
         assert_eq!(part["lastMutationIDChanges"]["clientA"], 42);
     }
 
-    #[tokio::test]
-    async fn test_mutations_patch_shape() {
+    #[test]
+    fn test_mutations_patch_shape() {
         let (handler, messages) = make_handler();
         let poke = handler.start_poke(CVRVersion {
             state_version: "v2".to_string(),
@@ -750,13 +779,11 @@ mod tests {
                 "result": {"ok": true},
             }),
         ))
-        .await
         .unwrap();
         poke.end(CVRVersion {
             state_version: "v2".to_string(),
             config_version: Some(1),
         })
-        .await
         .unwrap();
         let msgs = messages.lock().unwrap();
         let part = &msgs[1][1];
@@ -767,8 +794,8 @@ mod tests {
         assert_eq!(mp[0]["mutation"]["result"]["ok"], true);
     }
 
-    #[tokio::test]
-    async fn test_cancel_releases_chain() {
+    #[test]
+    fn test_cancel_releases_chain() {
         let (handler, messages) = make_handler();
         let poke = handler.start_poke(CVRVersion {
             state_version: "v2".to_string(),
@@ -776,9 +803,8 @@ mod tests {
         });
         // Start the poke by adding a patch
         poke.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})))
-            .await
             .unwrap();
-        poke.cancel().await.unwrap();
+        poke.cancel().unwrap();
         {
             let msgs = messages.lock().unwrap();
             // pokeStart + pokeEnd (cancel)
@@ -796,12 +822,11 @@ mod tests {
             state_version: "v3".to_string(),
             config_version: Some(1),
         })
-        .await
         .unwrap();
     }
 
-    #[tokio::test]
-    async fn test_end_advances_base_version() {
+    #[test]
+    fn test_end_advances_base_version() {
         let (handler, _messages) = make_handler();
         let poke = handler.start_poke(CVRVersion {
             state_version: "v2".to_string(),
@@ -811,17 +836,17 @@ mod tests {
             state_version: "v2".to_string(),
             config_version: Some(1),
         };
-        poke.end(final_v.clone()).await.unwrap();
-        let bv = handler.version().await;
+        poke.end(final_v.clone()).unwrap();
+        let bv = handler.version();
         assert_eq!(bv, Some(final_v));
     }
 
-    #[tokio::test]
-    async fn test_patches_below_base_version_skipped() {
+    #[test]
+    fn test_patches_below_base_version_skipped() {
         let (handler, messages) = make_handler();
         // Set base version
         {
-            let mut bv = handler.base_version.lock().await;
+            let mut bv = handler.base_version.lock().unwrap();
             *bv = Some(CVRVersion {
                 state_version: "v2".to_string(),
                 config_version: Some(1),
@@ -846,21 +871,19 @@ mod tests {
                 config_version: Some(1),
             },
         })
-        .await
         .unwrap();
         poke.end(CVRVersion {
             state_version: "v3".to_string(),
             config_version: None,
         })
-        .await
         .unwrap();
         let msgs = messages.lock().unwrap();
         // Only pokeStart + pokeEnd, no pokePart
         assert_eq!(msgs.len(), 2);
     }
 
-    #[tokio::test]
-    async fn test_normalize_mutation_result_string() {
+    #[test]
+    fn test_normalize_mutation_result_string() {
         let row = serde_json::json!({
             "clientID": "c1",
             "mutationID": 1,
@@ -871,8 +894,8 @@ mod tests {
         assert_eq!(normalized["result"]["ok"], true);
     }
 
-    #[tokio::test]
-    async fn test_normalize_mutation_result_object() {
+    #[test]
+    fn test_normalize_mutation_result_object() {
         let row = serde_json::json!({
             "clientID": "c1",
             "mutationID": 1,

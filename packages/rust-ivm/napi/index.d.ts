@@ -40,6 +40,23 @@ export interface NapiColumnSchema {
   type: string
   optional: boolean
 }
+/** Result of hydrate_and_sync / advance_and_sync. */
+export interface SyncResult {
+  /** JSON-encoded updated CVR snapshot. */
+  cvrJson: string
+  /** New CVR version string. */
+  version: string
+  /** JSON-encoded CVRFlushStats or null. */
+  flushedJson?: string
+  /** JSON-encoded query patches (config patches for catchup). */
+  queryPatchesJson: string
+  /** Number of row changes processed. */
+  numChanges: number
+  /** Reset reason if the engine triggered a reset (e.g. "advancement-timeout"). */
+  resetReason?: string
+  /** Reset message if the engine triggered a reset. */
+  resetMsg?: string
+}
 export declare class RustIvmEngine {
   constructor()
   /**
@@ -90,6 +107,19 @@ export declare class RustIvmEngine {
    * Bounded TSFN (max_queue_size=1, Blocking mode) for real backpressure.
    */
   advanceToHeadStreamingRows(onRow: (err: Error | null, row: NapiRowChange) => void, streamId: number): Promise<void>
+  /** Register a WebSocket client for poke delivery. */
+  registerClient(clientId: string, wsId: string, clientGroupId: string, shardJson: any, baseCookie: string | undefined | null, pushFn: (msg: unknown) => void, failFn: (err: string) => void, cancelFn: () => void): void
+  /** Unregister a WebSocket client. */
+  unregisterClient(wsId: string): void
+  /** Set the CVR store (created once, shared across all calls). */
+  setCvrStore(pgUri: string, schema: string, cvrId: string, taskId: string): void
+  /**
+   * Hydrate queries AND apply to CVR + push to clients — all on the actor thread.
+   * Row data never crosses the boundary.
+   */
+  hydrateAndSync(queries: Array<NapiQuerySpec>, cvrJson: string, stateVersion: string, replicaVersion: string, addQueriesFlat: Array<string>, removeQueries: Array<string>, clientIds: Array<string>, existingRowsJson: string, lastConnectTime: number, lastActive: number, ttlClock: number): Promise<SyncResult>
+  /** Advance to head AND apply to CVR + push to clients — all on the actor thread. */
+  advanceAndSync(cvrJson: string, replicaVersion: string, clientIds: Array<string>, existingRowsJson: string, lastConnectTime: number, lastActive: number, ttlClock: number): Promise<SyncResult>
   removeQuery(queryId: string): void
   /** Scalar-resolved logical AST for public PipelineDriver query metadata. */
   queryTransformedAst(queryId: string): string | null

@@ -653,11 +653,14 @@ struct NapiWebSocketSink {
   cancel_fn: ThreadsafeFunction<bool, ErrorStrategy::CalleeHandled>,
 }
 
-#[async_trait::async_trait]
 impl WebSocketSink for NapiWebSocketSink {
-  async fn push(&self, msg: Value) -> std::result::Result<(), String> {
-    let _ = self.push_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
-    Ok(())
+  fn push(&self, msg: Value) -> std::result::Result<(), String> {
+    let status = self.push_fn.call(Ok(msg), ThreadsafeFunctionCallMode::Blocking);
+    if status == Status::Ok || status == Status::Closing {
+      Ok(())
+    } else {
+      Err(format!("TSFN push failed: {:?}", status))
+    }
   }
 
   fn fail(&self, e: String) {
@@ -710,8 +713,8 @@ impl ClientHandlerHandle {
   }
 
   #[napi]
-  pub async fn version(&self) -> Result<serde_json::Value> {
-    let v = self.inner.version().await;
+  pub fn version(&self) -> Result<serde_json::Value> {
+    let v = self.inner.version();
     serde_json::to_value(&v).map_err(|e| {
       Error::new(Status::GenericFailure, format!("serialize: {}", e))
     })
@@ -737,16 +740,15 @@ impl ClientHandlerHandle {
   }
 
   #[napi]
-  pub async fn send_delete_clients(&self, client_ids: Vec<String>, client_group_ids: Vec<String>) -> Result<()> {
+  pub fn send_delete_clients(&self, client_ids: Vec<String>, client_group_ids: Vec<String>) -> Result<()> {
     self
       .inner
       .send_delete_clients(client_ids, client_group_ids)
-      .await
       .map_err(|e| Error::new(Status::GenericFailure, e))
   }
 
   #[napi]
-  pub async fn send_query_transform_application_errors(
+  pub fn send_query_transform_application_errors(
     &self,
     errors_json: serde_json::Value,
   ) -> Result<()> {
@@ -756,7 +758,6 @@ impl ClientHandlerHandle {
     self
       .inner
       .send_query_transform_application_errors(errors)
-      .await
       .map_err(|e| Error::new(Status::GenericFailure, e))
   }
 
@@ -774,7 +775,7 @@ pub struct PokeHandlerHandle {
 #[napi]
 impl PokeHandlerHandle {
   #[napi]
-  pub async fn add_patch(&self, patch_json: serde_json::Value) -> Result<()> {
+  pub fn add_patch(&self, patch_json: serde_json::Value) -> Result<()> {
     let patch: rust_cvr::types::PatchToVersion = serde_json::from_value(patch_json)
       .map_err(|e| {
         Error::new(Status::InvalidArg, format!("invalid patch: {}", e))
@@ -782,28 +783,25 @@ impl PokeHandlerHandle {
     self
       .inner
       .add_patch(&patch)
-      .await
       .map_err(|e| Error::new(Status::GenericFailure, e))
   }
 
   #[napi]
-  pub async fn cancel(&self) -> Result<()> {
+  pub fn cancel(&self) -> Result<()> {
     self
       .inner
       .cancel()
-      .await
       .map_err(|e| Error::new(Status::GenericFailure, e))
   }
 
   #[napi]
-  pub async fn end(&self, final_version: serde_json::Value) -> Result<()> {
+  pub fn end(&self, final_version: serde_json::Value) -> Result<()> {
     let version: CVRVersion = serde_json::from_value(final_version).map_err(|e| {
       Error::new(Status::InvalidArg, format!("invalid version: {}", e))
     })?;
     self
       .inner
       .end(version)
-      .await
       .map_err(|e| Error::new(Status::GenericFailure, e))
   }
 }

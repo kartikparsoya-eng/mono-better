@@ -495,7 +495,7 @@ pub struct CVRQueryDrivenUpdater {
     state_version: String, // LexiVersion string
 
     removed_or_executed_query_ids: HashSet<String>,
-    received_rows: HashMap<String, Option<RefCounts>>, // keyed by rowIDString
+    pub received_rows: HashMap<String, Option<RefCounts>>, // keyed by rowIDString
     last_patches: HashMap<String, RowPatchInfo>,       // keyed by rowIDString
     row_set_signature_provider: Option<Box<dyn Fn(&str) -> Option<u64> + Send + Sync>>,
 

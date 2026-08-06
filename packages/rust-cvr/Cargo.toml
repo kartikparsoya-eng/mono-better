@@ -24,7 +24,6 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 thiserror = "2"
 tokio-stream = "0.1"
-async-trait = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"
 

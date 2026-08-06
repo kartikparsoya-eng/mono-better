@@ -8,12 +8,20 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rust-ivm = { path = "..", default-features = false }
+rust-cvr = { path = "../../rust-cvr" }
 napi = { version = "2", features = ["napi8", "serde-json"] }
 napi-derive = { version = "2", features = ["type-def"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 rustc-hash = "2"
 rusqlite = { version = "0.32" }
+tokio = { version = "1", features = ["rt"] }
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "postgres",
+  "json",
+  "macros",
+] }
 
 [target.'cfg(target_env = "gnu")'.dependencies]
 libc = "0.2"
