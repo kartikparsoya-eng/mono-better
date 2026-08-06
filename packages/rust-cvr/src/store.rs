@@ -11,6 +11,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::types::*;
+use crate::types::StoreOp;
 use crate::version::{cmp_versions, version_from_string, version_string, CVRVersion, NullableCVRVersion};
 use std::cmp::Ordering;
 
@@ -288,6 +289,43 @@ impl CVRStoreHandle {
     pub fn force_updates(&mut self, ids: &[RowID]) {
         for id in ids {
             self.pending.force_updates.insert(crate::row_key::row_id_string(id));
+        }
+    }
+
+    /// Apply a batch of StoreOps directly to this store's pending writes buffer.
+    /// This is the internal Rust-to-Rust path — no napi boundary crossing.
+    pub fn apply_store_ops(&mut self, ops: Vec<StoreOp>) {
+        for op in ops {
+            match op {
+                StoreOp::InsertClient(c) => self.insert_client(&c),
+                StoreOp::PutQuery(q) => self.put_query(&q),
+                StoreOp::PutDesiredQuery {
+                    version,
+                    query_id,
+                    client_id,
+                    deleted,
+                    inactivated_at,
+                    ttl,
+                } => self.put_desired_query(
+                    &version,
+                    &query_id,
+                    &client_id,
+                    deleted,
+                    inactivated_at,
+                    ttl,
+                ),
+                StoreOp::PutInstance(cvr) => self.put_instance(&cvr),
+                StoreOp::DeleteClient(id) => self.delete_client(&id),
+                StoreOp::UpdateQuery(q) => self.update_query(&q),
+                StoreOp::MarkQueryAsDeleted { version, patch } => {
+                    self.mark_query_as_deleted(&version, &patch)
+                }
+                StoreOp::PutRowRecord(r) => self.put_row_record(&r),
+                StoreOp::DelRowRecord(id) => self.del_row_record(&id),
+                StoreOp::UpdateRowSetSignature { query_id, hex } => {
+                    self.update_row_set_signature(&query_id, &hex)
+                }
+            }
         }
     }
 

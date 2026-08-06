@@ -294,6 +294,11 @@ export class CVRStore {
     );
   }
 
+  /** Exposed for CVR updaters to share the same Rust store handle. */
+  get rustStoreHandle(): RustCVRStoreHandle | null {
+    return this.#rust;
+  }
+
   load(lc: LogContext, lastConnectTime: number): Promise<CVR> {
     if (this.#rust) {
       const rust = this.#rust;

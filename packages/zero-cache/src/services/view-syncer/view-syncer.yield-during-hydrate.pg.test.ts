@@ -227,7 +227,7 @@ describe('view-syncer/yield-during-hydrate', () => {
       REPLICA_VERSION,
       REPLICA_VERSION,
     );
-    updater.trackQueries(
+    await updater.trackQueries(
       lc,
       [
         {id: 'query-hash1', transformationHash: 'gojujxnrngdx'},

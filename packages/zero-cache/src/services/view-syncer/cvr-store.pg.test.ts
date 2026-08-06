@@ -643,7 +643,7 @@ describe('view-syncer/cvr-store', () => {
     ]);
 
     let updater = new CVRQueryDrivenUpdater(store, cvr, '04', '01');
-    updater.trackQueries(
+    await updater.trackQueries(
       lc,
       [{id: 'foo', transformationHash: 'foo-transformed'}],
       [],
@@ -701,7 +701,7 @@ describe('view-syncer/cvr-store', () => {
     // the DEFERRED_LIMIT. It should still be deferred because there
     // are now pending rows waiting to be flushed.
     updater = new CVRQueryDrivenUpdater(store, cvr, '05', '01');
-    updater.trackQueries(
+    await updater.trackQueries(
       lc,
       [{id: 'foo', transformationHash: 'foo-transformed'}],
       [],
@@ -789,7 +789,7 @@ describe('view-syncer/cvr-store', () => {
     for (let i = 20; i < 320; i += 10) {
       const version = stateVersionToString({major: i});
       const updater = new CVRQueryDrivenUpdater(store, cvr, version, '01');
-      updater.trackQueries(
+      await updater.trackQueries(
         lc,
         [{id: 'foo', transformationHash: 'foo-transformed'}],
         [],
@@ -866,7 +866,7 @@ describe('view-syncer/cvr-store', () => {
     for (let i = 20; i < 320; i += 10) {
       const version = stateVersionToString({major: i});
       const updater = new CVRQueryDrivenUpdater(store, cvr, version, '01');
-      updater.trackQueries(
+      await updater.trackQueries(
         lc,
         [{id: 'foo', transformationHash: 'foo-transformed'}],
         [],
@@ -894,7 +894,7 @@ describe('view-syncer/cvr-store', () => {
       stateVersionToString({major: 320}),
       '01',
     );
-    updater.trackQueries(
+    await updater.trackQueries(
       lc,
       [{id: 'foo', transformationHash: 'foo-transformed'}],
       [],
@@ -953,7 +953,7 @@ describe('view-syncer/cvr-store', () => {
     ]);
 
     const updater = new CVRQueryDrivenUpdater(store, cvr, '04', '01');
-    updater.trackQueries(
+    await updater.trackQueries(
       lc,
       [{id: 'foo', transformationHash: 'foo-transformed'}],
       [],

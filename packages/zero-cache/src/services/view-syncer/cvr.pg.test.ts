@@ -1897,7 +1897,7 @@ describe('view-syncer/cvr', () => {
     const cvr = await cvrStore.load(lc, LAST_CONNECT);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1aa', '123');
 
-    const {newVersion, queryPatches} = updater.trackQueries(
+    const {newVersion, queryPatches} = await updater.trackQueries(
       lc,
       [{id: 'oneHash', transformationHash: 'serverOneHash'}],
       [],
@@ -2385,7 +2385,7 @@ describe('view-syncer/cvr', () => {
     let cvr = await cvrStore.load(lc, LAST_CONNECT);
     let updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
 
-    let {newVersion, queryPatches} = updater.trackQueries(
+    let {newVersion, queryPatches} = await updater.trackQueries(
       lc,
       [{id: 'oneHash', transformationHash: 'serverTwoHash'}],
       [],
@@ -2698,7 +2698,7 @@ describe('view-syncer/cvr', () => {
     });
 
     updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
-    ({newVersion, queryPatches} = updater.trackQueries(
+    ({newVersion, queryPatches} = await updater.trackQueries(
       lc,
       [{id: 'oneHash', transformationHash: 'newXFormHash'}],
       [],
@@ -2943,7 +2943,7 @@ describe('view-syncer/cvr', () => {
     const cvr = await cvrStore.load(lc, LAST_CONNECT);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
 
-    const {newVersion, queryPatches} = updater.trackQueries(
+    const {newVersion, queryPatches} = await updater.trackQueries(
       lc,
       [
         {id: 'oneHash', transformationHash: 'updatedServerOneHash'},
@@ -3461,7 +3461,7 @@ describe('view-syncer/cvr', () => {
     const cvr = await cvrStore.load(lc, LAST_CONNECT);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
 
-    const {newVersion, queryPatches} = updater.trackQueries(
+    const {newVersion, queryPatches} = await updater.trackQueries(
       lc,
       [],
       [{id: 'oneHash'}],
@@ -3944,7 +3944,7 @@ describe('view-syncer/cvr', () => {
     `);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '120');
 
-    const {newVersion, queryPatches} = updater.trackQueries(
+    const {newVersion, queryPatches} = await updater.trackQueries(
       lc,
       [
         {id: 'oneHash', transformationHash: 'serverOneHash'},

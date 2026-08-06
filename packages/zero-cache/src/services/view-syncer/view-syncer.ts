@@ -1053,15 +1053,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     clientID: string,
     customQueryTransformMode: CustomQueryTransformMode,
     connCtx: ConnectionContext | undefined,
-    fn: (updater: CVRConfigDrivenUpdater) => PatchToVersion[],
+    fn: (updater: CVRConfigDrivenUpdater) => Promise<PatchToVersion[]>,
   ): Promise<CVRSnapshot> {
     const updater = new CVRConfigDrivenUpdater(
       this.#cvrStore,
       cvr,
       this.#shard,
     );
-    updater.ensureClient(clientID);
-    const patches = fn(updater);
+    await updater.ensureClient(clientID);
+    const patches = await fn(updater);
 
     this.#cvr = await this.#flushUpdater(lc, updater);
 
@@ -1218,15 +1218,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         clientID,
         customQueryTransformMode,
         connCtx,
-        updater => {
+        async updater => {
           const {ttlClock} = cvr;
           const patches: PatchToVersion[] = [];
 
           if (clientSchema) {
-            updater.setClientSchema(lc, clientSchema);
+            await updater.setClientSchema(lc, clientSchema);
           }
           if (profileID) {
-            updater.setProfileID(lc, profileID);
+            await updater.setProfileID(lc, profileID);
           }
 
           // Apply requested patches.
@@ -1237,19 +1237,19 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             for (const patch of desiredQueriesPatch) {
               switch (patch.op) {
                 case 'put':
-                  patches.push(...updater.putDesiredQueries(clientID, [patch]));
+                  patches.push(...(await updater.putDesiredQueries(clientID, [patch])));
                   break;
                 case 'del':
                   patches.push(
-                    ...updater.markDesiredQueriesAsInactive(
+                    ...(await updater.markDesiredQueriesAsInactive(
                       clientID,
                       [patch.hash],
                       ttlClock,
-                    ),
+                    )),
                   );
                   break;
                 case 'clear':
-                  patches.push(...updater.clearDesiredQueries(clientID));
+                  patches.push(...(await updater.clearDesiredQueries(clientID)));
                   break;
               }
             }
@@ -1276,7 +1276,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
 
           for (const cid of clientIDsToDelete) {
-            const patchesDueToClient = updater.deleteClient(cid, ttlClock);
+            const patchesDueToClient = await updater.deleteClient(cid, ttlClock);
             patches.push(...patchesDueToClient);
             deletedClientIDs.push(cid);
           }
@@ -1992,7 +1992,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
       // Note: This kicks off background PG queries for CVR data associated with the
       // executed and removed queries.
-      const {queryPatches, newVersion} = updater.trackQueries(
+      const {queryPatches, newVersion} = await updater.trackQueries(
         lc,
         addQueries,
         removeQueries,

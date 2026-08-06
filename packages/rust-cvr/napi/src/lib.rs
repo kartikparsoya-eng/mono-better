@@ -351,13 +351,18 @@ use rust_cvr::types::{CVR, ShardID, DesiredQuerySpec};
 
 #[napi]
 pub struct CVRConfigDrivenUpdaterHandle {
-  inner: std::sync::Mutex<CVRConfigDrivenUpdater>,
+  inner: tokio::sync::Mutex<CVRConfigDrivenUpdater>,
+  store: Arc<tokio::sync::Mutex<CVRStoreHandle>>,
 }
 
 #[napi]
 impl CVRConfigDrivenUpdaterHandle {
   #[napi(constructor)]
-  pub fn new(cvr_json: serde_json::Value, shard_json: serde_json::Value) -> Result<Self> {
+  pub fn new(
+    cvr_json: serde_json::Value,
+    shard_json: serde_json::Value,
+    store: &CVRStoreNapiHandle,
+  ) -> Result<Self> {
     let cvr: CVR = serde_json::from_value(cvr_json).map_err(|e| {
       Error::new(Status::InvalidArg, format!("invalid cvr: {}", e))
     })?;
@@ -365,16 +370,28 @@ impl CVRConfigDrivenUpdaterHandle {
       Error::new(Status::InvalidArg, format!("invalid shard: {}", e))
     })?;
     Ok(Self {
-      inner: std::sync::Mutex::new(CVRConfigDrivenUpdater::new(cvr, shard)),
+      inner: tokio::sync::Mutex::new(CVRConfigDrivenUpdater::new(cvr, shard)),
+      store: store.clone_inner(),
     })
   }
 
+  /// Internal helper: drain StoreOps from the updater and apply them to the store.
+  /// All in Rust — zero napi boundary crossing.
+  async fn drain_and_apply(&self, inner: &mut CVRConfigDrivenUpdater) -> Result<()> {
+    let ops = inner.base.drain_store_ops();
+    if ops.is_empty() {
+      return Ok(());
+    }
+    let mut store = self.store.lock().await;
+    store.apply_store_ops(ops);
+    Ok(())
+  }
+
   #[napi]
-  pub fn ensure_client(&self, id: String) -> Result<serde_json::Value> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn ensure_client(&self, id: String) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().await;
     inner.ensure_client(&id);
+    self.drain_and_apply(&mut inner).await?;
     let client = inner.base.cvr.clients.get(&id).ok_or_else(|| {
       Error::new(Status::GenericFailure, "ensure_client failed")
     })?;
@@ -384,93 +401,86 @@ impl CVRConfigDrivenUpdaterHandle {
   }
 
   #[napi]
-  pub fn set_client_schema(&self, schema_json: serde_json::Value) -> Result<()> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn set_client_schema(&self, schema_json: serde_json::Value) -> Result<()> {
+    let mut inner = self.inner.lock().await;
     let schema: rust_cvr::types::ClientSchema = serde_json::from_value(schema_json)
       .map_err(|e| {
         Error::new(Status::InvalidArg, format!("invalid schema: {}", e))
       })?;
     inner.set_client_schema(schema).map_err(|e| {
       Error::new(Status::GenericFailure, e)
-    })
+    })?;
+    self.drain_and_apply(&mut inner).await
   }
 
   #[napi]
-  pub fn set_profile_id(&self, profile_id: String) {
-    let mut inner = self.inner.lock().unwrap();
+  pub async fn set_profile_id(&self, profile_id: String) -> Result<()> {
+    let mut inner = self.inner.lock().await;
     inner.set_profile_id(&profile_id);
+    self.drain_and_apply(&mut inner).await
   }
 
   #[napi]
-  pub fn put_desired_queries(
+  pub async fn put_desired_queries(
     &self,
     client_id: String,
     desired_queries_json: serde_json::Value,
   ) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+    let mut inner = self.inner.lock().await;
     let specs: Vec<DesiredQuerySpec> = serde_json::from_value(desired_queries_json)
       .map_err(|e| {
         Error::new(Status::InvalidArg, format!("invalid desiredQueries: {}", e))
       })?;
     let patches = inner.put_desired_queries(&client_id, &specs);
+    self.drain_and_apply(&mut inner).await?;
     Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
   }
 
   #[napi]
-  pub fn delete_desired_queries(
+  pub async fn delete_desired_queries(
     &self,
     client_id: String,
     query_ids: Vec<String>,
   ) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+    let mut inner = self.inner.lock().await;
     let patches = inner.delete_desired_queries(&client_id, &query_ids);
+    self.drain_and_apply(&mut inner).await?;
     Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
   }
 
   #[napi]
-  pub fn mark_desired_queries_as_inactive(
+  pub async fn mark_desired_queries_as_inactive(
     &self,
     client_id: String,
     query_ids: Vec<String>,
     ttl_clock: i64,
   ) -> Result<()> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+    let mut inner = self.inner.lock().await;
     inner.mark_desired_queries_as_inactive(&client_id, &query_ids, ttl_clock);
-    Ok(())
+    self.drain_and_apply(&mut inner).await
   }
 
   #[napi]
-  pub fn clear_desired_queries(&self, client_id: String) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn clear_desired_queries(&self, client_id: String) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().await;
     let patches = inner.clear_desired_queries(&client_id);
+    self.drain_and_apply(&mut inner).await?;
     Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
   }
 
   #[napi]
-  pub fn delete_client(&self, client_id: String, ttl_clock: i64) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn delete_client(&self, client_id: String, ttl_clock: i64) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().await;
     let patches = inner.delete_client(&client_id, ttl_clock);
+    self.drain_and_apply(&mut inner).await?;
     Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
   }
 
   #[napi]
-  pub fn flush(&self, last_connect_time: i64, last_active: i64, ttl_clock: i64) -> Result<serde_json::Value> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn flush(&self, last_connect_time: i64, last_active: i64, ttl_clock: i64) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().await;
     let (version, patches) = inner.flush(last_connect_time, last_active, ttl_clock);
+    self.drain_and_apply(&mut inner).await?;
     Ok(serde_json::json!({
       "version": serde_json::to_value(&version).unwrap_or(Value::Null),
       "patches": patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect::<Vec<_>>(),
@@ -478,29 +488,16 @@ impl CVRConfigDrivenUpdaterHandle {
   }
 
   #[napi]
-  pub fn drain_store_ops(&self) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
-    let ops = inner.base.drain_store_ops();
-    Ok(ops.iter().map(|op| serde_json::to_value(op).unwrap_or(Value::Null)).collect())
-  }
-
-  #[napi]
-  pub fn get_cvr(&self) -> Result<serde_json::Value> {
-    let inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn get_cvr(&self) -> Result<serde_json::Value> {
+    let inner = self.inner.lock().await;
     serde_json::to_value(&inner.base.cvr).map_err(|e| {
       Error::new(Status::GenericFailure, format!("serialize: {}", e))
     })
   }
 
   #[napi]
-  pub fn get_version(&self) -> Result<serde_json::Value> {
-    let inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn get_version(&self) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().await;
     serde_json::to_value(&inner.base.cvr.version).map_err(|e| {
       Error::new(Status::GenericFailure, format!("serialize: {}", e))
     })
@@ -509,7 +506,8 @@ impl CVRConfigDrivenUpdaterHandle {
 
 #[napi]
 pub struct CVRQueryDrivenUpdaterHandle {
-  inner: std::sync::Mutex<CVRQueryDrivenUpdater>,
+  inner: tokio::sync::Mutex<CVRQueryDrivenUpdater>,
+  store: Arc<tokio::sync::Mutex<CVRStoreHandle>>,
 }
 
 #[napi]
@@ -519,34 +517,44 @@ impl CVRQueryDrivenUpdaterHandle {
     cvr_json: serde_json::Value,
     state_version: String,
     replica_version: String,
+    store: &CVRStoreNapiHandle,
   ) -> Result<Self> {
     let cvr: CVR = serde_json::from_value(cvr_json).map_err(|e| {
       Error::new(Status::InvalidArg, format!("invalid cvr: {}", e))
     })?;
     Ok(Self {
-      inner: std::sync::Mutex::new(CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, None)),
+      inner: tokio::sync::Mutex::new(CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, None)),
+      store: store.clone_inner(),
     })
   }
 
+  /// Internal helper: drain StoreOps from the updater and apply them to the store.
+  /// All in Rust — zero napi boundary crossing.
+  async fn drain_and_apply(&self, inner: &mut CVRQueryDrivenUpdater) -> Result<()> {
+    let ops = inner.base.drain_store_ops();
+    if ops.is_empty() {
+      return Ok(());
+    }
+    let mut store = self.store.lock().await;
+    store.apply_store_ops(ops);
+    Ok(())
+  }
+
   #[napi]
-  pub fn updated_version(&self) -> Result<serde_json::Value> {
-    let inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn updated_version(&self) -> Result<serde_json::Value> {
+    let inner = self.inner.lock().await;
     serde_json::to_value(&inner.updated_version()).map_err(|e| {
       Error::new(Status::GenericFailure, format!("serialize: {}", e))
     })
   }
 
   #[napi]
-  pub fn track_queries(
+  pub async fn track_queries(
     &self,
     executed_json: serde_json::Value,
     removed_json: serde_json::Value,
   ) -> Result<serde_json::Value> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+    let mut inner = self.inner.lock().await;
     // executed is an array of [queryID, transformationHash] pairs
     let executed_raw: Vec<(String, String)> = serde_json::from_value(executed_json)
       .map_err(|e| {
@@ -561,6 +569,7 @@ impl CVRQueryDrivenUpdaterHandle {
       })?;
     let removed_refs: Vec<&str> = removed.iter().map(|s| s.as_str()).collect();
     let (version, patches) = inner.track_queries(&executed_refs, &removed_refs);
+    self.drain_and_apply(&mut inner).await?;
     Ok(serde_json::json!({
       "version": serde_json::to_value(&version).unwrap_or(Value::Null),
       "patches": patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect::<Vec<_>>(),
@@ -568,14 +577,12 @@ impl CVRQueryDrivenUpdaterHandle {
   }
 
   #[napi]
-  pub fn received(
+  pub async fn received(
     &self,
     rows_json: serde_json::Value,
     existing_rows_json: serde_json::Value,
   ) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+    let mut inner = self.inner.lock().await;
     // rows is a map of rowIDString -> {id: RowID, update: RowUpdate}
     #[derive(Deserialize)]
     struct RowEntry {
@@ -593,31 +600,30 @@ impl CVRQueryDrivenUpdaterHandle {
         Error::new(Status::InvalidArg, format!("invalid existingRows: {}", e))
       })?;
     let patches = inner.received(&rows, &existing_rows);
+    self.drain_and_apply(&mut inner).await?;
     Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
   }
 
   #[napi]
-  pub fn delete_unreferenced_rows(
+  pub async fn delete_unreferenced_rows(
     &self,
     existing_rows_json: serde_json::Value,
   ) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+    let mut inner = self.inner.lock().await;
     let existing_rows: Vec<rust_cvr::types::RowRecord> =
       serde_json::from_value(existing_rows_json).map_err(|e| {
         Error::new(Status::InvalidArg, format!("invalid existingRows: {}", e))
       })?;
     let patches = inner.delete_unreferenced_rows(&existing_rows);
+    self.drain_and_apply(&mut inner).await?;
     Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
   }
 
   #[napi]
-  pub fn flush(&self, last_connect_time: i64, last_active: i64, ttl_clock: i64) -> Result<serde_json::Value> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn flush(&self, last_connect_time: i64, last_active: i64, ttl_clock: i64) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().await;
     let (version, patches) = inner.flush(last_connect_time, last_active, ttl_clock);
+    self.drain_and_apply(&mut inner).await?;
     Ok(serde_json::json!({
       "version": serde_json::to_value(&version).unwrap_or(Value::Null),
       "patches": patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect::<Vec<_>>(),
@@ -625,19 +631,8 @@ impl CVRQueryDrivenUpdaterHandle {
   }
 
   #[napi]
-  pub fn drain_store_ops(&self) -> Result<Vec<serde_json::Value>> {
-    let mut inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
-    let ops = inner.base.drain_store_ops();
-    Ok(ops.iter().map(|op| serde_json::to_value(op).unwrap_or(Value::Null)).collect())
-  }
-
-  #[napi]
-  pub fn get_cvr(&self) -> Result<serde_json::Value> {
-    let inner = self.inner.lock().map_err(|_| {
-      Error::new(Status::GenericFailure, "lock poisoned")
-    })?;
+  pub async fn get_cvr(&self) -> Result<serde_json::Value> {
+    let inner = self.inner.lock().await;
     serde_json::to_value(&inner.base.cvr).map_err(|e| {
       Error::new(Status::GenericFailure, format!("serialize: {}", e))
     })
@@ -818,7 +813,6 @@ impl PokeHandlerHandle {
 // ════════════════════════════════════════════════════════════════════════════
 
 use rust_cvr::store::{CVRStoreHandle, CVRFlushStats as RustCVRFlushStats};
-use rust_cvr::types::StoreOp;
 
 #[napi(object)]
 pub struct CVRFlushStatsJs {
@@ -843,7 +837,7 @@ impl From<RustCVRFlushStats> for CVRFlushStatsJs {
 
 #[napi]
 pub struct CVRStoreNapiHandle {
-  inner: tokio::sync::Mutex<CVRStoreHandle>,
+  inner: Arc<tokio::sync::Mutex<CVRStoreHandle>>,
 }
 
 #[napi]
@@ -864,61 +858,26 @@ impl CVRStoreNapiHandle {
         )
       })?;
     Ok(Self {
-      inner: tokio::sync::Mutex::new(CVRStoreHandle::new(pool, schema, cvr_id, task_id)),
+      inner: Arc::new(tokio::sync::Mutex::new(CVRStoreHandle::new(pool, schema, cvr_id, task_id))),
     })
+  }
+
+  /// Returns a clone of the inner Arc for sharing with updater handles.
+  /// Called internally by the updater constructor.
+  pub fn clone_inner(&self) -> Arc<tokio::sync::Mutex<CVRStoreHandle>> {
+    self.inner.clone()
   }
 
   #[napi]
   pub async fn has_pending_writes(&self) -> Result<bool> {
-    let inner = self.inner.lock().await;
+    let mut inner = self.inner.lock().await;
     Ok(inner.has_pending_writes())
   }
 
   #[napi]
   pub async fn row_count(&self) -> Result<u32> {
-    let inner = self.inner.lock().await;
-    Ok(inner.row_count() as u32)
-  }
-
-  #[napi]
-  pub async fn apply_store_ops(&self, ops_json: serde_json::Value) -> Result<()> {
     let mut inner = self.inner.lock().await;
-    let ops: Vec<StoreOp> = serde_json::from_value(ops_json).map_err(|e| {
-      Error::new(Status::InvalidArg, format!("invalid store ops: {}", e))
-    })?;
-    for op in ops {
-      match op {
-        StoreOp::InsertClient(c) => inner.insert_client(&c),
-        StoreOp::PutQuery(q) => inner.put_query(&q),
-        StoreOp::PutDesiredQuery {
-          version,
-          query_id,
-          client_id,
-          deleted,
-          inactivated_at,
-          ttl,
-        } => inner.put_desired_query(
-          &version,
-          &query_id,
-          &client_id,
-          deleted,
-          inactivated_at,
-          ttl,
-        ),
-        StoreOp::PutInstance(cvr) => inner.put_instance(&cvr),
-        StoreOp::DeleteClient(id) => inner.delete_client(&id),
-        StoreOp::UpdateQuery(q) => inner.update_query(&q),
-        StoreOp::MarkQueryAsDeleted { version, patch } => {
-          inner.mark_query_as_deleted(&version, &patch)
-        }
-        StoreOp::PutRowRecord(r) => inner.put_row_record(&r),
-        StoreOp::DelRowRecord(id) => inner.del_row_record(&id),
-        StoreOp::UpdateRowSetSignature { query_id, hex } => {
-          inner.update_row_set_signature(&query_id, &hex)
-        }
-      }
-    }
-    Ok(())
+    Ok(inner.row_count() as u32)
   }
 
   #[napi]
