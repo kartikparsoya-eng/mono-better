@@ -26,6 +26,20 @@ pub struct CVRVersion {
     pub config_version: Option<u64>,
 }
 
+/// Mirrors TS `oneAfter(v)`. Bumps the configVersion, or starts at 0 for null.
+pub fn one_after(v: &NullableCVRVersion) -> CVRVersion {
+    match v {
+        None => CVRVersion {
+            state_version: String::new(),
+            config_version: Some(0),
+        },
+        Some(v) => CVRVersion {
+            state_version: v.state_version.clone(),
+            config_version: Some(v.config_version.unwrap_or(0) + 1),
+        },
+    }
+}
+
 pub const EMPTY_CVR_VERSION: CVRVersion = CVRVersion::empty();
 
 impl CVRVersion {
