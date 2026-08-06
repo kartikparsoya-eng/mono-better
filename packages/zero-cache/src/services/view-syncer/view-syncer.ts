@@ -2186,6 +2186,20 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   ) {
     return startAsyncSpan(tracer, 'vs.#catchupClients', async span => {
       current ??= cvr.version;
+
+      // ─── Unified Rust CVR path ─────────────────────────────────────
+      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver && !usePokers) {
+        const engine = this.#pipelines.engine;
+        const clientIds = this.#getClients().map(c => c.wsID);
+        await engine.catchupClients(
+          JSON.stringify(cvr),
+          JSON.stringify(current),
+          clientIds,
+        );
+        return;
+      }
+
+      // ─── TS fallback path ───────────────────────────────────────────
       const clients = this.#getClients();
       const pokers = usePokers ?? startPoke(clients, cvr.version);
       span.setAttribute('numClients', clients.length);

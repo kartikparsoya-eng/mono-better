@@ -120,6 +120,8 @@ export declare class RustIvmEngine {
   hydrateAndSync(queries: Array<NapiQuerySpec>, cvrJson: string, stateVersion: string, replicaVersion: string, addQueriesFlat: Array<string>, removeQueries: Array<string>, clientIds: Array<string>, existingRowsJson: string, lastConnectTime: number, lastActive: number, ttlClock: number): Promise<SyncResult>
   /** Advance to head AND apply to CVR + push to clients — all on the actor thread. */
   advanceAndSync(cvrJson: string, replicaVersion: string, clientIds: Array<string>, existingRowsJson: string, lastConnectTime: number, lastActive: number, ttlClock: number): Promise<SyncResult>
+  /** Catchup clients that are behind the current CVR version. */
+  catchupClients(cvrJson: string, currentVersionJson: string, clientIds: Array<string>): Promise<SyncResult>
   removeQuery(queryId: string): void
   /** Scalar-resolved logical AST for public PipelineDriver query metadata. */
   queryTransformedAst(queryId: string): string | null
