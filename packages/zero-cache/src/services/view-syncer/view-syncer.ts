@@ -58,7 +58,7 @@ import {
 } from '../../types/error-with-level.ts';
 import type {PostgresDB} from '../../types/pg.ts';
 import {rowIDString, type RowKey} from '../../types/row-key.ts';
-import type {ShardID} from '../../types/shards.ts';
+import {cvrSchema, type ShardID} from '../../types/shards.ts';
 import type {Source} from '../../types/streams.ts';
 import {Subscription} from '../../types/subscription.ts';
 import type {ReplicaState} from '../replicator/replicator.ts';
@@ -391,6 +391,18 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     );
     this.#setTimeout = setTimeoutFn;
     this.#runPriorityOp = runPriorityOp;
+
+    // Wire the Rust engine's CVR store + client registry if unified path is active.
+    if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver && pgUri) {
+      const engine = this.#pipelines.engine;
+      engine.setCvrStore(
+        pgUri,
+        cvrSchema(shard),
+        clientGroupID,
+        taskID,
+      );
+    }
+
     // Wait for the first connection to init.
     this.keepalive();
   }
@@ -675,6 +687,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     if (c === client) {
       this.#clients.delete(clientID);
 
+      // Unregister from the Rust engine.
+      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
+        this.#pipelines.engine.unregisterClient(client.wsID);
+      }
+
       if (this.#clients.size === 0) {
         // It is possible to delete a client before we read the ttl clock from
         // the CVR.
@@ -829,6 +846,27 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         .get(connCtx.clientID)
         ?.close(`replaced by wsID: ${connCtx.wsID}`);
       this.#clients.set(connCtx.clientID, newClient);
+
+      // Register the client with the Rust engine for unified CVR poke delivery.
+      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
+        const engine = this.#pipelines.engine;
+        engine.registerClient(
+          connCtx.clientID,
+          connCtx.wsID,
+          this.id,
+          this.#shard,
+          connCtx.baseCookie,
+          (msg: unknown) => {
+            const {result} = downstream.push(msg as Downstream);
+            result.catch(() => {});
+          },
+          (err: string) => {
+            lc.error?.(`rust client handler error: ${err}`);
+            downstream.fail(wrapWithProtocolError(new Error(err)));
+          },
+          () => downstream.cancel(),
+        );
+      }
 
       // Note: initConnection() must be synchronous so that `downstream` is
       // immediately returned to the caller (connection.ts). This ensures
@@ -1070,7 +1108,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // Send pokes to catch up clients that are up to date.
       // (Clients that are behind the cvr.version need to be caught up in
       //  #syncQueryPipelineSet(), as row data may be needed for catchup)
-      const newCVR = this.#cvr;
+      const newCVR = this.#cvr!;
       await startAsyncSpan(
         tracer,
         'vs.#updateCVRConfig.pokeClients',
@@ -2008,9 +2046,32 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           throw new ResetPipelinesSignal(result.resetMsg ?? '', result.resetReason as ResetPipelinesReason);
         }
 
+        // Clean up inspector/metrics for removed queries (engine removal
+        // already happened inside hydrateAndSync).
+        for (const q of removeQueries) {
+          this.#inspectorDelegate.removeQuery(q.id);
+          this.#queryReplacements.delete(q.id);
+        }
+
         this.#cvr = JSON.parse(result.cvrJson);
+        const newCVR = this.#cvr!;
+
+        // Update TTL clock state from the flushed CVR.
+        this.#ttlClock = newCVR.ttlClock;
+        this.#ttlClockBase = Date.now();
+        if (result.flushedJson) {
+          this.#startTTLClockInterval(lc);
+        }
+
+        // Catch up clients that were behind the old CVR version.
+        // The Rust hydrate already poked clients up to the new version,
+        // but clients that were behind cvr.version need row patches from
+        // the CVR DB that the hydrate didn't cover.
+        await this.#catchupClients(lc, newCVR, newCVR.version, addQueries.map(q => q.id));
+
         lc.debug?.(
-          `hydrate_and_sync: ${result.numChanges} changes, version ${result.version}`,
+          `hydrate_and_sync: ${result.numChanges} changes, version ${result.version}` +
+            result.flushedJson ? ' (flushed)' : '',
         );
         return;
       }
@@ -2187,19 +2248,6 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     return startAsyncSpan(tracer, 'vs.#catchupClients', async span => {
       current ??= cvr.version;
 
-      // ─── Unified Rust CVR path ─────────────────────────────────────
-      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver && !usePokers) {
-        const engine = this.#pipelines.engine;
-        const clientIds = this.#getClients().map(c => c.wsID);
-        await engine.catchupClients(
-          JSON.stringify(cvr),
-          JSON.stringify(current),
-          clientIds,
-        );
-        return;
-      }
-
-      // ─── TS fallback path ───────────────────────────────────────────
       const clients = this.#getClients();
       const pokers = usePokers ?? startPoke(clients, cvr.version);
       span.setAttribute('numClients', clients.length);
@@ -2402,9 +2450,19 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         }
 
         this.#cvr = JSON.parse(result.cvrJson);
+        const newCVR = this.#cvr!;
+
+        // Update TTL clock state from the flushed CVR.
+        this.#ttlClock = newCVR.ttlClock;
+        this.#ttlClockBase = Date.now();
+        if (result.flushedJson) {
+          this.#startTTLClockInterval(lc);
+        }
+
         span.setAttribute('numChanges', result.numChanges);
         lc.debug?.(
-          `advance_and_sync: ${result.numChanges} changes, version ${result.version}`,
+          `advance_and_sync: ${result.numChanges} changes, version ${result.version}` +
+            result.flushedJson ? ' (flushed)' : '',
         );
         return 'success';
       }

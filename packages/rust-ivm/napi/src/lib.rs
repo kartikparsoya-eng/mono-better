@@ -2287,6 +2287,13 @@ impl Task for HydrateAndSyncTask {
                     });
                 }
 
+                // Remove queries from the engine before hydrating new ones.
+                // This matches the TS path which calls `this.#pipelines.removeQuery(q.id)`
+                // before the hydrate generator runs.
+                for qid in &remove_queries {
+                    eng.remove_query(qid);
+                }
+
                 let mut processor = ChangeProcessor::new(&mut updater, &pokers);
 
                 let checkpoint = eng.source_connection_checkpoint();

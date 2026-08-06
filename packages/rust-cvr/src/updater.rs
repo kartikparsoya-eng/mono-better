@@ -781,7 +781,7 @@ impl CVRQueryDrivenUpdater {
                             patches.push(PatchToVersion {
                                 patch: Patch::Row(RowPatch::Put {
                                     id: id.clone(),
-                                    contents: serde_json::json!({}),
+                                    contents: contents.clone(),
                                 }),
                                 to_version: to_version.clone(),
                             });
