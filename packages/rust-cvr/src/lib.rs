@@ -12,11 +12,13 @@
 //!
 //! See `packages/zero-cache/docs/rust-cvr-port/` for the rollout plan.
 
+pub mod client_handler;
 pub mod cvr;
 pub mod hash;
 pub mod row_key;
 pub mod row_record_cache;
 pub mod row_set_signature;
+pub mod store;
 pub mod ttl;
 pub mod types;
 pub mod updater;

@@ -1,6 +1,6 @@
 import {h64} from '../../../../shared/src/hash.ts';
 import {rowIDString, type RowID} from '../../types/row-key.ts';
-import {createRequire} from 'node:module';
+import {getRustCvrAddon} from './rust-cvr-addon.ts';
 
 /**
  * A 64-bit fingerprint of the rows of a result set, computed by XOR-ing
@@ -62,39 +62,27 @@ function tryLoadRustSignatureFns(): RustSignatureFns | null {
     return cachedRustSignatureFns;
   }
 
-  if (process.env['USE_RUST_CVR_SIGNATURE'] !== '1') {
+  const addon = getRustCvrAddon<{
+    rustCvrRowIdSignatureUnit?: RustSignatureUnit;
+    rustCvrParseSignature?: RustParseSignature;
+    rustCvrFormatSignature?: RustFormatSignature;
+  }>();
+  if (!addon) {
     cachedRustSignatureFns = null;
     return null;
   }
 
-  try {
-    const nodeRequire = createRequire(import.meta.url);
-    const addonPath =
-      process.env['RUST_CVR_ADDON_PATH'] ??
-      '../../../../packages/rust-cvr/napi/rust-cvr.node';
-    const addon = nodeRequire(addonPath) as {
-      rustCvrRowIdSignatureUnit?: RustSignatureUnit;
-      rustCvrParseSignature?: RustParseSignature;
-      rustCvrFormatSignature?: RustFormatSignature;
+  if (
+    typeof addon.rustCvrRowIdSignatureUnit === 'function' &&
+    typeof addon.rustCvrParseSignature === 'function' &&
+    typeof addon.rustCvrFormatSignature === 'function'
+  ) {
+    cachedRustSignatureFns = {
+      rustCvrRowIdSignatureUnit: addon.rustCvrRowIdSignatureUnit,
+      rustCvrParseSignature: addon.rustCvrParseSignature,
+      rustCvrFormatSignature: addon.rustCvrFormatSignature,
     };
-    if (
-      typeof addon.rustCvrRowIdSignatureUnit === 'function' &&
-      typeof addon.rustCvrParseSignature === 'function' &&
-      typeof addon.rustCvrFormatSignature === 'function'
-    ) {
-      cachedRustSignatureFns = {
-        rustCvrRowIdSignatureUnit: addon.rustCvrRowIdSignatureUnit,
-        rustCvrParseSignature: addon.rustCvrParseSignature,
-        rustCvrFormatSignature: addon.rustCvrFormatSignature,
-      };
-    } else {
-      cachedRustSignatureFns = null;
-    }
-  } catch (e) {
-    console.error(
-      '[rust-cvr-signature] Failed to load addon:',
-      (e as Error).message,
-    );
+  } else {
     cachedRustSignatureFns = null;
   }
 

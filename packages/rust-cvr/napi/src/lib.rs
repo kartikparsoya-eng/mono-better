@@ -341,3 +341,644 @@ impl CatchupCursorHandle {
     }
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Phase C napi: CVR Updaters
+// ════════════════════════════════════════════════════════════════════════════
+
+use rust_cvr::updater::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater};
+use rust_cvr::types::{CVR, ShardID, DesiredQuerySpec};
+
+#[napi]
+pub struct CVRConfigDrivenUpdaterHandle {
+  inner: std::sync::Mutex<CVRConfigDrivenUpdater>,
+}
+
+#[napi]
+impl CVRConfigDrivenUpdaterHandle {
+  #[napi(constructor)]
+  pub fn new(cvr_json: serde_json::Value, shard_json: serde_json::Value) -> Result<Self> {
+    let cvr: CVR = serde_json::from_value(cvr_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid cvr: {}", e))
+    })?;
+    let shard: ShardID = serde_json::from_value(shard_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid shard: {}", e))
+    })?;
+    Ok(Self {
+      inner: std::sync::Mutex::new(CVRConfigDrivenUpdater::new(cvr, shard)),
+    })
+  }
+
+  #[napi]
+  pub fn ensure_client(&self, id: String) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    inner.ensure_client(&id);
+    let client = inner.base.cvr.clients.get(&id).ok_or_else(|| {
+      Error::new(Status::GenericFailure, "ensure_client failed")
+    })?;
+    serde_json::to_value(client).map_err(|e| {
+      Error::new(Status::GenericFailure, format!("serialize: {}", e))
+    })
+  }
+
+  #[napi]
+  pub fn set_client_schema(&self, schema_json: serde_json::Value) -> Result<()> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let schema: rust_cvr::types::ClientSchema = serde_json::from_value(schema_json)
+      .map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid schema: {}", e))
+      })?;
+    inner.set_client_schema(schema).map_err(|e| {
+      Error::new(Status::GenericFailure, e)
+    })
+  }
+
+  #[napi]
+  pub fn set_profile_id(&self, profile_id: String) {
+    let mut inner = self.inner.lock().unwrap();
+    inner.set_profile_id(&profile_id);
+  }
+
+  #[napi]
+  pub fn put_desired_queries(
+    &self,
+    client_id: String,
+    desired_queries_json: serde_json::Value,
+  ) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let specs: Vec<DesiredQuerySpec> = serde_json::from_value(desired_queries_json)
+      .map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid desiredQueries: {}", e))
+      })?;
+    let patches = inner.put_desired_queries(&client_id, &specs);
+    Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn delete_desired_queries(
+    &self,
+    client_id: String,
+    query_ids: Vec<String>,
+  ) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let patches = inner.delete_desired_queries(&client_id, &query_ids);
+    Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn mark_desired_queries_as_inactive(
+    &self,
+    client_id: String,
+    query_ids: Vec<String>,
+    ttl_clock: i64,
+  ) -> Result<()> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    inner.mark_desired_queries_as_inactive(&client_id, &query_ids, ttl_clock);
+    Ok(())
+  }
+
+  #[napi]
+  pub fn clear_desired_queries(&self, client_id: String) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let patches = inner.clear_desired_queries(&client_id);
+    Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn delete_client(&self, client_id: String, ttl_clock: i64) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let patches = inner.delete_client(&client_id, ttl_clock);
+    Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn flush(&self, last_connect_time: i64, last_active: i64, ttl_clock: i64) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let (version, patches) = inner.flush(last_connect_time, last_active, ttl_clock);
+    Ok(serde_json::json!({
+      "version": serde_json::to_value(&version).unwrap_or(Value::Null),
+      "patches": patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect::<Vec<_>>(),
+    }))
+  }
+
+  #[napi]
+  pub fn drain_store_ops(&self) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let ops = inner.base.drain_store_ops();
+    Ok(ops.iter().map(|op| serde_json::to_value(op).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn get_cvr(&self) -> Result<serde_json::Value> {
+    let inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    serde_json::to_value(&inner.base.cvr).map_err(|e| {
+      Error::new(Status::GenericFailure, format!("serialize: {}", e))
+    })
+  }
+
+  #[napi]
+  pub fn get_version(&self) -> Result<serde_json::Value> {
+    let inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    serde_json::to_value(&inner.base.cvr.version).map_err(|e| {
+      Error::new(Status::GenericFailure, format!("serialize: {}", e))
+    })
+  }
+}
+
+#[napi]
+pub struct CVRQueryDrivenUpdaterHandle {
+  inner: std::sync::Mutex<CVRQueryDrivenUpdater>,
+}
+
+#[napi]
+impl CVRQueryDrivenUpdaterHandle {
+  #[napi(constructor)]
+  pub fn new(
+    cvr_json: serde_json::Value,
+    state_version: String,
+    replica_version: String,
+  ) -> Result<Self> {
+    let cvr: CVR = serde_json::from_value(cvr_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid cvr: {}", e))
+    })?;
+    Ok(Self {
+      inner: std::sync::Mutex::new(CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, None)),
+    })
+  }
+
+  #[napi]
+  pub fn updated_version(&self) -> Result<serde_json::Value> {
+    let inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    serde_json::to_value(&inner.updated_version()).map_err(|e| {
+      Error::new(Status::GenericFailure, format!("serialize: {}", e))
+    })
+  }
+
+  #[napi]
+  pub fn track_queries(
+    &self,
+    executed_json: serde_json::Value,
+    removed_json: serde_json::Value,
+  ) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    // executed is an array of [queryID, transformationHash] pairs
+    let executed_raw: Vec<(String, String)> = serde_json::from_value(executed_json)
+      .map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid executed: {}", e))
+      })?;
+    let executed_refs: Vec<(&str, &str)> = executed_raw.iter()
+      .map(|(a, b)| (a.as_str(), b.as_str()))
+      .collect();
+    let removed: Vec<String> = serde_json::from_value(removed_json)
+      .map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid removed: {}", e))
+      })?;
+    let removed_refs: Vec<&str> = removed.iter().map(|s| s.as_str()).collect();
+    let (version, patches) = inner.track_queries(&executed_refs, &removed_refs);
+    Ok(serde_json::json!({
+      "version": serde_json::to_value(&version).unwrap_or(Value::Null),
+      "patches": patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect::<Vec<_>>(),
+    }))
+  }
+
+  #[napi]
+  pub fn received(
+    &self,
+    rows_json: serde_json::Value,
+    existing_rows_json: serde_json::Value,
+  ) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    // rows is a map of rowIDString -> {id: RowID, update: RowUpdate}
+    #[derive(Deserialize)]
+    struct RowEntry {
+      id: rust_cvr::row_key::RowID,
+      update: rust_cvr::types::RowUpdate,
+    }
+    let rows: std::collections::HashMap<String, RowEntry> =
+      serde_json::from_value(rows_json).map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid rows: {}", e))
+      })?;
+    let rows: std::collections::HashMap<String, (rust_cvr::row_key::RowID, rust_cvr::types::RowUpdate)> =
+      rows.into_iter().map(|(k, v)| (k, (v.id, v.update))).collect();
+    let existing_rows: std::collections::HashMap<String, rust_cvr::types::RowRecord> =
+      serde_json::from_value(existing_rows_json).map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid existingRows: {}", e))
+      })?;
+    let patches = inner.received(&rows, &existing_rows);
+    Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn delete_unreferenced_rows(
+    &self,
+    existing_rows_json: serde_json::Value,
+  ) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let existing_rows: Vec<rust_cvr::types::RowRecord> =
+      serde_json::from_value(existing_rows_json).map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid existingRows: {}", e))
+      })?;
+    let patches = inner.delete_unreferenced_rows(&existing_rows);
+    Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn flush(&self, last_connect_time: i64, last_active: i64, ttl_clock: i64) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let (version, patches) = inner.flush(last_connect_time, last_active, ttl_clock);
+    Ok(serde_json::json!({
+      "version": serde_json::to_value(&version).unwrap_or(Value::Null),
+      "patches": patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect::<Vec<_>>(),
+    }))
+  }
+
+  #[napi]
+  pub fn drain_store_ops(&self) -> Result<Vec<serde_json::Value>> {
+    let mut inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    let ops = inner.base.drain_store_ops();
+    Ok(ops.iter().map(|op| serde_json::to_value(op).unwrap_or(Value::Null)).collect())
+  }
+
+  #[napi]
+  pub fn get_cvr(&self) -> Result<serde_json::Value> {
+    let inner = self.inner.lock().map_err(|_| {
+      Error::new(Status::GenericFailure, "lock poisoned")
+    })?;
+    serde_json::to_value(&inner.base.cvr).map_err(|e| {
+      Error::new(Status::GenericFailure, format!("serialize: {}", e))
+    })
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Phase D napi: ClientHandler + PokeHandler
+// ════════════════════════════════════════════════════════════════════════════
+
+use rust_cvr::client_handler::{ClientHandler, PokeHandler, WebSocketSink};
+use serde::Deserialize;
+use serde_json::Value;
+
+struct NapiWebSocketSink {
+  push_fn: ThreadsafeFunction<serde_json::Value, ErrorStrategy::CalleeHandled>,
+  fail_fn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>,
+  cancel_fn: ThreadsafeFunction<bool, ErrorStrategy::CalleeHandled>,
+}
+
+#[async_trait::async_trait]
+impl WebSocketSink for NapiWebSocketSink {
+  async fn push(&self, msg: Value) -> std::result::Result<(), String> {
+    let _ = self.push_fn.call(Ok(msg), ThreadsafeFunctionCallMode::NonBlocking);
+    Ok(())
+  }
+
+  fn fail(&self, e: String) {
+    let _ = self.fail_fn.call(Ok(e), ThreadsafeFunctionCallMode::NonBlocking);
+  }
+
+  fn cancel(&self) {
+    let _ = self.cancel_fn.call(Ok(true), ThreadsafeFunctionCallMode::NonBlocking);
+  }
+}
+
+#[napi]
+pub struct ClientHandlerHandle {
+  inner: Arc<ClientHandler>,
+}
+
+#[napi]
+impl ClientHandlerHandle {
+  #[napi(constructor)]
+  pub fn new(
+    client_group_id: String,
+    client_id: String,
+    ws_id: String,
+    shard_json: serde_json::Value,
+    base_cookie: Option<String>,
+    #[napi(ts_arg_type = "(msg: unknown) => void")]
+    push_fn: ThreadsafeFunction<serde_json::Value, ErrorStrategy::CalleeHandled>,
+    #[napi(ts_arg_type = "(err: string) => void")]
+    fail_fn: ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>,
+    #[napi(ts_arg_type = "() => void")]
+    cancel_fn: ThreadsafeFunction<bool, ErrorStrategy::CalleeHandled>,
+  ) -> Result<Self> {
+    let shard: ShardID = serde_json::from_value(shard_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid shard: {}", e))
+    })?;
+    let sink = Arc::new(NapiWebSocketSink {
+      push_fn,
+      fail_fn,
+      cancel_fn,
+    });
+    let inner = Arc::new(ClientHandler::new(
+      &client_group_id,
+      &client_id,
+      &ws_id,
+      &shard,
+      base_cookie.as_deref(),
+      sink,
+    ));
+    Ok(Self { inner })
+  }
+
+  #[napi]
+  pub async fn version(&self) -> Result<serde_json::Value> {
+    let v = self.inner.version().await;
+    serde_json::to_value(&v).map_err(|e| {
+      Error::new(Status::GenericFailure, format!("serialize: {}", e))
+    })
+  }
+
+  #[napi]
+  pub fn fail(&self, e: String) {
+    self.inner.fail(&e);
+  }
+
+  #[napi]
+  pub fn close(&self, reason: String) {
+    self.inner.close(&reason);
+  }
+
+  #[napi]
+  pub fn start_poke(&self, tentative_version: serde_json::Value) -> Result<PokeHandlerHandle> {
+    let version: CVRVersion = serde_json::from_value(tentative_version).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid version: {}", e))
+    })?;
+    let poke = self.inner.start_poke(version);
+    Ok(PokeHandlerHandle { inner: poke })
+  }
+
+  #[napi]
+  pub async fn send_delete_clients(&self, client_ids: Vec<String>, client_group_ids: Vec<String>) -> Result<()> {
+    self
+      .inner
+      .send_delete_clients(client_ids, client_group_ids)
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, e))
+  }
+
+  #[napi]
+  pub async fn send_query_transform_application_errors(
+    &self,
+    errors_json: serde_json::Value,
+  ) -> Result<()> {
+    let errors: Vec<Value> = serde_json::from_value(errors_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid errors: {}", e))
+    })?;
+    self
+      .inner
+      .send_query_transform_application_errors(errors)
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, e))
+  }
+
+  #[napi]
+  pub fn send_inspect_response(&self, response: serde_json::Value) {
+    self.inner.send_inspect_response(response);
+  }
+}
+
+#[napi]
+pub struct PokeHandlerHandle {
+  inner: PokeHandler,
+}
+
+#[napi]
+impl PokeHandlerHandle {
+  #[napi]
+  pub async fn add_patch(&self, patch_json: serde_json::Value) -> Result<()> {
+    let patch: rust_cvr::types::PatchToVersion = serde_json::from_value(patch_json)
+      .map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid patch: {}", e))
+      })?;
+    self
+      .inner
+      .add_patch(&patch)
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, e))
+  }
+
+  #[napi]
+  pub async fn cancel(&self) -> Result<()> {
+    self
+      .inner
+      .cancel()
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, e))
+  }
+
+  #[napi]
+  pub async fn end(&self, final_version: serde_json::Value) -> Result<()> {
+    let version: CVRVersion = serde_json::from_value(final_version).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid version: {}", e))
+    })?;
+    self
+      .inner
+      .end(version)
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, e))
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Phase E napi: CVRStore
+// ════════════════════════════════════════════════════════════════════════════
+
+use rust_cvr::store::{CVRStoreHandle, CVRFlushStats as RustCVRFlushStats};
+use rust_cvr::types::StoreOp;
+
+#[napi(object)]
+pub struct CVRFlushStatsJs {
+  pub clients: u32,
+  pub queries: u32,
+  pub rows: u32,
+  pub desires: u32,
+  pub instances: u32,
+}
+
+impl From<RustCVRFlushStats> for CVRFlushStatsJs {
+  fn from(s: RustCVRFlushStats) -> Self {
+    Self {
+      clients: s.clients as u32,
+      queries: s.queries as u32,
+      rows: s.rows as u32,
+      desires: s.desires as u32,
+      instances: s.instances as u32,
+    }
+  }
+}
+
+#[napi]
+pub struct CVRStoreNapiHandle {
+  inner: tokio::sync::Mutex<CVRStoreHandle>,
+}
+
+#[napi]
+impl CVRStoreNapiHandle {
+  #[napi(constructor)]
+  pub fn new(
+    pg_uri: String,
+    schema: String,
+    cvr_id: String,
+    task_id: String,
+  ) -> Result<Self> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+      .connect_lazy(&pg_uri)
+      .map_err(|e| {
+        Error::new(
+          Status::InvalidArg,
+          format!("Failed to create PgPool: {}", e),
+        )
+      })?;
+    Ok(Self {
+      inner: tokio::sync::Mutex::new(CVRStoreHandle::new(pool, schema, cvr_id, task_id)),
+    })
+  }
+
+  #[napi]
+  pub async fn has_pending_writes(&self) -> Result<bool> {
+    let inner = self.inner.lock().await;
+    Ok(inner.has_pending_writes())
+  }
+
+  #[napi]
+  pub async fn row_count(&self) -> Result<u32> {
+    let inner = self.inner.lock().await;
+    Ok(inner.row_count() as u32)
+  }
+
+  #[napi]
+  pub async fn apply_store_ops(&self, ops_json: serde_json::Value) -> Result<()> {
+    let mut inner = self.inner.lock().await;
+    let ops: Vec<StoreOp> = serde_json::from_value(ops_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid store ops: {}", e))
+    })?;
+    for op in ops {
+      match op {
+        StoreOp::InsertClient(c) => inner.insert_client(&c),
+        StoreOp::PutQuery(q) => inner.put_query(&q),
+        StoreOp::PutDesiredQuery {
+          version,
+          query_id,
+          client_id,
+          deleted,
+          inactivated_at,
+          ttl,
+        } => inner.put_desired_query(
+          &version,
+          &query_id,
+          &client_id,
+          deleted,
+          inactivated_at,
+          ttl,
+        ),
+        StoreOp::PutInstance(cvr) => inner.put_instance(&cvr),
+        StoreOp::DeleteClient(id) => inner.delete_client(&id),
+        StoreOp::UpdateQuery(q) => inner.update_query(&q),
+        StoreOp::MarkQueryAsDeleted { version, patch } => {
+          inner.mark_query_as_deleted(&version, &patch)
+        }
+        StoreOp::PutRowRecord(r) => inner.put_row_record(&r),
+        StoreOp::DelRowRecord(id) => inner.del_row_record(&id),
+        StoreOp::UpdateRowSetSignature { query_id, hex } => {
+          inner.update_row_set_signature(&query_id, &hex)
+        }
+      }
+    }
+    Ok(())
+  }
+
+  #[napi]
+  pub async fn flush(
+    &self,
+    version_json: serde_json::Value,
+    cvr_json: serde_json::Value,
+    last_connect_time: f64,
+  ) -> Result<CVRFlushStatsJs> {
+    let version: CVRVersion = serde_json::from_value(version_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid version: {}", e))
+    })?;
+    let cvr: CVR = serde_json::from_value(cvr_json).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid cvr: {}", e))
+    })?;
+    // We need to move the inner out, flush, and move back.
+    // Use try_lock pattern.
+    let mut inner_guard = self.inner.lock().await;
+    let stats = inner_guard
+      .flush(&version, &cvr, last_connect_time)
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, format!("{}", e)))?;
+    match stats {
+      Some(s) => Ok(s.into()),
+      None => Ok(CVRFlushStatsJs { clients: 0, queries: 0, rows: 0, desires: 0, instances: 0 }),
+    }
+  }
+
+  #[napi]
+  pub async fn load(&self, last_connect_time: f64) -> Result<serde_json::Value> {
+    let mut inner = self.inner.lock().await;
+    let result = inner
+      .load(last_connect_time)
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, format!("{}", e)))?;
+    serde_json::to_value(&result).map_err(|e| {
+      Error::new(Status::GenericFailure, format!("serialize: {}", e))
+    })
+  }
+
+  #[napi]
+  pub async fn catchup_config_patches(
+    &self,
+    after_version: Option<serde_json::Value>,
+    up_to_version: serde_json::Value,
+  ) -> Result<Vec<serde_json::Value>> {
+    let after: Option<CVRVersion> = match after_version {
+      Some(v) => Some(serde_json::from_value(v).map_err(|e| {
+        Error::new(Status::InvalidArg, format!("invalid afterVersion: {}", e))
+      })?),
+      None => None,
+    };
+    let up_to: CVRVersion = serde_json::from_value(up_to_version).map_err(|e| {
+      Error::new(Status::InvalidArg, format!("invalid upToVersion: {}", e))
+    })?;
+    let mut inner = self.inner.lock().await;
+    let patches = inner
+      .catchup_config_patches(after, &up_to, &up_to)
+      .await
+      .map_err(|e| Error::new(Status::GenericFailure, format!("{}", e)))?;
+    Ok(patches.iter().map(|p| serde_json::to_value(p).unwrap_or(Value::Null)).collect())
+  }
+}

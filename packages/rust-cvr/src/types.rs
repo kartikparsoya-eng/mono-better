@@ -221,7 +221,7 @@ pub enum RowPatch {
     #[serde(rename = "put")]
     Put {
         id: RowID,
-        row_version: String,
+        contents: Value,
     },
     #[serde(rename = "del")]
     Del {
@@ -262,7 +262,7 @@ pub struct RowPatchInfo {
 }
 
 /// Desired query spec — what the client wants.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesiredQuerySpec {
     pub hash: String,
     pub ast: Option<AST>,
@@ -283,7 +283,7 @@ pub struct CVRFlushStats {
 
 /// Store operations collected by the updater for TS to replay.
 /// Mirrors the CVRStore method calls that the TS updaters make inline.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StoreOp {
     InsertClient(ClientRecord),
     PutQuery(QueryRecord),

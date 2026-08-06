@@ -32,7 +32,7 @@ import {
   versionToNullableCookie,
 } from './schema/types.ts';
 import {tracer} from './tracer.ts';
-import {createRequire} from 'node:module';
+import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 
 // Rust handle type — the napi class surface.
 interface RustRowRecordCacheHandle {
@@ -155,7 +155,7 @@ export class RowRecordCache {
     'Number of (changed) rows flushed to a CVR',
   );
 
-  // Rust handle — non-null when USE_RUST_CVR_ROW_CACHE=1 and the addon loads.
+  // Rust handle — non-null when RUST_CVR=1 and the addon loads.
   #rust: RustRowRecordCacheHandle | null = null;
 
   constructor(
@@ -176,13 +176,9 @@ export class RowRecordCache {
     this.#deferredRowFlushThreshold = deferredRowFlushThreshold;
     this.#setTimeout = setTimeoutFn;
 
-    if (process.env['USE_RUST_CVR_ROW_CACHE'] === '1' && pgUri) {
+    if (isRustCvrEnabled() && pgUri) {
       try {
-        const nodeRequire = createRequire(import.meta.url);
-        const addonPath =
-          process.env['RUST_CVR_ADDON_PATH'] ??
-          '../../../../packages/rust-cvr/napi/rust-cvr.node';
-        const addon = nodeRequire(addonPath) as {
+        const addon = getRustCvrAddon<{
           RowRecordCacheHandle: new (
             pgUri: string,
             schema: string,
@@ -191,17 +187,19 @@ export class RowRecordCache {
             onFail: (err: string) => void,
             onMetrics: ((m: {rows: number; elapsedMs: number}) => void) | null,
           ) => RustRowRecordCacheHandle;
-        };
-        this.#rust = new addon.RowRecordCacheHandle(
-          pgUri,
-          this.#schema,
-          this.#cvrID,
-          this.#deferredRowFlushThreshold,
-          (err: string) => this.#failService(new Error(err)),
-          (m: {rows: number; elapsedMs: number}) =>
-            this.#recordAsyncFlushStats(m.rows, m.elapsedMs),
-        );
-        lc.info?.('rust-cvr row cache enabled');
+        }>();
+        if (addon) {
+          this.#rust = new addon.RowRecordCacheHandle(
+            pgUri,
+            this.#schema,
+            this.#cvrID,
+            this.#deferredRowFlushThreshold,
+            (err: string) => this.#failService(new Error(err)),
+            (m: {rows: number; elapsedMs: number}) =>
+              this.#recordAsyncFlushStats(m.rows, m.elapsedMs),
+          );
+          lc.info?.('rust-cvr row cache enabled');
+        }
       } catch (e) {
         lc.error?.('Failed to load rust-cvr row cache addon:', e);
       }

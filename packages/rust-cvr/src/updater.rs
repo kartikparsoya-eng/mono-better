@@ -781,7 +781,7 @@ impl CVRQueryDrivenUpdater {
                             patches.push(PatchToVersion {
                                 patch: Patch::Row(RowPatch::Put {
                                     id: id.clone(),
-                                    row_version: rv.clone(),
+                                    contents: serde_json::json!({}),
                                 }),
                                 to_version: to_version.clone(),
                             });
@@ -1342,8 +1342,8 @@ mod tests {
         // Should produce a put row patch
         assert_eq!(patches.len(), 1);
         match &patches[0].patch {
-            Patch::Row(RowPatch::Put { id, row_version }) => {
-                assert_eq!(row_version, "rv1");
+            Patch::Row(RowPatch::Put { id, .. }) => {
+                assert_eq!(id.schema, "s");
             }
             _ => panic!("expected RowPatch::Put"),
         }

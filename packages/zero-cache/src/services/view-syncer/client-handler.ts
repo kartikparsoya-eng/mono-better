@@ -45,6 +45,26 @@ import {
   type PutQueryPatch,
   type RowID,
 } from './schema/types.ts';
+import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
+
+interface RustPokeHandlerHandle {
+  addPatch(patch: unknown): Promise<void>;
+  cancel(): Promise<void>;
+  end(finalVersion: unknown): Promise<void>;
+}
+
+interface RustClientHandlerHandle {
+  version(): Promise<unknown>;
+  fail(e: string): void;
+  close(reason: string): void;
+  startPoke(tentativeVersion: unknown): RustPokeHandlerHandle;
+  sendDeleteClients(
+    clientIDs: string[],
+    clientGroupIDs: string[],
+  ): Promise<void>;
+  sendQueryTransformApplicationErrors(errors: unknown[]): Promise<void>;
+  sendInspectResponse(response: unknown): void;
+}
 
 export type PutRowPatch = {
   type: 'row';
@@ -124,6 +144,7 @@ export class ClientHandler {
   // first frame on the previous transaction's completion so that pokes to this
   // connection never interleave. See startPoke() for why.
   #pokeTail: Promise<void> = Promise.resolve();
+  readonly #rust: RustClientHandlerHandle | null = null;
 
   readonly #pokeTime = getOrCreateLatencyHistogram(
     'sync',
@@ -161,9 +182,49 @@ export class ClientHandler {
     this.#lc = lc;
     this.#downstream = downstream;
     this.#baseVersion = cookieToVersion(baseCookie);
+
+    if (isRustCvrEnabled()) {
+      const addon = getRustCvrAddon<Record<string, unknown>>();
+      const RustClientHandlerHandle = addon?.ClientHandlerHandle as
+        | (new (
+            clientGroupID: string,
+            clientID: string,
+            wsID: string,
+            shard: unknown,
+            baseCookie: string | null,
+            pushFn: (msg: unknown) => void,
+            failFn: (err: string) => void,
+            cancelFn: () => void,
+          ) => RustClientHandlerHandle)
+        | undefined;
+      if (RustClientHandlerHandle) {
+        this.#rust = new RustClientHandlerHandle(
+          clientGroupID,
+          clientID,
+          wsID,
+          shard,
+          baseCookie,
+          (msg: unknown) => {
+            // Fire-and-forget push to WS
+            const {result} = downstream.push(msg as Downstream);
+            result.catch(() => {});
+          },
+          (err: string) => {
+            lc.error?.(`rust client handler error: ${err}`);
+            downstream.fail(wrapWithProtocolError(new Error(err)));
+          },
+          () => downstream.cancel(),
+        );
+      }
+    }
   }
 
   version(): NullableCVRVersion {
+    if (this.#rust) {
+      // Rust version() is async but TS version() is sync.
+      // Return the cached baseVersion — it's updated after each poke end().
+      return this.#baseVersion;
+    }
     return this.#baseVersion;
   }
 
@@ -173,6 +234,10 @@ export class ClientHandler {
   }
 
   fail(e: unknown) {
+    if (this.#rust) {
+      this.#rust.fail(String(e));
+      return;
+    }
     this.#lc[getLogLevel(e)]?.(
       `view-syncer closing connection with error: ${String(e)}`,
       e,
@@ -181,11 +246,31 @@ export class ClientHandler {
   }
 
   close(reason: string) {
+    if (this.#rust) {
+      this.#rust.close(reason);
+      return;
+    }
     this.#lc.debug?.(`view-syncer closing connection: ${reason}`);
     this.#downstream.cancel();
   }
 
   startPoke(tentativeVersion: CVRVersion): PokeHandler {
+    if (this.#rust) {
+      const rust = this.#rust;
+      const rustPoke = rust.startPoke(tentativeVersion);
+      return {
+        addPatch: async patch => {
+          await rustPoke.addPatch(patch);
+        },
+        cancel: async () => {
+          await rustPoke.cancel();
+        },
+        end: async finalVersion => {
+          await rustPoke.end(finalVersion);
+          this.#baseVersion = finalVersion;
+        },
+      };
+    }
     const pokeID = versionToCookie(tentativeVersion);
     const lc = this.#lc.withContext('pokeID', pokeID);
 
@@ -382,6 +467,13 @@ export class ClientHandler {
     deletedClientIDs: string[],
     deletedClientGroupIDs: string[],
   ) {
+    if (this.#rust) {
+      await this.#rust.sendDeleteClients(
+        deletedClientIDs,
+        deletedClientGroupIDs,
+      );
+      return;
+    }
     const deleteClientsBody: Writable<DeleteClientsBody> = {};
     if (deletedClientIDs.length > 0) {
       deleteClientsBody.clientIDs = deletedClientIDs;
@@ -394,6 +486,10 @@ export class ClientHandler {
   }
 
   sendQueryTransformApplicationErrors(errors: ErroredQuery[]) {
+    if (this.#rust) {
+      void this.#rust.sendQueryTransformApplicationErrors(errors);
+      return;
+    }
     void this.#push(['transformError', errors]);
   }
 
@@ -402,6 +498,10 @@ export class ClientHandler {
   }
 
   sendInspectResponse(lc: LogContext, response: InspectDownBody): void {
+    if (this.#rust) {
+      this.#rust.sendInspectResponse(response);
+      return;
+    }
     lc.debug?.('sending inspect response', response);
     this.#downstream.push(['inspect', response]);
   }
