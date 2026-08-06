@@ -8,10 +8,17 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rust-cvr = { path = ".." }
-napi = { version = "2", features = ["napi8", "serde-json"] }
+napi = { version = "2", features = ["napi8", "serde-json", "tokio_rt"] }
 napi-derive = { version = "2", features = ["type-def"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "postgres",
+  "json",
+  "macros",
+] }
+tokio = { version = "1", features = ["sync"] }
 
 [build-dependencies]
 napi-build = "2"

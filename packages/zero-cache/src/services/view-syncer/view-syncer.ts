@@ -359,6 +359,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     ) => Promise<T>,
     keepaliveMs = DEFAULT_KEEPALIVE_MS,
     setTimeoutFn: SetTimeout = setTimeout.bind(globalThis),
+    pgUri?: string,
   ) {
     this.#config = config;
     this.id = clientGroupID;
@@ -381,6 +382,11 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // On failure, cancel the #stateChanges subscription. The run()
       // loop will then await #cvrStore.flushed() which rejects if necessary.
       () => this.#stateChanges.cancel(),
+      undefined, // loadAttemptIntervalMs — default
+      undefined, // maxLoadAttempts — default
+      undefined, // deferredRowFlushThreshold — default
+      undefined, // setTimeoutFn — default
+      pgUri,
     );
     this.#setTimeout = setTimeoutFn;
     this.#runPriorityOp = runPriorityOp;

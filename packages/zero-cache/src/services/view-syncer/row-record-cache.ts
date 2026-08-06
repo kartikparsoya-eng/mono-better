@@ -32,6 +32,45 @@ import {
   versionToNullableCookie,
 } from './schema/types.ts';
 import {tracer} from './tracer.ts';
+import {createRequire} from 'node:module';
+
+// Rust handle type — the napi class surface.
+interface RustRowRecordCacheHandle {
+  load(): Promise<number>;
+  getRowRecords(): Promise<Record<string, RowRecord>>;
+  apply(
+    rowRecords: {id: RowID; record: RowRecord | null}[],
+    rowsVersion: CVRVersion,
+    flushed: boolean,
+  ): Promise<number>;
+  hasPendingUpdates(): Promise<boolean>;
+  hasPendingUpdatesSync(): boolean;
+  flushed(): Promise<void>;
+  clear(): Promise<void>;
+  executeRowUpdates(
+    version: CVRVersion,
+    rowUpdates: {id: RowID; record: RowRecord | null}[],
+    mode: string,
+  ): {
+    kind: 'defer' | 'execute';
+    statements?: {
+      rowsVersion: {clientGroupID: string; version: string};
+      deletes: {schema: string; table: string; rowKey: RowID['rowKey']}[];
+      inserts: RowsRow[];
+      totalCount: number;
+    };
+  };
+  catchupRowPatches(
+    afterVersion: CVRVersion | null,
+    upToVersion: CVRVersion,
+    current: CVRVersion,
+    excludeQueryHashes: string[],
+  ): Promise<RustCatchupCursor>;
+}
+
+interface RustCatchupCursor {
+  nextPage(): Promise<RowsRow[] | null>;
+}
 
 const FLUSH_TYPE_ATTRIBUTE = 'flush.type';
 
@@ -116,6 +155,9 @@ export class RowRecordCache {
     'Number of (changed) rows flushed to a CVR',
   );
 
+  // Rust handle — non-null when USE_RUST_CVR_ROW_CACHE=1 and the addon loads.
+  #rust: RustRowRecordCacheHandle | null = null;
+
   constructor(
     lc: LogContext,
     db: PostgresDB,
@@ -124,6 +166,7 @@ export class RowRecordCache {
     failService: (e: unknown) => void,
     deferredRowFlushThreshold = 100,
     setTimeoutFn = setTimeout,
+    pgUri?: string,
   ) {
     this.#lc = lc;
     this.#db = db;
@@ -132,6 +175,37 @@ export class RowRecordCache {
     this.#failService = failService;
     this.#deferredRowFlushThreshold = deferredRowFlushThreshold;
     this.#setTimeout = setTimeoutFn;
+
+    if (process.env['USE_RUST_CVR_ROW_CACHE'] === '1' && pgUri) {
+      try {
+        const nodeRequire = createRequire(import.meta.url);
+        const addonPath =
+          process.env['RUST_CVR_ADDON_PATH'] ??
+          '../../../../packages/rust-cvr/napi/rust-cvr.node';
+        const addon = nodeRequire(addonPath) as {
+          RowRecordCacheHandle: new (
+            pgUri: string,
+            schema: string,
+            cvrId: string,
+            threshold: number | undefined,
+            onFail: (err: string) => void,
+            onMetrics: ((m: {rows: number; elapsedMs: number}) => void) | null,
+          ) => RustRowRecordCacheHandle;
+        };
+        this.#rust = new addon.RowRecordCacheHandle(
+          pgUri,
+          this.#schema,
+          this.#cvrID,
+          this.#deferredRowFlushThreshold,
+          (err: string) => this.#failService(new Error(err)),
+          (m: {rows: number; elapsedMs: number}) =>
+            this.#recordAsyncFlushStats(m.rows, m.elapsedMs),
+        );
+        lc.info?.('rust-cvr row cache enabled');
+      } catch (e) {
+        lc.error?.('Failed to load rust-cvr row cache addon:', e);
+      }
+    }
   }
 
   recordSyncFlushStats(stats: CVRFlushStats, elapsedMs: number) {
@@ -157,6 +231,25 @@ export class RowRecordCache {
   async #ensureLoaded(): Promise<CustomKeyMap<RowID, RowRecord>> {
     if (this.#cache) {
       return this.#cache;
+    }
+    if (this.#rust) {
+      const r = resolver<CustomKeyMap<RowID, RowRecord>>();
+      r.promise.catch(() => {});
+      this.#cache = r.promise;
+      try {
+        await this.#rust.load();
+        const json = await this.#rust.getRowRecords();
+        const cache = new CustomKeyMap<RowID, RowRecord>(rowIDString);
+        for (const record of Object.values(json)) {
+          cache.set(record.id, record);
+        }
+        this.#lc.info?.(`Loaded ${cache.size} row records (rust)`);
+        r.resolve(cache);
+        return this.#cache;
+      } catch (e) {
+        r.reject(e);
+        throw e;
+      }
     }
     const start = Date.now();
     const r = resolver<CustomKeyMap<RowID, RowRecord>>();
@@ -230,12 +323,24 @@ export class RowRecordCache {
     flushed: boolean,
   ): Promise<number> {
     const cache = await this.#ensureLoaded();
+    // Update TS cache (for fast getRowRecords reads).
     for (const [id, row] of rowRecords.entries()) {
       if (row === null || row.refCounts === null) {
         cache.delete(id);
       } else {
         cache.set(id, row);
       }
+    }
+    if (this.#rust) {
+      // Delegate flush management to Rust.
+      const entries = Array.from(rowRecords.entries()).map(([id, record]) => ({
+        id,
+        record,
+      }));
+      return this.#rust.apply(entries, rowsVersion, flushed);
+    }
+    // TS write-back path.
+    for (const [id, row] of rowRecords.entries()) {
       if (!flushed) {
         this.#pending.set(id, row);
       }
@@ -300,6 +405,9 @@ export class RowRecordCache {
   }
 
   hasPendingUpdates() {
+    if (this.#rust) {
+      return this.#rust.hasPendingUpdatesSync();
+    }
     return this.#flushing !== null;
   }
 
@@ -308,6 +416,9 @@ export class RowRecordCache {
    * have been committed.
    */
   flushed(lc: LogContext): Promise<void> {
+    if (this.#rust) {
+      return this.#rust.flushed();
+    }
     if (this.#flushing) {
       lc.debug?.('awaiting pending row flush');
       return this.#flushing.promise;
@@ -320,6 +431,9 @@ export class RowRecordCache {
     // comprise canonical (i.e. already flushed) data and must be flushed
     // even if the snapshot of the present state (the #cache) is cleared.
     this.#cache = undefined;
+    if (this.#rust) {
+      void this.#rust.clear();
+    }
   }
 
   async *catchupRowPatches(
@@ -330,6 +444,17 @@ export class RowRecordCache {
     excludeQueryHashes: string[] = [],
   ): AsyncGenerator<RowsRow[], void, undefined> {
     if (cmpVersions(afterVersion, upToCVR.version) >= 0) {
+      return;
+    }
+
+    if (this.#rust) {
+      yield* this.#catchupRowPatchesRust(
+        lc,
+        afterVersion,
+        upToCVR,
+        current,
+        excludeQueryHashes,
+      );
       return;
     }
 
@@ -395,6 +520,46 @@ export class RowRecordCache {
     );
   }
 
+  async *#catchupRowPatchesRust(
+    lc: LogContext,
+    afterVersion: NullableCVRVersion,
+    upToCVR: CVRSnapshot,
+    current: CVRVersion,
+    excludeQueryHashes: string[],
+  ): AsyncGenerator<RowsRow[], void, undefined> {
+    const startMs = Date.now();
+    lc.debug?.(
+      `scanning row patches (rust) from ${
+        afterVersion ? versionString(afterVersion) : ''
+      }`,
+    );
+
+    await this.flushed(lc);
+    const flushMs = Date.now() - startMs;
+
+    const cursor = await this.#rust!.catchupRowPatches(
+      afterVersion,
+      upToCVR.version,
+      current,
+      excludeQueryHashes,
+    );
+
+    try {
+      while (true) {
+        const page = await cursor.nextPage();
+        if (page === null) break;
+        yield page;
+      }
+    } finally {
+      // Cursor is dropped when the generator returns.
+    }
+
+    const totalMs = Date.now() - startMs;
+    lc.info?.(
+      `finished row catchup (rust, flush: ${flushMs} ms, total: ${totalMs} ms)`,
+    );
+  }
+
   executeRowUpdates(
     tx: PostgresTransaction,
     version: CVRVersion,
@@ -402,6 +567,60 @@ export class RowRecordCache {
     mode: 'allow-defer' | 'force',
     lc = this.#lc,
   ): PendingQuery<Row[]>[] {
+    if (this.#rust) {
+      const entries = Array.from(rowUpdates.entries()).map(([id, record]) => ({
+        id,
+        record,
+      }));
+      const result = this.#rust.executeRowUpdates(version, entries, mode);
+      if (result.kind === 'defer') {
+        return [];
+      }
+      const stmts = result.statements!;
+      const rowsVersion = stmts.rowsVersion;
+      const pending: PendingQuery<Row[]>[] = [
+        tx`INSERT INTO ${this.#cvr('rowsVersion')} ${tx(rowsVersion)}
+             ON CONFLICT ("clientGroupID") 
+             DO UPDATE SET ${tx(rowsVersion)}`,
+      ];
+      for (const del of stmts.deletes) {
+        pending.push(
+          tx`
+          DELETE FROM ${this.#cvr('rows')}
+            WHERE "clientGroupID" = ${this.#cvrID}
+              AND "schema" = ${del.schema}
+              AND "table" = ${del.table}
+              AND "rowKey" = ${del.rowKey}
+       `,
+        );
+      }
+      if (stmts.inserts.length) {
+        pending.push(
+          tx`
+  INSERT INTO ${this.#cvr('rows')}(
+      "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
+  ) SELECT
+      "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
+    FROM json_to_recordset(${stmts.inserts}) AS x(
+      "clientGroupID" TEXT,
+      "schema" TEXT,
+      "table" TEXT,
+      "rowKey" JSONB,
+      "rowVersion" TEXT,
+      "patchVersion" TEXT,
+      "refCounts" JSONB
+  ) ON CONFLICT ("clientGroupID", "schema", "table", "rowKey")
+    DO UPDATE SET "rowVersion" = excluded."rowVersion",
+      "patchVersion" = excluded."patchVersion",
+      "refCounts" = excluded."refCounts"
+    `,
+        );
+        lc.info?.(
+          `flushing ${rowUpdates.size} rows (${stmts.inserts.length} inserts, ${stmts.deletes.length} deletes)`,
+        );
+      }
+      return pending;
+    }
     if (
       mode === 'allow-defer' &&
       // defer if pending rows are being flushed

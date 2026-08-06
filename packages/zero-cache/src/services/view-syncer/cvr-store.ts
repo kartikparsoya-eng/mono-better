@@ -214,6 +214,7 @@ export class CVRStore {
     maxLoadAttempts = MAX_LOAD_ATTEMPTS,
     deferredRowFlushThreshold = 100, // somewhat arbitrary
     setTimeoutFn = setTimeout,
+    pgUri?: string,
   ) {
     this.#failService = failService;
     this.#db = cvrDb;
@@ -228,6 +229,7 @@ export class CVRStore {
       failService,
       deferredRowFlushThreshold,
       setTimeoutFn,
+      pgUri,
     );
     this.#loadAttemptIntervalMs = loadAttemptIntervalMs;
     this.#maxLoadAttempts = maxLoadAttempts;

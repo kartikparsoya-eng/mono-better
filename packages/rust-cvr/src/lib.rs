@@ -14,7 +14,9 @@
 
 pub mod hash;
 pub mod row_key;
+pub mod row_record_cache;
 pub mod row_set_signature;
+pub mod version;
 
 #[cfg(test)]
 mod parity_check;

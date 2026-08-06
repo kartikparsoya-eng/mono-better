@@ -246,6 +246,9 @@ export default async function runWorker(
       connContextManager,
       customQueryTransformer,
       runPriorityOp,
+      undefined, // keepaliveMs — default
+      undefined, // setTimeoutFn — default
+      cvr.db, // pgUri
     );
   };
 
