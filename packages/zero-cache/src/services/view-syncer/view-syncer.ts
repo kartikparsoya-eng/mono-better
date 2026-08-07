@@ -77,7 +77,7 @@ import type {
   ConnectionSelector,
   ConnectionValidation,
 } from './connection-context-manager.ts';
-import {ClientNotFoundError, CVRStore} from './cvr-store.ts';
+import {ClientNotFoundError, CVRStore, type CVRFlushStats} from './cvr-store.ts';
 import type {CVRUpdater} from './cvr.ts';
 import {
   CVRConfigDrivenUpdater,
@@ -2056,6 +2056,16 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         this.#cvr = JSON.parse(result.cvrJson);
         const newCVR = this.#cvr!;
 
+        // The Rust engine flushed row records directly to PG. Invalidate
+        // the TS row record cache and record flush stats metrics.
+        if (result.flushedJson) {
+          this.#cvrStore.clearRowCache();
+          this.#cvrStore.recordFlushStats(
+            JSON.parse(result.flushedJson) as CVRFlushStats,
+            performance.now() - start,
+          );
+        }
+
         // Update TTL clock state from the flushed CVR.
         this.#ttlClock = newCVR.ttlClock;
         this.#ttlClockBase = Date.now();
@@ -2069,9 +2079,25 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         // the CVR DB that the hydrate didn't cover.
         await this.#catchupClients(lc, newCVR, newCVR.version, addQueries.map(q => q.id));
 
-        lc.debug?.(
-          `hydrate_and_sync: ${result.numChanges} changes, version ${result.version}` +
-            result.flushedJson ? ' (flushed)' : '',
+        const queryPatches = JSON.parse(result.queryPatchesJson) as PatchToVersion[];
+
+        // Record metrics (matching TS fallback path).
+        const wallTime = performance.now() - start;
+        this.#hydrations.add(1);
+        this.#hydrationTime.recordMs(wallTime);
+        for (const q of addQueries) {
+          this.#addQueryMaterializationServerMetric(q.id, wallTime);
+          this.#inspectorDelegate.addQuery(q.id, q.ast);
+        }
+        manualSpan(tracer, 'vs.addAndConsumeQuery', wallTime, {
+          numQueries: addQueries.length,
+        });
+
+        lc.info?.(
+          `hydrated ${addQueries.length} queries: ` +
+            `${result.numChanges} changes, ` +
+            `${queryPatches.length} query patches ` +
+            `(${wallTime} ms)`,
         );
         return;
       }
@@ -2452,6 +2478,16 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         this.#cvr = JSON.parse(result.cvrJson);
         const newCVR = this.#cvr!;
 
+        // The Rust engine flushed row records directly to PG. Invalidate
+        // the TS row record cache and record flush stats metrics.
+        if (result.flushedJson) {
+          this.#cvrStore.clearRowCache();
+          this.#cvrStore.recordFlushStats(
+            JSON.parse(result.flushedJson) as CVRFlushStats,
+            performance.now() - start,
+          );
+        }
+
         // Update TTL clock state from the flushed CVR.
         this.#ttlClock = newCVR.ttlClock;
         this.#ttlClockBase = Date.now();
@@ -2460,9 +2496,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         }
 
         span.setAttribute('numChanges', result.numChanges);
+        const wallTime = performance.now() - start;
+        this.#transactionAdvanceTime.recordMs(wallTime);
         lc.debug?.(
           `advance_and_sync: ${result.numChanges} changes, version ${result.version}` +
-            result.flushedJson ? ' (flushed)' : '',
+            (result.flushedJson ? ' (flushed)' : '') +
+            ` (${wallTime} ms)`,
         );
         return 'success';
       }

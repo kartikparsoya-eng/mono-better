@@ -539,6 +539,18 @@ export class CVRStore {
     return this.#rowCache.getRowRecords();
   }
 
+  /** Invalidate the in-memory row record cache. Call after the Rust
+   *  engine flushes row records to PG directly (hydrateAndSync /
+   *  advanceAndSync), so the next getRowRecords() reloads from PG. */
+  clearRowCache(): void {
+    this.#rowCache.clear();
+  }
+
+  /** Record flush stats metrics after the Rust engine flushes directly. */
+  recordFlushStats(stats: CVRFlushStats, elapsedMs: number): void {
+    this.#rowCache.recordSyncFlushStats(stats, elapsedMs);
+  }
+
   putRowRecord(row: RowRecord): void {
     this.#pendingRowRecordUpdates.set(row.id, row);
   }

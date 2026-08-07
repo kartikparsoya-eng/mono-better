@@ -41,7 +41,7 @@ use rust_cvr::row_key::row_id_string;
 use rust_cvr::store::CVRStoreHandle;
 use rust_cvr::types::{CVR, PatchToVersion, RowRecord, ShardID};
 use rust_cvr::updater::{CVRQueryDrivenUpdater, RowRecordMap};
-use rust_cvr::version::{CVRVersion, version_string, cmp_versions};
+use rust_cvr::version::{CVRVersion, version_string};
 
 /// Watchdog warn/abort bounds for a single `EngineHandle::call`. The warn
 /// bound logs a slow-job signal (NON-aborting — a legit cold hydrate under load
@@ -1221,23 +1221,6 @@ impl RustIvmEngine {
             last_connect_time,
             last_active,
             ttl_clock,
-        })
-    }
-
-    /// Catchup clients that are behind the current CVR version.
-    #[napi(ts_return_type = "Promise<SyncResult>")]
-    pub fn catchup_clients(
-        &self,
-        cvr_json: String,
-        current_version_json: String,
-        client_ids: Vec<String>,
-    ) -> AsyncTask<CatchupClientsTask> {
-        AsyncTask::new(CatchupClientsTask {
-            handle: self.handle.clone(),
-            cvr_json,
-            current_version_json,
-            client_ids,
-            cvr_state: self.cvr_state.clone(),
         })
     }
 
@@ -2563,96 +2546,3 @@ impl Task for AdvanceAndSyncTask {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Catchup clients task
-// ---------------------------------------------------------------------------
-
-/// Catchup clients that are behind the current CVR version.
-pub struct CatchupClientsTask {
-    handle: EngineHandle,
-    cvr_json: String,
-    current_version_json: String,
-    client_ids: Vec<String>,
-    cvr_state: Arc<std::sync::Mutex<CVRState>>,
-}
-
-impl Task for CatchupClientsTask {
-    type Output = SyncResult;
-    type JsValue = SyncResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let cvr_json = std::mem::take(&mut self.cvr_json);
-        let current_version_json = std::mem::take(&mut self.current_version_json);
-        let client_ids = std::mem::take(&mut self.client_ids);
-        let cvr_state = self.cvr_state.clone();
-
-        let tokio_handle = tokio::runtime::Handle::try_current()
-            .map_err(|e| NapiError::from_reason(format!("Failed to get tokio handle: {}", e)))?;
-
-        self.handle
-            .call(move |state| -> std::result::Result<SyncResult, String> {
-                let eng = state.engine
-                    .as_ref()
-                    .ok_or_else(|| "Engine not initialized".to_string())?;
-
-                let cvr: CVR = serde_json::from_str(&cvr_json)
-                    .map_err(|e| format!("invalid cvr: {}", e))?;
-                let current: CVRVersion = serde_json::from_str(&current_version_json)
-                    .map_err(|e| format!("invalid current version: {}", e))?;
-
-                let cvr_guard = cvr_state.lock().unwrap();
-                let clients: Vec<Arc<ClientHandler>> = client_ids
-                    .iter()
-                    .filter_map(|id| cvr_guard.clients.get(id).cloned())
-                    .collect();
-                let store_arc = cvr_guard.store.clone();
-                drop(cvr_guard);
-
-                let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-                let pokers = MultiPoker::new(&client_refs, cvr.version.clone());
-
-                let catchup_from = clients
-                    .iter()
-                    .map(|c| c.version())
-                    .fold(Some(cvr.version.clone()), |a, b| {
-                        if cmp_versions(&a, &b) == std::cmp::Ordering::Less { a } else { b }
-                    });
-
-                // Get config patches from store
-                if let Some(ref store_arc) = store_arc {
-                    let mut store = store_arc.lock().unwrap();
-                    let config_patches = tokio_handle.block_on(async {
-                        store.catchup_config_patches(
-                            catchup_from.clone(),
-                            &current,
-                            &current,
-                        ).await
-                    }).map_err(|e| format!("catchup config: {}", e))?;
-                    for patch in &config_patches {
-                        pokers.add_patch(patch);
-                    }
-                }
-
-                pokers.end(cvr.version.clone());
-
-                let version_str = version_string(&cvr.version);
-                let cvr_json_out = serde_json::to_string(&cvr)
-                    .map_err(|e| format!("serialize cvr: {}", e))?;
-
-                Ok(SyncResult {
-                    cvr_json: cvr_json_out,
-                    version: version_str,
-                    flushed_json: None,
-                    query_patches_json: "[]".to_string(),
-                    num_changes: 0,
-                    reset_reason: None,
-                    reset_msg: None,
-                })
-            })?
-            .map_err(NapiError::from_reason)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}

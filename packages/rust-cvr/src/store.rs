@@ -101,6 +101,7 @@ pub struct RowsRow {
 // ─── Flush stats ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CVRFlushStats {
     pub instances: usize,
     pub queries: usize,
