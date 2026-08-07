@@ -1,9 +1,0 @@
-/Users/kartik.parsoya/Documents/Go-RS/mono-v1.7/packages/rust-syncer/target/debug/deps/socket2-e1e8df2ca4102d5f.d: /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/lib.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockaddr.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/socket.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockref.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sys/unix.rs
-
-/Users/kartik.parsoya/Documents/Go-RS/mono-v1.7/packages/rust-syncer/target/debug/deps/libsocket2-e1e8df2ca4102d5f.rmeta: /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/lib.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockaddr.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/socket.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockref.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sys/unix.rs
-
-/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/lib.rs:
-/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockaddr.rs:
-/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/socket.rs:
-/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sockref.rs:
-/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.6.5/src/sys/unix.rs:
