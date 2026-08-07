@@ -5,11 +5,25 @@
 //! See `packages/zero-cache/docs/rust-cvr-port/89-full-rust-syncer.md`.
 
 pub mod connect_params;
+pub mod connection;
+pub mod drain;
+pub mod message_handler;
 pub mod protocol;
+pub mod router;
 pub mod ws_server;
 pub mod ws_sink;
 
 pub use connect_params::{get_connect_params, ConnectParams, ConnectParamsError};
+pub use connection::{Connection, HandlerResult, MessageHandler, LogLevel, classify_error_log_level};
+pub use drain::DrainCoordinator;
+pub use message_handler::{
+    ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector,
+    MutagenDispatch, PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
+};
 pub use protocol::*;
+pub use router::{
+    AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter,
+    GroupAuthState,
+};
 pub use ws_server::{run_ws_server, accept_connection, ConnectionContext, WsServerConfig};
 pub use ws_sink::{DirectWebSocketSink, WsCommand};
