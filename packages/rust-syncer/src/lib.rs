@@ -6,6 +6,7 @@
 
 pub mod connect_params;
 pub mod connection;
+pub mod connection_context;
 pub mod drain;
 pub mod message_handler;
 pub mod protocol;
@@ -15,6 +16,14 @@ pub mod ws_sink;
 
 pub use connect_params::{get_connect_params, ConnectParams, ConnectParamsError};
 pub use connection::{Connection, HandlerResult, MessageHandler, LogLevel, classify_error_log_level};
+pub use connection_context::{
+    Auth, CCMError, ConnectionContextManager,
+    ConnectionState, ConnectionFetchContext,
+    ConnectionValidation, FetchConfig, HeaderOptions,
+    InitConnectionBody, JwtPayload, MaintenanceKind, MaintenancePlan,
+    ConnectParamsForRegistration, UpdateAuthBody, UserState, ValidationResult,
+    auth_equals, resolve_auth,
+};
 pub use drain::DrainCoordinator;
 pub use message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector,
