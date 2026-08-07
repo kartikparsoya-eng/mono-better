@@ -391,6 +391,18 @@ impl PokeHandler {
     }
 }
 
+impl Drop for PokeHandler {
+    fn drop(&mut self) {
+        // If the poke was started but end() was never called,
+        // release the poke chain so future pokes can proceed.
+        let mut state = self.state.lock().unwrap();
+        if state.poke_in_progress {
+            state.poke_in_progress = false;
+            self.poke_chain.store(false, AtomicOrdering::SeqCst);
+        }
+    }
+}
+
 /// Defense-in-depth: if `result` arrives as a JSON string, parse it.
 fn normalize_mutation_result(row: &Value) -> Value {
     if let Value::Object(map) = row {
@@ -459,6 +471,12 @@ impl ClientHandler {
             )),
             poke_chain: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Set the base version (for testing).
+    #[doc(hidden)]
+    pub fn set_base_version_for_test(&self, version: CVRVersion) {
+        *self.base_version.lock().unwrap() = Some(version);
     }
 
     pub fn version(&self) -> NullableCVRVersion {
@@ -550,6 +568,15 @@ impl ClientHandler {
         // Fire-and-forget like TS. On the actor thread, push is sync.
         // If push fails, there's nothing to do — the WS is already broken.
         let _ = self.downstream.push(serde_json::json!(["inspect", response]));
+    }
+
+    /// Send a query transform failed error to the client.
+    /// Port of `sendQueryTransformFailedError` from TS.
+    pub fn send_query_transform_failed_error(&self, error: &Value) {
+        // In TS, this calls `this.fail(new ProtocolError(error))`.
+        // ProtocolError is serialized as ["error", errorBody].
+        let _ = self.downstream.push(serde_json::json!(["error", error]));
+        self.fail("query transform failed");
     }
 }
 
