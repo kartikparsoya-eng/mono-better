@@ -59,17 +59,22 @@ pub enum ErrorOrigin {
     ZeroCache,
 }
 
-// ErrorReason has non-standard values (e.g. "oooMutation", "http").
+// ErrorReason values are lowercase/mixed ("database", "parse", "oooMutation", etc.).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorReason {
+    #[serde(rename = "database")]
     Database,
+    #[serde(rename = "parse")]
     Parse,
     #[serde(rename = "oooMutation")]
     OutOfOrderMutation,
+    #[serde(rename = "unsupportedPushVersion")]
     UnsupportedPushVersion,
+    #[serde(rename = "internal")]
     Internal,
     #[serde(rename = "http")]
     Http,
+    #[serde(rename = "timeout")]
     Timeout,
 }
 
