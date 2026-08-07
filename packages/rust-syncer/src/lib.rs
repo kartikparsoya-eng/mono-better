@@ -8,6 +8,7 @@ pub mod connect_params;
 pub mod connection;
 pub mod connection_context;
 pub mod drain;
+pub mod http_server;
 pub mod message_handler;
 pub mod protocol;
 pub mod router;
@@ -41,5 +42,6 @@ pub use view_syncer::{
     HydrateResult, InspectorDelegate, PipelineDriver, RustViewSyncer, TTLClock,
     TransformMode, has_expired_queries, is_expired,
 };
+pub use http_server::{run_http_server, ServerStats, HttpServerState};
 pub use ws_server::{run_ws_server, accept_connection, ConnectionContext, WsServerConfig};
 pub use ws_sink::{DirectWebSocketSink, WsCommand};

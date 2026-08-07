@@ -34,6 +34,8 @@ pub enum CGMessage {
     },
     /// The CG should shut down (no more connections).
     Shutdown,
+    /// Change-streamer notification — new data is available.
+    Notification(serde_json::Value),
 }
 
 /// Handle to a CG thread.
@@ -311,6 +313,16 @@ impl ConnectionRouter {
     pub fn cg_count(&self) -> usize {
         self.cg_handles.len()
     }
+
+    /// Send a change-streamer notification to the CG thread for the given client group.
+    /// Returns false if no CG thread exists for the given ID.
+    pub fn send_notification(&self, cg_id: &str, notification: serde_json::Value) -> bool {
+        if let Some(handle) = self.cg_handles.get(cg_id) {
+            handle.send(CGMessage::Notification(notification)).is_ok()
+        } else {
+            false
+        }
+    }
 }
 
 /// Run the CG thread.
@@ -428,6 +440,14 @@ fn run_cg_thread(
                     connection_count.fetch_sub(1, Ordering::Relaxed);
                 }
                 break;
+            }
+            CGMessage::Notification(notification) => {
+                tracing::debug!("CG thread {cg_id}: received notification: {}",
+                    serde_json::to_string(&notification).unwrap_or_default());
+                // Forward to the ViewSyncer's state changes channel.
+                // In the full implementation, this calls view_syncer.run()
+                // with the new state. For now, we log.
+                // TODO: wire to RustViewSyncer's state_changes_rx
             }
         }
     }
