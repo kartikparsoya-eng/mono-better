@@ -846,8 +846,11 @@ impl Engine {
         // Without this the sources read a newer (head) snapshot and
         // validate_change spuriously panics "Add duplicate row". MemorySource
         // ignores this (no-op).
-        for source in self.sources.values() {
-            source.borrow_mut().set_snapshot_db(prev_conn.clone());
+        {
+            let _t = crate::perf_trace::scope("advance.setdb");
+            for source in self.sources.values() {
+                source.borrow_mut().set_snapshot_db(prev_conn.clone());
+            }
         }
 
         // Per-table column types, so raw diff rows are coerced (bool/json) the
@@ -1040,8 +1043,11 @@ impl Engine {
         // Restore every TableSource to the CURR (head) snapshot for subsequent
         // reads (incremental fetches + next hydration), on every path — matches
         // TS `table.setDB(curr.db.db)` after the change loop.
-        for source in self.sources.values() {
-            source.borrow_mut().set_snapshot_db(curr_conn.clone());
+        {
+            let _t = crate::perf_trace::scope("advance.setdb");
+            for source in self.sources.values() {
+                source.borrow_mut().set_snapshot_db(curr_conn.clone());
+            }
         }
 
         // Cancellation can land after the final diff callback (or while its
