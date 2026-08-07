@@ -119,10 +119,12 @@ async function main() {
     const streamId = 1;
     await engine.addQueriesStreamingRows(
       [{queryId: 'q1', astJson: JSON.stringify(AST)}],
-      (_err, rc) => {
-        if (!rc) return;
-        engine.grantStreamCredit(streamId, 1);
-        if (rc.changeType >= 0) count++;
+      (_err, chunk) => {
+        if (!chunk) return;
+        for (const rc of Array.isArray(chunk) ? chunk : [chunk]) {
+          engine.grantStreamCredit(streamId, 1);
+          if (rc.changeType >= 0) count++;
+        }
       },
       streamId,
     );

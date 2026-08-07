@@ -95,31 +95,21 @@ export declare class RustIvmEngine {
    */
   advanceToHeadStreaming(): Promise<NapiRowChange[]>
   /**
-   * Add queries and hydrate them, streaming rows one at a time via `on_row`.
-   * Each RowChange is handed to JS as it is produced. A row-credit gate and
+   * Add queries and hydrate them, streaming rows in CHUNKS via `on_rows`
+   * (one TSFN crossing per chunk of up to `RUST_IVM_DELIVERY_CHUNK` rows;
+   * the final chunk ends with the `-3` END sentinel). A row-credit gate and
    * bounded TSFN queue cap in-flight rows independently of result size.
    */
-  addQueriesStreamingRows(queries: Array<NapiQuerySpec>, onRow: (err: Error | null, row: NapiRowChange) => void, streamId: number): Promise<void>
+  addQueriesStreamingRows(queries: Array<NapiQuerySpec>, onRows: (err: Error | null, rows: NapiRowChange[]) => void, streamId: number): Promise<void>
   /**
-   * Advance to head, streaming rows one at a time via `on_row`.
-   * Header (changeType=-1) is emitted first, change rows in the middle,
-   * reset row (changeType=-2) last if the engine reported a reset_reason.
-   * Bounded TSFN (max_queue_size=1, Blocking mode) for real backpressure.
+   * Advance to head, streaming rows in CHUNKS via `on_rows`. The header
+   * (changeType=-1) is the first element of the first chunk, change rows
+   * follow, a reset row (changeType=-2) is appended if the engine reported a
+   * reset_reason, and the final chunk ends with the `-3` END sentinel.
+   * Bounded TSFN (queue slots hold chunks, Blocking mode) + row-credit gate
+   * for real backpressure.
    */
-  advanceToHeadStreamingRows(onRow: (err: Error | null, row: NapiRowChange) => void, streamId: number): Promise<void>
-  /** Register a WebSocket client for poke delivery. */
-  registerClient(clientId: string, wsId: string, clientGroupId: string, shardJson: any, baseCookie: string | undefined | null, pushFn: (msg: unknown) => void, failFn: (err: string) => void, cancelFn: () => void): void
-  /** Unregister a WebSocket client. */
-  unregisterClient(wsId: string): void
-  /** Set the CVR store (created once, shared across all calls). */
-  setCvrStore(pgUri: string, schema: string, cvrId: string, taskId: string): void
-  /**
-   * Hydrate queries AND apply to CVR + push to clients — all on the actor thread.
-   * Row data never crosses the boundary.
-   */
-  hydrateAndSync(queries: Array<NapiQuerySpec>, cvrJson: string, stateVersion: string, replicaVersion: string, addQueriesFlat: Array<string>, removeQueries: Array<string>, clientIds: Array<string>, existingRowsJson: string, lastConnectTime: number, lastActive: number, ttlClock: number): Promise<SyncResult>
-  /** Advance to head AND apply to CVR + push to clients — all on the actor thread. */
-  advanceAndSync(cvrJson: string, replicaVersion: string, clientIds: Array<string>, existingRowsJson: string, lastConnectTime: number, lastActive: number, ttlClock: number): Promise<SyncResult>
+  advanceToHeadStreamingRows(onRows: (err: Error | null, rows: NapiRowChange[]) => void, streamId: number): Promise<void>
   removeQuery(queryId: string): void
   /** Scalar-resolved logical AST for public PipelineDriver query metadata. */
   queryTransformedAst(queryId: string): string | null

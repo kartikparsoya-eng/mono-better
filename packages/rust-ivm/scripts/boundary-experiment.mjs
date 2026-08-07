@@ -117,9 +117,13 @@ function streamRows(engine, specs, callback) {
   const streamId = nextStreamId++;
   return engine.addQueriesStreamingRows(
     specs,
-    (err, row) => {
-      if (row) engine.grantStreamCredit(streamId, 1);
-      callback(err, row);
+    (err, chunk) => {
+      // Chunked delivery: each callback carries an ordered array of rows.
+      const rows = Array.isArray(chunk) ? chunk : chunk ? [chunk] : [];
+      for (const row of rows) {
+        engine.grantStreamCredit(streamId, 1);
+        callback(err, row);
+      }
     },
     streamId,
   );

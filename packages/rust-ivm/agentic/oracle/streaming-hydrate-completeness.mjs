@@ -117,11 +117,13 @@ async function hydrateCount(dbPath, astJson) {
   const streamId = 1;
   await engine.addQueriesStreamingRows(
     [{queryId: 'q1', astJson}],
-    (err, rc) => {
+    (err, chunk) => {
       if (err) throw err;
-      if (!rc) return;
-      engine.grantStreamCredit(streamId, 1);
-      if (rc.changeType >= 0) count++;
+      if (!chunk) return;
+      for (const rc of Array.isArray(chunk) ? chunk : [chunk]) {
+        engine.grantStreamCredit(streamId, 1);
+        if (rc.changeType >= 0) count++;
+      }
     },
     streamId,
   );

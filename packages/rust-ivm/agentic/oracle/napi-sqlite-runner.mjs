@@ -235,17 +235,20 @@ async function runHydration(dbPath, tables, ast, queryId = 'q1') {
   const streamId = 1;
   await engine.addQueriesStreamingRows(
     [{queryId, astJson: JSON.stringify(ast)}],
-    (err, rc) => {
+    (err, chunk) => {
       if (err) throw err;
-      if (!rc) return;
-      engine.grantStreamCredit(streamId, 1);
-      if (rc.changeType === -2) {
-        // Unexpected in-place reset — capture (correctness diffing skips these).
-        resets.push({phase: 'hydrate', rowKey: rc.rowKey});
-        return;
+      if (!chunk) return;
+      // Chunked delivery: each callback carries an ordered array of rows.
+      for (const rc of Array.isArray(chunk) ? chunk : [chunk]) {
+        engine.grantStreamCredit(streamId, 1);
+        if (rc.changeType === -2) {
+          // Unexpected in-place reset — capture (correctness diffing skips these).
+          resets.push({phase: 'hydrate', rowKey: rc.rowKey});
+          continue;
+        }
+        if (rc.changeType < 0) continue; // skip control rows (headers, sentinels)
+        rows.push(napiRowToJs(rc));
       }
-      if (rc.changeType < 0) return; // skip control rows (headers, sentinels)
-      rows.push(napiRowToJs(rc));
     },
     streamId,
   );
