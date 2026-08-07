@@ -139,12 +139,15 @@ impl Snapshotter {
         // advance, roll the older connection back and re-pin it at head. The
         // two connections continually leapfrog; do not allocate a new snapshot
         // connection on every advance.
-        let next = match self.prev.take() {
-            Some(mut prev) => {
-                prev.reset_to_head()?;
-                prev
+        let next = {
+            let _t = crate::perf_trace::scope("snapshot.repin");
+            match self.prev.take() {
+                Some(mut prev) => {
+                    prev.reset_to_head()?;
+                    prev
+                }
+                None => Snapshot::create(&self.db_file, self.page_cache_size_kib)?,
             }
-            None => Snapshot::create(&self.db_file, self.page_cache_size_kib)?,
         };
 
         self.prev = self.curr.take();
@@ -156,7 +159,10 @@ impl Snapshotter {
         let prev_version_for_diff = self.prev.as_ref().unwrap().version.clone();
         let curr = self.curr.as_ref().unwrap();
         let curr_version_for_diff = curr.version.clone();
-        let change_count = curr.num_changes_since(&prev_version_for_diff)?;
+        let change_count = {
+            let _t = crate::perf_trace::scope("advance.count");
+            curr.num_changes_since(&prev_version_for_diff)?
+        };
 
         Ok(DiffOwned {
             app_id: self.app_id.clone(),
@@ -174,12 +180,15 @@ impl Snapshotter {
         if self.curr.is_none() {
             return Err("Snapshotter has not been initialized".to_string());
         }
-        let next = match self.prev.take() {
-            Some(mut prev) => {
-                prev.reset_to_head()?;
-                prev
+        let next = {
+            let _t = crate::perf_trace::scope("snapshot.repin");
+            match self.prev.take() {
+                Some(mut prev) => {
+                    prev.reset_to_head()?;
+                    prev
+                }
+                None => Snapshot::create(&self.db_file, self.page_cache_size_kib)?,
             }
-            None => Snapshot::create(&self.db_file, self.page_cache_size_kib)?,
         };
         self.prev = self.curr.take();
         self.curr = Some(next);

@@ -84,16 +84,60 @@ pub fn report(op: &str, total_ms: f64) {
             "[rust-ivm][PERF] {op} total={total_ms:.1}ms  {}",
             lines.join("  ")
         );
-        eprintln!("{line}");
-        if let Some(path) = env_value().filter(|v| v.starts_with('/')) {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
-                let _ = writeln!(f, "{line}");
-            }
-        }
+        emit(&line);
+        // Clear after printing so anything accumulated AFTER this report (e.g.
+        // the napi-side drain barrier, which runs post-compute on this same
+        // actor thread) is exactly what `report_residual` picks up.
+        s.borrow_mut().clear();
     });
+}
+
+/// Report ONLY the stats accumulated since the last `report()`/`reset()` on
+/// this thread — the post-engine residual (e.g. `deliver.drain`, which runs
+/// after the engine's own report). Prints nothing when empty; clears after
+/// printing. MUST be called on the same thread that ran the scopes (the engine
+/// actor thread).
+pub fn report_residual(op: &str) {
+    if !enabled() {
+        return;
+    }
+    STATS.with(|s| {
+        {
+            let stats = s.borrow();
+            if stats.is_empty() {
+                return;
+            }
+            let mut v: Vec<_> = stats.iter().map(|(k, &(ns, n))| (*k, ns, n)).collect();
+            v.sort_by_key(|e| std::cmp::Reverse(e.1));
+            // Nested scopes double-count into parents; use the largest span as
+            // the umbrella total (in practice this is `deliver.drain`).
+            let total_ms = v.first().map(|e| e.1 as f64 / 1e6).unwrap_or(0.0);
+            let lines: Vec<String> = v
+                .iter()
+                .map(|(k, ns, n)| {
+                    let ms = *ns as f64 / 1e6;
+                    format!("{k}={ms:.1}ms/{n}h/{:.1}us", ms * 1000.0 / (*n).max(1) as f64)
+                })
+                .collect();
+            emit(&format!(
+                "[rust-ivm][PERF] {op}-post total={total_ms:.1}ms  {}",
+                lines.join("  ")
+            ));
+        }
+        s.borrow_mut().clear();
+    });
+}
+
+fn emit(line: &str) {
+    eprintln!("{line}");
+    if let Some(path) = env_value().filter(|v| v.starts_with('/')) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
 }
