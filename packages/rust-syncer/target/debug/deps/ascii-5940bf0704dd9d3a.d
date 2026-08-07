@@ -1,0 +1,9 @@
+/Users/kartik.parsoya/Documents/Go-RS/mono-v1.7/packages/rust-syncer/target/debug/deps/ascii-5940bf0704dd9d3a.d: /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/lib.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_char.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_str.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_string.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/free_functions.rs
+
+/Users/kartik.parsoya/Documents/Go-RS/mono-v1.7/packages/rust-syncer/target/debug/deps/libascii-5940bf0704dd9d3a.rmeta: /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/lib.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_char.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_str.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_string.rs /Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/free_functions.rs
+
+/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/lib.rs:
+/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_char.rs:
+/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_str.rs:
+/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/ascii_string.rs:
+/Users/kartik.parsoya/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ascii-1.1.0/src/free_functions.rs:

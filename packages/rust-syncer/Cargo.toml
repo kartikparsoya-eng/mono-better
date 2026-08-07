@@ -1,0 +1,25 @@
+[package]
+name = "rust-syncer"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rust-syncer"
+path = "src/main.rs"
+
+[dependencies]
+rust-cvr = { path = "../rust-cvr" }
+rust-ivm = { path = "../rust-ivm" }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+url = "2"
+urlencoding = "2"
+dashmap = "6"
+crossbeam-channel = "0.5"
+thiserror = "2"
