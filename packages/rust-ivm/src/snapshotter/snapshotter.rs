@@ -279,6 +279,7 @@ impl Drop for Snapshot {
 impl Snapshot {
     /// Open a fresh connection and pin it at the current head.
     fn create(db_file: &str, page_cache_size_kib: Option<i64>) -> Result<Self, String> {
+        let _t = crate::perf_trace::scope("snapshot.begin");
         // Open read-write so wal2 can register a checkpoint-blocking read-mark
         // in -shm via BEGIN CONCURRENT. A read-only open cannot write -shm, so the
         // checkpointer IGNORES it and recycles needed frames under the pinned

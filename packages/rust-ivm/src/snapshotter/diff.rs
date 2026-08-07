@@ -303,9 +303,15 @@ where
     // connection (set to PREV) and needs to borrow it, so a held borrow here
     // would RefCell-panic.
     let permissions_table = format!("{}.permissions", diff.app_id);
-    let entries = read_changelog(&curr_conn.borrow(), &diff.prev_version)?;
+    let entries = {
+        let _t = crate::perf_trace::scope("advance.diff");
+        read_changelog(&curr_conn.borrow(), &diff.prev_version)?
+    };
 
     for e in &entries {
+        // Times the per-entry SnapshotChange read (prev/curr row lookups etc.);
+        // dropped just before `emit` so the push/deliver work is excluded.
+        let diff_scope = crate::perf_trace::scope("advance.diff");
         // RESET → schema change, abort.
         if e.op == RESET_OP {
             return Err(DiffError::Reset(ResetPipelinesSignal {
@@ -413,6 +419,7 @@ where
             next_value: next_raw,
             row_key,
         };
+        drop(diff_scope);
 
         emit(change)?;
     }

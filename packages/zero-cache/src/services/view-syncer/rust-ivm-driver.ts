@@ -144,10 +144,52 @@ function reviveNativeRow(
   return value;
 }
 
+// Mirror of the Rust RUST_IVM_PERF_TRACE gate: JS-side per-row costs
+// (JSON.parse / revive / queue push). Zero overhead when the env is unset
+// (checked once at module load).
+const PERF_TRACE_JS = !!process.env['RUST_IVM_PERF_TRACE'];
+const perfJS = {
+  parse: {ms: 0, hits: 0},
+  revive: {ms: 0, hits: 0},
+  queue: {ms: 0, hits: 0},
+};
+function perfJSReport(lc: LogContext, op: string): void {
+  if (!PERF_TRACE_JS) {
+    return;
+  }
+  const f = (b: {ms: number; hits: number}) => `${b.ms.toFixed(1)}ms/${b.hits}h`;
+  const line = `[rust-ivm][PERF-JS] ${op} parse=${f(perfJS.parse)} revive=${f(perfJS.revive)} queue=${f(perfJS.queue)}`;
+  lc.info?.(line);
+  // Write directly to fd 2: vitest's `silent: 'passed-only'` swallows
+  // intercepted console output for passing tests, but not raw stream writes
+  // (matching the native addon's eprintln! lines).
+  process.stderr.write(`${line}\n`);
+  for (const b of [perfJS.parse, perfJS.revive, perfJS.queue]) {
+    b.ms = 0;
+    b.hits = 0;
+  }
+}
+
 function napiToRowChange(
   c: NapiRowChange,
   tableSpecs: ReadonlyMap<string, LiteAndZqlSpec>,
 ): RowChange {
+  if (PERF_TRACE_JS) {
+    const t0 = performance.now();
+    const rowKeyObj = parseJSONObject(c.rowKey, 'native row key');
+    const rowObj = c.row ? parseJSONObject(c.row, 'native row') : undefined;
+    const t1 = performance.now();
+    const rowKey = reviveNativeRow(rowKeyObj, c.table, tableSpecs) as RowKey;
+    const row = rowObj
+      ? (reviveNativeRow(rowObj, c.table, tableSpecs) as Row)
+      : undefined;
+    const t2 = performance.now();
+    perfJS.parse.ms += t1 - t0;
+    perfJS.parse.hits++;
+    perfJS.revive.ms += t2 - t1;
+    perfJS.revive.hits++;
+    return {type: c.changeType, queryID: c.queryId, table: c.table, rowKey, row};
+  }
   return {
     type: c.changeType,
     queryID: c.queryId,
@@ -793,7 +835,14 @@ export class RustIVMDriver {
           });
           this.#rowSetSignatures.set(change.queryID, cur ^ unit);
         }
-        queue.push(change);
+        if (PERF_TRACE_JS) {
+          const t0 = performance.now();
+          queue.push(change);
+          perfJS.queue.ms += performance.now() - t0;
+          perfJS.queue.hits++;
+        } else {
+          queue.push(change);
+        }
       } catch (error) {
         // Exceptions thrown from a raw TSFN callback otherwise escape outside
         // the async task promise and can terminate the whole syncer worker.
@@ -835,6 +884,7 @@ export class RustIVMDriver {
         }
       }
       completed = true;
+      perfJSReport(this.#lc, 'hydrate');
     } finally {
       // Only cancel on EARLY exit; on normal completion the engine already
       // finished and the token resets at the next op anyway. close() is
@@ -901,6 +951,11 @@ export class RustIVMDriver {
           headerResolve(row);
           headerResolve = null;
           headerReject = null;
+        } else if (PERF_TRACE_JS) {
+          const t0 = performance.now();
+          queue.push(row);
+          perfJS.queue.ms += performance.now() - t0;
+          perfJS.queue.hits++;
         } else {
           queue.push(row);
         }
@@ -1008,6 +1063,7 @@ export class RustIVMDriver {
         }
       }
       completed = true;
+      perfJSReport(this.#lc, 'advance');
     } finally {
       if (!completed) {
         // See #addQueryStreaming: cancel() (token + gate) before cancelStream.

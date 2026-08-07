@@ -470,6 +470,8 @@ impl Engine {
     ) -> Vec<QueryResult> {
         // Reset cancellation at the start of hydration.
         self.cancellation_token.reset();
+        crate::perf_trace::reset();
+        let perf_timer = Instant::now();
         for q in queries {
             self.remove_query(&q.query_id);
         }
@@ -481,6 +483,7 @@ impl Engine {
         let mut built: Vec<Built> = Vec::new();
 
         for q in queries {
+            let _t = crate::perf_trace::scope("hydrate.build");
             let timer = Instant::now();
             // Resolve scalar subqueries against the live sources (`&self`),
             // producing the resolved AST + retained live companion pipelines.
@@ -530,6 +533,7 @@ impl Engine {
         // destroy what we built (the queries are being discarded anyway).
         let mut cancelled = false;
         'hydrate: for b in &built {
+            let _t = crate::perf_trace::scope("hydrate.fetch");
             if self.cancellation_token.is_cancelled() {
                 cancelled = true;
                 break 'hydrate;
@@ -562,6 +566,7 @@ impl Engine {
                 let change = crate::ivm::change::make_add_change(node);
                 streamer.accumulate(&b.query_id, &b.schema, std::slice::from_ref(&change));
                 for rc in streamer.stream() {
+                    let _t = crate::perf_trace::scope("deliver.row");
                     on_row_change(&rc);
                 }
             }
@@ -596,6 +601,7 @@ impl Engine {
                     ),
                 };
                 let row_key = crate::streamer::get_row_key(pk, row);
+                let _t = crate::perf_trace::scope("deliver.row");
                 on_row_change(&RowChange {
                     change_type: crate::ivm::change::ChangeType::Add,
                     query_id: b.query_id.clone(),
@@ -665,6 +671,7 @@ impl Engine {
             });
         }
 
+        crate::perf_trace::report("hydrate", perf_timer.elapsed().as_secs_f64() * 1000.0);
         results
     }
 
@@ -711,6 +718,7 @@ impl Engine {
                 for entry in &self.pipelines {
                     let row_changes = std::mem::take(&mut entry.collector.borrow_mut().row_changes);
                     for rc in row_changes {
+                        let _t = crate::perf_trace::scope("deliver.row");
                         on_row_change(&rc);
                     }
                     // Stream surviving companion changes (the resolved value was
@@ -723,6 +731,7 @@ impl Engine {
                                 Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
                             streamer.accumulate(&entry.query_id, &c.schema, &cc);
                             for rc in streamer.stream() {
+                                let _t = crate::perf_trace::scope("deliver.row");
                                 on_row_change(&rc);
                             }
                         }
@@ -792,6 +801,8 @@ impl Engine {
         // callback below ("advance cancelled before all changes were
         // delivered") if that flow were ever reordered.
         self.cancellation_token.reset();
+        crate::perf_trace::reset();
+        let perf_timer = Instant::now();
 
         // 1. Advance the snapshotter — get the diff between prev and curr.
         let diff = snapshotter
@@ -945,15 +956,19 @@ impl Engine {
                         let change = crate::ivm::change::make_source_change_remove(
                             sqlite_value_to_row(prev_row, col_types),
                         );
-                        if let Some(reset) = push_source_change(
-                            &self.sources,
-                            &self.pipelines,
-                            &sc.table,
-                            change,
-                            &self.primary_keys,
-                            &self.table_specs,
-                            &mut on_row_change,
-                        ) {
+                        let push_reset = {
+                            let _t = crate::perf_trace::scope("advance.push");
+                            push_source_change(
+                                &self.sources,
+                                &self.pipelines,
+                                &sc.table,
+                                change,
+                                &self.primary_keys,
+                                &self.table_specs,
+                                &mut on_row_change,
+                            )
+                        };
+                        if let Some(reset) = push_reset {
                             return Err(crate::snapshotter::DiffError::Reset(
                                 crate::snapshotter::ResetPipelinesSignal {
                                     reason: "scalar-subquery",
@@ -971,15 +986,19 @@ impl Engine {
                     } else {
                         crate::ivm::change::make_source_change_add(row)
                     };
-                    if let Some(reset) = push_source_change(
-                        &self.sources,
-                        &self.pipelines,
-                        &sc.table,
-                        change,
-                        &self.primary_keys,
-                        &self.table_specs,
-                        &mut on_row_change,
-                    ) {
+                    let push_reset = {
+                        let _t = crate::perf_trace::scope("advance.push");
+                        push_source_change(
+                            &self.sources,
+                            &self.pipelines,
+                            &sc.table,
+                            change,
+                            &self.primary_keys,
+                            &self.table_specs,
+                            &mut on_row_change,
+                        )
+                    };
+                    if let Some(reset) = push_reset {
                         return Err(crate::snapshotter::DiffError::Reset(
                             crate::snapshotter::ResetPipelinesSignal {
                                 reason: "scalar-subquery",
@@ -1033,21 +1052,31 @@ impl Engine {
             ));
         }
 
+        let perf_elapsed_ms = perf_timer.elapsed().as_secs_f64() * 1000.0;
         match result {
-            Ok(()) => Ok(AdvanceToHeadResult {
-                version: new_version,
-                num_changes,
-                aborted: false,
-                reset_reason: None,
-                reset_msg: None,
-            }),
-            Err(crate::snapshotter::DiffError::Reset(sig)) => Ok(AdvanceToHeadResult {
-                version: new_version,
-                num_changes: pos,
-                aborted: true,
-                reset_reason: Some(sig.reason.to_string()),
-                reset_msg: Some(sig.msg),
-            }),
+            Ok(()) => {
+                crate::perf_trace::report("advance", perf_elapsed_ms);
+                Ok(AdvanceToHeadResult {
+                    version: new_version,
+                    num_changes,
+                    aborted: false,
+                    reset_reason: None,
+                    reset_msg: None,
+                })
+            }
+            Err(crate::snapshotter::DiffError::Reset(sig)) => {
+                // Every breaker trip (advancement-timeout / scalar-subquery /
+                // schema / permissions / truncation reset) logs its own
+                // breakdown before returning.
+                crate::perf_trace::report("advance-TRIPPED", perf_elapsed_ms);
+                Ok(AdvanceToHeadResult {
+                    version: new_version,
+                    num_changes: pos,
+                    aborted: true,
+                    reset_reason: Some(sig.reason.to_string()),
+                    reset_msg: Some(sig.msg),
+                })
+            }
             // Hard errors, including InvalidDiff, propagate to teardown exactly
             // as they do in PipelineDriver. They must not be smoothed into a
             // recoverable reset.
@@ -1354,24 +1383,39 @@ fn push_source_change(
 
         // Collect and stream RowChanges from each pipeline.
         for entry in pipelines {
-            let row_changes = std::mem::take(&mut entry.collector.borrow_mut().row_changes);
+            let row_changes = {
+                let _t = crate::perf_trace::scope("advance.collect");
+                std::mem::take(&mut entry.collector.borrow_mut().row_changes)
+            };
             for rc in row_changes {
                 let delivery_start = Instant::now();
-                on_row_change(&rc);
+                {
+                    let _t = crate::perf_trace::scope("deliver.row");
+                    on_row_change(&rc);
+                }
                 crate::advance_gate::exclude_current(delivery_start.elapsed());
             }
             // Surviving companion changes (resolved value unchanged) stream
             // under the owning query, per TS companion accumulation.
             for c in &entry.companions {
-                let cc: Vec<Change> = std::mem::take(&mut c.output.borrow_mut().changes);
-                if !cc.is_empty() {
-                    let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
-                    streamer.accumulate(&entry.query_id, &c.schema, &cc);
-                    for rc in streamer.stream() {
-                        let delivery_start = Instant::now();
-                        on_row_change(&rc);
-                        crate::advance_gate::exclude_current(delivery_start.elapsed());
+                let streamed: Vec<RowChange> = {
+                    let _t = crate::perf_trace::scope("advance.collect");
+                    let cc: Vec<Change> = std::mem::take(&mut c.output.borrow_mut().changes);
+                    if cc.is_empty() {
+                        Vec::new()
+                    } else {
+                        let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
+                        streamer.accumulate(&entry.query_id, &c.schema, &cc);
+                        streamer.stream()
                     }
+                };
+                for rc in streamed {
+                    let delivery_start = Instant::now();
+                    {
+                        let _t = crate::perf_trace::scope("deliver.row");
+                        on_row_change(&rc);
+                    }
+                    crate::advance_gate::exclude_current(delivery_start.elapsed());
                 }
             }
         }

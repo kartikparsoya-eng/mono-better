@@ -83,6 +83,7 @@ impl LazyRows {
         columns: HashMap<String, ColumnType>,
         table_name: String,
     ) -> Result<Pin<Box<Self>>, rusqlite::Error> {
+        let _t = crate::perf_trace::scope("source.sql_prepare");
         // Hold an immutable RefCell borrow for the entire struct lifetime.
         let guard: Ref<'_, Connection> = conn.borrow();
         let guard_static: Ref<'static, Connection> = unsafe { std::mem::transmute(guard) };
@@ -189,8 +190,13 @@ impl Iterator for LazyRowsIter {
         let column_names = &this.column_names;
         let columns = &this.columns;
         let table_name = &this.table_name;
-        match rows.next() {
+        let stepped = {
+            let _t = crate::perf_trace::scope("source.sql_step");
+            rows.next()
+        };
+        match stepped {
             Ok(Some(raw_row)) => {
+                let _t = crate::perf_trace::scope("source.row_mat");
                 let mut map: FxHashMap<String, Value> = FxHashMap::default();
                 for (i, col) in column_names.iter().enumerate() {
                     let val = crate::sqlite::db::read_value_lossy(raw_row, i);
@@ -565,7 +571,11 @@ impl TableSource {
         }
 
         // Write the change to SQLite
-        if let Err(e) = self.write_change(&change) {
+        let write_result = {
+            let _t = crate::perf_trace::scope("source.write");
+            self.write_change(&change)
+        };
+        if let Err(e) = write_result {
             eprintln!(
                 "[rust-ivm] write_change error for {}: {}",
                 self.table_name, e
@@ -579,6 +589,7 @@ impl TableSource {
     }
 
     fn validate_change(&self, change: &SourceChange) {
+        let _t = crate::perf_trace::scope("source.validate");
         let snapshot_db = self.db.borrow();
         let db = snapshot_db.borrow();
         match change {
@@ -836,8 +847,10 @@ impl TableSource {
             }
         };
 
-        let mut overlay_changes =
-            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns);
+        let mut overlay_changes = {
+            let _t = crate::perf_trace::scope("source.overlay");
+            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns)
+        };
         let historical_change_count = overlay_changes.len();
         if let Some(change) = overlay_change {
             overlay_changes.push(change);
@@ -851,6 +864,7 @@ impl TableSource {
             self.table_name.clone(),
         );
 
+        let _t = crate::perf_trace::scope("source.overlay");
         crate::ivm::source::apply_source_overlays(
             stream,
             overlay_changes,
@@ -929,8 +943,10 @@ impl Input for TableSourceInput {
             }
         };
 
-        let mut overlay_changes =
-            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns);
+        let mut overlay_changes = {
+            let _t = crate::perf_trace::scope("source.overlay");
+            applied_changes_for_request(&self.applied_changes.borrow(), req, &order, &self.columns)
+        };
         let historical_change_count = overlay_changes.len();
         if let Some(change) = overlay_change {
             overlay_changes.push(change);
@@ -944,6 +960,7 @@ impl Input for TableSourceInput {
             self.table_name.clone(),
         );
 
+        let _t = crate::perf_trace::scope("source.overlay");
         crate::ivm::source::apply_source_overlays(
             stream,
             overlay_changes,
