@@ -246,7 +246,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
         init: (specs: unknown[], dbPath: string, appID: string) => void;
         addQueriesStreamingRows: (
           specs: unknown[],
-          callback: (error: unknown, row: {changeType: number}) => void,
+          callback: (error: unknown, rows: {changeType: number}[]) => void,
           streamID: number,
         ) => Promise<void>;
         grantStreamCredit: (streamID: number, permits: number) => void;
@@ -277,9 +277,11 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     let delivered = 0;
     const done = engine.addQueriesStreamingRows(
       [{queryId: 'native-bound', astJson: JSON.stringify(AST)}],
-      (_error, row) => {
-        if (row.changeType >= 0) {
-          delivered++;
+      (_error, rows) => {
+        for (const row of rows) {
+          if (row.changeType >= 0) {
+            delivered++;
+          }
         }
       },
       streamID,
@@ -293,18 +295,36 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
       expect(delivered).toBe(expected);
     };
 
-    const window = Math.min(
-      Number(process.env['RUST_IVM_STREAM_CREDIT']),
-      Number(process.env['RUST_IVM_TSFN_QUEUE']),
+    // Chunked delivery: the effective chunk is min(RUST_IVM_DELIVERY_CHUNK,
+    // credit) and the credit window is min(credit, queue * chunk) rows. With
+    // the tiny test window (credit=4 ≤ default chunk) both collapse to
+    // `credit` rows = exactly one chunk in flight; with
+    // RUST_IVM_DELIVERY_CHUNK=1 this reproduces the old per-row shape
+    // (window = min(credit, queue), grant-1-releases-1).
+    const credit = Number(process.env['RUST_IVM_STREAM_CREDIT']);
+    const queue = Number(process.env['RUST_IVM_TSFN_QUEUE']);
+    const chunk = Math.min(
+      Number(process.env['RUST_IVM_DELIVERY_CHUNK'] ?? '64'),
+      credit,
     );
+    const window = Math.min(credit, queue * chunk);
     await waitFor(window);
     await new Promise(resolve => setTimeout(resolve, 25));
     expect(delivered).toBe(window);
 
+    // A PARTIAL grant (< one chunk of credit) must NOT release the next chunk
+    // — credit is acquired per chunk, so the producer stays parked. In the
+    // chunk=1 per-row shape, one grant releases exactly one row.
     engine.grantStreamCredit(streamID, 1);
-    await waitFor(window + 1);
     await new Promise(resolve => setTimeout(resolve, 25));
-    expect(delivered).toBe(window + 1);
+    expect(delivered).toBe(chunk > 1 ? window : window + 1);
+
+    // Topping up to one full chunk's worth of credit releases exactly one more
+    // chunk (grant of 0 is a no-op in the chunk=1 shape).
+    engine.grantStreamCredit(streamID, chunk - 1);
+    await waitFor(window + chunk);
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(delivered).toBe(window + chunk);
 
     engine.cancel();
     engine.cancelStream(streamID);
@@ -321,7 +341,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
         init: (specs: unknown[], dbPath: string, appID: string) => void;
         addQueriesStreamingRows: (
           specs: unknown[],
-          callback: (error: unknown, row: {changeType: number}) => void,
+          callback: (error: unknown, rows: {changeType: number}[]) => void,
           streamID: number,
         ) => Promise<void>;
         cancel: () => void;
@@ -333,6 +353,16 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     const configuredCredit = process.env['RUST_IVM_STREAM_CREDIT'];
     process.env['RUST_IVM_TSFN_QUEUE'] = '1';
     process.env['RUST_IVM_STREAM_CREDIT'] = '4';
+    // Chunked delivery: chunk = min(DELIVERY_CHUNK, credit), window =
+    // min(credit, queue * chunk) rows = at most ONE chunk on the depth-1
+    // queue. The producer must deliver exactly one chunk and then park
+    // interruptibly on credit — never block uninterruptibly in tsfn.call.
+    // (With RUST_IVM_DELIVERY_CHUNK=1 this is the old min(credit, queue) = 1.)
+    const clampChunk = Math.min(
+      Number(process.env['RUST_IVM_DELIVERY_CHUNK'] ?? '64'),
+      4,
+    );
+    const expectedWindow = Math.min(4, 1 * clampChunk);
     const engine = new RustIvmEngine();
     engine.init(
       [
@@ -354,9 +384,11 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     let delivered = 0;
     const done = engine.addQueriesStreamingRows(
       [{queryId: 'queue-clamp', astJson: JSON.stringify(AST)}],
-      (_error, row) => {
-        if (row.changeType >= 0) {
-          delivered++;
+      (_error, rows) => {
+        for (const row of rows) {
+          if (row.changeType >= 0) {
+            delivered++;
+          }
         }
       },
       9_002,
@@ -364,7 +396,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     process.env['RUST_IVM_TSFN_QUEUE'] = configuredQueue;
     process.env['RUST_IVM_STREAM_CREDIT'] = configuredCredit;
     await new Promise(resolve => setTimeout(resolve, 50));
-    expect(delivered).toBe(1);
+    expect(delivered).toBe(expectedWindow);
 
     engine.cancel();
     await done;

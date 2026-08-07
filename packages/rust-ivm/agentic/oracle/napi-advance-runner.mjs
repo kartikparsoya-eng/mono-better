@@ -414,16 +414,18 @@ async function runFixture(fixture) {
     const hydrateStreamId = 1;
     await engine.addQueriesStreamingRows(
       [{queryId: 'q1', astJson: JSON.stringify(fixture.ast)}],
-      (err, rc) => {
+      (err, chunk) => {
         if (err) throw err;
-        if (!rc) return;
-        engine.grantStreamCredit(hydrateStreamId, 1);
-        if (rc.changeType === -2) {
-          result.resets.push({phase: 'hydrate', rowKey: rc.rowKey});
-          return;
+        if (!chunk) return;
+        for (const rc of Array.isArray(chunk) ? chunk : [chunk]) {
+          engine.grantStreamCredit(hydrateStreamId, 1);
+          if (rc.changeType === -2) {
+            result.resets.push({phase: 'hydrate', rowKey: rc.rowKey});
+            continue;
+          }
+          if (rc.changeType < 0) continue;
+          result.hydrate.push(napiRowToJs(rc));
         }
-        if (rc.changeType < 0) return;
-        result.hydrate.push(napiRowToJs(rc));
       },
       hydrateStreamId,
     );
@@ -436,16 +438,18 @@ async function runFixture(fixture) {
     // 4. Advance (streaming path — TSFN callback, production code)
     if (fixture.pushes && fixture.pushes.length > 0) {
       const advanceStreamId = 2;
-      await engine.advanceToHeadStreamingRows((err, rc) => {
+      await engine.advanceToHeadStreamingRows((err, chunk) => {
         if (err) throw err;
-        if (!rc) return;
-        engine.grantStreamCredit(advanceStreamId, 1);
-        if (rc.changeType === -2) {
-          result.resets.push({phase: 'advance', rowKey: rc.rowKey});
-          return;
+        if (!chunk) return;
+        for (const rc of Array.isArray(chunk) ? chunk : [chunk]) {
+          engine.grantStreamCredit(advanceStreamId, 1);
+          if (rc.changeType === -2) {
+            result.resets.push({phase: 'advance', rowKey: rc.rowKey});
+            continue;
+          }
+          if (rc.changeType < 0) continue; // skip headers/sentinels
+          result.advance.push(napiRowToJs(rc));
         }
-        if (rc.changeType < 0) return; // skip headers/sentinels
-        result.advance.push(napiRowToJs(rc));
       }, advanceStreamId);
       result.phaseCheckpointProbes.push(
         probeCheckpointPassive(dbPath, 'advance'),
@@ -473,12 +477,14 @@ async function runFixture(fixture) {
       const finalStreamId = 1;
       await engine2.addQueriesStreamingRows(
         [{queryId: 'q1', astJson: JSON.stringify(fixture.ast)}],
-        (err, rc) => {
+        (err, chunk) => {
           if (err) throw err;
-          if (!rc) return;
-          engine2.grantStreamCredit(finalStreamId, 1);
-          if (rc.changeType < 0) return;
-          result.finalView.push(napiRowToJs(rc));
+          if (!chunk) return;
+          for (const rc of Array.isArray(chunk) ? chunk : [chunk]) {
+            engine2.grantStreamCredit(finalStreamId, 1);
+            if (rc.changeType < 0) continue;
+            result.finalView.push(napiRowToJs(rc));
+          }
         },
         finalStreamId,
       );

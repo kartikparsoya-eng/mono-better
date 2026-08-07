@@ -11,11 +11,12 @@ export type {
   NapiTableSpec,
 } from '../../../../rust-ivm/napi/index.js';
 
-// Terminal sentinel changeType streamed as the final TSFN call by the addon's
-// drain_barrier (napi/src/lib.rs). It carries no data; consumers skip it. Its
-// only purpose is to keep the addon's actor thread blocked until every real row
-// has been delivered to JS before the hydrate/advance promise resolves — so the
-// driver's queue-close cannot race ahead and drop the last row (seed 308).
+// Terminal sentinel changeType — the LAST element of the final delivery chunk
+// (see drain_barrier_chunk in napi/src/lib.rs). It carries no data; consumers
+// skip it. Its only purpose is to keep the addon's actor thread blocked until
+// every real row has been delivered to JS before the hydrate/advance promise
+// resolves — so the driver's queue-close cannot race ahead and drop the last
+// row (seed 308).
 const END_STREAM_SENTINEL = -3;
 
 import {must} from '../../../../shared/src/must.ts';
@@ -157,7 +158,8 @@ function perfJSReport(lc: LogContext, op: string): void {
   if (!PERF_TRACE_JS) {
     return;
   }
-  const f = (b: {ms: number; hits: number}) => `${b.ms.toFixed(1)}ms/${b.hits}h`;
+  const f = (b: {ms: number; hits: number}) =>
+    `${b.ms.toFixed(1)}ms/${b.hits}h`;
   const line = `[rust-ivm][PERF-JS] ${op} parse=${f(perfJS.parse)} revive=${f(perfJS.revive)} queue=${f(perfJS.queue)}`;
   lc.info?.(line);
   // Write directly to fd 2: vitest's `silent: 'passed-only'` swallows
@@ -188,7 +190,13 @@ function napiToRowChange(
     perfJS.parse.hits++;
     perfJS.revive.ms += t2 - t1;
     perfJS.revive.hits++;
-    return {type: c.changeType, queryID: c.queryId, table: c.table, rowKey, row};
+    return {
+      type: c.changeType,
+      queryID: c.queryId,
+      table: c.table,
+      rowKey,
+      row,
+    };
   }
   return {
     type: c.changeType,
@@ -853,9 +861,16 @@ export class RustIVMDriver {
     };
 
     const spec = [{queryId: queryID, astJson: JSON.stringify(query)}];
+    // The addon delivers CHUNKS: one TSFN callback carries an ordered array of
+    // NapiRowChanges (up to RUST_IVM_DELIVERY_CHUNK; the final chunk ends with
+    // the -3 END sentinel). Iterating here preserves the exact per-row order.
     const hydrated = this.#engine.addQueriesStreamingRows(
       spec,
-      (_err: unknown, row: NapiRowChange) => handleRow(row),
+      (_err: unknown, rows: NapiRowChange[]) => {
+        for (const row of rows) {
+          handleRow(row);
+        }
+      },
       streamId,
     );
 
@@ -945,19 +960,25 @@ export class RustIVMDriver {
     });
 
     const streamId = this.#nextStreamId++;
+    // Chunked delivery: each TSFN callback carries an ordered array. The first
+    // element of the first chunk is the header (-1) — or a reset (-2) when the
+    // advance resets before producing a header — and the final chunk ends with
+    // the -3 END sentinel (skipped by the drain loop).
     const advancing = this.#engine
-      .advanceToHeadStreamingRows((_err: unknown, row: NapiRowChange) => {
-        if (headerResolve) {
-          headerResolve(row);
-          headerResolve = null;
-          headerReject = null;
-        } else if (PERF_TRACE_JS) {
-          const t0 = performance.now();
-          queue.push(row);
-          perfJS.queue.ms += performance.now() - t0;
-          perfJS.queue.hits++;
-        } else {
-          queue.push(row);
+      .advanceToHeadStreamingRows((_err: unknown, rows: NapiRowChange[]) => {
+        for (const row of rows) {
+          if (headerResolve) {
+            headerResolve(row);
+            headerResolve = null;
+            headerReject = null;
+          } else if (PERF_TRACE_JS) {
+            const t0 = performance.now();
+            queue.push(row);
+            perfJS.queue.ms += performance.now() - t0;
+            perfJS.queue.hits++;
+          } else {
+            queue.push(row);
+          }
         }
       }, streamId)
       .then(() => deferClose(queue))

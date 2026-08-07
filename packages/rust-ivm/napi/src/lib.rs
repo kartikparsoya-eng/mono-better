@@ -18,21 +18,21 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::AsyncTask;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::{Env, Error as NapiError, JsFunction, Status, Task, bindgen_prelude::*};
+use napi::{bindgen_prelude::*, Env, Error as NapiError, JsFunction, Status, Task};
 use napi_derive::napi;
 use rust_ivm::credit::{StreamCreditGate, StreamCreditGuard};
 use rust_ivm::engine::{CancellationToken, Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::source::{MemorySource, Source};
-use rust_ivm::snapshotter::Snapshotter;
 use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
-use rust_ivm::sqlite::JobWatchdog;
+use rust_ivm::snapshotter::Snapshotter;
 use rust_ivm::sqlite::table_source::TableSource;
+use rust_ivm::sqlite::JobWatchdog;
 
 /// Watchdog warn/abort bounds for a single `EngineHandle::call`. The warn
 /// bound logs a slow-job signal (NON-aborting — a legit cold hydrate under load
@@ -77,13 +77,44 @@ fn stream_credit_capacity() -> i64 {
         .unwrap_or(256) as i64
 }
 
+/// Rows per TSFN crossing on the streaming paths. Each streaming delivery
+/// batches up to this many `NapiRowChange`s into ONE `tsfn.call` (one JS
+/// event-loop turnaround), instead of one call per row — under a busy event
+/// loop each turnaround costs ms, so per-row delivery made advance/hydrate
+/// latency load-dependent. `RUST_IVM_DELIVERY_CHUNK=1` reproduces per-row-ish
+/// delivery (chunks of one; header/END still merge into their chunk). Read
+/// once per process.
+fn delivery_chunk_size() -> usize {
+    static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        std::env::var("RUST_IVM_DELIVERY_CHUNK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(64)
+    })
+}
+
 /// A producer must exhaust its interruptible credit gate before it can fill the
 /// TSFN queue. Otherwise `credit > queue` lets it acquire another permit and
 /// block inside an uninterruptible `tsfn.call(Blocking)`, beyond the reach of
 /// cancel/watchdog. Clamping preserves the configured bound and makes every
 /// park site cancellation-safe.
-fn effective_stream_credit_capacity(queue_depth: usize) -> i64 {
-    stream_credit_capacity().min(queue_depth as i64)
+///
+/// Chunked delivery: one TSFN queue slot now holds one CHUNK (≤ `chunk` rows),
+/// so the row-credit window is clamped to `queue_depth * chunk` rows — the
+/// producer parks on `credit.acquire` (interruptible) strictly before it could
+/// block in `tsfn.call`. The chunk itself is clamped to the configured credit
+/// window (an `acquire(chunk_len)` larger than capacity would be rejected), so
+/// a tiny operator-configured window (e.g. the backpressure tests' 4) simply
+/// shrinks the chunk instead of breaking the stream.
+///
+/// Returns `(chunk_rows, credit_capacity_rows)`; `capacity >= chunk` always.
+fn delivery_window(queue_depth: usize) -> (usize, i64) {
+    let credit = stream_credit_capacity(); // >= 1 by construction
+    let chunk = delivery_chunk_size().min(credit as usize).max(1);
+    let capacity = credit.min((queue_depth as i64).saturating_mul(chunk as i64));
+    (chunk, capacity)
 }
 
 /// Return freed heap memory to the OS after a CG teardown. glibc retains freed
@@ -291,23 +322,24 @@ fn end_sentinel() -> NapiRowChange {
     }
 }
 
-/// Block the actor thread until JS has actually *executed* the callback for a
-/// terminal END sentinel — a true drain barrier.
+/// Deliver the FINAL chunk of a stream (its last element is the `-3` END
+/// sentinel) and block the actor thread until JS has actually *executed* the
+/// callback for it — a true drain barrier merged with the last data delivery.
 ///
-/// WHY: the streaming tasks fire rows via `tsfn.call(.., Blocking)` with a queue
-/// depth of one and then return from `compute()`, resolving the async-task promise.
+/// WHY: the streaming tasks fire chunks via `tsfn.call(.., Blocking)` and then
+/// return from `compute()`, resolving the async-task promise.
 /// The driver closes its row queue on that promise (`hydrated.then(deferClose)`).
 /// But `call(Blocking)` only blocks until the queue has *space* (the prior item
-/// was popped), NOT until its JS callback finished running. So the final row's
+/// was popped), NOT until its JS callback finished running. So the final chunk's
 /// callback could still be in flight when the promise resolves and the queue is
-/// closed → the last row is silently dropped (differential fuzzer seed 308,
+/// closed → the last rows are silently dropped (differential fuzzer seed 308,
 /// worst-case on a fat trailing row). Raising the queue depth only perturbs the
 /// timing; it does not fix the race.
 ///
 /// `call_with_return_value` invokes `cb` on the main JS thread *after* the JS
 /// callback returns. Because the TSFN queue is FIFO and the main thread is
-/// single-threaded, the sentinel's callback runs strictly after every prior
-/// row's callback has completed. We block the actor thread on a channel that the
+/// single-threaded, the final chunk's callback runs strictly after every prior
+/// chunk's callback has completed. We block the actor thread on a channel that the
 /// `cb` signals, so `compute()` cannot return (→ promise resolve → queue close)
 /// until every row has been delivered to the driver. Bounded by a generous
 /// timeout so a torn-down/aborted TSFN can never wedge the actor thread.
@@ -316,14 +348,26 @@ fn end_sentinel() -> NapiRowChange {
 /// driver tears down/retries). Swallowing it would resolve the promise with
 /// rows possibly undelivered — a silent incomplete hydrate/advance, the exact
 /// row-drop class this barrier exists to close.
-fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) -> std::result::Result<(), String> {
+///
+/// Delivering the trailing rows + END + ack in ONE crossing (instead of the old
+/// separate END call) merges the barrier round-trip with the last data
+/// delivery — one JS-loop turnaround, not two.
+fn drain_barrier_chunk(
+    tsfn: &ThreadsafeFunction<Vec<NapiRowChange>>,
+    final_chunk: Vec<NapiRowChange>,
+) -> std::result::Result<(), String> {
+    debug_assert!(
+        matches!(final_chunk.last(), Some(rc) if rc.change_type == -3),
+        "final chunk must end with the END sentinel",
+    );
     // NOTE: this scope accrues AFTER the engine's perf_trace::report() for the
-    // op has already run (the barrier is post-compute), so its time shows up in
-    // no [PERF] line unless a subsequent report runs before the next reset().
+    // op has already run (report() clears the stats), so it is surfaced by the
+    // `perf_trace::report_residual(..)` call right after each drain_barrier
+    // call site (same actor thread → same thread-local stats).
     let _t = rust_ivm::perf_trace::scope("deliver.drain");
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
     let status = tsfn.call_with_return_value(
-        Ok(end_sentinel()),
+        Ok(final_chunk),
         ThreadsafeFunctionCallMode::Blocking,
         move |_ret: napi::JsUnknown| {
             let _ = tx.send(());
@@ -332,18 +376,157 @@ fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) -> std::result::Resul
     );
     if status != Status::Ok {
         return Err(format!(
-            "drain barrier: TSFN closed before the END sentinel could be queued \
+            "drain barrier: TSFN closed before the final chunk could be queued \
              (status {:?}) — stream completeness cannot be confirmed",
             status
         ));
     }
     rx.recv_timeout(std::time::Duration::from_secs(30))
         .map_err(|_| {
-            "drain barrier: END sentinel callback did not execute within 30s — \
+            "drain barrier: final-chunk callback did not execute within 30s — \
          stream completeness cannot be confirmed (JS thread wedged or TSFN torn \
          down mid-drain)"
                 .to_string()
         })
+}
+
+// ---------------------------------------------------------------------------
+// ChunkSender — per-CHUNK TSFN delivery (collapses per-row boundary crossings)
+// ---------------------------------------------------------------------------
+
+/// Accumulates outgoing rows into chunks of `chunk_size` and crosses the TSFN
+/// boundary once per CHUNK instead of once per row. Under a contended JS event
+/// loop each crossing waits a full loop turnaround (ms), so per-row delivery
+/// made advance latency O(rows × loop-latency); per-chunk delivery is 1-2
+/// turnarounds per advance regardless of row count.
+///
+/// Protocol (element order inside chunks is the exact former per-row order):
+/// - the advance header (`-1`) is the FIRST element of the first chunk;
+/// - a reset (`-2`) is appended and nothing but END follows it;
+/// - the END sentinel (`-3`) is appended to the FINAL chunk, which is delivered
+///   through [`drain_barrier_chunk`] so the drain-barrier ack round-trip is
+///   merged with the last data delivery;
+/// - credit is acquired in ONE `acquire(stream_id, data_rows_in_chunk)` call
+///   before the chunk crosses (control rows −1/−2/−3 are not credit-gated,
+///   matching the JS side which only grants for data rows).
+///
+/// The engine's between-rows cancellation checks are untouched — they never
+/// crossed the boundary.
+struct ChunkSender<'a> {
+    tsfn: &'a ThreadsafeFunction<Vec<NapiRowChange>>,
+    credit: &'a StreamCreditGate,
+    stream_id: u64,
+    cancel: CancellationToken,
+    chunk_size: usize,
+    buf: Vec<NapiRowChange>,
+    /// Credit-gated (data) rows currently in `buf`.
+    data_in_buf: i64,
+    /// Set on credit-closed / TSFN failure; drops all further output.
+    stopped: bool,
+}
+
+impl<'a> ChunkSender<'a> {
+    fn new(
+        tsfn: &'a ThreadsafeFunction<Vec<NapiRowChange>>,
+        credit: &'a StreamCreditGate,
+        stream_id: u64,
+        cancel: CancellationToken,
+        chunk_size: usize,
+    ) -> Self {
+        ChunkSender {
+            tsfn,
+            credit,
+            stream_id,
+            cancel,
+            chunk_size: chunk_size.max(1),
+            buf: Vec::with_capacity(chunk_size.max(1) + 1),
+            data_in_buf: 0,
+            stopped: false,
+        }
+    }
+
+    /// Append a data row; flushes when the chunk is full.
+    fn push_data(&mut self, rc: &rust_ivm::streamer::RowChange) {
+        if self.stopped {
+            return;
+        }
+        let napi_rc = {
+            let _t = rust_ivm::perf_trace::scope("deliver.json");
+            row_change_to_napi(rc)
+        };
+        self.buf.push(napi_rc);
+        self.data_in_buf += 1;
+        if self.buf.len() >= self.chunk_size {
+            self.flush();
+        }
+    }
+
+    /// Append a control row (header `-1` / reset `-2`) — not credit-gated and
+    /// never triggers a mid-stream flush by itself (a reset is always followed
+    /// by `finish`, which flushes it with END appended).
+    fn push_control(&mut self, rc: NapiRowChange) {
+        if self.stopped {
+            return;
+        }
+        self.buf.push(rc);
+    }
+
+    /// Mid-stream flush: one credit acquire for the chunk's data rows, then one
+    /// TSFN crossing for the whole chunk. On a closed/cancelled gate or a dead
+    /// TSFN, flips the cancel token (the engine's between-rows check ends the
+    /// op) and drops the buffered rows — the consumer is discarding anyway.
+    fn flush(&mut self) {
+        if self.stopped || self.buf.is_empty() {
+            return;
+        }
+        let acquired = {
+            let _t = rust_ivm::perf_trace::scope("deliver.credit");
+            self.credit
+                .acquire(self.stream_id, self.data_in_buf, &self.cancel)
+        };
+        if !acquired {
+            self.cancel.cancel();
+            self.stopped = true;
+            self.buf.clear();
+            self.data_in_buf = 0;
+            return;
+        }
+        let chunk = std::mem::replace(&mut self.buf, Vec::with_capacity(self.chunk_size + 1));
+        self.data_in_buf = 0;
+        let status = {
+            let _t = rust_ivm::perf_trace::scope("deliver.tsfn");
+            self.tsfn
+                .call(Ok(chunk), ThreadsafeFunctionCallMode::Blocking)
+        };
+        if status != Status::Ok {
+            self.cancel.cancel();
+            self.stopped = true;
+        }
+    }
+
+    /// Terminal flush: appends the END sentinel and delivers the final chunk
+    /// through the drain barrier (ack merged with the last data delivery).
+    /// A cancelled/stopped stream skips the barrier entirely — on early
+    /// abandonment the consumer is discarding rows, so there is no last row to
+    /// guarantee, and blocking would stall the actor until the 30s timeout.
+    fn finish(mut self) -> std::result::Result<(), String> {
+        if self.stopped || self.cancel.is_cancelled() {
+            return Ok(());
+        }
+        if self.data_in_buf > 0 {
+            let acquired = {
+                let _t = rust_ivm::perf_trace::scope("deliver.credit");
+                self.credit
+                    .acquire(self.stream_id, self.data_in_buf, &self.cancel)
+            };
+            if !acquired {
+                self.cancel.cancel();
+                return Ok(());
+            }
+        }
+        self.buf.push(end_sentinel());
+        drain_barrier_chunk(self.tsfn, std::mem::take(&mut self.buf))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,51 +1234,60 @@ impl RustIvmEngine {
         })
     }
 
-    /// Add queries and hydrate them, streaming rows one at a time via `on_row`.
-    /// Each RowChange is handed to JS as it is produced. A row-credit gate and
+    /// Add queries and hydrate them, streaming rows in CHUNKS via `on_rows`
+    /// (one TSFN crossing per chunk of up to `RUST_IVM_DELIVERY_CHUNK` rows;
+    /// the final chunk ends with the `-3` END sentinel). A row-credit gate and
     /// bounded TSFN queue cap in-flight rows independently of result size.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn add_queries_streaming_rows(
         &self,
         env: Env,
         queries: Vec<NapiQuerySpec>,
-        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")] on_row: JsFunction,
+        #[napi(ts_arg_type = "(err: Error | null, rows: NapiRowChange[]) => void")]
+        on_rows: JsFunction,
         // Caller-minted monotonic stream id (#3): the driver passes the same id
         // to `grant_stream_credit`/`cancel_stream` so grants are tagged to this
         // exact stream. See StreamCreditGate.
         stream_id: f64,
     ) -> Result<AsyncTask<HydrateStreamingTask>> {
         let queue_depth = tsfn_queue_depth();
+        let (chunk_size, credit_capacity) = delivery_window(queue_depth);
         let tsfn =
-            env.create_threadsafe_function(&on_row, queue_depth, |ctx| Ok(vec![ctx.value]))?;
+            env.create_threadsafe_function(&on_rows, queue_depth, |ctx| Ok(vec![ctx.value]))?;
         Ok(AsyncTask::new(HydrateStreamingTask {
             handle: self.handle.clone(),
             queries,
             tsfn,
             stream_id: stream_id as u64,
-            credit_capacity: effective_stream_credit_capacity(queue_depth),
+            credit_capacity,
+            chunk_size,
         }))
     }
 
-    /// Advance to head, streaming rows one at a time via `on_row`.
-    /// Header (changeType=-1) is emitted first, change rows in the middle,
-    /// reset row (changeType=-2) last if the engine reported a reset_reason.
-    /// Bounded TSFN (max_queue_size=1, Blocking mode) for real backpressure.
+    /// Advance to head, streaming rows in CHUNKS via `on_rows`. The header
+    /// (changeType=-1) is the first element of the first chunk, change rows
+    /// follow, a reset row (changeType=-2) is appended if the engine reported a
+    /// reset_reason, and the final chunk ends with the `-3` END sentinel.
+    /// Bounded TSFN (queue slots hold chunks, Blocking mode) + row-credit gate
+    /// for real backpressure.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn advance_to_head_streaming_rows(
         &self,
         env: Env,
-        #[napi(ts_arg_type = "(err: Error | null, row: NapiRowChange) => void")] on_row: JsFunction,
+        #[napi(ts_arg_type = "(err: Error | null, rows: NapiRowChange[]) => void")]
+        on_rows: JsFunction,
         stream_id: f64,
     ) -> Result<AsyncTask<AdvanceStreamingTask>> {
         let queue_depth = tsfn_queue_depth();
+        let (chunk_size, credit_capacity) = delivery_window(queue_depth);
         let tsfn =
-            env.create_threadsafe_function(&on_row, queue_depth, |ctx| Ok(vec![ctx.value]))?;
+            env.create_threadsafe_function(&on_rows, queue_depth, |ctx| Ok(vec![ctx.value]))?;
         Ok(AsyncTask::new(AdvanceStreamingTask {
             handle: self.handle.clone(),
             tsfn,
             stream_id: stream_id as u64,
-            credit_capacity: effective_stream_credit_capacity(queue_depth),
+            credit_capacity,
+            chunk_size,
         }))
     }
 
@@ -1615,13 +1807,15 @@ impl Task for AdvanceTask {
 // Streaming tasks — row-by-row via ThreadsafeFunction
 // ---------------------------------------------------------------------------
 
-/// Hydration streaming task. Streams rows via TSFN instead of materializing.
+/// Hydration streaming task. Streams row CHUNKS via TSFN instead of
+/// materializing (see ChunkSender for the chunk protocol).
 pub struct HydrateStreamingTask {
     handle: EngineHandle,
     queries: Vec<NapiQuerySpec>,
-    tsfn: ThreadsafeFunction<NapiRowChange>,
+    tsfn: ThreadsafeFunction<Vec<NapiRowChange>>,
     stream_id: u64,
     credit_capacity: i64,
+    chunk_size: usize,
 }
 
 impl Task for HydrateStreamingTask {
@@ -1634,6 +1828,7 @@ impl Task for HydrateStreamingTask {
         let credit = self.handle.credit.clone();
         let stream_id = self.stream_id;
         let capacity = self.credit_capacity;
+        let chunk_size = self.chunk_size;
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
@@ -1656,52 +1851,36 @@ impl Task for HydrateStreamingTask {
                 // closes it on EVERY exit (return, panic-unwind, cancel) so a
                 // parked-nowhere consumer never leaks an open generation.
                 let _credit_guard = StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
-                let do_hydrate = |rc: &rust_ivm::streamer::RowChange| {
-                    // Wait for one credit before crossing the boundary; the
-                    // consumer grants as it drains its AsyncQueue. `false` =
-                    // gate closed/cancelled (consumer gone or watchdog abort) →
-                    // stop; the engine's between-rows cancel check ends the fetch.
-                    let acquired = {
-                        let _t = rust_ivm::perf_trace::scope("deliver.credit");
-                        credit.acquire(stream_id, 1, &cancel)
-                    };
-                    if !acquired {
-                        cancel.cancel();
-                        return;
-                    }
-                    let napi_rc = {
-                        let _t = rust_ivm::perf_trace::scope("deliver.json");
-                        row_change_to_napi(rc)
-                    };
-                    let status = {
-                        let _t = rust_ivm::perf_trace::scope("deliver.tsfn");
-                        tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking)
-                    };
-                    if status != Status::Ok {
-                        cancel.cancel();
-                    }
-                };
-                // Single-fetch hydrate, streaming row-by-row to JS via the TSFN
-                // (blocking backpressure). One fetch per pipeline warms operator
-                // state and emits output while the actor graph remains
+                // Per-CHUNK delivery: rows accumulate on the actor (no boundary
+                // crossing) and cross via one credit acquire + one TSFN call
+                // per chunk. The gate-closed path flips cancel; the engine's
+                // between-rows cancel check ends the fetch.
+                let mut sender =
+                    ChunkSender::new(&tsfn, &credit, stream_id, cancel.clone(), chunk_size);
+                // Single-fetch hydrate, streaming chunk-by-chunk to JS via the
+                // TSFN (blocking backpressure). One fetch per pipeline warms
+                // operator state and emits output while the actor graph remains
                 // single-writer.
                 let checkpoint = eng.source_connection_checkpoint();
                 let hydrated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    eng.add_queries_streaming(&specs, do_hydrate);
+                    eng.add_queries_streaming(&specs, |rc| sender.push_data(rc));
                 }));
                 if let Err(payload) = hydrated {
                     eng.rollback_source_connections(&checkpoint);
                     std::panic::resume_unwind(payload);
                 }
                 // Barrier: don't resolve the promise (→ driver closes its row
-                // queue) until every streamed row has landed in JS. See
-                // drain_barrier for the seed-308 last-row-drop it closes. SKIP it
+                // queue) until every streamed row has landed in JS. finish()
+                // flushes the trailing rows WITH the END sentinel through the
+                // drain barrier (one merged crossing) — see drain_barrier_chunk
+                // for the seed-308 last-row-drop it closes. It SKIPS the barrier
                 // when cancelled: on early abandonment the consumer is discarding
                 // rows, so there is no last row to guarantee — blocking on the
                 // barrier would stall this job (and everything queued behind it
                 // on the actor) until the barrier's 30s timeout (#3).
+                sender.finish()?;
                 if !cancel.is_cancelled() {
-                    drain_barrier(&tsfn)?;
+                    rust_ivm::perf_trace::report_residual("hydrate");
                 }
                 Ok(())
             })?
@@ -1713,12 +1892,14 @@ impl Task for HydrateStreamingTask {
     }
 }
 
-/// Advance streaming task. Streams rows via TSFN instead of materializing.
+/// Advance streaming task. Streams row CHUNKS via TSFN instead of
+/// materializing (see ChunkSender for the chunk protocol).
 pub struct AdvanceStreamingTask {
     handle: EngineHandle,
-    tsfn: ThreadsafeFunction<NapiRowChange>,
+    tsfn: ThreadsafeFunction<Vec<NapiRowChange>>,
     stream_id: u64,
     credit_capacity: i64,
+    chunk_size: usize,
 }
 
 impl Task for AdvanceStreamingTask {
@@ -1730,20 +1911,24 @@ impl Task for AdvanceStreamingTask {
         let credit = self.handle.credit.clone();
         let stream_id = self.stream_id;
         let capacity = self.credit_capacity;
+        let chunk_size = self.chunk_size;
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
                 // A prior panic left the engine possibly half-mutated. Refuse to
                 // advance on it; stream a reset so the driver rehydrates first.
                 if state.poisoned {
                     state.poisoned = false;
-                    let _ = tsfn.call(
-                        Ok(make_reset_row(
-                            "schema-change",
-                            "engine reset after a prior advance panic; rehydrating",
-                        )),
-                        ThreadsafeFunctionCallMode::Blocking,
-                    );
-                    drain_barrier(&tsfn)?;
+                    drain_barrier_chunk(
+                        &tsfn,
+                        vec![
+                            make_reset_row(
+                                "schema-change",
+                                "engine reset after a prior advance panic; rehydrating",
+                            ),
+                            end_sentinel(),
+                        ],
+                    )?;
+                    rust_ivm::perf_trace::report_residual("advance");
                     return Ok(());
                 }
                 let syncable_tables = state.syncable_tables.clone();
@@ -1768,56 +1953,47 @@ impl Task for AdvanceStreamingTask {
                 let _credit_guard =
                     StreamCreditGuard::begin(credit.clone(), stream_id, capacity);
 
+                // Per-CHUNK delivery. The header is the first element of the
+                // first chunk; data rows are credit-gated per chunk (one
+                // acquire(chunk_len) each); a reset/END lands in the final
+                // barriered chunk (see finish below). RefCell: the header and
+                // row callbacks both feed the same sender (single actor thread).
+                let sender = RefCell::new(ChunkSender::new(
+                    &tsfn,
+                    &credit,
+                    stream_id,
+                    cancel.clone(),
+                    chunk_size,
+                ));
                 let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     eng.advance_to_head_stream(
                         &mut snapshotter,
                         &syncable_tables,
                         &all_table_names,
                         |version, num_changes| {
+                            let _t = rust_ivm::perf_trace::scope("deliver.header");
                             let header_key = serde_json::json!({
                                 "version": version.to_string(),
                                 "numChanges": num_changes as f64,
                                 "aborted": false,
                             }).to_string();
-                            let _ = tsfn.call(Ok(NapiRowChange {
+                            sender.borrow_mut().push_control(NapiRowChange {
                                 change_type: -1,
                                 query_id: String::new(),
                                 table: String::new(),
                                 row_key: header_key,
                                 row: None,
                                 is_hidden: false,
-                            }), ThreadsafeFunctionCallMode::Blocking);
+                            });
                         },
-                        |rc| {
-                            // Credit-gate each data row (#3). `false` = gate
-                            // closed/cancelled → stop; the between-rows cancel
-                            // check ends the advance.
-                            let acquired = {
-                                let _t = rust_ivm::perf_trace::scope("deliver.credit");
-                                credit.acquire(stream_id, 1, &cancel)
-                            };
-                            if !acquired {
-                                cancel.cancel();
-                                return;
-                            }
-                            let napi_rc = {
-                                let _t = rust_ivm::perf_trace::scope("deliver.json");
-                                row_change_to_napi(rc)
-                            };
-                            let status = {
-                                let _t = rust_ivm::perf_trace::scope("deliver.tsfn");
-                                tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking)
-                            };
-                            if status != Status::Ok {
-                                cancel.cancel();
-                            }
-                        },
+                        |rc| sender.borrow_mut().push_data(rc),
                     )
                 }));
 
                 state.engine = Some(eng);
                 state.snapshotter = Some(snapshotter);
 
+                let mut sender = sender.into_inner();
                 match advance {
                     Ok(result) => {
                         match result {
@@ -1827,40 +2003,60 @@ impl Task for AdvanceStreamingTask {
                                         "reason": reason,
                                         "msg": advance_result.reset_msg.clone().unwrap_or_default(),
                                     }).to_string();
-                                    let _ = tsfn.call(Ok(NapiRowChange {
+                                    sender.push_control(NapiRowChange {
                                         change_type: -2,
                                         query_id: String::new(),
                                         table: String::new(),
                                         row_key: reset_key,
                                         row: None,
                                         is_hidden: false,
-                                    }), ThreadsafeFunctionCallMode::Blocking);
+                                    });
                                 }
-                                // Skip the barrier on early abandonment (#3): a
-                                // discarding consumer has no last row to await.
+                                // finish() delivers the final chunk (trailing
+                                // rows + optional reset + END) through the
+                                // merged drain barrier; it skips the barrier on
+                                // early abandonment (#3): a discarding consumer
+                                // has no last row to await.
+                                sender.finish()?;
                                 if !cancel.is_cancelled() {
-                                    drain_barrier(&tsfn)?;
+                                    rust_ivm::perf_trace::report_residual("advance");
                                 }
                                 Ok(())
                             }
-                            Err(e) => Err(format!("advance failed: {}", e)),
+                            Err(e) => {
+                                // Deliver what was already produced (header +
+                                // pre-failure rows) before failing — per-row
+                                // delivery did this implicitly, and the driver's
+                                // currentVersion comes from the header even when
+                                // the advance errors (matching TS, where the
+                                // snapshotter has advanced before the failure).
+                                sender.flush();
+                                Err(format!("advance failed: {}", e))
+                            }
                         }
                     }
                     Err(payload) => {
                         // Scalar-subquery value change → transparent reset:
                         // stream a -2 reset row (reason 'scalar-subquery') and
-                        // succeed, rather than throwing a teardown error.
+                        // succeed, rather than throwing a teardown error. The
+                        // buffered header/pre-reset rows are flushed first (the
+                        // former per-row protocol had already delivered them).
                         if let Some(msg) = scalar_reset_message(&payload) {
-                            let _ = tsfn.call(
-                                Ok(make_reset_row("scalar-subquery", &msg)),
-                                ThreadsafeFunctionCallMode::Blocking,
-                            );
-                            drain_barrier(&tsfn)?;
+                            sender.flush();
+                            drain_barrier_chunk(
+                                &tsfn,
+                                vec![make_reset_row("scalar-subquery", &msg), end_sentinel()],
+                            )?;
+                            rust_ivm::perf_trace::report_residual("advance");
                             Ok(())
                         } else {
                             // Poison the engine: half-mutated graph must reset+
                             // rehydrate before the next advance (see AdvanceTask).
                             state.poisoned = true;
+                            // Deliver the buffered header/pre-panic rows before
+                            // surfacing the error (per-row parity; the header
+                            // carries the advanced version — see the Err(e) arm).
+                            sender.flush();
                             let msg = panic_message(&payload);
                             eprintln!(
                                 "[rust-ivm] advance streamed panicked — surfacing as thrown error: {msg}"
