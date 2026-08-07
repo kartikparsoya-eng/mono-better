@@ -58,6 +58,7 @@ impl TakeStorage {
     }
 
     pub fn get(&self, key: &str) -> Option<TakeState> {
+        let _t = crate::perf_trace::scope("take.storage");
         self.states.get(key).map(|state| TakeState {
             size: state.size,
             // PipelineDriver's DatabaseStorage JSON-serializes every value.
@@ -68,6 +69,7 @@ impl TakeStorage {
     }
 
     pub fn set(&mut self, key: String, state: TakeState) {
+        let _t = crate::perf_trace::scope("take.storage");
         self.states.insert(key, state);
     }
 
@@ -495,6 +497,7 @@ impl Take {
                 constraint: constraint.clone(),
                 ..Default::default()
             };
+            let _t = crate::perf_trace::scope("take.bound_fetch");
             stream_first(self.input.borrow().fetch(&req))
         } else {
             // Fetch bound and the row before it
@@ -507,9 +510,11 @@ impl Take {
                 reverse: true,
                 ..Default::default()
             };
-            let mut iter = skip_yields(self.input.borrow().fetch(&req));
-            let bound_node = iter.next();
-            let before_bound_node = iter.next();
+            let (bound_node, before_bound_node) = {
+                let _t = crate::perf_trace::scope("take.bound_fetch");
+                let mut iter = skip_yields(self.input.borrow().fetch(&req));
+                (iter.next(), iter.next())
+            };
             // Update bound to the row before the old bound (or the new row if it's larger)
             if let Some(ref bbn) = before_bound_node {
                 let new_bound = if compare(&node.row, &bbn.row) == CmpOrdering::Greater {
@@ -586,7 +591,10 @@ impl Take {
             reverse: true,
             ..Default::default()
         };
-        let before_bound_node = stream_first(self.input.borrow().fetch(&req));
+        let before_bound_node = {
+            let _t = crate::perf_trace::scope("take.bound_fetch");
+            stream_first(self.input.borrow().fetch(&req))
+        };
 
         let mut new_bound: Option<(Node, bool)> = None;
         if let Some(ref bbn) = before_bound_node {
@@ -605,6 +613,7 @@ impl Take {
                 constraint: constraint.clone(),
                 ..Default::default()
             };
+            let _t = crate::perf_trace::scope("take.bound_fetch");
             for n in skip_yields(self.input.borrow().fetch(&req)) {
                 let push = compare(&n.row, bound) == CmpOrdering::Greater;
                 new_bound = Some((n, push));

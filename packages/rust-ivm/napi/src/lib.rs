@@ -326,6 +326,10 @@ fn end_sentinel() -> NapiRowChange {
 /// rows possibly undelivered — a silent incomplete hydrate/advance, the exact
 /// row-drop class this barrier exists to close.
 fn drain_barrier(tsfn: &ThreadsafeFunction<NapiRowChange>) -> std::result::Result<(), String> {
+    // NOTE: this scope accrues AFTER the engine's perf_trace::report() for the
+    // op has already run (the barrier is post-compute), so its time shows up in
+    // no [PERF] line unless a subsequent report runs before the next reset().
+    let _t = rust_ivm::perf_trace::scope("deliver.drain");
     let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
     let status = tsfn.call_with_return_value(
         Ok(end_sentinel()),
@@ -1795,12 +1799,23 @@ impl Task for HydrateStreamingTask {
                     // consumer grants as it drains its AsyncQueue. `false` =
                     // gate closed/cancelled (consumer gone or watchdog abort) →
                     // stop; the engine's between-rows cancel check ends the fetch.
-                    if !credit.acquire(stream_id, 1, &cancel) {
+                    let acquired = {
+                        let _t = rust_ivm::perf_trace::scope("deliver.credit");
+                        credit.acquire(stream_id, 1, &cancel)
+                    };
+                    if !acquired {
                         cancel.cancel();
                         return;
                     }
-                    let napi_rc = row_change_to_napi(rc);
-                    if tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking) != Status::Ok {
+                    let napi_rc = {
+                        let _t = rust_ivm::perf_trace::scope("deliver.json");
+                        row_change_to_napi(rc)
+                    };
+                    let status = {
+                        let _t = rust_ivm::perf_trace::scope("deliver.tsfn");
+                        tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking)
+                    };
+                    if status != Status::Ok {
                         cancel.cancel();
                     }
                 };
@@ -1915,12 +1930,23 @@ impl Task for AdvanceStreamingTask {
                             // Credit-gate each data row (#3). `false` = gate
                             // closed/cancelled → stop; the between-rows cancel
                             // check ends the advance.
-                            if !credit.acquire(stream_id, 1, &cancel) {
+                            let acquired = {
+                                let _t = rust_ivm::perf_trace::scope("deliver.credit");
+                                credit.acquire(stream_id, 1, &cancel)
+                            };
+                            if !acquired {
                                 cancel.cancel();
                                 return;
                             }
-                            let napi_rc = row_change_to_napi(rc);
-                            if tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking) != Status::Ok {
+                            let napi_rc = {
+                                let _t = rust_ivm::perf_trace::scope("deliver.json");
+                                row_change_to_napi(rc)
+                            };
+                            let status = {
+                                let _t = rust_ivm::perf_trace::scope("deliver.tsfn");
+                                tsfn.call(Ok(napi_rc), ThreadsafeFunctionCallMode::Blocking)
+                            };
+                            if status != Status::Ok {
                                 cancel.cancel();
                             }
                         },

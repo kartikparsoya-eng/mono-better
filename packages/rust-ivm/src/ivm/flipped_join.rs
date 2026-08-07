@@ -129,6 +129,7 @@ impl FlippedJoin {
     }
 
     fn fetch_batched(&self, req: &FetchRequest, child_nodes: Vec<Node>) -> NodeStream {
+        let _t = crate::perf_trace::scope("fjoin.batch_fetch");
         let parent_key = self.parent_key.clone();
         let child_key = self.child_key.clone();
         let parent_req_constraint = req.constraint.clone();

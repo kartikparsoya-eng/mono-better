@@ -17,6 +17,7 @@ pub mod builder;
 pub mod credit;
 pub mod engine;
 pub mod ivm;
+pub mod perf_trace;
 pub mod planner;
 pub mod replay;
 pub mod snapshotter;

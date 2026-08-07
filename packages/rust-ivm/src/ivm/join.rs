@@ -119,10 +119,13 @@ impl Join {
                 build_join_constraint(&parent_row_for_closure, &parent_key, &child_key);
             let child_input = child.borrow();
             let stream = match constraint {
-                Some(c) => child_input.fetch(&FetchRequest {
-                    constraint: Some(c),
-                    ..Default::default()
-                }),
+                Some(c) => {
+                    let _t = crate::perf_trace::scope("join.child_fetch");
+                    child_input.fetch(&FetchRequest {
+                        constraint: Some(c),
+                        ..Default::default()
+                    })
+                }
                 None => empty_stream(),
             };
 
@@ -272,6 +275,7 @@ impl Join {
             let output = self.output.borrow().clone();
             let output = output.expect("Join output not set");
 
+            let _t = crate::perf_trace::scope("join.push_parents");
             for parent_node in parent_stream {
                 *self.inprogress_child_change_position.borrow_mut() = Some(parent_node.row.clone());
 
@@ -352,10 +356,13 @@ impl Join {
                     build_join_constraint(&parent_row_for_closure, &parent_key, &child_key);
                 let child_input = child.borrow();
                 let stream = match constraint {
-                    Some(c) => child_input.fetch(&FetchRequest {
-                        constraint: Some(c),
-                        ..Default::default()
-                    }),
+                    Some(c) => {
+                        let _t = crate::perf_trace::scope("join.child_fetch");
+                        child_input.fetch(&FetchRequest {
+                            constraint: Some(c),
+                            ..Default::default()
+                        })
+                    }
                     None => empty_stream(),
                 };
 

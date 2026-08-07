@@ -92,6 +92,7 @@ impl Exists {
     }
 
     fn fetch_size(&self, node: &Node) -> usize {
+        let _t = crate::perf_trace::scope("exists.size");
         if let Some(rel_fn) = node.relationships.get(&self.relationship_name) {
             rel_fn()
                 .filter(|i| matches!(i, crate::ivm::stream::StreamItem::Data(_)))
@@ -174,24 +175,30 @@ impl Input for Exists {
                 if let Some(&cached) = cache.borrow().get(&key) {
                     cached
                 } else {
-                    let size = if let Some(rel_fn) = n.relationships.get(&rel_name) {
-                        rel_fn()
-                            .filter(|i| matches!(i, crate::ivm::stream::StreamItem::Data(_)))
-                            .count()
-                    } else {
-                        0
+                    let size = {
+                        let _t = crate::perf_trace::scope("exists.size");
+                        if let Some(rel_fn) = n.relationships.get(&rel_name) {
+                            rel_fn()
+                                .filter(|i| matches!(i, crate::ivm::stream::StreamItem::Data(_)))
+                                .count()
+                        } else {
+                            0
+                        }
                     };
                     let exists = size > 0;
                     cache.borrow_mut().insert(key, exists);
                     exists
                 }
             } else {
-                let size = if let Some(rel_fn) = n.relationships.get(&rel_name) {
-                    rel_fn()
-                        .filter(|i| matches!(i, crate::ivm::stream::StreamItem::Data(_)))
-                        .count()
-                } else {
-                    0
+                let size = {
+                    let _t = crate::perf_trace::scope("exists.size");
+                    if let Some(rel_fn) = n.relationships.get(&rel_name) {
+                        rel_fn()
+                            .filter(|i| matches!(i, crate::ivm::stream::StreamItem::Data(_)))
+                            .count()
+                    } else {
+                        0
+                    }
                 };
                 size > 0
             };
