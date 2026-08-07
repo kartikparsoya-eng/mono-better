@@ -124,6 +124,10 @@ fn main() {
             });
         }).await
     });
+
+    // Send ready message to parent process (TS ProcessManager)
+    // Format matches TS: JSON array ["ready", {"ready": true}]
+    println!("[\"ready\", {{\"ready\": true}}]");
 }
 
 /// Placeholder services factory — will be replaced with full implementation.

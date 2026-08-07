@@ -37,8 +37,13 @@ import {
   SHADOW_SYNCER_URL,
   SYNCER_URL,
 } from './worker-urls.ts';
+import {spawn, type ChildProcess} from 'node:child_process';
+import {EventEmitter} from 'node:events';
+import {fileURLToPath} from 'node:url';
 
 const clientConnectionBifurcated = false;
+
+const useRustSyncer = process.env.ZERO_SYNCER === 'rust';
 
 // Default LogContext, overridden in runWorker
 let lc = new LogContext('info', {}, consoleLogSink);
@@ -93,6 +98,54 @@ export default async function runWorker(
     const worker = childWorker(moduleUrl, env, ...args, ...internalFlags);
     const name = path.basename(moduleUrl.pathname) + (id ? ` (${id})` : '');
     return processes.addWorker(worker, type, name);
+  }
+
+  // Spawn the rust-syncer binary as a child process instead of a TS worker.
+  // The binary communicates readiness via stdout: ["ready", {"ready": true}]
+  function loadRustSyncer(id: number, ...args: string[]): Worker {
+    const bin = path.join(
+      path.dirname(fileURLToPath(SYNCER_URL)),
+      '..',
+      'rust-syncer',
+    );
+    const child = spawn(bin, [...args, ...internalFlags], {
+      detached: process.platform !== 'win32',
+      env,
+      stdio: ['inherit', 'pipe', 'inherit'],
+    }) as ChildProcess;
+
+    // Wrap ChildProcess into a Worker-compatible interface.
+    const emitter = new EventEmitter() as Worker;
+    emitter.kill = (signal?: string) => child.kill(signal as any);
+    (emitter as any).pid = child.pid;
+    (emitter as any).send = (_msg: unknown) => false; // no IPC to binary
+
+    // Listen for ready message on stdout.
+    let buffer = '';
+    child.stdout?.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('[')) {
+          try {
+            const msg = JSON.parse(trimmed);
+            emitter.emit('message', msg);
+          } catch {
+            // Non-JSON output, ignore
+          }
+        }
+      }
+    });
+    child.on('exit', (code, signal) => {
+      emitter.emit('close', code, signal);
+    });
+    child.on('error', err => {
+      emitter.emit('error', err);
+    });
+
+    return processes.addWorker(emitter, 'user-facing', `rust-syncer (${id})`);
   }
 
   const {
@@ -181,9 +234,15 @@ export default async function runWorker(
 
     const notifier = createNotifierFrom(lc, replicator);
     for (let i = 0; i < numSyncers; i++) {
-      syncers.push(loadWorker(SYNCER_URL, 'user-facing', i, mode, String(i)));
+      if (useRustSyncer) {
+        syncers.push(loadRustSyncer(i, mode, String(i)));
+      } else {
+        syncers.push(loadWorker(SYNCER_URL, 'user-facing', i, mode, String(i)));
+      }
     }
-    syncers.forEach(syncer => handleSubscriptionsFrom(lc, syncer, notifier));
+    if (!useRustSyncer) {
+      syncers.forEach(syncer => handleSubscriptionsFrom(lc, syncer, notifier));
+    }
   }
   let mutator: Worker | undefined;
   if (clientConnectionBifurcated) {
