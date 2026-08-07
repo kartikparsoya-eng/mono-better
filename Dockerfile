@@ -215,6 +215,12 @@ ENV RUST_IVM_TSFN_QUEUE=64
 # Keep the producer credit window aligned with the callback queue so a slow JS
 # consumer cannot accumulate a second, larger buffer behind the native bound.
 ENV RUST_IVM_STREAM_CREDIT=64
+# Per-stage perf spans (perf_trace.rs): one [rust-ivm][PERF] breakdown line per
+# hydrate, per advance, and on EVERY breaker-trip abort (advance-TRIPPED), so
+# resets self-diagnose compute-vs-delivery in the pod logs. Stderr only —
+# do NOT set a file path here (unbounded append in the container). Overhead
+# ~2-3% on hot scans, zero when unset. Set empty to disable.
+ENV RUST_IVM_PERF_TRACE=1
 # Distribute client groups across sync workers by count (round-robin) instead
 # of by CG-id hash. Sticky per CG within a process lifetime; evens out load
 # when hash bucketing leaves workers lopsided.
