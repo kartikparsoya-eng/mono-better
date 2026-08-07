@@ -11,6 +11,7 @@ pub mod drain;
 pub mod message_handler;
 pub mod protocol;
 pub mod router;
+pub mod view_syncer;
 pub mod ws_server;
 pub mod ws_sink;
 
@@ -33,6 +34,12 @@ pub use protocol::*;
 pub use router::{
     AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter,
     GroupAuthState,
+};
+pub use view_syncer::{
+    AdvanceNotification, AdvanceParams, AdvanceResult, AdvanceSyncResult,
+    CVRQuery, CVRSnapshot, CVRStoreOps, CVRVersion, HydrateParams,
+    HydrateResult, InspectorDelegate, PipelineDriver, RustViewSyncer, TTLClock,
+    TransformMode, has_expired_queries, is_expired,
 };
 pub use ws_server::{run_ws_server, accept_connection, ConnectionContext, WsServerConfig};
 pub use ws_sink::{DirectWebSocketSink, WsCommand};

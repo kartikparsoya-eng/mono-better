@@ -278,6 +278,14 @@ impl ErrorBody {
         })
     }
 
+    pub fn basic(kind: ErrorKind, message: String) -> Self {
+        ErrorBody::Basic(BasicErrorBody {
+            kind,
+            message,
+            origin: Some(ErrorOrigin::ZeroCache),
+        })
+    }
+
     pub fn rehome(message: impl Into<String>) -> Self {
         ErrorBody::Backoff(BackoffBody {
             kind: ErrorKind::Rehome,
