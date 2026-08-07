@@ -26,7 +26,6 @@ import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
 import {DbFile} from '../../test/lite.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
 import {Database} from '../../../../zqlite/src/db.ts';
-import type {DB} from '../../../../zqlite/src/db.ts';
 import {initReplicationState} from '../replicator/schema/replication-state.ts';
 import {listTables} from '../../db/lite-tables.ts';
 import {populateFromExistingTables} from '../replicator/schema/column-metadata.ts';
@@ -57,7 +56,7 @@ describe.skipIf(!ADDON_PATH || !RUN)('advance fixed overhead bench', () => {
   const BASE = '8400bivbkg';
 
   let dbFile: DbFile;
-  let db: DB;
+  let db: Database;
   let lc: LogContext;
 
   beforeEach(() => {

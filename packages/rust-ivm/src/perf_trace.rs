@@ -116,7 +116,10 @@ pub fn report_residual(op: &str) {
                 .iter()
                 .map(|(k, ns, n)| {
                     let ms = *ns as f64 / 1e6;
-                    format!("{k}={ms:.1}ms/{n}h/{:.1}us", ms * 1000.0 / (*n).max(1) as f64)
+                    format!(
+                        "{k}={ms:.1}ms/{n}h/{:.1}us",
+                        ms * 1000.0 / (*n).max(1) as f64
+                    )
                 })
                 .collect();
             emit(&format!(
