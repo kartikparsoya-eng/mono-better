@@ -71,16 +71,27 @@ pub fn report(op: &str, total_ms: f64) {
                 let ms = *ns as f64 / 1e6;
                 format!(
                     "{k}={ms:.1}ms({:.0}%)/{n}h/{:.1}us",
-                    if total_ms > 0.0 { ms / total_ms * 100.0 } else { 0.0 },
+                    if total_ms > 0.0 {
+                        ms / total_ms * 100.0
+                    } else {
+                        0.0
+                    },
                     ms * 1000.0 / (*n).max(1) as f64
                 )
             })
             .collect();
-        let line = format!("[rust-ivm][PERF] {op} total={total_ms:.1}ms  {}", lines.join("  "));
+        let line = format!(
+            "[rust-ivm][PERF] {op} total={total_ms:.1}ms  {}",
+            lines.join("  ")
+        );
         eprintln!("{line}");
         if let Some(path) = env_value().filter(|v| v.starts_with('/')) {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
                 let _ = writeln!(f, "{line}");
             }
         }
