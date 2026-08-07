@@ -64,7 +64,7 @@ pub fn report(op: &str, total_ms: f64) {
     }
     STATS.with(|s| {
         let mut v: Vec<_> = s.borrow().iter().map(|(k, &(ns, n))| (*k, ns, n)).collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|e| std::cmp::Reverse(e.1));
         let lines: Vec<String> = v
             .iter()
             .map(|(k, ns, n)| {
