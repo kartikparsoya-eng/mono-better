@@ -35,6 +35,15 @@ jobs:
         working-directory: packages/rust-ivm
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Build static WAL2 SQLite for tests
+        working-directory: packages/rust-ivm
+        run: |
+          BUILD=$(scripts/build-wal2-static-lib.sh)
+          echo "SQLITE3_LIB_DIR=$BUILD" >> "$GITHUB_ENV"
+          echo "SQLITE3_INCLUDE_DIR=$BUILD" >> "$GITHUB_ENV"
+          echo "SQLITE3_STATIC=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_LIBDIR=$(mktemp -d)" >> "$GITHUB_ENV"
+
       - name: Rust unit and integration tests
         working-directory: packages/rust-ivm
         run: cargo test --locked --all-targets -- --test-threads=1
