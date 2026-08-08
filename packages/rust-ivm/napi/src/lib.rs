@@ -18,21 +18,21 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use napi::bindgen_prelude::AsyncTask;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::{bindgen_prelude::*, Env, Error as NapiError, JsFunction, Status, Task};
+use napi::{Env, Error as NapiError, JsFunction, Status, Task, bindgen_prelude::*};
 use napi_derive::napi;
 use rust_ivm::credit::{StreamCreditGate, StreamCreditGuard};
 use rust_ivm::engine::{CancellationToken, Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::source::{MemorySource, Source};
-use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::snapshotter::Snapshotter;
-use rust_ivm::sqlite::table_source::TableSource;
+use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::sqlite::JobWatchdog;
+use rust_ivm::sqlite::table_source::TableSource;
 
 /// Watchdog warn/abort bounds for a single `EngineHandle::call`. The warn
 /// bound logs a slow-job signal (NON-aborting — a legit cold hydrate under load
@@ -267,6 +267,54 @@ impl EngineHandle {
             Err(_) => Err(NapiError::from_reason("engine actor dropped the reply")),
         }
     }
+}
+
+/// Map a zql type string to the engine's `ColumnType` (same mapping used for
+/// source registration and the planner cost model's table specs).
+fn to_column_type(zql_type: &str, optional: bool) -> rust_ivm::ivm::schema::ColumnType {
+    match zql_type {
+        "boolean" => rust_ivm::ivm::schema::ColumnType::Boolean { optional },
+        "number" => rust_ivm::ivm::schema::ColumnType::Number { optional },
+        "json" => rust_ivm::ivm::schema::ColumnType::Json { optional },
+        _ => rust_ivm::ivm::schema::ColumnType::String { optional },
+    }
+}
+
+/// Derive per-table column lists straight from the replica schema. Fallback
+/// for the planner cost model when the engine has a snapshotter but no
+/// initialized sources (harness-only path): the probe's SELECT list does not
+/// affect the plan, and constraint columns are treated as non-boolean.
+fn replica_table_specs(
+    conn: &rusqlite::Connection,
+) -> std::result::Result<HashMap<String, HashMap<String, rust_ivm::ivm::schema::ColumnType>>, String>
+{
+    let mut out = HashMap::new();
+    let mut tables_stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        .map_err(|e| format!("plan_ast replica tables: {}", e))?;
+    let tables: Vec<String> = tables_stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("plan_ast replica tables: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for table in tables {
+        let mut cols_stmt = conn
+            .prepare("SELECT name FROM pragma_table_info(?)")
+            .map_err(|e| format!("plan_ast table_info: {}", e))?;
+        let cols: HashMap<String, rust_ivm::ivm::schema::ColumnType> = cols_stmt
+            .query_map(rusqlite::params![table], |r| r.get::<_, String>(0))
+            .map_err(|e| format!("plan_ast table_info: {}", e))?
+            .filter_map(|r| r.ok())
+            .map(|c| {
+                (
+                    c,
+                    rust_ivm::ivm::schema::ColumnType::String { optional: false },
+                )
+            })
+            .collect();
+        out.insert(table, cols);
+    }
+    Ok(out)
 }
 
 /// Extract a human-readable message from a caught panic payload.
@@ -1099,21 +1147,8 @@ impl RustIvmEngine {
                 for spec in &tables {
                     let mut columns = HashMap::new();
                     for (col, schema) in &spec.columns {
-                        let col_type = match schema.r#type.as_str() {
-                            "boolean" => rust_ivm::ivm::schema::ColumnType::Boolean {
-                                optional: schema.optional,
-                            },
-                            "number" => rust_ivm::ivm::schema::ColumnType::Number {
-                                optional: schema.optional,
-                            },
-                            "json" => rust_ivm::ivm::schema::ColumnType::Json {
-                                optional: schema.optional,
-                            },
-                            _ => rust_ivm::ivm::schema::ColumnType::String {
-                                optional: schema.optional,
-                            },
-                        };
-                        columns.insert(col.clone(), col_type);
+                        columns
+                            .insert(col.clone(), to_column_type(&schema.r#type, schema.optional));
                     }
 
                     let rc_source: std::rc::Rc<RefCell<dyn Source>> =
@@ -1416,6 +1451,11 @@ impl RustIvmEngine {
     /// sets `flip` per position. The driver invokes this when the same
     /// `enablePlanner` flag used by PipelineDriver is enabled. Returns `[]` if no
     /// snapshot exists yet.
+    ///
+    /// Cost model: the scanstatus/stat-fanout model (exact port of TS
+    /// `createSQLiteCostModel` — filter-aware, probe SQL prepared against the
+    /// snapshot connection). `RUST_IVM_PLANNER_COST_MODEL=count` restores the
+    /// legacy filter-blind `COUNT(*)` model (escape hatch).
     #[napi]
     pub fn plan_ast(&self, ast_json: String) -> Result<String> {
         self.handle
@@ -1430,14 +1470,50 @@ impl RustIvmEngine {
                     (Ok(c), Ok(v)) => (c, v.to_string()),
                     _ => return Ok("[]".to_string()),
                 };
-                // Reuse row counts across the connection-init addQuery burst
-                // (same snapshot version); COUNT(*) runs at most once per
-                // (table, version) instead of once per table per addQuery.
-                let model = rust_ivm::planner::create_snapshot_cost_model_cached(
-                    conn,
-                    &version,
-                    state.plan_count_cache.clone(),
+                let use_count_model = matches!(
+                    std::env::var("RUST_IVM_PLANNER_COST_MODEL").as_deref(),
+                    Ok("count")
                 );
+                let model = if use_count_model {
+                    // Legacy model. Reuses row counts across the
+                    // connection-init addQuery burst (same snapshot version);
+                    // COUNT(*) runs at most once per (table, version).
+                    rust_ivm::planner::create_snapshot_cost_model_cached(
+                        conn,
+                        &version,
+                        state.plan_count_cache.clone(),
+                    )
+                } else {
+                    // TS-parity model: scanstatus probe + stat4/stat1 fanout.
+                    // Table specs mirror TS `tableSpecs.zqlSpec`; when the
+                    // engine was initialized without sources (snapshotter-only
+                    // harness path) fall back to the replica schema — the
+                    // SELECT list does not affect the probe's plan.
+                    let specs = if state.syncable_tables.is_empty() {
+                        replica_table_specs(&conn.borrow())?
+                    } else {
+                        state
+                            .syncable_tables
+                            .iter()
+                            .map(|(table, spec)| {
+                                (
+                                    table.clone(),
+                                    spec.zql_spec
+                                        .iter()
+                                        .map(|(col, cs)| {
+                                            (col.clone(), to_column_type(&cs.r#type, cs.optional))
+                                        })
+                                        .collect(),
+                                )
+                            })
+                            .collect()
+                    };
+                    rust_ivm::sqlite::sqlite_cost_model::create_sqlite_cost_model(
+                        conn.clone(),
+                        specs,
+                    )
+                    .map_err(|e| format!("plan_ast cost model: {}", e))?
+                };
                 let flips = rust_ivm::planner::plan_ast_flips(&ast_value, model);
                 let arr: Vec<serde_json::Value> = flips
                     .iter()

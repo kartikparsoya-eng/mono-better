@@ -4,18 +4,18 @@
 //! the actor's pinned snapshot connection, and returns the ordered `flip`
 //! decisions the TS driver applies to its own AST (no AST re-serialization).
 //!
-//! ## Cost model
-//! `create_snapshot_cost_model` is the row-count + constraint-aware model:
-//!   - unconstrained read  → the table's row count (an unindexed full scan),
-//!   - constrained read    → ~1 row (an indexed key seek),
-//!   - fanout              → 1.0 / `none` confidence.
+//! ## Cost models
+//! The DEFAULT production model is the scanstatus/stat-fanout model
+//! (`crate::sqlite::sqlite_cost_model::create_sqlite_cost_model`) — the exact
+//! port of TS `createSQLiteCostModel`: filter-aware probe SQL prepared on the
+//! snapshot connection, `SQLITE_SCANSTAT_EST` row estimates, stat4/stat1
+//! fanout. It requires `SQLITE_ENABLE_STMT_SCANSTATUS` in the linked SQLite
+//! (true for the prod image, the local wal2 build, and macOS system SQLite).
 //!
-//! This is the SAME shape the differential oracle (`planner_oracle_test`) proves
-//! matches TS `planQuery`'s flip decisions — here fed REAL table sizes from the
-//! replica. (A scanstatus-exact model — TS `createSQLiteCostModel` — is a future
-//! refinement for byte-exact cost parity; it needs `SQLITE_ENABLE_STMT_SCANSTATUS`
-//! in the build and is image-only-testable. The plan graph is identical either
-//! way; only the numbers fed in differ.)
+//! `create_snapshot_cost_model` here is the LEGACY row-count model
+//! (filter-blind `COUNT(*)`; constrained read ≈ 1 row; fanout 1.0/none),
+//! selectable via `RUST_IVM_PLANNER_COST_MODEL=count` as an escape hatch and
+//! still used by the mock-cost oracle tests.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
