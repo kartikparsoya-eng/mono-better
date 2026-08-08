@@ -356,3 +356,40 @@ fn selective_exists_flips_where_count_model_does_not() {
          starts flipping, the escape-hatch model changed"
     );
 }
+
+/// Leak probe (run explicitly): loop the full model lifecycle and report RSS
+/// growth via ru_maxrss. Prod shows ~5MB retained per plan_ast-scale event.
+#[test]
+#[ignore]
+fn leak_probe_model_loop() {
+    require_scanstatus!();
+    fn maxrss_mb() -> f64 {
+        // ps-based RSS (KB) — avoids a libc dev-dependency.
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(0.0)
+            / 1e3
+    }
+    let conn = seed();
+    conn.borrow().execute_batch("ANALYZE;").unwrap();
+    let start = maxrss_mb();
+    for i in 0..2000 {
+        let model = create_sqlite_cost_model(conn.clone(), specs()).unwrap();
+        let _ = model("child", &[], Some(&eq_filter("email", "e42")), None);
+        let _ = model("child", &[], None, None);
+        let _ = model("parent", &[("id".into(), "asc".into())], None, None);
+        if i % 500 == 0 {
+            eprintln!("iter {i}: maxrss={:.1}MB", maxrss_mb());
+        }
+    }
+    let end = maxrss_mb();
+    eprintln!(
+        "LEAK PROBE: start={start:.1}MB end={end:.1}MB delta={:.2}MB over 2000 iters (6000 probes)",
+        end - start
+    );
+}

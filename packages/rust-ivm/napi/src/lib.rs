@@ -1055,6 +1055,22 @@ struct EngineState {
     /// one `COUNT(*)` per table rather than re-counting per query. Self-
     /// invalidates on snapshot version change (see `create_snapshot_cost_model_cached`).
     plan_count_cache: rust_ivm::planner::PlanCountCache,
+    /// Prepared (sorted) table specs for the scanstatus cost model, built once
+    /// per schema and reused across every `plan_ast`. The specs are the full
+    /// visible-column map of every syncable table — invariant between init and
+    /// reset — so rebuilding them per `addQuery` (as the first cut did) is pure
+    /// allocator churn that ratchets resident set upward under the system
+    /// allocator. Lazily populated on first plan; `None` until then. Cleared by
+    /// `reset` and (via `EngineState::default`) by `init`.
+    cost_specs_cache: Option<std::rc::Rc<rust_ivm::sqlite::sqlite_cost_model::PreparedTableSpecs>>,
+    /// The whole scanstatus cost model, cached and keyed by snapshot version —
+    /// the port of TS `PipelineDriver.#costModels` (a `Map<db, costModel>`; see
+    /// `#ensureCostModelExistsIfEnabled`). Within one snapshot version a burst of
+    /// `addQuery`s reuses the SAME model, so its `SQLiteStatFanout` fanout cache
+    /// stays warm (no per-query stat4 recompute) and the closure isn't rebuilt.
+    /// Rebuilt only when the snapshot advances (new version ⇒ new pinned conn),
+    /// exactly as TS re-creates the model for a new `db`. Cleared on reset/init.
+    cost_model_cache: Option<(String, rust_ivm::planner::ConnectionCostModel)>,
     /// Set by `DestroyTask` after teardown so the actor loop exits promptly and
     /// frees its 2 MB stack — instead of lingering (blocked on `rx.recv()`) until
     /// V8 GCs the owning `RustIvmEngine`. Under reconnect churn, GC-timing-bound
@@ -1073,6 +1089,8 @@ impl Default for EngineState {
             primary_keys: HashMap::new(),
             poisoned: false,
             plan_count_cache: std::rc::Rc::new(RefCell::new((String::new(), HashMap::new()))),
+            cost_specs_cache: None,
+            cost_model_cache: None,
             should_exit: false,
         }
     }
@@ -1472,6 +1490,11 @@ impl RustIvmEngine {
                 cache.0.clear();
                 cache.1.clear();
             }
+            // Schema may change across reset; drop the prepared cost-model specs
+            // and the cached model so the next plan rebuilds both against the new
+            // syncable_tables / snapshot.
+            state.cost_specs_cache = None;
+            state.cost_model_cache = None;
             state.poisoned = false;
         })
     }
@@ -1517,34 +1540,70 @@ impl RustIvmEngine {
                     )
                 } else {
                     // TS-parity model: scanstatus probe + stat4/stat1 fanout.
-                    // Table specs mirror TS `tableSpecs.zqlSpec`; when the
-                    // engine was initialized without sources (snapshotter-only
-                    // harness path) fall back to the replica schema — the
-                    // SELECT list does not affect the probe's plan.
-                    let specs = if state.syncable_tables.is_empty() {
-                        replica_table_specs(&conn.borrow())?
-                    } else {
-                        state
-                            .syncable_tables
-                            .iter()
-                            .map(|(table, spec)| {
-                                (
-                                    table.clone(),
-                                    spec.zql_spec
-                                        .iter()
-                                        .map(|(col, cs)| {
-                                            (col.clone(), to_column_type(&cs.r#type, cs.optional))
-                                        })
-                                        .collect(),
-                                )
-                            })
-                            .collect()
-                    };
-                    rust_ivm::sqlite::sqlite_cost_model::create_sqlite_cost_model(
-                        conn.clone(),
-                        specs,
-                    )
-                    .map_err(|e| format!("plan_ast cost model: {}", e))?
+                    // Cache the whole model keyed by snapshot version — the port
+                    // of TS `PipelineDriver.#costModels` (keyed by db). Within one
+                    // version's `addQuery` burst the same model (and its warm
+                    // `SQLiteStatFanout` cache) is reused — no per-query stat4
+                    // recompute, no closure rebuild. Rebuilt on advance (new
+                    // version ⇒ new pinned conn), as TS rebuilds for a new db.
+                    let hit = matches!(&state.cost_model_cache, Some((v, _)) if *v == version);
+                    if !hit {
+                        // Prepared specs mirror TS `tableSpecs.zqlSpec` and are
+                        // invariant per schema (syncable_tables changes only at
+                        // init/reset), so build+sort them once and reuse across
+                        // versions — rebuilding the full column map per plan is
+                        // per-call allocator churn.
+                        let specs = if state.syncable_tables.is_empty() {
+                            // Snapshotter-only harness path: no schema to cache
+                            // against (sources absent). Fall back to the replica
+                            // schema — the SELECT list does not affect the probe's
+                            // plan. Not a prod path.
+                            std::rc::Rc::new(
+                                rust_ivm::sqlite::sqlite_cost_model::prepare_table_specs(
+                                    replica_table_specs(&conn.borrow())?,
+                                ),
+                            )
+                        } else {
+                            if state.cost_specs_cache.is_none() {
+                                let raw: std::collections::HashMap<
+                                    String,
+                                    std::collections::HashMap<
+                                        String,
+                                        rust_ivm::ivm::schema::ColumnType,
+                                    >,
+                                > = state
+                                    .syncable_tables
+                                    .iter()
+                                    .map(|(table, spec)| {
+                                        (
+                                            table.clone(),
+                                            spec.zql_spec
+                                                .iter()
+                                                .map(|(col, cs)| {
+                                                    (
+                                                        col.clone(),
+                                                        to_column_type(&cs.r#type, cs.optional),
+                                                    )
+                                                })
+                                                .collect(),
+                                        )
+                                    })
+                                    .collect();
+                                state.cost_specs_cache = Some(std::rc::Rc::new(
+                                    rust_ivm::sqlite::sqlite_cost_model::prepare_table_specs(raw),
+                                ));
+                            }
+                            state.cost_specs_cache.as_ref().unwrap().clone()
+                        };
+                        let model =
+                            rust_ivm::sqlite::sqlite_cost_model::create_sqlite_cost_model_prepared(
+                                conn.clone(),
+                                specs,
+                            )
+                            .map_err(|e| format!("plan_ast cost model: {}", e))?;
+                        state.cost_model_cache = Some((version.clone(), model));
+                    }
+                    state.cost_model_cache.as_ref().unwrap().1.clone()
                 };
                 let flips = rust_ivm::planner::plan_ast_flips(&ast_value, model);
                 let arr: Vec<serde_json::Value> = flips
