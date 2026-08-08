@@ -20,16 +20,21 @@ BUILD="$RUST_IVM_DIR/wal2-sqlite/build"
 mkdir -p "$BUILD"
 
 # 1. Compile the wal2 fork into a static lib. This is a LEAN local build — the
-#    minimum defines for wal2 + JSON1 + snapshot + the planner's SCANSTATUS. It
-#    is NOT define-identical to Dockerfile stage 1, which adds perf/robustness
-#    flags (e.g. STAT4, DQS=0) for the shipped image; cost-model realism can
-#    therefore differ slightly locally. Correctness (wal2 file format, value
-#    semantics) is unaffected — that is what the differential suite checks.
+#    minimum defines for wal2 + JSON1 + snapshot + the planner's SCANSTATUS +
+#    STAT4. STAT4 (+ the 128-sample count) MUST match the prod Dockerfile and
+#    @rocicorp/zero-sqlite3 (deps/defines.gypi): the planner cost model reads
+#    SQLITE_SCANSTAT_EST, whose value depends on the stat4 histograms — without
+#    identical stats machinery, rust-vs-TS flip-decision parity tests would
+#    diverge locally. Still NOT fully define-identical to Dockerfile stage 1
+#    (perf/robustness flags like DQS=0 don't affect planning). Correctness
+#    (wal2 file format, value semantics) is unaffected — that is what the
+#    differential suite checks.
 echo "[1/3] compiling wal2 SQLite (static)…"
 cc -O2 -ffp-contract=off -fPIC -c "$RUST_IVM_DIR/wal2-sqlite/sqlite3.c" -o "$BUILD/sqlite3.o" \
    -DSQLITE_THREADSAFE=2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE \
    -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_SNAPSHOT \
-   -DSQLITE_ENABLE_STMT_SCANSTATUS
+   -DSQLITE_ENABLE_STMT_SCANSTATUS \
+   -DSQLITE_ENABLE_STAT4 -DSQLITE_STAT4_SAMPLES=128
 ar rcs "$BUILD/libsqlite3.a" "$BUILD/sqlite3.o"
 cp "$RUST_IVM_DIR/wal2-sqlite/sqlite3.h" "$RUST_IVM_DIR/wal2-sqlite/sqlite3ext.h" "$BUILD/"
 

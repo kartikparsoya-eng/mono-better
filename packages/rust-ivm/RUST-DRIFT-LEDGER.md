@@ -71,3 +71,31 @@ Reason: A production server must not crash on a transient SQLite error (locked
 DB, disk full, etc.). The error is logged and the operation degrades gracefully.
 
 Required follow-up: none.
+
+## R5: Planner scanstatus cost model — cosmetic probe-SQL differences
+
+Status: Intentional Rust divergence (cosmetic only; decisions identical).
+
+The default planner cost model (`sqlite/sqlite_cost_model.rs`) is the faithful
+port of TS `createSQLiteCostModel` (scanstatus EST + stat4/stat1 fanout,
+filter-inlined probe SQL, boolean-constraint `= 0` quirk included). Two
+non-semantic differences from the TS-built probe:
+
+1. SELECT-list column ORDER: TS uses zqlSpec insertion order; Rust sorts
+   column names for determinism. The SELECT list does not affect the query
+   plan or `SQLITE_SCANSTAT_EST`.
+2. Constraint-column ORDER in WHERE: TS uses `Object.entries` insertion order
+   of the merged constraint; Rust's `PlannerConstraint` is a `BTreeMap`
+   (sorted). `a = ? AND b = ?` vs `b = ? AND a = ?` plan identically.
+
+Also: when the engine has a snapshotter but no initialized sources
+(harness-only path, e.g. rust-ivm-driver.planner.test.ts's bare engine), table
+specs fall back to `pragma_table_info` with string-typed columns; TS `must()`
+would throw there. Production always initializes sources, using the same
+zqlSpec column set as TS.
+
+Decision parity is asserted by rust-ivm-planner-parity.test.ts (PLANNER_PARITY=1)
+across 9 AST shapes at multiple scales. Escape hatch: the legacy filter-blind
+COUNT(*) model remains behind `RUST_IVM_PLANNER_COST_MODEL=count`.
+
+Required follow-up: none.

@@ -360,7 +360,9 @@ fn to_sqlite_column_value(value: &Value, column_type: Option<&ColumnType>) -> Sq
 
 /// Convert a Condition (with CSQ stripped) to a SQL WHERE clause.
 /// Port of TS `filtersToSQL` (query-builder.ts:169).
-fn condition_to_sql(cond: &Condition) -> (String, Vec<SqlParam>) {
+/// `pub(crate)`: also used by the planner cost model to build its probe SQL
+/// (sqlite_cost_model.rs) so probe and execution SQL stay one implementation.
+pub(crate) fn condition_to_sql(cond: &Condition) -> (String, Vec<SqlParam>) {
     match cond {
         Condition::Simple(s) => simple_condition_to_sql(s),
         Condition::And(conds) => {
