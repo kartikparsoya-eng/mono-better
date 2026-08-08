@@ -9,7 +9,7 @@
 //!
 //! - `rows`        = EST of the first top-level loop (the main scan),
 //! - `startupCost` = Σ btree_cost(rows) for subsequent top-level ORDER BY
-//!                   (sorter) loops,
+//!   (sorter) loops,
 //! - `fanout`      = stat4-median → stat1 → default-3 via [`SQLiteStatFanout`].
 //!
 //! Requires SQLite compiled with `SQLITE_ENABLE_STMT_SCANSTATUS` (true for the
