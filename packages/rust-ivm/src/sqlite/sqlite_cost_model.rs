@@ -382,9 +382,45 @@ fn build_probe_sql(
 ///
 /// Errors when the linked SQLite lacks `SQLITE_ENABLE_STMT_SCANSTATUS` —
 /// callers must fail loudly (or fall back explicitly), never estimate blind.
+/// Pre-sorted table specs — the invariant part of the cost model. Building this
+/// (a clone of every visible column of every syncable table) depends on neither
+/// the query nor the snapshot version; it changes only with the schema (engine
+/// init/reset). Callers planning many queries against one schema should build it
+/// once via [`prepare_table_specs`] and reuse it through
+/// [`create_sqlite_cost_model_prepared`] — rebuilding it per `addQuery` is pure
+/// allocator churn (freed each call, but under the non-compacting system
+/// allocator it ratchets resident set upward as cold fragmented pages).
+pub type PreparedTableSpecs = HashMap<String, Vec<(String, ColumnType)>>;
+
+/// Sort each table's columns for deterministic probe SQL. Extracted from
+/// `create_sqlite_cost_model` so it can be computed once and cached.
+pub fn prepare_table_specs(
+    table_specs: HashMap<String, HashMap<String, ColumnType>>,
+) -> PreparedTableSpecs {
+    table_specs
+        .into_iter()
+        .map(|(table, cols)| {
+            let mut cols: Vec<(String, ColumnType)> = cols.into_iter().collect();
+            cols.sort_by(|a, b| a.0.cmp(&b.0));
+            (table, cols)
+        })
+        .collect()
+}
+
 pub fn create_sqlite_cost_model(
     conn: Rc<RefCell<rusqlite::Connection>>,
     table_specs: HashMap<String, HashMap<String, ColumnType>>,
+) -> Result<ConnectionCostModel, String> {
+    create_sqlite_cost_model_prepared(conn, Rc::new(prepare_table_specs(table_specs)))
+}
+
+/// Like [`create_sqlite_cost_model`] but takes already-prepared specs shared by
+/// `Rc`, so the engine builds them once per schema and reuses them across every
+/// `plan_ast`. This is the hot path in prod (planner on): avoids rebuilding the
+/// full column map on each query.
+pub fn create_sqlite_cost_model_prepared(
+    conn: Rc<RefCell<rusqlite::Connection>>,
+    specs: Rc<PreparedTableSpecs>,
 ) -> Result<ConnectionCostModel, String> {
     if !scanstatus_available() {
         return Err(
@@ -394,16 +430,6 @@ pub fn create_sqlite_cost_model(
                 .to_string(),
         );
     }
-
-    // Sorted column lists per table — deterministic probe SQL.
-    let specs: HashMap<String, Vec<(String, ColumnType)>> = table_specs
-        .into_iter()
-        .map(|(table, cols)| {
-            let mut cols: Vec<(String, ColumnType)> = cols.into_iter().collect();
-            cols.sort_by(|a, b| a.0.cmp(&b.0));
-            (table, cols)
-        })
-        .collect();
 
     let fanout_estimator = Rc::new(SQLiteStatFanout::new(conn.clone()));
 
