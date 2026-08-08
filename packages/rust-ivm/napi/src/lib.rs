@@ -552,6 +552,38 @@ impl<'a> ChunkSender<'a> {
         }
     }
 
+    /// Ack'd flush for ERROR paths: deliver the buffered rows (header +
+    /// pre-failure data) and WAIT for the JS callback to process them before
+    /// returning. The task's rejection travels a different queue than the
+    /// TSFN callbacks, so a fire-and-forget flush lets the rejection overtake
+    /// the header on some schedules (CI-observed) — the driver must record the
+    /// advanced version from the header BEFORE it sees the error, as the
+    /// per-row protocol guaranteed by ordering. Best-effort: barrier failures
+    /// are swallowed — the caller is already surfacing an error.
+    fn flush_acked(&mut self) {
+        if self.stopped || self.cancel.is_cancelled() || self.buf.is_empty() {
+            self.buf.clear();
+            self.data_in_buf = 0;
+            return;
+        }
+        if self.data_in_buf > 0 {
+            let acquired = {
+                let _t = rust_ivm::perf_trace::scope("deliver.credit");
+                self.credit
+                    .acquire(self.stream_id, self.data_in_buf, &self.cancel)
+            };
+            if !acquired {
+                self.cancel.cancel();
+                self.stopped = true;
+                self.buf.clear();
+                self.data_in_buf = 0;
+                return;
+            }
+        }
+        self.data_in_buf = 0;
+        let _ = drain_barrier_chunk(self.tsfn, std::mem::take(&mut self.buf));
+    }
+
     /// Terminal flush: appends the END sentinel and delivers the final chunk
     /// through the drain barrier (ack merged with the last data delivery).
     /// A cancelled/stopped stream skips the barrier entirely — on early
@@ -2106,7 +2138,7 @@ impl Task for AdvanceStreamingTask {
                                 // currentVersion comes from the header even when
                                 // the advance errors (matching TS, where the
                                 // snapshotter has advanced before the failure).
-                                sender.flush();
+                                sender.flush_acked();
                                 Err(format!("advance failed: {}", e))
                             }
                         }
@@ -2132,7 +2164,7 @@ impl Task for AdvanceStreamingTask {
                             // Deliver the buffered header/pre-panic rows before
                             // surfacing the error (per-row parity; the header
                             // carries the advanced version — see the Err(e) arm).
-                            sender.flush();
+                            sender.flush_acked();
                             let msg = panic_message(&payload);
                             eprintln!(
                                 "[rust-ivm] advance streamed panicked — surfacing as thrown error: {msg}"
