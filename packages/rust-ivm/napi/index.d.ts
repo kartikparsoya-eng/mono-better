@@ -158,6 +158,11 @@ export declare class RustIvmEngine {
    * sets `flip` per position. The driver invokes this when the same
    * `enablePlanner` flag used by PipelineDriver is enabled. Returns `[]` if no
    * snapshot exists yet.
+   *
+   * Cost model: the scanstatus/stat-fanout model (exact port of TS
+   * `createSQLiteCostModel` — filter-aware, probe SQL prepared against the
+   * snapshot connection). `RUST_IVM_PLANNER_COST_MODEL=count` restores the
+   * legacy filter-blind `COUNT(*)` model (escape hatch).
    */
   planAst(astJson: string): string
   /**
