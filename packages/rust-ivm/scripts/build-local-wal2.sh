@@ -30,13 +30,7 @@ mkdir -p "$BUILD"
 #    (wal2 file format, value semantics) is unaffected — that is what the
 #    differential suite checks.
 echo "[1/3] compiling wal2 SQLite (static)…"
-cc -O2 -ffp-contract=off -fPIC -c "$RUST_IVM_DIR/wal2-sqlite/sqlite3.c" -o "$BUILD/sqlite3.o" \
-   -DSQLITE_THREADSAFE=2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE \
-   -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_SNAPSHOT \
-   -DSQLITE_ENABLE_STMT_SCANSTATUS \
-   -DSQLITE_ENABLE_STAT4 -DSQLITE_STAT4_SAMPLES=128
-ar rcs "$BUILD/libsqlite3.a" "$BUILD/sqlite3.o"
-cp "$RUST_IVM_DIR/wal2-sqlite/sqlite3.h" "$RUST_IVM_DIR/wal2-sqlite/sqlite3ext.h" "$BUILD/"
+"$RUST_IVM_DIR/scripts/build-wal2-static-lib.sh" > /dev/null
 
 # 2. Build the addon, forcing libsqlite3-sys to STATIC-link our lib. The empty
 #    PKG_CONFIG_LIBDIR is essential: without it libsqlite3-sys's pkg-config probe
