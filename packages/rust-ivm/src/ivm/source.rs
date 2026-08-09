@@ -117,7 +117,10 @@ pub struct MemorySource {
     primary_index_sort: SortOrder,
     data: SharedData,
     comparator: Comparator,
-    connections: Vec<Shared<Connection>>,
+    /// Shared with every `SourceInput` so `destroy()` can splice its
+    /// connection out (TS parity: memory-source.ts destroy removes the
+    /// connection). A plain Vec leaked one Connection per removed query.
+    connections: Rc<RefCell<Vec<Shared<Connection>>>>,
     overlay: SharedOverlay,
     push_epoch: usize,
     db_path: Option<String>,
@@ -161,7 +164,7 @@ impl MemorySource {
             primary_index_sort,
             data: Rc::new(RefCell::new(Vec::new())),
             comparator,
-            connections: Vec::new(),
+            connections: Rc::new(RefCell::new(Vec::new())),
             overlay: Rc::new(RefCell::new(None)),
             push_epoch: 0,
             db_path: None,
@@ -314,6 +317,7 @@ impl MemorySource {
             data,
             comparator,
             conn: conn.clone(),
+            connections: self.connections.clone(),
             schema,
             overlay,
             db_path,
@@ -324,7 +328,7 @@ impl MemorySource {
             removed_this_advance: self.removed_this_advance.clone(),
         }));
 
-        self.connections.push(conn.clone());
+        self.connections.borrow_mut().push(conn.clone());
         input
     }
 
@@ -351,7 +355,7 @@ impl MemorySource {
             ref old_row,
         } = change
         {
-            let should_split = self.connections.iter().any(|c| {
+            let should_split = self.connections.borrow().iter().any(|c| {
                 let conn = c.borrow();
                 if let Some(ref keys) = conn.split_edit_keys {
                     keys.iter().any(|k| {
@@ -406,6 +410,7 @@ impl MemorySource {
 
         let active: Vec<Shared<Connection>> = self
             .connections
+            .borrow()
             .iter()
             .filter(|c| c.borrow().output.is_some())
             .cloned()
@@ -540,16 +545,17 @@ impl Source for MemorySource {
 
     fn has_active_connections(&self) -> bool {
         self.connections
+            .borrow()
             .iter()
             .any(|connection| connection.borrow().output.is_some())
     }
 
     fn connection_count(&self) -> usize {
-        self.connections.len()
+        self.connections.borrow().len()
     }
 
     fn truncate_connections(&mut self, count: usize) {
-        self.connections.truncate(count);
+        self.connections.borrow_mut().truncate(count);
     }
 
     fn connect(
@@ -585,6 +591,9 @@ pub struct SourceInput {
     #[allow(dead_code)]
     comparator: Comparator,
     conn: Shared<Connection>,
+    /// Back-reference to the owning source's connection list so `destroy()`
+    /// can splice this connection out (TS parity).
+    connections: Rc<RefCell<Vec<Shared<Connection>>>>,
     schema: SourceSchema,
     overlay: SharedOverlay,
     db_path: Option<String>,
@@ -605,6 +614,12 @@ impl InputBase for SourceInput {
     fn destroy(&mut self) {
         // Clear the back-edge to break the Rc cycle.
         self.conn.borrow_mut().output = None;
+        // Splice this connection out of the source (TS parity: memory-source's
+        // destroy removes the connection from the source's list). Without this
+        // every removed query permanently retained its Connection.
+        self.connections
+            .borrow_mut()
+            .retain(|c| !Rc::ptr_eq(c, &self.conn));
     }
 }
 

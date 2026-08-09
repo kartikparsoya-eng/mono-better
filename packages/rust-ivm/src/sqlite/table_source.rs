@@ -384,7 +384,11 @@ pub struct TableSource {
     primary_key: Vec<String>,
     primary_index_sort: SortOrder,
     db: SharedSnapshotDb,
-    connections: Vec<Shared<TableConnection>>,
+    /// Shared with every `TableSourceInput` so `destroy()` can splice its
+    /// connection out (TS parity: zqlite table-source.ts `destroy` removes the
+    /// connection from `#connections`). A plain Vec leaked one TableConnection
+    /// per removed query, growing memory AND the per-push scan forever.
+    connections: Rc<RefCell<Vec<Shared<TableConnection>>>>,
     overlay: SharedOverlay,
     /// Changes already pushed during the current advance. TS persists these
     /// into its private PREV transaction; Rust layers them over the read-only
@@ -415,7 +419,7 @@ impl TableSource {
             primary_key: primary_key.clone(),
             primary_index_sort,
             db: Rc::new(RefCell::new(db)),
-            connections: Vec::new(),
+            connections: Rc::new(RefCell::new(Vec::new())),
             overlay: Rc::new(RefCell::new(None)),
             applied_changes: Rc::new(RefCell::new(Vec::new())),
             push_epoch: 0,
@@ -486,13 +490,14 @@ impl TableSource {
             column_names,
             columns,
             conn: conn.clone(),
+            connections: self.connections.clone(),
             schema,
             filter_condition: filter_condition.clone(),
             overlay: self.overlay.clone(),
             applied_changes: self.applied_changes.clone(),
         }));
 
-        self.connections.push(conn.clone());
+        self.connections.borrow_mut().push(conn.clone());
         input
     }
 
@@ -510,7 +515,7 @@ impl TableSource {
             ref old_row,
         } = change
         {
-            let should_split = self.connections.iter().any(|c| {
+            let should_split = self.connections.borrow().iter().any(|c| {
                 let conn = c.borrow();
                 conn.split_edit_keys.as_ref().is_some_and(|keys| {
                     keys.iter().any(|k| {
@@ -550,6 +555,7 @@ impl TableSource {
 
         let active: Vec<Shared<TableConnection>> = self
             .connections
+            .borrow()
             .iter()
             .filter(|c| c.borrow().output.is_some())
             .cloned()
@@ -893,6 +899,9 @@ pub struct TableSourceInput {
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
     conn: Shared<TableConnection>,
+    /// Back-reference to the owning source's connection list so `destroy()`
+    /// can splice this connection out (TS parity: zqlite table-source.ts:242).
+    connections: Rc<RefCell<Vec<Shared<TableConnection>>>>,
     schema: SourceSchema,
     filter_condition: Option<Condition>,
     overlay: SharedOverlay,
@@ -906,6 +915,13 @@ impl InputBase for TableSourceInput {
 
     fn destroy(&mut self) {
         self.conn.borrow_mut().output = None;
+        // Splice this connection out of the source (TS parity: zqlite
+        // table-source.ts destroy() → #connections.splice). Without this every
+        // removed query permanently retained its TableConnection, growing both
+        // memory and the per-push connection scan.
+        self.connections
+            .borrow_mut()
+            .retain(|c| !Rc::ptr_eq(c, &self.conn));
     }
 }
 
@@ -1091,16 +1107,17 @@ impl Source for TableSource {
 
     fn has_active_connections(&self) -> bool {
         self.connections
+            .borrow()
             .iter()
             .any(|connection| connection.borrow().output.is_some())
     }
 
     fn connection_count(&self) -> usize {
-        self.connections.len()
+        self.connections.borrow().len()
     }
 
     fn truncate_connections(&mut self, count: usize) {
-        self.connections.truncate(count);
+        self.connections.borrow_mut().truncate(count);
     }
 
     fn set_snapshot_db(&mut self, db: Rc<RefCell<Connection>>) {
