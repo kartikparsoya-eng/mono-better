@@ -1605,7 +1605,32 @@ impl RustIvmEngine {
                     }
                     state.cost_model_cache.as_ref().unwrap().1.clone()
                 };
-                let flips = rust_ivm::planner::plan_ast_flips(&ast_value, model);
+                // A watchdog interrupt racing the cost-model probe unwinds with
+                // a CostProbeInterrupted payload. That is not a planner bug —
+                // degrade to "no flips" (the unplanned AST, same contract as
+                // the uninitialized-snapshotter path above) instead of letting
+                // the panic cross the napi boundary and tear down the CG.
+                let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rust_ivm::planner::plan_ast_flips(&ast_value, model)
+                }));
+                let flips = match planned {
+                    Ok(flips) => flips,
+                    Err(payload) => {
+                        match payload.downcast::<
+                            rust_ivm::sqlite::sqlite_cost_model::CostProbeInterrupted,
+                        >() {
+                            Ok(interrupted) => {
+                                eprintln!(
+                                    "[rust-ivm] plan_ast: cost-model probe interrupted; \
+                                     planning without flips: {}",
+                                    interrupted.0
+                                );
+                                return Ok("[]".to_string());
+                            }
+                            Err(payload) => std::panic::resume_unwind(payload),
+                        }
+                    }
+                };
                 let arr: Vec<serde_json::Value> = flips
                     .iter()
                     .map(|f| match f {

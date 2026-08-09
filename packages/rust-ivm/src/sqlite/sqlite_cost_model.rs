@@ -81,6 +81,21 @@ pub struct ScanstatusLoop {
     pub explain: String,
 }
 
+/// Prefix marking a probe failure caused by `sqlite3_interrupt` (watchdog
+/// abort racing the probe), as opposed to a real planner/SQL bug.
+pub const INTERRUPT_ERR_PREFIX: &str = "[sqlite-interrupt] ";
+
+/// True when a cost-model error string was marked as an interrupt.
+pub fn is_interrupt_error(e: &str) -> bool {
+    e.starts_with(INTERRUPT_ERR_PREFIX)
+}
+
+/// Typed panic payload thrown by the cost-model closure when its probe was
+/// interrupted. The closure signature cannot return a Result, so the interrupt
+/// unwinds as a panic; `plan_ast` catches this payload and degrades to
+/// planning without flips instead of tearing down the client group.
+pub struct CostProbeInterrupted(pub String);
+
 /// Prepare `sql` (without executing) and read all scanstatus loops.
 /// Port of TS `getScanstatusLoops` (sqlite-cost-model.ts:139); like TS,
 /// iterates idx until the API reports end-of-loops, with the COMPLEX flag so
@@ -111,6 +126,15 @@ pub fn get_scanstatus_loops(
                 .into_owned();
             if !stmt.is_null() {
                 rusqlite::ffi::sqlite3_finalize(stmt);
+            }
+            // SQLITE_INTERRUPT is not a planner bug: the watchdog's stuck-actor
+            // abort flips sqlite3_interrupt on the shared snapshot connection,
+            // and a probe racing that flag gets rejected. Mark it so callers
+            // can degrade to planning without stats instead of tearing down.
+            if rc == rusqlite::ffi::SQLITE_INTERRUPT {
+                return Err(format!(
+                    "{INTERRUPT_ERR_PREFIX}cost-model probe prepare failed ({msg}): {sql}"
+                ));
             }
             return Err(format!("cost-model probe prepare failed ({msg}): {sql}"));
         }
@@ -455,8 +479,15 @@ pub fn create_sqlite_cost_model_prepared(
                 sort,
             );
 
-            let loops =
-                get_scanstatus_loops(&conn.borrow(), &sql).unwrap_or_else(|e| panic!("{e}"));
+            let loops = get_scanstatus_loops(&conn.borrow(), &sql).unwrap_or_else(|e| {
+                if is_interrupt_error(&e) {
+                    // Watchdog interrupt racing the probe — unwind with a typed
+                    // payload so plan_ast degrades to no-flips (see
+                    // CostProbeInterrupted) instead of tearing down the CG.
+                    std::panic::panic_any(CostProbeInterrupted(e));
+                }
+                panic!("{e}")
+            });
 
             // Scanstatus should always be available — parity with TS assert.
             assert!(
