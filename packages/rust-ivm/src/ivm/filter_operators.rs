@@ -113,6 +113,9 @@ impl InputBase for FilterEnd {
     }
 
     fn destroy(&mut self) {
+        // TS parity (filter-operators.ts:135): forward destroy through the
+        // filter window so the cascade reaches the source input below it.
+        self.start.borrow_mut().destroy();
         // Break the Rc cycle: clear the back-edge to the downstream output.
         *self.output.borrow_mut() = None;
     }
