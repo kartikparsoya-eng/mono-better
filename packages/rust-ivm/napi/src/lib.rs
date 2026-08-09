@@ -2475,6 +2475,15 @@ impl Task for DestroyTask {
             if let Some(ref mut eng) = state.engine {
                 eng.destroy();
             }
+            // Release every TableSource BEFORE the snapshotter drops: each
+            // source's `db` field holds a clone of the snapshot connection Rc,
+            // so with sources alive the Snapshot::drop close is deferred to
+            // the last implicit drop — where a close failure is swallowed
+            // (observed live: "151 outstanding conn holder(s) at drop" on
+            // every CG close). Sources-first makes the snapshot the sole
+            // holder, so its explicit close runs and failures are logged.
+            state.engine = None;
+            state.sources.clear();
             if let Some(ref mut snap) = state.snapshotter {
                 snap.destroy();
             }
