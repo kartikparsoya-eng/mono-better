@@ -18,6 +18,12 @@ pub struct FanIn {
     schema: SourceSchema,
     accumulated_pushes: Vec<Change>,
     output: Rc<RefCell<Option<OutputHandle>>>,
+    /// Branch tails feeding this fan-in (TS `FanIn#inputs`). destroy() must
+    /// forward to every branch so the cascade reaches the ref-counted FanOut
+    /// and, through it, the source input — otherwise a removed query's whole
+    /// OR-subtree stays anchored by its source connection (the
+    /// connection-splice leak class).
+    inputs: Vec<Shared<dyn Input>>,
 }
 
 impl FanIn {
@@ -26,7 +32,13 @@ impl FanIn {
             schema,
             accumulated_pushes: Vec::new(),
             output: Rc::new(RefCell::new(None)),
+            inputs: Vec::new(),
         }))
+    }
+
+    /// Register a branch tail (TS receives these in the FanIn constructor).
+    pub fn add_input(&mut self, input: Shared<dyn Input>) {
+        self.inputs.push(input);
     }
 
     pub fn set_output(&self, output: OutputHandle) {
@@ -59,6 +71,12 @@ impl InputBase for FanIn {
     }
 
     fn destroy(&mut self) {
+        // TS parity (fan-in.ts:49): destroy every branch input so the cascade
+        // reaches the ref-counted FanOut and the source input below it.
+        for input in &self.inputs {
+            input.borrow_mut().destroy();
+        }
+        self.inputs.clear();
         // Break the Rc cycle: clear the back-edge to the downstream output.
         *self.output.borrow_mut() = None;
     }
