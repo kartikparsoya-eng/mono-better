@@ -282,6 +282,43 @@ impl Drop for Snapshot {
                 );
             }
         }
+        drop(conn);
+
+        // Close LOUDLY. rusqlite's Drop calls sqlite3_close and swallows the
+        // error; a failed close (any live statement) silently leaks the entire
+        // handle — ~11.5MB of schema + sqlite_stat4 decode + page cache, plus
+        // the fds — per occurrence. When this Snapshot is the sole holder
+        // (engine/sources drop before the snapshotter in EngineState, so this
+        // is the normal teardown order), close explicitly and report failure.
+        // Otherwise report the outstanding holders: their eventual implicit
+        // close is unobservable, which is exactly the leak-risk to surface.
+        let holders = Rc::strong_count(&self.conn);
+        if holders > 1 {
+            eprintln!(
+                "[rust-ivm] snapshot drop: {} outstanding conn holder(s) at drop \
+                 (version {:?}); close defers to the last holder and any close \
+                 failure there is SILENT — leaked-handle risk",
+                holders - 1,
+                self.version,
+            );
+            return;
+        }
+        // Sole owner: swap in a throwaway in-memory conn so the real one can
+        // be moved out and closed with an observable result. If the dummy
+        // can't be opened (never in practice), fall back to the silent drop.
+        if let Ok(dummy) = rusqlite::Connection::open_in_memory() {
+            let rc = std::mem::replace(&mut self.conn, Rc::new(RefCell::new(dummy)));
+            if let Ok(cell) = Rc::try_unwrap(rc) {
+                if let Err((leaked, e)) = cell.into_inner().close() {
+                    eprintln!(
+                        "[rust-ivm] snapshot close FAILED for version {:?}: {} — \
+                         sqlite handle leaked (schema/stat4/page-cache retained)",
+                        self.version, e,
+                    );
+                    drop(leaked);
+                }
+            }
+        }
     }
 }
 
