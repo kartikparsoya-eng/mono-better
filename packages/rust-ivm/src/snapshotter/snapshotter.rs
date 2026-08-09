@@ -308,15 +308,15 @@ impl Drop for Snapshot {
         // can't be opened (never in practice), fall back to the silent drop.
         if let Ok(dummy) = rusqlite::Connection::open_in_memory() {
             let rc = std::mem::replace(&mut self.conn, Rc::new(RefCell::new(dummy)));
-            if let Ok(cell) = Rc::try_unwrap(rc) {
-                if let Err((leaked, e)) = cell.into_inner().close() {
-                    eprintln!(
-                        "[rust-ivm] snapshot close FAILED for version {:?}: {} — \
-                         sqlite handle leaked (schema/stat4/page-cache retained)",
-                        self.version, e,
-                    );
-                    drop(leaked);
-                }
+            if let Ok(cell) = Rc::try_unwrap(rc)
+                && let Err((leaked, e)) = cell.into_inner().close()
+            {
+                eprintln!(
+                    "[rust-ivm] snapshot close FAILED for version {:?}: {} — \
+                     sqlite handle leaked (schema/stat4/page-cache retained)",
+                    self.version, e,
+                );
+                drop(leaked);
             }
         }
     }
