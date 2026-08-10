@@ -30,6 +30,12 @@ impl PlannerFanIn {
         self.output = Some(node);
     }
 
+    /// Drop the upward `output` back-edge to break the graph's Rc cycle at
+    /// teardown (see `impl Drop for PlannerGraph`).
+    pub fn clear_output(&mut self) {
+        self.output = None;
+    }
+
     pub fn reset(&mut self) {
         self.node_type = FanInType::FI;
     }

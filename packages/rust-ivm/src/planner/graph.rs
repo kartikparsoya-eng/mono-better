@@ -196,6 +196,34 @@ impl PlannerGraph {
     }
 }
 
+impl Drop for PlannerGraph {
+    /// Break the plan graph's `Rc` reference cycle so its nodes actually free.
+    ///
+    /// Every node holds a STRONG downward ref to its input(s) (`terminus.input`,
+    /// `fanout.input`, `join.parent`/`child`) AND a STRONG upward back-edge to
+    /// its consumer (`connection`/`join`/`fanin.output`, `fanout.outputs`). The
+    /// downward edges alone form a DAG, but each upward back-edge closes a cycle
+    /// (e.g. `connection.output → join`, `join.parent → connection`), so when the
+    /// graph's owning `Vec`s drop, the nodes keep each other alive and the whole
+    /// graph leaks — ~one plan graph per `planAst` (the ported TS graph relies on
+    /// GC to reclaim these cycles; Rust does not). Clearing every upward back-edge
+    /// here severs all cycles so the downward tree can cascade to zero.
+    fn drop(&mut self) {
+        for j in &self.joins {
+            j.borrow_mut().clear_output();
+        }
+        for c in &self.connections {
+            c.borrow_mut().clear_output();
+        }
+        for fi in &self.fan_ins {
+            fi.borrow_mut().clear_output();
+        }
+        for fo in &self.fan_outs {
+            fo.borrow_mut().clear_outputs();
+        }
+    }
+}
+
 struct FofiInfo {
     fi_index: Option<usize>,
     join_indices: Vec<usize>,

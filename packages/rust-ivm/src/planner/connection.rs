@@ -86,6 +86,12 @@ impl PlannerConnection {
         self.output = Some(node);
     }
 
+    /// Drop the upward `output` back-edge to break the graph's Rc cycle at
+    /// teardown (see `impl Drop for PlannerGraph`).
+    pub fn clear_output(&mut self) {
+        self.output = None;
+    }
+
     pub fn closest_join_or_source(&self) -> JoinOrConnection {
         JoinOrConnection::Connection
     }

@@ -196,6 +196,12 @@ impl PlannerJoin {
         self.output.as_ref()
     }
 
+    /// Drop the upward `output` back-edge to break the graph's Rc cycle at
+    /// teardown (see `impl Drop for PlannerGraph`).
+    pub fn clear_output(&mut self) {
+        self.output = None;
+    }
+
     pub fn reset(&mut self) {
         self.join_type = self.initial_type;
     }
