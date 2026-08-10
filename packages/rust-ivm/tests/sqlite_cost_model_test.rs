@@ -139,7 +139,10 @@ fn filter_aware_est_selective_filter_shrinks_rows() {
     require_scanstatus!();
     let conn = seed();
     conn.borrow().execute_batch("ANALYZE;").unwrap();
-    let model = create_sqlite_cost_model(conn, specs()).unwrap();
+    // clone + keep `conn` in scope: the model holds only a Weak conn ref (so it
+    // never blocks Snapshot::drop's close), so a strong holder must outlive it —
+    // in prod the snapshotter; here the test's `conn` binding.
+    let model = create_sqlite_cost_model(conn.clone(), specs()).unwrap();
 
     let unfiltered = model("child", &[], None, None);
     let filtered = model("child", &[], Some(&eq_filter("email", "e42")), None);
@@ -177,7 +180,10 @@ fn constraint_is_estimated_as_indexed_seek() {
     require_scanstatus!();
     let conn = seed();
     conn.borrow().execute_batch("ANALYZE;").unwrap();
-    let model = create_sqlite_cost_model(conn, specs()).unwrap();
+    // clone + keep `conn` in scope: the model holds only a Weak conn ref (so it
+    // never blocks Snapshot::drop's close), so a strong holder must outlive it —
+    // in prod the snapshotter; here the test's `conn` binding.
+    let model = create_sqlite_cost_model(conn.clone(), specs()).unwrap();
 
     let mut constraint = rust_ivm::planner::PlannerConstraint::default();
     constraint.insert("parent_id".to_string(), None);
@@ -199,7 +205,10 @@ fn order_by_without_index_adds_startup_cost() {
     require_scanstatus!();
     let conn = seed();
     conn.borrow().execute_batch("ANALYZE;").unwrap();
-    let model = create_sqlite_cost_model(conn, specs()).unwrap();
+    // clone + keep `conn` in scope: the model holds only a Weak conn ref (so it
+    // never blocks Snapshot::drop's close), so a strong holder must outlive it —
+    // in prod the snapshotter; here the test's `conn` binding.
+    let model = create_sqlite_cost_model(conn.clone(), specs()).unwrap();
 
     let sorted_by_pk = model(
         "child",
@@ -297,7 +306,8 @@ fn stat4_median_ignores_null_samples() {
     conn.execute_batch("ANALYZE;").unwrap();
 
     let conn = Rc::new(RefCell::new(conn));
-    let est = SQLiteStatFanout::new(conn);
+    // `conn` stays in scope as the strong holder; the fanout keeps only a Weak.
+    let est = SQLiteStatFanout::new(conn.clone());
     let r = est.get_fanout("tasks", &["project_id".to_string()]);
     assert_eq!(r.source, FanoutSource::Stat4);
     assert!(
