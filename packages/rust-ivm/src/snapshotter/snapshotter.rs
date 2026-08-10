@@ -297,9 +297,10 @@ impl Drop for Snapshot {
             eprintln!(
                 "[rust-ivm] snapshot drop: {} outstanding conn holder(s) at drop \
                  (version {:?}); close defers to the last holder and any close \
-                 failure there is SILENT — leaked-handle risk",
+                 failure there is SILENT — leaked-handle risk [census {}]",
                 holders - 1,
                 self.version,
+                crate::live_count::snapshot(),
             );
             // Name the drop path: holders-alive-at-drop means some teardown
             // path bypassed the ordered release (engine → sources → caches →
