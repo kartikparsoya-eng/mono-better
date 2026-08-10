@@ -105,6 +105,20 @@ impl Default for JobWatchdog {
 }
 
 impl JobWatchdog {
+    /// Explicit shutdown: stop the monitor thread now. Mirrors `Drop` minus
+    /// the join (callers reach the watchdog through an `Arc`, so only `&self`
+    /// is available; the parked `JoinHandle` is reaped when the last Arc
+    /// drops). Without this, a destroyed engine's watchdog thread — stack and
+    /// all — lingers until V8 GC finalizes the owning JS object, which
+    /// accumulates idle threads under reconnect churn. Idempotent; a
+    /// registration after shutdown is simply never monitored.
+    pub fn shutdown(&self) {
+        let (lock, cv) = &*self.inner;
+        let mut s = lock.lock().unwrap();
+        s.shutdown = true;
+        cv.notify_all();
+    }
+
     /// Create a new watchdog and start its monitor thread.
     pub fn new() -> Self {
         let inner = Arc::new((

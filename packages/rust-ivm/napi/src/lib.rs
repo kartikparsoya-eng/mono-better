@@ -199,6 +199,13 @@ struct EngineHandle {
     /// (which is parked inside the stream) — the same reason `cancel` uses
     /// `cancel_slot` directly.
     credit: Arc<StreamCreditGate>,
+    /// Sticky destroy latch. `destroy()`'s out-of-band cancel is NOT sticky:
+    /// a stream job already queued behind it resets the cancel token at op
+    /// start and re-opens the credit gate, then — its JS consumer being gone —
+    /// parks on credit until the watchdog abort (default 600s), stalling the
+    /// queued DestroyTask behind it and pinning the engine + SQLite fds the
+    /// whole time. Stream jobs check this latch at entry and bail instead.
+    destroying: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl EngineHandle {
@@ -217,9 +224,13 @@ impl EngineHandle {
                         break;
                     }
                 }
-                if let Some(ref mut eng) = state.engine {
-                    eng.destroy();
-                }
+                // Actor exiting because the last Sender dropped (driver GC'd /
+                // errored without awaiting destroy()): run the SAME ordered
+                // teardown as DestroyTask. Before this, `state` dropped in
+                // field order — snapshotter before sources/cost caches — which
+                // re-created the silent-close handle leak on the GC path
+                // (observed live: "8..20 outstanding conn holder(s)" drops).
+                ordered_teardown(&mut state);
             })
             .expect("spawn rust-ivm engine actor thread");
         EngineHandle {
@@ -228,6 +239,7 @@ impl EngineHandle {
             snapshot_interrupt_handles: Arc::new(Mutex::new(Vec::new())),
             watchdog: Arc::new(JobWatchdog::new()),
             credit: Arc::new(StreamCreditGate::new()),
+            destroying: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1044,9 +1056,31 @@ fn value_map_to_json_value(map: &rust_ivm::ivm::data::Row) -> serde_json::Value 
     serde_json::Value::Object(out)
 }
 
+/// Ordered teardown, shared by `DestroyTask` and the actor-exit epilogue:
+/// every connection-Rc holder (engine graph, sources map, cached cost model)
+/// MUST drop before the snapshotter so each `Snapshot` is the sole holder of
+/// its connection at drop — only then does its explicit, loudly-logged close
+/// run. With holders alive, the close defers to the last implicit drop where
+/// rusqlite swallows failure and leaks the handle (~11.5MB stat4/schema +
+/// page cache; the prod ~5GB/hr leak class). The cost model alone pins TWO
+/// clones (probe closure + SQLiteStatFanout) — observed live as "2
+/// outstanding conn holder(s)" on every planner-enabled CG close.
+fn ordered_teardown(state: &mut EngineState) {
+    if let Some(ref mut eng) = state.engine {
+        eng.destroy();
+    }
+    state.engine = None;
+    state.sources.clear();
+    state.cost_model_cache = None;
+    state.cost_specs_cache = None;
+    if let Some(ref mut snap) = state.snapshotter {
+        snap.destroy();
+    }
+    state.snapshotter = None;
+}
+
 struct EngineState {
     engine: Option<Engine>,
-    snapshotter: Option<Snapshotter>,
     syncable_tables: HashMap<String, LiteAndZqlSpec>,
     all_table_names: HashSet<String>,
     sources: HashMap<String, std::rc::Rc<RefCell<dyn Source>>>,
@@ -1080,6 +1114,15 @@ struct EngineState {
     /// Rebuilt only when the snapshot advances (new version ⇒ new pinned conn),
     /// exactly as TS re-creates the model for a new `db`. Cleared on reset/init.
     cost_model_cache: Option<(String, rust_ivm::planner::ConnectionCostModel)>,
+    /// Declared AFTER every conn-Rc holder (engine graph, sources,
+    /// cost_model_cache) so that on any implicit drop of EngineState the
+    /// holders release first and each Snapshot is the SOLE holder of its
+    /// connection when it drops — its explicit close then runs and failures
+    /// are logged. Holders-alive-at-drop defers the close to rusqlite's
+    /// silent-swallow path (the ~11.5MB handle-leak class; prod root cause).
+    /// `ordered_teardown` enforces the same order explicitly; this field
+    /// position is the backstop for panic/unwind drops.
+    snapshotter: Option<Snapshotter>,
     /// Set by `DestroyTask` after teardown so the actor loop exits promptly and
     /// frees its 2 MB stack — instead of lingering (blocked on `rx.recv()`) until
     /// V8 GCs the owning `RustIvmEngine`. Under reconnect churn, GC-timing-bound
@@ -1848,6 +1891,11 @@ impl RustIvmEngine {
     pub fn advance_without_diff(&self) -> Result<String> {
         self.handle
             .call(|state| -> std::result::Result<String, String> {
+                // The cached cost model pins a conn Rc from the pre-advance
+                // snapshot; it can never hit after the version bump, and if the
+                // leapfrog reset fails the orphaned Snapshot must be the sole
+                // holder for its loud close to run. Release before advancing.
+                state.cost_model_cache = None;
                 let snap = state
                     .snapshotter
                     .as_mut()
@@ -1920,8 +1968,13 @@ impl RustIvmEngine {
     /// before the Promise resolves.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn destroy(&self) -> AsyncTask<DestroyTask> {
-        // Destroy is actor-queued, while a producer may be parked waiting for
-        // credit on that same actor. Cancel out-of-band before queueing it.
+        // Latch first (sticky — survives per-op token resets), then cancel
+        // out-of-band: a producer parked on credit unparks now, and any stream
+        // job still queued ahead of the DestroyTask bails at entry instead of
+        // re-opening the gate and parking for the watchdog window.
+        self.handle
+            .destroying
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.cancel();
         AsyncTask::new(DestroyTask {
             handle: self.handle.clone(),
@@ -2011,6 +2064,9 @@ impl Task for AdvanceTask {
                         "engine reset after a prior advance panic; rehydrating",
                     )]);
                 }
+                // Stale after the coming version bump; also pins a conn Rc that
+                // must not outlive a failed-leapfrog Snapshot drop.
+                state.cost_model_cache = None;
                 let syncable_tables = state.syncable_tables.clone();
                 let all_table_names = state.all_table_names.clone();
                 let mut eng = state
@@ -2159,8 +2215,16 @@ impl Task for HydrateStreamingTask {
         let stream_id = self.stream_id;
         let capacity = self.credit_capacity;
         let chunk_size = self.chunk_size;
+        let destroying = self.handle.destroying.clone();
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
+                // Queued behind a destroy(): bail before resetting the cancel
+                // token / re-opening the credit gate (see EngineHandle
+                // `destroying` — the consumer is gone; parking here would
+                // stall the DestroyTask for the watchdog window).
+                if destroying.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("engine is being destroyed".to_string());
+                }
                 // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
                 state.poisoned = false;
                 let eng = state
@@ -2242,8 +2306,15 @@ impl Task for AdvanceStreamingTask {
         let stream_id = self.stream_id;
         let capacity = self.credit_capacity;
         let chunk_size = self.chunk_size;
+        let destroying = self.handle.destroying.clone();
         self.handle
             .call(move |state| -> std::result::Result<(), String> {
+                // Queued behind a destroy(): bail before resetting the cancel
+                // token / re-opening the credit gate (see EngineHandle
+                // `destroying`).
+                if destroying.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("engine is being destroyed".to_string());
+                }
                 // A prior panic left the engine possibly half-mutated. Refuse to
                 // advance on it; stream a reset so the driver rehydrates first.
                 if state.poisoned {
@@ -2261,6 +2332,9 @@ impl Task for AdvanceStreamingTask {
                     rust_ivm::perf_trace::report_residual("advance");
                     return Ok(());
                 }
+                // Stale after the coming version bump; also pins a conn Rc that
+                // must not outlive a failed-leapfrog Snapshot drop.
+                state.cost_model_cache = None;
                 let syncable_tables = state.syncable_tables.clone();
                 let all_table_names = state.all_table_names.clone();
                 let mut eng = state
@@ -2472,27 +2546,17 @@ impl Task for DestroyTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         self.handle.call(|state| {
-            if let Some(ref mut eng) = state.engine {
-                eng.destroy();
-            }
-            // Release every TableSource BEFORE the snapshotter drops: each
-            // source's `db` field holds a clone of the snapshot connection Rc,
-            // so with sources alive the Snapshot::drop close is deferred to
-            // the last implicit drop — where a close failure is swallowed
-            // (observed live: "151 outstanding conn holder(s) at drop" on
-            // every CG close). Sources-first makes the snapshot the sole
-            // holder, so its explicit close runs and failures are logged.
-            state.engine = None;
-            state.sources.clear();
-            if let Some(ref mut snap) = state.snapshotter {
-                snap.destroy();
-            }
+            ordered_teardown(state);
             *state = EngineState::default();
             // Signal the actor loop to exit after this job so its stack is freed
             // immediately (see EngineState::should_exit). Set AFTER the default
             // reset above (which would otherwise clear it).
             state.should_exit = true;
         })?;
+        // The destroy job above was the watchdog's last customer — stop its
+        // monitor thread now instead of at GC-finalize of the JS engine object
+        // (GC-bound idle threads accumulate under reconnect churn).
+        self.handle.watchdog.shutdown();
         // Return the CG's just-freed heap to the OS. glibc retains freed arena
         // memory under reconnect churn (profiled: ~2.3GB/worker of [anon]+[heap]
         // held post-soak) — malloc_trim forces it back. Rate-limited (≤1/s) so
