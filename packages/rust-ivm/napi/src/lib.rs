@@ -1057,13 +1057,32 @@ fn value_map_to_json_value(map: &rust_ivm::ivm::data::Row) -> serde_json::Value 
 /// clones (probe closure + SQLiteStatFanout) — observed live as "2
 /// outstanding conn holder(s)" on every planner-enabled CG close.
 fn ordered_teardown(state: &mut EngineState) {
+    let census = std::env::var("RUST_IVM_DROP_BACKTRACE").as_deref() == Ok("1");
+    if census {
+        eprintln!(
+            "[rust-ivm] teardown census pre-destroy: {}",
+            rust_ivm::live_count::snapshot()
+        );
+    }
     if let Some(ref mut eng) = state.engine {
         eng.destroy();
     }
     state.engine = None;
+    if census {
+        eprintln!(
+            "[rust-ivm] teardown census post-engine-destroy: {}",
+            rust_ivm::live_count::snapshot()
+        );
+    }
     state.sources.clear();
     state.cost_model_cache = None;
     state.cost_specs_cache = None;
+    if census {
+        eprintln!(
+            "[rust-ivm] teardown census post-clears: {}",
+            rust_ivm::live_count::snapshot()
+        );
+    }
     if let Some(ref mut snap) = state.snapshotter {
         snap.destroy();
     }

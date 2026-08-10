@@ -22,6 +22,7 @@ pub struct UnionFanOut {
 
 impl UnionFanOut {
     pub fn new(input: Shared<dyn Input>) -> Shared<UnionFanOut> {
+        crate::live_count::inc(&crate::live_count::UNION_FAN_OUT);
         let schema = input.borrow().get_schema();
         let ufo = Rc::new(RefCell::new(UnionFanOut {
             input: input.clone(),
@@ -118,5 +119,11 @@ impl UnionFanOut {
 impl Output for UfoOutput {
     fn push(&mut self, change: Change, pusher: &dyn InputBase) {
         self.ufo.borrow().push_internal(change, pusher);
+    }
+}
+
+impl Drop for UnionFanOut {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::UNION_FAN_OUT);
     }
 }

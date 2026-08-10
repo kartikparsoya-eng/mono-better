@@ -39,6 +39,7 @@ pub struct UnionFanIn {
 
 impl UnionFanIn {
     pub fn new(schema: SourceSchema) -> Shared<UnionFanIn> {
+        crate::live_count::inc(&crate::live_count::UNION_FAN_IN);
         let fan_out_relationships: HashSet<String> = schema.relationships.keys().cloned().collect();
         Rc::new(RefCell::new(UnionFanIn {
             inputs: Vec::new(),
@@ -356,3 +357,9 @@ pub fn merge_fetches(
 }
 
 use crate::ivm::data::Value;
+
+impl Drop for UnionFanIn {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::UNION_FAN_IN);
+    }
+}

@@ -56,6 +56,7 @@ impl Drop for InprogressGuard {
 
 impl Join {
     pub fn new(args: JoinArgs) -> Shared<Join> {
+        crate::live_count::inc(&crate::live_count::JOIN);
         assert!(
             !Rc::ptr_eq(&args.parent, &args.child),
             "Join parent and child must be different inputs"
@@ -498,4 +499,10 @@ fn generate_with_overlay_join(
     schema: &crate::ivm::schema::SourceSchema,
 ) -> NodeStream {
     crate::ivm::join_utils::generate_with_overlay(stream, change, schema)
+}
+
+impl Drop for Join {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::JOIN);
+    }
 }
