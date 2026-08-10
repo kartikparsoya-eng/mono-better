@@ -17,8 +17,8 @@ use rust_ivm::builder::ast::{
 };
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::snapshotter::Snapshotter;
+use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::sqlite::table_source::TableSource;
 use rust_ivm::streamer::RowChange;
 

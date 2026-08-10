@@ -143,8 +143,7 @@ fn run(flip: bool, iters: usize) {
         let _ = engine.advance(&[("issues".to_string(), add)]);
         if i >= 2 {
             let id_old = format!("i{}", i + 100 - 2);
-            let rem =
-                make_source_change_remove(make_row(&[("id", &id_old), ("ownerId", "Alice")]));
+            let rem = make_source_change_remove(make_row(&[("id", &id_old), ("ownerId", "Alice")]));
             let _ = engine.advance(&[("issues".to_string(), rem)]);
         }
 
