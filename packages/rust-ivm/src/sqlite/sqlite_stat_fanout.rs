@@ -16,7 +16,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// Result of fanout calculation from SQLite statistics.
 /// Port of TS `FanoutResult` (sqlite-stat-fanout.ts:6).
@@ -50,7 +50,17 @@ pub const DEFAULT_FANOUT: f64 = 3.0;
 /// Computes join fanout factors from SQLite statistics tables.
 /// Port of TS `SQLiteStatFanout` (sqlite-stat-fanout.ts:89).
 pub struct SQLiteStatFanout {
-    conn: Rc<RefCell<rusqlite::Connection>>,
+    /// WEAK ref to the snapshot connection. The cost model (which owns this
+    /// fanout) is cached on `EngineState.cost_model_cache` for the engine's
+    /// life; a STRONG ref here would keep the snapshot connection's
+    /// `Rc::strong_count > 1` at `Snapshot::drop`, which skips the explicit
+    /// `sqlite3_close` (snapshotter.rs:295) and leaks the whole connection —
+    /// schema + stat4 decode + the ≤64-entry prepared-statement cache
+    /// (VDBE programs) = the per-reconnect `sqlite3MemMalloc` leak that scales
+    /// with query complexity (deep correlated-EXISTS). The fanout is only ever
+    /// used during planning, when the snapshotter holds the conn strong, so
+    /// `upgrade()` cannot fail in practice.
+    conn: Weak<RefCell<rusqlite::Connection>>,
     default_fanout: f64,
     /// Cache of fanout results by `"table:col1,col2"` (columns sorted) —
     /// TS `#cache`.
@@ -74,10 +84,18 @@ impl SQLiteStatFanout {
         default_fanout: f64,
     ) -> Self {
         SQLiteStatFanout {
-            conn,
+            conn: Rc::downgrade(&conn),
             default_fanout,
             cache: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Upgrade the weak conn ref. Panics only if the snapshot connection was
+    /// dropped, which cannot happen during planning (the sole caller path).
+    fn conn(&self) -> Rc<RefCell<rusqlite::Connection>> {
+        self.conn
+            .upgrade()
+            .expect("SQLiteStatFanout: snapshot connection dropped while planning")
     }
 
     /// Gets the fanout factor for join column(s).
@@ -121,7 +139,8 @@ impl SQLiteStatFanout {
     fn fanout_from_stat4(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
         let index_info = self.find_index_for_columns(table_name, columns)?;
 
-        let conn = self.conn.borrow();
+        let conn_rc = self.conn();
+        let conn = conn_rc.borrow();
         let mut stmt = conn
             .prepare_cached(
                 "SELECT neq, nlt, ndlt, sample
@@ -199,7 +218,8 @@ impl SQLiteStatFanout {
     fn fanout_from_stat1(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
         let index_info = self.find_index_for_columns(table_name, columns)?;
 
-        let conn = self.conn.borrow();
+        let conn_rc = self.conn();
+        let conn = conn_rc.borrow();
         let mut stmt = conn
             .prepare_cached("SELECT stat FROM sqlite_stat1 WHERE tbl = ? AND idx = ?")
             .ok()?;
@@ -230,7 +250,8 @@ impl SQLiteStatFanout {
     /// Finds an index whose FIRST `columns.len()` positions contain ALL the
     /// requested columns (order-independent, case-insensitive).
     fn find_index_for_columns(&self, table_name: &str, columns: &[String]) -> Option<IndexInfo> {
-        let conn = self.conn.borrow();
+        let conn_rc = self.conn();
+        let conn = conn_rc.borrow();
         let mut stmt = conn
             .prepare_cached(
                 "SELECT il.name as index_name, ii.seqno, ii.name as column_name

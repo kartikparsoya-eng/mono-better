@@ -457,6 +457,14 @@ pub fn create_sqlite_cost_model_prepared(
 
     let fanout_estimator = Rc::new(SQLiteStatFanout::new(conn.clone()));
 
+    // WEAK capture: the returned model is cached on EngineState for the engine's
+    // life. Moving a STRONG `conn` into this closure would keep the snapshot
+    // connection's Rc::strong_count > 1 at Snapshot::drop, skipping the explicit
+    // close and leaking the connection (schema/stat4/statement-cache =
+    // sqlite3MemMalloc). The probe only runs during planning, when the
+    // snapshotter holds the conn strong, so upgrade() cannot fail in practice.
+    let conn_weak = Rc::downgrade(&conn);
+
     Ok(Rc::new(
         move |table_name: &str,
               sort: &[(String, String)],
@@ -479,7 +487,10 @@ pub fn create_sqlite_cost_model_prepared(
                 sort,
             );
 
-            let loops = get_scanstatus_loops(&conn.borrow(), &sql).unwrap_or_else(|e| {
+            let conn_rc = conn_weak
+                .upgrade()
+                .expect("cost model probe: snapshot connection dropped while planning");
+            let loops = get_scanstatus_loops(&conn_rc.borrow(), &sql).unwrap_or_else(|e| {
                 if is_interrupt_error(&e) {
                     // Watchdog interrupt racing the probe — unwind with a typed
                     // payload so plan_ast degrades to no-flips (see

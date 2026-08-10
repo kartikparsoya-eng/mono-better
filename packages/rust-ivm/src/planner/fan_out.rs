@@ -30,6 +30,12 @@ impl PlannerFanOut {
         &self.outputs
     }
 
+    /// Drop the upward `outputs` back-edges to break the graph's Rc cycle at
+    /// teardown (see `impl Drop for PlannerGraph`).
+    pub fn clear_outputs(&mut self) {
+        self.outputs.clear();
+    }
+
     pub fn closest_join_or_source(&self) -> JoinOrConnection {
         self.input.closest_join_or_source()
     }
