@@ -301,6 +301,17 @@ impl Drop for Snapshot {
                 holders - 1,
                 self.version,
             );
+            // Name the drop path: holders-alive-at-drop means some teardown
+            // path bypassed the ordered release (engine → sources → caches →
+            // snapshotter). The backtrace identifies it in the field; gated so
+            // steady-state prod logging doesn't pay the capture cost unless
+            // enabled.
+            if std::env::var("RUST_IVM_DROP_BACKTRACE").as_deref() == Ok("1") {
+                eprintln!(
+                    "[rust-ivm] snapshot drop backtrace:\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
             return;
         }
         // Sole owner: swap in a throwaway in-memory conn so the real one can
