@@ -133,7 +133,8 @@ fn remove_query_frees_join_tree() {
     engine.remove_query("q1");
     let (join2, _, _) = census();
     assert_eq!(
-        join2, join0,
+        join2,
+        join0,
         "remove_query retained {} Join operator(s) — tree not deallocated \
          (Rc cycle not fully severed by destroy())",
         join2 - join0
@@ -158,7 +159,10 @@ fn engine_destroy_frees_all_trees() {
             },
         ]);
         let (join1, exists1, _) = census();
-        assert!(join1 > join0 && exists1 >= exists0, "queries must build ops");
+        assert!(
+            join1 > join0 && exists1 >= exists0,
+            "queries must build ops"
+        );
         engine.destroy();
         // engine dropped at scope end
     }
