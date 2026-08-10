@@ -92,6 +92,16 @@ export class WorkerDispatcher implements Service {
           syncer = roundRobinIdx % syncers.length;
           roundRobinIdx++;
           assignedSyncer.set(clientGroupID, syncer);
+          // Bound the map: without eviction it grows by one entry per unique
+          // CG ever seen for the life of the process. Evicting the oldest
+          // assignment is safe — the documented contract already tolerates
+          // re-assignment (not sticky across restarts).
+          if (assignedSyncer.size > 100_000) {
+            const oldest = assignedSyncer.keys().next().value;
+            if (oldest !== undefined) {
+              assignedSyncer.delete(oldest);
+            }
+          }
         }
       } else {
         // Hash-based: same CG always goes to same worker.

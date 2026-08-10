@@ -1070,7 +1070,10 @@ export class RustIVMDriver {
         // credit-gated on the producer side, so we don't grant for them).
         this.#engine.grantStreamCredit?.(streamId, 1);
         const change = napiToRowChange(row, this.#tableSpecs);
-        if (change.type !== ChangeType.EDIT) {
+        // The #queryInfo guard: a removeQuery racing rows still buffered in
+        // this queue would otherwise resurrect the just-deleted signature
+        // entry, orphaning it until the next remove/reset for that id.
+        if (change.type !== ChangeType.EDIT && this.#queryInfo.has(change.queryID)) {
           const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
           const unit = rowIDSignatureUnit({
             schema: '',

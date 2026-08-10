@@ -2518,23 +2518,25 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       lc = lc.withContext('newVersion', version);
 
       // Probably need a new updater type. CVRAdvancementUpdater?
-      const updater = new CVRQueryDrivenUpdater(
-        this.#cvrStore,
-        cvr,
-        version,
-        this.#pipelines.replicaVersion,
-        queryID => this.#pipelines.rowSetSignature(queryID),
-      );
-      // Only poke clients that are at the cvr.version. New clients that
-      // are behind need to first be caught up when their initConnection
-      // message is processed (and #syncQueryPipelines is called).
-      const pokers = startPoke(
-        this.#getClients(cvr.version),
-        updater.updatedVersion(),
-      );
-      lc.debug?.(`applying ${numChanges} to advance to ${version}`);
-
+      let pokers: ReturnType<typeof startPoke> | undefined;
+      let updater: CVRQueryDrivenUpdater;
       try {
+        updater = new CVRQueryDrivenUpdater(
+          this.#cvrStore,
+          cvr,
+          version,
+          this.#pipelines.replicaVersion,
+          queryID => this.#pipelines.rowSetSignature(queryID),
+        );
+        // Only poke clients that are at the cvr.version. New clients that
+        // are behind need to first be caught up when their initConnection
+        // message is processed (and #syncQueryPipelines is called).
+        pokers = startPoke(
+          this.#getClients(cvr.version),
+          updater.updatedVersion(),
+        );
+        lc.debug?.(`applying ${numChanges} to advance to ${version}`);
+
         await this.#processChanges(
           lc,
           await timer.start(),
@@ -2544,8 +2546,23 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         );
       } catch (e) {
         if (e instanceof ResetPipelinesSignal) {
-          await pokers.cancel();
+          await pokers?.cancel();
           return e;
+        }
+        // A throw between advance() resolving and #processChanges iterating
+        // (updater/startPoke/timer.start) abandons the streaming `changes`
+        // generator UN-STARTED: its finally — which cancels the native
+        // stream — never runs, so the rust producer stays parked on credit
+        // until the watchdog abort, wedging the engine actor behind a dead
+        // consumer. Run the generator's finally explicitly; no-op when
+        // iteration already ran to completion or threw.
+        const ret = (changes as {return?: () => unknown}).return;
+        if (typeof ret === 'function') {
+          try {
+            await ret.call(changes);
+          } catch {
+            // the stream is already dead; the original error wins
+          }
         }
         throw e;
       }
