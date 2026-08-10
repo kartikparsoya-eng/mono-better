@@ -64,6 +64,7 @@ impl Exists {
         parent_join_key: Vec<String>,
         not: bool,
     ) -> Shared<Exists> {
+        crate::live_count::inc(&crate::live_count::EXISTS);
         let schema = input.borrow().get_schema();
 
         // If the parentJoinKey is the primary key, no sense in trying to reuse.
@@ -371,5 +372,11 @@ impl Output for ExistsOutput {
         }
 
         // `_in_push_guard` clears `in_push` here as it drops.
+    }
+}
+
+impl Drop for Exists {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::EXISTS);
     }
 }

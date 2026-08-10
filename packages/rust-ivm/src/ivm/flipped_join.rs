@@ -85,6 +85,7 @@ impl Drop for InprogressGuard {
 
 impl FlippedJoin {
     pub fn new(args: FlippedJoinArgs) -> Shared<FlippedJoin> {
+        crate::live_count::inc(&crate::live_count::FLIPPED_JOIN);
         assert!(
             !Rc::ptr_eq(&args.parent, &args.child),
             "FlippedJoin parent and child must be different inputs"
@@ -585,5 +586,11 @@ fn canonical_value(v: &Value) -> String {
         Value::F64(n) => format!("d{}", n),
         Value::Str(s) => format!("s{}", s),
         Value::Json(s) => format!("j{}", s),
+    }
+}
+
+impl Drop for FlippedJoin {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::FLIPPED_JOIN);
     }
 }

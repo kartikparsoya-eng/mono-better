@@ -455,6 +455,7 @@ impl TableSource {
             .unwrap_or_else(|| self.primary_index_sort.clone());
         let compare_rows = make_comparator(internal_sort.clone(), false);
 
+        crate::live_count::inc(&crate::live_count::TABLE_CONNECTION);
         let conn = Rc::new(RefCell::new(TableConnection {
             sort: sort.clone(),
             internal_sort,
@@ -484,6 +485,7 @@ impl TableSource {
         let columns = self.columns.clone();
         let _overlay_epoch = Rc::new(RefCell::new(0usize)); // tracks last_pushed_epoch
 
+        crate::live_count::inc(&crate::live_count::TABLE_SOURCE_INPUT);
         let input: Shared<dyn Input> = Rc::new(RefCell::new(TableSourceInput {
             db,
             table_name,
@@ -1534,5 +1536,17 @@ mod advance_gate_fetch_tests {
         let _guard = crate::advance_gate::arm(gate.clone());
         assert_eq!(fetch_count(db), 300);
         assert!(!gate.tripped());
+    }
+}
+
+impl Drop for TableConnection {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::TABLE_CONNECTION);
+    }
+}
+
+impl Drop for TableSourceInput {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::TABLE_SOURCE_INPUT);
     }
 }
