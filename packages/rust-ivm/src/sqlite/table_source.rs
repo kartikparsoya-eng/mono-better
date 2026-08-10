@@ -412,6 +412,7 @@ impl TableSource {
                 .collect(),
         );
 
+        crate::live_count::inc(&crate::live_count::TABLE_SOURCE);
         TableSource {
             table_name: table_name.to_string(),
             columns,
@@ -1548,5 +1549,11 @@ impl Drop for TableConnection {
 impl Drop for TableSourceInput {
     fn drop(&mut self) {
         crate::live_count::dec(&crate::live_count::TABLE_SOURCE_INPUT);
+    }
+}
+
+impl Drop for TableSource {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::TABLE_SOURCE);
     }
 }

@@ -8,6 +8,7 @@
 //! DELTA logged across teardown stages, not the absolute value.
 use std::sync::atomic::{AtomicI64, Ordering};
 
+pub static TABLE_SOURCE: AtomicI64 = AtomicI64::new(0);
 pub static TABLE_SOURCE_INPUT: AtomicI64 = AtomicI64::new(0);
 pub static TABLE_CONNECTION: AtomicI64 = AtomicI64::new(0);
 pub static UNION_FAN_OUT: AtomicI64 = AtomicI64::new(0);
@@ -26,7 +27,8 @@ pub fn dec(c: &AtomicI64) {
 
 pub fn snapshot() -> String {
     format!(
-        "tsi={} conn={} ufo={} ufi={} join={} fjoin={} exists={}",
+        "ts={} tsi={} conn={} ufo={} ufi={} join={} fjoin={} exists={}",
+        TABLE_SOURCE.load(Ordering::Relaxed),
         TABLE_SOURCE_INPUT.load(Ordering::Relaxed),
         TABLE_CONNECTION.load(Ordering::Relaxed),
         UNION_FAN_OUT.load(Ordering::Relaxed),
