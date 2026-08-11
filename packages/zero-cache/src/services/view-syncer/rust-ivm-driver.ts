@@ -69,6 +69,7 @@ try {
 }
 
 export type {Timer} from './pipeline-driver.ts';
+import {MIN_ADVANCEMENT_TIME_LIMIT_MS} from './pipeline-driver.ts';
 import type {Timer} from './pipeline-driver.ts';
 
 export type RowChange = {
@@ -960,6 +961,11 @@ export class RustIVMDriver {
     });
 
     const streamId = this.#nextStreamId++;
+    // Captured BEFORE the advance job starts: totalHydrationTimeMs is a
+    // synchronous actor call, and once the streaming job is live on the actor
+    // a queued sync call would deadlock against the credit gate (we would
+    // block the event loop the producer needs for credit grants).
+    const totalHydrationTimeMs = this.totalHydrationTimeMs();
     // Chunked delivery: each TSFN callback carries an ordered array. The first
     // element of the first chunk is the header (-1) — or a reset (-2) when the
     // advance resets before producing a header — and the final chunk ends with
@@ -1029,6 +1035,8 @@ export class RustIVMDriver {
         streamId,
         advancing,
         timer,
+        numChanges,
+        totalHydrationTimeMs,
       ),
     };
   }
@@ -1039,9 +1047,35 @@ export class RustIVMDriver {
     streamId: number,
     advancing: Promise<unknown>,
     timer: Timer,
+    numChanges: number,
+    totalHydrationTimeMs: number,
   ): AsyncIterable<RowChange | 'yield'> {
     let count = 0;
     let completed = false;
+
+    // Advancement-timeout breaker — port of PipelineDriver
+    // #shouldAdvanceYieldMaybeAbortAdvance (pipeline-driver.ts). The stock
+    // driver documents this as BOTH a circuit breaker for very large
+    // transactions AND "a bound on the amount of time the previous connection
+    // locks the inactive WAL file ... which can make the WAL grow continuously"
+    // — i.e. it is a WAL-checkpoint-starvation bound, and the rust path must
+    // enforce it too (the engine watchdog only bounds a LIVE engine job at its
+    // 600s hard deadline; this scales the limit to the CG's hydration time).
+    const maybeAbortAdvance = (pos: number) => {
+      const elapsed = timer.totalElapsed();
+      if (
+        elapsed > MIN_ADVANCEMENT_TIME_LIMIT_MS &&
+        (elapsed > totalHydrationTimeMs ||
+          (elapsed > totalHydrationTimeMs / 2 && pos <= numChanges / 2))
+      ) {
+        throw new ResetPipelinesSignal(
+          `Advancement exceeded timeout at ${pos} of ${numChanges} changes ` +
+            `after ${elapsed} ms. Advancement time limited based on total ` +
+            `hydration time of ${totalHydrationTimeMs} ms.`,
+          'advancement-timeout',
+        );
+      }
+    };
 
     // A thrown ResetPipelinesSignal (or the consumer abandoning early) exits
     // this generator mid-stream. On early exit, cancel the engine + close the
@@ -1063,6 +1097,12 @@ export class RustIVMDriver {
           );
         }
 
+        // Stock parity: checked before each change is processed. (`count` is
+        // emitted rows — a proxy for the stock driver's change position; rows
+        // can exceed changes, which only makes the mid-point clause stricter
+        // later, never laxer.)
+        maybeAbortAdvance(count);
+
         // #3 backpressure: this DATA row left the buffer — return the one
         // credit the producer acquired for it (the header/-2 rows are not
         // credit-gated on the producer side, so we don't grant for them).
@@ -1071,7 +1111,10 @@ export class RustIVMDriver {
         // The #queryInfo guard: a removeQuery racing rows still buffered in
         // this queue would otherwise resurrect the just-deleted signature
         // entry, orphaning it until the next remove/reset for that id.
-        if (change.type !== ChangeType.EDIT && this.#queryInfo.has(change.queryID)) {
+        if (
+          change.type !== ChangeType.EDIT &&
+          this.#queryInfo.has(change.queryID)
+        ) {
           const cur = this.#rowSetSignatures.get(change.queryID) ?? 0n;
           const unit = rowIDSignatureUnit({
             schema: '',

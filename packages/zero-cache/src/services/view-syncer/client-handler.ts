@@ -108,6 +108,31 @@ export function startPoke(
 // When row size is being computed, that should be used as a threshold instead.
 const PART_COUNT_FLUSH_THRESHOLD = 100;
 
+// Upper bound on how long a single downstream push may remain unconsumed
+// before the connection is failed (closed) as unrecoverably slow.
+//
+// The poke path awaits each push's `result`, which resolves only when the
+// outbound ws pipeline consumes the message. A stalled-but-open socket — a
+// silently dead peer before the kernel's TCP timeout (~15-25 min), or a
+// suspended/backgrounded tab whose kernel keeps ACKing into a zero-window
+// (which never times out) — leaves that await pending indefinitely. Because
+// pokes run inside the view-syncer lock (`#advancePipelines` →
+// `pokers.addPatch`/`end`, and initConnection catchup), ONE such client
+// freezes advances for the entire client group: the snapshotter's pinned
+// read-marks stop moving, wal2 checkpointing is starved behind them, and the
+// replica WAL grows at the write rate, unbounded. The server sends pongs but
+// enforces NO inbound liveness on client sockets, and the advancement-timeout
+// breaker only runs while rows are flowing — nothing else bounds this stall.
+//
+// Failing the one stalled connection settles every pending push (Subscription
+// cleanup resolves them 'unconsumed'), releases the poke chain (#pokeTail),
+// and lets the rest of the client group advance; the client reconnects and
+// catches up normally.
+const PUSH_CONSUME_TIMEOUT_MS = (() => {
+  const v = Number(process.env['ZERO_PUSH_CONSUME_TIMEOUT_MS']);
+  return Number.isFinite(v) && v > 0 ? v : 60_000;
+})();
+
 /**
  * Handles a single `ViewSyncer` connection.
  */
@@ -169,7 +194,27 @@ export class ClientHandler {
 
   async #push(msg: Downstream): Promise<void> {
     const {result} = this.#downstream.push(msg);
-    await result;
+    // Bound the wait (see PUSH_CONSUME_TIMEOUT_MS): a stalled-but-open
+    // connection must fail rather than hold the view-syncer lock forever.
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<'push-timeout'>(resolve => {
+      timer = setTimeout(resolve, PUSH_CONSUME_TIMEOUT_MS, 'push-timeout');
+      // Don't let a pending poke keep the process alive.
+      timer.unref?.();
+    });
+    try {
+      const won = await Promise.race([result, timeout]);
+      if (won === 'push-timeout') {
+        this.fail(
+          new Error(
+            `client not consuming pokes for ${PUSH_CONSUME_TIMEOUT_MS}ms ` +
+              `(stalled connection); closing to unblock the client group`,
+          ),
+        );
+      }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   fail(e: unknown) {

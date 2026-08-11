@@ -127,8 +127,11 @@ export type Timer = {
 /**
  * No matter how fast hydration is, advancement is given at least this long to
  * complete before doing a pipeline reset.
+ *
+ * Exported for RustIVMDriver, which enforces the same advancement-timeout
+ * breaker on its streaming advance consumption.
  */
-const MIN_ADVANCEMENT_TIME_LIMIT_MS = 50;
+export const MIN_ADVANCEMENT_TIME_LIMIT_MS = 50;
 
 /**
  * Manages the state of IVM pipelines for a given ViewSyncer (i.e. client group).

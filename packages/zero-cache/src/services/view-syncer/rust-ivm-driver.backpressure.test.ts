@@ -415,7 +415,10 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     process.env['RUST_IVM_WATCHDOG_WARN_MS'] = '10';
     process.env['RUST_IVM_WATCHDOG_ABORT_MS'] = '10';
     try {
-      const result = await rust.advance(LARGE_TIMER);
+      // NO_TIMER: a constant huge timer would now trip the (ported)
+      // advancement-timeout breaker before the watchdog cancellation this
+      // test is about.
+      const result = await rust.advance(NO_TIMER);
       if (result instanceof ResetPipelinesSignal) {
         throw result;
       }
@@ -443,7 +446,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     const {rust, ts} = setup();
     await drain(rust.addQuery('h', 'q', AST, LARGE_TIMER));
     editEveryItem('8500000101');
-    await rust.advance(LARGE_TIMER);
+    await rust.advance(NO_TIMER);
     await new Promise(resolve => setTimeout(resolve, 25));
 
     await expect(
@@ -462,11 +465,48 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     await drain(rust.addQuery('h', 'q', AST, TIMER_500));
     editEveryItem('8500000102');
 
-    const result = await rust.advance(TIMER_500);
+    // TIMER_17 (< MIN_ADVANCEMENT_TIME_LIMIT_MS): the point of this test is
+    // that WALL-CLOCK-slow delivery (drainVerySlow) does not burn the
+    // advancement budget — the budget is the TimeSliceTimer's processing
+    // time. A constant 500ms budget would now (correctly) trip the ported
+    // advancement-timeout breaker against this CG's 500ms hydration time.
+    const result = await rust.advance(TIMER_17);
     if (result instanceof ResetPipelinesSignal) {
       throw result;
     }
     expect(await drainVerySlow(result.changes)).toHaveLength(ROWS);
+
+    await rust.destroy();
+    ts.destroy();
+  });
+
+  test('advancement-timeout breaker aborts a budget-exceeded advance (stock parity)', async () => {
+    // Port-regression fence: PipelineDriver's #shouldAdvanceYieldMaybeAbortAdvance
+    // is documented as "a bound on the amount of time the previous connection
+    // locks the inactive WAL file ... which can make the WAL grow continuously".
+    // The rust driver must enforce the same hydration-scaled budget on its
+    // streamed advance (the engine watchdog alone only bounds a live engine
+    // job at 600s). Hydration budget = 500ms (TIMER_500 at addQuery); advance
+    // processing time = 500ms > budget/2 with < half the changes processed ->
+    // ResetPipelinesSignal('advancement-timeout'), exactly like stock.
+    const {rust, ts} = setup();
+    await drain(rust.addQuery('h', 'q', AST, TIMER_500));
+    editEveryItem('8500000103');
+
+    const result = await rust.advance(TIMER_500);
+    if (result instanceof ResetPipelinesSignal) {
+      // The breaker lives in the row stream, not the header path.
+      throw result;
+    }
+    let caught: unknown;
+    try {
+      await drain(result.changes);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ResetPipelinesSignal);
+    expect((caught as ResetPipelinesSignal).reason).toBe('advancement-timeout');
+    expect(String(caught)).toMatch(/Advancement exceeded timeout/);
 
     await rust.destroy();
     ts.destroy();
