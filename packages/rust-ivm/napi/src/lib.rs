@@ -170,6 +170,91 @@ fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
     )
 }
 
+/// How long a pinned snapshot may lag the replica head with NO real engine
+/// work before the stale-pin guard rolls it forward. Tunable via
+/// `RUST_IVM_STALE_PIN_MS`; clamped to ≥10s so a mis-set env cannot turn the
+/// guard into a reset storm. The default (3 min) bounds worst-case WAL
+/// checkpoint starvation at ~3 min of replica write volume.
+fn stale_pin_window() -> std::time::Duration {
+    let ms = std::env::var("RUST_IVM_STALE_PIN_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(180_000)
+        .max(10_000);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Stale-pin guard body — runs on the actor as a MAINTENANCE job.
+///
+/// TS's read-mark lifetime is bounded by its synchronous lifecycle: every
+/// `version-ready` advances the snapshotter (view-syncer.ts run loop) and
+/// `Snapshotter.destroy()` closes both connections inline — no queue in
+/// between. The Rust engine's marks instead move only when jobs ARRIVE; if the
+/// JS side wedges upstream (lock held by an unresolved await, a starved
+/// subscription, an abandoned-but-referenced engine), the pinned BEGIN
+/// CONCURRENT read-marks freeze while the replicator keeps writing, the wal2
+/// checkpointer can never copy past them, and the WAL grows at the write rate
+/// — invisibly (the process is healthy and idle in epoll; the observed prod
+/// wedge, shm byte-124 holder).
+///
+/// This guard converts that failure mode into: loud log + roll both pins
+/// forward to head + poison the engine so its next touch goes through the
+/// reset → rehydrate path (the graph is stale once the data moves under it).
+/// A quiet replica (head == pinned) never triggers — an idle CG on an idle
+/// system pins nothing the checkpointer needs.
+fn stale_pin_check(state: &mut EngineState, window: std::time::Duration) {
+    let idle = state.last_real_job.elapsed();
+    if idle < window {
+        return;
+    }
+    let Some(snap) = state.snapshotter.as_mut() else {
+        return;
+    };
+    if !snap.initialized() || snap.destroyed() {
+        return;
+    }
+    let pinned = match snap.current_version() {
+        Ok(v) => v.to_string(),
+        Err(_) => return,
+    };
+    let head = match snap.head_version() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[rust-ivm] stale-pin guard: head read failed: {}", e);
+            return;
+        }
+    };
+    if head == pinned {
+        return;
+    }
+    eprintln!(
+        "[rust-ivm] stale-pin guard: snapshot pinned at {:?} while replica head is {:?} \
+         with no engine work for {}s — this pin starves wal2 checkpointing (unbounded \
+         WAL growth); rolling pins forward and poisoning the engine",
+        pinned,
+        head,
+        idle.as_secs(),
+    );
+    match snap.repin_at_head() {
+        Ok((old, new)) => {
+            // Data moved under the pipelines: force the next advance/hydrate
+            // through reset → rehydrate. The version-keyed cost-model cache is
+            // stale too (its Weak conn is still alive but pinned elsewhere).
+            state.poisoned = true;
+            state.cost_model_cache = None;
+            eprintln!(
+                "[rust-ivm] stale-pin guard: repinned {:?} → {:?}; engine poisoned \
+                 (next touch resets + rehydrates)",
+                old, new,
+            );
+        }
+        Err(e) => {
+            eprintln!("[rust-ivm] stale-pin guard: repin failed: {}", e);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Engine actor — a dedicated thread owning the !Send EngineState.
 // ---------------------------------------------------------------------------
@@ -177,12 +262,23 @@ fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
 /// A unit of work executed on the actor thread with exclusive `&mut EngineState`.
 /// The actor loop exits (and destroys the engine) when the last `Sender` drops,
 /// i.e. when the owning `RustIvmEngine` and any in-flight `AsyncTask`s are gone.
-struct Job(Box<dyn FnOnce(&mut EngineState) + Send>);
+struct Job {
+    f: Box<dyn FnOnce(&mut EngineState) + Send>,
+    /// True for guard/housekeeping jobs (the stale-pin check). Maintenance
+    /// jobs do NOT refresh `EngineState.last_real_job`, so the guard's own
+    /// periodic ticks can never mask a wedged caller as "activity".
+    maintenance: bool,
+}
 
 /// Handle to an engine actor thread. Cheaply cloneable; `Send + Sync`.
+///
+/// `tx` is behind ONE shared `Arc` (not per-clone `Sender` clones) so the
+/// stale-pin guard thread can hold a `Weak` to it: the guard must never keep
+/// the channel alive, or the actor's last-Sender-drop teardown (the GC path
+/// epilogue) would never fire.
 #[derive(Clone)]
 struct EngineHandle {
-    tx: Sender<Job>,
+    tx: Arc<Sender<Job>>,
     /// Populated by `init` once the engine exists; read by out-of-band `cancel`.
     cancel_slot: Arc<Mutex<Option<CancellationToken>>>,
     /// Interrupt handles for Snapshotter's live `prev` and `curr` connections.
@@ -211,12 +307,17 @@ struct EngineHandle {
 impl EngineHandle {
     fn spawn() -> Self {
         let (tx, rx) = channel::<Job>();
+        let tx = Arc::new(tx);
+        let destroying = Arc::new(std::sync::atomic::AtomicBool::new(false));
         std::thread::Builder::new()
             .name("rust-ivm-engine".into())
             .spawn(move || {
                 let mut state = EngineState::default();
-                while let Ok(Job(f)) = rx.recv() {
-                    f(&mut state);
+                while let Ok(job) = rx.recv() {
+                    (job.f)(&mut state);
+                    if !job.maintenance {
+                        state.last_real_job = std::time::Instant::now();
+                    }
                     // Deterministic teardown: DestroyTask sets should_exit so the
                     // thread exits now (freeing its stack) rather than lingering
                     // until the last Sender drops at GC time.
@@ -233,13 +334,48 @@ impl EngineHandle {
                 ordered_teardown(&mut state);
             })
             .expect("spawn rust-ivm engine actor thread");
+
+        // Stale-pin guard: a detached thread that periodically enqueues a
+        // MAINTENANCE job checking whether this engine's pinned snapshot has
+        // been left behind by the replica head with no real work arriving —
+        // the wedge class where a JS-side await (lock, subscription, abandoned
+        // engine) silently stops advances while the pinned read-marks starve
+        // the wal2 checkpointer and the WAL grows at the write rate, unbounded.
+        // Holds only a Weak to the Sender (see EngineHandle.tx) and exits when
+        // the engine is destroyed or the channel is gone.
+        {
+            let weak_tx = Arc::downgrade(&tx);
+            let destroying = destroying.clone();
+            std::thread::Builder::new()
+                .name("rust-ivm-stale-pin-guard".into())
+                .spawn(move || {
+                    let window = stale_pin_window();
+                    let tick = std::cmp::max(window / 4, std::time::Duration::from_secs(5));
+                    loop {
+                        std::thread::sleep(tick);
+                        if destroying.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        let Some(tx) = weak_tx.upgrade() else { break };
+                        let job = Job {
+                            f: Box::new(move |s| stale_pin_check(s, window)),
+                            maintenance: true,
+                        };
+                        if tx.send(job).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("spawn rust-ivm stale-pin guard thread");
+        }
+
         EngineHandle {
             tx,
             cancel_slot: Arc::new(Mutex::new(None)),
             snapshot_interrupt_handles: Arc::new(Mutex::new(Vec::new())),
             watchdog: Arc::new(JobWatchdog::new()),
             credit: Arc::new(StreamCreditGate::new()),
-            destroying: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            destroying,
         }
     }
 
@@ -268,7 +404,9 @@ impl EngineHandle {
             .watchdog
             .register(now + warn, now + abort, cancel.clone(), handles);
         self.tx
-            .send(Job(Box::new(move |s| {
+            .send(Job {
+                maintenance: false,
+                f: Box::new(move |s| {
                 // Contain any panic so it (a) does NOT unwind out of and kill the
                 // actor thread, and (b) surfaces to JS as a THROWN error. This
                 // matches the TS engine contract: an unexpected error during
@@ -278,9 +416,10 @@ impl EngineHandle {
                 // the client reconnects. We must NOT convert these into a
                 // ResetPipelinesSignal (that is the in-place-reset path TS
                 // reserves for advancement-timeout/schema-change/etc.).
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
-                let _ = rtx.send(r);
-            })))
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
+                    let _ = rtx.send(r);
+                }),
+            })
             .map_err(|_| NapiError::from_reason("engine actor thread is gone"))?;
         match rrx.recv() {
             Ok(Ok(v)) => Ok(v),
@@ -1147,6 +1286,11 @@ struct EngineState {
     /// V8 GCs the owning `RustIvmEngine`. Under reconnect churn, GC-timing-bound
     /// thread lingering would accumulate stacks; this makes teardown deterministic.
     should_exit: bool,
+    /// When the actor last completed a NON-maintenance job. Read by the
+    /// stale-pin guard: a pinned snapshot lagging the replica head with no
+    /// real work for longer than `stale_pin_window()` is rolled forward (see
+    /// `stale_pin_check`). Maintenance jobs deliberately do not refresh this.
+    last_real_job: std::time::Instant,
 }
 
 impl Default for EngineState {
@@ -1163,6 +1307,7 @@ impl Default for EngineState {
             cost_specs_cache: None,
             cost_model_cache: None,
             should_exit: false,
+            last_real_job: std::time::Instant::now(),
         }
     }
 }

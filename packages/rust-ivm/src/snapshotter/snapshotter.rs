@@ -196,6 +196,51 @@ impl Snapshotter {
         Ok(&self.curr.as_ref().unwrap().version)
     }
 
+    /// Read the head `stateVersion` via a fresh, transient autocommit
+    /// connection. The pinned `curr` connection cannot be used for this — its
+    /// held read transaction can only see its own snapshot. The connection is
+    /// opened, read, and dropped inside this call; it holds no read-mark.
+    pub fn head_version(&self) -> Result<String, String> {
+        let conn = rusqlite::Connection::open(&self.db_file)
+            .map_err(|e| format!("head_version open: {}", e))?;
+        conn.query_row(
+            "SELECT stateVersion FROM \"_zero.replicationState\"",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("head_version read: {}", e))
+    }
+
+    /// Roll BOTH live snapshot transactions forward to the current head,
+    /// releasing their (possibly checkpoint-starving) read-marks and re-pinning
+    /// at head. Returns `(old_curr_version, new_curr_version)`.
+    ///
+    /// This is the stale-pin self-heal: when an engine stops receiving
+    /// advances (wedged lock upstream, starved subscription, abandoned
+    /// engine), its pinned read-marks freeze and the wal2 checkpointer can
+    /// never copy past them — the WAL then grows at the replica write rate,
+    /// unbounded. Rolling the pins forward bounds the starvation window. The
+    /// engine graph is NOT updated here — data under the sources has moved, so
+    /// the CALLER MUST poison the engine (forcing the next touch through the
+    /// reset → rehydrate path) whenever it repins under live pipelines.
+    pub fn repin_at_head(&mut self) -> Result<(String, String), String> {
+        let old = self
+            .curr
+            .as_ref()
+            .map(|s| s.version.clone())
+            .ok_or_else(|| "Snapshotter has not been initialized".to_string())?;
+        if let Some(prev) = self.prev.as_mut() {
+            prev.reset_to_head()?;
+        }
+        let curr = self.curr.as_mut().expect("checked above");
+        curr.reset_to_head()?;
+        self.publish_snapshot_interrupt_handles();
+        Ok((
+            old,
+            self.curr.as_ref().expect("checked above").version.clone(),
+        ))
+    }
+
     /// Close both snapshot connections.
     pub fn destroy(&mut self) {
         self.destroyed = true;
