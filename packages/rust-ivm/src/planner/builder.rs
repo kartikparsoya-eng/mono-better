@@ -92,6 +92,12 @@ fn process_condition(
                         parent_table,
                         plan_id_counter,
                     );
+                    // TS parity (planner-builder.ts processOr): the FO also
+                    // records each branch END as an output — usually a
+                    // duplicate of the wire_output above (BFS dedups), but for
+                    // a nested-OR branch the end is a FanIn the FO would not
+                    // otherwise point to.
+                    fo_node.set_output(branch.clone());
                     branches.push(branch);
                 }
             }
@@ -225,6 +231,10 @@ pub fn build_plan_graph(
     }
 
     let terminus = Rc::new(RefCell::new(PlannerTerminus::new(end.clone())));
+    // TS parity (planner-builder.ts: `wireOutput(end, terminus)`): the end
+    // node's upward back-edge points at the terminus. Weak, like all
+    // back-edges — the terminus is strong-held by `graph.terminus`.
+    wire_output(&end, PlannerNode::Terminus(terminus.clone()));
     graph.set_terminus(terminus);
 
     let mut sub_plans = HashMap::new();

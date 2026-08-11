@@ -1,16 +1,21 @@
 //! Planner fan-out — port of `planner-fan-out.ts`.
 
 use crate::planner::constraint::PlannerConstraint;
-use crate::planner::node::{CostEstimate, FanOutType, JoinOrConnection, PlannerNode};
+use crate::planner::node::{
+    CostEstimate, FanOutType, JoinOrConnection, PlannerNode, PlannerNodeWeak,
+};
 
 pub struct PlannerFanOut {
     node_type: FanOutType,
-    outputs: Vec<PlannerNode>,
+    /// Upward back-edges — WEAK so the graph stays acyclic (see
+    /// `PlannerNodeWeak`); TS holds these strong and lets GC break the cycle.
+    outputs: Vec<PlannerNodeWeak>,
     input: PlannerNode,
 }
 
 impl PlannerFanOut {
     pub fn new(input: PlannerNode) -> Self {
+        crate::live_count::inc(&crate::live_count::PLANNER_NODE);
         PlannerFanOut {
             node_type: FanOutType::FO,
             outputs: Vec::new(),
@@ -23,17 +28,14 @@ impl PlannerFanOut {
     }
 
     pub fn add_output(&mut self, node: PlannerNode) {
-        self.outputs.push(node);
+        self.outputs.push(node.downgrade());
     }
 
-    pub fn outputs(&self) -> &[PlannerNode] {
-        &self.outputs
-    }
-
-    /// Drop the upward `outputs` back-edges to break the graph's Rc cycle at
-    /// teardown (see `impl Drop for PlannerGraph`).
-    pub fn clear_outputs(&mut self) {
-        self.outputs.clear();
+    /// Upgraded outputs. Only read during planning (FO→FI BFS), while the
+    /// graph holds every node strong — dead entries (impossible there) are
+    /// skipped.
+    pub fn outputs(&self) -> Vec<PlannerNode> {
+        self.outputs.iter().filter_map(|w| w.upgrade()).collect()
     }
 
     pub fn closest_join_or_source(&self) -> JoinOrConnection {
@@ -69,5 +71,11 @@ impl PlannerFanOut {
 
     pub fn propagate_unlimit_from_flipped_join(&self) {
         self.input.propagate_unlimit_from_flipped_join();
+    }
+}
+
+impl Drop for PlannerFanOut {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::PLANNER_NODE);
     }
 }

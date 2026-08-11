@@ -41,6 +41,7 @@ impl Default for PlannerGraph {
 
 impl PlannerGraph {
     pub fn new() -> Self {
+        crate::live_count::inc(&crate::live_count::PLANNER_GRAPH);
         PlannerGraph {
             sources: HashMap::new(),
             terminus: None,
@@ -197,30 +198,16 @@ impl PlannerGraph {
 }
 
 impl Drop for PlannerGraph {
-    /// Break the plan graph's `Rc` reference cycle so its nodes actually free.
-    ///
-    /// Every node holds a STRONG downward ref to its input(s) (`terminus.input`,
-    /// `fanout.input`, `join.parent`/`child`) AND a STRONG upward back-edge to
-    /// its consumer (`connection`/`join`/`fanin.output`, `fanout.outputs`). The
-    /// downward edges alone form a DAG, but each upward back-edge closes a cycle
-    /// (e.g. `connection.output → join`, `join.parent → connection`), so when the
-    /// graph's owning `Vec`s drop, the nodes keep each other alive and the whole
-    /// graph leaks — ~one plan graph per `planAst` (the ported TS graph relies on
-    /// GC to reclaim these cycles; Rust does not). Clearing every upward back-edge
-    /// here severs all cycles so the downward tree can cascade to zero.
+    /// Census only. The graph needs NO cycle-breaking here: every upward
+    /// back-edge (`output`/`outputs`) is `Weak` (see `PlannerNodeWeak`), so the
+    /// strong topology is a DAG — dropping the owning `Vec`s cascades every
+    /// node to zero unconditionally. (An earlier revision stored strong
+    /// back-edges like TS and cleared them in this Drop; that freed correctly
+    /// only for nodes registered in the graph's `Vec`s, leaving the cycle
+    /// CLASS alive for any node a future edit forgets to register. Weak
+    /// back-edges remove the class.)
     fn drop(&mut self) {
-        for j in &self.joins {
-            j.borrow_mut().clear_output();
-        }
-        for c in &self.connections {
-            c.borrow_mut().clear_output();
-        }
-        for fi in &self.fan_ins {
-            fi.borrow_mut().clear_output();
-        }
-        for fo in &self.fan_outs {
-            fo.borrow_mut().clear_outputs();
-        }
+        crate::live_count::dec(&crate::live_count::PLANNER_GRAPH);
     }
 }
 
@@ -243,7 +230,7 @@ fn find_fi_and_joins(graph: &PlannerGraph, fo: &PlannerFanOut) -> FofiInfo {
     let mut fi_index = None;
 
     // BFS through FO outputs
-    let mut queue: Vec<PlannerNode> = fo.outputs().to_vec();
+    let mut queue: Vec<PlannerNode> = fo.outputs();
     let mut visited_rcs: Vec<*const ()> = Vec::new();
 
     while !queue.is_empty() {
@@ -270,11 +257,11 @@ fn find_fi_and_joins(graph: &PlannerGraph, fo: &PlannerFanOut) -> FofiInfo {
                 }
                 // Traverse to join's output (TS: queue.push(node.output))
                 if let Some(out) = j.borrow().get_output() {
-                    queue.push(out.clone());
+                    queue.push(out);
                 }
             }
             PlannerNode::FanOut(inner_fo) => {
-                queue.extend(inner_fo.borrow().outputs().iter().cloned());
+                queue.extend(inner_fo.borrow().outputs());
             }
             PlannerNode::FanIn(fi) => {
                 for (i, gfi) in graph.fan_ins.iter().enumerate() {

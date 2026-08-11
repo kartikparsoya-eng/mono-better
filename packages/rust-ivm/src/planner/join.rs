@@ -1,7 +1,9 @@
 //! Planner join — port of `planner-join.ts`.
 
 use crate::planner::constraint::{PlannerConstraint, merge_constraints};
-use crate::planner::node::{CostEstimate, JoinOrConnection, JoinType, PlannerNode};
+use crate::planner::node::{
+    CostEstimate, JoinOrConnection, JoinType, PlannerNode, PlannerNodeWeak,
+};
 
 fn translate_constraints_for_flipped_join(
     incoming: Option<&PlannerConstraint>,
@@ -37,7 +39,10 @@ pub struct PlannerJoin {
     child_constraint: PlannerConstraint,
     flippable: bool,
     pub plan_id: usize,
-    output: Option<PlannerNode>,
+    /// Upward back-edge to the consumer — WEAK so the graph stays acyclic
+    /// (see `PlannerNodeWeak`); TS holds this strong and lets GC break the
+    /// cycle.
+    output: Option<PlannerNodeWeak>,
     join_type: JoinType,
     initial_type: JoinType,
 }
@@ -52,6 +57,7 @@ impl PlannerJoin {
         plan_id: usize,
         initial_type: JoinType,
     ) -> Self {
+        crate::live_count::inc(&crate::live_count::PLANNER_NODE);
         PlannerJoin {
             parent,
             child,
@@ -66,7 +72,7 @@ impl PlannerJoin {
     }
 
     pub fn set_output(&mut self, node: PlannerNode) {
-        self.output = Some(node);
+        self.output = Some(node.downgrade());
     }
 
     pub fn closest_join_or_source(&self) -> JoinOrConnection {
@@ -192,14 +198,8 @@ impl PlannerJoin {
         }
     }
 
-    pub fn get_output(&self) -> Option<&PlannerNode> {
-        self.output.as_ref()
-    }
-
-    /// Drop the upward `output` back-edge to break the graph's Rc cycle at
-    /// teardown (see `impl Drop for PlannerGraph`).
-    pub fn clear_output(&mut self) {
-        self.output = None;
+    pub fn get_output(&self) -> Option<PlannerNode> {
+        self.output.as_ref().and_then(|w| w.upgrade())
     }
 
     pub fn reset(&mut self) {
@@ -208,5 +208,11 @@ impl PlannerJoin {
 
     pub fn get_name(&self) -> String {
         format!("{} ⋈ {}", self.parent.name(), self.child.name())
+    }
+}
+
+impl Drop for PlannerJoin {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::PLANNER_NODE);
     }
 }
