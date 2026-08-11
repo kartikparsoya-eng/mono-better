@@ -161,11 +161,25 @@ fn watchdog_bounds() -> (std::time::Duration, std::time::Duration) {
     )
 }
 
-/// How long a pinned snapshot may lag the replica head with NO real engine
-/// work before the stale-pin guard rolls it forward. Tunable via
-/// `RUST_IVM_STALE_PIN_MS`; clamped to ≥10s so a mis-set env cannot turn the
-/// guard into a reset storm. The default (3 min) bounds worst-case WAL
-/// checkpoint starvation at ~3 min of replica write volume.
+/// How long a pinned snapshot may lag the replica head before the stale-pin
+/// guard rolls it forward. Tunable via `RUST_IVM_STALE_PIN_MS`; clamped to
+/// ≥10s so a mis-set env cannot turn the guard into a reset storm. The
+/// default (3 min) bounds worst-case WAL checkpoint starvation at ~3 min of
+/// replica write volume (plus up to two guard ticks for the two-strike arm —
+/// see `stale_pin_check`).
+/// Refusal message for hydrating a poisoned engine. Poison means the data
+/// moved under the live graph (stale-pin repin, repin failure, or a caught
+/// advance panic); TS's analog is always a full reset → rehydrate. An
+/// incremental hydrate on a poisoned engine would come up at the repinned
+/// snapshot while the EXISTING pipelines still reflect the old one — the next
+/// advance would then emit only the new-window delta, silently losing the
+/// in-between window for every already-hydrated query (permanent client
+/// staleness). This error propagates to JS as a thrown hydrate error → the
+/// view-syncer tears down and the client reconnects (the stock TS contract
+/// for unexpected engine errors). Only `reset`/`init` clear poison.
+const POISONED_HYDRATE_MSG: &str =
+    "engine poisoned (snapshot repinned under live pipelines); reset required before hydrate";
+
 fn stale_pin_window() -> std::time::Duration {
     let ms = std::env::var("RUST_IVM_STALE_PIN_MS")
         .ok()
@@ -176,29 +190,35 @@ fn stale_pin_window() -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
-/// Stale-pin guard body — runs on the actor as a MAINTENANCE job.
+/// Stale-pin guard body — runs on the actor as a periodic guard job.
 ///
 /// TS's read-mark lifetime is bounded by its synchronous lifecycle: every
 /// `version-ready` advances the snapshotter (view-syncer.ts run loop) and
 /// `Snapshotter.destroy()` closes both connections inline — no queue in
-/// between. The Rust engine's marks instead move only when jobs ARRIVE; if the
-/// JS side wedges upstream (lock held by an unresolved await, a starved
-/// subscription, an abandoned-but-referenced engine), the pinned BEGIN
-/// CONCURRENT read-marks freeze while the replicator keeps writing, the wal2
-/// checkpointer can never copy past them, and the WAL grows at the write rate
-/// — invisibly (the process is healthy and idle in epoll; the observed prod
-/// wedge, shm byte-124 holder).
+/// between. TS's invariant is therefore "pins track head, moved by advances";
+/// this guard watches PIN PROGRESS directly: if the pinned version has not
+/// moved for a full window while the replica head has, the engine has stopped
+/// receiving advances — whether it is fully idle (lock held by an unresolved
+/// await, an abandoned-but-referenced engine; the observed prod wedge, shm
+/// byte-124 holder) or still busy serving reads/hydrates off a starved
+/// subscription (a reconnect storm hammering addQuery keeps an engine
+/// "active" without a single advance — an activity-based idle check misses
+/// that whole class).
 ///
-/// This guard converts that failure mode into: loud log + roll both pins
-/// forward to head + poison the engine so its next touch goes through the
-/// reset → rehydrate path (the graph is stale once the data moves under it).
-/// A quiet replica (head == pinned) never triggers — an idle CG on an idle
-/// system pins nothing the checkpointer needs.
+/// Two-strike: the first stale observation only arms `guard_suspect`; the
+/// repin happens when the NEXT tick still finds the same frozen pin. This
+/// absorbs the lawful laggard — a long cold hydrate holding the view-syncer
+/// lock with a version-ready advance queued right behind it: that advance
+/// runs before the next tick (guard ticks queue FIFO behind it), moves the
+/// pin, and disarms the strike. Worst-case trigger latency is one window
+/// plus two ticks.
+///
+/// On trigger: loud log + roll both pins forward to head + poison the engine
+/// so its next touch goes through the reset → rehydrate path (the graph is
+/// stale once the data moves under it). A quiet replica (head == pinned)
+/// never triggers — an idle CG on an idle system pins nothing the
+/// checkpointer needs.
 fn stale_pin_check(state: &mut EngineState, window: std::time::Duration) {
-    let idle = state.last_real_job.elapsed();
-    if idle < window {
-        return;
-    }
     let Some(snap) = state.snapshotter.as_mut() else {
         return;
     };
@@ -209,24 +229,38 @@ fn stale_pin_check(state: &mut EngineState, window: std::time::Duration) {
         Ok(v) => v.to_string(),
         Err(_) => return,
     };
-    let head = match snap.head_version() {
-        Ok(v) => v,
+    let tracker = state
+        .guard_tracker
+        .get_or_insert_with(|| rust_ivm::snapshotter::StalePinTracker::new(window));
+    let action = match tracker.observe(&pinned, || snap.head_version()) {
+        Ok(a) => a,
         Err(e) => {
             eprintln!("[rust-ivm] stale-pin guard: head read failed: {}", e);
             return;
         }
     };
-    if head == pinned {
-        return;
+    match action {
+        rust_ivm::snapshotter::StalePinAction::None => return,
+        rust_ivm::snapshotter::StalePinAction::Warn => {
+            eprintln!(
+                "[rust-ivm] stale-pin guard: snapshot pinned at {:?} for {}s while the \
+                 replica head has moved on — repinning next tick unless an advance \
+                 moves the pin",
+                pinned,
+                tracker.stale_for().as_secs(),
+            );
+            return;
+        }
+        rust_ivm::snapshotter::StalePinAction::Repin => {
+            eprintln!(
+                "[rust-ivm] stale-pin guard: snapshot still pinned at {:?} after {}s \
+                 with the replica head ahead — this pin starves wal2 checkpointing \
+                 (unbounded WAL growth); rolling pins forward and poisoning the engine",
+                pinned,
+                tracker.stale_for().as_secs(),
+            );
+        }
     }
-    eprintln!(
-        "[rust-ivm] stale-pin guard: snapshot pinned at {:?} while replica head is {:?} \
-         with no engine work for {}s — this pin starves wal2 checkpointing (unbounded \
-         WAL growth); rolling pins forward and poisoning the engine",
-        pinned,
-        head,
-        idle.as_secs(),
-    );
     match snap.repin_at_head() {
         Ok((old, new)) => {
             // Data moved under the pipelines: force the next advance/hydrate
@@ -241,7 +275,21 @@ fn stale_pin_check(state: &mut EngineState, window: std::time::Duration) {
             );
         }
         Err(e) => {
-            eprintln!("[rust-ivm] stale-pin guard: repin failed: {}", e);
+            // Repin failure leaves the snapshot state UNKNOWN: reset_to_head's
+            // ROLLBACK may have succeeded with the re-BEGIN failing (busy
+            // replica), leaving a conn in autocommit — reads through it would
+            // see the moving head while version bookkeeping still claims the
+            // old pin. Poison so nothing advances/hydrates on it as if pinned;
+            // the next tick retries the repin (reset_to_head tolerates the
+            // txn-less state).
+            state.poisoned = true;
+            state.cost_model_cache = None;
+            eprintln!(
+                "[rust-ivm] stale-pin guard: repin FAILED: {} — engine poisoned \
+                 (snapshot state unknown; next touch resets + rehydrates; repin \
+                 retries next tick)",
+                e,
+            );
         }
     }
 }
@@ -253,13 +301,7 @@ fn stale_pin_check(state: &mut EngineState, window: std::time::Duration) {
 /// A unit of work executed on the actor thread with exclusive `&mut EngineState`.
 /// The actor loop exits (and destroys the engine) when the last `Sender` drops,
 /// i.e. when the owning `RustIvmEngine` and any in-flight `AsyncTask`s are gone.
-struct Job {
-    f: Box<dyn FnOnce(&mut EngineState) + Send>,
-    /// True for guard/housekeeping jobs (the stale-pin check). Maintenance
-    /// jobs do NOT refresh `EngineState.last_real_job`, so the guard's own
-    /// periodic ticks can never mask a wedged caller as "activity".
-    maintenance: bool,
-}
+type Job = Box<dyn FnOnce(&mut EngineState) + Send>;
 
 /// Handle to an engine actor thread. Cheaply cloneable; `Send + Sync`.
 ///
@@ -305,10 +347,7 @@ impl EngineHandle {
             .spawn(move || {
                 let mut state = EngineState::default();
                 while let Ok(job) = rx.recv() {
-                    (job.f)(&mut state);
-                    if !job.maintenance {
-                        state.last_real_job = std::time::Instant::now();
-                    }
+                    job(&mut state);
                     // Deterministic teardown: DestroyTask sets should_exit so the
                     // thread exits now (freeing its stack) rather than lingering
                     // until the last Sender drops at GC time.
@@ -326,14 +365,14 @@ impl EngineHandle {
             })
             .expect("spawn rust-ivm engine actor thread");
 
-        // Stale-pin guard: a detached thread that periodically enqueues a
-        // MAINTENANCE job checking whether this engine's pinned snapshot has
-        // been left behind by the replica head with no real work arriving —
-        // the wedge class where a JS-side await (lock, subscription, abandoned
-        // engine) silently stops advances while the pinned read-marks starve
-        // the wal2 checkpointer and the WAL grows at the write rate, unbounded.
-        // Holds only a Weak to the Sender (see EngineHandle.tx) and exits when
-        // the engine is destroyed or the channel is gone.
+        // Stale-pin guard: a detached thread that periodically enqueues a job
+        // checking whether this engine's pinned snapshot has stopped moving
+        // while the replica head advances — the wedge class where a JS-side
+        // await (lock, subscription, abandoned engine) silently stops advances
+        // while the pinned read-marks starve the wal2 checkpointer and the WAL
+        // grows at the write rate, unbounded. Holds only a Weak to the Sender
+        // (see EngineHandle.tx) and exits when the engine is destroyed or the
+        // channel is gone.
         {
             let weak_tx = Arc::downgrade(&tx);
             let destroying = destroying.clone();
@@ -348,10 +387,23 @@ impl EngineHandle {
                             break;
                         }
                         let Some(tx) = weak_tx.upgrade() else { break };
-                        let job = Job {
-                            f: Box::new(move |s| stale_pin_check(s, window)),
-                            maintenance: true,
-                        };
+                        // Contained like real jobs are in `call`: a panic in the
+                        // guard (a poisoned registry mutex, a rusqlite invariant)
+                        // must not unwind out of and silently kill the actor
+                        // thread. A panic can strike mid-repin, so the snapshot
+                        // state is unknown — poison, same as a failed repin.
+                        let job: Job = Box::new(move |s| {
+                            let r = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| stale_pin_check(s, window)),
+                            );
+                            if r.is_err() {
+                                s.poisoned = true;
+                                eprintln!(
+                                    "[rust-ivm] stale-pin guard: check PANICKED; engine \
+                                     poisoned (next touch resets + rehydrates)"
+                                );
+                            }
+                        });
                         if tx.send(job).is_err() {
                             break;
                         }
@@ -395,9 +447,7 @@ impl EngineHandle {
             .watchdog
             .register(now + warn, now + abort, cancel.clone(), handles);
         self.tx
-            .send(Job {
-                maintenance: false,
-                f: Box::new(move |s| {
+            .send(Box::new(move |s| {
                 // Contain any panic so it (a) does NOT unwind out of and kill the
                 // actor thread, and (b) surfaces to JS as a THROWN error. This
                 // matches the TS engine contract: an unexpected error during
@@ -407,10 +457,9 @@ impl EngineHandle {
                 // the client reconnects. We must NOT convert these into a
                 // ResetPipelinesSignal (that is the in-place-reset path TS
                 // reserves for advancement-timeout/schema-change/etc.).
-                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
-                    let _ = rtx.send(r);
-                }),
-            })
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(s)));
+                let _ = rtx.send(r);
+            }))
             .map_err(|_| NapiError::from_reason("engine actor thread is gone"))?;
         match rrx.recv() {
             Ok(Ok(v)) => Ok(v),
@@ -1234,13 +1283,15 @@ struct EngineState {
     all_table_names: HashSet<String>,
     sources: HashMap<String, std::rc::Rc<RefCell<dyn Source>>>,
     primary_keys: HashMap<String, Vec<String>>,
-    /// Set true when a non-scalar panic (e.g. a source-drift assert) was caught
-    /// mid-advance. The engine graph may be left half-mutated; the restored
-    /// engine must NOT advance again until it is rehydrated. A poisoned engine
-    /// forces the next advance to emit a reset (rehydrate) instead of running
-    /// on the inconsistent graph — defense-in-depth for the case where a caller
-    /// retries advance rather than tearing down after the thrown error. Cleared
-    /// by (re)hydrate / reset / init.
+    /// Set true when the live graph can no longer be trusted against the
+    /// pinned snapshot: a non-scalar panic (e.g. a source-drift assert) was
+    /// caught mid-advance (graph possibly half-mutated), or the stale-pin
+    /// guard repinned the snapshot under live pipelines (data moved under the
+    /// graph). A poisoned engine forces the next advance to emit a reset
+    /// (rehydrate) and REFUSES to hydrate — TS's analog of "data moved under
+    /// us" is always a full reset → rehydrate, never an incremental hydrate
+    /// on a stale graph (which would silently lose the in-between window for
+    /// every already-hydrated query). Cleared ONLY by reset / init.
     poisoned: bool,
     /// Version-keyed table row-count cache for the planner cost model, shared
     /// across `plan_ast` calls so a connection-init burst of `addQuery`s reuses
@@ -1277,11 +1328,10 @@ struct EngineState {
     /// V8 GCs the owning `RustIvmEngine`. Under reconnect churn, GC-timing-bound
     /// thread lingering would accumulate stacks; this makes teardown deterministic.
     should_exit: bool,
-    /// When the actor last completed a NON-maintenance job. Read by the
-    /// stale-pin guard: a pinned snapshot lagging the replica head with no
-    /// real work for longer than `stale_pin_window()` is rolled forward (see
-    /// `stale_pin_check`). Maintenance jobs deliberately do not refresh this.
-    last_real_job: std::time::Instant,
+    /// Stale-pin guard bookkeeping (see `stale_pin_check`): pin-progress
+    /// tracker applying the two-strike rule. Lazily created with the guard's
+    /// window on the first tick; only the guard job reads/writes it.
+    guard_tracker: Option<rust_ivm::snapshotter::StalePinTracker>,
 }
 
 impl Default for EngineState {
@@ -1298,7 +1348,7 @@ impl Default for EngineState {
             cost_specs_cache: None,
             cost_model_cache: None,
             should_exit: false,
-            last_real_job: std::time::Instant::now(),
+            guard_tracker: None,
         }
     }
 }
@@ -2036,8 +2086,11 @@ impl Task for HydrateTask {
         self.handle
             .call(
                 move |state| -> std::result::Result<Vec<NapiRowChange>, String> {
-                    // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
-                    state.poisoned = false;
+                    // NEVER clear poison here: this path also serves INCREMENTAL
+                    // addQuery on a live engine (see POISONED_HYDRATE_MSG).
+                    if state.poisoned {
+                        return Err(POISONED_HYDRATE_MSG.to_string());
+                    }
                     let eng = state
                         .engine
                         .as_mut()
@@ -2081,13 +2134,16 @@ impl Task for AdvanceTask {
     fn compute(&mut self) -> Result<Self::Output> {
         self.handle
             .call(|state| -> std::result::Result<Vec<NapiRowChange>, String> {
-                // A prior panic left the engine possibly half-mutated. Refuse to
-                // advance on it; emit a reset so the driver rehydrates first.
+                // Poisoned (advance panic or stale-pin repin): refuse to advance;
+                // emit a reset so the driver resets + rehydrates first. Poison
+                // stays SET until reset()/init clears it — a caller that retries
+                // advance without resetting gets another reset row rather than
+                // advancing the stale graph.
                 if state.poisoned {
-                    state.poisoned = false;
                     return Ok(vec![make_reset_row(
                         "schema-change",
-                        "engine reset after a prior advance panic; rehydrating",
+                        "engine poisoned (stale-pin repin or prior advance panic); \
+                         resetting + rehydrating",
                     )]);
                 }
                 // Stale after the coming version bump; also pins a conn Rc that
@@ -2251,8 +2307,11 @@ impl Task for HydrateStreamingTask {
                 if destroying.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err("engine is being destroyed".to_string());
                 }
-                // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
-                state.poisoned = false;
+                // NEVER clear poison here: this path also serves INCREMENTAL
+                // addQuery on a live engine (see POISONED_HYDRATE_MSG).
+                if state.poisoned {
+                    return Err(POISONED_HYDRATE_MSG.to_string());
+                }
                 let eng = state
                     .engine
                     .as_mut()
@@ -2341,16 +2400,19 @@ impl Task for AdvanceStreamingTask {
                 if destroying.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err("engine is being destroyed".to_string());
                 }
-                // A prior panic left the engine possibly half-mutated. Refuse to
-                // advance on it; stream a reset so the driver rehydrates first.
+                // Poisoned (advance panic or stale-pin repin): refuse to advance;
+                // stream a reset so the driver resets + rehydrates first. Poison
+                // stays SET until reset()/init clears it — a caller that retries
+                // advance without resetting gets another reset row rather than
+                // advancing the stale graph.
                 if state.poisoned {
-                    state.poisoned = false;
                     drain_barrier_chunk(
                         &tsfn,
                         vec![
                             make_reset_row(
                                 "schema-change",
-                                "engine reset after a prior advance panic; rehydrating",
+                                "engine poisoned (stale-pin repin or prior advance \
+                                 panic); resetting + rehydrating",
                             ),
                             end_sentinel(),
                         ],

@@ -2376,15 +2376,20 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         }
         // A throw between advance() resolving and #processChanges iterating
         // (updater/startPoke/timer.start) abandons the streaming `changes`
-        // generator UN-STARTED: its finally — which cancels the native
-        // stream — never runs, so the rust producer stays parked on credit
-        // until the watchdog abort, wedging the engine actor behind a dead
-        // consumer. Run the generator's finally explicitly; no-op when
-        // iteration already ran to completion or threw.
-        const ret = (changes as {return?: () => unknown}).return;
-        if (typeof ret === 'function') {
+        // generator UN-STARTED — and .return() on a never-started async
+        // generator does NOT run its body, so its finally (which cancels the
+        // native stream) would never fire: the rust producer would stay
+        // parked on credit until the watchdog abort, wedging the engine
+        // actor behind a dead consumer. The rust driver exposes an explicit
+        // cancel() for exactly this: it tears down the eager engine job /
+        // credit generation / row queue regardless of whether iteration ever
+        // started, and is idempotent with the generator's own finally. Stock
+        // TS's `changes` is a lazy sync generator holding no eager
+        // resources, so it has no cancel and needs none.
+        const cancel = (advanceResult as {cancel?: () => Promise<void>}).cancel;
+        if (typeof cancel === 'function') {
           try {
-            await ret.call(changes);
+            await cancel();
           } catch {
             // the stream is already dead; the original error wins
           }

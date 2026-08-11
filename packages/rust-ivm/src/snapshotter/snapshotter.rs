@@ -201,8 +201,17 @@ impl Snapshotter {
     /// held read transaction can only see its own snapshot. The connection is
     /// opened, read, and dropped inside this call; it holds no read-mark.
     pub fn head_version(&self) -> Result<String, String> {
-        let conn = rusqlite::Connection::open(&self.db_file)
-            .map_err(|e| format!("head_version open: {}", e))?;
+        // READ_ONLY: a default open (READ_WRITE|CREATE) would silently create
+        // an empty db if the replica file was swapped/unlinked under us (the
+        // restore path) and then fail with "no such table"; a read-only open
+        // fails cleanly on a missing file and can never write -shm.
+        let conn = rusqlite::Connection::open_with_flags(
+            &self.db_file,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| format!("head_version open: {}", e))?;
         conn.query_row(
             "SELECT stateVersion FROM \"_zero.replicationState\"",
             [],
@@ -249,6 +258,97 @@ impl Snapshotter {
         if let Some(registry) = &self.snapshot_interrupt_registry {
             registry.lock().unwrap().clear();
         }
+    }
+}
+
+/// What one stale-pin observation decided (see `StalePinTracker`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StalePinAction {
+    /// Healthy / not yet actionable: the pin moved, the window hasn't
+    /// elapsed, or the head hasn't moved past the pin.
+    None,
+    /// First strike: the pin has been frozen for a full window AND the head
+    /// has moved past it. Warn only — repin on the NEXT observation unless
+    /// an advance moves the pin in between.
+    Warn,
+    /// Second strike: same frozen pin, head still ahead. Repin now.
+    Repin,
+}
+
+/// Pure decision core of the napi stale-pin guard (`stale_pin_check` in
+/// napi/src/lib.rs): tracks pin PROGRESS and applies the two-strike rule.
+/// Lives in this crate so the logic is unit-testable — the napi cdylib
+/// cannot link a test harness (unresolved `napi_*` symbols outside node).
+///
+/// The trigger condition is deliberately pin-progress-based, NOT
+/// activity-based: a starved replication subscription under a reconnect
+/// storm keeps an engine "busy" (addQuery/readQuery jobs flowing) without a
+/// single advance — an idle-based check never fires while the frozen pins
+/// starve the wal2 checkpointer indefinitely.
+///
+/// The two-strike rule is what makes `pin_since` (rather than
+/// "time-since-head-passed-the-pin") a safe staleness clock: a long-idle CG
+/// whose head suddenly moves gets its version-ready advance within
+/// milliseconds under healthy conditions, so the pin moves before the next
+/// observation and the strike disarms. Repin requires the pin to still be
+/// frozen a full tick AFTER the head was seen ahead — a genuinely starved
+/// engine, not a fast-advancing one caught mid-race. It likewise absorbs
+/// the long-cold-hydrate laggard (advance queued right behind the hydrate
+/// runs before the next tick).
+pub struct StalePinTracker {
+    window: std::time::Duration,
+    pin: Option<String>,
+    pin_since: std::time::Instant,
+    suspect: bool,
+}
+
+impl StalePinTracker {
+    pub fn new(window: std::time::Duration) -> Self {
+        StalePinTracker {
+            window,
+            pin: None,
+            pin_since: std::time::Instant::now(),
+            suspect: false,
+        }
+    }
+
+    /// Feed one observation. `pinned` is the currently pinned version;
+    /// `head` lazily reads the replica head — it is only invoked once the
+    /// pin has been frozen a full window (in prod it is a real SQLite
+    /// open+read; see `Snapshotter::head_version`). A head-read error
+    /// propagates without mutating the strike state.
+    pub fn observe<E>(
+        &mut self,
+        pinned: &str,
+        head: impl FnOnce() -> Result<String, E>,
+    ) -> Result<StalePinAction, E> {
+        if self.pin.as_deref() != Some(pinned) {
+            // Pin moved (an advance or repin ran) — the healthy case. Re-arm.
+            self.pin = Some(pinned.to_string());
+            self.pin_since = std::time::Instant::now();
+            self.suspect = false;
+            return Ok(StalePinAction::None);
+        }
+        if self.pin_since.elapsed() < self.window {
+            return Ok(StalePinAction::None);
+        }
+        let head = head()?;
+        if head == pinned {
+            // Quiet replica: an unmoving pin AT head starves nothing.
+            self.suspect = false;
+            return Ok(StalePinAction::None);
+        }
+        if !self.suspect {
+            self.suspect = true;
+            return Ok(StalePinAction::Warn);
+        }
+        self.suspect = false;
+        Ok(StalePinAction::Repin)
+    }
+
+    /// How long the current pin has been frozen (for log lines).
+    pub fn stale_for(&self) -> std::time::Duration {
+        self.pin_since.elapsed()
     }
 }
 
@@ -498,10 +598,18 @@ impl Snapshot {
                 busy, self.version,
             );
         }
-        self.conn
-            .borrow()
-            .execute_batch("ROLLBACK")
-            .map_err(|e| format!("ROLLBACK: {}", e))?;
+        if let Err(e) = self.conn.borrow().execute_batch("ROLLBACK") {
+            let msg = e.to_string();
+            // Tolerate a conn already in autocommit (same as Snapshot::drop):
+            // a PRIOR failed re-pin (ROLLBACK succeeded, BEGIN failed — busy
+            // replica) leaves the conn txn-less while `version` still claims
+            // the old pin. Erroring here would make that state permanent —
+            // every later advance/repin would fail on the same ROLLBACK.
+            // Proceeding to begin_and_pin below is the self-heal.
+            if !msg.contains("no transaction is active") {
+                return Err(format!("ROLLBACK: {}", msg));
+            }
+        }
         self.begin_and_pin()
     }
 }
