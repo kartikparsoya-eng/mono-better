@@ -1569,7 +1569,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             await timer.start(),
             queryName,
           );
-          const addIterable = addResult instanceof Promise ? await addResult : addResult;
+          const addIterable =
+            addResult instanceof Promise ? await addResult : addResult;
           for await (const change of addIterable) {
             if (change === 'yield') {
               await timer.yieldProcess('yield in hydrateUnchangedQueries');
@@ -2528,6 +2529,20 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           this.#pipelines.replicaVersion,
           queryID => this.#pipelines.rowSetSignature(queryID),
         );
+        // Same-version re-advance WITH changes (poisoned CVR from the prior
+        // replicaVersion conflation bug, or a same-version re-advance): row
+        // changes require a version bump before received(), and the pokeStart
+        // cookie below must carry the final version. The updater constructor
+        // deliberately does NOT auto-bump at an unchanged stateVersion (that
+        // spuriously churned configVersion for no-op query updates — see
+        // cvr.pg.test "unchanged queries"); bump here, where numChanges tells
+        // us rows will actually flow.
+        if (
+          numChanges > 0 &&
+          cmpVersions(cvr.version, updater.updatedVersion()) === 0
+        ) {
+          updater.ensureNewVersion();
+        }
         // Only poke clients that are at the cvr.version. New clients that
         // are behind need to first be caught up when their initConnection
         // message is processed (and #syncQueryPipelines is called).
@@ -2540,7 +2555,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         await this.#processChanges(
           lc,
           await timer.start(),
-          changes as Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
+          changes as
+            | Iterable<RowChange | 'yield'>
+            | AsyncIterable<RowChange | 'yield'>,
           updater,
           pokers,
         );
@@ -2794,7 +2811,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 // Default 10000 matches Go IVM's hydrateChunkSize / advanceChunkSize so
 // the streaming chunk boundary aligns with the CVR flush boundary.
 const CURSOR_PAGE_SIZE = parseInt(
-  process.env.ZERO_CURSOR_PAGE_SIZE ?? "10000",
+  process.env.ZERO_CURSOR_PAGE_SIZE ?? '10000',
   10,
 );
 
