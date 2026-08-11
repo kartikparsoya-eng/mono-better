@@ -171,6 +171,16 @@ fn run(flip: bool, iters: usize) {
         grew as f64 / iters as f64
     );
     // dhat-heap.json written on _profiler drop → attributes the retained blocks.
+
+    // Self-gating: live bytes must stay FLAT per advance. Before the
+    // clear_advance_state fix, the plain-advance path retained one pk_key
+    // String per removed row (+1 block, ~46.5 bytes per advance, dhat-
+    // attributed to removed_this_advance). Generous jitter budget; a real
+    // per-advance retention blows through it within a few hundred advances.
+    assert!(
+        (grew as f64 / iters as f64) < 4.0,
+        "per-advance heap growth: {grew} bytes over {iters} advances"
+    );
 }
 
 #[test]

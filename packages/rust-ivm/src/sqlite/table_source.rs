@@ -1127,6 +1127,10 @@ impl Source for TableSource {
         self.set_db(db);
     }
 
+    fn clear_advance_state(&mut self) {
+        self.applied_changes.borrow_mut().clear();
+    }
+
     fn column_types(&self) -> HashMap<String, ColumnType> {
         self.columns.clone()
     }

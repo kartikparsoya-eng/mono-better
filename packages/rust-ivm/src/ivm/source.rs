@@ -76,6 +76,15 @@ pub trait Source {
     /// SQLite connection, so this is a no-op there.
     fn set_snapshot_db(&mut self, _db: std::rc::Rc<std::cell::RefCell<rusqlite::Connection>>) {}
 
+    /// Drop per-advance bookkeeping (same-advance removed-PK set /
+    /// applied-changes map). The snapshotter-driven advance clears these via
+    /// its `set_snapshot_db` calls at the PREV/CURR boundaries; the plain
+    /// `Engine::advance` path (tests, replay harnesses) has no snapshot swap,
+    /// so it calls this at each advance start instead — without it, the
+    /// per-advance sets accumulate one entry per removed row forever
+    /// (dhat-measured: +1 block/advance across 20k advances).
+    fn clear_advance_state(&mut self) {}
+
     /// Column types for this table, so the advance path can coerce raw SQLite
     /// values (Integer/Real → Bool for boolean cols, Text → Json) identically to
     /// the fetch path. Default empty (untyped → pass-through).
@@ -536,6 +545,10 @@ impl Source for MemorySource {
     /// db no-op (the connection is set once via set_db_path) but use this as the
     /// advance boundary to clear the same-advance removed-PK set.
     fn set_snapshot_db(&mut self, _db: std::rc::Rc<std::cell::RefCell<rusqlite::Connection>>) {
+        self.removed_this_advance.borrow_mut().clear();
+    }
+
+    fn clear_advance_state(&mut self) {
         self.removed_this_advance.borrow_mut().clear();
     }
 

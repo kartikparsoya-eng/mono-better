@@ -55,7 +55,10 @@ unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let p = unsafe { System.realloc(ptr, layout, new_size) };
         if !p.is_null() {
-            LIVE_BYTES.fetch_add(new_size as isize - layout.size() as isize, Ordering::Relaxed);
+            LIVE_BYTES.fetch_add(
+                new_size as isize - layout.size() as isize,
+                Ordering::Relaxed,
+            );
         }
         p
     }
@@ -198,8 +201,9 @@ fn one_cycle(db_path: &str, cycle: i64) {
         let users = make_source("users", &["id"]);
         let posts = make_source("posts", &["id", "user_id"]);
         for i in 0..50i64 {
-            let row: FxHashMap<String, Value> =
-                [("id".to_string(), Value::F64(i as f64))].into_iter().collect();
+            let row: FxHashMap<String, Value> = [("id".to_string(), Value::F64(i as f64))]
+                .into_iter()
+                .collect();
             users.borrow_mut().add_row(row);
             let row: FxHashMap<String, Value> = [
                 ("id".to_string(), Value::F64(i as f64)),
@@ -248,12 +252,11 @@ fn one_cycle(db_path: &str, cycle: i64) {
         }
         let ast = rust_ivm::replay::json_to_ast(&planner_exists_ast());
         for _ in 0..8 {
-            let model =
-                rust_ivm::sqlite::sqlite_cost_model::create_sqlite_cost_model(
-                    conn.clone(),
-                    specs.clone(),
-                )
-                .unwrap();
+            let model = rust_ivm::sqlite::sqlite_cost_model::create_sqlite_cost_model(
+                conn.clone(),
+                specs.clone(),
+            )
+            .unwrap();
             let planned = rust_ivm::planner::plan_query(&ast, model);
             assert!(planned.where_clause.is_some());
         }
