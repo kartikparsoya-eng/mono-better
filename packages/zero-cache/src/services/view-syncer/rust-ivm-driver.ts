@@ -1053,14 +1053,21 @@ export class RustIVMDriver {
     let count = 0;
     let completed = false;
 
-    // Advancement-timeout breaker — port of PipelineDriver
-    // #shouldAdvanceYieldMaybeAbortAdvance (pipeline-driver.ts). The stock
-    // driver documents this as BOTH a circuit breaker for very large
-    // transactions AND "a bound on the amount of time the previous connection
-    // locks the inactive WAL file ... which can make the WAL grow continuously"
-    // — i.e. it is a WAL-checkpoint-starvation bound, and the rust path must
-    // enforce it too (the engine watchdog only bounds a LIVE engine job at its
-    // 600s hard deadline; this scales the limit to the CG's hydration time).
+    // JS-clock advancement-timeout breaker — the complement of the
+    // ENGINE-side breaker, not a replacement for it. The engine already
+    // enforces this exact budget natively (engine/mod.rs
+    // AdvanceContext::should_abort per change + advance_gate.rs per row
+    // fetch — those are the 'advancement-timeout' resets seen in prod), but
+    // it runs on the engine's own wall clock inside the native job and
+    // cannot see JS-side consumption time: parse/revive/signature work and
+    // poke flushes between rows, plus the buffered tail still draining after
+    // the engine job completes. Stock PipelineDriver
+    // (#shouldAdvanceYieldMaybeAbortAdvance) applies the budget to the
+    // view-syncer's TimeSliceTimer — the JS clock — and documents it as "a
+    // bound on the amount of time the previous connection locks the inactive
+    // WAL file ... which can make the WAL grow continuously". This check
+    // applies the SAME formula to the SAME clock, so it fires only where
+    // stock TS would fire.
     const maybeAbortAdvance = (pos: number) => {
       const elapsed = timer.totalElapsed();
       if (

@@ -481,13 +481,14 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
   });
 
   test('advancement-timeout breaker aborts a budget-exceeded advance (stock parity)', async () => {
-    // Port-regression fence: PipelineDriver's #shouldAdvanceYieldMaybeAbortAdvance
-    // is documented as "a bound on the amount of time the previous connection
-    // locks the inactive WAL file ... which can make the WAL grow continuously".
-    // The rust driver must enforce the same hydration-scaled budget on its
-    // streamed advance (the engine watchdog alone only bounds a live engine
-    // job at 600s). Hydration budget = 500ms (TIMER_500 at addQuery); advance
-    // processing time = 500ms > budget/2 with < half the changes processed ->
+    // JS-clock parity fence: the ENGINE already enforces this budget on its
+    // own wall clock (engine/mod.rs AdvanceContext::should_abort +
+    // advance_gate.rs — the 'advancement-timeout' resets seen in prod). This
+    // test pins the JS-side complement: the same formula applied to the
+    // view-syncer's TimeSliceTimer, the clock stock TS uses, covering JS
+    // consumption time the engine clock cannot see. Hydration budget = 500ms
+    // (TIMER_500 at addQuery); advance processing time = 500ms > budget/2
+    // with < half the changes processed ->
     // ResetPipelinesSignal('advancement-timeout'), exactly like stock.
     const {rust, ts} = setup();
     await drain(rust.addQuery('h', 'q', AST, TIMER_500));
