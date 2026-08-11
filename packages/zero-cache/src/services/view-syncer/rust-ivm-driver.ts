@@ -935,6 +935,7 @@ export class RustIVMDriver {
         changes:
           | Iterable<RowChange | 'yield'>
           | AsyncIterable<RowChange | 'yield'>;
+        cancel: () => Promise<void>;
       }
     | ResetPipelinesSignal
   > {
@@ -951,6 +952,7 @@ export class RustIVMDriver {
         version: string;
         numChanges: number;
         changes: AsyncIterable<RowChange | 'yield'>;
+        cancel: () => Promise<void>;
       }
     | ResetPipelinesSignal
   > {
@@ -1040,6 +1042,23 @@ export class RustIVMDriver {
         numChanges,
         totalHydrationTimeMs,
       ),
+      // Explicit abandonment hook. Stock TS's `changes` is a LAZY sync
+      // generator holding no resources until first next(); here the engine
+      // job, credit generation, and row queue are all live EAGERLY — and
+      // calling .return() on a never-started async generator does NOT run its
+      // body, so the generator's own finally cannot cover the un-started
+      // abandonment case (a throw in updater ctor / startPoke / timer.start
+      // before #processChanges iterates). The view-syncer calls this from its
+      // catch; every step is idempotent with the generator's finally, so
+      // calling it after a started-then-thrown iteration is harmless.
+      cancel: async () => {
+        this.#engine.cancel?.();
+        this.#engine.cancelStream?.(streamId);
+        queue.close();
+        // Do not let a subsequent synchronous actor call block the event loop
+        // while an already-credited TSFN delivery is still completing.
+        await advancing.catch(() => {});
+      },
     };
   }
 
