@@ -598,13 +598,14 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
     );
     if (stateVersion > cvr.version.stateVersion) {
       this._setVersion({stateVersion});
-    } else if (stateVersion === cvr.version.stateVersion) {
-      // The CVR's stateVersion already matches (e.g. poisoned CVR from a
-      // prior bug, or a same-version re-advance). Bump the minor version so
-      // that received()/#assertNewVersion doesn't fire — row changes still
-      // need a version bump to be written to the CVR store.
-      this._ensureNewVersion();
     }
+    // At an UNCHANGED stateVersion, no bump happens here: an eager bump
+    // spuriously churned configVersion for no-op same-version query updates
+    // (cvr.pg.test "unchanged queries"). Callers that KNOW row changes will
+    // flow at an unchanged version (the advance path's poisoned-CVR /
+    // same-version re-advance recovery, numChanges > 0) must call
+    // {@link ensureNewVersion} BEFORE startPoke — received()/#assertNewVersion
+    // requires the final version to be decided before any rows are poked.
   }
 
   /**
