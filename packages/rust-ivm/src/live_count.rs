@@ -16,6 +16,11 @@ pub static UNION_FAN_IN: AtomicI64 = AtomicI64::new(0);
 pub static JOIN: AtomicI64 = AtomicI64::new(0);
 pub static FLIPPED_JOIN: AtomicI64 = AtomicI64::new(0);
 pub static EXISTS: AtomicI64 = AtomicI64::new(0);
+/// Plan graphs (planner). Nonzero after a `plan_ast` returns = a graph
+/// (or an escaped node subtree) is being retained — the planner leak class.
+pub static PLANNER_GRAPH: AtomicI64 = AtomicI64::new(0);
+/// Planner nodes (connection/join/fan-in/fan-out/terminus), aggregate.
+pub static PLANNER_NODE: AtomicI64 = AtomicI64::new(0);
 
 pub fn inc(c: &AtomicI64) {
     c.fetch_add(1, Ordering::Relaxed);
@@ -27,7 +32,7 @@ pub fn dec(c: &AtomicI64) {
 
 pub fn snapshot() -> String {
     format!(
-        "ts={} tsi={} conn={} ufo={} ufi={} join={} fjoin={} exists={}",
+        "ts={} tsi={} conn={} ufo={} ufi={} join={} fjoin={} exists={} pgraph={} pnode={}",
         TABLE_SOURCE.load(Ordering::Relaxed),
         TABLE_SOURCE_INPUT.load(Ordering::Relaxed),
         TABLE_CONNECTION.load(Ordering::Relaxed),
@@ -36,5 +41,7 @@ pub fn snapshot() -> String {
         JOIN.load(Ordering::Relaxed),
         FLIPPED_JOIN.load(Ordering::Relaxed),
         EXISTS.load(Ordering::Relaxed),
+        PLANNER_GRAPH.load(Ordering::Relaxed),
+        PLANNER_NODE.load(Ordering::Relaxed),
     )
 }

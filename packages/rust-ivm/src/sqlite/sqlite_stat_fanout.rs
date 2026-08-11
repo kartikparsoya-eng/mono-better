@@ -14,7 +14,7 @@
 //! ALL constraint columns appear (order-independent, case-insensitive) in its
 //! first N positions; `depth = columns.len()`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
@@ -59,12 +59,16 @@ pub struct SQLiteStatFanout {
     /// (VDBE programs) = the per-reconnect `sqlite3MemMalloc` leak that scales
     /// with query complexity (deep correlated-EXISTS). The fanout is only ever
     /// used during planning, when the snapshotter holds the conn strong, so
-    /// `upgrade()` cannot fail in practice.
+    /// `upgrade()` cannot fail in practice; if it ever does, `get_fanout`
+    /// degrades to the default fanout (TS strategy-3 path) instead of
+    /// panicking.
     conn: Weak<RefCell<rusqlite::Connection>>,
     default_fanout: f64,
     /// Cache of fanout results by `"table:col1,col2"` (columns sorted) —
     /// TS `#cache`.
     cache: RefCell<HashMap<String, FanoutResult>>,
+    /// One-shot flag so a dead-conn degrade logs once, not per estimate.
+    warned_dead_conn: Cell<bool>,
 }
 
 /// One decoded stat4 sample: fanout at the requested depth + NULL-ness of the
@@ -87,15 +91,23 @@ impl SQLiteStatFanout {
             conn: Rc::downgrade(&conn),
             default_fanout,
             cache: RefCell::new(HashMap::new()),
+            warned_dead_conn: Cell::new(false),
         }
     }
 
-    /// Upgrade the weak conn ref. Panics only if the snapshot connection was
-    /// dropped, which cannot happen during planning (the sole caller path).
-    fn conn(&self) -> Rc<RefCell<rusqlite::Connection>> {
-        self.conn
-            .upgrade()
-            .expect("SQLiteStatFanout: snapshot connection dropped while planning")
+    /// Upgrade the weak conn ref. `None` only if the snapshot connection was
+    /// dropped, which cannot happen during planning (the sole caller path);
+    /// callers fall through to the default-fanout strategy, and the condition
+    /// is logged once so it is visible without tearing anything down.
+    fn conn(&self) -> Option<Rc<RefCell<rusqlite::Connection>>> {
+        let up = self.conn.upgrade();
+        if up.is_none() && !self.warned_dead_conn.replace(true) {
+            eprintln!(
+                "[rust-ivm] SQLiteStatFanout: snapshot connection dropped while \
+                 estimating fanout; degrading to default fanout"
+            );
+        }
+        up
     }
 
     /// Gets the fanout factor for join column(s).
@@ -139,7 +151,7 @@ impl SQLiteStatFanout {
     fn fanout_from_stat4(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
         let index_info = self.find_index_for_columns(table_name, columns)?;
 
-        let conn_rc = self.conn();
+        let conn_rc = self.conn()?;
         let conn = conn_rc.borrow();
         let mut stmt = conn
             .prepare_cached(
@@ -218,7 +230,7 @@ impl SQLiteStatFanout {
     fn fanout_from_stat1(&self, table_name: &str, columns: &[String]) -> Option<FanoutResult> {
         let index_info = self.find_index_for_columns(table_name, columns)?;
 
-        let conn_rc = self.conn();
+        let conn_rc = self.conn()?;
         let conn = conn_rc.borrow();
         let mut stmt = conn
             .prepare_cached("SELECT stat FROM sqlite_stat1 WHERE tbl = ? AND idx = ?")
@@ -250,7 +262,7 @@ impl SQLiteStatFanout {
     /// Finds an index whose FIRST `columns.len()` positions contain ALL the
     /// requested columns (order-independent, case-insensitive).
     fn find_index_for_columns(&self, table_name: &str, columns: &[String]) -> Option<IndexInfo> {
-        let conn_rc = self.conn();
+        let conn_rc = self.conn()?;
         let conn = conn_rc.borrow();
         let mut stmt = conn
             .prepare_cached(

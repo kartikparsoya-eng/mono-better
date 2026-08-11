@@ -1,16 +1,21 @@
 //! Planner fan-in — port of `planner-fan-in.ts`.
 
 use crate::planner::constraint::PlannerConstraint;
-use crate::planner::node::{CostEstimate, FanInType, JoinOrConnection, PlannerNode};
+use crate::planner::node::{
+    CostEstimate, FanInType, JoinOrConnection, PlannerNode, PlannerNodeWeak,
+};
 
 pub struct PlannerFanIn {
     node_type: FanInType,
-    output: Option<PlannerNode>,
+    /// Upward back-edge — WEAK so the graph stays acyclic (see
+    /// `PlannerNodeWeak`); TS holds this strong and lets GC break the cycle.
+    output: Option<PlannerNodeWeak>,
     inputs: Vec<PlannerNode>,
 }
 
 impl PlannerFanIn {
     pub fn new(inputs: Vec<PlannerNode>) -> Self {
+        crate::live_count::inc(&crate::live_count::PLANNER_NODE);
         PlannerFanIn {
             node_type: FanInType::FI,
             output: None,
@@ -27,13 +32,7 @@ impl PlannerFanIn {
     }
 
     pub fn set_output(&mut self, node: PlannerNode) {
-        self.output = Some(node);
-    }
-
-    /// Drop the upward `output` back-edge to break the graph's Rc cycle at
-    /// teardown (see `impl Drop for PlannerGraph`).
-    pub fn clear_output(&mut self) {
-        self.output = None;
+        self.output = Some(node.downgrade());
     }
 
     pub fn reset(&mut self) {
@@ -125,5 +124,11 @@ impl PlannerFanIn {
                 }
             }
         }
+    }
+}
+
+impl Drop for PlannerFanIn {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::PLANNER_NODE);
     }
 }

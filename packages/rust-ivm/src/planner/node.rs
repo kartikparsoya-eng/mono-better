@@ -5,7 +5,7 @@
 //! of the Rc pointer. This mirrors TS's shared mutable class instances.
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 #[derive(Clone)]
 pub struct FanoutEst {
@@ -93,7 +93,55 @@ pub enum PlannerNode {
     Terminus(Rc<RefCell<crate::planner::terminus::PlannerTerminus>>),
 }
 
+/// Weak counterpart of [`PlannerNode`], used for every upward back-edge in the
+/// graph (`output` / `outputs`).
+///
+/// The TS graph stores strong upward back-edges (`planner-join.ts #output`,
+/// `planner-fan-out.ts #outputs`) and relies on the GC to reclaim the resulting
+/// cycles once `planQuery` returns. Rust has no cycle collector, so the same
+/// topology leaks — one whole plan graph per `planAst`. Making the back-edges
+/// `Weak` removes the cycle CLASS structurally: the graph's owning collections
+/// (`PlannerGraph.{joins,fan_outs,fan_ins,connections,terminus}` plus the
+/// builder's downward input edges) hold the only strong refs, so the entire
+/// graph cascades to zero the moment `PlannerGraph` drops — with no Drop-time
+/// cleanup that a future edit could forget to extend.
+///
+/// Back-edges are only read during planning (the FO→FI BFS in
+/// `planner-graph.rs`), while the graph holds every node strong, so `upgrade()`
+/// cannot fail there; a dead upgrade is skipped exactly like TS's BFS ignoring
+/// a terminus.
+#[derive(Clone)]
+pub enum PlannerNodeWeak {
+    Connection(Weak<RefCell<crate::planner::connection::PlannerConnection>>),
+    Join(Weak<RefCell<crate::planner::join::PlannerJoin>>),
+    FanOut(Weak<RefCell<crate::planner::fan_out::PlannerFanOut>>),
+    FanIn(Weak<RefCell<crate::planner::fan_in::PlannerFanIn>>),
+    Terminus(Weak<RefCell<crate::planner::terminus::PlannerTerminus>>),
+}
+
+impl PlannerNodeWeak {
+    pub fn upgrade(&self) -> Option<PlannerNode> {
+        match self {
+            PlannerNodeWeak::Connection(w) => w.upgrade().map(PlannerNode::Connection),
+            PlannerNodeWeak::Join(w) => w.upgrade().map(PlannerNode::Join),
+            PlannerNodeWeak::FanOut(w) => w.upgrade().map(PlannerNode::FanOut),
+            PlannerNodeWeak::FanIn(w) => w.upgrade().map(PlannerNode::FanIn),
+            PlannerNodeWeak::Terminus(w) => w.upgrade().map(PlannerNode::Terminus),
+        }
+    }
+}
+
 impl PlannerNode {
+    pub fn downgrade(&self) -> PlannerNodeWeak {
+        match self {
+            PlannerNode::Connection(c) => PlannerNodeWeak::Connection(Rc::downgrade(c)),
+            PlannerNode::Join(j) => PlannerNodeWeak::Join(Rc::downgrade(j)),
+            PlannerNode::FanOut(fo) => PlannerNodeWeak::FanOut(Rc::downgrade(fo)),
+            PlannerNode::FanIn(fi) => PlannerNodeWeak::FanIn(Rc::downgrade(fi)),
+            PlannerNode::Terminus(t) => PlannerNodeWeak::Terminus(Rc::downgrade(t)),
+        }
+    }
+
     pub fn kind(&self) -> NodeKind {
         match self {
             PlannerNode::Connection(_) => NodeKind::Connection,

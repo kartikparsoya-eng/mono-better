@@ -8,6 +8,7 @@ pub struct PlannerTerminus {
 
 impl PlannerTerminus {
     pub fn new(input: PlannerNode) -> Self {
+        crate::live_count::inc(&crate::live_count::PLANNER_NODE);
         PlannerTerminus { input }
     }
 
@@ -25,5 +26,11 @@ impl PlannerTerminus {
 
     pub fn propagate_unlimit_from_flipped_join(&self) {
         // No-op
+    }
+}
+
+impl Drop for PlannerTerminus {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::PLANNER_NODE);
     }
 }

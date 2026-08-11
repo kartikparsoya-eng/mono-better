@@ -487,9 +487,19 @@ pub fn create_sqlite_cost_model_prepared(
                 sort,
             );
 
-            let conn_rc = conn_weak
-                .upgrade()
-                .expect("cost model probe: snapshot connection dropped while planning");
+            // A dead upgrade cannot happen while planning (the snapshotter
+            // holds the conn strong for the duration of the single-threaded
+            // actor call). If it EVER does, degrade exactly like a watchdog
+            // interrupt — unwind with the typed payload so `plan_ast` returns
+            // "no flips" instead of tearing down the client group.
+            let conn_rc = match conn_weak.upgrade() {
+                Some(c) => c,
+                None => std::panic::panic_any(CostProbeInterrupted(
+                    "cost-model probe: snapshot connection dropped while planning; \
+                     degrading to planning without flips"
+                        .to_string(),
+                )),
+            };
             let loops = get_scanstatus_loops(&conn_rc.borrow(), &sql).unwrap_or_else(|e| {
                 if is_interrupt_error(&e) {
                     // Watchdog interrupt racing the probe — unwind with a typed

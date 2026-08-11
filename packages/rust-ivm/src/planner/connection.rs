@@ -34,7 +34,9 @@ pub struct PlannerConnection {
     base_constraints: Option<PlannerConstraint>,
     base_limit: Option<usize>,
     pub selectivity: f64,
-    output: Option<crate::planner::node::PlannerNode>,
+    /// Upward back-edge — WEAK so the graph stays acyclic (see
+    /// `PlannerNodeWeak`); TS holds this strong and lets GC break the cycle.
+    output: Option<crate::planner::node::PlannerNodeWeak>,
 
     // Mutable
     pub limit: Option<usize>,
@@ -65,6 +67,7 @@ impl PlannerConnection {
             1.0
         };
 
+        crate::live_count::inc(&crate::live_count::PLANNER_NODE);
         PlannerConnection {
             sort,
             filters,
@@ -83,13 +86,7 @@ impl PlannerConnection {
     }
 
     pub fn set_output(&mut self, node: crate::planner::node::PlannerNode) {
-        self.output = Some(node);
-    }
-
-    /// Drop the upward `output` back-edge to break the graph's Rc cycle at
-    /// teardown (see `impl Drop for PlannerGraph`).
-    pub fn clear_output(&mut self) {
-        self.output = None;
+        self.output = Some(node.downgrade());
     }
 
     pub fn closest_join_or_source(&self) -> JoinOrConnection {
@@ -178,5 +175,11 @@ impl PlannerConnection {
     pub fn restore_constraints(&mut self, constraints: HashMap<String, Option<PlannerConstraint>>) {
         self.constraints = constraints;
         self.cached_costs.clear();
+    }
+}
+
+impl Drop for PlannerConnection {
+    fn drop(&mut self) {
+        crate::live_count::dec(&crate::live_count::PLANNER_NODE);
     }
 }
