@@ -684,6 +684,17 @@ impl Engine {
         // Reset cancellation at the start of each advance.
         self.cancellation_token.reset();
 
+        // Advance-boundary bookkeeping reset. The snapshotter-driven path
+        // (`advance_to_head_stream`) clears per-advance source state via its
+        // PREV/CURR `set_snapshot_db` calls; this plain path has no snapshot
+        // swap, so clear explicitly — otherwise the same-advance removed-PK /
+        // applied-changes sets grow by one entry per removed row FOREVER
+        // (+1 block/advance, dhat-measured). Safe here: this function is not
+        // on the `advance_to_head_stream` path, so no mid-advance clearing.
+        for source in self.sources.values() {
+            source.borrow_mut().clear_advance_state();
+        }
+
         let total_hydration_time_ms = self.total_hydration_time_ms();
 
         let advance_ctx = AdvanceContext {
