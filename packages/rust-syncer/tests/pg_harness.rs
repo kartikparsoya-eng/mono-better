@@ -444,6 +444,81 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
     });
 }
 
+/// Config catch-up must emit GOT-query patches (from the `queries` table, no
+/// clientID) as well as per-client desire patches, so a reconnecting client can
+/// rebuild its `gotQueriesPatch`. The old code read only `desires`.
+#[test]
+fn pg_cvr_store_catchup_includes_got_query_patches() {
+    use rust_cvr::types::{Patch, QueryPatch};
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_cvr_store_catchup_got_query: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_store_catchup_got";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+
+        // Seed: instance @ "05", a GOT query q1 @ "03", a desire for q1 @ "04".
+        sqlx::raw_sql(&format!(
+            r#"
+            INSERT INTO "{schema}".instances ("clientGroupID","version","lastActive")
+                VALUES ('cg1','05', now());
+            INSERT INTO "{schema}".clients ("clientGroupID","clientID") VALUES ('cg1','c1');
+            INSERT INTO "{schema}".queries ("clientGroupID","queryHash","patchVersion","deleted")
+                VALUES ('cg1','q1','03', false);
+            INSERT INTO "{schema}".desires
+                ("clientGroupID","clientID","queryHash","patchVersion","deleted")
+                VALUES ('cg1','c1','q1','04', false);
+            "#
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let store = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        );
+        let up_to = CVRVersion {
+            state_version: "05".to_string(),
+            config_version: None,
+        };
+        let patches = store
+            .catchup_config_patches(None, &up_to, &up_to)
+            .await
+            .expect("catchup");
+
+        let got = patches.iter().any(|p| {
+            matches!(&p.patch, Patch::Query(QueryPatch::Put { id, client_id })
+                if id == "q1" && client_id.is_none())
+        });
+        let desire = patches.iter().any(|p| {
+            matches!(&p.patch, Patch::Query(QueryPatch::Put { id, client_id })
+                if id == "q1" && client_id.as_deref() == Some("c1"))
+        });
+        assert!(got, "expected a GOT-query patch (clientID null) for q1");
+        assert!(desire, "expected a per-client desire patch for q1");
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// Loading a CVR grants the loading task ownership (gated on `lastConnectTime`),
 /// so a task that connected earlier is refused and a task that connects later
 /// takes over — which then makes the stale ex-owner's flush fail. Port of TS

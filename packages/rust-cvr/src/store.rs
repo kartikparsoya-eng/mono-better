@@ -1003,7 +1003,27 @@ impl CVRStoreHandle {
             }
         }
 
-        // Read desires patches
+        // Read GOT-query patches (query-state, no clientID) — the queries the
+        // server transformed/removed in this range, needed so a reconnecting
+        // client can rebuild its `gotQueriesPatch`. TS `catchupConfigPatches`
+        // reads BOTH the queries and desires tables; the old code read only
+        // desires, so reconnecting clients never learned which queries had
+        // become "got" between their cookie and now.
+        let queries_sql = format!(
+            r#"SELECT "deleted", "queryHash", "patchVersion"
+               FROM "{}".queries
+               WHERE "clientGroupID" = $1 AND "patchVersion" > $2 AND "patchVersion" <= $3
+               ORDER BY "patchVersion""#,
+            self.schema
+        );
+        let query_rows: Vec<(Option<bool>, String, Option<String>)> = sqlx::query_as(&queries_sql)
+            .bind(&self.cvr_id)
+            .bind(&start)
+            .bind(&end)
+            .fetch_all(&mut *tx)
+            .await?;
+
+        // Read desires patches (per-client)
         let desires_sql = format!(
             r#"SELECT "clientID", "queryHash", "patchVersion", "deleted", "ttlMs", "inactivatedAtMs"
                FROM "{}".desires
@@ -1022,6 +1042,25 @@ impl CVRStoreHandle {
         drop(tx);
 
         let mut patches = Vec::new();
+        // Got-query patches first (matching TS order), each with no clientID.
+        for (deleted, query_hash, patch_version) in query_rows {
+            let Some(pv) = patch_version else {
+                continue; // patchVersion must be set for a query patch
+            };
+            let to_version = version_from_string(&pv);
+            let patch = if deleted.unwrap_or(false) {
+                Patch::Query(QueryPatch::Del {
+                    id: query_hash,
+                    client_id: None,
+                })
+            } else {
+                Patch::Query(QueryPatch::Put {
+                    id: query_hash,
+                    client_id: None,
+                })
+            };
+            patches.push(PatchToVersion { patch, to_version });
+        }
         for (client_id, query_hash, patch_version, deleted, _, _) in desires {
             let to_version = version_from_string(&patch_version);
             let patch = if deleted {
