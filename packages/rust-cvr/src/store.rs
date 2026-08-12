@@ -18,6 +18,14 @@ use crate::version::{
 };
 use std::cmp::Ordering;
 
+// The time to wait between load() attempts when the rows table is behind the
+// CVR instance version. Port of TS `LOAD_ATTEMPT_INTERVAL_MS`.
+const LOAD_ATTEMPT_INTERVAL_MS: u64 = 500;
+// The maximum number of load() attempts if the rowsVersion is behind (~5s of
+// catchup wait before the CVR is considered invalid). Port of TS
+// `MAX_LOAD_ATTEMPTS`.
+const MAX_LOAD_ATTEMPTS: u32 = 10;
+
 // ─── Error types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -410,7 +418,11 @@ impl CVRStoreHandle {
             let (db_version, owner, granted_at) = match row {
                 Some((v, o, g)) => (v, o, g),
                 // No instance row yet → a brand-new CVR (empty version, no owner).
-                None => (crate::version::EMPTY_CVR_VERSION.state_version.to_string(), None, None),
+                None => (
+                    crate::version::EMPTY_CVR_VERSION.state_version.to_string(),
+                    None,
+                    None,
+                ),
             };
             if owner.as_deref() != Some(self.task_id.as_str())
                 && granted_at.unwrap_or(0.0) > last_connect_time
@@ -622,11 +634,15 @@ impl CVRStoreHandle {
         // 7. Row record upserts and deletes.
         //
         // The `rows` table has a FOREIGN KEY to `rowsVersion(clientGroupID)`, so
-        // a `rowsVersion` row must exist first. Upsert it (to the CVR version)
-        // before writing any rows. The `rowsVersion` may lag `instances.version`
-        // in general, but writing them together here is correct and satisfies
-        // the constraint.
-        if !self.pending.pending_row_record_updates.is_empty() {
+        // a `rowsVersion` row must exist first. Upsert `rowsVersion` = the CVR
+        // version on EVERY flush (not only when rows change): in this Rust port
+        // the store is the single atomic PG writer (instance + rows + rowsVersion
+        // in one tx; the RowRecordCache write-back is `flushed=true`, cache-only),
+        // so `rowsVersion` must stay in lockstep with `instances.version`. If we
+        // wrote it only on row changes, a config-only advance would leave
+        // `rowsVersion` behind and make every subsequent `load` falsely detect a
+        // rows-behind CVR (see the `RowsVersionBehind` check in `load_once`).
+        {
             let rv_sql = format!(
                 r#"INSERT INTO "{}"."rowsVersion" ("clientGroupID", "version")
                    VALUES ($1, $2)
@@ -672,8 +688,7 @@ impl CVRStoreHandle {
             }
 
             let row = record.as_ref().expect("non-delete row has a record");
-            let row_key_json: Value =
-                serde_json::to_value(&row.id.row_key).unwrap_or(Value::Null);
+            let row_key_json: Value = serde_json::to_value(&row.id.row_key).unwrap_or(Value::Null);
             let ref_counts_json: Option<Value> = row
                 .ref_counts
                 .as_ref()
@@ -719,21 +734,58 @@ impl CVRStoreHandle {
 
     // ─── Load ─────────────────────────────────────────────────────────
 
+    /// Load the CVR, retrying while the rows table lags the CVR instance
+    /// version. Port of TS `CVRStore.load`'s retry loop: a lagging rows table
+    /// means the previous owner hasn't yet flushed its pending row writes, so we
+    /// wait (having signalled it via the ownership grant) and retry up to
+    /// `MAX_LOAD_ATTEMPTS` before declaring the CVR invalid.
     pub async fn load(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
+        let mut last_behind: Option<CVRStoreError> = None;
+        for attempt in 0..MAX_LOAD_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(LOAD_ATTEMPT_INTERVAL_MS))
+                    .await;
+            }
+            match self.load_once(last_connect_time).await {
+                Err(e @ CVRStoreError::RowsVersionBehind { .. }) => {
+                    eprintln!("CVR load attempt {}: {e}", attempt + 1);
+                    last_behind = Some(e);
+                    continue;
+                }
+                other => return other,
+            }
+        }
+        // Exhausted attempts waiting for row catchup: the CVR is invalid (TS
+        // throws ClientNotFoundError, which spawns a fresh client group).
+        let detail = last_behind
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "rows never caught up".to_string());
+        Err(CVRStoreError::ClientNotFound(format!(
+            "max attempts exceeded waiting for CVR to catch up ({detail})"
+        )))
+    }
+
+    async fn load_once(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
             .await?;
 
-        // Load instance
+        // Load instance. LEFT JOIN the rows table's version so we can detect a
+        // rows-behind CVR (the previous owner's pending row writes not yet
+        // flushed) — see the `RowsVersionBehind` check below.
         let instance_sql = format!(
-            r#"SELECT "version",
-                      (extract(epoch from "lastActive") * 1000)::float8 AS "lastActive",
-                      "ttlClock", "replicaVersion",
-                      "clientSchema", "profileID", "owner",
-                      (extract(epoch from "grantedAt") * 1000)::float8 AS "grantedAt",
-                      COALESCE("deleted", false) AS "deleted"
-               FROM "{}".instances WHERE "clientGroupID" = $1"#,
+            r#"SELECT cvr."version",
+                      (extract(epoch from cvr."lastActive") * 1000)::float8 AS "lastActive",
+                      cvr."ttlClock", cvr."replicaVersion",
+                      cvr."clientSchema", cvr."profileID", cvr."owner",
+                      (extract(epoch from cvr."grantedAt") * 1000)::float8 AS "grantedAt",
+                      COALESCE(cvr."deleted", false) AS "deleted",
+                      rows."version" AS "rowsVersion"
+               FROM "{0}".instances AS cvr
+               LEFT JOIN "{0}"."rowsVersion" AS rows
+                 ON cvr."clientGroupID" = rows."clientGroupID"
+               WHERE cvr."clientGroupID" = $1"#,
             self.schema
         );
         let instance: Option<(
@@ -746,6 +798,7 @@ impl CVRStoreHandle {
             Option<String>,
             Option<f64>,
             bool,
+            Option<String>,
         )> = sqlx::query_as(&instance_sql)
             .bind(&self.cvr_id)
             .fetch_optional(&mut *tx)
@@ -758,6 +811,9 @@ impl CVRStoreHandle {
         // pool, gated so it only wins under the same conditions as TS). Set here,
         // executed just before returning.
         let mut grant_ownership = false;
+        // The raw instance version string and the rows table's version, compared
+        // after the ownership grant to detect a rows-behind CVR.
+        let mut rows_behind: Option<(String, Option<String>)> = None;
 
         let cvr = match instance {
             None => {
@@ -787,6 +843,7 @@ impl CVRStoreHandle {
                 owner,
                 granted_at,
                 deleted,
+                rows_version,
             )) => {
                 // A CVR that was purged for inactivity is gone (TS throws
                 // ClientNotFoundError, which triggers a fresh client group).
@@ -808,6 +865,17 @@ impl CVRStoreHandle {
                         });
                     }
                     grant_ownership = true;
+                }
+                // Detect a rows-behind CVR: the raw instance version must equal
+                // the rows table version (EMPTY "00" when absent). Checked AFTER
+                // the ownership grant fires (below) so the previous owner is
+                // signalled to flush before we retry. Port of TS `#load`'s
+                // `version !== (rowsVersion ?? EMPTY_CVR_VERSION.stateVersion)`.
+                let expected_rows = rows_version
+                    .clone()
+                    .unwrap_or_else(|| crate::version::EMPTY_CVR_VERSION.state_version.to_string());
+                if version != expected_rows {
+                    rows_behind = Some((version.clone(), rows_version));
                 }
                 let cvr_version = version_from_string(&version);
                 CVR {
@@ -958,6 +1026,16 @@ impl CVRStoreHandle {
                 .bind(&self.cvr_id)
                 .execute(&self.pool)
                 .await;
+        }
+
+        // Rows-behind: the ownership grant above has signalled the previous
+        // owner to stop and flush; return so `load` waits and retries. Must NOT
+        // set `current_version` (we're discarding this partial load).
+        if let Some((cvr_version, rows_version)) = rows_behind {
+            return Err(CVRStoreError::RowsVersionBehind {
+                cvr_version,
+                rows_version,
+            });
         }
 
         self.current_version = Some(cvr.version.clone());

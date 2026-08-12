@@ -264,10 +264,7 @@ fn pg_cvr_store_deletes_rows() {
 
     let mk_row = |key: &str, refs: Option<i64>| -> RowRecord {
         let mut row_key = serde_json::Map::new();
-        row_key.insert(
-            "id".to_string(),
-            serde_json::Value::String(key.to_string()),
-        );
+        row_key.insert("id".to_string(), serde_json::Value::String(key.to_string()));
         RowRecord {
             id: RowID {
                 schema: "public".to_string(),
@@ -289,7 +286,10 @@ fn pg_cvr_store_deletes_rows() {
             .connect(&uri)
             .await
             .expect("connect");
-        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Create the CVR instance so the rows can be persisted.
         let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
@@ -320,7 +320,10 @@ fn pg_cvr_store_deletes_rows() {
             StoreOp::PutRowRecord(mk_row("A", Some(1))),
             StoreOp::PutRowRecord(mk_row("B", Some(1))),
         ]);
-        store.flush(&cvr.version, &cvr, 0.0).await.expect("flush puts");
+        store
+            .flush(&cvr.version, &cvr, 0.0)
+            .await
+            .expect("flush puts");
         assert_eq!(row_count(pool.clone()).await, 2, "both rows persisted");
 
         // Delete A via a tombstone (put refCounts = None); delete B via an
@@ -374,7 +377,10 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
             .connect(&uri)
             .await
             .expect("connect");
-        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Store A creates the instance (version X).
         let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
@@ -388,7 +394,9 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
             "task-A".to_string(),
         );
         a.apply_store_ops(ops);
-        a.flush(&cvr_x.version, &cvr_x, 0.0).await.expect("A create");
+        a.flush(&cvr_x.version, &cvr_x, 0.0)
+            .await
+            .expect("A create");
 
         // Store B loads the CVR at version X.
         let mut b = CVRStoreHandle::new(
@@ -405,7 +413,9 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
             state_version: "09".to_string(),
             config_version: None,
         };
-        a.flush(&cvr_y.version, &cvr_y, 0.0).await.expect("A advance");
+        a.flush(&cvr_y.version, &cvr_y, 0.0)
+            .await
+            .expect("A advance");
 
         // Store B, still at X, must be rejected as concurrently modified.
         let err = b
@@ -444,6 +454,96 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
     });
 }
 
+/// Rows-behind retry (port of TS `CVRStore.load`'s retry loop): if the rows
+/// table lags the CVR instance version at load time (the previous owner hasn't
+/// flushed its pending row writes yet), `load` must WAIT and retry rather than
+/// return a CVR whose row records are inconsistent with its version. Once the
+/// rows table catches up, the load succeeds.
+#[test]
+fn pg_cvr_store_load_retries_until_rows_catch_up() {
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_cvr_store_load_retries: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_store_rows_behind";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create the CVR at version "01" (flush upserts rowsVersion = "01" too).
+        let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
+        cfg.ensure_client("client1");
+        let (cvr_x, _) = cfg.flush(0, 0, 0);
+        let ops = cfg.base.drain_store_ops();
+        let mut a = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-A".to_string(),
+        );
+        a.apply_store_ops(ops);
+        a.flush(&cvr_x.version, &cvr_x, 0.0).await.expect("A create");
+
+        // Simulate an in-flight advance: the instance version jumps to "05" but
+        // the rows table still lags at "01" (pending row writes not flushed).
+        sqlx::raw_sql(&format!(
+            r#"UPDATE "{schema}".instances SET "version" = '05' WHERE "clientGroupID" = 'cg1'"#
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Background: after ~700ms (past the first retry sleep) the rows table
+        // catches up to "05". The load below must retry and then succeed.
+        let bg_pool = pool.clone();
+        let bg_schema = schema.to_string();
+        let catcher = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            sqlx::raw_sql(&format!(
+                r#"UPDATE "{bg_schema}"."rowsVersion" SET "version" = '05' WHERE "clientGroupID" = 'cg1'"#
+            ))
+            .execute(&bg_pool)
+            .await
+            .unwrap();
+        });
+
+        // task-A owns the CVR, so no ownership error — only the rows-behind
+        // check gates this load. It should block through ≥1 retry then return
+        // the CVR at the caught-up version "05".
+        let mut b = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-A".to_string(),
+        );
+        let loaded = b.load(0.0).await.expect("B load must eventually succeed");
+        assert!(!loaded.is_new);
+        assert_eq!(loaded.cvr.version.state_version, "05");
+        catcher.await.unwrap();
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// Config catch-up must emit GOT-query patches (from the `queries` table, no
 /// clientID) as well as per-client desire patches, so a reconnecting client can
 /// rebuild its `gotQueriesPatch`. The old code read only `desires`.
@@ -467,7 +567,10 @@ fn pg_cvr_store_catchup_includes_got_query_patches() {
             .connect(&uri)
             .await
             .expect("connect");
-        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Seed: instance @ "05", a GOT query q1 @ "03", a desire for q1 @ "04".
         sqlx::raw_sql(&format!(
@@ -555,7 +658,10 @@ fn pg_cvr_store_load_grants_and_transfers_ownership() {
             .connect(&uri)
             .await
             .expect("connect");
-        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // task-A creates the instance.
         let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
@@ -631,7 +737,10 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
             .connect(&uri)
             .await
             .expect("connect");
-        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Client c1 desires q1 with an explicit 60s ttl.
         let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
@@ -655,7 +764,10 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
             "task-0".to_string(),
         );
         store.apply_store_ops(ops);
-        store.flush(&cvr1.version, &cvr1, 0.0).await.expect("flush 1");
+        store
+            .flush(&cvr1.version, &cvr1, 0.0)
+            .await
+            .expect("flush 1");
 
         // Reload: the desire state (ttl, active) is reconstructed on q1.
         let mut store2 = CVRStoreHandle::new(
@@ -681,7 +793,10 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
         let (cvr2, _) = cfg2.flush(0, 0, 1234);
         let ops2 = cfg2.base.drain_store_ops();
         store.apply_store_ops(ops2);
-        store.flush(&cvr2.version, &cvr2, 0.0).await.expect("flush 2");
+        store
+            .flush(&cvr2.version, &cvr2, 0.0)
+            .await
+            .expect("flush 2");
 
         // Reload: the inactivation timestamp survives (not reloaded as active).
         let mut store3 = CVRStoreHandle::new(
