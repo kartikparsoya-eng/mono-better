@@ -140,6 +140,10 @@ impl SyncEngine {
         cvr_id: String,
         task_id: String,
     ) -> Result<(), String> {
+        // Creating the pool spawns sqlx's background connection reaper, which
+        // requires an ambient Tokio runtime. This runs on the runtime-less CG
+        // thread, so enter the injected runtime context for the duration.
+        let _guard = self.tokio_handle.as_ref().map(|h| h.enter());
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy(pg_uri)
             .map_err(|e| format!("Failed to create PgPool: {e}"))?;

@@ -368,7 +368,7 @@ impl CVRStoreHandle {
                 r#"INSERT INTO "{}".instances
                    ("clientGroupID", "version", "lastActive", "ttlClock",
                     "replicaVersion", "owner", "grantedAt", "clientSchema", "profileID")
-                   VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8)
+                   VALUES ($1, $2, to_timestamp($3 / 1000.0), $4, $5, $6, NOW(), $7, $8)
                    ON CONFLICT ("clientGroupID") DO UPDATE SET
                     "version" = excluded."version",
                     "lastActive" = excluded."lastActive",
@@ -543,7 +543,26 @@ impl CVRStoreHandle {
             stats.desires += 1;
         }
 
-        // 7. Row record upserts and deletes
+        // 7. Row record upserts and deletes.
+        //
+        // The `rows` table has a FOREIGN KEY to `rowsVersion(clientGroupID)`, so
+        // a `rowsVersion` row must exist first. Upsert it (to the CVR version)
+        // before writing any rows. The `rowsVersion` may lag `instances.version`
+        // in general, but writing them together here is correct and satisfies
+        // the constraint.
+        if !self.pending.pending_row_record_updates.is_empty() {
+            let rv_sql = format!(
+                r#"INSERT INTO "{}"."rowsVersion" ("clientGroupID", "version")
+                   VALUES ($1, $2)
+                   ON CONFLICT ("clientGroupID") DO UPDATE SET "version" = excluded."version""#,
+                self.schema
+            );
+            sqlx::query(&rv_sql)
+                .bind(&self.cvr_id)
+                .bind(version_string(&cvr.version))
+                .execute(&mut *tx)
+                .await?;
+        }
         for (id_str, record) in &self.pending.pending_row_record_updates {
             match record {
                 Some(row) => {
@@ -608,8 +627,11 @@ impl CVRStoreHandle {
 
         // Load instance
         let instance_sql = format!(
-            r#"SELECT "version", "lastActive", "ttlClock", "replicaVersion",
-                      "clientSchema", "profileID", "owner", "grantedAt"
+            r#"SELECT "version",
+                      (extract(epoch from "lastActive") * 1000)::float8 AS "lastActive",
+                      "ttlClock", "replicaVersion",
+                      "clientSchema", "profileID", "owner",
+                      (extract(epoch from "grantedAt") * 1000)::float8 AS "grantedAt"
                FROM "{}".instances WHERE "clientGroupID" = $1"#,
             self.schema
         );

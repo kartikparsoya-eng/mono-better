@@ -366,6 +366,15 @@ impl RowRecordCache {
 
         state.pending_rows_version = Some(rows_version.clone());
 
+        // When the caller already persisted these rows (`flushed`), the on-disk
+        // version advances too — otherwise `flushed()` (which waits for
+        // `flushed_rows_version == pending_rows_version`) would block forever,
+        // since no background flush is spawned in this path.
+        if flushed {
+            state.flushed_rows_version = Some(rows_version.clone());
+            let _ = self.flushed_version_tx.send(Some(rows_version.clone()));
+        }
+
         // Initiate a flush if not already flushing and not flushed.
         let should_spawn_flush = !flushed && !self.is_flushing.load(Ordering::SeqCst);
 
