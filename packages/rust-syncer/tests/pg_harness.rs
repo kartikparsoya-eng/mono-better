@@ -444,6 +444,113 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
     });
 }
 
+/// On reload, each client's per-query desire state (ttl + inactivatedAt) must be
+/// reconstructed onto the query's `client_state`. The old load populated only
+/// `desired_query_ids`, so an INACTIVE (TTL-pending) desire reloaded as fully
+/// active — the TTL scheduler could never see it to expire it. Port of TS
+/// `loadCVR`, which rebuilds `clientState` from the desires rows.
+#[test]
+fn pg_cvr_store_reloads_desire_state_and_inactivation() {
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_cvr_store_reloads_desire_state: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_store_desire_state";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+
+        // Client c1 desires q1 with an explicit 60s ttl.
+        let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
+        cfg.ensure_client("c1");
+        let _ = cfg.put_desired_queries(
+            "c1",
+            &[DesiredQuerySpec {
+                hash: "q1".to_string(),
+                ast: Some(serde_json::json!({"table": "issue"})),
+                name: None,
+                args: None,
+                ttl: Some(60_000),
+            }],
+        );
+        let (cvr1, _) = cfg.flush(0, 0, 0);
+        let ops = cfg.base.drain_store_ops();
+        let mut store = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        );
+        store.apply_store_ops(ops);
+        store.flush(&cvr1.version, &cvr1, 0.0).await.expect("flush 1");
+
+        // Reload: the desire state (ttl, active) is reconstructed on q1.
+        let mut store2 = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        );
+        let loaded = store2.load(0.0).await.expect("load 1");
+        let cs = loaded
+            .cvr
+            .queries
+            .get("q1")
+            .and_then(|q| q.client_state())
+            .and_then(|m| m.get("c1"))
+            .expect("q1 has c1 desire state");
+        assert_eq!(cs.ttl, 60_000, "ttl round-trips");
+        assert_eq!(cs.inactivated_at, None, "still active");
+
+        // Mark q1 inactive (TTL-pending) at ttlClock 1234, flush.
+        let mut cfg2 = CVRConfigDrivenUpdater::new(loaded.cvr, shard.clone());
+        let _ = cfg2.mark_desired_queries_as_inactive("c1", &["q1".to_string()], 1234);
+        let (cvr2, _) = cfg2.flush(0, 0, 1234);
+        let ops2 = cfg2.base.drain_store_ops();
+        store.apply_store_ops(ops2);
+        store.flush(&cvr2.version, &cvr2, 0.0).await.expect("flush 2");
+
+        // Reload: the inactivation timestamp survives (not reloaded as active).
+        let mut store3 = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        );
+        let loaded2 = store3.load(0.0).await.expect("load 2");
+        let cs2 = loaded2
+            .cvr
+            .queries
+            .get("q1")
+            .and_then(|q| q.client_state())
+            .and_then(|m| m.get("c1"))
+            .expect("q1 still has c1 desire state");
+        assert_eq!(
+            cs2.inactivated_at,
+            Some(1234),
+            "inactivation timestamp reloaded — desire is NOT resurrected as active"
+        );
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// REPRODUCTION: isolate the catchup read path exactly as the CG thread drives
 /// it — a non-worker OS thread calling `Handle::block_on`. If this hangs, the
 /// deadlock is inside `RowRecordCache` (flush/flushed/catchup), independent of

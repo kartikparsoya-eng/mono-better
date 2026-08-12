@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 
+use crate::ttl::DEFAULT_TTL_MS;
 use crate::types::StoreOp;
 use crate::types::*;
 use crate::version::{
@@ -864,12 +865,32 @@ impl CVRStoreHandle {
             cvr.queries.insert(qrow.query_hash, query);
         }
 
-        // Populate desiredQueryIDs from desires
-        for (client_id, query_hash, _, deleted, _, _) in &desires {
-            if !deleted {
-                if let Some(client) = cvr.clients.get_mut(client_id) {
-                    client.desired_query_ids.push(query_hash.clone());
-                }
+        // Rebuild each client's desired-query list AND the per-client desire
+        // state (inactivatedAt / ttl / version) on the corresponding query.
+        // Without the client_state an inactive (TTL-pending) desire reloads as
+        // fully active, so the TTL scheduler can never see it to expire it, and
+        // its ttl/version are lost. Port of TS `loadCVR`, which reconstructs
+        // `clientState` from the desires rows.
+        for (client_id, query_hash, patch_version, deleted, ttl_ms, inactivated_at_ms) in &desires {
+            if *deleted {
+                continue;
+            }
+            if let Some(client) = cvr.clients.get_mut(client_id) {
+                client.desired_query_ids.push(query_hash.clone());
+            }
+            if let Some(state) = cvr
+                .queries
+                .get_mut(query_hash)
+                .and_then(|q| q.client_state_mut())
+            {
+                state.insert(
+                    client_id.clone(),
+                    ClientState {
+                        inactivated_at: (*inactivated_at_ms).map(|ms| ms as TTLClock),
+                        ttl: (*ttl_ms).map(|ms| ms as i64).unwrap_or(DEFAULT_TTL_MS),
+                        version: version_from_string(patch_version),
+                    },
+                );
             }
         }
         // Sort desired query IDs
