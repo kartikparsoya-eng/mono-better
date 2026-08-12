@@ -768,29 +768,42 @@ impl SyncEngine {
         // An advance folds its delta onto each query's PRIOR full signature, so
         // seed the accumulator from the CVR's persisted per-query signatures.
         let mut sig_acc = Self::seed_signatures_from_cvr(&cvr);
-        let (sigs, provider) = Self::signature_provider();
-        let mut updater =
-            CVRQueryDrivenUpdater::new(cvr, String::new(), replica_version, Some(provider));
-        let pokers_version = updater.updated_version();
 
-        let clients = self.clients_for(client_ids);
-        let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-        let pokers = MultiPoker::new(&client_refs, pokers_version);
-
-        let mut processor = ChangeProcessor::new(&mut updater, &pokers);
+        // Advance FIRST, capturing the new state version from the header (the
+        // version the snapshot advanced TO) and collecting the delta. The updater
+        // must be constructed with THIS version, not an empty placeholder: its
+        // `new()` asserts `stateVersion >= cvr.version.stateVersion` (which "" is
+        // NOT, for any non-empty CVR version → panic), and the rows must be tagged
+        // with the correct cookie. This mirrors TS, which does
+        // `const {version, changes} = await pipelines.advance()` and only THEN
+        // constructs the `CVRQueryDrivenUpdater` with `version`
+        // (view-syncer.ts). An advance delta is small (only changes since the
+        // last version — TS likewise returns `changes` as an array), so buffering
+        // it is cheap, unlike a full hydrate.
+        type CollectedChange = (
+            u8,
+            String,
+            String,
+            serde_json::Map<String, serde_json::Value>,
+            Option<serde_json::Map<String, serde_json::Value>>,
+        );
+        let mut new_version = String::new();
         let mut num_changes = 0usize;
+        let mut collected: Vec<CollectedChange> = Vec::new();
         let outcome = self.pipelines.advance(
-            |_version, n| num_changes = n,
+            |version, n| {
+                new_version = version.to_string();
+                num_changes = n;
+            },
             |rc| {
                 accumulate_signature(&mut sig_acc, rc);
-                let (ct, qid, table, rk, row) = row_change_to_maps(rc);
-                processor.on_row_change(ct, &qid, &table, &rk, row.as_ref(), existing_rows);
+                collected.push(row_change_to_maps(rc));
             },
         )?;
 
         if let AdvanceOutcome::Reset { reason, msg } = outcome {
-            drop(processor);
-            pokers.cancel();
+            // No poke was started (the pokers are built below, after a clean
+            // advance), so there is nothing to cancel — just report the reset.
             return Ok(SyncResult {
                 cvr: cvr_for_reset,
                 version: String::new(),
@@ -801,9 +814,25 @@ impl SyncEngine {
             });
         }
 
-        processor.finish(existing_rows);
-        num_changes = processor.total_processed();
-        drop(processor);
+        // Build the updater with the real post-advance version, then replay the
+        // collected delta through it (order preserved).
+        let (sigs, provider) = Self::signature_provider();
+        let mut updater =
+            CVRQueryDrivenUpdater::new(cvr, new_version, replica_version, Some(provider));
+        let pokers_version = updater.updated_version();
+
+        let clients = self.clients_for(client_ids);
+        let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
+        let pokers = MultiPoker::new(&client_refs, pokers_version);
+
+        {
+            let mut processor = ChangeProcessor::new(&mut updater, &pokers);
+            for (ct, qid, table, rk, row) in &collected {
+                processor.on_row_change(*ct, qid, table, rk, row.as_ref(), existing_rows);
+            }
+            processor.finish(existing_rows);
+            num_changes = processor.total_processed();
+        }
 
         // Hand the folded post-advance signatures to the updater's provider.
         *sigs.lock().unwrap() = sig_acc;
@@ -1208,6 +1237,99 @@ mod tests {
         );
         assert_eq!(frames.first().unwrap()[0], "pokeStart");
         assert_eq!(frames.last().unwrap()[0], "pokeEnd");
+    }
+
+    /// Regression for the advance-path panic: `advance_and_sync` must construct
+    /// the query-driven updater with the REAL post-advance version, not an empty
+    /// placeholder. The old code passed `String::new()`, and `new()` asserts
+    /// `stateVersion >= cvr.version.stateVersion` — false for any non-empty CVR
+    /// version (`"" >= "00"` is false in Rust) → panic on the FIRST advance after
+    /// hydration. `make_cvr()` has stateVersion "00", so the old code panicked
+    /// here; the fix advances first and uses the header version. Needs a
+    /// snapshotter-backed pipeline (advance is unavailable on MemorySource).
+    #[test]
+    fn advance_and_sync_uses_header_version_not_empty() {
+        use rusqlite::Connection;
+
+        let db_path = "/tmp/rust-syncer-advance-and-sync-test.db";
+        let cleanup = || {
+            for suffix in ["", "-wal", "-wal2", "-shm"] {
+                let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+            }
+        };
+        cleanup();
+        {
+            let conn = Connection::open(db_path).unwrap();
+            let _ = conn.pragma_update(None, "journal_mode", "wal2");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE "_zero.replicationConfig" (
+                    lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    replicaVersion TEXT NOT NULL,
+                    publications TEXT NOT NULL
+                );
+                CREATE TABLE "_zero.replicationState" (
+                    lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                    stateVersion TEXT NOT NULL
+                );
+                CREATE TABLE "_zero.changeLog2" (
+                    "stateVersion" TEXT NOT NULL,
+                    "table"        TEXT NOT NULL,
+                    "rowKey"       TEXT NOT NULL,
+                    "op"           TEXT NOT NULL,
+                    "pos"          INTEGER NOT NULL,
+                    PRIMARY KEY ("stateVersion", "pos")
+                );
+                CREATE TABLE users (id TEXT PRIMARY KEY, "_0_version" TEXT NOT NULL);
+                INSERT INTO "_zero.replicationConfig" (lock, replicaVersion, publications)
+                    VALUES ('singleton', 'v1', '[]');
+                INSERT INTO "_zero.replicationState" (lock, stateVersion)
+                    VALUES ('singleton', 'v1');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let mut pipelines = IvmPipelines::new();
+        pipelines
+            .init(vec![users_spec()], Some(db_path), "app")
+            .unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        engine.register_client(
+            "client1",
+            "ws1",
+            "cg1",
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
+            None,
+            sink,
+        );
+
+        // make_cvr() has stateVersion "00" and replicaVersion "v1"; advancing a
+        // snapshot pinned at "v1" MUST NOT panic (it did before the fix).
+        let existing_rows: RowRecordMap = HashMap::new();
+        let result = engine.advance_and_sync(
+            make_cvr(),
+            "v1".to_string(),
+            &["ws1".to_string()],
+            &existing_rows,
+            0,
+            0,
+            0,
+        );
+
+        cleanup();
+        let result = result.expect("advance_and_sync must not error/panic");
+        assert!(result.reset_reason.is_none(), "unexpected reset");
+        assert!(
+            !result.version.is_empty(),
+            "advance produced an empty version — the updater was built without the header version"
+        );
     }
 
     #[test]
