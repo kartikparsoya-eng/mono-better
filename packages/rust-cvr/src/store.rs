@@ -172,6 +172,14 @@ pub struct CVRStoreHandle {
     task_id: String,
     pending: PendingWrites,
     row_count: usize,
+    /// The CVR version this store believes is currently persisted — set on
+    /// `load` and advanced after each successful `flush`. It equals the
+    /// `_orig.version` that TS threads into `flush` as `expectedCurrentVersion`
+    /// (each updater is built from the last-flushed CVR), so tracking it here
+    /// lets the flush do the optimistic version+ownership check without the
+    /// caller having to pass the pre-update version. `None` until first
+    /// load/flush (a brand-new CVR, whose expected version is the empty version).
+    current_version: Option<CVRVersion>,
 }
 
 impl CVRStoreHandle {
@@ -183,6 +191,7 @@ impl CVRStoreHandle {
             task_id,
             pending: PendingWrites::default(),
             row_count: 0,
+            current_version: None,
         }
     }
 
@@ -354,9 +363,14 @@ impl CVRStoreHandle {
 
     pub async fn flush(
         &mut self,
+        // Kept for signature parity with TS `flush(expectedCurrentVersion, ...)`,
+        // but the store's own `current_version` (set on load, advanced after each
+        // flush) is authoritative — it equals TS's `_orig.version`. When the store
+        // was never loaded (a brand-new CVR) the expected on-disk version is the
+        // empty version (no instance row yet).
         _expected_current_version: &CVRVersion,
         cvr: &CVR,
-        _last_connect_time: f64,
+        last_connect_time: f64,
     ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
         // Queue the instance write
         self.put_instance(cvr);
@@ -367,6 +381,53 @@ impl CVRStoreHandle {
 
         let mut stats = CVRFlushStats::default();
         let mut tx = self.pool.begin().await?;
+
+        // ── Version + ownership guard (port of TS `#checkVersionAndOwnership`) ──
+        // Lock the instance row and refuse to write if (a) another task now owns
+        // this CVR (was granted it AFTER our last connect) or (b) the on-disk
+        // version has moved since we last saw it. Returning Err here drops `tx`
+        // uncommitted → the transaction rolls back, so no partial write escapes.
+        // Without this, two syncers owning the same client group would clobber
+        // each other's CVR (lost updates / cross-owner corruption).
+        {
+            let expected = self
+                .current_version
+                .clone()
+                .unwrap_or_else(|| crate::version::EMPTY_CVR_VERSION);
+            let row: Option<(String, Option<String>, Option<f64>)> = sqlx::query_as(&format!(
+                r#"SELECT "version", "owner",
+                          (extract(epoch from "grantedAt") * 1000.0)::double precision
+                   FROM "{}".instances
+                   WHERE "clientGroupID" = $1
+                   FOR UPDATE"#,
+                self.schema
+            ))
+            .bind(&self.cvr_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            let (db_version, owner, granted_at) = match row {
+                Some((v, o, g)) => (v, o, g),
+                // No instance row yet → a brand-new CVR (empty version, no owner).
+                None => (crate::version::EMPTY_CVR_VERSION.state_version.to_string(), None, None),
+            };
+            if owner.as_deref() != Some(self.task_id.as_str())
+                && granted_at.unwrap_or(0.0) > last_connect_time
+            {
+                return Err(CVRStoreError::OwnershipError {
+                    owner: owner.unwrap_or_default(),
+                    granted_at: granted_at.unwrap_or(0.0),
+                    last_connect_time,
+                });
+            }
+            let expected_str = version_string(&expected);
+            if db_version != expected_str {
+                return Err(CVRStoreError::ConcurrentModification {
+                    expected: expected_str,
+                    actual: db_version,
+                });
+            }
+        }
 
         // 1. Instance upsert with ownership check
         if let Some(instance) = &self.pending.pending_instance_write {
@@ -635,6 +696,10 @@ impl CVRStoreHandle {
 
         tx.commit().await?;
 
+        // The write committed at `cvr.version`; that is now the expected on-disk
+        // version for the next flush's optimistic check.
+        self.current_version = Some(cvr.version.clone());
+
         // Clear pending
         self.pending = PendingWrites::default();
 
@@ -692,6 +757,7 @@ impl CVRStoreHandle {
                     profile_id: None,
                 };
                 drop(tx);
+                self.current_version = Some(cvr.version.clone());
                 return Ok(LoadResult { cvr, is_new: true });
             }
             Some((
@@ -812,6 +878,7 @@ impl CVRStoreHandle {
             client.desired_query_ids.dedup();
         }
 
+        self.current_version = Some(cvr.version.clone());
         Ok(LoadResult { cvr, is_new })
     }
 

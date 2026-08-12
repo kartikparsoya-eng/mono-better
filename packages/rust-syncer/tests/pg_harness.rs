@@ -346,6 +346,104 @@ fn pg_cvr_store_deletes_rows() {
     });
 }
 
+/// Optimistic concurrency + ownership guard (port of TS `#checkVersionAndOwnership`):
+/// a flush must be REJECTED if the on-disk CVR version moved since this store
+/// last saw it, or if another task now owns the CVR. Without it two syncers
+/// clobber each other's CVR.
+#[test]
+fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
+    use rust_cvr::store::CVRStoreError;
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_cvr_store_guard: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_store_guard";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+
+        // Store A creates the instance (version X).
+        let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
+        cfg.ensure_client("client1");
+        let (cvr_x, _) = cfg.flush(0, 0, 0);
+        let ops = cfg.base.drain_store_ops();
+        let mut a = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-A".to_string(),
+        );
+        a.apply_store_ops(ops);
+        a.flush(&cvr_x.version, &cvr_x, 0.0).await.expect("A create");
+
+        // Store B loads the CVR at version X.
+        let mut b = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-A".to_string(),
+        );
+        assert!(!b.load(0.0).await.expect("B load").is_new);
+
+        // Store A advances the CVR to a higher version Y.
+        let mut cvr_y = cvr_x.clone();
+        cvr_y.version = CVRVersion {
+            state_version: "09".to_string(),
+            config_version: None,
+        };
+        a.flush(&cvr_y.version, &cvr_y, 0.0).await.expect("A advance");
+
+        // Store B, still at X, must be rejected as concurrently modified.
+        let err = b
+            .flush(&cvr_y.version, &cvr_y, 0.0)
+            .await
+            .expect_err("B flush must be rejected");
+        assert!(
+            matches!(err, CVRStoreError::ConcurrentModification { .. }),
+            "expected ConcurrentModification, got {err:?}"
+        );
+
+        // Ownership: hand the CVR to another task, granted just now (> A's last
+        // connect time of 0). A's next flush must be rejected as not-owner.
+        sqlx::raw_sql(&format!(
+            r#"UPDATE "{schema}".instances
+               SET "owner" = 'task-OTHER', "grantedAt" = now()
+               WHERE "clientGroupID" = 'cg1'"#
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A is at version Y (matches DB), so only the ownership check can fire.
+        let err = a
+            .flush(&cvr_y.version, &cvr_y, 0.0)
+            .await
+            .expect_err("A flush must be rejected on ownership");
+        assert!(
+            matches!(err, CVRStoreError::OwnershipError { .. }),
+            "expected OwnershipError, got {err:?}"
+        );
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// REPRODUCTION: isolate the catchup read path exactly as the CG thread drives
 /// it — a non-worker OS thread calling `Handle::block_on`. If this hangs, the
 /// deadlock is inside `RowRecordCache` (flush/flushed/catchup), independent of
