@@ -202,6 +202,10 @@ struct CacheState {
     flushed_rows_version: Option<CVRVersion>,
     /// Whether a background flush task is currently running.
     flushing: bool,
+    /// Set when a background flush fails. `flushed()` returns this as an error
+    /// instead of blocking forever (in TS a flush failure calls `failService`,
+    /// tearing down the whole service; here we surface it to awaiters).
+    flush_error: Option<String>,
 }
 
 impl CacheState {
@@ -212,6 +216,7 @@ impl CacheState {
             pending_rows_version: None,
             flushed_rows_version: None,
             flushing: false,
+            flush_error: None,
         }
     }
 }
@@ -421,22 +426,24 @@ impl RowRecordCache {
         state.flushing
     }
 
-    /// Mirrors TS `flushed(lc)`. Waits until all pending writes are flushed.
+    /// Mirrors TS `flushed(lc)`. Waits until all pending writes are flushed, or
+    /// returns an error if the background flush failed (rather than blocking
+    /// forever). Compares `flushed_rows_version` to the LIVE
+    /// `pending_rows_version`, so a later `apply` that raises `pending` is also
+    /// awaited — the flush loop itself runs until the two are equal.
     pub async fn flushed(&self) -> Result<(), String> {
-        let target = {
-            let state = self.state.lock().await;
-            state.pending_rows_version.clone()
-        };
-
-        if target.is_none() {
-            return Ok(());
-        }
-
+        // Subscribe BEFORE the first check so no wakeup is missed between the
+        // check and the `changed().await`.
         let mut rx = self.flushed_version_tx.subscribe();
         loop {
-            let current = rx.borrow().clone();
-            if current == target {
-                return Ok(());
+            {
+                let state = self.state.lock().await;
+                if let Some(e) = &state.flush_error {
+                    return Err(e.clone());
+                }
+                if state.pending_rows_version == state.flushed_rows_version {
+                    return Ok(());
+                }
             }
             if rx.changed().await.is_err() {
                 return Err("flush version channel closed".to_string());
@@ -683,10 +690,18 @@ async fn flush_loop(
             }
             Err(e) => {
                 let err_msg = format!("row record flush failed: {}", e);
-                (fail_service)(err_msg);
-                let mut state = state.lock().await;
-                state.flushing = false;
+                (fail_service)(err_msg.clone());
+                let last = {
+                    let mut state = state.lock().await;
+                    state.flush_error = Some(err_msg);
+                    state.flushing = false;
+                    state.flushed_rows_version.clone()
+                };
                 is_flushing.store(false, Ordering::SeqCst);
+                // Wake any `flushed()` awaiters so they observe `flush_error`
+                // and return an error instead of blocking forever. `watch::send`
+                // always marks the value changed, even if it is unchanged.
+                let _ = flushed_tx.send(last);
                 return;
             }
         }
@@ -784,7 +799,7 @@ async fn flush_one_iteration(
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
   ) SELECT
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
-    FROM json_to_recordset($1) AS x(
+    FROM json_to_recordset($1::json) AS x(
       "clientGroupID" TEXT,
       "schema" TEXT,
       "table" TEXT,
