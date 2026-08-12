@@ -299,7 +299,23 @@ export function computeZqlSpecsFromLiteSpecs(
       zqlSpec: Object.fromEntries(
         Object.entries(tableSpec.columns).map(([name, {dataType}]) => [
           name,
-          mapLiteDataTypeToZqlSchemaValue(dataType),
+          {
+            ...mapLiteDataTypeToZqlSchemaValue(dataType),
+            // Populate nullability from the upstream |NOT_NULL attribute
+            // (with the primary-key override already computed above).
+            // Without this, every SchemaValue had `optional` UNSET, so the
+            // start-constraint SQL in zqlite/src/query-builder.ts (and the
+            // rust-ivm port, via buildNapiTableSpecs' `optional ?? false`)
+            // treated ALL columns as non-nullable and emitted NULL-blind
+            // comparisons (`col = NULL` never matches; NULL-valued rows are
+            // unreachable through `col < ?`). For LIMIT queries ordered by a
+            // nullable column this silently corrupts the Take operator's
+            // bound tracking: wrong LIMIT rows, and the prod take.rs:545/:702
+            // panics ("boundNode must be found during fetch" / "Bound should
+            // be set"). Reproduced + pinned by rust-ivm's
+            // tests/take_bound_fuzz_test.rs.
+            optional: !notNullColumns.has(name),
+          },
         ]),
       ),
     });

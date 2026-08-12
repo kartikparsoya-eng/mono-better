@@ -309,11 +309,26 @@ fn nullable_aware_equality(
     optional: bool,
     params: &mut Vec<SqlParam>,
 ) -> String {
+    // VALUE-aware NULL guard (2026-08-12, take-bound divergence fix): a NULL
+    // bound value with `=` yields always-false SQL (`col = NULL`), so a Take
+    // bound/At fetch silently returns EMPTY and the operator's persisted
+    // bound diverges from the source — the prod take.rs:545/:702 panic class
+    // (and, worse, silent wrong LIMIT rows; see take_bound_fuzz_test.rs).
+    // This fires only when the declared optionality is wrong for the data
+    // (spec drift) — TS has the same declared-optionality keying and the same
+    // latent hole, but the correctness cost here is a wedged pipeline, so we
+    // choose robustness: when the VALUE is NULL, use `IS` regardless of the
+    // declared type. For non-NULL values behavior is unchanged (index-
+    // friendly `=` on non-optional columns, per the MULTI-INDEX OR note).
     params.push(to_sqlite_column_value(value, column_type));
     format!(
         "{} {} ?",
         quote_ident(field),
-        if optional { "IS" } else { "=" }
+        if optional || value.is_null() {
+            "IS"
+        } else {
+            "="
+        }
     )
 }
 
@@ -326,7 +341,11 @@ fn nullable_aware_range_comparison(
     params: &mut Vec<SqlParam>,
 ) -> String {
     let param = || to_sqlite_column_value(value, column_type);
-    if !optional {
+    // VALUE-aware NULL guard — see nullable_aware_equality. `col > NULL` /
+    // `col < NULL` are always-false; when the bound value is NULL the
+    // NULL-ordered branches below are the only correct SQL, regardless of
+    // the declared optionality.
+    if !optional && !value.is_null() {
         params.push(param());
         return format!("{} {} ?", quote_ident(field), operator);
     }
@@ -682,14 +701,24 @@ mod literal_left_tests {
         );
         assert_eq!(optional_params.len(), 3);
 
+        // VALUE-aware NULL guard (take-bound divergence fix): a NULL start
+        // value now takes the NULL-aware branches even on a declared
+        // non-optional column. The old TS-shaped output
+        // `(("required" > ?) OR ("required" = ?))` with NULL params is
+        // always-false SQL — an At/bound fetch through it returns EMPTY,
+        // which is exactly the take.rs:545/:702 divergence class
+        // (see tests/take_bound_fuzz_test.rs).
         let (required_sql, required_params) = gather_start_constraints(
             &start,
             false,
             &[("required".to_string(), "asc".to_string())],
             &columns,
         );
-        assert_eq!(required_sql, "((\"required\" > ?) OR (\"required\" = ?))");
-        assert_eq!(required_params.len(), 2);
+        assert_eq!(
+            required_sql,
+            "(((? IS NULL OR \"required\" > ?)) OR (\"required\" IS ?))"
+        );
+        assert_eq!(required_params.len(), 3);
     }
 
     #[test]
