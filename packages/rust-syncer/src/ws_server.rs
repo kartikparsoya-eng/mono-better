@@ -63,7 +63,7 @@ pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<Connecti
     let path_clone = path.clone();
     let headers_clone = headers.clone();
 
-    let callback = move |req: &Request, response: Response| {
+    let callback = move |req: &Request, mut response: Response| {
         // Capture the path (with query string).
         let uri = req.uri();
         let full_path = if let Some(query) = uri.query() {
@@ -73,6 +73,26 @@ pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<Connecti
         };
         *path_clone.lock().unwrap() = full_path;
         *headers_clone.lock().unwrap() = req.headers().clone();
+
+        // Echo the first offered `Sec-WebSocket-Protocol` back in the handshake
+        // response. The zero client passes its encoded initConnection/auth as a
+        // WS subprotocol, and per RFC 6455 the client fails the connection if
+        // the server does not select one. (The `ws` server the TS syncer uses
+        // does this automatically — `protocols.values().next().value`.)
+        if let Some(proto) = req
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Ok(value) = proto.parse() {
+                response
+                    .headers_mut()
+                    .insert("sec-websocket-protocol", value);
+            }
+        }
         Ok(response)
     };
 
