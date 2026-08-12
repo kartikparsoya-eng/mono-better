@@ -27,6 +27,34 @@ use serde_json::{Map, Value, json};
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
+/// A deny-all compiled-permissions config: no table has any `select` rule, so
+/// the read-authorizer's deny-by-default kicks in and every client query
+/// returns zero rows. Used as the fail-CLOSED fallback when permissions cannot
+/// be loaded.
+pub fn deny_all_permissions() -> Value {
+    json!({"tables": {}})
+}
+
+/// Resolve the outcome of loading read-permissions into the compiled config the
+/// engine should enforce, applying fail-CLOSED semantics on error:
+///
+/// - `Ok(Some(perms))` → enforce those permissions.
+/// - `Ok(None)` → no permissions deployed. Pass client queries through
+///   untransformed — matches TS `load-permissions.ts`, which merely warns and
+///   serves without authorization when nothing is deployed.
+/// - `Err(_)` → a permissions doc exists but could not be opened / parsed /
+///   validated. Do NOT fall through to `None` (that would execute client
+///   queries with no authorization — a fail-OPEN security hole). Enforce
+///   `deny_all_permissions()` so no unauthorized row is ever served. (TS throws
+///   on an unparseable permissions doc; deny-all is the equivalent fail-closed
+///   posture that keeps the rest of the CG serving.)
+pub fn resolve_permissions(loaded: Result<Option<Value>, String>) -> Option<Value> {
+    match loaded {
+        Ok(perms) => perms,
+        Err(_) => Some(deny_all_permissions()),
+    }
+}
+
 /// Transform a query AST for read-permissions and compute its transformation
 /// hash. Port of `transformAndHashQuery`. `internal` queries (e.g. the
 /// mutation-results / lmid internal queries) skip transformation.
@@ -739,5 +767,31 @@ mod tests {
         assert_eq!(base36(36), "10");
         // sanity: 2^63
         assert_eq!(base36(9223372036854775808), "1y2p0ij32e8e8");
+    }
+
+    #[test]
+    fn resolve_permissions_fails_closed_on_load_error() {
+        // Present → enforced as-is.
+        let perms = json!({"tables":{"issue":{"row":{"select":[]}}}});
+        assert_eq!(resolve_permissions(Ok(Some(perms.clone()))), Some(perms));
+        // Absent → pass-through (None), matching TS (warn + serve).
+        assert_eq!(resolve_permissions(Ok(None)), None);
+        // Load/parse error → deny-all, NOT None. A load failure must never fall
+        // through to unauthorized pass-through (the fail-open hole).
+        let denied = resolve_permissions(Err("corrupt permissions".to_string()));
+        assert_eq!(denied, Some(deny_all_permissions()));
+        assert_ne!(
+            denied, None,
+            "a permissions load failure must fail closed, not pass through"
+        );
+    }
+
+    #[test]
+    fn deny_all_permissions_denies_every_client_query() {
+        // Under the deny-all config, a client query against ANY table is rewritten
+        // with an always-false (empty-OR) where, so the read-authorizer returns
+        // zero rows — no unauthorized data escapes.
+        let out = transform_query(&json!({"table":"issue"}), &deny_all_permissions(), &json!({}));
+        assert_eq!(out["where"], json!({"type":"or","conditions":[]}));
     }
 }

@@ -281,26 +281,24 @@ impl CGServicesFactory for RealServicesFactory {
                 Vec::new()
             }
         };
-        let permissions = match rusqlite::Connection::open(&self.config.replica_file)
-            .map_err(|e| e.to_string())
-            .and_then(|conn| {
-                rust_syncer::load_permissions(&conn, &self.config.app_id).map_err(|e| e)
-            }) {
-            Ok(loaded) => {
-                if loaded.permissions.is_some() {
-                    tracing::info!("CG {cg_id}: loaded read-permissions from replica");
-                } else {
-                    tracing::warn!(
-                        "CG {cg_id}: no read-permissions deployed — queries pass through"
-                    );
-                }
-                loaded.permissions
+        let load_result: Result<Option<serde_json::Value>, String> =
+            rusqlite::Connection::open(&self.config.replica_file)
+                .map_err(|e| e.to_string())
+                .and_then(|conn| rust_syncer::load_permissions(&conn, &self.config.app_id))
+                .map(|loaded| loaded.permissions);
+        match &load_result {
+            Ok(Some(_)) => tracing::info!("CG {cg_id}: loaded read-permissions from replica"),
+            Ok(None) => {
+                tracing::warn!("CG {cg_id}: no read-permissions deployed — queries pass through")
             }
-            Err(e) => {
-                tracing::error!("CG {cg_id}: failed to load permissions: {e}");
-                None
-            }
-        };
+            // Fail CLOSED: an existing-but-unloadable permissions doc must not
+            // silently disable authorization. `resolve_permissions` substitutes a
+            // deny-all config so no unauthorized row is served.
+            Err(e) => tracing::error!(
+                "CG {cg_id}: failed to load permissions ({e}); denying all client queries (fail-closed)"
+            ),
+        }
+        let permissions = rust_syncer::resolve_permissions(load_result);
         let app_id = self.config.app_id.clone();
         rust_syncer::SyncEngineConfig {
             tables,
