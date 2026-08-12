@@ -1559,6 +1559,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "cc",
  "crossbeam-channel",
  "dashmap",
  "futures-util",
