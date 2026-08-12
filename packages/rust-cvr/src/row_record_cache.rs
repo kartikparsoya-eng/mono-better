@@ -380,6 +380,14 @@ impl RowRecordCache {
             let _ = self.flushed_version_tx.send(Some(rows_version.clone()));
         }
 
+        // Snapshot the post-update cache size while we still hold this guard.
+        // The tokio `Mutex` is NOT reentrant: re-locking `self.state` below while
+        // this guard is live deadlocks — and the `flushed=true` write-back path
+        // (which does not spawn a flush) never dropped the guard before the old
+        // re-lock, hanging the CG thread on every hydrate. Compute `count` here
+        // and drop the guard explicitly in both branches instead.
+        let count = state.cache.as_ref().map(|c| c.len()).unwrap_or(0);
+
         // Initiate a flush if not already flushing and not flushed.
         let should_spawn_flush = !flushed && !self.is_flushing.load(Ordering::SeqCst);
 
@@ -411,12 +419,10 @@ impl RowRecordCache {
                 )
                 .await;
             });
+        } else {
+            drop(state);
         }
 
-        let count = {
-            let state = self.state.lock().await;
-            state.cache.as_ref().map(|c| c.len()).unwrap_or(0)
-        };
         Ok(count)
     }
 
@@ -1064,5 +1070,49 @@ mod tests {
     fn test_flush_mode_equality() {
         assert_eq!(FlushMode::AllowDefer, FlushMode::AllowDefer);
         assert_ne!(FlushMode::AllowDefer, FlushMode::Force);
+    }
+
+    /// Build a cache backed by a lazy (never-connecting) pool whose in-memory
+    /// cache is already marked loaded, so `apply(flushed=true)` runs without PG.
+    fn loaded_cache_for_test() -> RowRecordCache {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://u:p@127.0.0.1:1/db")
+            .expect("lazy pool");
+        let cache = RowRecordCache::new(
+            pool,
+            "s".to_string(),
+            "cvr1".to_string(),
+            100,
+            Arc::new(|_| {}),
+            None,
+        );
+        cache.state.try_lock().unwrap().cache = Some(HashMap::new());
+        cache
+    }
+
+    /// Regression: `apply(flushed=true)` must not deadlock. The `flushed=true`
+    /// write-back path (used on every hydrate) does NOT spawn a background flush,
+    /// so it must not fall through to a second `self.state.lock().await` while the
+    /// first guard is still held — the tokio `Mutex` is not reentrant and that
+    /// would hang the CG thread forever (poke opens, never completes). Only the
+    /// `flushed=false` path dropped the guard, so this went unnoticed until a live
+    /// hydrate. Guarded by a timeout so a re-introduced re-lock fails, not hangs.
+    #[tokio::test]
+    async fn apply_flushed_true_does_not_deadlock() {
+        let cache = loaded_cache_for_test();
+        let deltas = vec![(
+            make_record("public", "label", 1, "v1").id,
+            Some(make_record("public", "label", 1, "v1")),
+        )];
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            cache.apply(deltas, CVRVersion::empty(), true),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "apply(flushed=true) deadlocked — it re-locked the non-reentrant state Mutex"
+        );
+        assert_eq!(res.unwrap().unwrap(), 1, "the applied row should be in cache");
     }
 }
