@@ -319,6 +319,17 @@ impl SyncEngine {
         last_active: i64,
         ttl_clock: TTLClock,
     ) -> Result<CVR, String> {
+        // Snapshot each connected client's cookie BEFORE any poke advances it.
+        // Both the config poke and the hydrate poke call `end()`, which advances
+        // `base_version` to the new CVR version; catch-up (below) must replay from
+        // these ORIGINAL cookies, not the post-poke ones, or a reconnecting client
+        // loses the whole `[oldCookie, current]` interval. See `catchup_clients`.
+        let original_client_versions: std::collections::HashMap<String, NullableCVRVersion> = self
+            .clients_for(poke_ws_ids)
+            .iter()
+            .map(|c| (c.ws_id.clone(), c.version()))
+            .collect();
+
         // ── Phase 1: config-driven — record client + desired queries. ──
         let mut cfg = CVRConfigDrivenUpdater::new(cvr, shard.clone());
         cfg.ensure_client(client_id);
@@ -478,7 +489,13 @@ impl SyncEngine {
         // a reconnecting client with an old cookie still needs the row/config
         // patches between its cookie and the current CVR version.
         if add_queries.is_empty() {
-            self.catchup_clients(&cfg_cvr, &cfg_cvr.version, &[], poke_ws_ids)?;
+            self.catchup_clients(
+                &cfg_cvr,
+                &cfg_cvr.version,
+                &[],
+                poke_ws_ids,
+                &original_client_versions,
+            )?;
             Ok(cfg_cvr)
         } else {
             let excluded: Vec<String> = add_queries.iter().map(|(id, _)| id.clone()).collect();
@@ -497,7 +514,13 @@ impl SyncEngine {
                 last_active,
                 ttl_clock,
             )?;
-            self.catchup_clients(&result.cvr, &result.cvr.version, &excluded, poke_ws_ids)?;
+            self.catchup_clients(
+                &result.cvr,
+                &result.cvr.version,
+                &excluded,
+                poke_ws_ids,
+                &original_client_versions,
+            )?;
             Ok(result.cvr)
         }
     }
@@ -518,12 +541,44 @@ impl SyncEngine {
     /// full state a hydrate just poked (they need no replay).
     ///
     /// No-op when there is no CVR store (dev/tests) — the patches live in PG.
+    /// The catch-up floor: `min(cvr_version, min over clients of their ORIGINAL
+    /// cookie)`. A client's original cookie comes from `original_versions` (the
+    /// cycle-start snapshot); only if a client is absent there do we fall back to
+    /// its live `version()`. Split out so the original-vs-live selection — the
+    /// crux of the reconnect-catch-up fix — is unit-testable without a store.
+    fn catchup_floor(
+        cvr_version: &CVRVersion,
+        clients: &[Arc<ClientHandler>],
+        original_versions: &std::collections::HashMap<String, NullableCVRVersion>,
+    ) -> NullableCVRVersion {
+        let mut floor: NullableCVRVersion = Some(cvr_version.clone());
+        for c in clients {
+            let v = original_versions
+                .get(&c.ws_id)
+                .cloned()
+                .unwrap_or_else(|| c.version());
+            if cmp_versions(&v, &floor) == std::cmp::Ordering::Less {
+                floor = v;
+            }
+        }
+        floor
+    }
+
     pub fn catchup_clients(
         &mut self,
         cvr: &CVR,
         current: &CVRVersion,
         exclude_query_hashes: &[String],
         poke_ws_ids: &[String],
+        // Each connected client's cookie as of the START of this config/hydrate
+        // cycle (keyed by ws_id), captured BEFORE any poke advanced it. Using the
+        // client's live `version()` here instead would be wrong: the config and
+        // hydrate pokes' `end()` already advanced `base_version` to the new CVR
+        // version, so the catch-up interval would collapse to `[current, current]`
+        // and a reconnecting client would silently lose every patch between its
+        // real cookie and now. TS `#catchupClients` runs before `pokeEnd`, i.e.
+        // against the un-advanced cookies — this snapshot reproduces that.
+        original_versions: &std::collections::HashMap<String, NullableCVRVersion>,
     ) -> Result<(), String> {
         let (Some(store_arc), Some(cache)) = (self.store.clone(), self.row_cache.as_ref()) else {
             return Ok(()); // no store → nothing persisted to catch up from
@@ -538,15 +593,11 @@ impl SyncEngine {
             return Ok(());
         }
 
-        // catchupFrom = min(cvr.version, min over connected clients' cookies).
-        // Port of the `clients.map(c => c.version()).reduce(min, cvr.version)`.
-        let mut catchup_from: NullableCVRVersion = Some(cvr.version.clone());
-        for c in &clients {
-            let v = c.version();
-            if cmp_versions(&v, &catchup_from) == std::cmp::Ordering::Less {
-                catchup_from = v;
-            }
-        }
+        // catchupFrom = min(cvr.version, min over connected clients' ORIGINAL
+        // cookies). Port of `clients.map(c => c.version()).reduce(min, cvr.version)`
+        // — but against the cycle-start snapshot, since each client's live
+        // `version()` has already been advanced by the config/hydrate pokes.
+        let catchup_from = Self::catchup_floor(&cvr.version, &clients, original_versions);
 
         // Gather the row pages + config patches from PG (async), then release
         // the cache/store borrows before touching the engine (`getRow`).
@@ -1789,8 +1840,62 @@ mod tests {
         let cvr = super::empty_cvr("cg1", "v1");
         // No store set → catchup returns Ok(()) without touching PG.
         engine
-            .catchup_clients(&cvr, &cvr.version.clone(), &[], &["ws1".to_string()])
+            .catchup_clients(
+                &cvr,
+                &cvr.version.clone(),
+                &[],
+                &["ws1".to_string()],
+                &std::collections::HashMap::new(),
+            )
             .unwrap();
+    }
+
+    /// Regression for reconnect catch-up: the floor must be each client's cookie
+    /// as of the START of the config/hydrate cycle — NOT its live `version()`,
+    /// which the config & hydrate pokes' `end()` have already advanced to the new
+    /// CVR version. Feeding the live version collapses the interval to
+    /// `[current, current]` and a reconnecting client loses everything it missed.
+    #[test]
+    fn catchup_floor_uses_original_cookie_not_advanced_version() {
+        use rust_cvr::version::version_from_string;
+
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(8);
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        // Client connected at cookie "01".
+        engine.register_client("c1", "ws1", "cg1", &shard, Some("01"), sink);
+
+        // Cycle-start snapshot (captured before any poke advanced base_version).
+        let original: std::collections::HashMap<String, NullableCVRVersion> =
+            std::collections::HashMap::from([(
+                "ws1".to_string(),
+                Some(version_from_string("01")),
+            )]);
+
+        // Simulate the config/hydrate pokes advancing base_version to the new "05".
+        let clients = engine.clients_for(&["ws1".to_string()]);
+        clients[0].set_base_version_for_test(version_from_string("05"));
+
+        let cvr_version = version_from_string("05");
+
+        // With the snapshot the floor is the ORIGINAL "01" — catch-up replays the
+        // whole [01, 05] interval the reconnecting client missed.
+        let floor = SyncEngine::catchup_floor(&cvr_version, &clients, &original);
+        assert_eq!(floor, Some(version_from_string("01")));
+
+        // Guard: the OLD behavior (reading the already-advanced live version)
+        // collapses the floor to "05" == current → an empty catch-up interval.
+        let buggy =
+            SyncEngine::catchup_floor(&cvr_version, &clients, &std::collections::HashMap::new());
+        assert_eq!(buggy, Some(version_from_string("05")));
+        assert_ne!(floor, buggy, "the fix must not collapse the catch-up interval");
     }
 
     #[test]
