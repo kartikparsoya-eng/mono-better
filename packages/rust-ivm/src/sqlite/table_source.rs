@@ -1059,13 +1059,19 @@ fn sql_start_matches(
         };
         let optional = is_optional(field);
 
-        if optional {
-            if greater && start_value.is_null() {
-                return true;
-            }
-            if !greater && row_value.is_null() {
-                return true;
-            }
+        // Mirror of query_builder's VALUE-aware NULL guard (take-bound
+        // divergence fix): the generated SQL takes the NULL-aware branch
+        // whenever the column is declared optional OR the start value is
+        // NULL (spec-drift robustness). The overlay matcher must agree with
+        // the SQL exactly, or fetch results diverge between the db rows and
+        // the same-advance overlay.
+        if greater && start_value.is_null() {
+            // SQL: `(? IS NULL OR col > ?)` with a NULL param — always true.
+            return true;
+        }
+        if !greater && row_value.is_null() && (optional || start_value.is_null()) {
+            // SQL: `(col IS NULL OR col < ?)` — row NULL matches.
+            return true;
         }
         if row_value.is_null() || start_value.is_null() {
             return false;
@@ -1080,9 +1086,11 @@ fn sql_start_matches(
     let equality_matches = |field: &str| {
         let row_value = row.get(field).cloned().unwrap_or(Value::Null);
         let start_value = start.row.get(field).cloned().unwrap_or(Value::Null);
-        let optional = is_optional(field);
         if row_value.is_null() || start_value.is_null() {
-            return optional && row_value.is_null() && start_value.is_null();
+            // VALUE-aware IS semantics (see query_builder): a NULL start value
+            // now always generates `col IS ?`, which matches exactly the
+            // NULL rows — declared optionality no longer changes the outcome.
+            return row_value.is_null() && start_value.is_null();
         }
         compare_values(&row_value, &start_value) == CmpOrdering::Equal
     };
@@ -1253,8 +1261,15 @@ mod value_parity_tests {
             ("id".to_string(), "asc".to_string()),
         ];
 
-        assert!(!sql_start_matches(&row, &start, false, &order, &columns));
-        assert!(
+        // VALUE-aware NULL guard (take-bound divergence fix): a NULL start
+        // value now generates the NULL-aware SQL branches even on declared
+        // non-optional columns (`(? IS NULL OR c > ?)` — always true for a
+        // NULL param), so the overlay matcher must agree and MATCH this row.
+        // The old expectation (no match, empty applied changes) mirrored SQL
+        // that could never return rows past a NULL bound — the take.rs
+        // divergence class (see tests/take_bound_fuzz_test.rs).
+        assert!(sql_start_matches(&row, &start, false, &order, &columns));
+        assert_eq!(
             applied_changes_for_request(
                 &[SourceChange::Add { row }],
                 &FetchRequest {
@@ -1264,8 +1279,9 @@ mod value_parity_tests {
                 &order,
                 &columns,
             )
-            .is_empty(),
-            "a prior write is read through SQL in TS and cannot bypass `> NULL` as an overlay",
+            .len(),
+            1,
+            "the overlay must mirror the NULL-aware SQL and surface the prior write",
         );
     }
 }
