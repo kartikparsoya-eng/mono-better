@@ -26,6 +26,9 @@ pub struct Metrics {
     pub auth_changes: AtomicU64,
     /// deleteClients operations processed.
     pub client_deletions: AtomicU64,
+    /// Read-permission hot-reloads (deployed doc changed → re-transform +
+    /// rehydrate).
+    pub permission_reloads: AtomicU64,
 }
 
 impl Metrics {
@@ -46,6 +49,7 @@ impl Metrics {
             "expiredQueries": self.expired_queries.load(Ordering::Relaxed),
             "authChanges": self.auth_changes.load(Ordering::Relaxed),
             "clientDeletions": self.client_deletions.load(Ordering::Relaxed),
+            "permissionReloads": self.permission_reloads.load(Ordering::Relaxed),
         })
     }
 }

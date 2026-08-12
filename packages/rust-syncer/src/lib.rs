@@ -46,8 +46,8 @@ pub use message_handler::{
     PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
 pub use permissions::{
-    LoadedPermissions, deny_all_permissions, hash_of_ast, load_permissions, resolve_permissions,
-    transform_and_hash, transform_query,
+    LoadedPermissions, PermissionsReload, deny_all_permissions, hash_of_ast, load_permissions,
+    reload_permissions_if_changed, resolve_permissions, transform_and_hash, transform_query,
 };
 pub use pipeline_driver::{
     AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,

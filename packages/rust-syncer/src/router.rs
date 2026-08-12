@@ -118,6 +118,10 @@ pub struct SyncEngineConfig {
     /// Compiled read-permissions (`PermissionsConfig` JSON) loaded from the
     /// replica, or `None` if none are deployed (queries pass through).
     pub permissions: Option<serde_json::Value>,
+    /// The deployed permissions `hash` at load time, used to detect a
+    /// hot-reload (a redeploy of `zero-deploy-permissions`). `None` when no
+    /// permissions are deployed. Port of TS `LoadedPermissions.hash`.
+    pub permissions_hash: Option<String>,
     /// Runtime handle for the `block_on` PG I/O edge on the CG thread.
     pub tokio_handle: tokio::runtime::Handle,
     /// Admin password gating the inspector protocol (TS `isAdminPasswordValid`).
@@ -563,6 +567,9 @@ struct CgState {
     app_id: String,
     /// Compiled read-permissions for this CG's app (loaded from the replica).
     permissions: Option<serde_json::Value>,
+    /// The deployed permissions `hash` last loaded, for hot-reload detection
+    /// (TS `reloadPermissionsIfChanged`).
+    permissions_hash: Option<String>,
     /// The in-memory CVR, lazily loaded from the store on first notification.
     cvr: Option<CVR>,
     /// Monotonic TTL clock (ms), seeded from `cvr.ttl_clock` when the CVR is
@@ -641,6 +648,7 @@ impl CgState {
             .current_version()
             .unwrap_or_default();
         let permissions = config.permissions;
+        let permissions_hash = config.permissions_hash;
 
         let mut cvr_pg = false;
         if let Some(pg) = config.cvr_pg {
@@ -670,6 +678,7 @@ impl CgState {
             replica_path,
             app_id,
             permissions,
+            permissions_hash,
             cvr: None,
             ttl_clock: 0,
             ttl_clock_base: now_ms(),
@@ -1336,6 +1345,50 @@ impl CgState {
         self.global_connections.lock().unwrap().remove(&client_id);
     }
 
+    /// Hot-reload the read-permissions doc if it changed on the replica since
+    /// the last check. Port of TS `PipelineDriver.currentPermissions()` →
+    /// `reloadPermissionsIfChanged`, which the view-syncer consults every sync
+    /// cycle: a `zero-deploy-permissions` redeploy flows through the replica as
+    /// a WAL commit, so by the time this CG is notified the new doc is
+    /// committed. Returns `true` if the permissions changed (the caller must
+    /// then re-transform + re-hydrate every query under the new rules).
+    ///
+    /// No-ops for in-memory CGs (no `replica_path`, e.g. unit tests).
+    fn maybe_reload_permissions(&mut self) -> bool {
+        let Some(path) = self.replica_path.as_deref() else {
+            return false;
+        };
+        let conn = match rusqlite::Connection::open(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "CG {}: could not open replica to check permissions: {e}",
+                    self.cg_id
+                );
+                return false;
+            }
+        };
+        match crate::permissions::reload_permissions_if_changed(
+            &conn,
+            &self.app_id,
+            self.permissions_hash.as_deref(),
+        ) {
+            crate::permissions::PermissionsReload::Unchanged => false,
+            crate::permissions::PermissionsReload::Changed { permissions, hash } => {
+                tracing::info!(
+                    "CG {}: read-permissions changed (hash {:?} → {:?}); re-transforming queries",
+                    self.cg_id,
+                    self.permissions_hash,
+                    hash
+                );
+                self.permissions = permissions;
+                self.permissions_hash = hash;
+                crate::metrics::Metrics::inc(&self.metrics.permission_reloads);
+                true
+            }
+        }
+    }
+
     /// Change-streamer notification: advance the pipelines to head and poke all
     /// clients. Loads the CVR from the store on first use. A no-store / no-CVR
     /// CG (e.g. tests without PG) logs and skips.
@@ -1347,6 +1400,18 @@ impl CgState {
                 "CG {}: notification with no CVR loaded; skipping advance",
                 self.cg_id
             );
+            return;
+        }
+        // Hot-reload permissions before advancing. If the deployed doc changed,
+        // every query's read-permission expansion (and thus its transformation
+        // hash) may differ, so we re-init the pipeline and re-hydrate the whole
+        // CVR under the new rules — the same reset path used for schema drift.
+        // This subsumes the normal advance for this cycle (rehydrate pulls to
+        // head), matching TS, where a permission change forces the query
+        // pipeline set to be re-synced.
+        if self.maybe_reload_permissions() {
+            let cvr = self.cvr.take().unwrap();
+            self.reset_pipelines_and_rehydrate(cvr, "read-permissions changed");
             return;
         }
         let cvr = self.cvr.take().unwrap();
@@ -1620,6 +1685,7 @@ mod tests {
                 },
                 cvr_pg: None,
                 permissions: None,
+                permissions_hash: None,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -1655,11 +1721,130 @@ mod tests {
                 },
                 cvr_pg: None,
                 permissions: None,
+                permissions_hash: None,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
                 metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
             }
+        }
+    }
+
+    /// Factory that points a CG at a real on-disk replica (with a
+    /// `zero.permissions` row) and seeds an initial permissions hash — for the
+    /// hot-reload test.
+    struct PermsReloadFactory {
+        handle: tokio::runtime::Handle,
+        replica_path: String,
+        initial_hash: Option<String>,
+        initial_permissions: Option<serde_json::Value>,
+    }
+    impl CGServicesFactory for PermsReloadFactory {
+        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
+            Arc::new(NoopViewSyncer)
+        }
+        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
+            Arc::new(NoopCcm)
+        }
+        fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
+            None
+        }
+        fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
+            None
+        }
+        fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
+            SyncEngineConfig {
+                tables: Vec::new(),
+                replica_path: Some(self.replica_path.clone()),
+                app_id: "zero".to_string(),
+                shard: ShardID {
+                    app_id: "zero".to_string(),
+                    shard_num: 0,
+                },
+                cvr_pg: None,
+                permissions: self.initial_permissions.clone(),
+                permissions_hash: self.initial_hash.clone(),
+                tokio_handle: self.handle.clone(),
+                admin_password: None,
+                server_version: "test".to_string(),
+                metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
+            }
+        }
+    }
+
+    /// `maybe_reload_permissions` is a no-op while the deployed hash is
+    /// unchanged, and on a redeploy (new hash) it swaps in the new compiled
+    /// permissions, remembers the new hash, and bumps the reload metric. This is
+    /// the CG-thread half of the TS `reloadPermissionsIfChanged` hot-reload.
+    #[test]
+    fn maybe_reload_permissions_swaps_on_redeploy() {
+        use rusqlite::Connection;
+        let db_path = "/tmp/rust-syncer-perms-reload-test.db";
+        for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+        let doc_v1 = r#"{"tables":{}}"#;
+        {
+            let conn = Connection::open(db_path).unwrap();
+            conn.execute_batch(r#"CREATE TABLE "zero.permissions" (permissions TEXT, hash TEXT);"#)
+                .unwrap();
+            conn.execute(
+                r#"INSERT INTO "zero.permissions" (permissions, hash) VALUES (?1, 'h1')"#,
+                rusqlite::params![doc_v1],
+            )
+            .unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(PermsReloadFactory {
+            handle: rt.handle().clone(),
+            replica_path: db_path.to_string(),
+            initial_hash: Some("h1".to_string()),
+            initial_permissions: Some(serde_json::json!({"tables": {}})),
+        });
+        let global = Arc::new(Mutex::new(HashMap::new()));
+        let count = Arc::new(AtomicU64::new(0));
+        let mut state = CgState::new(
+            "cg1",
+            &factory,
+            Arc::new(crate::auth::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            global,
+            count,
+        );
+
+        // Same hash → no reload.
+        assert!(!state.maybe_reload_permissions());
+        assert_eq!(state.permissions_hash.as_deref(), Some("h1"));
+        assert_eq!(state.metrics.snapshot()["permissionReloads"], 0);
+
+        // Simulate a redeploy: new doc + new hash committed to the replica.
+        let doc_v2 = r#"{"tables":{"issue":{"row":{"select":[]}}}}"#;
+        {
+            let conn = Connection::open(db_path).unwrap();
+            conn.execute(
+                r#"UPDATE "zero.permissions" SET permissions = ?1, hash = 'h2'"#,
+                rusqlite::params![doc_v2],
+            )
+            .unwrap();
+        }
+
+        // Hash moved h1 → h2: reload swaps in the new compiled doc + hash.
+        assert!(state.maybe_reload_permissions());
+        assert_eq!(state.permissions_hash.as_deref(), Some("h2"));
+        assert_eq!(
+            state.permissions,
+            Some(serde_json::json!({"tables":{"issue":{"row":{"select":[]}}}}))
+        );
+        assert_eq!(state.metrics.snapshot()["permissionReloads"], 1);
+
+        for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
         }
     }
 
@@ -1701,6 +1886,8 @@ mod tests {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
+                issuer: None,
+                audience: None,
             }),
             global,
             count,
@@ -1766,6 +1953,8 @@ mod tests {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
+                issuer: None,
+                audience: None,
             }),
             global,
             count,
@@ -1787,10 +1976,16 @@ mod tests {
                 ws1_failed = true;
             }
         }
-        assert!(ws1_failed, "the superseded ws1 connection must be failed/closed");
+        assert!(
+            ws1_failed,
+            "the superseded ws1 connection must be failed/closed"
+        );
 
         // The mapping now points at ws2, with exactly one registered client.
-        assert_eq!(state.registered_ws.get("c1").map(String::as_str), Some("ws2"));
+        assert_eq!(
+            state.registered_ws.get("c1").map(String::as_str),
+            Some("ws2")
+        );
         assert_eq!(state.registered_ws.len(), 1);
     }
 
@@ -1811,6 +2006,8 @@ mod tests {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
+                issuer: None,
+                audience: None,
             }),
             global,
             count,
@@ -1849,6 +2046,8 @@ mod tests {
             jwk: None,
             secret: None,
             jwks_url: None,
+            issuer: None,
+            audience: None,
         });
         let router = ConnectionRouter::new(
             factory,
@@ -1881,6 +2080,8 @@ mod tests {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
+                issuer: None,
+                audience: None,
             }),
             global,
             count,
@@ -1927,6 +2128,8 @@ mod tests {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
+                issuer: None,
+                audience: None,
             }),
             global,
             count,

@@ -645,6 +645,60 @@ pub fn load_permissions(conn: &Connection, app_id: &str) -> Result<LoadedPermiss
     }
 }
 
+/// Outcome of a hot-reload check against the deployed permissions doc.
+pub enum PermissionsReload {
+    /// The deployed permissions hash is unchanged (or unreadable — see below);
+    /// keep the currently-loaded permissions.
+    Unchanged,
+    /// The deployed permissions hash differs from the currently-loaded one.
+    /// `permissions` is the newly-resolved config (fail-CLOSED via
+    /// [`resolve_permissions`] if the reload errored) and `hash` is the new
+    /// deployed hash to remember for the next check.
+    Changed {
+        permissions: Option<Value>,
+        hash: Option<String>,
+    },
+}
+
+/// Port of TS `reloadPermissionsIfChanged`: cheaply read just the deployed
+/// permissions `hash` and, only if it differs from `current_hash`, reload the
+/// full doc.
+///
+/// Faithful differences from the TS version, both deliberate:
+///  - The full reload is routed through [`resolve_permissions`] so a doc that
+///    exists but fails to parse yields deny-all (fail-CLOSED), matching the
+///    posture established at CG creation, rather than throwing.
+///  - If the cheap `hash` read itself errors (e.g. a transient replica read
+///    failure), we return [`PermissionsReload::Unchanged`] rather than
+///    clobbering a working permission set — a persistent problem still surfaces
+///    via the pipeline reset path. (TS lets the read error bubble to a reset.)
+pub fn reload_permissions_if_changed(
+    conn: &Connection,
+    app_id: &str,
+    current_hash: Option<&str>,
+) -> PermissionsReload {
+    let sql = format!("SELECT hash FROM \"{app_id}.permissions\"");
+    let new_hash: Option<String> = match conn.query_row(&sql, [], |row| row.get(0)) {
+        Ok(h) => h,
+        // No row / no table yet == nothing deployed.
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            tracing::warn!("permissions hash read failed ({e}); keeping current permissions");
+            return PermissionsReload::Unchanged;
+        }
+    };
+    if new_hash.as_deref() == current_hash {
+        return PermissionsReload::Unchanged;
+    }
+    // Hash moved — reload the full doc (fail-CLOSED on parse/read error).
+    let loaded = load_permissions(conn, app_id).map(|l| l.permissions);
+    let permissions = resolve_permissions(loaded);
+    PermissionsReload::Changed {
+        permissions,
+        hash: new_hash,
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -786,12 +840,85 @@ mod tests {
         );
     }
 
+    /// Build an in-memory replica with a `{app}.permissions(permissions, hash)`
+    /// row, matching the shape `load_permissions` reads.
+    fn perms_replica(app_id: &str, permissions: Option<&str>, hash: Option<&str>) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE \"{app_id}.permissions\" (permissions TEXT, hash TEXT);"
+        ))
+        .unwrap();
+        conn.execute(
+            &format!("INSERT INTO \"{app_id}.permissions\" (permissions, hash) VALUES (?1, ?2)"),
+            rusqlite::params![permissions, hash],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn reload_permissions_unchanged_when_hash_matches() {
+        let doc = r#"{"tables":{}}"#;
+        let conn = perms_replica("zero", Some(doc), Some("h1"));
+        // Same hash as currently loaded → no reload.
+        assert!(matches!(
+            reload_permissions_if_changed(&conn, "zero", Some("h1")),
+            PermissionsReload::Unchanged
+        ));
+    }
+
+    #[test]
+    fn reload_permissions_reloads_when_hash_changes() {
+        let doc = r#"{"tables":{"issue":{"row":{"select":[]}}}}"#;
+        let conn = perms_replica("zero", Some(doc), Some("h2"));
+        // A redeploy changed the hash h1 → h2: reload the full doc.
+        match reload_permissions_if_changed(&conn, "zero", Some("h1")) {
+            PermissionsReload::Changed { permissions, hash } => {
+                assert_eq!(hash.as_deref(), Some("h2"));
+                assert_eq!(
+                    permissions,
+                    Some(json!({"tables":{"issue":{"row":{"select":[]}}}}))
+                );
+            }
+            PermissionsReload::Unchanged => panic!("expected a reload on hash change"),
+        }
+    }
+
+    #[test]
+    fn reload_permissions_detects_first_deploy_from_none() {
+        // Nothing loaded yet (current_hash None); a doc is now deployed.
+        let conn = perms_replica("zero", Some(r#"{"tables":{}}"#), Some("h1"));
+        assert!(matches!(
+            reload_permissions_if_changed(&conn, "zero", None),
+            PermissionsReload::Changed { hash: Some(h), .. } if h == "h1"
+        ));
+    }
+
+    #[test]
+    fn reload_permissions_fails_closed_on_unparseable_redeploy() {
+        // The hash moved (a redeploy happened) but the doc is corrupt: the
+        // reload must resolve to deny-all, never silently pass through.
+        let conn = perms_replica("zero", Some("{ not json"), Some("h2"));
+        match reload_permissions_if_changed(&conn, "zero", Some("h1")) {
+            PermissionsReload::Changed { permissions, hash } => {
+                assert_eq!(hash.as_deref(), Some("h2"));
+                assert_eq!(permissions, Some(deny_all_permissions()));
+                assert_ne!(permissions, None, "corrupt redeploy must fail closed");
+            }
+            PermissionsReload::Unchanged => panic!("a hash change must trigger a reload"),
+        }
+    }
+
     #[test]
     fn deny_all_permissions_denies_every_client_query() {
         // Under the deny-all config, a client query against ANY table is rewritten
         // with an always-false (empty-OR) where, so the read-authorizer returns
         // zero rows — no unauthorized data escapes.
-        let out = transform_query(&json!({"table":"issue"}), &deny_all_permissions(), &json!({}));
+        let out = transform_query(
+            &json!({"table":"issue"}),
+            &deny_all_permissions(),
+            &json!({}),
+        );
         assert_eq!(out["where"], json!({"type":"or","conditions":[]}));
     }
 }

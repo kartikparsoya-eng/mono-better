@@ -304,6 +304,15 @@ impl CGServicesFactory for RealServicesFactory {
                 "CG {cg_id}: failed to load permissions ({e}); denying all client queries (fail-closed)"
             ),
         }
+        // Re-read the hash separately for hot-reload detection. It shares the
+        // load path but we keep it even when `resolve_permissions` substitutes
+        // deny-all on error: a later successful read with a real hash then
+        // differs from this seed and triggers a self-healing reload.
+        let permissions_hash: Option<String> =
+            rusqlite::Connection::open(&self.config.replica_file)
+                .ok()
+                .and_then(|conn| rust_syncer::load_permissions(&conn, &self.config.app_id).ok())
+                .and_then(|loaded| loaded.hash);
         let permissions = rust_syncer::resolve_permissions(load_result);
         let app_id = self.config.app_id.clone();
         rust_syncer::SyncEngineConfig {
@@ -322,6 +331,7 @@ impl CGServicesFactory for RealServicesFactory {
                 max_conns: self.config.cvr_max_conns,
             }),
             permissions,
+            permissions_hash,
             tokio_handle: self.tokio_handle.clone(),
             admin_password: self.config.admin_password.clone(),
             server_version: self.config.server_version.clone(),
