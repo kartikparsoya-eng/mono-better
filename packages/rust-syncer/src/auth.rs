@@ -62,6 +62,32 @@ pub struct JwtAuthValidator {
     pub jwk: Option<String>,
     pub secret: Option<String>,
     pub jwks_url: Option<String>,
+    /// Expected `iss` claim. When set, tokens with a different/missing issuer are
+    /// rejected; when `None`, issuer is not validated (matches TS, which only
+    /// passes the `issuer` option when `config.auth.issuer` is set).
+    pub issuer: Option<String>,
+    /// Expected `aud` claim, same conditional semantics as `issuer`.
+    pub audience: Option<String>,
+}
+
+/// Apply the claim checks TS performs in `verifyToken`: `subject` always, plus
+/// `issuer`/`audience` only when configured. The audience default is flipped off
+/// when unconfigured so a token bearing an `aud` claim isn't rejected for a
+/// server that never opted into audience validation.
+fn apply_claim_validation(
+    validation: &mut Validation,
+    user_id: &str,
+    issuer: Option<&str>,
+    audience: Option<&str>,
+) {
+    validation.sub = Some(user_id.to_string());
+    if let Some(iss) = issuer {
+        validation.set_issuer(&[iss]);
+    }
+    match audience {
+        Some(aud) => validation.set_audience(&[aud]),
+        None => validation.validate_aud = false,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,14 +109,24 @@ impl JwtAuthValidator {
         if let Some(jwk_json) = &self.jwk {
             let jwk: Jwk = serde_json::from_str(jwk_json)
                 .map_err(|e| format!("invalid AUTH_JWK json: {e}"))?;
-            return verify_with_jwk(token, &jwk, user_id);
+            return verify_with_jwk(
+                token,
+                &jwk,
+                user_id,
+                self.issuer.as_deref(),
+                self.audience.as_deref(),
+            );
         }
         if let Some(secret) = &self.secret {
             let key = DecodingKey::from_secret(secret.as_bytes());
             let mut validation = Validation::new(Algorithm::HS256);
             validation.algorithms = vec![Algorithm::HS256, Algorithm::HS384, Algorithm::HS512];
-            // Verify `sub` equals the connection's claimed userID.
-            validation.sub = Some(user_id.to_string());
+            apply_claim_validation(
+                &mut validation,
+                user_id,
+                self.issuer.as_deref(),
+                self.audience.as_deref(),
+            );
             decode::<Claims>(token, &key, &validation).map_err(|e| e.to_string())?;
             return Ok(());
         }
@@ -110,7 +146,13 @@ impl JwtAuthValidator {
 
         // Fast path: a fresh cached JWKS that contains the key.
         if let Some(jwk) = lookup_cached_jwk(jwks_url, header.kid.as_deref()) {
-            return verify_with_jwk(token, &jwk, user_id);
+            return verify_with_jwk(
+                token,
+                &jwk,
+                user_id,
+                self.issuer.as_deref(),
+                self.audience.as_deref(),
+            );
         }
 
         // Miss/stale → fetch, cache, then look up. A concurrent refresh just
@@ -133,7 +175,13 @@ impl JwtAuthValidator {
                 },
             );
         }
-        verify_with_jwk(token, &jwk, user_id)
+        verify_with_jwk(
+            token,
+            &jwk,
+            user_id,
+            self.issuer.as_deref(),
+            self.audience.as_deref(),
+        )
     }
 }
 
@@ -189,7 +237,13 @@ fn lookup_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
 /// Verify a token against a single asymmetric JWK. The algorithm is taken from
 /// the JWK (`alg`), NOT the token header, to prevent algorithm-confusion. The
 /// `sub` claim is required to equal `user_id`.
-fn verify_with_jwk(token: &str, jwk: &Jwk, user_id: &str) -> Result<(), String> {
+fn verify_with_jwk(
+    token: &str,
+    jwk: &Jwk,
+    user_id: &str,
+    issuer: Option<&str>,
+    audience: Option<&str>,
+) -> Result<(), String> {
     let alg = jwk
         .common
         .key_algorithm
@@ -198,7 +252,7 @@ fn verify_with_jwk(token: &str, jwk: &Jwk, user_id: &str) -> Result<(), String> 
     let key = DecodingKey::from_jwk(jwk).map_err(|e| format!("invalid JWK: {e}"))?;
     let mut validation = Validation::new(alg);
     validation.algorithms = vec![alg];
-    validation.sub = Some(user_id.to_string());
+    apply_claim_validation(&mut validation, user_id, issuer, audience);
     decode::<Claims>(token, &key, &validation).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -270,6 +324,8 @@ mod tests {
             jwk: None,
             secret: Some(secret.to_string()),
             jwks_url: None,
+            issuer: None,
+            audience: None,
         }
     }
 
@@ -293,6 +349,63 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(*err.kind(), crate::protocol::ErrorKind::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn validates_issuer_and_audience_only_when_configured() {
+        #[derive(Serialize)]
+        struct ClaimsIssAud {
+            sub: String,
+            exp: usize,
+            iss: String,
+            aud: String,
+        }
+        let mk = |iss: &str, aud: &str| {
+            encode(
+                &Header::new(Algorithm::HS256),
+                &ClaimsIssAud {
+                    sub: "user1".to_string(),
+                    exp: 9_999_999_999,
+                    iss: iss.to_string(),
+                    aud: aud.to_string(),
+                },
+                &EncodingKey::from_secret(b"s3cret"),
+            )
+            .unwrap()
+        };
+
+        let v = JwtAuthValidator {
+            jwk: None,
+            secret: Some("s3cret".to_string()),
+            jwks_url: None,
+            issuer: Some("iss-A".to_string()),
+            audience: Some("aud-A".to_string()),
+        };
+        // Matching iss + aud → accepted.
+        assert!(
+            v.validate_auth("cg", "c", Some("user1"), Some(&mk("iss-A", "aud-A")))
+                .await
+                .is_ok()
+        );
+        // Wrong issuer or audience → rejected.
+        assert!(
+            v.validate_auth("cg", "c", Some("user1"), Some(&mk("WRONG", "aud-A")))
+                .await
+                .is_err()
+        );
+        assert!(
+            v.validate_auth("cg", "c", Some("user1"), Some(&mk("iss-A", "WRONG")))
+                .await
+                .is_err()
+        );
+        // With neither configured, a token that HAPPENS to carry iss/aud still
+        // passes — we don't validate claims we didn't opt into (matches TS).
+        let open = validator("s3cret");
+        assert!(
+            open.validate_auth("cg", "c", Some("user1"), Some(&mk("any", "any")))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -328,6 +441,8 @@ mod tests {
             jwk: None,
             secret: None,
             jwks_url: None,
+            issuer: None,
+            audience: None,
         };
         // No JWT config → opaque token, passes.
         assert!(
@@ -407,6 +522,8 @@ mod tests {
             jwk: Some("{not json".to_string()),
             secret: None,
             jwks_url: None,
+            issuer: None,
+            audience: None,
         };
         let t = token("s3cret", "user1");
         let err = v

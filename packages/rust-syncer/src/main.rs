@@ -41,6 +41,8 @@ pub struct SyncerConfig {
     pub auth_jwk: Option<String>,
     pub auth_jwks_url: Option<String>,
     pub auth_secret: Option<String>,
+    pub auth_issuer: Option<String>,
+    pub auth_audience: Option<String>,
     pub mutagen_url: Option<String>,
     pub pusher_url: Option<String>,
     pub max_client_groups: usize,
@@ -73,6 +75,8 @@ impl SyncerConfig {
             auth_jwk: env::var("AUTH_JWK").ok(),
             auth_jwks_url: env::var("AUTH_JWKS_URL").ok(),
             auth_secret: env::var("AUTH_SECRET").ok(),
+            auth_issuer: env::var("AUTH_ISSUER").ok(),
+            auth_audience: env::var("AUTH_AUDIENCE").ok(),
             mutagen_url: env::var("MUTAGEN_URL").ok(),
             pusher_url: env::var("PUSHER_URL").ok(),
             max_client_groups: env::var("MAX_CLIENT_GROUPS")
@@ -159,6 +163,8 @@ fn main() {
             jwk: config.auth_jwk.clone(),
             secret: config.auth_secret.clone(),
             jwks_url: config.auth_jwks_url.clone(),
+            issuer: config.auth_issuer.clone(),
+            audience: config.auth_audience.clone(),
         }),
         metrics.clone(),
     ));
