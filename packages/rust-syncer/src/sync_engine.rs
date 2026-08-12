@@ -541,6 +541,23 @@ impl SyncEngine {
     /// full state a hydrate just poked (they need no replay).
     ///
     /// No-op when there is no CVR store (dev/tests) — the patches live in PG.
+    /// Clients eligible for an advance-delta poke: exactly those whose cookie is
+    /// the pre-advance `cvr_version`. A lagging client (behind that version) must
+    /// be excluded — its cookie doesn't match the delta poke's baseCookie, so
+    /// applying the delta would skip the `[clientCookie, cvr_version]` gap; it is
+    /// instead caught up on its next `initConnection`. Port of TS
+    /// `#advancePipelines`, which pokes `#getClients(cvr.version)`. Split out so
+    /// the exclusion is unit-testable.
+    fn advance_poke_targets(
+        clients: Vec<Arc<ClientHandler>>,
+        cvr_version: &CVRVersion,
+    ) -> Vec<Arc<ClientHandler>> {
+        clients
+            .into_iter()
+            .filter(|c| c.version() == Some(cvr_version.clone()))
+            .collect()
+    }
+
     /// The catch-up floor: `min(cvr_version, min over clients of their ORIGINAL
     /// cookie)`. A client's original cookie comes from `original_versions` (the
     /// cycle-start snapshot); only if a client is absent there do we fall back to
@@ -816,6 +833,9 @@ impl SyncEngine {
         ttl_clock: TTLClock,
     ) -> Result<SyncResult, String> {
         let cvr_for_reset = cvr.clone();
+        // The pre-advance CVR version — only clients AT this version may receive
+        // the advance delta (see the poke-target filter below).
+        let cvr_version = cvr.version.clone();
         // An advance folds its delta onto each query's PRIOR full signature, so
         // seed the accumulator from the CVR's persisted per-query signatures.
         let mut sig_acc = Self::seed_signatures_from_cvr(&cvr);
@@ -872,7 +892,9 @@ impl SyncEngine {
             CVRQueryDrivenUpdater::new(cvr, new_version, replica_version, Some(provider));
         let pokers_version = updater.updated_version();
 
-        let clients = self.clients_for(client_ids);
+        // Only poke clients that are AT the pre-advance `cvr.version` (see
+        // `advance_poke_targets`).
+        let clients = Self::advance_poke_targets(self.clients_for(client_ids), &cvr_version);
         let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
         let pokers = MultiPoker::new(&client_refs, pokers_version);
 
@@ -1896,6 +1918,42 @@ mod tests {
             SyncEngine::catchup_floor(&cvr_version, &clients, &std::collections::HashMap::new());
         assert_eq!(buggy, Some(version_from_string("05")));
         assert_ne!(floor, buggy, "the fix must not collapse the catch-up interval");
+    }
+
+    /// An advance may only poke clients that are AT the pre-advance cvr.version;
+    /// lagging clients (behind it) and never-poked clients are excluded and get
+    /// caught up on reconnect instead. Port of TS `#getClients(cvr.version)`.
+    #[test]
+    fn advance_poke_targets_excludes_lagging_clients() {
+        use rust_cvr::version::version_from_string;
+
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        let mk = || -> Arc<dyn WebSocketSink> {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(8);
+            Arc::new(DirectWebSocketSink::new(tx))
+        };
+        engine.register_client("cA", "wsA", "cg1", &shard, Some("05"), mk()); // at cvr.version
+        engine.register_client("cB", "wsB", "cg1", &shard, Some("03"), mk()); // lagging
+        engine.register_client("cC", "wsC", "cg1", &shard, None, mk()); // never poked
+
+        let all = engine.clients_for(&[
+            "wsA".to_string(),
+            "wsB".to_string(),
+            "wsC".to_string(),
+        ]);
+        let targets = SyncEngine::advance_poke_targets(all, &version_from_string("05"));
+        let ids: Vec<String> = targets.iter().map(|c| c.ws_id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec!["wsA".to_string()],
+            "only the client at cvr.version may receive the advance delta"
+        );
     }
 
     #[test]
