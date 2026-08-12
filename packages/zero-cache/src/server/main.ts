@@ -192,13 +192,19 @@ export default async function runWorker(
       buffer = lines.pop() ?? '';
       for (const line of lines) {
         const trimmed = line.trim();
+        // Lines that parse as a JSON array are IPC-style messages (e.g. the
+        // ["ready", …] handshake). Everything else is the binary's own logging
+        // — forward it to the parent's stdout so rust-syncer stays observable.
         if (trimmed.startsWith('[')) {
           try {
-            const msg = JSON.parse(trimmed);
-            raw.emit('message', msg);
+            raw.emit('message', JSON.parse(trimmed));
+            continue;
           } catch {
-            // Non-JSON output, ignore
+            // Not JSON — fall through and treat as a log line.
           }
+        }
+        if (line.length > 0) {
+          process.stdout.write(`${line}\n`);
         }
       }
     });
