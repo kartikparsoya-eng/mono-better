@@ -18,10 +18,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::cvr::{
     assert_not_internal, get_mutation_results_query, merge_ref_counts, new_query_record,
 };
-use crate::ttl::{clamp_ttl, compare_ttl, TTL, DEFAULT_TTL_MS};
-use crate::types::*;
 use crate::row_key::RowID;
-use crate::version::{cmp_versions, max_version, one_after, CVRVersion};
+use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl, compare_ttl};
+use crate::types::*;
+use crate::version::{CVRVersion, cmp_versions, max_version, one_after};
 
 /// Row records keyed by rowIDString for O(1) lookup.
 pub type RowRecordMap = HashMap<String, RowRecord>;
@@ -60,7 +60,11 @@ impl CVRUpdater {
     /// Ensures that the working CVR has a higher version than the original.
     /// Idempotent — always returns the same (possibly bumped) version.
     pub fn ensure_new_version(&mut self) -> CVRVersion {
-        if cmp_versions(&Some(self.orig.version.clone()), &Some(self.cvr.version.clone())) == Ordering::Equal {
+        if cmp_versions(
+            &Some(self.orig.version.clone()),
+            &Some(self.cvr.version.clone()),
+        ) == Ordering::Equal
+        {
             let new = one_after(&Some(self.cvr.version.clone()));
             self.set_version(new);
         }
@@ -152,10 +156,10 @@ impl CVRConfigDrivenUpdater {
                     ]
                 }),
             });
-            self.base.cvr.queries.insert(
-                CLIENT_LMID_QUERY_ID.to_string(),
-                lmids_query.clone(),
-            );
+            self.base
+                .cvr
+                .queries
+                .insert(CLIENT_LMID_QUERY_ID.to_string(), lmids_query.clone());
             self.base.store_ops.push(StoreOp::PutQuery(lmids_query));
         }
 
@@ -184,7 +188,9 @@ impl CVRConfigDrivenUpdater {
         match &self.base.cvr.client_schema {
             None => {
                 self.base.cvr.client_schema = Some(client_schema);
-                self.base.store_ops.push(StoreOp::PutInstance(self.base.cvr.clone()));
+                self.base
+                    .store_ops
+                    .push(StoreOp::PutInstance(self.base.cvr.clone()));
                 Ok(())
             }
             Some(existing) => {
@@ -206,7 +212,9 @@ impl CVRConfigDrivenUpdater {
                 }
             }
             self.base.cvr.profile_id = Some(profile_id.to_string());
-            self.base.store_ops.push(StoreOp::PutInstance(self.base.cvr.clone()));
+            self.base
+                .store_ops
+                .push(StoreOp::PutInstance(self.base.cvr.clone()));
         }
     }
 
@@ -220,7 +228,10 @@ impl CVRConfigDrivenUpdater {
         let mut patches = Vec::new();
         self.ensure_client(client_id);
 
-        let current: HashSet<String> = self.base.cvr.clients
+        let current: HashSet<String> = self
+            .base
+            .cvr
+            .clients
             .get(client_id)
             .unwrap()
             .desired_query_ids
@@ -283,7 +294,12 @@ impl CVRConfigDrivenUpdater {
         combined.sort();
         // Remove duplicates (already done by HashSet, but be safe).
         combined.dedup();
-        self.base.cvr.clients.get_mut(client_id).unwrap().desired_query_ids = combined;
+        self.base
+            .cvr
+            .clients
+            .get_mut(client_id)
+            .unwrap()
+            .desired_query_ids = combined;
 
         for id in &needed {
             let q = queries.iter().find(|q| &q.hash == id).unwrap();
@@ -299,11 +315,14 @@ impl CVRConfigDrivenUpdater {
             // Update client state.
             let mut query = query;
             if let Some(cs) = query.client_state_mut() {
-                cs.insert(client_id.to_string(), ClientState {
-                    inactivated_at: None,
-                    ttl,
-                    version: new_version.clone(),
-                });
+                cs.insert(
+                    client_id.to_string(),
+                    ClientState {
+                        inactivated_at: None,
+                        ttl,
+                        version: new_version.clone(),
+                    },
+                );
             }
 
             self.base.cvr.queries.insert(id.clone(), query.clone());
@@ -359,7 +378,10 @@ impl CVRConfigDrivenUpdater {
         let mut patches = Vec::new();
         self.ensure_client(client_id);
 
-        let current: HashSet<String> = self.base.cvr.clients
+        let current: HashSet<String> = self
+            .base
+            .cvr
+            .clients
             .get(client_id)
             .unwrap()
             .desired_query_ids
@@ -379,7 +401,12 @@ impl CVRConfigDrivenUpdater {
         // Update desiredQueryIDs: sorted difference.
         let mut remaining: Vec<String> = current.difference(&remove).cloned().collect();
         remaining.sort();
-        self.base.cvr.clients.get_mut(client_id).unwrap().desired_query_ids = remaining;
+        self.base
+            .cvr
+            .clients
+            .get_mut(client_id)
+            .unwrap()
+            .desired_query_ids = remaining;
 
         for id in &remove {
             let query = match self.base.cvr.queries.get(id) {
@@ -409,11 +436,14 @@ impl CVRConfigDrivenUpdater {
                             );
                             ttl = clamp_ttl(TTL::Ms(state.ttl));
                         }
-                        cs.insert(client_id.to_string(), ClientState {
-                            inactivated_at: Some(inactivated_at),
-                            ttl,
-                            version: new_version.clone(),
-                        });
+                        cs.insert(
+                            client_id.to_string(),
+                            ClientState {
+                                inactivated_at: Some(inactivated_at),
+                                ttl,
+                                version: new_version.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -444,7 +474,10 @@ impl CVRConfigDrivenUpdater {
     /// Clear all desired queries for a client.
     pub fn clear_desired_queries(&mut self, client_id: &str) -> Vec<PatchToVersion> {
         self.ensure_client(client_id);
-        let desired = self.base.cvr.clients
+        let desired = self
+            .base
+            .cvr
+            .clients
             .get(client_id)
             .unwrap()
             .desired_query_ids
@@ -453,24 +486,19 @@ impl CVRConfigDrivenUpdater {
     }
 
     /// Delete a client and mark all its queries as inactive.
-    pub fn delete_client(
-        &mut self,
-        client_id: &str,
-        ttl_clock: TTLClock,
-    ) -> Vec<PatchToVersion> {
+    pub fn delete_client(&mut self, client_id: &str, ttl_clock: TTLClock) -> Vec<PatchToVersion> {
         let client = match self.base.cvr.clients.get(client_id) {
             Some(c) => c.clone(),
             None => return Vec::new(),
         };
 
-        let patches = self.mark_desired_queries_as_inactive(
-            client_id,
-            &client.desired_query_ids,
-            ttl_clock,
-        );
+        let patches =
+            self.mark_desired_queries_as_inactive(client_id, &client.desired_query_ids, ttl_clock);
 
         self.base.cvr.clients.remove(client_id);
-        self.base.store_ops.push(StoreOp::DeleteClient(client_id.to_string()));
+        self.base
+            .store_ops
+            .push(StoreOp::DeleteClient(client_id.to_string()));
 
         patches
     }
@@ -496,7 +524,7 @@ pub struct CVRQueryDrivenUpdater {
 
     removed_or_executed_query_ids: HashSet<String>,
     pub received_rows: HashMap<String, Option<RefCounts>>, // keyed by rowIDString
-    last_patches: HashMap<String, RowPatchInfo>,       // keyed by rowIDString
+    last_patches: HashMap<String, RowPatchInfo>,           // keyed by rowIDString
     row_set_signature_provider: Option<Box<dyn Fn(&str) -> Option<u64> + Send + Sync>>,
 
     // Whether trackQueries has been called.
@@ -578,8 +606,10 @@ impl CVRQueryDrivenUpdater {
             query_patches.extend(patches);
         }
 
-        let version_bumped =
-            cmp_versions(&Some(self.base.orig.version.clone()), &Some(self.base.cvr.version.clone())) == Ordering::Less;
+        let version_bumped = cmp_versions(
+            &Some(self.base.orig.version.clone()),
+            &Some(self.base.cvr.version.clone()),
+        ) == Ordering::Less;
 
         let patches: Vec<PatchToVersion> = query_patches
             .into_iter()
@@ -598,7 +628,8 @@ impl CVRQueryDrivenUpdater {
             "Query {} already tracked as executed or removed",
             query_id
         );
-        self.removed_or_executed_query_ids.insert(query_id.to_string());
+        self.removed_or_executed_query_ids
+            .insert(query_id.to_string());
 
         let mut got_query_patch: Option<Patch> = None;
 
@@ -626,7 +657,9 @@ impl CVRQueryDrivenUpdater {
 
             query.base_mut().transformation_hash = Some(transformation_hash.to_string());
             query.base_mut().transformation_version = Some(transformation_version);
-            self.base.store_ops.push(StoreOp::UpdateQuery(query.clone()));
+            self.base
+                .store_ops
+                .push(StoreOp::UpdateQuery(query.clone()));
         }
 
         match got_query_patch {
@@ -650,7 +683,8 @@ impl CVRQueryDrivenUpdater {
             "Query {} already tracked as executed or removed",
             query_id
         );
-        self.removed_or_executed_query_ids.insert(query_id.to_string());
+        self.removed_or_executed_query_ids
+            .insert(query_id.to_string());
 
         self.base.cvr.queries.remove(query_id);
 
@@ -673,7 +707,10 @@ impl CVRQueryDrivenUpdater {
     /// Assert that a new version has been set (trackQueries or ensureNewVersion was called).
     fn assert_new_version(&self) -> CVRVersion {
         assert!(
-            cmp_versions(&Some(self.base.orig.version.clone()), &Some(self.base.cvr.version.clone())) == Ordering::Less,
+            cmp_versions(
+                &Some(self.base.orig.version.clone()),
+                &Some(self.base.cvr.version.clone())
+            ) == Ordering::Less,
             "Expected CVR version to have been bumped above original"
         );
         self.base.cvr.version.clone()
@@ -707,12 +744,14 @@ impl CVRQueryDrivenUpdater {
                 ),
             };
 
-            self.received_rows
-                .insert(id_str.clone(), merged.clone());
+            self.received_rows.insert(id_str.clone(), merged.clone());
 
             let new_row_version: Option<String> = merged.as_ref().and_then(|_| version.clone());
             let patch_version = match existing {
-                Some(e) if e.row_version == new_row_version.as_ref().map(|s| s.as_str()).unwrap_or("") => {
+                Some(e)
+                    if e.row_version
+                        == new_row_version.as_ref().map(|s| s.as_str()).unwrap_or("") =>
+                {
                     e.patch_version.clone()
                 }
                 _ => self.assert_new_version(),
@@ -772,9 +811,10 @@ impl CVRQueryDrivenUpdater {
                     if let Some(contents) = contents {
                         let rv = row_version.as_ref().unwrap();
                         let should_send = match last_patch {
-                            Some(lp) => {
-                                lp.row_version.as_deref().map_or(true, |lrv| lrv < rv.as_str())
-                            }
+                            Some(lp) => lp
+                                .row_version
+                                .as_deref()
+                                .map_or(true, |lrv| lrv < rv.as_str()),
                             None => true,
                         };
                         if should_send {
@@ -803,10 +843,7 @@ impl CVRQueryDrivenUpdater {
 
     /// Delete rows that are no longer referenced by any query.
     /// `existing_rows` is the set of rows associated with executed/removed queries.
-    pub fn delete_unreferenced_rows(
-        &mut self,
-        existing_rows: &[RowRecord],
-    ) -> Vec<PatchToVersion> {
+    pub fn delete_unreferenced_rows(&mut self, existing_rows: &[RowRecord]) -> Vec<PatchToVersion> {
         let mut patches: Vec<PatchToVersion> = Vec::new();
 
         if self.removed_or_executed_query_ids.is_empty() {
@@ -846,7 +883,9 @@ impl CVRQueryDrivenUpdater {
 
             if new_ref_counts.is_none() {
                 patches.push(PatchToVersion {
-                    patch: Patch::Row(RowPatch::Del { id: existing.id.clone() }),
+                    patch: Patch::Row(RowPatch::Del {
+                        id: existing.id.clone(),
+                    }),
                     to_version: self.base.cvr.version.clone(),
                 });
             }
@@ -887,10 +926,9 @@ impl CVRQueryDrivenUpdater {
                 if let Some(query) = self.base.cvr.queries.get_mut(&query_id) {
                     query.base_mut().row_set_signature = Some(hex.clone());
                 }
-                self.base.store_ops.push(StoreOp::UpdateRowSetSignature {
-                    query_id,
-                    hex,
-                });
+                self.base
+                    .store_ops
+                    .push(StoreOp::UpdateRowSetSignature { query_id, hex });
             }
         }
 
@@ -1210,16 +1248,8 @@ mod tests {
 
     // ─── CVRQueryDrivenUpdater tests ───────────────────────────────────
 
-    fn make_query_driven_updater(
-        cvr: CVR,
-        state_version: &str,
-    ) -> CVRQueryDrivenUpdater {
-        CVRQueryDrivenUpdater::new(
-            cvr,
-            state_version.to_string(),
-            "r1".to_string(),
-            None,
-        )
+    fn make_query_driven_updater(cvr: CVR, state_version: &str) -> CVRQueryDrivenUpdater {
+        CVRQueryDrivenUpdater::new(cvr, state_version.to_string(), "r1".to_string(), None)
     }
 
     #[test]
@@ -1257,10 +1287,7 @@ mod tests {
         cvr.queries.insert("hash1".to_string(), query);
 
         let mut updater = make_query_driven_updater(cvr, "v2");
-        let (version, patches) = updater.track_queries(
-            &[("hash1", "th1")],
-            &[],
-        );
+        let (version, patches) = updater.track_queries(&[("hash1", "th1")], &[]);
 
         // Should produce a got query patch
         assert_eq!(patches.len(), 1);
@@ -1273,10 +1300,7 @@ mod tests {
 
         // Query should have transformationHash set
         let query = updater.base.cvr.queries.get("hash1").unwrap();
-        assert_eq!(
-            query.base().transformation_hash.as_deref(),
-            Some("th1")
-        );
+        assert_eq!(query.base().transformation_hash.as_deref(), Some("th1"));
         assert!(query.patch_version().is_some());
     }
 
@@ -1373,9 +1397,7 @@ mod tests {
                     state_version: "v1".to_string(),
                     config_version: Some(1),
                 },
-                ref_counts: Some(
-                    [("hash1".to_string(), 1)].into_iter().collect(),
-                ),
+                ref_counts: Some([("hash1".to_string(), 1)].into_iter().collect()),
             },
         );
 
@@ -1436,9 +1458,7 @@ mod tests {
                 state_version: "v1".to_string(),
                 config_version: Some(1),
             },
-            ref_counts: Some(
-                [("hash1".to_string(), 1)].into_iter().collect(),
-            ),
+            ref_counts: Some([("hash1".to_string(), 1)].into_iter().collect()),
         }];
 
         let patches = updater.delete_unreferenced_rows(&existing);
@@ -1473,12 +1493,8 @@ mod tests {
         let provider: Box<dyn Fn(&str) -> Option<u64> + Send + Sync> =
             Box::new(|_id: &str| Some(12345u64));
 
-        let mut updater = CVRQueryDrivenUpdater::new(
-            cvr,
-            "v2".to_string(),
-            "r1".to_string(),
-            Some(provider),
-        );
+        let mut updater =
+            CVRQueryDrivenUpdater::new(cvr, "v2".to_string(), "r1".to_string(), Some(provider));
 
         let (_cvr, _stats) = updater.flush(0, 0, 0);
 

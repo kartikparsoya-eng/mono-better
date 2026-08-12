@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::ttl::{clamp_ttl, TTL};
+use crate::ttl::{TTL, clamp_ttl};
 use crate::types::*;
 
 /// Merge existing refCounts with received refCounts, optionally removing
@@ -158,10 +158,7 @@ pub fn get_mutation_results_query(
 /// Assert that a query is not internal. Panics with the same message as TS.
 pub fn assert_not_internal(query: &QueryRecord) {
     if let QueryRecord::Internal(r) = query {
-        panic!(
-            "Query ID {} is reserved for internal use",
-            r.base.id
-        );
+        panic!("Query ID {} is reserved for internal use", r.base.id);
     }
 }
 
@@ -207,9 +204,7 @@ pub fn get_inactive_queries(cvr: &CVR) -> Vec<InactiveQuery> {
                 Some(existing) => {
                     let existing_ttl = clamp_ttl(TTL::Ms(existing.ttl));
                     // Use the last eviction time (furthest in the future).
-                    if existing_ttl + existing.inactivated_at
-                        < inactivated_at + clamped_ttl
-                    {
+                    if existing_ttl + existing.inactivated_at < inactivated_at + clamped_ttl {
                         inactive.insert(
                             query_id.clone(),
                             InactiveQuery {

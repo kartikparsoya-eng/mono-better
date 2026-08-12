@@ -9,18 +9,18 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use axum::{
+    Router,
     extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::router::ConnectionRouter;
 
@@ -42,10 +42,7 @@ pub struct HttpServerState {
 }
 
 /// Run the HTTP server on the given address.
-pub async fn run_http_server(
-    addr: SocketAddr,
-    router: Arc<ConnectionRouter>,
-) {
+pub async fn run_http_server(addr: SocketAddr, router: Arc<ConnectionRouter>) {
     let state = Arc::new(HttpServerState {
         router,
         stats: Arc::new(Mutex::new(ServerStats::default())),
@@ -55,6 +52,10 @@ pub async fn run_http_server(
     let app = Router::new()
         .route("/statz", get(statz_handler))
         .route("/heapz", get(heapz_handler))
+        // Global commit notification — the replicator POSTs here on each commit;
+        // every hosted CG advances to the new replica head.
+        .route("/notify", post(notify_broadcast_handler))
+        // Targeted notification for a single client group (kept for completeness).
         .route("/notify/:cg_id", post(notify_handler))
         .with_state(state);
 
@@ -64,9 +65,7 @@ pub async fn run_http_server(
 }
 
 /// GET /statz — return server statistics.
-async fn statz_handler(
-    State(state): State<Arc<HttpServerState>>,
-) -> (StatusCode, Json<Value>) {
+async fn statz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json<Value>) {
     let stats = state.stats.lock().unwrap();
     let uptime_ms = state.start_time.elapsed().as_millis() as u64;
     let active_cgs = state.router.cg_count();
@@ -77,6 +76,7 @@ async fn statz_handler(
         "totalMessagesReceived": stats.total_messages_received,
         "totalMessagesSent": stats.total_messages_sent,
         "uptimeMs": uptime_ms,
+        "metrics": state.router.metrics_snapshot(),
     });
 
     (StatusCode::OK, Json(response))
@@ -84,9 +84,7 @@ async fn statz_handler(
 
 /// GET /heapz — heap snapshot placeholder.
 /// Returns a minimal V8-style heap snapshot for compatibility.
-async fn heapz_handler(
-    State(state): State<Arc<HttpServerState>>,
-) -> (StatusCode, Json<Value>) {
+async fn heapz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json<Value>) {
     let stats = state.stats.lock().unwrap();
     let response = json!({
         "type": "heap_snapshot",
@@ -101,6 +99,38 @@ async fn heapz_handler(
     });
 
     (StatusCode::OK, Json(response))
+}
+
+/// POST /notify — global commit notification from the replicator.
+///
+/// The TS replicator/change-streamer POSTs here on each commit (the Rust analog
+/// of the in-process `version-ready` `Subscription<ReplicaState>` in TS). Every
+/// hosted CG thread advances to the new replica head and pokes its clients.
+async fn notify_broadcast_handler(
+    State(state): State<Arc<HttpServerState>>,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<Value>) {
+    // The body is optional; default to an empty object when absent/blank. When
+    // present it must be valid JSON (e.g. `{"state":"version-ready"}`).
+    let notification: Value = if body.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid json: {}", e)})),
+                );
+            }
+        }
+    };
+    let notified = state.router.broadcast_notification(notification);
+    tracing::debug!("broadcast notification to {notified} CG thread(s)");
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "notified": notified})),
+    )
 }
 
 /// POST /notify/:cg_id — change-streamer notification endpoint.

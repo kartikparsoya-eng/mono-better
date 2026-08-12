@@ -2,7 +2,7 @@
 //!
 //! Parsed from URL query params + `sec-websocket-protocol` header.
 
-use crate::protocol::{decode_sec_protocols, InitConnectionMessage, SecProtocols};
+use crate::protocol::{InitConnectionMessage, SecProtocols, decode_sec_protocols};
 use std::collections::HashMap;
 
 /// All connect parameters extracted from a WebSocket upgrade request.
@@ -50,7 +50,10 @@ pub fn get_connect_params(
     origin: Option<&str>,
 ) -> Result<ConnectParams, ConnectParamsError> {
     let parsed = url::Url::parse(url).map_err(|_| ConnectParamsError::MissingParam("url"))?;
-    let params: HashMap<String, String> = parsed.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let params: HashMap<String, String> = parsed
+        .query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
 
     let client_id = get_string(&params, "clientID", true)?.expect("required");
     let client_group_id = get_string(&params, "clientGroupID", true)?.expect("required");
@@ -102,7 +105,11 @@ pub fn extract_protocol_version(path: &str) -> Option<u32> {
 
 // ─── URL parameter helpers (port of url-params.ts) ─────────────────────────
 
-fn get_string(params: &HashMap<String, String>, name: &'static str, required: bool) -> Result<Option<String>, ConnectParamsError> {
+fn get_string(
+    params: &HashMap<String, String>,
+    name: &'static str,
+    required: bool,
+) -> Result<Option<String>, ConnectParamsError> {
     let value = params.get(name).map(|s| s.as_str());
     match value {
         Some(v) if !v.is_empty() => Ok(Some(v.to_string())),
@@ -116,9 +123,15 @@ fn get_string(params: &HashMap<String, String>, name: &'static str, required: bo
     }
 }
 
-fn get_integer(params: &HashMap<String, String>, name: &'static str, required: bool) -> Result<i64, ConnectParamsError> {
+fn get_integer(
+    params: &HashMap<String, String>,
+    name: &'static str,
+    required: bool,
+) -> Result<i64, ConnectParamsError> {
     match get_string(params, name, required)? {
-        Some(v) => v.parse::<i64>().map_err(|_| ConnectParamsError::InvalidInt { name, value: v }),
+        Some(v) => v
+            .parse::<i64>()
+            .map_err(|_| ConnectParamsError::InvalidInt { name, value: v }),
         None => Ok(0),
     }
 }

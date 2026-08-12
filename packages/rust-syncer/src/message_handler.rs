@@ -8,9 +8,7 @@
 //! in the full binary).
 
 use crate::connection::{HandlerResult, MessageHandler};
-use crate::protocol::{
-    self, ErrorBody, ErrorKind, ErrorOrigin, PushBody, Upstream,
-};
+use crate::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin, PushBody, Upstream};
 use std::sync::{Arc, Mutex};
 
 /// Connection selector — identifies a connection by clientID + wsID.
@@ -179,11 +177,14 @@ impl MessageHandler for SyncerWsMessageHandler {
                     let arr: Vec<serde_json::Value> = serde_json::from_str(msg).unwrap_or_default();
                     arr.get(1).cloned().unwrap_or(serde_json::Value::Null)
                 };
-                let initial = self.conn_context_manager.must_get_connection_context(selector);
+                let initial = self
+                    .conn_context_manager
+                    .must_get_connection_context(selector);
                 let auth_revision_changed =
                     self.conn_context_manager.update_auth(selector, &body_value);
                 let _ = initial; // initial revision compared above
-                self.view_syncer.update_auth(selector, msg, auth_revision_changed);
+                self.view_syncer
+                    .update_auth(selector, msg, auth_revision_changed);
                 vec![HandlerResult::Ok]
             }
 
@@ -198,11 +199,21 @@ impl MessageHandler for SyncerWsMessageHandler {
             }
 
             Upstream::InitConnection(_) => {
+                // NOTE: in the full binary the `ConnectionRouter` intercepts
+                // `initConnection` (and `changeDesiredQueries` / `updateAuth` /
+                // `deleteClients`) on the CG thread BEFORE it reaches this
+                // handler — those tags never arrive here in production, so there
+                // is no double dispatch. The CG-thread path
+                // (`CgState::handle_desired_queries`) fires the same
+                // `connContextManager.initConnection` + `pusher.initConnection`
+                // side effects this arm does. This arm remains as the
+                // self-contained, unit-tested reference dispatch.
                 let body_value: serde_json::Value = {
                     let arr: Vec<serde_json::Value> = serde_json::from_str(msg).unwrap_or_default();
                     arr.get(1).cloned().unwrap_or(serde_json::Value::Null)
                 };
-                self.conn_context_manager.init_connection(selector, &body_value);
+                self.conn_context_manager
+                    .init_connection(selector, &body_value);
 
                 let traceparent = body_value
                     .get("traceparent")
@@ -272,10 +283,7 @@ impl SyncerWsMessageHandler {
 
             // Determine mutation type from the first mutation.
             let first_mutation = &body.mutations[0];
-            let is_custom = first_mutation
-                .get("type")
-                .and_then(|v| v.as_str())
-                == Some("custom");
+            let is_custom = first_mutation.get("type").and_then(|v| v.as_str()) == Some("custom");
 
             if is_custom {
                 // Custom mutation → forward to pusher.
@@ -306,7 +314,9 @@ impl SyncerWsMessageHandler {
             };
 
             // Get auth from connection context.
-            let conn_ctx = self.conn_context_manager.must_get_connection_context(selector);
+            let conn_ctx = self
+                .conn_context_manager
+                .must_get_connection_context(selector);
             // Assert auth is JWT (not opaque).
             // In TS: assert(auth?.type !== 'opaque', 'Only JWT auth is supported for CRUD mutations')
             // We skip this assertion here since auth type is not available in the

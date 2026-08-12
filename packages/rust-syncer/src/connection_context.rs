@@ -157,21 +157,19 @@ pub enum CCMError {
 impl CCMError {
     pub fn to_error_body(&self) -> ErrorBody {
         match self {
-            CCMError::InvalidConnectionRequest(msg) => ErrorBody::Basic(
-                crate::protocol::BasicErrorBody {
+            CCMError::InvalidConnectionRequest(msg) => {
+                ErrorBody::Basic(crate::protocol::BasicErrorBody {
                     kind: ErrorKind::InvalidConnectionRequest,
                     message: msg.clone(),
                     origin: Some(ErrorOrigin::ZeroCache),
-                },
-            ),
+                })
+            }
             CCMError::Unauthorized(msg) => ErrorBody::unauthorized(msg),
-            CCMError::AuthInvalidated(msg) => ErrorBody::Basic(
-                crate::protocol::BasicErrorBody {
-                    kind: ErrorKind::AuthInvalidated,
-                    message: msg.clone(),
-                    origin: Some(ErrorOrigin::ZeroCache),
-                },
-            ),
+            CCMError::AuthInvalidated(msg) => ErrorBody::Basic(crate::protocol::BasicErrorBody {
+                kind: ErrorKind::AuthInvalidated,
+                message: msg.clone(),
+                origin: Some(ErrorOrigin::ZeroCache),
+            }),
         }
     }
 }
@@ -199,7 +197,9 @@ pub fn resolve_auth(
     previous_auth: Option<&Auth>,
     user_id: Option<&str>,
     wire_auth: Option<&str>,
-    validate_legacy_jwt: Option<&(dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync)>,
+    validate_legacy_jwt: Option<
+        &(dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync),
+    >,
 ) -> Result<Option<Auth>, CCMError> {
     let has_provided_auth = wire_auth.map_or(false, |a| !a.is_empty());
 
@@ -249,10 +249,7 @@ pub fn resolve_auth(
 }
 
 /// Port of `pickToken()` from `auth.ts`.
-fn pick_token(
-    previous: Option<&Auth>,
-    new: &Auth,
-) -> Result<Option<Auth>, CCMError> {
+fn pick_token(previous: Option<&Auth>, new: &Auth) -> Result<Option<Auth>, CCMError> {
     let previous = match previous {
         None => return Ok(Some(new.clone())),
         Some(p) => p,
@@ -350,7 +347,8 @@ impl Auth {
 pub struct ConnectionContextManager {
     connections: HashMap<String, ConnectionContext>,
     group: GroupAuthState,
-    validate_legacy_jwt: Option<Box<dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync>>,
+    validate_legacy_jwt:
+        Option<Box<dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync>>,
     now: Box<dyn Fn() -> i64 + Send + Sync>,
     revalidate_interval_ms: Option<i64>,
     retransform_interval_ms: Option<i64>,
@@ -438,13 +436,17 @@ impl ConnectionContextManager {
         };
 
         ConnectionFetchContext {
-            url: config.as_ref().and_then(|c| c.url.as_ref().and_then(|urls| urls.first().cloned())),
+            url: config
+                .as_ref()
+                .and_then(|c| c.url.as_ref().and_then(|urls| urls.first().cloned())),
             allowed_url_patterns: config.as_ref().and_then(|c| c.url.clone()),
             header_options: HeaderOptions {
                 custom_headers: None,
                 origin: params.origin.clone(),
                 api_key: config.as_ref().and_then(|c| c.api_key.clone()),
-                allowed_client_headers: config.as_ref().and_then(|c| c.allowed_client_headers.clone()),
+                allowed_client_headers: config
+                    .as_ref()
+                    .and_then(|c| c.allowed_client_headers.clone()),
                 cookie: if config.as_ref().map_or(false, |c| c.forward_cookies) {
                     params.http_cookie.clone()
                 } else {
@@ -531,7 +533,9 @@ impl ConnectionContextManager {
         if connection.revision != revision {
             tracing::debug!(
                 "Skipping validateConnection for stale revision: {:?} attempted={} current={}",
-                selector, revision, connection.revision
+                selector,
+                revision,
+                connection.revision
             );
             return Ok(None);
         }
@@ -641,7 +645,10 @@ impl ConnectionContextManager {
 
     // ─── Getters ───────────────────────────────────────────────────────────
 
-    pub fn get_connection_context(&self, selector: &ConnectionSelector) -> Option<ConnectionContext> {
+    pub fn get_connection_context(
+        &self,
+        selector: &ConnectionSelector,
+    ) -> Option<ConnectionContext> {
         let connection = self.connections.get(&selector.client_id)?;
         if connection.ws_id != selector.ws_id {
             return None;
@@ -685,8 +692,7 @@ impl ConnectionContextManager {
         let mut earliest_deadline_at = self.group.retransform_at;
 
         for connection in self.connections.values() {
-            if connection.state != ConnectionState::Validated
-                || connection.revalidate_at.is_none()
+            if connection.state != ConnectionState::Validated || connection.revalidate_at.is_none()
             {
                 continue;
             }
@@ -697,10 +703,7 @@ impl ConnectionContextManager {
             earliest_deadline_at = min_defined(earliest_deadline_at, Some(revalidate_at));
         }
 
-        let due_retransform = self
-            .group
-            .retransform_at
-            .map_or(false, |at| at <= now);
+        let due_retransform = self.group.retransform_at.map_or(false, |at| at <= now);
 
         let maintenance_not_before_at = self.group.maintenance_not_before_at;
 
@@ -709,9 +712,7 @@ impl ConnectionContextManager {
                 return MaintenancePlan {
                     due_revalidations: Vec::new(),
                     due_retransform: false,
-                    earliest_deadline_at: Some(
-                        earliest_deadline_at.unwrap().max(not_before),
-                    ),
+                    earliest_deadline_at: Some(earliest_deadline_at.unwrap().max(not_before)),
                 };
             }
         }
@@ -728,7 +729,8 @@ impl ConnectionContextManager {
     // ─── Internal helpers ──────────────────────────────────────────────────
 
     fn store_connection(&mut self, connection: ConnectionContext) -> ConnectionContext {
-        self.connections.insert(connection.client_id.clone(), connection.clone());
+        self.connections
+            .insert(connection.client_id.clone(), connection.clone());
         connection
     }
 
@@ -743,7 +745,9 @@ impl ConnectionContextManager {
             if connection.revision != rev {
                 tracing::debug!(
                     "Ignoring removeConnection for stale revision: {:?} attempted={} current={}",
-                    selector, rev, connection.revision
+                    selector,
+                    rev,
+                    connection.revision
                 );
                 return None;
             }
@@ -829,9 +833,7 @@ impl ConnectionContextManager {
 
     fn update_background_retransform_deadline(&mut self, reset: bool) {
         let bg = self.get_background_connection_context();
-        if bg.is_none()
-            || self.retransform_interval_ms.is_none()
-            || !self.shared_retransform_ready
+        if bg.is_none() || self.retransform_interval_ms.is_none() || !self.shared_retransform_ready
         {
             if self.group.retransform_at.is_some() {
                 self.group.retransform_at = None;
@@ -875,10 +877,7 @@ fn min_defined(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 }
 
 /// Ascending by `insertion_order`, then `ws_id` ascending.
-fn compare_by_insertion_order(
-    a: &ConnectionContext,
-    b: &ConnectionContext,
-) -> std::cmp::Ordering {
+fn compare_by_insertion_order(a: &ConnectionContext, b: &ConnectionContext) -> std::cmp::Ordering {
     a.insertion_order
         .cmp(&b.insertion_order)
         .then(a.ws_id.cmp(&b.ws_id))

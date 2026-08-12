@@ -6,17 +6,15 @@
 //!   deleteClients, ackMutationResponses, changeDesiredQueries)
 //! - `drain-coordinator.ts` behavior: shouldDrain, drainNextIn
 
-use rust_syncer::connection::{classify_error_log_level, LogLevel, MessageHandler};
+use rust_syncer::connection::{LogLevel, MessageHandler, classify_error_log_level};
 use rust_syncer::drain::DrainCoordinator;
 use rust_syncer::message_handler::{
-    ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector,
-    MutagenDispatch, PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
+    ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
+    PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
-use rust_syncer::protocol::{
-    self, ErrorBody, ErrorKind, ErrorOrigin, PushBody,
-};
-use std::sync::{Arc, Mutex};
+use rust_syncer::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin, PushBody};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 // ─── Mock implementations ──────────────────────────────────────────────────
 
@@ -112,10 +110,11 @@ impl MutagenDispatch for MockMutagen {
         auth: Option<&serde_json::Value>,
         has_pusher: bool,
     ) -> Option<(ErrorKind, String)> {
-        self.process_mutation_calls
-            .lock()
-            .unwrap()
-            .push((mutation.clone(), auth.cloned(), has_pusher));
+        self.process_mutation_calls.lock().unwrap().push((
+            mutation.clone(),
+            auth.cloned(),
+            has_pusher,
+        ));
         self.process_mutation_result.lock().unwrap().clone()
     }
 }
@@ -142,7 +141,10 @@ impl PusherDispatch for MockPusher {
     }
 
     fn init_connection(&self, selector: &ConnectionSelector) {
-        self.init_connection_calls.lock().unwrap().push(selector.clone());
+        self.init_connection_calls
+            .lock()
+            .unwrap()
+            .push(selector.clone());
     }
 
     fn ack_mutation_responses(&self, selector: &ConnectionSelector, body: &serde_json::Value) {
@@ -255,7 +257,10 @@ fn test_push_with_custom_mutation_routes_to_pusher() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(pusher.enqueue_push_calls.lock().unwrap().len(), 1);
 }
 
@@ -288,7 +293,10 @@ fn test_push_with_empty_mutations_returns_ok() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(pusher.enqueue_push_calls.lock().unwrap().len(), 0);
 }
 
@@ -325,7 +333,10 @@ fn test_push_with_crud_mutation_routes_to_mutagen() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(mutagen.process_mutation_calls.lock().unwrap().len(), 1);
 }
 
@@ -351,7 +362,10 @@ fn test_push_with_crud_mutation_error_returns_transient() {
     let vs = Arc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let mutagen = Arc::new(MockMutagen {
-        process_mutation_result: Mutex::new(Some((ErrorKind::MutationFailed, "mutation error".to_string()))),
+        process_mutation_result: Mutex::new(Some((
+            ErrorKind::MutationFailed,
+            "mutation error".to_string(),
+        ))),
         ..Default::default()
     });
     let pusher = Arc::new(MockPusher::default());
@@ -385,7 +399,10 @@ fn test_change_desired_queries_routes_to_view_syncer() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(vs.change_desired_queries_calls.lock().unwrap().len(), 1);
 }
 
@@ -402,7 +419,10 @@ fn test_update_auth_routes_to_view_syncer() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     let calls = vs.update_auth_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert!(calls[0].2); // auth_revision_changed = true
@@ -421,7 +441,10 @@ fn test_update_auth_no_change_does_not_call_view_syncer_with_changed() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     let calls = vs.update_auth_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert!(!calls[0].2); // auth_revision_changed = false
@@ -441,7 +464,10 @@ fn test_delete_clients_routes_to_view_syncer_and_pusher() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(vs.delete_clients_calls.lock().unwrap().len(), 1);
     assert_eq!(pusher.delete_client_calls.lock().unwrap().len(), 1);
     assert_eq!(
@@ -463,7 +489,10 @@ fn test_delete_clients_no_pusher_no_error() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
 }
 
 #[test]
@@ -477,7 +506,10 @@ fn test_delete_clients_empty_result_no_pusher_call() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(pusher.delete_client_calls.lock().unwrap().len(), 0);
 }
 
@@ -492,7 +524,10 @@ fn test_ack_mutation_responses_routes_to_pusher() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(pusher.ack_calls.lock().unwrap().len(), 1);
 }
 
@@ -506,7 +541,10 @@ fn test_ack_mutation_responses_no_pusher_no_error() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
 }
 
 #[test]
@@ -523,7 +561,10 @@ fn test_init_connection_routes_to_view_syncer_and_pusher() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(vs.init_connection_calls.lock().unwrap().len(), 1);
     assert_eq!(*ccm.init_connection_calls.lock().unwrap(), 1);
     assert_eq!(pusher.init_connection_calls.lock().unwrap().len(), 1);
@@ -539,7 +580,10 @@ fn test_close_connection_is_noop() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
 }
 
 #[test]
@@ -552,7 +596,10 @@ fn test_inspect_routes_to_view_syncer() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
     assert_eq!(vs.inspect_calls.lock().unwrap().len(), 1);
 }
 
@@ -566,7 +613,10 @@ fn test_ping_returns_ok() {
     let results = handler.handle_message(msg);
 
     assert_eq!(results.len(), 1);
-    assert!(matches!(results[0], rust_syncer::connection::HandlerResult::Ok));
+    assert!(matches!(
+        results[0],
+        rust_syncer::connection::HandlerResult::Ok
+    ));
 }
 
 #[test]
@@ -621,7 +671,10 @@ fn test_drain_coordinator_drain_next_in_sets_draining() {
     assert!(dc.is_draining());
     // next_drain_time should be in the future (now + 100 / 0.6 ≈ now + 166).
     use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
     assert!(dc.next_drain_time() > now_ms);
 }
 

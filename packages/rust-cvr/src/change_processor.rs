@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 
 use crate::client_handler::MultiPoker;
-use crate::row_key::{row_id_string, RowID};
+use crate::row_key::{RowID, row_id_string};
 use crate::types::{PatchToVersion, RowUpdate};
-use crate::updater::{RowRecordMap, CVRQueryDrivenUpdater};
+use crate::updater::{CVRQueryDrivenUpdater, RowRecordMap};
 
 use serde_json::{Map, Value};
 
@@ -181,7 +181,7 @@ impl<'a> ChangeProcessor<'a> {
 mod tests {
     use super::*;
     use crate::client_handler::{ClientHandler, WebSocketSink};
-    use crate::types::{ShardID};
+    use crate::types::ShardID;
     use crate::version::CVRVersion;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -192,7 +192,12 @@ mod tests {
     impl MockSink {
         fn new() -> (Self, Arc<StdMutex<Vec<Value>>>) {
             let messages = Arc::new(StdMutex::new(Vec::new()));
-            (Self { messages: messages.clone() }, messages)
+            (
+                Self {
+                    messages: messages.clone(),
+                },
+                messages,
+            )
         }
     }
 
@@ -211,7 +216,10 @@ mod tests {
             "cg1",
             "client1",
             "ws1",
-            &ShardID { app_id: "app".to_string(), shard_num: 0 },
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
             None,
             Arc::new(sink),
         );
@@ -222,7 +230,10 @@ mod tests {
         use crate::types::*;
         let mut cvr = CVR {
             id: "cg1".to_string(),
-            version: CVRVersion { state_version: "00".to_string(), config_version: None },
+            version: CVRVersion {
+                state_version: "00".to_string(),
+                config_version: None,
+            },
             last_active: 0,
             ttl_clock: 0,
             replica_version: Some("v1".to_string()),
@@ -252,7 +263,7 @@ mod tests {
         // track_queries must be called before received/deleteUnreferencedRows
         u.track_queries(
             &[("q1", "hash1")], // executed: (queryID, transformationHash) pairs
-            &[],               // removed
+            &[],                // removed
         );
         u
     }
@@ -262,10 +273,13 @@ mod tests {
         let cvr = make_cvr();
         let mut updater = make_updater(cvr);
         let (handler, messages) = make_client_handler();
-        let pokers = MultiPoker::new(&[&handler], CVRVersion {
-            state_version: "00".to_string(),
-            config_version: Some(1),
-        });
+        let pokers = MultiPoker::new(
+            &[&handler],
+            CVRVersion {
+                state_version: "00".to_string(),
+                config_version: Some(1),
+            },
+        );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
 
@@ -281,11 +295,18 @@ mod tests {
 
         processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
         processor.finish(&existing_rows);
-        pokers.end(CVRVersion { state_version: "00".to_string(), config_version: Some(2) });
+        pokers.end(CVRVersion {
+            state_version: "00".to_string(),
+            config_version: Some(2),
+        });
 
         let msgs = messages.lock().unwrap();
         // pokeStart + pokePart + pokeEnd
-        assert!(msgs.len() >= 2, "Expected at least pokeStart + pokeEnd, got {}", msgs.len());
+        assert!(
+            msgs.len() >= 2,
+            "Expected at least pokeStart + pokeEnd, got {}",
+            msgs.len()
+        );
         assert_eq!(msgs[0][0], "pokeStart");
     }
 
@@ -294,10 +315,13 @@ mod tests {
         let cvr = make_cvr();
         let mut updater = make_updater(cvr);
         let (handler, messages) = make_client_handler();
-        let pokers = MultiPoker::new(&[&handler], CVRVersion {
-            state_version: "00".to_string(),
-            config_version: Some(1),
-        });
+        let pokers = MultiPoker::new(
+            &[&handler],
+            CVRVersion {
+                state_version: "00".to_string(),
+                config_version: Some(1),
+            },
+        );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
 
@@ -314,7 +338,10 @@ mod tests {
         processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
         processor.on_row_change(1, "q1", "users", &row_key, None, &existing_rows);
         processor.finish(&existing_rows);
-        pokers.end(CVRVersion { state_version: "00".to_string(), config_version: Some(2) });
+        pokers.end(CVRVersion {
+            state_version: "00".to_string(),
+            config_version: Some(2),
+        });
 
         // The row should have been received and then deleted
         // (exact patch count depends on updater logic, but there should be poke frames)
@@ -327,10 +354,13 @@ mod tests {
         let cvr = make_cvr();
         let mut updater = make_updater(cvr);
         let (handler, _messages) = make_client_handler();
-        let pokers = MultiPoker::new(&[&handler], CVRVersion {
-            state_version: "00".to_string(),
-            config_version: Some(1),
-        });
+        let pokers = MultiPoker::new(
+            &[&handler],
+            CVRVersion {
+                state_version: "00".to_string(),
+                config_version: Some(1),
+            },
+        );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
 
@@ -347,7 +377,10 @@ mod tests {
         processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
         processor.on_row_change(0, "q2", "users", &row_key, Some(&row), &existing_rows);
         processor.finish(&existing_rows);
-        pokers.end(CVRVersion { state_version: "00".to_string(), config_version: Some(2) });
+        pokers.end(CVRVersion {
+            state_version: "00".to_string(),
+            config_version: Some(2),
+        });
 
         // The row should have merged refCounts
         // Check the updater's received_rows
@@ -366,7 +399,12 @@ mod tests {
         let rc_val = rc.unwrap().as_ref();
         assert!(rc_val.is_some(), "Expected non-null refCounts");
         let rc_map = rc_val.unwrap();
-        assert_eq!(rc_map.len(), 2, "Expected 2 query refs, got {}", rc_map.len());
+        assert_eq!(
+            rc_map.len(),
+            2,
+            "Expected 2 query refs, got {}",
+            rc_map.len()
+        );
     }
 
     #[test]
@@ -374,10 +412,13 @@ mod tests {
         let cvr = make_cvr();
         let mut updater = make_updater(cvr);
         let (handler, messages) = make_client_handler();
-        let pokers = MultiPoker::new(&[&handler], CVRVersion {
-            state_version: "00".to_string(),
-            config_version: Some(1),
-        });
+        let pokers = MultiPoker::new(
+            &[&handler],
+            CVRVersion {
+                state_version: "00".to_string(),
+                config_version: Some(1),
+            },
+        );
 
         // Use a small page size for testing
         let mut processor = ChangeProcessor::with_page_size(&mut updater, &pokers, 3);
@@ -396,7 +437,10 @@ mod tests {
             processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
         }
         processor.finish(&existing_rows);
-        pokers.end(CVRVersion { state_version: "00".to_string(), config_version: Some(2) });
+        pokers.end(CVRVersion {
+            state_version: "00".to_string(),
+            config_version: Some(2),
+        });
 
         let msgs = messages.lock().unwrap();
         // pokeStart + pokePart (batch 1, 3 rows) + pokePart (batch 2, 2 rows) + pokeEnd
@@ -410,10 +454,13 @@ mod tests {
         let cvr = make_cvr();
         let mut updater = make_updater(cvr);
         let (handler, _messages) = make_client_handler();
-        let pokers = MultiPoker::new(&[&handler], CVRVersion {
-            state_version: "00".to_string(),
-            config_version: Some(1),
-        });
+        let pokers = MultiPoker::new(
+            &[&handler],
+            CVRVersion {
+                state_version: "00".to_string(),
+                config_version: Some(1),
+            },
+        );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
 
@@ -429,11 +476,16 @@ mod tests {
 
         processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
         processor.finish(&existing_rows);
-        pokers.end(CVRVersion { state_version: "00".to_string(), config_version: Some(2) });
+        pokers.end(CVRVersion {
+            state_version: "00".to_string(),
+            config_version: Some(2),
+        });
 
         // Verify the store_ops contain a PutRowRecord with the correct version
         let ops = updater.base.drain_store_ops();
-        let put_op = ops.iter().find(|op| matches!(op, crate::types::StoreOp::PutRowRecord(_)));
+        let put_op = ops
+            .iter()
+            .find(|op| matches!(op, crate::types::StoreOp::PutRowRecord(_)));
         assert!(put_op.is_some(), "Expected PutRowRecord in store_ops");
         if let crate::types::StoreOp::PutRowRecord(record) = put_op.unwrap() {
             assert_eq!(record.row_version, "v1");
@@ -445,10 +497,13 @@ mod tests {
         let cvr = make_cvr();
         let mut updater = make_updater(cvr);
         let (handler, _messages) = make_client_handler();
-        let pokers = MultiPoker::new(&[&handler], CVRVersion {
-            state_version: "00".to_string(),
-            config_version: Some(1),
-        });
+        let pokers = MultiPoker::new(
+            &[&handler],
+            CVRVersion {
+                state_version: "00".to_string(),
+                config_version: Some(1),
+            },
+        );
 
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
 
@@ -473,7 +528,10 @@ mod tests {
 
         processor.on_row_change(2, "q1", "users", &row_key, Some(&row2), &existing_rows);
         processor.finish(&existing_rows);
-        pokers.end(CVRVersion { state_version: "00".to_string(), config_version: Some(2) });
+        pokers.end(CVRVersion {
+            state_version: "00".to_string(),
+            config_version: Some(2),
+        });
 
         let received = &updater.received_rows;
         let key = {
@@ -488,6 +546,10 @@ mod tests {
         assert!(rc.is_some());
         let rc_map = rc.unwrap();
         let q1_count = rc_map.get("q1").copied().unwrap_or(0);
-        assert_eq!(q1_count, 1, "EDIT should not change refCount, expected 1, got {}", q1_count);
+        assert_eq!(
+            q1_count, 1,
+            "EDIT should not change refCount, expected 1, got {}",
+            q1_count
+        );
     }
 }

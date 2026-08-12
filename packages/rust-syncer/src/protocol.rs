@@ -653,28 +653,38 @@ pub enum Upstream {
 pub fn parse_upstream(text: &str) -> Result<Upstream, serde_json::Error> {
     let arr: Vec<Value> = serde_json::from_str(text)?;
     if arr.len() < 2 {
-        return Err(serde::de::Error::custom("message must be a tuple [type, body]"));
+        return Err(serde::de::Error::custom(
+            "message must be a tuple [type, body]",
+        ));
     }
-    let msg_type = arr[0].as_str().ok_or_else(|| {
-        serde::de::Error::custom("message type must be a string")
-    })?;
+    let msg_type = arr[0]
+        .as_str()
+        .ok_or_else(|| serde::de::Error::custom("message type must be a string"))?;
     let body = &arr[1];
 
     let result = match msg_type {
         "initConnection" => Upstream::InitConnection(body.clone()),
         "ping" => Upstream::Ping,
-        "deleteClients" => Upstream::DeleteClients(serde_json::from_value::<DeleteClientsBody>(body.clone())?),
-        "changeDesiredQueries" => Upstream::ChangeDesiredQueries(serde_json::from_value::<ChangeDesiredQueriesBody>(body.clone())?),
+        "deleteClients" => {
+            Upstream::DeleteClients(serde_json::from_value::<DeleteClientsBody>(body.clone())?)
+        }
+        "changeDesiredQueries" => Upstream::ChangeDesiredQueries(serde_json::from_value::<
+            ChangeDesiredQueriesBody,
+        >(body.clone())?),
         "pull" => Upstream::Pull(body.clone()),
-        "updateAuth" => Upstream::UpdateAuth(serde_json::from_value::<UpdateAuthBody>(body.clone())?),
+        "updateAuth" => {
+            Upstream::UpdateAuth(serde_json::from_value::<UpdateAuthBody>(body.clone())?)
+        }
         "push" => Upstream::Push(serde_json::from_value::<PushBody>(body.clone())?),
         "closeConnection" => Upstream::CloseConnection,
         "inspect" => Upstream::Inspect(serde_json::from_value::<InspectUpBody>(body.clone())?),
-        "ackMutationResponses" => Upstream::AckMutationResponses(serde_json::from_value::<AckMutationResponsesBody>(body.clone())?),
+        "ackMutationResponses" => Upstream::AckMutationResponses(serde_json::from_value::<
+            AckMutationResponsesBody,
+        >(body.clone())?),
         other => {
             return Err(serde::de::Error::custom(format!(
                 "unknown message type: {other}"
-            )))
+            )));
         }
     };
     Ok(result)
@@ -692,10 +702,13 @@ pub fn downstream_message(msg_type: &str, body: &impl Serialize) -> Value {
 
 /// Create a `["connected", {wsid, timestamp}]` message.
 pub fn connected_message(wsid: &str) -> Value {
-    downstream_message("connected", &ConnectedBody {
-        wsid: wsid.to_string(),
-        timestamp: Some(now_ms()),
-    })
+    downstream_message(
+        "connected",
+        &ConnectedBody {
+            wsid: wsid.to_string(),
+            timestamp: Some(now_ms()),
+        },
+    )
 }
 
 /// Create a `["pong", {}]` message.
@@ -727,8 +740,7 @@ pub struct SecProtocols {
 /// Rust: `urlencoding::decode` → `base64::decode` → UTF-8 → `serde_json::from_slice`.
 pub fn decode_sec_protocols(header: &str) -> Result<SecProtocols, DecodeError> {
     // 1. URL-decode
-    let decoded = urlencoding::decode(header)
-        .map_err(|e| DecodeError::UrlDecode(e.to_string()))?;
+    let decoded = urlencoding::decode(header).map_err(|e| DecodeError::UrlDecode(e.to_string()))?;
     // 2. Base64-decode
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(decoded.as_bytes())

@@ -5,7 +5,7 @@
 //! (bounded channel — the CG thread blocks when the channel is full, exactly
 //! like the TS `ws.send()` backpressure model).
 
-use crate::protocol::ErrorBody;
+use crate::protocol::{BasicErrorBody, ErrorBody, ErrorKind};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -56,5 +56,34 @@ impl DirectWebSocketSink {
     /// Close the connection gracefully.
     pub fn close(&self, reason: String) {
         let _ = self.tx.blocking_send(WsCommand::Close(reason));
+    }
+}
+
+/// Adapt `DirectWebSocketSink` to `rust-cvr`'s `WebSocketSink` trait so
+/// `ClientHandler` / `PokeHandler` can push poke frames straight to the WS
+/// writer task. Replaces `NapiWebSocketSink` (the one napi-specific piece of
+/// the CVR hot path) with no TSFN — the bounded channel is the backpressure.
+impl rust_cvr::client_handler::WebSocketSink for DirectWebSocketSink {
+    fn push(&self, msg: Value) -> Result<(), String> {
+        self.tx
+            .blocking_send(WsCommand::Send(msg))
+            .map_err(|e| format!("ws sink closed: {e}"))
+    }
+
+    fn fail(&self, e: String) {
+        // rust-cvr passes a plain message; the accompanying `["error", ..]`
+        // frame is delivered separately via `push`. Close with code 3000.
+        let _ = self
+            .tx
+            .blocking_send(WsCommand::Fail(ErrorBody::Basic(BasicErrorBody {
+                kind: ErrorKind::Internal,
+                message: e,
+                origin: None,
+            })));
+    }
+
+    fn cancel(&self) {
+        // Poke-chain cancel: the `pokeEnd {cancel:true}` frame is already sent
+        // via `push` by `PokeHandler::cancel`, so nothing to send here.
     }
 }

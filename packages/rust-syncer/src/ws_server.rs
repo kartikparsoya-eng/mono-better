@@ -4,12 +4,10 @@
 //! Uses `tokio-tungstenite` for the WebSocket protocol. No handoff mechanism
 //! (the server accepts directly, unlike the TS handoff model).
 
-use crate::connect_params::{
-    extract_protocol_version, get_connect_params, ConnectParams,
-};
+use crate::connect_params::{ConnectParams, extract_protocol_version, get_connect_params};
 use crate::protocol::{
-    connected_message, error_message, pong_message, ErrorBody, PROTOCOL_VERSION,
-    MIN_SERVER_SUPPORTED_SYNC_PROTOCOL,
+    ErrorBody, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION, connected_message,
+    error_message, pong_message,
 };
 use crate::ws_sink::{DirectWebSocketSink, WsCommand};
 use futures_util::{SinkExt, StreamExt};
@@ -18,9 +16,9 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::Message;
 
 /// Downstream message interval: slightly longer than client's 5s PING_INTERVAL.
 const DOWNSTREAM_MSG_INTERVAL_MS: u64 = 6000;
@@ -107,13 +105,8 @@ pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<Connecti
     let full_url = format!("http://localhost{}", path);
 
     // Parse connect params.
-    let params = match get_connect_params(
-        protocol_version,
-        &full_url,
-        sec_protocol,
-        cookie,
-        origin,
-    ) {
+    let params = match get_connect_params(protocol_version, &full_url, sec_protocol, cookie, origin)
+    {
         Ok(params) => params,
         Err(e) => {
             tracing::warn!("connect params error: {e}");
@@ -124,8 +117,7 @@ pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<Connecti
     };
 
     // Validate protocol version.
-    if protocol_version > PROTOCOL_VERSION
-        || protocol_version < MIN_SERVER_SUPPORTED_SYNC_PROTOCOL
+    if protocol_version > PROTOCOL_VERSION || protocol_version < MIN_SERVER_SUPPORTED_SYNC_PROTOCOL
     {
         let error = ErrorBody::version_not_supported(format!(
             "Server supports protocol versions {MIN_SERVER_SUPPORTED_SYNC_PROTOCOL} to {PROTOCOL_VERSION}, but client requested {protocol_version}"
@@ -286,10 +278,7 @@ async fn send_error_and_close(
 
 /// Start the WebSocket server. Accepts connections and dispatches them to
 /// the provided handler.
-pub async fn run_ws_server<F>(
-    config: WsServerConfig,
-    handler: F,
-) -> Result<(), std::io::Error>
+pub async fn run_ws_server<F>(config: WsServerConfig, handler: F) -> Result<(), std::io::Error>
 where
     F: Fn(ConnectionContext) + Send + Sync + 'static,
 {

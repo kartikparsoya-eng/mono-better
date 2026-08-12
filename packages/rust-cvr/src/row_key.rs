@@ -101,12 +101,14 @@ pub fn row_id_string(id: &RowID) -> String {
 /// unboundedly if callers construct unique RowIDs on the fly. **Alert:** if
 /// profiling shows this becomes a leak, switch to a `DashMap` keyed by the
 /// computed hash itself (bounded by total unique RowIDs across the process).
-pub static ROW_ID_STRING_CACHE: OnceLock<parking_lot::Mutex<std::collections::HashMap<RowID, String>>> =
-    OnceLock::new();
+pub static ROW_ID_STRING_CACHE: OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<RowID, String>>,
+> = OnceLock::new();
 
 /// Mirrors TS's memoized `rowIDString` using a thread-safe cache.
 pub fn row_id_string_cached(id: &RowID) -> String {
-    let cache = ROW_ID_STRING_CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let cache = ROW_ID_STRING_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
     let mut guard = cache.lock();
     if let Some(s) = guard.get(id) {
         return s.clone();
@@ -141,7 +143,7 @@ fn base36_encode(mut n: u128) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Map};
+    use serde_json::{Map, json};
 
     fn make_row_id(schema: &str, table: &str, row_key_json: serde_json::Value) -> RowID {
         let row_key = row_key_json.as_object().unwrap().clone();
@@ -183,7 +185,10 @@ mod tests {
     #[test]
     fn test_row_id_string_multi_pk_sorted() {
         let id = make_row_id("public", "orders", json!({"userId": "u1", "id": 42}));
-        assert_eq!(row_id_string(&id), r#"["public","orders","id",42,"userId","u1"]"#);
+        assert_eq!(
+            row_id_string(&id),
+            r#"["public","orders","id",42,"userId","u1"]"#
+        );
     }
 
     #[test]

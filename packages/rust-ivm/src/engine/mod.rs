@@ -82,7 +82,12 @@ struct PipelineEntry {
 
 /// Compute the signature unit for a row key (XOR into the query's signature).
 /// Port of TS `rowIDSignatureUnit`.
-fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
+/// Compute the row-set-signature unit (a table+rowKey hash) that is XOR-folded
+/// into a query's row-set signature. Exposed so the full-Rust syncer can
+/// maintain the same signature over its streamed hydrate/advance changes (the
+/// streaming engine paths don't fold it internally). Must stay byte-identical to
+/// the fold used by `add_queries`.
+pub fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
     table.hash(&mut hasher);

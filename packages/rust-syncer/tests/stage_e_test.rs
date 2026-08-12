@@ -1,0 +1,231 @@
+//! Stage E — end-to-end data-path test.
+//!
+//! Builds a real SQLite table with rows, drives the full syncer hot path
+//! (`SyncEngine::config_and_hydrate`: config-driven desired-query tracking +
+//! query-driven hydrate against the real `TableSource`), and asserts that
+//! actual ROW data — not just query patches — reaches the client sink as poke
+//! frames. This is the first test exercising real engine rows through the
+//! syncer, proving `IvmPipelines` → `rust-cvr` → poke end to end.
+//!
+//! Uses `init_from_connection` (hydrate needs only a plain SQLite connection —
+//! the snapshotter/wal2 machinery is only required for `advance`).
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use rusqlite::Connection;
+use rust_cvr::client_handler::WebSocketSink;
+use rust_cvr::types::{DesiredQuerySpec, ShardID};
+use rust_cvr::updater::RowRecordMap;
+use rust_syncer::pipeline_driver::IvmPipelines;
+use rust_syncer::sync_engine::{SyncEngine, empty_cvr};
+use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
+
+#[test]
+fn hydrate_real_rows_produces_row_pokes() {
+    // A real SQLite table with two rows.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "issue" (
+            "id"    "text|NOT_NULL",
+            "title" "text",
+            "_0_version" "text",
+            PRIMARY KEY ("id")
+        );
+        INSERT INTO "issue" ("id", "title", "_0_version") VALUES
+            ('i1', 'first issue', '01'),
+            ('i2', 'second issue', '01');
+        "#,
+    )
+    .unwrap();
+
+    // Derive the table specs from the real replica schema (Part 1). This
+    // includes `_0_version`, which the ChangeProcessor reads as the row version.
+    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+
+    // Build the pipelines from that connection (no snapshotter needed to hydrate).
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init_from_connection(specs, shared_conn).unwrap();
+
+    let mut engine = SyncEngine::new(pipelines);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+
+    // A fresh CVR + a desired query for the whole `issue` table.
+    let cvr = empty_cvr("cg1", "01");
+    let puts = vec![DesiredQuerySpec {
+        hash: "q_issue".to_string(),
+        ast: Some(serde_json::json!({"table": "issue"})),
+        name: None,
+        args: None,
+        ttl: None,
+    }];
+    let existing_rows: RowRecordMap = HashMap::new();
+
+    let result_cvr = engine
+        .config_and_hydrate(
+            cvr,
+            "client1",
+            &["ws1".to_string()],
+            &shard,
+            puts,
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            None,
+            "00".to_string(),
+            "01".to_string(),
+            &existing_rows,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+
+    // The row-set-signature provider (task 13) persisted a signature for the
+    // hydrated query — the engine XOR-accumulates a per-row unit as `q_issue`
+    // hydrates its two rows, and the updater's flush wrote it into the CVR.
+    let sig = result_cvr
+        .queries
+        .get("q_issue")
+        .and_then(|q| q.base().row_set_signature.clone());
+    assert!(
+        sig.is_some(),
+        "expected a persisted row_set_signature for the hydrated query"
+    );
+
+    // Collect all poke frames and assert the two real rows arrived as row
+    // patches inside a pokePart.
+    let mut saw_i1 = false;
+    let mut saw_i2 = false;
+    let mut saw_poke_part = false;
+    let mut frames = 0;
+    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+        frames += 1;
+        if v[0] == "pokePart" {
+            saw_poke_part = true;
+            let s = serde_json::to_string(&v).unwrap();
+            if s.contains("\"i1\"") && s.contains("first issue") {
+                saw_i1 = true;
+            }
+            if s.contains("\"i2\"") && s.contains("second issue") {
+                saw_i2 = true;
+            }
+        }
+    }
+
+    assert!(frames > 0, "expected poke frames");
+    assert!(saw_poke_part, "expected a pokePart with row data");
+    assert!(saw_i1, "expected row i1 in a poke");
+    assert!(saw_i2, "expected row i2 in a poke");
+}
+
+/// The internal `lmids` query (created by `ensure_client`) hydrates a real
+/// `{app}_{shard}.clients` row and its `lastMutationID` reaches the client as a
+/// `lastMutationIDChanges` poke — the mechanism by which a client learns its
+/// mutations have been applied. This exercises the full-desired-set pipeline
+/// sync (internal queries are hydrated from the CVR, not just client puts).
+#[test]
+fn lmids_internal_query_produces_last_mutation_id_changes() {
+    // The upstream schema for shard app/0 is `app_0`; the internal `lmids`
+    // query reads `app_0.clients` filtered by `clientGroupID = <cvr.id>`.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "app_0.clients" (
+            "clientGroupID"  "text|NOT_NULL",
+            "clientID"       "text|NOT_NULL",
+            "lastMutationID" "int8|NOT_NULL",
+            "userID"         "text",
+            "_0_version"     "text",
+            PRIMARY KEY ("clientGroupID", "clientID")
+        );
+        CREATE TABLE "app_0.mutations" (
+            "clientGroupID"  "text|NOT_NULL",
+            "clientID"       "text|NOT_NULL",
+            "mutationID"     "int8|NOT_NULL",
+            "result"         "json|NOT_NULL",
+            "_0_version"     "text",
+            PRIMARY KEY ("clientGroupID", "clientID", "mutationID")
+        );
+        INSERT INTO "app_0.clients"
+            ("clientGroupID", "clientID", "lastMutationID", "userID", "_0_version")
+            VALUES ('cg1', 'client1', 5, NULL, '01');
+        "#,
+    )
+    .unwrap();
+
+    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init_from_connection(specs, shared_conn).unwrap();
+
+    let mut engine = SyncEngine::new(pipelines);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+
+    // No client queries at all — only the internal `lmids` / `mutationResults`
+    // queries that `ensure_client` creates. They must still hydrate.
+    let cvr = empty_cvr("cg1", "01");
+    let existing_rows: RowRecordMap = HashMap::new();
+    let result_cvr = engine
+        .config_and_hydrate(
+            cvr,
+            "client1",
+            &["ws1".to_string()],
+            &shard,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            None,
+            "00".to_string(),
+            "01".to_string(),
+            &existing_rows,
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+
+    // The internal queries exist in the CVR but produce NO got-query patch.
+    assert!(result_cvr.queries.contains_key("lmids"));
+    assert!(result_cvr.queries.contains_key("mutationResults"));
+
+    // The client received a poke carrying lastMutationIDChanges.client1 == 5.
+    let mut saw_lmid = false;
+    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+        if v[0] == "pokePart" {
+            let changes = &v[1]["lastMutationIDChanges"];
+            if changes.get("client1").and_then(|n| n.as_i64()) == Some(5) {
+                saw_lmid = true;
+            }
+        }
+    }
+    assert!(
+        saw_lmid,
+        "expected lastMutationIDChanges.client1 == 5 in a pokePart"
+    );
+}
+
+// `SharedConn` is `Rc<RefCell<rusqlite::Connection>>`; alias locally for clarity.
+type SharedConnAlias = Rc<RefCell<Connection>>;

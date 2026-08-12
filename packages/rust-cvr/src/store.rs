@@ -10,16 +10,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::types::*;
 use crate::types::StoreOp;
-use crate::version::{cmp_versions, version_from_string, version_string, CVRVersion, NullableCVRVersion};
+use crate::types::*;
+use crate::version::{
+    CVRVersion, NullableCVRVersion, cmp_versions, version_from_string, version_string,
+};
 use std::cmp::Ordering;
 
 // ─── Error types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum CVRStoreError {
-    #[error("CVR ownership was transferred to {owner} at {granted_at} (last connect: {last_connect_time})")]
+    #[error(
+        "CVR ownership was transferred to {owner} at {granted_at} (last connect: {last_connect_time})"
+    )]
     OwnershipError {
         owner: String,
         granted_at: f64,
@@ -210,17 +214,23 @@ impl CVRStoreHandle {
     }
 
     pub fn delete_client(&mut self, client_id: &str) {
-        self.pending.pending_clients_delete.push(client_id.to_string());
+        self.pending
+            .pending_clients_delete
+            .push(client_id.to_string());
     }
 
     pub fn put_query(&mut self, query: &QueryRecord) {
         let row = query_record_to_query_row(&self.cvr_id, query);
-        self.pending.pending_query_updates.insert(query.id().to_string(), row);
+        self.pending
+            .pending_query_updates
+            .insert(query.id().to_string(), row);
     }
 
     pub fn update_query(&mut self, query: &QueryRecord) {
         // Partial update — only set changed fields.
-        let existing = self.pending.pending_query_partial_updates
+        let existing = self
+            .pending
+            .pending_query_partial_updates
             .entry(query.id().to_string())
             .or_default();
         existing.transformation_hash = query.base().transformation_hash.clone();
@@ -279,7 +289,9 @@ impl CVRStoreHandle {
 
     pub fn put_row_record(&mut self, row: &RowRecord) {
         let id_str = crate::row_key::row_id_string(&row.id);
-        self.pending.pending_row_record_updates.insert(id_str, Some(row.clone()));
+        self.pending
+            .pending_row_record_updates
+            .insert(id_str, Some(row.clone()));
     }
 
     pub fn del_row_record(&mut self, id: &RowID) {
@@ -289,7 +301,9 @@ impl CVRStoreHandle {
 
     pub fn force_updates(&mut self, ids: &[RowID]) {
         for id in ids {
-            self.pending.force_updates.insert(crate::row_key::row_id_string(id));
+            self.pending
+                .force_updates
+                .insert(crate::row_key::row_id_string(id));
         }
     }
 
@@ -482,11 +496,21 @@ impl CVRStoreHandle {
                 bind_idx
             );
             let mut q = sqlx::query(&sql).bind(&self.cvr_id);
-            if let Some(ref pv) = partial.patch_version { q = q.bind(pv); }
-            if let Some(d) = partial.deleted { q = q.bind(d); }
-            if let Some(ref th) = partial.transformation_hash { q = q.bind(th); }
-            if let Some(ref tv) = partial.transformation_version { q = q.bind(tv); }
-            if let Some(ref rs) = partial.row_set_signature { q = q.bind(rs); }
+            if let Some(ref pv) = partial.patch_version {
+                q = q.bind(pv);
+            }
+            if let Some(d) = partial.deleted {
+                q = q.bind(d);
+            }
+            if let Some(ref th) = partial.transformation_hash {
+                q = q.bind(th);
+            }
+            if let Some(ref tv) = partial.transformation_version {
+                q = q.bind(tv);
+            }
+            if let Some(ref rs) = partial.row_set_signature {
+                q = q.bind(rs);
+            }
             q = q.bind(hash);
             q.execute(&mut *tx).await?;
             stats.queries += 1;
@@ -523,7 +547,8 @@ impl CVRStoreHandle {
         for (id_str, record) in &self.pending.pending_row_record_updates {
             match record {
                 Some(row) => {
-                    let row_key_json: Value = serde_json::to_value(&row.id.row_key).unwrap_or(Value::Null);
+                    let row_key_json: Value =
+                        serde_json::to_value(&row.id.row_key).unwrap_or(Value::Null);
                     let ref_counts_json: Option<Value> = row
                         .ref_counts
                         .as_ref()
@@ -568,7 +593,8 @@ impl CVRStoreHandle {
         // Clear pending
         self.pending = PendingWrites::default();
 
-        stats.statements = stats.instances + stats.clients + stats.queries + stats.desires + stats.rows;
+        stats.statements =
+            stats.instances + stats.clients + stats.queries + stats.desires + stats.rows;
         Ok(Some(stats))
     }
 
@@ -587,11 +613,19 @@ impl CVRStoreHandle {
                FROM "{}".instances WHERE "clientGroupID" = $1"#,
             self.schema
         );
-        let instance: Option<(String, f64, f64, Option<String>, Option<Value>, Option<String>, Option<String>, Option<f64>)> =
-            sqlx::query_as(&instance_sql)
-                .bind(&self.cvr_id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let instance: Option<(
+            String,
+            f64,
+            f64,
+            Option<String>,
+            Option<Value>,
+            Option<String>,
+            Option<String>,
+            Option<f64>,
+        )> = sqlx::query_as(&instance_sql)
+            .bind(&self.cvr_id)
+            .fetch_optional(&mut *tx)
+            .await?;
 
         let is_new = instance.is_none();
 
@@ -612,7 +646,16 @@ impl CVRStoreHandle {
                 drop(tx);
                 return Ok(LoadResult { cvr, is_new: true });
             }
-            Some((version, last_active, ttl_clock, replica_version, client_schema, profile_id, _owner, _granted_at)) => {
+            Some((
+                version,
+                last_active,
+                ttl_clock,
+                replica_version,
+                client_schema,
+                profile_id,
+                _owner,
+                _granted_at,
+            )) => {
                 let cvr_version = version_from_string(&version);
                 CVR {
                     id: self.cvr_id.clone(),
@@ -646,11 +689,21 @@ impl CVRStoreHandle {
                FROM "{}".queries WHERE "clientGroupID" = $1 AND COALESCE("deleted", false) = false"#,
             self.schema
         );
-        let queries: Vec<(String, Option<Value>, Option<String>, Option<Value>, Option<String>, Option<String>, Option<String>, Option<bool>, Option<bool>, Option<String>)> =
-            sqlx::query_as(&queries_sql)
-                .bind(&self.cvr_id)
-                .fetch_all(&mut *tx)
-                .await?;
+        let queries: Vec<(
+            String,
+            Option<Value>,
+            Option<String>,
+            Option<Value>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<bool>,
+            Option<bool>,
+            Option<String>,
+        )> = sqlx::query_as(&queries_sql)
+            .bind(&self.cvr_id)
+            .fetch_all(&mut *tx)
+            .await?;
 
         // Load desires
         let desires_sql = format!(
@@ -670,10 +723,13 @@ impl CVRStoreHandle {
         let mut cvr = cvr;
 
         for (client_id,) in clients {
-            cvr.clients.insert(client_id.clone(), ClientRecord {
-                id: client_id,
-                desired_query_ids: Vec::new(),
-            });
+            cvr.clients.insert(
+                client_id.clone(),
+                ClientRecord {
+                    id: client_id,
+                    desired_query_ids: Vec::new(),
+                },
+            );
         }
 
         for row in queries {
@@ -735,11 +791,10 @@ impl CVRStoreHandle {
             r#"SELECT "version" FROM "{}".instances WHERE "clientGroupID" = $1"#,
             self.schema
         );
-        let current_version: Option<(String,)> =
-            sqlx::query_as(&check_sql)
-                .bind(&self.cvr_id)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let current_version: Option<(String,)> = sqlx::query_as(&check_sql)
+            .bind(&self.cvr_id)
+            .fetch_optional(&mut *tx)
+            .await?;
 
         if let Some((cv,)) = &current_version {
             let cv = version_from_string(cv);
@@ -848,11 +903,7 @@ pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRo
             query_args: None,
             patch_version: None,
             transformation_hash: r.base.transformation_hash.clone(),
-            transformation_version: r
-                .base
-                .transformation_version
-                .as_ref()
-                .map(version_string),
+            transformation_version: r.base.transformation_version.as_ref().map(version_string),
             internal: Some(true),
             deleted: Some(false),
             row_set_signature: r.base.row_set_signature.clone(),
@@ -865,11 +916,7 @@ pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRo
             query_args: None,
             patch_version: r.patch_version.as_ref().map(version_string),
             transformation_hash: r.base.transformation_hash.clone(),
-            transformation_version: r
-                .base
-                .transformation_version
-                .as_ref()
-                .map(version_string),
+            transformation_version: r.base.transformation_version.as_ref().map(version_string),
             internal: None,
             deleted: Some(false),
             row_set_signature: r.base.row_set_signature.clone(),
@@ -882,11 +929,7 @@ pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRo
             query_args: Some(Value::Array(r.args.clone())),
             patch_version: r.patch_version.as_ref().map(version_string),
             transformation_hash: r.base.transformation_hash.clone(),
-            transformation_version: r
-                .base
-                .transformation_version
-                .as_ref()
-                .map(version_string),
+            transformation_version: r.base.transformation_version.as_ref().map(version_string),
             internal: None,
             deleted: Some(false),
             row_set_signature: r.base.row_set_signature.clone(),
@@ -969,7 +1012,9 @@ mod tests {
         let mut pending = PendingWrites::default();
         let q = make_client_query("hash1");
         let row = query_record_to_query_row("cg1", &q);
-        pending.pending_query_updates.insert("hash1".to_string(), row);
+        pending
+            .pending_query_updates
+            .insert("hash1".to_string(), row);
         assert!(!pending.is_empty());
     }
 
@@ -978,23 +1023,42 @@ mod tests {
         let mut pending = PendingWrites::default();
         let mut partial = PartialQueriesRow::default();
         partial.transformation_hash = Some("th2".to_string());
-        pending.pending_query_partial_updates.insert("hash1".to_string(), partial);
+        pending
+            .pending_query_partial_updates
+            .insert("hash1".to_string(), partial);
         assert!(!pending.is_empty());
     }
 
     #[test]
     fn test_mark_query_as_deleted() {
         let mut pending = PendingWrites::default();
-        let patch = QueryPatch::Del { id: "hash1".to_string(), client_id: None };
-        pending.pending_query_partial_updates.entry("hash1".to_string()).or_default().deleted = Some(true);
+        let patch = QueryPatch::Del {
+            id: "hash1".to_string(),
+            client_id: None,
+        };
+        pending
+            .pending_query_partial_updates
+            .entry("hash1".to_string())
+            .or_default()
+            .deleted = Some(true);
         assert!(!pending.is_empty());
-        assert_eq!(patch, QueryPatch::Del { id: "hash1".to_string(), client_id: None });
+        assert_eq!(
+            patch,
+            QueryPatch::Del {
+                id: "hash1".to_string(),
+                client_id: None
+            }
+        );
     }
 
     #[test]
     fn test_update_row_set_signature() {
         let mut pending = PendingWrites::default();
-        pending.pending_query_partial_updates.entry("hash1".to_string()).or_default().row_set_signature = Some("deadbeef".to_string());
+        pending
+            .pending_query_partial_updates
+            .entry("hash1".to_string())
+            .or_default()
+            .row_set_signature = Some("deadbeef".to_string());
         assert!(!pending.is_empty());
     }
 
@@ -1011,12 +1075,23 @@ mod tests {
             ttl: Some(300000.0),
             inactivated_at: None,
         };
-        pending.pending_desire_updates.insert(key.clone(), row.clone());
+        pending
+            .pending_desire_updates
+            .insert(key.clone(), row.clone());
         // Overwrite with updated version
-        let row2 = DesiresRow { deleted: true, ..row };
+        let row2 = DesiresRow {
+            deleted: true,
+            ..row
+        };
         pending.pending_desire_updates.insert(key, row2);
         assert_eq!(pending.pending_desire_updates.len(), 1);
-        assert!(pending.pending_desire_updates.get("c1:hash1").unwrap().deleted);
+        assert!(
+            pending
+                .pending_desire_updates
+                .get("c1:hash1")
+                .unwrap()
+                .deleted
+        );
     }
 
     #[test]
@@ -1037,7 +1112,9 @@ mod tests {
             },
             ref_counts: Some(BTreeMap::new()),
         };
-        pending.pending_row_record_updates.insert(id_str.clone(), Some(record));
+        pending
+            .pending_row_record_updates
+            .insert(id_str.clone(), Some(record));
         assert!(!pending.is_empty());
         // Now delete
         pending.pending_row_record_updates.insert(id_str, None);

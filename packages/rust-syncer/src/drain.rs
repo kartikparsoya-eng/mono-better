@@ -11,8 +11,8 @@
 //! receiving server breathing room.
 //! `FORCE_DRAIN_PADDING = 2` ms — extra padding on force drain timeout.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Notify;
 
 /// The target (additional) utilization to impose on the server that
@@ -71,8 +71,7 @@ impl DrainCoordinator {
 
         // Assert: next_drain_time should be <= now (should_drain() was true).
         // In Rust we just set it without asserting.
-        self.next_drain_time
-            .store(now + adjusted, Ordering::SeqCst);
+        self.next_drain_time.store(now + adjusted, Ordering::SeqCst);
 
         // Arm the force drain timeout.
         *self.force_drain_armed.lock().unwrap() = true;

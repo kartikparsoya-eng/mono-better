@@ -164,7 +164,10 @@ fn test_register_provisional_apply_init_replace() {
     assert_eq!(conn.state, ConnectionState::Provisional);
     assert_eq!(conn.user.id, Some("user-c1".to_string()));
     assert_eq!(conn.revalidate_at, None);
-    assert_eq!(conn.query_context.header_options.origin, Some("origin-ws1".to_string()));
+    assert_eq!(
+        conn.query_context.header_options.origin,
+        Some("origin-ws1".to_string())
+    );
     assert_eq!(conn.query_context.header_options.cookie, None);
 
     // Apply init metadata
@@ -181,14 +184,30 @@ fn test_register_provisional_apply_init_replace() {
     );
     assert_eq!(init.revision, 1);
     assert_eq!(init.state, ConnectionState::Provisional);
-    assert_eq!(init.query_context.url, Some("https://api.example/query".to_string()));
     assert_eq!(
-        init.query_context.header_options.custom_headers.as_ref().unwrap().get("foo"),
+        init.query_context.url,
+        Some("https://api.example/query".to_string())
+    );
+    assert_eq!(
+        init.query_context
+            .header_options
+            .custom_headers
+            .as_ref()
+            .unwrap()
+            .get("foo"),
         Some(&"bar".to_string())
     );
-    assert_eq!(init.mutate_context.url, Some("https://api.example/push".to_string()));
     assert_eq!(
-        init.mutate_context.header_options.custom_headers.as_ref().unwrap().get("baz"),
+        init.mutate_context.url,
+        Some("https://api.example/push".to_string())
+    );
+    assert_eq!(
+        init.mutate_context
+            .header_options
+            .custom_headers
+            .as_ref()
+            .unwrap()
+            .get("baz"),
         Some(&"qux".to_string())
     );
 
@@ -199,8 +218,16 @@ fn test_register_provisional_apply_init_replace() {
     assert_eq!(conn2.query_context.url, None);
 
     // Old ws is gone
-    assert!(manager.get_connection_context(&selector("c1", "ws1")).is_none());
-    assert!(manager.get_connection_context(&selector("c1", "ws2")).is_some());
+    assert!(
+        manager
+            .get_connection_context(&selector("c1", "ws1"))
+            .is_none()
+    );
+    assert!(
+        manager
+            .get_connection_context(&selector("c1", "ws2"))
+            .is_some()
+    );
 }
 
 #[test]
@@ -214,11 +241,13 @@ fn test_binds_first_validated_user_id_from_client() {
     assert_eq!(result.connection.revalidate_at, None); // no revalidate interval configured
 
     let group = result.group;
-    assert_eq!(group.pinned_user, Some(UserState { id: Some("user-1".to_string()) }));
     assert_eq!(
-        group.background_connection,
-        Some(selector("c1", "ws1"))
+        group.pinned_user,
+        Some(UserState {
+            id: Some("user-1".to_string())
+        })
     );
+    assert_eq!(group.background_connection, Some(selector("c1", "ws1")));
 }
 
 #[test]
@@ -231,9 +260,12 @@ fn test_pins_logged_out_client_group_to_null_user_id() {
         &mut manager,
         "c1",
         "ws1",
-        ConnectionValidation::ServerValidated { validated_user_id: None },
+        ConnectionValidation::ServerValidated {
+            validated_user_id: None,
+        },
     )
-    .unwrap().unwrap();
+    .unwrap()
+    .unwrap();
     assert_eq!(result.connection.state, ConnectionState::Validated);
     assert_eq!(result.connection.user.id, None);
     assert_eq!(result.group.pinned_user, Some(UserState { id: None }));
@@ -242,7 +274,10 @@ fn test_pins_logged_out_client_group_to_null_user_id() {
     let err = manager
         .validate_connection(
             &selector("c2", "ws2"),
-            manager.must_get_connection_context(&selector("c2", "ws2")).unwrap().revision,
+            manager
+                .must_get_connection_context(&selector("c2", "ws2"))
+                .unwrap()
+                .revision,
             &ConnectionValidation::ClientFallback,
         )
         .unwrap_err();
@@ -258,13 +293,17 @@ fn test_rejects_mismatched_validated_user_ids() {
         &mut manager,
         "c1",
         "ws1",
-        ConnectionValidation::ServerValidated { validated_user_id: Some("user-2".to_string()) },
+        ConnectionValidation::ServerValidated {
+            validated_user_id: Some("user-2".to_string()),
+        },
     )
     .unwrap_err();
     assert!(matches!(err, CCMError::Unauthorized(_)));
 
     // Connection should remain provisional
-    let conn = manager.get_connection_context(&selector("c1", "ws1")).unwrap();
+    let conn = manager
+        .get_connection_context(&selector("c1", "ws1"))
+        .unwrap();
     assert_eq!(conn.state, ConnectionState::Provisional);
 
     // Group should not be pinned
@@ -281,11 +320,15 @@ fn test_rejects_mismatched_user_ids_and_keeps_provisional() {
     let err = validate(&mut manager, "c2", "ws2").unwrap_err();
     assert!(matches!(err, CCMError::Unauthorized(_)));
 
-    let conn = manager.get_connection_context(&selector("c2", "ws2")).unwrap();
+    let conn = manager
+        .get_connection_context(&selector("c2", "ws2"))
+        .unwrap();
     assert_eq!(conn.state, ConnectionState::Provisional);
     assert_eq!(
         manager.get_group_state().pinned_user,
-        Some(UserState { id: Some("user-1".to_string()) })
+        Some(UserState {
+            id: Some("user-1".to_string())
+        })
     );
 }
 
@@ -300,7 +343,9 @@ fn test_keeps_user_id_pinned_after_all_connections_removed() {
 
     assert_eq!(
         manager.get_group_state().pinned_user,
-        Some(UserState { id: Some("user-1".to_string()) })
+        Some(UserState {
+            id: Some("user-1".to_string())
+        })
     );
     assert_eq!(manager.get_group_state().background_connection, None);
 
@@ -321,11 +366,16 @@ fn test_allows_multiple_validated_connections_matching_user_ids() {
 
     assert_eq!(
         manager.get_group_state().pinned_user,
-        Some(UserState { id: Some("user-1".to_string()) })
+        Some(UserState {
+            id: Some("user-1".to_string())
+        })
     );
     for (cid, wid) in [("c1", "ws1"), ("c2", "ws2"), ("c3", "ws3")] {
         assert_eq!(
-            manager.get_connection_context(&selector(cid, wid)).unwrap().state,
+            manager
+                .get_connection_context(&selector(cid, wid))
+                .unwrap()
+                .state,
             ConnectionState::Validated
         );
     }
@@ -334,24 +384,34 @@ fn test_allows_multiple_validated_connections_matching_user_ids() {
 #[test]
 fn test_returned_contexts_stay_stable_across_updates() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(10), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(10), None, None, None, Some(now_fn));
 
     let registered = register_with_user(&mut manager, "c1", "ws1", "user-1");
     assert_eq!(registered.revision, 0);
     assert_eq!(registered.state, ConnectionState::Provisional);
     assert_eq!(registered.query_context.url, None);
 
-    let initialized = init_connection(&mut manager, "c1", "ws1", InitConnectionBody {
-        user_query_url: Some("https://api.example/query".to_string()),
-        user_query_headers: Some([("foo".to_string(), "bar".to_string())].into()),
-        ..Default::default()
-    });
+    let initialized = init_connection(
+        &mut manager,
+        "c1",
+        "ws1",
+        InitConnectionBody {
+            user_query_url: Some("https://api.example/query".to_string()),
+            user_query_headers: Some([("foo".to_string(), "bar".to_string())].into()),
+            ..Default::default()
+        },
+    );
     assert_eq!(initialized.revision, 1);
-    assert_eq!(initialized.query_context.url, Some("https://api.example/query".to_string()));
+    assert_eq!(
+        initialized.query_context.url,
+        Some("https://api.example/query".to_string())
+    );
 
-    let validated = validate(&mut manager, "c1", "ws1").unwrap().unwrap().connection;
+    let validated = validate(&mut manager, "c1", "ws1")
+        .unwrap()
+        .unwrap()
+        .connection;
     assert_eq!(validated.revision, 1);
     assert_eq!(validated.state, ConnectionState::Validated);
     assert_eq!(validated.revalidate_at, Some(6000)); // now(1000) + 5s
@@ -363,22 +423,28 @@ fn test_returned_contexts_stay_stable_across_updates() {
     let updated = manager
         .update_auth(
             &selector("c1", "ws1"),
-            &UpdateAuthBody { auth: Some("token-ws1-next".to_string()) },
+            &UpdateAuthBody {
+                auth: Some("token-ws1-next".to_string()),
+            },
         )
         .unwrap();
     assert_eq!(updated.revision, 2);
     assert_eq!(updated.state, ConnectionState::Provisional);
     assert_eq!(updated.revalidate_at, None);
-    assert_eq!(updated.auth, Some(Auth::Opaque { raw: "token-ws1-next".to_string() }));
+    assert_eq!(
+        updated.auth,
+        Some(Auth::Opaque {
+            raw: "token-ws1-next".to_string()
+        })
+    );
     assert!(manager.get_background_connection_context().is_none());
 }
 
 #[test]
 fn test_returned_group_contexts_stay_stable() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(2), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(2), None, None, None, Some(now_fn));
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     register_with_user(&mut manager, "c2", "ws2", "user-1");
@@ -386,7 +452,12 @@ fn test_returned_group_contexts_stay_stable() {
     manager.set_shared_retransform_ready(true);
 
     let initial = manager.get_group_state().clone();
-    assert_eq!(initial.pinned_user, Some(UserState { id: Some("user-1".to_string()) }));
+    assert_eq!(
+        initial.pinned_user,
+        Some(UserState {
+            id: Some("user-1".to_string())
+        })
+    );
     assert_eq!(initial.background_connection, Some(selector("c1", "ws1")));
     assert_eq!(initial.retransform_at, Some(3000)); // now(1000) + 2s
 
@@ -396,13 +467,19 @@ fn test_returned_group_contexts_stay_stable() {
     assert_eq!(manager.get_group_state().retransform_at, Some(4000)); // now(2000) + 2s
 
     manager.defer_maintenance(MaintenanceKind::Revalidate);
-    assert_eq!(manager.get_group_state().maintenance_not_before_at, Some(7000)); // now(2000) + 5s
+    assert_eq!(
+        manager.get_group_state().maintenance_not_before_at,
+        Some(7000)
+    ); // now(2000) + 5s
 
     validate(&mut manager, "c2", "ws2").unwrap();
     manager.close_connection(&selector("c1", "ws1"));
 
     let final_state = manager.get_group_state();
-    assert_eq!(final_state.background_connection, Some(selector("c2", "ws2")));
+    assert_eq!(
+        final_state.background_connection,
+        Some(selector("c2", "ws2"))
+    );
     assert_eq!(final_state.maintenance_not_before_at, Some(7000));
     assert_eq!(final_state.retransform_at, Some(4000));
 }
@@ -410,9 +487,8 @@ fn test_returned_group_contexts_stay_stable() {
 #[test]
 fn test_does_not_demote_when_auth_unchanged_by_value() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(10), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(10), None, None, None, Some(now_fn));
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     validate(&mut manager, "c1", "ws1").unwrap();
@@ -427,7 +503,9 @@ fn test_does_not_demote_when_auth_unchanged_by_value() {
     let updated = manager
         .update_auth(
             &selector("c1", "ws1"),
-            &UpdateAuthBody { auth: Some("token-ws1".to_string()) },
+            &UpdateAuthBody {
+                auth: Some("token-ws1".to_string()),
+            },
         )
         .unwrap();
 
@@ -445,9 +523,8 @@ fn test_does_not_demote_when_auth_unchanged_by_value() {
 #[test]
 fn test_demotes_only_connection_whose_auth_changes() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(10), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(10), None, None, None, Some(now_fn));
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     register_with_user(&mut manager, "c2", "ws2", "user-1");
@@ -458,7 +535,9 @@ fn test_demotes_only_connection_whose_auth_changes() {
     let updated = manager
         .update_auth(
             &selector("c2", "ws2"),
-            &UpdateAuthBody { auth: Some("token-ws2-new".to_string()) },
+            &UpdateAuthBody {
+                auth: Some("token-ws2-new".to_string()),
+            },
         )
         .unwrap();
 
@@ -467,7 +546,9 @@ fn test_demotes_only_connection_whose_auth_changes() {
     assert_eq!(updated.revision, 1);
 
     // c1 should remain validated
-    let c1 = manager.get_connection_context(&selector("c1", "ws1")).unwrap();
+    let c1 = manager
+        .get_connection_context(&selector("c1", "ws1"))
+        .unwrap();
     assert_eq!(c1.state, ConnectionState::Validated);
     assert_eq!(c1.revalidate_at, Some(6000));
 
@@ -511,17 +592,23 @@ fn test_stale_websocket_operations_are_no_ops() {
     assert!(manager.close_connection(&selector("c1", "ws1")).is_none());
 
     // mustGet should error
-    assert!(manager
-        .must_get_connection_context(&selector("c1", "ws1"))
-        .is_err());
+    assert!(
+        manager
+            .must_get_connection_context(&selector("c1", "ws1"))
+            .is_err()
+    );
 
     // updateAuth should error
-    assert!(manager
-        .update_auth(&selector("c1", "ws1"), &UpdateAuthBody { auth: None })
-        .is_err());
+    assert!(
+        manager
+            .update_auth(&selector("c1", "ws1"), &UpdateAuthBody { auth: None })
+            .is_err()
+    );
 
     // ws2 is still there
-    let conn = manager.get_connection_context(&selector("c1", "ws2")).unwrap();
+    let conn = manager
+        .get_connection_context(&selector("c1", "ws2"))
+        .unwrap();
     assert_eq!(conn.state, ConnectionState::Provisional);
 }
 
@@ -541,29 +628,48 @@ fn test_stores_normalized_fetch_context() {
     };
 
     let mut manager = ConnectionContextManager::new(
-        None, None,
-        Some(query_config), Some(push_config),
-        None, None,
+        None,
+        None,
+        Some(query_config),
+        Some(push_config),
+        None,
+        None,
     );
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
 
-    let init = init_connection(&mut manager, "c1", "ws1", InitConnectionBody {
-        user_query_url: Some("https://user.example/query".to_string()),
-        user_query_headers: Some([("x-query-header".to_string(), "query-value".to_string())].into()),
-        user_push_url: Some("https://user.example/push".to_string()),
-        user_push_headers: Some([("x-push-header".to_string(), "push-value".to_string())].into()),
-        ..Default::default()
-    });
+    let init = init_connection(
+        &mut manager,
+        "c1",
+        "ws1",
+        InitConnectionBody {
+            user_query_url: Some("https://user.example/query".to_string()),
+            user_query_headers: Some(
+                [("x-query-header".to_string(), "query-value".to_string())].into(),
+            ),
+            user_push_url: Some("https://user.example/push".to_string()),
+            user_push_headers: Some(
+                [("x-push-header".to_string(), "push-value".to_string())].into(),
+            ),
+            ..Default::default()
+        },
+    );
 
     assert_eq!(init.revision, 1);
-    assert_eq!(init.query_context.url, Some("https://user.example/query".to_string()));
+    assert_eq!(
+        init.query_context.url,
+        Some("https://user.example/query".to_string())
+    );
     assert_eq!(
         init.query_context.header_options.api_key,
         Some("query-api-key".to_string())
     );
     assert_eq!(
-        init.query_context.header_options.custom_headers.unwrap().get("x-query-header"),
+        init.query_context
+            .header_options
+            .custom_headers
+            .unwrap()
+            .get("x-query-header"),
         Some(&"query-value".to_string())
     );
     assert_eq!(
@@ -579,7 +685,10 @@ fn test_stores_normalized_fetch_context() {
         Some("origin-ws1".to_string())
     );
 
-    assert_eq!(init.mutate_context.url, Some("https://user.example/push".to_string()));
+    assert_eq!(
+        init.mutate_context.url,
+        Some("https://user.example/push".to_string())
+    );
     assert_eq!(
         init.mutate_context.header_options.api_key,
         Some("push-api-key".to_string())
@@ -594,19 +703,30 @@ fn test_stores_normalized_fetch_context() {
 fn test_ignores_stale_revision_validation_and_failure() {
     let mut manager = ConnectionContextManager::new(None, None, None, None, None, None);
     let registered = register(&mut manager, "c1", "ws1");
-    let revised = init_connection(&mut manager, "c1", "ws1", InitConnectionBody {
-        user_query_url: Some("https://api.example/query".to_string()),
-        ..Default::default()
-    });
+    let revised = init_connection(
+        &mut manager,
+        "c1",
+        "ws1",
+        InitConnectionBody {
+            user_query_url: Some("https://api.example/query".to_string()),
+            ..Default::default()
+        },
+    );
 
     // Validate with old revision → None
     assert!(validate_with_rev(&mut manager, "c1", "ws1", registered.revision).is_none());
 
     // Fail with old revision → None
-    assert!(manager.fail_connection(&selector("c1", "ws1"), registered.revision).is_none());
+    assert!(
+        manager
+            .fail_connection(&selector("c1", "ws1"), registered.revision)
+            .is_none()
+    );
 
     // Connection should still be there with revised state
-    let conn = manager.get_connection_context(&selector("c1", "ws1")).unwrap();
+    let conn = manager
+        .get_connection_context(&selector("c1", "ws1"))
+        .unwrap();
     assert_eq!(conn.revision, revised.revision);
     assert_eq!(conn.state, ConnectionState::Provisional);
 }
@@ -614,9 +734,8 @@ fn test_ignores_stale_revision_validation_and_failure() {
 #[test]
 fn test_plans_maintenance_with_revalidation_and_retransform() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(2), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(2), None, None, None, Some(now_fn));
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     register_with_user(&mut manager, "c2", "ws2", "user-1");
@@ -678,9 +797,8 @@ fn test_plans_maintenance_with_revalidation_and_retransform() {
 #[test]
 fn test_revalidation_does_not_reset_retransform_but_success_does() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(2), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(2), None, None, None, Some(now_fn));
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     validate(&mut manager, "c1", "ws1").unwrap();
@@ -688,7 +806,10 @@ fn test_revalidation_does_not_reset_retransform_but_success_does() {
 
     // revalidate_at=6000, retransform_at=3000
     assert_eq!(
-        manager.get_connection_context(&selector("c1", "ws1")).unwrap().revalidate_at,
+        manager
+            .get_connection_context(&selector("c1", "ws1"))
+            .unwrap()
+            .revalidate_at,
         Some(6000)
     );
     assert_eq!(manager.get_group_state().retransform_at, Some(3000));
@@ -698,7 +819,10 @@ fn test_revalidation_does_not_reset_retransform_but_success_does() {
 
     // revalidate_at=6500 (1500+5000), retransform_at unchanged (3000)
     assert_eq!(
-        manager.get_connection_context(&selector("c1", "ws1")).unwrap().revalidate_at,
+        manager
+            .get_connection_context(&selector("c1", "ws1"))
+            .unwrap()
+            .revalidate_at,
         Some(6500)
     );
     assert_eq!(manager.get_group_state().retransform_at, Some(3000));
@@ -714,9 +838,8 @@ fn test_revalidation_does_not_reset_retransform_but_success_does() {
 #[test]
 fn test_defers_all_scheduled_maintenance() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(2), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(2), None, None, None, Some(now_fn));
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     register_with_user(&mut manager, "c2", "ws2", "user-1");
@@ -726,7 +849,10 @@ fn test_defers_all_scheduled_maintenance() {
 
     set_now(&now, 3000);
     manager.defer_maintenance(MaintenanceKind::Retransform);
-    assert_eq!(manager.get_group_state().maintenance_not_before_at, Some(5000));
+    assert_eq!(
+        manager.get_group_state().maintenance_not_before_at,
+        Some(5000)
+    );
 
     let plan = manager.plan_maintenance();
     assert_eq!(plan.due_revalidations.len(), 0);
@@ -735,7 +861,10 @@ fn test_defers_all_scheduled_maintenance() {
 
     set_now(&now, 6000);
     manager.defer_maintenance(MaintenanceKind::Revalidate);
-    assert_eq!(manager.get_group_state().maintenance_not_before_at, Some(11000));
+    assert_eq!(
+        manager.get_group_state().maintenance_not_before_at,
+        Some(11000)
+    );
 
     let plan = manager.plan_maintenance();
     assert_eq!(plan.earliest_deadline_at, Some(11000));
@@ -751,9 +880,8 @@ fn test_defers_all_scheduled_maintenance() {
 #[test]
 fn test_does_not_schedule_retransform_until_ready() {
     let (now, now_fn) = make_now_fn();
-    let mut manager = ConnectionContextManager::new(
-        Some(5), Some(2), None, None, None, Some(now_fn),
-    );
+    let mut manager =
+        ConnectionContextManager::new(Some(5), Some(2), None, None, None, Some(now_fn));
 
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     validate(&mut manager, "c1", "ws1").unwrap();
@@ -779,11 +907,29 @@ fn test_does_not_schedule_retransform_until_ready() {
 
 #[test]
 fn test_auth_equals() {
-    let opaque1 = Auth::Opaque { raw: "token1".to_string() };
-    let opaque2 = Auth::Opaque { raw: "token1".to_string() };
-    let opaque3 = Auth::Opaque { raw: "token2".to_string() };
-    let jwt1 = Auth::Jwt { raw: "jwt1".to_string(), decoded: JwtPayload { sub: Some("u1".to_string()), iat: Some(1) } };
-    let jwt2 = Auth::Jwt { raw: "jwt1".to_string(), decoded: JwtPayload { sub: Some("u1".to_string()), iat: Some(1) } };
+    let opaque1 = Auth::Opaque {
+        raw: "token1".to_string(),
+    };
+    let opaque2 = Auth::Opaque {
+        raw: "token1".to_string(),
+    };
+    let opaque3 = Auth::Opaque {
+        raw: "token2".to_string(),
+    };
+    let jwt1 = Auth::Jwt {
+        raw: "jwt1".to_string(),
+        decoded: JwtPayload {
+            sub: Some("u1".to_string()),
+            iat: Some(1),
+        },
+    };
+    let jwt2 = Auth::Jwt {
+        raw: "jwt1".to_string(),
+        decoded: JwtPayload {
+            sub: Some("u1".to_string()),
+            iat: Some(1),
+        },
+    };
 
     assert!(auth_equals(Some(&opaque1), Some(&opaque2))); // same value, different object
     assert!(!auth_equals(Some(&opaque1), Some(&opaque3))); // different raw
@@ -796,27 +942,43 @@ fn test_auth_equals() {
 
 #[test]
 fn test_resolve_auth_opaque_unchanged() {
-    let prev = Auth::Opaque { raw: "token1".to_string() };
+    let prev = Auth::Opaque {
+        raw: "token1".to_string(),
+    };
     let result = resolve_auth(Some(&prev), Some("user-1"), Some("token1"), None).unwrap();
     assert_eq!(result, Some(prev));
 }
 
 #[test]
 fn test_resolve_auth_opaque_changed() {
-    let prev = Auth::Opaque { raw: "token1".to_string() };
+    let prev = Auth::Opaque {
+        raw: "token1".to_string(),
+    };
     let result = resolve_auth(Some(&prev), Some("user-1"), Some("token2"), None).unwrap();
-    assert_eq!(result, Some(Auth::Opaque { raw: "token2".to_string() }));
+    assert_eq!(
+        result,
+        Some(Auth::Opaque {
+            raw: "token2".to_string()
+        })
+    );
 }
 
 #[test]
 fn test_resolve_auth_no_previous() {
     let result = resolve_auth(None, Some("user-1"), Some("token1"), None).unwrap();
-    assert_eq!(result, Some(Auth::Opaque { raw: "token1".to_string() }));
+    assert_eq!(
+        result,
+        Some(Auth::Opaque {
+            raw: "token1".to_string()
+        })
+    );
 }
 
 #[test]
 fn test_resolve_auth_clearing_when_authenticated() {
-    let prev = Auth::Opaque { raw: "token1".to_string() };
+    let prev = Auth::Opaque {
+        raw: "token1".to_string(),
+    };
     let err = resolve_auth(Some(&prev), Some("user-1"), None, None).unwrap_err();
     assert!(matches!(err, CCMError::Unauthorized(_)));
 }

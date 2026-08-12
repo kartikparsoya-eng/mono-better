@@ -63,9 +63,7 @@ pub fn cmp_versions(a: &NullableCVRVersion, b: &NullableCVRVersion) -> Ordering 
         (Some(a), Some(b)) => a
             .state_version
             .cmp(&b.state_version)
-            .then_with(|| {
-                (a.config_version.unwrap_or(0)).cmp(&b.config_version.unwrap_or(0))
-            }),
+            .then_with(|| (a.config_version.unwrap_or(0)).cmp(&b.config_version.unwrap_or(0))),
     }
 }
 

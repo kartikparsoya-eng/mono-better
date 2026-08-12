@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::types::*;
-use crate::version::{cmp_versions, version_string, CVRVersion, NullableCVRVersion};
+use crate::version::{CVRVersion, NullableCVRVersion, cmp_versions, version_string};
 use std::cmp::Ordering;
 
 const PART_COUNT_FLUSH_THRESHOLD: usize = 100;
@@ -80,11 +80,17 @@ pub struct PokePartBody {
     pub poke_id: String,
     #[serde(rename = "gotQueriesPatch", skip_serializing_if = "Option::is_none")]
     pub got_queries_patch: Option<Vec<QueryPatchEntry>>,
-    #[serde(rename = "desiredQueriesPatches", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "desiredQueriesPatches",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub desired_queries_patches: Option<BTreeMap<String, Vec<QueryPatchEntry>>>,
     #[serde(rename = "rowsPatch", skip_serializing_if = "Option::is_none")]
     pub rows_patch: Option<Vec<RowPatchOp>>,
-    #[serde(rename = "lastMutationIDChanges", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "lastMutationIDChanges",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub last_mutation_id_changes: Option<BTreeMap<String, i64>>,
     #[serde(rename = "mutationsPatch", skip_serializing_if = "Option::is_none")]
     pub mutations_patch: Option<Vec<MutationPatchEntry>>,
@@ -159,7 +165,9 @@ impl PokeHandler {
                                 dqp.entry(cid.clone()).or_default().push(entry);
                             }
                             None => {
-                                body.got_queries_patch.get_or_insert_with(Vec::new).push(entry);
+                                body.got_queries_patch
+                                    .get_or_insert_with(Vec::new)
+                                    .push(entry);
                             }
                         }
                     }
@@ -176,7 +184,9 @@ impl PokeHandler {
                                 dqp.entry(cid.clone()).or_default().push(entry);
                             }
                             None => {
-                                body.got_queries_patch.get_or_insert_with(Vec::new).push(entry);
+                                body.got_queries_patch
+                                    .get_or_insert_with(Vec::new)
+                                    .push(entry);
                             }
                         }
                     }
@@ -212,11 +222,10 @@ impl PokeHandler {
     pub fn cancel(&self) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         if state.started {
-            self.downstream
-                .push(serde_json::json!([
-                    "pokeEnd",
-                    {"pokeID": state.poke_id, "cookie": "", "cancel": true}
-                ]))?;
+            self.downstream.push(serde_json::json!([
+                "pokeEnd",
+                {"pokeID": state.poke_id, "cookie": "", "cancel": true}
+            ]))?;
         }
         self.release_chain(&mut state);
         Ok(())
@@ -234,11 +243,10 @@ impl PokeHandler {
             }
             drop(base);
             self.acquire_chain(&mut state);
-            self.downstream
-                .push(serde_json::json!([
-                    "pokeStart",
-                    {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
-                ]))?;
+            self.downstream.push(serde_json::json!([
+                "pokeStart",
+                {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
+            ]))?;
             state.started = true;
         } else {
             let base = self.base_version.lock().unwrap();
@@ -252,11 +260,10 @@ impl PokeHandler {
         }
 
         self.flush_body(&mut state)?;
-        self.downstream
-            .push(serde_json::json!([
-                "pokeEnd",
-                {"pokeID": state.poke_id, "cookie": cookie}
-            ]))?;
+        self.downstream.push(serde_json::json!([
+            "pokeEnd",
+            {"pokeID": state.poke_id, "cookie": cookie}
+        ]))?;
 
         let mut base = self.base_version.lock().unwrap();
         *base = Some(final_version);
@@ -269,11 +276,10 @@ impl PokeHandler {
     fn ensure_body(&self, state: &mut PokeState) -> Result<(), String> {
         if !state.started {
             self.acquire_chain(state);
-            self.downstream
-                .push(serde_json::json!([
-                    "pokeStart",
-                    {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
-                ]))?;
+            self.downstream.push(serde_json::json!([
+                "pokeStart",
+                {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
+            ]))?;
             state.started = true;
         }
         if state.body.is_none() {
@@ -353,15 +359,15 @@ impl PokeHandler {
                     .get("mutationID")
                     .and_then(|v| v.as_i64())
                     .ok_or("mutationID missing in mutation row")?;
-                let result = normalized
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let result = normalized.get("result").cloned().unwrap_or(Value::Null);
 
                 patches.push(MutationPatchEntry {
                     op: "put".to_string(),
                     mutation: Some(MutationPatchMutation {
-                        id: MutationPatchId { client_id, id: mutation_id },
+                        id: MutationPatchId {
+                            client_id,
+                            id: mutation_id,
+                        },
                         result,
                     }),
                     id: None,
@@ -383,7 +389,10 @@ impl PokeHandler {
                 patches.push(MutationPatchEntry {
                     op: "del".to_string(),
                     mutation: None,
-                    id: Some(MutationPatchId { client_id, id: mutation_id }),
+                    id: Some(MutationPatchId {
+                        client_id,
+                        id: mutation_id,
+                    }),
                 });
             }
         }
@@ -543,14 +552,16 @@ impl ClientHandler {
     ) -> Result<(), String> {
         let mut body = serde_json::Map::new();
         if !client_ids.is_empty() {
-            body.insert("clientIDs".to_string(), Value::Array(
-                client_ids.into_iter().map(Value::String).collect(),
-            ));
+            body.insert(
+                "clientIDs".to_string(),
+                Value::Array(client_ids.into_iter().map(Value::String).collect()),
+            );
         }
         if !client_group_ids.is_empty() {
-            body.insert("clientGroupIDs".to_string(), Value::Array(
-                client_group_ids.into_iter().map(Value::String).collect(),
-            ));
+            body.insert(
+                "clientGroupIDs".to_string(),
+                Value::Array(client_group_ids.into_iter().map(Value::String).collect()),
+            );
         }
         self.downstream
             .push(serde_json::json!(["deleteClients", body]))
@@ -567,7 +578,9 @@ impl ClientHandler {
     pub fn send_inspect_response(&self, response: Value) {
         // Fire-and-forget like TS. On the actor thread, push is sync.
         // If push fails, there's nothing to do — the WS is already broken.
-        let _ = self.downstream.push(serde_json::json!(["inspect", response]));
+        let _ = self
+            .downstream
+            .push(serde_json::json!(["inspect", response]));
     }
 
     /// Send a query transform failed error to the client.
@@ -670,7 +683,10 @@ mod tests {
             "cg1",
             "client1",
             "ws1",
-            &ShardID { app_id: "app".to_string(), shard_num: 0 },
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
             None,
             Arc::new(sink),
         );
@@ -845,11 +861,12 @@ mod tests {
             state_version: "v3".to_string(),
             config_version: None,
         });
-        poke2.end(CVRVersion {
-            state_version: "v3".to_string(),
-            config_version: Some(1),
-        })
-        .unwrap();
+        poke2
+            .end(CVRVersion {
+                state_version: "v3".to_string(),
+                config_version: Some(1),
+            })
+            .unwrap();
     }
 
     #[test]

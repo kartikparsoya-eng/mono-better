@@ -89,7 +89,8 @@ fn test_poke_handler_normal_lifecycle() {
     poke.end(rust_cvr::version::CVRVersion {
         state_version: "1".to_string(),
         config_version: Some(1),
-    }).unwrap();
+    })
+    .unwrap();
 
     // Should have sent pokeStart and pokeEnd
     let messages = sink.messages.lock().unwrap();
@@ -144,7 +145,8 @@ fn test_client_handler_start_poke_noop_when_base_equal() {
     poke.end(rust_cvr::version::CVRVersion {
         state_version: "1".to_string(),
         config_version: Some(1),
-    }).unwrap();
+    })
+    .unwrap();
 
     // No messages should have been sent
     let messages = sink.messages.lock().unwrap();
@@ -192,10 +194,9 @@ fn test_client_handler_close() {
 fn test_client_handler_send_delete_clients() {
     let (handler, sink) = make_handler();
 
-    handler.send_delete_clients(
-        vec!["client-a".to_string(), "client-b".to_string()],
-        vec![],
-    ).unwrap();
+    handler
+        .send_delete_clients(vec!["client-a".to_string(), "client-b".to_string()], vec![])
+        .unwrap();
 
     let messages = sink.messages.lock().unwrap();
     assert_eq!(messages.len(), 1);
@@ -208,11 +209,11 @@ fn test_client_handler_send_delete_clients() {
 fn test_client_handler_send_query_transform_application_errors() {
     let (handler, sink) = make_handler();
 
-    let errors = vec![
-        serde_json::json!({"id": "q1", "error": "bad"}),
-    ];
+    let errors = vec![serde_json::json!({"id": "q1", "error": "bad"})];
 
-    handler.send_query_transform_application_errors(errors).unwrap();
+    handler
+        .send_query_transform_application_errors(errors)
+        .unwrap();
 
     let messages = sink.messages.lock().unwrap();
     assert_eq!(messages.len(), 1);

@@ -10,8 +10,8 @@
 //! `DirectWebSocketSink`.
 
 use crate::protocol::{
-    self, connected_message, error_message, pong_message, ErrorBody, ErrorKind,
-    ErrorOrigin, PROTOCOL_VERSION, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL,
+    self, ErrorBody, ErrorKind, ErrorOrigin, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION,
+    connected_message, error_message, pong_message,
 };
 use crate::ws_sink::DirectWebSocketSink;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -116,7 +116,11 @@ impl Connection {
             let error = ErrorBody::version_not_supported(format!(
                 "server is at sync protocol v{PROTOCOL_VERSION} and does not support v{}. The {} must be updated to a newer release.",
                 self.protocol_version,
-                if self.protocol_version > PROTOCOL_VERSION { "server" } else { "client" }
+                if self.protocol_version > PROTOCOL_VERSION {
+                    "server"
+                } else {
+                    "client"
+                }
             ));
             self.close_with_error(error);
             false
@@ -202,16 +206,11 @@ impl Connection {
         );
     }
 
-    /// Close the connection with an error.
-    ///
-    /// Port of `Connection.#closeWithError()`.
-    fn close_with_error(&self, error: ErrorBody) {
+    /// Close the connection with an error (TS `Connection.#closeWithError` /
+    /// `client.fail`): send the error downstream, then close.
+    pub fn close_with_error(&self, error: ErrorBody) {
         self.send_error(error.clone());
-        self.close(&format!(
-            "{:?}: {}",
-            error.kind(),
-            error.message()
-        ));
+        self.close(&format!("{:?}: {}", error.kind(), error.message()));
     }
 
     /// Close the connection.
@@ -377,4 +376,68 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────────────
+//
+// Port of the log-level classification cases from TS `connection.test.ts`
+// (`sendError` log level: ClientNotFound/TransformFailed → warn, compressed-
+// socket-closed → warn, internal → error, protocol errors → info).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::BasicErrorBody;
+
+    fn basic(kind: ErrorKind, message: &str) -> ErrorBody {
+        ErrorBody::Basic(BasicErrorBody {
+            kind,
+            message: message.to_string(),
+            origin: None,
+        })
+    }
+
+    #[test]
+    fn client_not_found_and_transform_failed_are_warn() {
+        assert_eq!(
+            classify_error_log_level(&ErrorBody::client_not_found("gone")),
+            LogLevel::Warn
+        );
+        assert_eq!(
+            classify_error_log_level(&basic(ErrorKind::TransformFailed, "bad transform")),
+            LogLevel::Warn
+        );
+    }
+
+    #[test]
+    fn internal_errors_are_error_level() {
+        assert_eq!(
+            classify_error_log_level(&ErrorBody::internal("boom")),
+            LogLevel::Error
+        );
+    }
+
+    #[test]
+    fn protocol_errors_default_to_info() {
+        assert_eq!(
+            classify_error_log_level(&ErrorBody::invalid_message("nope")),
+            LogLevel::Info
+        );
+        assert_eq!(
+            classify_error_log_level(&ErrorBody::version_not_supported("old")),
+            LogLevel::Info
+        );
+    }
+
+    #[test]
+    fn compressed_socket_close_is_downgraded_to_warn() {
+        // A transient "socket was closed while data was being compressed" is a
+        // benign disconnect, not an internal error — downgraded to warn even
+        // though its kind would otherwise be Internal.
+        let err = basic(
+            ErrorKind::Internal,
+            "The socket was closed while data was being compressed",
+        );
+        assert_eq!(classify_error_log_level(&err), LogLevel::Warn);
+    }
 }

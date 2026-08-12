@@ -18,14 +18,14 @@
 //!   + `SET LOCAL idle_in_transaction_session_timeout = 60000`.
 //! - Catchup tx: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` + same SET LOCALs.
 
-use crate::row_key::{row_id_string, RowID};
-use crate::version::{version_from_string, version_string, CVRVersion, NullableCVRVersion};
+use crate::row_key::{RowID, row_id_string};
+use crate::version::{CVRVersion, NullableCVRVersion, version_from_string, version_string};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch, Mutex as TokioMutex};
-use futures_util::StreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{Mutex as TokioMutex, mpsc, watch};
 
 /// Mirrors TS `RowRecord` from `schema/types.ts`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,20 +104,17 @@ pub fn rows_row_to_row_record(row: &RowsRow) -> RowRecord {
         },
         row_version: row.row_version.clone(),
         patch_version: version_from_string(&row.patch_version),
-        ref_counts: row.ref_counts.as_ref().map(|v| {
-            match v {
-                serde_json::Value::Object(m) => {
-                    m.iter()
-                        .map(|(k, v)| {
-                            let n = v.as_i64().unwrap_or_else(|| {
-                                panic!("refCount value is not an integer: {:?}", v)
-                            });
-                            (k.clone(), n)
-                        })
-                        .collect()
-                }
-                _ => panic!("refCounts is not an object: {:?}", v),
-            }
+        ref_counts: row.ref_counts.as_ref().map(|v| match v {
+            serde_json::Value::Object(m) => m
+                .iter()
+                .map(|(k, v)| {
+                    let n = v
+                        .as_i64()
+                        .unwrap_or_else(|| panic!("refCount value is not an integer: {:?}", v));
+                    (k.clone(), n)
+                })
+                .collect(),
+            _ => panic!("refCounts is not an object: {:?}", v),
         }),
     }
 }
@@ -125,16 +122,13 @@ pub fn rows_row_to_row_record(row: &RowsRow) -> RowRecord {
 /// Converts a `RowRecord` (cache form) to a `RowsRow` (DB form).
 /// Mirrors TS `rowRecordToRowsRow` from `schema/cvr.ts`.
 pub fn row_record_to_rows_row(client_group_id: &str, record: &RowRecord) -> RowsRow {
-    let ref_counts = record
-        .ref_counts
-        .as_ref()
-        .map(|rc| {
-            let map: serde_json::Map<String, serde_json::Value> = rc
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::Number((*v).into())))
-                .collect();
-            serde_json::Value::Object(map)
-        });
+    let ref_counts = record.ref_counts.as_ref().map(|rc| {
+        let map: serde_json::Map<String, serde_json::Value> = rc
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::Number((*v).into())))
+            .collect();
+        serde_json::Value::Object(map)
+    });
 
     RowsRow {
         client_group_id: client_group_id.to_string(),
@@ -646,10 +640,7 @@ async fn flush_loop(
                 is_flushing.store(false, Ordering::SeqCst);
                 return;
             }
-            (
-                state.pending.clone(),
-                state.pending_rows_version.clone(),
-            )
+            (state.pending.clone(), state.pending_rows_version.clone())
         };
 
         let version = match &pending_version {
@@ -777,7 +768,8 @@ async fn flush_one_iteration(
 
     // 3. Bulk insert via json_to_recordset (matches TS exactly).
     if !inserts.is_empty() {
-        let inserts_json = serde_json::to_value(&inserts).unwrap_or(serde_json::Value::Array(vec![]));
+        let inserts_json =
+            serde_json::to_value(&inserts).unwrap_or(serde_json::Value::Array(vec![]));
         let bulk_sql = format!(
             r#"INSERT INTO "{}"."rows"(
       "clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts"
@@ -884,9 +876,7 @@ async fn catchup_task_inner(
         .await
         .map_err(|e| format!("checkVersion query: {}", e))?;
 
-    let actual_version = version_row
-        .map(|(v,)| v)
-        .unwrap_or_default(); // EMPTY_CVR_VERSION.stateVersion = ""
+    let actual_version = version_row.map(|(v,)| v).unwrap_or_default(); // EMPTY_CVR_VERSION.stateVersion = ""
 
     if actual_version != current_str {
         // Version mismatch — abort (matches TS checkVersion throwing CVRVersionMismatch).
@@ -916,7 +906,11 @@ async fn catchup_task_inner(
             Ok(db_row) => {
                 chunk.push(db_row.into());
                 if chunk.len() >= CATCHUP_PAGE_SIZE {
-                    if page_sender.send(Ok(std::mem::take(&mut chunk))).await.is_err() {
+                    if page_sender
+                        .send(Ok(std::mem::take(&mut chunk)))
+                        .await
+                        .is_err()
+                    {
                         // Consumer dropped — abort.
                         drop(stream);
                         let _ = sqlx::query("ROLLBACK").execute(&mut *tx).await;
@@ -990,7 +984,10 @@ mod tests {
         assert_eq!(record.id.table, "users");
         assert_eq!(record.row_version, "v1");
         assert_eq!(record.patch_version.state_version, "01");
-        assert_eq!(record.ref_counts, Some(HashMap::from([("q1".to_string(), 1)])));
+        assert_eq!(
+            record.ref_counts,
+            Some(HashMap::from([("q1".to_string(), 1)]))
+        );
     }
 
     #[test]

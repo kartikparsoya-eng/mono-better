@@ -5,8 +5,8 @@
 //! - `packages/zero-protocol/src/error.test.ts` — ProtocolError properties
 //! - `packages/zero-protocol/src/protocol-version.test.ts` — version constants
 
-use rust_syncer::protocol::*;
 use base64::Engine as _;
+use rust_syncer::protocol::*;
 
 // ─── protocol-version.test.ts ──────────────────────────────────────────────
 
@@ -129,7 +129,10 @@ fn test_sec_protocols_round_trip_random() {
     for (init_msg, auth) in &test_cases {
         let encoded = encode_sec_protocols(*init_msg, *auth);
         let decoded = decode_sec_protocols(&encoded).unwrap();
-        assert_eq!(decoded.init_connection_message.is_some(), init_msg.is_some());
+        assert_eq!(
+            decoded.init_connection_message.is_some(),
+            init_msg.is_some()
+        );
         assert_eq!(decoded.auth_token.as_deref(), *auth);
     }
 }
@@ -184,9 +187,10 @@ fn test_backoff_error_body_serialization() {
         message: "Reconnect required".to_string(),
         min_backoff_ms: Some(1000),
         max_backoff_ms: Some(30000),
-        reconnect_params: Some(serde_json::Map::from_iter(vec![
-            ("key".to_string(), serde_json::Value::String("value".to_string())),
-        ])),
+        reconnect_params: Some(serde_json::Map::from_iter(vec![(
+            "key".to_string(),
+            serde_json::Value::String("value".to_string()),
+        )])),
         origin: Some(ErrorOrigin::ZeroCache),
     });
     let json = serde_json::to_value(&body).unwrap();
@@ -233,10 +237,22 @@ fn test_error_kind_all_variants_serialize() {
     let kinds = vec![
         (ErrorKind::AuthInvalidated, "AuthInvalidated"),
         (ErrorKind::ClientNotFound, "ClientNotFound"),
-        (ErrorKind::InvalidConnectionRequest, "InvalidConnectionRequest"),
-        (ErrorKind::InvalidConnectionRequestBaseCookie, "InvalidConnectionRequestBaseCookie"),
-        (ErrorKind::InvalidConnectionRequestLastMutationID, "InvalidConnectionRequestLastMutationID"),
-        (ErrorKind::InvalidConnectionRequestClientDeleted, "InvalidConnectionRequestClientDeleted"),
+        (
+            ErrorKind::InvalidConnectionRequest,
+            "InvalidConnectionRequest",
+        ),
+        (
+            ErrorKind::InvalidConnectionRequestBaseCookie,
+            "InvalidConnectionRequestBaseCookie",
+        ),
+        (
+            ErrorKind::InvalidConnectionRequestLastMutationID,
+            "InvalidConnectionRequestLastMutationID",
+        ),
+        (
+            ErrorKind::InvalidConnectionRequestClientDeleted,
+            "InvalidConnectionRequestClientDeleted",
+        ),
         (ErrorKind::InvalidMessage, "InvalidMessage"),
         (ErrorKind::InvalidPush, "InvalidPush"),
         (ErrorKind::PushFailed, "PushFailed"),
@@ -247,7 +263,10 @@ fn test_error_kind_all_variants_serialize() {
         (ErrorKind::TransformFailed, "TransformFailed"),
         (ErrorKind::Unauthorized, "Unauthorized"),
         (ErrorKind::VersionNotSupported, "VersionNotSupported"),
-        (ErrorKind::SchemaVersionNotSupported, "SchemaVersionNotSupported"),
+        (
+            ErrorKind::SchemaVersionNotSupported,
+            "SchemaVersionNotSupported",
+        ),
         (ErrorKind::ServerOverloaded, "ServerOverloaded"),
         (ErrorKind::Internal, "Internal"),
     ];
@@ -280,7 +299,10 @@ fn test_error_reason_all_variants_serialize() {
         (ErrorReason::Database, "database"),
         (ErrorReason::Parse, "parse"),
         (ErrorReason::OutOfOrderMutation, "oooMutation"),
-        (ErrorReason::UnsupportedPushVersion, "unsupportedPushVersion"),
+        (
+            ErrorReason::UnsupportedPushVersion,
+            "unsupportedPushVersion",
+        ),
         (ErrorReason::Internal, "internal"),
         (ErrorReason::Http, "http"),
         (ErrorReason::Timeout, "timeout"),
@@ -326,16 +348,32 @@ fn test_parse_all_upstream_message_types() {
         (r#"["ping",{}]"#, "ping"),
         (r#"["closeConnection",[]]"#, "closeConnection"),
         (r#"["deleteClients",{"clientIDs":["c1"]}]"#, "deleteClients"),
-        (r#"["changeDesiredQueries",{"desiredQueriesPatch":[]}]"#, "changeDesiredQueries"),
+        (
+            r#"["changeDesiredQueries",{"desiredQueriesPatch":[]}]"#,
+            "changeDesiredQueries",
+        ),
         (r#"["updateAuth",{"auth":"token"}]"#, "updateAuth"),
-        (r#"["ackMutationResponses",{"id":1,"clientID":"c1"}]"#, "ackMutationResponses"),
-        (r#"["initConnection",{"desiredQueriesPatch":[]}]"#, "initConnection"),
-        (r#"["pull",{"clientGroupID":"g1","cookie":null,"requestID":"r1"}]"#, "pull"),
+        (
+            r#"["ackMutationResponses",{"id":1,"clientID":"c1"}]"#,
+            "ackMutationResponses",
+        ),
+        (
+            r#"["initConnection",{"desiredQueriesPatch":[]}]"#,
+            "initConnection",
+        ),
+        (
+            r#"["pull",{"clientGroupID":"g1","cookie":null,"requestID":"r1"}]"#,
+            "pull",
+        ),
     ];
 
     for (json, expected_type) in test_cases {
         let result = parse_upstream(json);
-        assert!(result.is_ok(), "Failed to parse {expected_type}: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse {expected_type}: {:?}",
+            result.err()
+        );
     }
 }
 
@@ -421,7 +459,7 @@ fn test_parse_invalid_json_errors() {
 
 // ─── Connect params ────────────────────────────────────────────────────────
 
-use rust_syncer::connect_params::{get_connect_params, extract_protocol_version};
+use rust_syncer::connect_params::{extract_protocol_version, get_connect_params};
 
 #[test]
 fn test_extract_protocol_version_from_path() {
@@ -446,7 +484,14 @@ fn test_connect_params_full() {
     let sec = make_sec_protocol(Some("testtoken"));
     let url = "http://localhost/sync/v51/connect?clientID=c1&clientGroupID=cg1&ts=1234567890&lmid=42&wsid=ws-1&userID=u1&debugPerf=true";
 
-    let params = get_connect_params(51, url, Some(&sec), Some("cookie=abc"), Some("https://example.com")).unwrap();
+    let params = get_connect_params(
+        51,
+        url,
+        Some(&sec),
+        Some("cookie=abc"),
+        Some("https://example.com"),
+    )
+    .unwrap();
 
     assert_eq!(params.protocol_version, 51);
     assert_eq!(params.client_id, "c1");
@@ -514,38 +559,27 @@ fn test_connect_params_with_optional_fields() {
     assert_eq!(params.ws_id, "ws-2");
 }
 
-// ─── TODO: Port these tests in later phases ────────────────────────────────
+// ─── TS test port status ────────────────────────────────────────────────────
 //
-// The following TS tests require Rust implementations that don't exist yet:
+// PORTED (unit-testable Rust equivalents now exist):
+// - connection.test.ts log-level classification → `connection.rs` tests
+//   (ClientNotFound/TransformFailed → warn, compressed-socket-close → warn,
+//   internal → error, protocol → info).
+// - syncer-ws-message-handler.test.ts push routing / deleteClients /
+//   ackMutationResponses forwarding → `tests/phase2_test.rs`.
+// - inspect-handler.test.ts auth gate + version → `router.rs`
+//   `inspect_auth_gate_then_version`.
+// - JWT auth validation (secret/jwk/jwks, sub match, opaque, fail-closed) →
+//   `auth.rs` tests.
 //
-// Phase 2 (Connection + Message Handler):
-// - connection.test.ts: send/sendError behavior, log level classification
-//   (ClientNotFound → warn, TransformFailed → warn, EPIPE → warn, etc.)
-// - syncer-ws-message-handler.test.ts: auth handling, push routing,
-//   deleteClients forwarding, ackMutationResponses forwarding
-//
-// Phase 3 (Connection Context Manager):
-// - connection-context-manager.test.ts (866 lines, 19 tests):
-//   - register/init/validate/fail/close connection
-//   - group auth pinning (userID mismatch rejection)
-//   - background connection selection (sticky until disappears)
-//   - maintenance planning (revalidation + retransform deadlines)
-//   - defer maintenance
-//   - stale revision handling
-//
-// Phase 4 (ViewSyncer):
-// - client-handler.test.ts (849 lines, 6 tests):
-//   - no-op and canceled pokes
-//   - poke non-interleaving guard
-//   - multi-client poke handler
-//   - error on unsafe integer
-//   - ensureSafeJSON
-// - inspect-handler.test.ts (102 lines)
-// - view-syncer.pg.test.ts (large integration tests)
-//
-// Phase 5 (Process Integration):
-// - syncer.test.ts (large integration tests):
-//   - JWT auth validation (too many options, missing options)
-//   - connection hijacking prevention
-//   - ref counting (mutagen/pusher lifecycle)
-//   - connection telemetry
+// STILL PENDING — these depend on subsystems intentionally left as placeholders
+// or on live infrastructure (tracked with the PG test harness):
+// - connection-context-manager.test.ts: background-connection selection +
+//   maintenance planning (revalidation/retransform deadlines, defer, stale
+//   revision). The Rust ConnContextManager is a placeholder (auth state lives on
+//   the CG thread); these need the full CCM port before they can be ported.
+// - client-handler.test.ts poke non-interleaving / ensureSafeJSON: exercise
+//   `rust-cvr`'s ClientHandler (covered by that crate's own suite).
+// - view-syncer.pg.test.ts / syncer.test.ts: large integration tests needing a
+//   live Postgres + replica (the planned PG harness); e.g. connection hijacking
+//   prevention + ref counting are integration-level.

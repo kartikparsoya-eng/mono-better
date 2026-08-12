@@ -12,8 +12,8 @@
 //!
 //! See `packages/zero-cache/docs/rust-cvr-port/` for the rollout plan.
 
-pub mod client_handler;
 pub mod change_processor;
+pub mod client_handler;
 pub mod cvr;
 pub mod hash;
 pub mod row_key;

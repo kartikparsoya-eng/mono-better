@@ -6,8 +6,8 @@
 //!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
-use crate::hash::{h128, h32, h64};
-use crate::row_key::{row_id_hash, row_id_string_cached, RowID};
+use crate::hash::{h32, h64, h128};
+use crate::row_key::{RowID, row_id_hash, row_id_string_cached};
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
 use serde_json::Value;
 

@@ -219,14 +219,9 @@ pub enum Patch {
 #[serde(tag = "op")]
 pub enum RowPatch {
     #[serde(rename = "put")]
-    Put {
-        id: RowID,
-        contents: Value,
-    },
+    Put { id: RowID, contents: Value },
     #[serde(rename = "del")]
-    Del {
-        id: RowID,
-    },
+    Del { id: RowID },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
