@@ -23,6 +23,7 @@ import {
   childWorker,
   parentWorker,
   singleProcessMode,
+  wrap,
   type Worker,
 } from '../types/processes.ts';
 import type {Subscription} from '../types/subscription.ts';
@@ -165,8 +166,11 @@ export default async function runWorker(
       stdio: ['inherit', 'pipe', 'inherit'],
     }) as ChildProcess;
 
-    // Wrap ChildProcess into a Worker-compatible interface.
-    const emitter = new EventEmitter() as Worker;
+    // Wrap ChildProcess into a Worker-compatible interface. `wrap` adds the
+    // onMessageType/onceMessageType methods the ProcessManager relies on (e.g.
+    // to await the 'ready' message); messages are emitted on `raw` below.
+    const raw = new EventEmitter();
+    const emitter = wrap(raw) as unknown as Worker;
     emitter.kill = (signal?: string) => child.kill(signal as any);
     (emitter as any).pid = child.pid;
     // The dispatcher hands off a client upgrade via `send(handoffMsg, socket)`.
@@ -191,7 +195,7 @@ export default async function runWorker(
         if (trimmed.startsWith('[')) {
           try {
             const msg = JSON.parse(trimmed);
-            emitter.emit('message', msg);
+            raw.emit('message', msg);
           } catch {
             // Non-JSON output, ignore
           }
@@ -199,10 +203,10 @@ export default async function runWorker(
       }
     });
     child.on('exit', (code, signal) => {
-      emitter.emit('close', code, signal);
+      raw.emit('close', code, signal);
     });
     child.on('error', err => {
-      emitter.emit('error', err);
+      raw.emit('error', err);
     });
 
     return processes.addWorker(emitter, 'user-facing', `rust-syncer (${id})`);

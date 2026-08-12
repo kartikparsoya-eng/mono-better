@@ -107,7 +107,7 @@ export interface Worker extends Subprocess, Receiver {}
  * Adds the {@link Receiver.onMessageType()} and {@link Receiver.onceMessageType()}
  * methods to convert the given `EventEmitter` to a `Receiver`.
  */
-function wrap<P extends EventEmitter>(proc: P): P & Receiver {
+export function wrap<P extends EventEmitter>(proc: P): P & Receiver {
   return new Proxy(proc, {
     get(target: P, prop: string | symbol, receiver: unknown) {
       switch (prop) {
