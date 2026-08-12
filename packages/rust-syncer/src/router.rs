@@ -122,6 +122,10 @@ pub struct SyncEngineConfig {
     /// hot-reload (a redeploy of `zero-deploy-permissions`). `None` when no
     /// permissions are deployed. Port of TS `LoadedPermissions.hash`.
     pub permissions_hash: Option<String>,
+    /// Interval (ms) between periodic JWT re-validation + query re-transform for
+    /// live connections. Port of TS `--auth-revalidate-interval-seconds`
+    /// (default 300s). `None` disables periodic auth maintenance.
+    pub revalidate_interval_ms: Option<i64>,
     /// Runtime handle for the `block_on` PG I/O edge on the CG thread.
     pub tokio_handle: tokio::runtime::Handle,
     /// Admin password gating the inspector protocol (TS `isAdminPasswordValid`).
@@ -570,6 +574,14 @@ struct CgState {
     /// The deployed permissions `hash` last loaded, for hot-reload detection
     /// (TS `reloadPermissionsIfChanged`).
     permissions_hash: Option<String>,
+    /// Interval (ms) between periodic auth maintenance ticks (JWT re-validation
+    /// + query re-transform). `None` disables it. Port of TS
+    /// `ConnectionContextManager`'s `revalidateIntervalMs`.
+    revalidate_interval_ms: Option<i64>,
+    /// Wall-clock (ms) deadline for the next auth-maintenance tick, or `None`
+    /// when nothing is armed (no authed connection, or feature disabled). Port
+    /// of the group's earliest `revalidateAt` deadline.
+    next_auth_maintenance_at: Option<i64>,
     /// The in-memory CVR, lazily loaded from the store on first notification.
     cvr: Option<CVR>,
     /// Monotonic TTL clock (ms), seeded from `cvr.ttl_clock` when the CVR is
@@ -649,6 +661,7 @@ impl CgState {
             .unwrap_or_default();
         let permissions = config.permissions;
         let permissions_hash = config.permissions_hash;
+        let revalidate_interval_ms = config.revalidate_interval_ms;
 
         let mut cvr_pg = false;
         if let Some(pg) = config.cvr_pg {
@@ -679,6 +692,8 @@ impl CgState {
             app_id,
             permissions,
             permissions_hash,
+            revalidate_interval_ms,
+            next_auth_maintenance_at: None,
             cvr: None,
             ttl_clock: 0,
             ttl_clock_base: now_ms(),
@@ -776,6 +791,111 @@ impl CgState {
         }
     }
 
+    /// Arm the group auth-maintenance deadline if the feature is enabled and at
+    /// least one connection carries a JWT. Idempotent: an already-armed deadline
+    /// is left in place (matches TS, where a new validated connection does not
+    /// pull the group's earliest deadline earlier than an existing one at the
+    /// same interval). Port of the group's earliest `revalidateAt`.
+    fn arm_auth_maintenance(&mut self) {
+        let Some(interval) = self.revalidate_interval_ms else {
+            return;
+        };
+        if self.next_auth_maintenance_at.is_some() {
+            return;
+        }
+        if self.client_raw_auth.is_empty() {
+            return;
+        }
+        self.next_auth_maintenance_at = Some(now_ms() + interval);
+    }
+
+    /// The delay until the next auth-maintenance tick, or `None` if none is
+    /// armed. Mirrors `next_expiry_delay` so the CG loop can wake for whichever
+    /// deadline comes first.
+    fn next_auth_maintenance_delay(&self) -> Option<Duration> {
+        let deadline = self.next_auth_maintenance_at?;
+        let delay = (deadline - now_ms()).max(0);
+        Some(Duration::from_millis(delay as u64))
+    }
+
+    /// Periodic auth maintenance: re-validate each live connection's JWT and, for
+    /// the survivors, re-transform their queries. Port of TS
+    /// `#runAuthMaintenance` (`planMaintenance` → `dueRevalidations` +
+    /// `dueRetransform`):
+    ///
+    ///  - Revalidation (security-critical, always run): a token that has since
+    ///    expired or been revoked now fails `validate_auth`, so the connection is
+    ///    closed — a live socket cannot outlive its credential. A still-valid
+    ///    token is a no-op for that connection.
+    ///  - Retransform: after revalidation, re-run each surviving client's
+    ///    config/hydrate pass (`changed = true`) so read-permission / server-side
+    ///    authorization drift is picked up (custom queries are re-fetched with
+    ///    the current Bearer token). This folds TS's separate `retransform`
+    ///    interval into the same tick; both default to 300s so the observable
+    ///    cadence is identical.
+    ///
+    /// Re-arms the deadline (or clears it if no authed connection remains).
+    fn on_auth_maintenance_tick(&mut self) {
+        // Snapshot the (client_id, raw_token) pairs to re-verify. Only tokened
+        // connections are subject to revalidation.
+        let due: Vec<(String, String)> = self
+            .client_raw_auth
+            .iter()
+            .map(|(c, t)| (c.clone(), t.clone()))
+            .collect();
+
+        let mut survivors: Vec<String> = Vec::new();
+        for (client_id, token) in due {
+            // The connection may have closed since we snapshotted.
+            if !self.registered_ws.contains_key(&client_id) {
+                continue;
+            }
+            let user_id = crate::auth::decode_jwt_claims(&token)
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let validator = self.auth_validator.clone();
+            let cg_id = self.cg_id.clone();
+            let cid = client_id.clone();
+            let tok = token.clone();
+            let verify = self.tokio_handle.block_on(async move {
+                validator
+                    .validate_auth(&cg_id, &cid, user_id.as_deref(), Some(&tok))
+                    .await
+            });
+            match verify {
+                Err(error_body) => {
+                    tracing::info!(
+                        "CG {}: periodic revalidation failed for client {client_id}; closing",
+                        self.cg_id
+                    );
+                    crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+                    if let Some(conn) = self.connections.get(&client_id) {
+                        conn.close_with_error(error_body);
+                    }
+                    self.on_connection_closed(client_id);
+                }
+                Ok(()) => survivors.push(client_id),
+            }
+        }
+
+        crate::metrics::Metrics::inc(&self.metrics.auth_revalidations);
+
+        // Retransform each surviving connection's queries against current auth +
+        // permissions (re-fetching custom queries with the current token).
+        let empty_body = serde_json::json!({});
+        for client_id in survivors {
+            if self.registered_ws.contains_key(&client_id) {
+                self.handle_desired_queries(&client_id, &empty_body, true);
+            }
+        }
+
+        // Re-arm: schedule the next tick if any authed connection remains,
+        // otherwise disarm until the next connection arrives.
+        self.next_auth_maintenance_at = None;
+        self.arm_auth_maintenance();
+    }
+
     fn on_new_connection(&mut self, params: ConnectParams, sink: DirectWebSocketSink) {
         let client_id = params.client_id.clone();
         let ws_id = params.ws_id.clone();
@@ -828,6 +948,9 @@ impl CgState {
             self.client_raw_auth
                 .insert(client_id.clone(), tok.to_string());
         }
+        // Arm periodic auth maintenance for this (now validated) connection.
+        // Port of `validateConnection` setting `revalidateAt = now + interval`.
+        self.arm_auth_maintenance();
 
         let handler = Box::new(SyncerWsMessageHandler::new(
             self.view_syncer.clone(),
@@ -1565,15 +1688,36 @@ fn run_cg_thread(
         connection_count,
     );
 
-    // Event loop: block on the next message, but wake early when a query's TTL
-    // is due so expired queries are evicted + poked (TS `#scheduleExpireEviction`
-    // / `#removeExpiredQueries`). With nothing pending we block indefinitely.
+    // Event loop: block on the next message, but wake early when a deadline is
+    // due — a query TTL eviction (TS `#scheduleExpireEviction` /
+    // `#removeExpiredQueries`) or a periodic auth-maintenance tick (TS
+    // `#scheduleAuthMaintenance` / `#runAuthMaintenance`). We wake at the
+    // earliest of the two and run whichever ones are actually due. With nothing
+    // pending we block indefinitely.
     loop {
-        let msg = match state.next_expiry_delay() {
+        let next_delay = [
+            state.next_expiry_delay(),
+            state.next_auth_maintenance_delay(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let msg = match next_delay {
             Some(delay) => match rx.recv_timeout(delay) {
                 Ok(msg) => msg,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    state.on_expiry_tick();
+                    // A wake could be for either deadline; run each if due.
+                    if state
+                        .next_auth_maintenance_at
+                        .is_some_and(|at| at <= now_ms())
+                    {
+                        state.on_auth_maintenance_tick();
+                    }
+                    // Evict expired queries only when some are pending (running
+                    // early on an auth-only wake would be a needless engine call).
+                    if state.next_expiry_delay().is_some() {
+                        state.on_expiry_tick();
+                    }
                     continue;
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -1686,6 +1830,7 @@ mod tests {
                 cvr_pg: None,
                 permissions: None,
                 permissions_hash: None,
+                revalidate_interval_ms: None,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -1722,6 +1867,7 @@ mod tests {
                 cvr_pg: None,
                 permissions: None,
                 permissions_hash: None,
+                revalidate_interval_ms: None,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -1764,6 +1910,7 @@ mod tests {
                 cvr_pg: None,
                 permissions: self.initial_permissions.clone(),
                 permissions_hash: self.initial_hash.clone(),
+                revalidate_interval_ms: None,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -1865,6 +2012,177 @@ mod tests {
             http_cookie: None,
             origin: None,
         }
+    }
+
+    fn authed_params(client_id: &str, ws_id: &str, token: &str) -> ConnectParams {
+        let mut p = test_params(client_id, ws_id);
+        p.auth = Some(token.to_string());
+        p
+    }
+
+    /// AuthValidator whose verdict flips with a shared flag — to simulate a
+    /// token that later expires / is revoked.
+    struct ToggleAuthValidator {
+        valid: Arc<std::sync::atomic::AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl AuthValidator for ToggleAuthValidator {
+        async fn validate_auth(
+            &self,
+            _cg: &str,
+            _cid: &str,
+            _uid: Option<&str>,
+            _auth: Option<&str>,
+        ) -> Result<(), crate::protocol::ErrorBody> {
+            if self.valid.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(crate::protocol::ErrorBody::unauthorized("token expired"))
+            }
+        }
+    }
+
+    /// Factory with a configurable periodic auth-maintenance interval (no PG,
+    /// in-memory sources).
+    struct RevalidateFactory {
+        handle: tokio::runtime::Handle,
+        revalidate_interval_ms: Option<i64>,
+    }
+    impl CGServicesFactory for RevalidateFactory {
+        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
+            Arc::new(NoopViewSyncer)
+        }
+        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
+            Arc::new(NoopCcm)
+        }
+        fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
+            None
+        }
+        fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
+            None
+        }
+        fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
+            SyncEngineConfig {
+                tables: Vec::new(),
+                replica_path: None,
+                app_id: "zero".to_string(),
+                shard: ShardID {
+                    app_id: "zero".to_string(),
+                    shard_num: 0,
+                },
+                cvr_pg: None,
+                permissions: None,
+                permissions_hash: None,
+                revalidate_interval_ms: self.revalidate_interval_ms,
+                tokio_handle: self.handle.clone(),
+                admin_password: None,
+                server_version: "test".to_string(),
+                metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
+            }
+        }
+    }
+
+    fn revalidate_state(
+        rt: &tokio::runtime::Runtime,
+        interval_ms: Option<i64>,
+        valid: Arc<std::sync::atomic::AtomicBool>,
+    ) -> CgState {
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(RevalidateFactory {
+            handle: rt.handle().clone(),
+            revalidate_interval_ms: interval_ms,
+        });
+        CgState::new(
+            "cg1",
+            &factory,
+            Arc::new(ToggleAuthValidator { valid }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
+
+    /// Periodic revalidation must CLOSE a connection whose token no longer
+    /// validates (expired/revoked). Security core of TS `#runAuthMaintenance`'s
+    /// `dueRevalidations` → `#validateConnection` failure path.
+    #[test]
+    fn periodic_revalidation_closes_expired_connection() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid.clone());
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        state.on_new_connection(
+            authed_params("c1", "ws1", "tok-c1"),
+            DirectWebSocketSink::new(tx),
+        );
+        assert_eq!(state.registered_ws.len(), 1);
+        // Arming happened on connect (interval set + a token present).
+        assert!(state.next_auth_maintenance_at.is_some());
+
+        // The token expires; the next maintenance tick must drop the connection.
+        valid.store(false, Ordering::SeqCst);
+        state.on_auth_maintenance_tick();
+
+        assert_eq!(
+            state.registered_ws.len(),
+            0,
+            "expired connection must be closed"
+        );
+        assert!(state.client_raw_auth.is_empty());
+        assert_eq!(state.metrics.snapshot()["authRevalidationFailures"], 1);
+        // No authed connection remains → disarmed.
+        assert!(state.next_auth_maintenance_at.is_none());
+    }
+
+    /// A still-valid token survives the tick and the deadline is re-armed for the
+    /// next interval.
+    #[test]
+    fn periodic_revalidation_keeps_valid_connection_and_rearms() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        state.on_new_connection(
+            authed_params("c1", "ws1", "tok-c1"),
+            DirectWebSocketSink::new(tx),
+        );
+        let armed_before = state.next_auth_maintenance_at;
+        assert!(armed_before.is_some());
+
+        state.on_auth_maintenance_tick();
+
+        assert_eq!(
+            state.registered_ws.len(),
+            1,
+            "valid connection must survive"
+        );
+        assert_eq!(state.metrics.snapshot()["authRevalidations"], 1);
+        // Re-armed (still a token present).
+        assert!(state.next_auth_maintenance_at.is_some());
+    }
+
+    /// With the feature disabled (interval None) no deadline is ever armed, and a
+    /// connection without a token is never subject to revalidation.
+    #[test]
+    fn periodic_revalidation_disabled_or_unauthed_never_arms() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        // Disabled: interval None.
+        let mut disabled = revalidate_state(&rt, None, valid.clone());
+        let (tx, _d) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        disabled.on_new_connection(
+            authed_params("c1", "ws1", "tok"),
+            DirectWebSocketSink::new(tx),
+        );
+        assert!(disabled.next_auth_maintenance_at.is_none());
+        assert!(disabled.next_auth_maintenance_delay().is_none());
+
+        // Enabled but the connection carries no token → nothing to revalidate.
+        let mut unauthed = revalidate_state(&rt, Some(300_000), valid);
+        let (tx2, _d2) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        unauthed.on_new_connection(test_params("c2", "ws2"), DirectWebSocketSink::new(tx2));
+        assert!(unauthed.next_auth_maintenance_at.is_none());
     }
 
     /// The CG event loop: a new connection sends `connected` and registers a

@@ -51,6 +51,10 @@ pub struct SyncerConfig {
     /// Max CVR Postgres connections for this worker (parity with the TS
     /// `--cvr-max-conns-per-worker` flag: whole budget divided across syncers).
     pub cvr_max_conns: u32,
+    /// Interval (ms) between periodic JWT re-validation + query re-transform for
+    /// live connections (TS `--auth-revalidate-interval-seconds`, default 300s).
+    /// `0` disables periodic auth maintenance.
+    pub revalidate_interval_ms: Option<i64>,
 }
 
 impl SyncerConfig {
@@ -92,6 +96,14 @@ impl SyncerConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
+            // TS default: 300s. `0` (or a negative) disables it.
+            revalidate_interval_ms: {
+                let secs = env::var("AUTH_REVALIDATE_INTERVAL_SECONDS")
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(300);
+                (secs > 0).then_some(secs * 1000)
+            },
         }
     }
 }
@@ -332,6 +344,7 @@ impl CGServicesFactory for RealServicesFactory {
             }),
             permissions,
             permissions_hash,
+            revalidate_interval_ms: self.config.revalidate_interval_ms,
             tokio_handle: self.tokio_handle.clone(),
             admin_password: self.config.admin_password.clone(),
             server_version: self.config.server_version.clone(),

@@ -29,6 +29,11 @@ pub struct Metrics {
     /// Read-permission hot-reloads (deployed doc changed → re-transform +
     /// rehydrate).
     pub permission_reloads: AtomicU64,
+    /// Periodic auth-maintenance ticks that ran (JWT re-validation + retransform).
+    pub auth_revalidations: AtomicU64,
+    /// Connections closed by periodic revalidation because their token was no
+    /// longer valid (expired / revoked).
+    pub auth_revalidation_failures: AtomicU64,
 }
 
 impl Metrics {
@@ -50,6 +55,8 @@ impl Metrics {
             "authChanges": self.auth_changes.load(Ordering::Relaxed),
             "clientDeletions": self.client_deletions.load(Ordering::Relaxed),
             "permissionReloads": self.permission_reloads.load(Ordering::Relaxed),
+            "authRevalidations": self.auth_revalidations.load(Ordering::Relaxed),
+            "authRevalidationFailures": self.auth_revalidation_failures.load(Ordering::Relaxed),
         })
     }
 }
