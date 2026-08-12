@@ -166,16 +166,28 @@ fn read_table_spec(
         .map_err(|e| format!("query table_info({table}): {e}"))?;
 
     let mut columns = std::collections::HashMap::new();
-    // (pk_position, column_name) so we can order the primary key correctly.
-    let mut pk: Vec<(i64, String)> = Vec::new();
+    // Columns that are NOT NULL upstream (eligible to form a row key). A key over
+    // a nullable column can't uniquely identify a row, so only these are usable.
+    let mut not_null_columns: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    // Columns marked as PRIMARY KEY by `pragma_table_info` (`pk > 0`). These are
+    // treated as non-null even if the lite type omitted `|NOT_NULL`, matching TS
+    // `fullTable.primaryKey?.includes(col)`.
+    let mut declared_pk: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for r in rows {
         let (col_name, lite_type, pk_pos) = r.map_err(|e| format!("read column: {e}"))?;
+        if pk_pos > 0 {
+            declared_pk.insert(col_name.clone());
+        }
         let Some(zql_type) = lite_type_to_zql_value_type(&lite_type) else {
-            // Unsupported upstream type — drop the column (matches TS).
+            // Unsupported upstream type — drop the column (matches TS visibleColumns).
             continue;
         };
         let optional = !lite_type.contains(NOT_NULL_ATTRIBUTE);
+        if !optional {
+            not_null_columns.insert(col_name.clone());
+        }
         columns.insert(
             col_name.clone(),
             IvmColumnSchema {
@@ -183,37 +195,56 @@ fn read_table_spec(
                 optional,
             },
         );
-        if pk_pos > 0 {
-            pk.push((pk_pos, col_name));
-        }
     }
 
     if columns.is_empty() {
         return Ok(None);
     }
 
-    pk.sort_by_key(|(pos, _)| *pos);
-    let primary_key: Vec<String> = pk.into_iter().map(|(_, name)| name).collect();
+    // A declared-PK column is non-null even if the lite type omitted `|NOT_NULL`
+    // (only if it survived as a visible column). Port of TS `notNullColumns`.
+    for col in &declared_pk {
+        if columns.contains_key(col) {
+            not_null_columns.insert(col.clone());
+        }
+    }
 
-    // Unique keys = the table's UNIQUE indexes, plus the declared primary key
-    // (always unique) if the indexes didn't surface it — e.g. an INTEGER PRIMARY
-    // KEY (rowid alias) has no separate index. Filter out columns that were
-    // dropped as unsupported so an index over an unsynced column isn't offered
-    // as a key. `None` (→ engine default `[primary_key]`) only when empty.
-    let mut unique: Vec<Vec<String>> = unique_indexes
+    // The primary key is chosen from the table's UNIQUE INDEXES — NOT from the
+    // `pragma_table_info` pk, because Zero's replica encodes row keys as explicit
+    // unique indexes and frequently declares no SQL PRIMARY KEY at all (pragma pk
+    // would then be empty). This is a direct port of TS `computeZqlSpecs`.
+    //
+    // `unique_keys`: every unique index over still-visible (supported) columns.
+    let all_unique: Vec<Vec<String>> = unique_indexes
         .get(table)
         .cloned()
         .unwrap_or_default()
         .into_iter()
         .filter(|key| key.iter().all(|c| columns.contains_key(c)))
         .collect();
-    if !primary_key.is_empty() && !unique.iter().any(|k| *k == primary_key) {
-        unique.push(primary_key.clone());
+
+    // Candidate keys: unique indexes whose columns are ALL non-null. Port of the
+    // `keys` filter in TS `computeZqlSpecs`.
+    let mut keys: Vec<Vec<String>> = all_unique
+        .iter()
+        .filter(|key| key.iter().all(|c| not_null_columns.contains(c)))
+        .cloned()
+        .collect();
+
+    if keys.is_empty() {
+        // No usable row key → table is not syncable (TS skips it with a debug log:
+        // "not syncing table ... has no primary key").
+        return Ok(None);
     }
-    let unique_keys = if unique.is_empty() {
+
+    // Pick the "best" key: fewest columns, then lexicographic. Port of TS `keyCmp`.
+    keys.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.iter().cmp(b.iter())));
+    let primary_key = keys[0].clone();
+
+    let unique_keys = if all_unique.is_empty() {
         None
     } else {
-        Some(unique)
+        Some(all_unique)
     };
 
     Ok(Some(IvmTableSpec {
@@ -317,9 +348,11 @@ mod tests {
                 "name" "varchar",
                 "age" "int8|NOT_NULL",
                 "meta" "jsonb",
-                "raw" "bytea",
-                PRIMARY KEY ("id")
+                "raw" "bytea"
             );
+            -- Real replicas declare NO SQL PRIMARY KEY (pragma pk = 0); the row
+            -- key is an explicit UNIQUE INDEX. The PK must be derived from it.
+            CREATE UNIQUE INDEX "users_pkey" ON "users" ("id");
             CREATE TABLE "_litestream_seq" ("y" "text");
             "#,
         )
@@ -327,11 +360,16 @@ mod tests {
         // A `_zero.*` table (name contains a dot) — must be filtered out.
         conn.execute_batch(r#"CREATE TABLE "_zero.clients" ("z" "text");"#)
             .unwrap();
+        // A table with no unique index has no row key → not syncable (skipped),
+        // matching TS `computeZqlSpecs` ("not syncing table ... has no primary key").
+        conn.execute_batch(r#"CREATE TABLE "keyless" ("a" "text|NOT_NULL");"#)
+            .unwrap();
 
         let specs = compute_table_specs(&conn).unwrap();
-        assert_eq!(specs.len(), 1, "only the user table should be included");
+        assert_eq!(specs.len(), 1, "only the keyed user table should be included");
         let users = &specs[0];
         assert_eq!(users.table, "users");
+        // PK is derived from the unique index, not a declared SQL PRIMARY KEY.
         assert_eq!(users.primary_key, vec!["id".to_string()]);
         // `raw` (bytea) is unsupported → dropped; the other 4 remain.
         assert_eq!(users.columns.len(), 4);
@@ -342,7 +380,7 @@ mod tests {
         assert!(!users.columns["age"].optional);
         assert_eq!(users.columns["meta"].r#type, "json");
         assert!(!users.columns.contains_key("raw"));
-        // The declared PK is surfaced as a unique key.
+        // The unique index is surfaced as a unique key.
         assert_eq!(users.unique_keys, Some(vec![vec!["id".to_string()]]));
         // No metadata table → no minRowVersion override.
         assert_eq!(users.min_row_version, None);
@@ -358,9 +396,9 @@ mod tests {
                 "email" "text|NOT_NULL",
                 "org" "text|NOT_NULL",
                 "team" "text|NOT_NULL",
-                "_0_version" "text",
-                PRIMARY KEY ("id")
+                "_0_version" "text"
             );
+            CREATE UNIQUE INDEX "u_id" ON "public.users" ("id");
             CREATE UNIQUE INDEX "u_email" ON "public.users" ("email");
             CREATE UNIQUE INDEX "u_org_team" ON "public.users" ("org", "team");
             CREATE INDEX "nonunique" ON "public.users" ("team");
@@ -386,10 +424,14 @@ mod tests {
         // minRowVersion is read from `_zero.tableMetadata` (keyed schema.table).
         assert_eq!(users.min_row_version.as_deref(), Some("2abc"));
 
-        // Unique keys include both UNIQUE indexes and the PK; the plain index is
-        // excluded.
+        // Primary key = keyCmp winner: fewest columns, then lexicographically
+        // first. Among the single-column keys [email] and [id], "email" sorts
+        // first, so it wins over the composite [org, team]. (Matches TS keyCmp.)
+        assert_eq!(users.primary_key, vec!["email".to_string()]);
+
+        // unique_keys include every UNIQUE index; the plain index is excluded.
         let keys = users.unique_keys.clone().unwrap();
-        assert!(keys.contains(&vec!["id".to_string()]), "PK present");
+        assert!(keys.contains(&vec!["id".to_string()]), "id unique");
         assert!(
             keys.contains(&vec!["email".to_string()]),
             "single-col unique"
