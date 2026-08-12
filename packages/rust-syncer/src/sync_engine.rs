@@ -190,6 +190,18 @@ impl SyncEngine {
         }
     }
 
+    /// Fail (send an error + close the socket of) a specific client by ws_id, if
+    /// still registered. Used to close a connection that a newer connection for
+    /// the same clientID has superseded. Returns whether a client was found.
+    pub fn fail_client(&self, ws_id: &str, msg: &str) -> bool {
+        if let Some(c) = self.clients.get(ws_id) {
+            c.fail(msg);
+            true
+        } else {
+            false
+        }
+    }
+
     fn clients_for(&self, client_ids: &[String]) -> Vec<Arc<ClientHandler>> {
         client_ids
             .iter()

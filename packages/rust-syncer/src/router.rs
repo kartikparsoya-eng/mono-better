@@ -752,6 +752,25 @@ impl CgState {
         let protocol_version = params.protocol_version;
         let client_group_id = params.client_group_id.clone();
 
+        // Close any prior connection for this clientID before installing the new
+        // one. Otherwise the previous ws_id's ClientHandler stays registered in
+        // the SyncEngine — it keeps receiving pokes and its socket is never
+        // closed, so a stale connection can go on emitting under the same
+        // clientID. TS closes the superseded connection when a client reconnects.
+        if let Some(prev_ws_id) = self.registered_ws.get(&client_id).cloned() {
+            if prev_ws_id != ws_id {
+                tracing::debug!(
+                    "CG {}: client {client_id} reconnected; closing superseded connection (ws {prev_ws_id} -> {ws_id})",
+                    self.cg_id
+                );
+                self.sync_engine.fail_client(
+                    &prev_ws_id,
+                    "Connection superseded by a newer connection for the same clientID",
+                );
+                self.sync_engine.unregister_client(&prev_ws_id);
+            }
+        }
+
         // Register the client with the SyncEngine so notifications can poke it.
         let cvr_sink: Arc<dyn rust_cvr::client_handler::WebSocketSink> = Arc::new(sink.clone());
         self.sync_engine.register_client(
@@ -1690,6 +1709,52 @@ mod tests {
         state.on_connection_closed("c1".to_string());
         assert_eq!(state.registered_ws.len(), 0);
         assert_eq!(state.connections.len(), 0);
+    }
+
+    /// When a client reconnects (same clientID, new wsID) the superseded
+    /// connection's socket must be failed/closed and unregistered — otherwise the
+    /// old ws_id keeps receiving pokes and its socket lingers open.
+    #[test]
+    fn reconnect_closes_superseded_connection() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let global = Arc::new(Mutex::new(HashMap::new()));
+        let count = Arc::new(AtomicU64::new(0));
+        let mut state = CgState::new(
+            "cg1",
+            &factory,
+            Arc::new(crate::auth::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+            }),
+            global,
+            count,
+        );
+
+        // First connection: client c1 on ws1.
+        let (tx1, mut drx1) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx1));
+        while drx1.try_recv().is_ok() {} // drain ws1's `connected` frame
+
+        // Reconnect: same client c1 on a NEW ws2.
+        let (tx2, _drx2) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        state.on_new_connection(test_params("c1", "ws2"), DirectWebSocketSink::new(tx2));
+
+        // The superseded ws1 socket must have been failed/closed.
+        let mut ws1_failed = false;
+        while let Ok(cmd) = drx1.try_recv() {
+            if matches!(cmd, WsCommand::Fail(_)) {
+                ws1_failed = true;
+            }
+        }
+        assert!(ws1_failed, "the superseded ws1 connection must be failed/closed");
+
+        // The mapping now points at ws2, with exactly one registered client.
+        assert_eq!(state.registered_ws.get("c1").map(String::as_str), Some("ws2"));
+        assert_eq!(state.registered_ws.len(), 1);
     }
 
     /// On shutdown (drain), each connection is failed with a `Rehome` error so
