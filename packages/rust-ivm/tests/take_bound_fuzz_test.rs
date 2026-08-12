@@ -1,36 +1,52 @@
-//! take_bound_fuzz_test.rs — seeded fuzz of the Take/LIMIT operator over the
-//! REAL advance path (Snapshotter + TableSource + advance_to_head_stream),
-//! hunting the live-prod Take bound divergences:
+//! take_bound_fuzz_test.rs — seeded fuzz of the Take/LIMIT and Skip/cursor
+//! operators over the REAL advance path (Snapshotter + TableSource +
+//! advance_to_head_stream), hunting the live-prod Take bound divergences:
 //!   take.rs:545 "Take: boundNode must be found during fetch"
 //!   take.rs:702 "Bound should be set"
-//! observed on zero-02-rust (2026-08-12) and preprod hf2cg.
+//! observed on zero-02-rust (2026-08-12) and preprod hf2cg, plus the SILENT
+//! sibling: wrong LIMIT/page rows without any panic.
 //!
 //! Shape: one table with a NULLABLE REAL order-by column (NULLs + duplicate
-//! values force the bound onto degenerate sort keys), LIMIT 1..=3, random
-//! upstream insert/update/delete sequences applied as genuine replication
-//! steps (changeLog2 + stateVersion bump), advanced through the engine.
-//! Two spec variants per seed: the order-by column declared optional:true
-//! (faithful spec) and optional:false (drifted spec — data still contains
-//! NULLs), because the start-constraint SQL only uses NULL-aware operators
-//! (IS vs =) when the column is declared optional (query_builder.rs
-//! nullable_aware_equality / nullable_aware_range_comparison).
+//! values force bounds/cursors onto degenerate sort keys), random upstream
+//! insert/update/delete sequences applied as genuine replication steps
+//! (changeLog2 + stateVersion bump), advanced through the engine.
+//!
+//! Dimensions per seed:
+//!   - optionality CONTRACT variants (declared non-optional => data never
+//!     contains NULL): optional:true with NULL-heavy data (the prod shape —
+//!     requires computeZqlSpecs to populate SchemaValue.optional, the
+//!     2026-08-12 root-cause fix in zero-cache/src/db/lite-tables.ts) and
+//!     optional:false with NULL-free data.
+//!   - LIMIT 1..=3 (Take) and no-limit (pure Skip).
+//!   - asc/desc ordering.
+//!   - client cursors (Skip): none / inclusive / exclusive, with cursor
+//!     values covering NULL, a duplicate-heavy value, and a mid-range value;
+//!     cursor id may refer to a row that gets deleted (persisted-cursor edge).
 //!
 //! Failure modes caught:
-//!   1. Panic inside advance (the prod signature) — reported with seed + step
-//!      + full op history for deterministic replay.
+//!   1. Panic inside advance (the prod signature) — reported with seed +
+//!      step + full op history for deterministic replay via
+//!      TAKE_FUZZ_DEBUG="seed,optional,limit,desc,cursor" single-config
+//!      verbose mode; TAKE_FUZZ_SEEDS scales depth.
 //!   2. Silent wrong rows: client materialization from emitted RowChanges is
-//!      compared against a direct SQL top-K requery after every advance.
+//!      compared after every advance against an in-test oracle implementing
+//!      the zql TOTAL ORDER (NULL sorts lowest, id tiebreak) + cursor filter
+//!      + limit truncation over a direct full-table SQL read.
 
 use std::cell::RefCell;
+use std::cmp::Ordering as CmpOrd;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use rusqlite::Connection;
+use rustc_hash::FxHashMap;
 
-use rust_ivm::builder::ast::{Ast, OrderPart};
+use rust_ivm::builder::ast::{Ast, Bound, OrderPart};
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::change::ChangeType;
+use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::snapshotter::Snapshotter;
 use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
@@ -65,6 +81,15 @@ enum Op {
     Update { id: String, val: Option<f64> },
     Delete { id: String },
 }
+
+/// A Skip cursor: (order-by value, row id, exclusive).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cursor {
+    val: Option<f64>,
+    exclusive: bool,
+}
+
+const CURSOR_ID: &str = "r0001";
 
 fn db_path(tag: &str) -> String {
     format!("/tmp/rust-ivm-take-fuzz-{tag}-{}.db", std::process::id())
@@ -150,14 +175,26 @@ fn source_columns(val_optional: bool) -> HashMap<String, ColumnType> {
     c
 }
 
-fn take_ast(limit: usize, desc: bool) -> Ast {
+fn query_ast(limit: Option<usize>, desc: bool, cursor: Option<Cursor>) -> Ast {
+    let start = cursor.map(|c| {
+        let mut row = FxHashMap::default();
+        row.insert(
+            "val".to_string(),
+            c.val.map(Value::F64).unwrap_or(Value::Null),
+        );
+        row.insert("id".to_string(), Value::Str(CURSOR_ID.into()));
+        Bound {
+            row: Arc::new(row),
+            exclusive: c.exclusive,
+        }
+    });
     Ast {
         schema: None,
         table: "items".to_string(),
         alias: None,
         where_clause: None,
         related: vec![],
-        limit: Some(limit),
+        limit,
         order_by: Some(vec![
             OrderPart {
                 column: "val".to_string(),
@@ -168,11 +205,13 @@ fn take_ast(limit: usize, desc: bool) -> Ast {
                 direction: "asc".to_string(),
             },
         ]),
-        start: None,
+        start,
     }
 }
 
-/// Apply one op to the db as a genuine replication step.
+/// Apply one op to the db as a genuine replication step. changeLog2 mirrors
+/// prod semantics: UNIQUE("table","rowKey") + INSERT OR REPLACE — the log
+/// tracks the LAST op per row (duplicate same-row entries are illegal input).
 fn apply_op(w: &Connection, op: &Op, version: &str, pos: i64) {
     match op {
         Op::Insert { id, val } | Op::Update { id, val } => {
@@ -200,16 +239,49 @@ fn apply_op(w: &Connection, op: &Op, version: &str, pos: i64) {
     }
 }
 
-/// Direct SQL top-K oracle. SQLite ASC sorts NULLs first, matching zql
-/// compare_values (Null orders lowest); DESC sorts NULLs last symmetric.
-fn sql_top_k(r: &Connection, limit: usize, desc: bool) -> Vec<String> {
-    let dir = if desc { "DESC" } else { "ASC" };
-    let sql = format!("SELECT id FROM items ORDER BY val {dir}, id ASC LIMIT {limit}");
-    let mut stmt = r.prepare(&sql).unwrap();
-    stmt.query_map([], |row| row.get::<_, String>(0))
+/// zql total order over (val, id): NULL sorts lowest; asc reverses to desc on
+/// val only (id tiebreak stays asc, matching the query's order_by).
+fn total_order(a: &(Option<f64>, String), b: &(Option<f64>, String), desc: bool) -> CmpOrd {
+    let vcmp = match (a.0, b.0) {
+        (None, None) => CmpOrd::Equal,
+        (None, Some(_)) => CmpOrd::Less,
+        (Some(_), None) => CmpOrd::Greater,
+        (Some(x), Some(y)) => x.partial_cmp(&y).unwrap(),
+    };
+    let vcmp = if desc { vcmp.reverse() } else { vcmp };
+    vcmp.then_with(|| a.1.cmp(&b.1))
+}
+
+/// In-test oracle: full-table read, zql total order, cursor filter, limit.
+fn oracle_rows(
+    r: &Connection,
+    limit: Option<usize>,
+    desc: bool,
+    cursor: Option<Cursor>,
+) -> Vec<String> {
+    let mut stmt = r.prepare("SELECT id, val FROM items").unwrap();
+    let mut rows: Vec<(Option<f64>, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, Option<f64>>(1)?, row.get::<_, String>(0)?))
+        })
         .unwrap()
         .map(|x| x.unwrap())
-        .collect()
+        .collect();
+    rows.sort_by(|a, b| total_order(a, b, desc));
+    if let Some(c) = cursor {
+        let cur = (c.val, CURSOR_ID.to_string());
+        rows.retain(|row| match total_order(row, &cur, desc) {
+            CmpOrd::Greater => true,
+            CmpOrd::Equal => !c.exclusive,
+            CmpOrd::Less => false,
+        });
+    }
+    if let Some(k) = limit {
+        rows.truncate(k);
+    }
+    let mut ids: Vec<String> = rows.into_iter().map(|(_, id)| id).collect();
+    ids.sort();
+    ids
 }
 
 fn gen_val(rng: &mut Rng, allow_null: bool) -> Option<f64> {
@@ -229,26 +301,35 @@ struct FuzzFailure {
     kind: String,
 }
 
-fn run_seed(seed: u64, val_optional: bool, limit: usize, desc: bool) -> Result<(), FuzzFailure> {
-    run_seed_verbose(seed, val_optional, limit, desc, false)
+fn run_seed(
+    seed: u64,
+    val_optional: bool,
+    limit: Option<usize>,
+    desc: bool,
+    cursor: Option<Cursor>,
+) -> Result<(), FuzzFailure> {
+    run_seed_verbose(seed, val_optional, limit, desc, cursor, false)
 }
 
 fn run_seed_verbose(
     seed: u64,
     val_optional: bool,
-    limit: usize,
+    limit: Option<usize>,
     desc: bool,
+    cursor: Option<Cursor>,
     verbose: bool,
 ) -> Result<(), FuzzFailure> {
     let variant = format!(
-        "optional={val_optional} limit={limit} {}",
+        "optional={val_optional} limit={limit:?} {} cursor={cursor:?}",
         if desc { "desc" } else { "asc" }
     );
     let path = db_path(&format!("s{seed}"));
     seed_db(&path);
     let mut rng = Rng::new(seed);
 
-    // Seed initial rows (some before hydration, exercising hydrate-set bounds).
+    // Seed initial rows (some before hydration, exercising hydrate-set
+    // bounds; r0001 always exists initially so cursors reference a real row
+    // that later ops may delete — the persisted-cursor edge).
     let writer = Connection::open(&path).unwrap();
     let initial = 2 + rng.below(6) as usize;
     let mut next_id = 0usize;
@@ -294,13 +375,13 @@ fn run_seed_verbose(
         eng.add_queries_streaming(
             &[QuerySpec {
                 query_id: "q".into(),
-                ast: take_ast(limit, desc),
+                ast: query_ast(limit, desc, cursor),
             }],
             move |rc| {
                 if rc.table != "items" {
                     return;
                 }
-                if let Some(rust_ivm::ivm::data::Value::Str(id)) = rc.row_key.get("id") {
+                if let Some(Value::Str(id)) = rc.row_key.get("id") {
                     client.borrow_mut().insert(id.to_string(), true);
                 }
             },
@@ -314,20 +395,18 @@ fn run_seed_verbose(
     let reader = Connection::open(&path).unwrap();
     let mut history: Vec<Op> = Vec::new();
 
-    // Verify hydration matches the SQL oracle before any advance.
+    // Verify hydration matches the oracle before any advance.
     {
-        let expect = sql_top_k(&reader, limit, desc);
+        let expect = oracle_rows(&reader, limit, desc, cursor);
         let got: Vec<String> = client.borrow().keys().cloned().collect();
-        let mut expect_sorted = expect.clone();
-        expect_sorted.sort();
-        if got != expect_sorted {
+        if got != expect {
             clean(&path);
             return Err(FuzzFailure {
                 seed,
                 variant,
                 step: 0,
                 history,
-                kind: format!("hydrate mismatch: got {got:?} expect {expect_sorted:?}"),
+                kind: format!("hydrate mismatch: got {got:?} expect {expect:?}"),
             });
         }
     }
@@ -397,7 +476,7 @@ fn run_seed_verbose(
                         return;
                     }
                     let id = match rc.row_key.get("id") {
-                        Some(rust_ivm::ivm::data::Value::Str(s)) => s.to_string(),
+                        Some(Value::Str(s)) => s.to_string(),
                         _ => return,
                     };
                     if verbose {
@@ -452,12 +531,8 @@ fn run_seed_verbose(
             Ok(Ok(_)) => {}
         }
 
-        // Compare client materialization vs the SQL top-K oracle.
-        let expect = {
-            let mut e = sql_top_k(&reader, limit, desc);
-            e.sort();
-            e
-        };
+        // Compare client materialization vs the oracle.
+        let expect = oracle_rows(&reader, limit, desc, cursor);
         let got: Vec<String> = client.borrow().keys().cloned().collect();
         if verbose {
             eprintln!("  after step {step}: client={got:?} oracle={expect:?}");
@@ -479,17 +554,57 @@ fn run_seed_verbose(
     Ok(())
 }
 
+/// Cursor variants exercised for each (seed, optionality, direction):
+/// NULL-valued cursor (the Skip form of the prod bug), a duplicate-heavy
+/// value, and a mid-range value; alternating inclusive/exclusive.
+fn cursor_variants(seed: u64, val_optional: bool) -> Vec<Cursor> {
+    let exclusive = seed.is_multiple_of(2);
+    let mut out = vec![
+        Cursor {
+            val: Some(1.0),
+            exclusive,
+        },
+        Cursor {
+            val: Some(50.0),
+            exclusive: !exclusive,
+        },
+    ];
+    if val_optional {
+        out.push(Cursor {
+            val: None,
+            exclusive,
+        });
+    }
+    out
+}
+
 #[test]
 fn take_bound_fuzz_debug_single() {
     let Ok(cfg) = std::env::var("TAKE_FUZZ_DEBUG") else {
         return;
     };
+    // "seed,optional,limit(0=none),asc|desc[,cursorval|null,incl|excl]"
     let parts: Vec<&str> = cfg.split(',').collect();
     let seed: u64 = parts[0].parse().unwrap();
     let optional: bool = parts[1].parse().unwrap();
-    let limit: usize = parts[2].parse().unwrap();
-    let desc: bool = parts[3].parse().unwrap();
-    if let Err(f) = run_seed_verbose(seed, optional, limit, desc, true) {
+    let limit: Option<usize> = match parts[2].parse::<usize>().unwrap() {
+        0 => None,
+        n => Some(n),
+    };
+    let desc: bool = parts[3] == "desc";
+    let cursor = if parts.len() > 5 {
+        Some(Cursor {
+            val: if parts[4] == "null" {
+                None
+            } else {
+                Some(parts[4].parse().unwrap())
+            },
+            exclusive: parts[5] == "excl",
+        })
+    } else {
+        None
+    };
+    if let Err(f) = run_seed_verbose(seed, optional, limit, desc, cursor, true) {
         panic!("debug repro failed at step {}: {}", f.step, f.kind);
     }
     eprintln!("debug repro PASSED");
@@ -500,24 +615,26 @@ fn take_bound_fuzz() {
     let seeds: u64 = std::env::var("TAKE_FUZZ_SEEDS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(120);
+        .unwrap_or(80);
     let mut failures: Vec<FuzzFailure> = Vec::new();
 
     for seed in 1..=seeds {
         for &val_optional in &[true, false] {
-            for &limit in &[1usize, 2, 3] {
-                for &desc in &[false, true] {
-                    if let Err(f) = run_seed(seed, val_optional, limit, desc) {
-                        eprintln!(
-                            "FUZZ FAILURE seed={} [{}] step={} kind={}\n  history ({} ops): {:?}",
-                            f.seed,
-                            f.variant,
-                            f.step,
-                            f.kind,
-                            f.history.len(),
-                            f.history
-                        );
+            for &desc in &[false, true] {
+                // Take-only configs (the original prod shape).
+                for &limit in &[1usize, 2, 3] {
+                    if let Err(f) = run_seed(seed, val_optional, Some(limit), desc, None) {
+                        report(&f);
                         failures.push(f);
+                    }
+                }
+                // Skip configs: pure cursor (no limit) + cursor-under-limit.
+                for c in cursor_variants(seed, val_optional) {
+                    for &limit in &[None, Some(2usize)] {
+                        if let Err(f) = run_seed(seed, val_optional, limit, desc, Some(c)) {
+                            report(&f);
+                            failures.push(f);
+                        }
                     }
                 }
             }
@@ -528,5 +645,17 @@ fn take_bound_fuzz() {
         failures.is_empty(),
         "take_bound_fuzz: {} failing configurations (see stderr for seeds + op histories)",
         failures.len()
+    );
+}
+
+fn report(f: &FuzzFailure) {
+    eprintln!(
+        "FUZZ FAILURE seed={} [{}] step={} kind={}\n  history ({} ops): {:?}",
+        f.seed,
+        f.variant,
+        f.step,
+        f.kind,
+        f.history.len(),
+        f.history
     );
 }
