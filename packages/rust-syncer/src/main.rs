@@ -25,9 +25,9 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use rust_syncer::http_server::run_http_server;
+use rust_syncer::http_server::{bind_http_listener, serve_http};
 use rust_syncer::router::{CGServicesFactory, ConnectionRouter};
-use rust_syncer::ws_server::{WsServerConfig, run_ws_server};
+use rust_syncer::ws_server::{WsServerConfig, bind_ws_listener, serve_ws};
 
 /// Configuration parsed from environment variables.
 pub struct SyncerConfig {
@@ -46,6 +46,9 @@ pub struct SyncerConfig {
     pub max_client_groups: usize,
     pub admin_password: Option<String>,
     pub server_version: String,
+    /// Max CVR Postgres connections for this worker (parity with the TS
+    /// `--cvr-max-conns-per-worker` flag: whole budget divided across syncers).
+    pub cvr_max_conns: u32,
 }
 
 impl SyncerConfig {
@@ -81,6 +84,10 @@ impl SyncerConfig {
                 .filter(|s| !s.is_empty()),
             server_version: env::var("ZERO_SERVER_VERSION")
                 .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string()),
+            cvr_max_conns: env::var("CVR_MAX_CONNS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
         }
     }
 }
@@ -156,14 +163,14 @@ fn main() {
         metrics.clone(),
     ));
 
-    // Start the HTTP server
+    // Bind BOTH listeners eagerly so the process is genuinely accepting on its
+    // WS + HTTP ports before we announce readiness. The TS dispatcher reverse-
+    // proxies client upgrades to the WS port and POSTs commit notifications to
+    // the HTTP port, and `ProcessManager.allWorkersReady()` gates the dispatcher
+    // on the ready signal — so readiness MUST come after the binds, not (as
+    // before) after the accept loop exits at shutdown.
     let http_router = router.clone();
     let http_addr: SocketAddr = format!("0.0.0.0:{}", config.http_port).parse().unwrap();
-    runtime.spawn(async move {
-        run_http_server(http_addr, http_router).await;
-    });
-
-    // Start the WebSocket server
     let ws_router = router.clone();
     let ws_config = WsServerConfig {
         port: config.ws_port,
@@ -171,9 +178,29 @@ fn main() {
         compression: false,
     };
 
+    let (http_listener, ws_listener) = runtime.block_on(async {
+        let http_listener = bind_http_listener(http_addr).await;
+        let ws_listener = bind_ws_listener(ws_config.port)
+            .await
+            .expect("bind WebSocket port");
+        (http_listener, ws_listener)
+    });
+
+    // Serve HTTP in the background now that its listener is bound.
+    runtime.spawn(async move {
+        serve_http(http_listener, http_router).await;
+    });
+
+    // Both ports are bound → announce readiness to the parent ProcessManager.
+    // Format matches TS: JSON array ["ready", {"ready": true}]. Flush stdout
+    // (it is piped, so line-buffered) so the parent sees it immediately.
+    println!("[\"ready\", {{\"ready\": true}}]");
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+
     let _ = runtime.block_on(async move {
         let ws_router2 = ws_router.clone();
-        let server = run_ws_server(ws_config, move |ctx| {
+        let server = serve_ws(ws_listener, move |ctx| {
             // Route the connection to the appropriate CG thread
             let router = ws_router2.clone();
             tokio::spawn(async move {
@@ -195,10 +222,6 @@ fn main() {
         };
         result
     });
-
-    // Send ready message to parent process (TS ProcessManager)
-    // Format matches TS: JSON array ["ready", {"ready": true}]
-    println!("[\"ready\", {{\"ready\": true}}]");
 }
 
 /// Per-CG services factory. Builds a real `SyncEngine` config from the process
@@ -292,6 +315,7 @@ impl CGServicesFactory for RealServicesFactory {
                 schema: format!("{}_{}/cvr", app_id, self.config.shard),
                 cvr_id: cg_id.to_string(),
                 task_id: self.config.task_id.clone(),
+                max_conns: self.config.cvr_max_conns,
             }),
             permissions,
             tokio_handle: self.tokio_handle.clone(),

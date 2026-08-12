@@ -66,6 +66,10 @@ pub struct Connection {
     client_id: String,
     /// Client group ID.
     client_group_id: String,
+    /// Server app id + shard number, echoed in the `connected` message so a
+    /// direct-mutation client can address the mutate endpoint.
+    app_id: String,
+    shard_num: u32,
     /// Whether the connection has been closed.
     closed: AtomicBool,
     /// Time of last downstream message sent.
@@ -82,12 +86,15 @@ impl Connection {
     /// In the TS code, the constructor sets up event listeners and starts
     /// proxying inbound messages. In Rust, the WS reader task already forwards
     /// messages to a channel — the CG thread calls `handle_inbound()` for each.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sink: DirectWebSocketSink,
         protocol_version: u32,
         ws_id: String,
         client_id: String,
         client_group_id: String,
+        app_id: String,
+        shard_num: u32,
         handler: Box<dyn MessageHandler>,
         on_close: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
@@ -97,6 +104,8 @@ impl Connection {
             ws_id,
             client_id,
             client_group_id,
+            app_id,
+            shard_num,
             closed: AtomicBool::new(false),
             last_downstream_msg_time: std::sync::Mutex::new(Instant::now()),
             handler,
@@ -125,7 +134,7 @@ impl Connection {
             self.close_with_error(error);
             false
         } else {
-            self.send(connected_message(&self.ws_id));
+            self.send(connected_message(&self.ws_id, &self.app_id, self.shard_num));
             true
         }
     }

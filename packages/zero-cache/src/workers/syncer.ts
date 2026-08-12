@@ -32,6 +32,7 @@ import type {ConnectionContextManager} from '../services/view-syncer/connection-
 import {DrainCoordinator} from '../services/view-syncer/drain-coordinator.ts';
 import type {ViewSyncer} from '../services/view-syncer/view-syncer.ts';
 import type {Worker} from '../types/processes.ts';
+import {getShardID, type ShardID} from '../types/shards.ts';
 import type {Subscription} from '../types/subscription.ts';
 import {installWebSocketReceiver} from '../types/websocket-handoff.ts';
 import type {ConnectParams} from './connect-params.ts';
@@ -88,6 +89,7 @@ export class Syncer implements SingletonService {
   readonly #wss: WebSocketServer;
   readonly #stopped = resolver();
   readonly #config: ZeroConfig;
+  readonly #shard: ShardID;
   readonly #validateLegacyJWT: ValidateLegacyJWT | undefined;
 
   constructor(
@@ -109,6 +111,7 @@ export class Syncer implements SingletonService {
     validateLegacyJWT: ValidateLegacyJWT | undefined,
   ) {
     this.#config = config;
+    this.#shard = getShardID(config);
     this.#validateLegacyJWT = validateLegacyJWT;
     // Relays notifications from the parent thread subscription
     // to ViewSyncers within this thread.
@@ -297,6 +300,7 @@ export class Syncer implements SingletonService {
       connection = new Connection(
         this.#lc,
         params,
+        this.#shard,
         ws,
         new SyncerWsMessageHandler(
           this.#lc,

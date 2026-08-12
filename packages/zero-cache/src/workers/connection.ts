@@ -23,6 +23,7 @@ import {
   getLogLevel,
   wrapWithProtocolError,
 } from '../types/error-with-level.ts';
+import type {ShardID} from '../types/shards.ts';
 import type {Source} from '../types/streams.ts';
 import type {ConnectParams} from './connect-params.ts';
 
@@ -75,6 +76,7 @@ export class Connection {
   readonly #ws: WebSocket;
   readonly #wsID: string;
   readonly #protocolVersion: number;
+  readonly #shard: ShardID;
   readonly #lc: LogContext;
   readonly #onClose: () => void;
   readonly #messageHandler: MessageHandler;
@@ -87,6 +89,7 @@ export class Connection {
   constructor(
     lc: LogContext,
     connectParams: ConnectParams,
+    shard: ShardID,
     ws: WebSocket,
     messageHandler: MessageHandler,
     onClose: () => void,
@@ -97,6 +100,7 @@ export class Connection {
     this.#ws = ws;
     this.#wsID = wsID;
     this.#protocolVersion = protocolVersion;
+    this.#shard = shard;
 
     this.#lc = lc
       .withContext('connection')
@@ -140,7 +144,12 @@ export class Connection {
     } else {
       const connectedMessage: ConnectedMessage = [
         'connected',
-        {wsid: this.#wsID, timestamp: Date.now()},
+        {
+          wsid: this.#wsID,
+          timestamp: Date.now(),
+          appID: this.#shard.appID,
+          shardNum: this.#shard.shardNum,
+        },
       ];
       this.send(connectedMessage, 'ignore-backpressure');
       return true;

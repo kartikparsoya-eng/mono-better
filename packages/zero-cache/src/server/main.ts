@@ -1,4 +1,8 @@
+import {spawn, type ChildProcess} from 'node:child_process';
+import {EventEmitter} from 'node:events';
+import {type Socket} from 'node:net';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
 import {must} from '../../../shared/src/must.ts';
@@ -14,12 +18,14 @@ import {
   restoreReplica,
   startReplicaBackupProcess,
 } from '../services/litestream/commands.ts';
+import type {ReplicaState} from '../services/replicator/replicator.ts';
 import {
   childWorker,
   parentWorker,
   singleProcessMode,
   type Worker,
 } from '../types/processes.ts';
+import type {Subscription} from '../types/subscription.ts';
 import {
   createNotifierFrom,
   handleSubscriptionsFrom,
@@ -28,6 +34,12 @@ import {
 } from '../workers/replicator.ts';
 import {createLogContext} from './logging.ts';
 import {startOtelAuto} from './otel-start.ts';
+import {
+  notifyRustSyncers,
+  proxyUpgradeToRust,
+  rustSyncerEnv,
+  type UpgradeHandoff,
+} from './rust-syncer-bridge.ts';
 import {WorkerDispatcher} from './worker-dispatcher.ts';
 import {
   CHANGE_STREAMER_URL,
@@ -37,13 +49,23 @@ import {
   SHADOW_SYNCER_URL,
   SYNCER_URL,
 } from './worker-urls.ts';
-import {spawn, type ChildProcess} from 'node:child_process';
-import {EventEmitter} from 'node:events';
-import {fileURLToPath} from 'node:url';
 
 const clientConnectionBifurcated = false;
 
 const useRustSyncer = process.env.ZERO_SYNCER === 'rust';
+
+// rust-syncer runs as a separate process listening on its own WebSocket +
+// HTTP ports, so it cannot receive the dispatcher's IPC file-descriptor
+// handoff. These bases give each syncer index `i` a unique pair of ports
+// (`ws = wsBase + i`, `http = httpBase + i`); the dispatcher reverse-proxies
+// client upgrades to the WS port and fans replica notifications to the HTTP
+// port. Override via ZERO_RUST_SYNCER_BASE_PORT / _HTTP_BASE_PORT.
+const RUST_SYNCER_WS_BASE_PORT = Number(
+  process.env.ZERO_RUST_SYNCER_BASE_PORT ?? 3100,
+);
+const RUST_SYNCER_HTTP_BASE_PORT = Number(
+  process.env.ZERO_RUST_SYNCER_HTTP_BASE_PORT ?? 3200,
+);
 
 // Default LogContext, overridden in runWorker
 let lc = new LogContext('info', {}, consoleLogSink);
@@ -100,17 +122,46 @@ export default async function runWorker(
     return processes.addWorker(worker, type, name);
   }
 
+  // The HTTP `/notify` port of each spawned rust-syncer, indexed by syncer id,
+  // used by the notification fan-out below.
+  const rustSyncerHttpPorts: number[] = [];
+
+  // Per-worker CVR connection budget, matching the `--cvr-max-conns-per-worker`
+  // flag handed to TS syncers (whole config divided across the syncers).
+  const cvrMaxConnsPerWorker =
+    numSyncers > 0
+      ? Math.floor(config.cvr.maxConns / numSyncers)
+      : config.cvr.maxConns;
+
   // Spawn the rust-syncer binary as a child process instead of a TS worker.
   // The binary communicates readiness via stdout: ["ready", {"ready": true}]
-  function loadRustSyncer(id: number, ...args: string[]): Worker {
-    const bin = path.join(
-      path.dirname(fileURLToPath(SYNCER_URL)),
-      '..',
-      'rust-syncer',
-    );
-    const child = spawn(bin, [...args, ...internalFlags], {
+  function loadRustSyncer(id: number, fileMode: ReplicaFileMode): Worker {
+    const wsPort = RUST_SYNCER_WS_BASE_PORT + id;
+    const httpPort = RUST_SYNCER_HTTP_BASE_PORT + id;
+    rustSyncerHttpPorts[id] = httpPort;
+
+    // Binary location: `ZERO_RUST_SYNCER_PATH` if set (dev runs from the cargo
+    // target, prod from the packaged dist), else the default next to the
+    // compiled syncer module.
+    const bin =
+      process.env.ZERO_RUST_SYNCER_PATH ??
+      path.join(path.dirname(fileURLToPath(SYNCER_URL)), '..', 'rust-syncer');
+    // Config is resolved TS-side (single source of truth) and passed via env
+    // under the names main.rs reads — replica path (with file-mode applied),
+    // cvr db, shard, task id, and auth. Each syncer also gets its own
+    // PORT/HTTP_PORT so multiple syncers don't collide.
+    const child = spawn(bin, [], {
       detached: process.platform !== 'win32',
-      env,
+      env: {
+        ...env,
+        ...rustSyncerEnv(
+          config,
+          fileMode,
+          wsPort,
+          httpPort,
+          cvrMaxConnsPerWorker,
+        ),
+      },
       stdio: ['inherit', 'pipe', 'inherit'],
     }) as ChildProcess;
 
@@ -118,7 +169,16 @@ export default async function runWorker(
     const emitter = new EventEmitter() as Worker;
     emitter.kill = (signal?: string) => child.kill(signal as any);
     (emitter as any).pid = child.pid;
-    (emitter as any).send = (_msg: unknown) => false; // no IPC to binary
+    // The dispatcher hands off a client upgrade via `send(handoffMsg, socket)`.
+    // Since the binary has no IPC channel, reverse-proxy the socket to its WS
+    // port instead of fd-passing. Non-handoff sends (no socket) are dropped.
+    (emitter as any).send = (msg: unknown, socket?: Socket) => {
+      if (socket && typeof socket.pipe === 'function') {
+        proxyUpgradeToRust(lc, msg as UpgradeHandoff, socket, wsPort);
+        return true;
+      }
+      return false;
+    };
 
     // Listen for ready message on stdout.
     let buffer = '';
@@ -217,6 +277,9 @@ export default async function runWorker(
   }
 
   const syncers: Worker[] = [];
+  // The replica-notification subscription that drives the rust-syncer HTTP
+  // notify fan-out; cancelled on dispatcher shutdown.
+  let rustNotifySubscription: Subscription<ReplicaState> | undefined;
   if (numSyncers) {
     const mode: ReplicaFileMode =
       runChangeStreamer && litestream.backupURL ? 'serving-copy' : 'serving';
@@ -235,12 +298,24 @@ export default async function runWorker(
     const notifier = createNotifierFrom(lc, replicator);
     for (let i = 0; i < numSyncers; i++) {
       if (useRustSyncer) {
-        syncers.push(loadRustSyncer(i, mode, String(i)));
+        syncers.push(loadRustSyncer(i, mode));
       } else {
         syncers.push(loadWorker(SYNCER_URL, 'user-facing', i, mode, String(i)));
       }
     }
-    if (!useRustSyncer) {
+    if (useRustSyncer) {
+      // rust-syncer has no IPC channel, so relay replica commit notifications
+      // over HTTP: on each `version-ready` from the replicator, POST /notify to
+      // every rust-syncer so it advances its hosted CGs and pokes clients. The
+      // subscription is cancelled on dispatcher shutdown (below).
+      rustNotifySubscription = notifier.subscribe();
+      const subscription = rustNotifySubscription;
+      void (async () => {
+        for await (const _state of subscription) {
+          await notifyRustSyncers(lc, rustSyncerHttpPorts);
+        }
+      })();
+    } else {
       syncers.forEach(syncer => handleSubscriptionsFrom(lc, syncer, notifier));
     }
   }
@@ -275,6 +350,9 @@ export default async function runWorker(
     );
   } catch (err) {
     processes.logErrorAndExit(err, 'dispatcher');
+  } finally {
+    // Stop the rust-syncer notify fan-out so its subscription doesn't linger.
+    rustNotifySubscription?.cancel();
   }
 
   await processes.done();

@@ -14,6 +14,12 @@ import {upQueriesPatchSchema} from './queries-patch.ts';
 export const connectedBodySchema = v.object({
   wsid: v.string(),
   timestamp: v.number().optional(),
+  // The server's app id and shard number. Sent so that a client configured for
+  // direct mutations can build the mutate-endpoint request (`schema` / `appID`
+  // query params) identically to how zero-cache would relay it. Optional for
+  // backward compatibility with older servers.
+  appID: v.string().optional(),
+  shardNum: v.number().optional(),
 });
 
 export const connectedMessageSchema = v.tuple([

@@ -139,12 +139,14 @@ impl SyncEngine {
         schema: String,
         cvr_id: String,
         task_id: String,
+        max_conns: u32,
     ) -> Result<(), String> {
         // Creating the pool spawns sqlx's background connection reaper, which
         // requires an ambient Tokio runtime. This runs on the runtime-less CG
         // thread, so enter the injected runtime context for the duration.
         let _guard = self.tokio_handle.as_ref().map(|h| h.enter());
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_conns.max(1))
             .connect_lazy(pg_uri)
             .map_err(|e| format!("Failed to create PgPool: {e}"))?;
         let store = CVRStoreHandle::new(pool.clone(), schema.clone(), cvr_id.clone(), task_id);

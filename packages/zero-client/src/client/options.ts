@@ -162,6 +162,21 @@ export type ZeroOptions<
   mutateHeaders?: Record<string, string> | undefined;
 
   /**
+   * Push mutations directly to your API server ({@linkcode mutateURL}) over
+   * HTTP instead of tunneling them through zero-cache over the sync WebSocket.
+   *
+   * This keeps the sync connection read-only; mutation results still return via
+   * the normal sync path. Requires {@linkcode mutateURL} to be set and a
+   * zero-cache new enough to advertise its `appID`/`shard` on connect (older
+   * servers fall back to WebSocket pushing automatically).
+   *
+   * Because the browser then calls your API server directly, that endpoint must
+   * allow CORS and authenticate the request with the user's token (the same
+   * `Authorization: Bearer` header zero-cache would have forwarded).
+   */
+  mutateDirectly?: boolean | undefined;
+
+  /**
    * Custom URL for query requests sent to your API server.
    * If not provided, uses the default configured in zero-cache.
    *

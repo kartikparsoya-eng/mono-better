@@ -318,10 +318,12 @@ fn test_error_reason_all_variants_serialize() {
 
 #[test]
 fn test_connected_message_format() {
-    let msg = connected_message("ws-123");
+    let msg = connected_message("ws-123", "zero", 0);
     assert_eq!(msg[0], "connected");
     assert_eq!(msg[1]["wsid"], "ws-123");
     assert!(msg[1]["timestamp"].is_number());
+    assert_eq!(msg[1]["appID"], "zero");
+    assert_eq!(msg[1]["shardNum"], 0);
 }
 
 #[test]
@@ -333,9 +335,9 @@ fn test_pong_message_format() {
 
 #[test]
 fn test_connected_message_serializes_to_valid_json() {
-    let msg = connected_message("test-ws");
+    let msg = connected_message("test-ws", "zero", 0);
     let text = serde_json::to_string(&msg).unwrap();
-    // Should be a JSON array: ["connected", {"wsid": "...", "timestamp": ...}]
+    // Should be a JSON array: ["connected", {"wsid": "...", "timestamp": ..., ...}]
     assert!(text.starts_with(r#"["connected",{"wsid":"test-ws","timestamp":"#));
 }
 

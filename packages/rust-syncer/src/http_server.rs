@@ -41,8 +41,15 @@ pub struct HttpServerState {
     pub start_time: std::time::Instant,
 }
 
-/// Run the HTTP server on the given address.
-pub async fn run_http_server(addr: SocketAddr, router: Arc<ConnectionRouter>) {
+/// Bind the HTTP TCP listener without serving, so the caller can confirm the
+/// port is bound (and emit its process-ready signal) before serving begins.
+pub async fn bind_http_listener(addr: SocketAddr) -> tokio::net::TcpListener {
+    tracing::info!("HTTP server listening on {}", addr);
+    tokio::net::TcpListener::bind(addr).await.unwrap()
+}
+
+/// Serve the axum app on an already-bound listener (see `bind_http_listener`).
+pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<ConnectionRouter>) {
     let state = Arc::new(HttpServerState {
         router,
         stats: Arc::new(Mutex::new(ServerStats::default())),
@@ -59,9 +66,13 @@ pub async fn run_http_server(addr: SocketAddr, router: Arc<ConnectionRouter>) {
         .route("/notify/:cg_id", post(notify_handler))
         .with_state(state);
 
-    tracing::info!("HTTP server listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Run the HTTP server on the given address (bind + serve).
+pub async fn run_http_server(addr: SocketAddr, router: Arc<ConnectionRouter>) {
+    let listener = bind_http_listener(addr).await;
+    serve_http(listener, router).await;
 }
 
 /// GET /statz — return server statistics.

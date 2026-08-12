@@ -38,7 +38,9 @@ pub use connection_context::{
     auth_equals, resolve_auth,
 };
 pub use drain::DrainCoordinator;
-pub use http_server::{HttpServerState, ServerStats, run_http_server};
+pub use http_server::{
+    HttpServerState, ServerStats, bind_http_listener, run_http_server, serve_http,
+};
 pub use message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
     PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
@@ -56,5 +58,7 @@ pub use router::{
     GroupAuthState, SyncEngineConfig,
 };
 pub use sync_engine::{SyncEngine, SyncResult, parse_existing_rows};
-pub use ws_server::{ConnectionContext, WsServerConfig, accept_connection, run_ws_server};
+pub use ws_server::{
+    ConnectionContext, WsServerConfig, accept_connection, bind_ws_listener, run_ws_server, serve_ws,
+};
 pub use ws_sink::{DirectWebSocketSink, WsCommand};

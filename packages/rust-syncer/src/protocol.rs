@@ -397,6 +397,14 @@ pub type MutationsPatch = Vec<MutationPatchOp>;
 pub struct ConnectedBody {
     pub wsid: String,
     pub timestamp: Option<i64>,
+    /// The server's app id, so a direct-mutation client can build the
+    /// mutate-endpoint `appID` / `schema` params identically to zero-cache.
+    #[serde(rename = "appID", skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// The server's shard number (pairs with `app_id` to form the upstream
+    /// schema `{appID}_{shardNum}`).
+    #[serde(rename = "shardNum", skip_serializing_if = "Option::is_none")]
+    pub shard_num: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +422,8 @@ impl ConnectedMessage {
             body: ConnectedBody {
                 wsid,
                 timestamp: Some(now_ms()),
+                app_id: None,
+                shard_num: None,
             },
         }
     }
@@ -700,13 +710,15 @@ pub fn downstream_message(msg_type: &str, body: &impl Serialize) -> Value {
     serde_json::json!([msg_type, body])
 }
 
-/// Create a `["connected", {wsid, timestamp}]` message.
-pub fn connected_message(wsid: &str) -> Value {
+/// Create a `["connected", {wsid, timestamp, appID, shardNum}]` message.
+pub fn connected_message(wsid: &str, app_id: &str, shard_num: u32) -> Value {
     downstream_message(
         "connected",
         &ConnectedBody {
             wsid: wsid.to_string(),
             timestamp: Some(now_ms()),
+            app_id: Some(app_id.to_string()),
+            shard_num: Some(shard_num),
         },
     )
 }

@@ -301,7 +301,10 @@ fn test_push_with_empty_mutations_returns_ok() {
 }
 
 #[test]
-fn test_push_with_custom_mutation_no_pusher_returns_fatal() {
+fn test_push_with_custom_mutation_no_pusher_returns_transient() {
+    // With no pusher configured (mutations are direct — the sync connection is
+    // read-only), a `push` over the WebSocket is surfaced as a transient error
+    // that keeps the read connection open (rather than tearing it down).
     let vs = Arc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
@@ -312,7 +315,7 @@ fn test_push_with_custom_mutation_no_pusher_returns_fatal() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Fatal { .. }
+        rust_syncer::connection::HandlerResult::Transient { .. }
     ));
 }
 

@@ -6,8 +6,7 @@
 
 use crate::connect_params::{ConnectParams, extract_protocol_version, get_connect_params};
 use crate::protocol::{
-    ErrorBody, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION, connected_message,
-    error_message, pong_message,
+    ErrorBody, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION, error_message, pong_message,
 };
 use crate::ws_sink::{DirectWebSocketSink, WsCommand};
 use futures_util::{SinkExt, StreamExt};
@@ -136,8 +135,10 @@ pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<Connecti
     let (downstream_tx, downstream_rx) = mpsc::channel::<WsCommand>(256);
     let sink = DirectWebSocketSink::new(downstream_tx);
 
-    // Send the `connected` message.
-    sink.push(connected_message(&params.ws_id));
+    // The `connected` message is sent by `Connection::init()` on the CG thread
+    // (TS parity — the connection handler owns it, and it needs the server's
+    // app id / shard for the client's direct-mutation addressing). Sending it
+    // here too would double-send.
 
     // Spawn the WS writer task.
     tokio::spawn(run_ws_writer(ws_writer, downstream_rx));
@@ -278,13 +279,28 @@ async fn send_error_and_close(
 
 /// Start the WebSocket server. Accepts connections and dispatches them to
 /// the provided handler.
+/// Bind the WebSocket TCP listener without serving. Split out so the caller can
+/// confirm the port is bound (and emit its process-ready signal) BEFORE the
+/// blocking accept loop begins.
+pub async fn bind_ws_listener(port: u16) -> Result<TcpListener, std::io::Error> {
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    tracing::info!("WebSocket server listening on port {}", port);
+    Ok(listener)
+}
+
 pub async fn run_ws_server<F>(config: WsServerConfig, handler: F) -> Result<(), std::io::Error>
 where
     F: Fn(ConnectionContext) + Send + Sync + 'static,
 {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", config.port)).await?;
-    tracing::info!("WebSocket server listening on port {}", config.port);
+    let listener = bind_ws_listener(config.port).await?;
+    serve_ws(listener, handler).await
+}
 
+/// Serve the accept loop on an already-bound listener (see `bind_ws_listener`).
+pub async fn serve_ws<F>(listener: TcpListener, handler: F) -> Result<(), std::io::Error>
+where
+    F: Fn(ConnectionContext) + Send + Sync + 'static,
+{
     let handler = Arc::new(handler);
 
     loop {

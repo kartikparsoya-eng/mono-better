@@ -118,6 +118,11 @@ import {
 import type {ConditionalSchemaQuery} from '../../../zql/src/query/schema-query.ts';
 import type {TypedView} from '../../../zql/src/query/typed-view.ts';
 import {nanoid} from '../util/nanoid.ts';
+import {
+  buildMutateHeaders,
+  buildMutateURL,
+  postDirectPush,
+} from './direct-pusher.ts';
 
 import {ActiveClientsManager} from './active-clients-manager.ts';
 import {ClientErrorKind} from './client-error-kind.ts';
@@ -344,6 +349,11 @@ export class Zero<
   readonly #queryManager: QueryManager;
   readonly #ivmMain: IVMSourceBranch;
   readonly #clientToServer: NameMapper;
+  // The server's app id / shard, advertised in the `connected` message. Used to
+  // address the mutate endpoint when `mutateDirectly` is enabled. `undefined`
+  // until the first connect (older servers never send them → WS push fallback).
+  #serverAppID: string | undefined = undefined;
+  #serverShardNum: number | undefined = undefined;
   readonly #deleteClientsManager: DeleteClientsManager;
   readonly #mutationTracker: MutationTracker;
 
@@ -1523,6 +1533,11 @@ export class Zero<
     const [, connectBody] = connectedMessage;
     lc = addWebSocketIDToLogContext(connectBody.wsid, lc);
 
+    // Remember the server's app id / shard so a direct-mutation push can
+    // address the mutate endpoint identically to a zero-cache relay.
+    this.#serverAppID = connectBody.appID;
+    this.#serverShardNum = connectBody.shardNum;
+
     if (this.#connectedCount === 0) {
       this.#checkConnectivity('firstConnect');
     } else if (this.#connectErrorCount > 0) {
@@ -1938,6 +1953,7 @@ export class Zero<
       'mutations.',
     );
     const now = Date.now();
+    const zeroMutations = [];
     for (let i = start; i < req.mutations.length; i++) {
       const m = req.mutations[i];
       const timestamp = now - Math.round(performance.now() - m.timestamp);
@@ -1959,6 +1975,47 @@ export class Zero<
               name: m.name,
               args: [m.args],
             } satisfies CustomMutation);
+      zeroMutations.push(zeroM);
+      if (!isMutationRecoveryPush) {
+        this.#lastMutationIDSent = {clientID: m.clientID, id: m.id};
+      }
+    }
+
+    // Direct-mutation mode: POST the whole batch to the app's mutate endpoint
+    // over HTTP instead of tunneling it through zero-cache over the WebSocket.
+    // The sync connection stays read-only; results still arrive via the poked
+    // `mutationResults`/lmid queries. Falls back to WebSocket pushing unless the
+    // server advertised its appID/shard on connect and `mutateURL` is set.
+    const directURL = this.#directMutateURL();
+    if (directURL !== undefined) {
+      if (zeroMutations.length === 0) {
+        return {httpRequestInfo: {errorMessage: '', httpStatusCode: 200}};
+      }
+      const traceparent = this.#options.getTraceparent?.();
+      const headers = buildMutateHeaders(
+        fromReplicacheAuthToken(this.#rep.auth),
+        {
+          ...this.#options.mutateHeaders,
+          ...(traceparent ? {traceparent} : undefined),
+        },
+      );
+      const result = await postDirectPush(directURL, headers, {
+        timestamp: now,
+        clientGroupID: req.clientGroupID,
+        mutations: zeroMutations,
+        pushVersion: req.pushVersion,
+        requestID,
+      });
+      return {
+        httpRequestInfo: {
+          errorMessage: result.errorMessage,
+          httpStatusCode: result.httpStatusCode,
+        },
+      };
+    }
+
+    // WebSocket push (default): one `push` message per mutation.
+    for (const zeroM of zeroMutations) {
       const msg: PushMessage = [
         'push',
         {
@@ -1971,9 +2028,6 @@ export class Zero<
         },
       ];
       this.#send(msg);
-      if (!isMutationRecoveryPush) {
-        this.#lastMutationIDSent = {clientID: m.clientID, id: m.id};
-      }
     }
     return {
       httpRequestInfo: {
@@ -1981,6 +2035,27 @@ export class Zero<
         httpStatusCode: 200,
       },
     };
+  }
+
+  /**
+   * The resolved mutate-endpoint URL when direct-mutation pushing is enabled and
+   * possible (opt-in + a configured `mutateURL` + the server advertised its
+   * appID/shard on connect), else `undefined` (→ WebSocket push).
+   */
+  #directMutateURL(): string | undefined {
+    if (
+      !this.#options.mutateDirectly ||
+      !this.#options.mutateURL ||
+      this.#serverAppID === undefined ||
+      this.#serverShardNum === undefined
+    ) {
+      return undefined;
+    }
+    return buildMutateURL(
+      this.#options.mutateURL,
+      {appID: this.#serverAppID, shardNum: this.#serverShardNum},
+      globalThis.location?.href,
+    );
   }
 
   async #runLoop() {

@@ -294,10 +294,17 @@ impl SyncerWsMessageHandler {
                         .unwrap_or(serde_json::Value::Null);
                     return pusher.enqueue_push(selector, &body_value);
                 }
-                return HandlerResult::Fatal {
-                    error: ErrorBody::invalid_push(
-                        "A ZERO_MUTATE_URL must be set in order to process custom mutations.",
-                    ),
+                // This server keeps the sync connection read-only and does not
+                // relay mutations. The client should push mutations directly to
+                // the app's mutate endpoint (`mutateDirectly: true` + a
+                // `mutateURL`). Surface a clear error but keep the (read)
+                // connection open rather than tearing it down.
+                return HandlerResult::Transient {
+                    errors: vec![ErrorBody::invalid_push(
+                        "This server does not process mutations over the sync connection. \
+                         Enable direct mutations on the client (set `mutateDirectly: true` \
+                         with a `mutateURL`) so mutations POST to your API server directly.",
+                    )],
                 };
             }
 

@@ -100,6 +100,9 @@ pub struct CvrPgConfig {
     /// CVR id (== client group id).
     pub cvr_id: String,
     pub task_id: String,
+    /// Max Postgres connections for this CG's CVR pool (TS parity:
+    /// `--cvr-max-conns-per-worker`).
+    pub max_conns: u32,
 }
 
 /// Everything the CG thread needs to build its `SyncEngine` locally. `Send` so
@@ -620,7 +623,13 @@ impl CgState {
 
         let mut cvr_pg = false;
         if let Some(pg) = config.cvr_pg {
-            match sync_engine.set_cvr_store(&pg.pg_uri, pg.schema, pg.cvr_id, pg.task_id) {
+            match sync_engine.set_cvr_store(
+                &pg.pg_uri,
+                pg.schema,
+                pg.cvr_id,
+                pg.task_id,
+                pg.max_conns,
+            ) {
                 Ok(()) => cvr_pg = true,
                 Err(e) => tracing::error!("CG {cg_id}: set_cvr_store failed: {e}"),
             }
@@ -793,6 +802,8 @@ impl CgState {
             ws_id.clone(),
             client_id.clone(),
             client_group_id,
+            self.shard.app_id.clone(),
+            self.shard.shard_num,
             handler,
             on_close,
         );
