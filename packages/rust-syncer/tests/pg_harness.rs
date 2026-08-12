@@ -444,6 +444,91 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
     });
 }
 
+/// Loading a CVR grants the loading task ownership (gated on `lastConnectTime`),
+/// so a task that connected earlier is refused and a task that connects later
+/// takes over — which then makes the stale ex-owner's flush fail. Port of TS
+/// `load`'s ownership grant + `#checkVersionAndOwnership`.
+#[test]
+fn pg_cvr_store_load_grants_and_transfers_ownership() {
+    use rust_cvr::store::CVRStoreError;
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_cvr_store_load_ownership: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_store_ownership";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    let store = |pool: &sqlx::PgPool, task: &str| {
+        CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            task.to_string(),
+        )
+    };
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+
+        // task-A creates the instance.
+        let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
+        cfg.ensure_client("c1");
+        let (cvr, _) = cfg.flush(0, 0, 0);
+        let ops = cfg.base.drain_store_ops();
+        let mut a = store(&pool, "task-A");
+        a.apply_store_ops(ops);
+        // A connects at time 1000 → its flush grants ownership @1000.
+        a.flush(&cvr.version, &cvr, 1000.0).await.expect("A create");
+        a.load(1000.0).await.expect("A reload (still owner)");
+
+        // task-B connected EARLIER (500) → A's live lease refuses it.
+        let mut b = store(&pool, "task-B");
+        let err = b.load(500.0).await.expect_err("B must be refused");
+        assert!(
+            matches!(err, CVRStoreError::OwnershipError { .. }),
+            "expected OwnershipError for the earlier task, got {err:?}"
+        );
+
+        // task-C connected LATER (2000) → A's lease has lapsed → C takes over.
+        let mut c = store(&pool, "task-C");
+        c.load(2000.0).await.expect("C takes over");
+        let owner: (Option<String>,) = sqlx::query_as(&format!(
+            r#"SELECT "owner" FROM "{schema}".instances WHERE "clientGroupID" = 'cg1'"#
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(owner.0.as_deref(), Some("task-C"), "C now owns the CVR");
+
+        // The stale ex-owner A can no longer flush (C's lease @2000 > A's 1000).
+        let err = a
+            .flush(&cvr.version, &cvr, 1000.0)
+            .await
+            .expect_err("stale ex-owner must be rejected");
+        assert!(
+            matches!(err, CVRStoreError::OwnershipError { .. }),
+            "expected OwnershipError for the stale ex-owner, got {err:?}"
+        );
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// On reload, each client's per-query desire state (ttl + inactivatedAt) must be
 /// reconstructed onto the query's `client_state`. The old load populated only
 /// `desired_query_ids`, so an INACTIVE (TTL-pending) desire reloaded as fully

@@ -433,20 +433,27 @@ impl CVRStoreHandle {
         // 1. Instance upsert with ownership check
         if let Some(instance) = &self.pending.pending_instance_write {
             let sql = format!(
+                // owner + grantedAt re-assert this task's ownership at its connect
+                // time (NOT `NOW()`), matching TS `putInstance` which writes
+                // `owner=taskID, grantedAt=lastConnectTime` and updates BOTH
+                // unconditionally on conflict. The `#checkVersionAndOwnership`
+                // guard above has already ensured we're allowed to take it.
                 r#"INSERT INTO "{}".instances
                    ("clientGroupID", "version", "lastActive", "ttlClock",
                     "replicaVersion", "owner", "grantedAt", "clientSchema", "profileID")
-                   VALUES ($1, $2, to_timestamp($3 / 1000.0), $4, $5, $6, NOW(), $7, $8)
+                   VALUES ($1, $2, to_timestamp($3 / 1000.0), $4, $5, $6,
+                           to_timestamp($9 / 1000.0), $7, $8)
                    ON CONFLICT ("clientGroupID") DO UPDATE SET
                     "version" = excluded."version",
                     "lastActive" = excluded."lastActive",
                     "ttlClock" = excluded."ttlClock",
                     "replicaVersion" = excluded."replicaVersion",
-                    "owner" = COALESCE("{}".instances."owner", excluded."owner"),
+                    "owner" = excluded."owner",
+                    "grantedAt" = excluded."grantedAt",
                     "clientSchema" = COALESCE("{}".instances."clientSchema", excluded."clientSchema"),
                     "profileID" = COALESCE("{}".instances."profileID", excluded."profileID")
                 "#,
-                self.schema, self.schema, self.schema, self.schema
+                self.schema, self.schema, self.schema
             );
             sqlx::query(&sql)
                 .bind(&instance.client_group_id)
@@ -457,6 +464,7 @@ impl CVRStoreHandle {
                 .bind(&self.task_id)
                 .bind(&instance.client_schema)
                 .bind(&instance.profile_id)
+                .bind(last_connect_time)
                 .execute(&mut *tx)
                 .await?;
             stats.instances = 1;
@@ -711,7 +719,7 @@ impl CVRStoreHandle {
 
     // ─── Load ─────────────────────────────────────────────────────────
 
-    pub async fn load(&mut self, _last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
+    pub async fn load(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
@@ -723,7 +731,8 @@ impl CVRStoreHandle {
                       (extract(epoch from "lastActive") * 1000)::float8 AS "lastActive",
                       "ttlClock", "replicaVersion",
                       "clientSchema", "profileID", "owner",
-                      (extract(epoch from "grantedAt") * 1000)::float8 AS "grantedAt"
+                      (extract(epoch from "grantedAt") * 1000)::float8 AS "grantedAt",
+                      COALESCE("deleted", false) AS "deleted"
                FROM "{}".instances WHERE "clientGroupID" = $1"#,
             self.schema
         );
@@ -736,12 +745,19 @@ impl CVRStoreHandle {
             Option<String>,
             Option<String>,
             Option<f64>,
+            bool,
         )> = sqlx::query_as(&instance_sql)
             .bind(&self.cvr_id)
             .fetch_optional(&mut *tx)
             .await?;
 
         let is_new = instance.is_none();
+        // Deferred ownership grant: when this task is taking over a CVR whose
+        // ownership lease has lapsed (or was never set), it grants itself
+        // ownership AFTER the read-only load tx (a fire-and-forget UPDATE on the
+        // pool, gated so it only wins under the same conditions as TS). Set here,
+        // executed just before returning.
+        let mut grant_ownership = false;
 
         let cvr = match instance {
             None => {
@@ -768,9 +784,31 @@ impl CVRStoreHandle {
                 replica_version,
                 client_schema,
                 profile_id,
-                _owner,
-                _granted_at,
+                owner,
+                granted_at,
+                deleted,
             )) => {
+                // A CVR that was purged for inactivity is gone (TS throws
+                // ClientNotFoundError, which triggers a fresh client group).
+                if deleted {
+                    drop(tx);
+                    return Err(CVRStoreError::ClientNotFound(self.cvr_id.clone()));
+                }
+                // Ownership: if another task owns this CVR and its lease is still
+                // live (granted after our last connect), refuse to load it.
+                // Otherwise take it over by granting ourselves ownership below.
+                // Port of TS `load`'s ownership handling.
+                if owner.as_deref() != Some(self.task_id.as_str()) {
+                    if granted_at.unwrap_or(0.0) > last_connect_time {
+                        drop(tx);
+                        return Err(CVRStoreError::OwnershipError {
+                            owner: owner.unwrap_or_default(),
+                            granted_at: granted_at.unwrap_or(0.0),
+                            last_connect_time,
+                        });
+                    }
+                    grant_ownership = true;
+                }
                 let cvr_version = version_from_string(&version);
                 CVR {
                     id: self.cvr_id.clone(),
@@ -897,6 +935,29 @@ impl CVRStoreHandle {
         for client in cvr.clients.values_mut() {
             client.desired_query_ids.sort();
             client.desired_query_ids.dedup();
+        }
+
+        // Take over ownership of a CVR whose lease has lapsed. Done AFTER the
+        // read-only load tx, on the pool, and gated so it only wins if nobody has
+        // been granted the CVR more recently than our connect time. Fire-and-
+        // forget / non-fatal (a lost race means another task legitimately won,
+        // which its own flush guard enforces). Port of TS `load`'s ownership
+        // UPDATE. Once granted, our own `flush` guard rejects a stale ex-owner.
+        if grant_ownership {
+            let grant_sql = format!(
+                r#"UPDATE "{}".instances
+                   SET "owner" = $1, "grantedAt" = to_timestamp($2 / 1000.0)
+                   WHERE "clientGroupID" = $3
+                     AND ("grantedAt" IS NULL
+                          OR "grantedAt" <= to_timestamp($2 / 1000.0))"#,
+                self.schema
+            );
+            let _ = sqlx::query(&grant_sql)
+                .bind(&self.task_id)
+                .bind(last_connect_time)
+                .bind(&self.cvr_id)
+                .execute(&self.pool)
+                .await;
         }
 
         self.current_version = Some(cvr.version.clone());
