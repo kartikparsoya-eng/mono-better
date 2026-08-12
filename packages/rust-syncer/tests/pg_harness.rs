@@ -238,6 +238,114 @@ fn pg_cvr_store_flush_and_reload_roundtrip() {
     });
 }
 
+/// A row leaves the CVR either as an explicit del OR as a put with
+/// `refCounts = null` (the tombstone form). BOTH must DELETE the row from the
+/// `rows` table. The old store skipped `None` deletes entirely and wrote
+/// tombstones as `refCounts = NULL` upserts, leaking dead rows and dropping
+/// real deletions. Mirrors TS `executeRowUpdates`.
+#[test]
+fn pg_cvr_store_deletes_rows() {
+    use rust_cvr::row_key::RowID;
+    use rust_cvr::types::{RowRecord, StoreOp};
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_cvr_store_deletes_rows: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_store_deletes";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+
+    let mk_row = |key: &str, refs: Option<i64>| -> RowRecord {
+        let mut row_key = serde_json::Map::new();
+        row_key.insert(
+            "id".to_string(),
+            serde_json::Value::String(key.to_string()),
+        );
+        RowRecord {
+            id: RowID {
+                schema: "public".to_string(),
+                table: "issue".to_string(),
+                row_key,
+            },
+            row_version: "rv1".to_string(),
+            patch_version: CVRVersion {
+                state_version: "01".to_string(),
+                config_version: None,
+            },
+            ref_counts: refs.map(|n| BTreeMap::from([("q1".to_string(), n)])),
+        }
+    };
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+
+        // Create the CVR instance so the rows can be persisted.
+        let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
+        cfg.ensure_client("client1");
+        let (cvr, _) = cfg.flush(0, 0, 0);
+        let ops = cfg.base.drain_store_ops();
+        let mut store = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        );
+        store.apply_store_ops(ops);
+        store.flush(&cvr.version, &cvr, 0.0).await.expect("flush");
+
+        let row_count = |pool: sqlx::PgPool| async move {
+            let c: (i64,) = sqlx::query_as(&format!(
+                r#"SELECT count(*) FROM "{schema}".rows WHERE "clientGroupID" = 'cg1'"#
+            ))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            c.0
+        };
+
+        // Put two referenced rows A and B.
+        store.apply_store_ops(vec![
+            StoreOp::PutRowRecord(mk_row("A", Some(1))),
+            StoreOp::PutRowRecord(mk_row("B", Some(1))),
+        ]);
+        store.flush(&cvr.version, &cvr, 0.0).await.expect("flush puts");
+        assert_eq!(row_count(pool.clone()).await, 2, "both rows persisted");
+
+        // Delete A via a tombstone (put refCounts = None); delete B via an
+        // explicit del. Both must remove the row from the `rows` table.
+        store.apply_store_ops(vec![
+            StoreOp::PutRowRecord(mk_row("A", None)),
+            StoreOp::DelRowRecord(mk_row("B", None).id),
+        ]);
+        store
+            .flush(&cvr.version, &cvr, 0.0)
+            .await
+            .expect("flush deletes");
+        assert_eq!(
+            row_count(pool.clone()).await,
+            0,
+            "both the tombstone and the explicit del removed their rows"
+        );
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// REPRODUCTION: isolate the catchup read path exactly as the CG thread drives
 /// it — a non-worker OS thread calling `Handle::block_on`. If this hangs, the
 /// deadlock is inside `RowRecordCache` (flush/flushed/catchup), independent of

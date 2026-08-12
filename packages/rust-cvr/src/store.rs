@@ -143,7 +143,11 @@ pub struct PendingWrites {
     pub pending_query_updates: BTreeMap<String, QueriesRow>,
     pub pending_query_partial_updates: BTreeMap<String, PartialQueriesRow>,
     pub pending_desire_updates: BTreeMap<String, DesiresRow>,
-    pub pending_row_record_updates: HashMap<String, Option<RowRecord>>,
+    // Keyed by rowIDString. The `RowID` is kept alongside the (optional) record
+    // so a delete (`None`, or a `Some` tombstone with `refCounts = None`) can be
+    // turned into a `DELETE ... WHERE rowKey = ...` — the row_key is otherwise
+    // unrecoverable from the string key.
+    pub pending_row_record_updates: HashMap<String, (RowID, Option<RowRecord>)>,
     pub force_updates: HashSet<String>,
 }
 
@@ -291,12 +295,14 @@ impl CVRStoreHandle {
         let id_str = crate::row_key::row_id_string(&row.id);
         self.pending
             .pending_row_record_updates
-            .insert(id_str, Some(row.clone()));
+            .insert(id_str, (row.id.clone(), Some(row.clone())));
     }
 
     pub fn del_row_record(&mut self, id: &RowID) {
         let id_str = crate::row_key::row_id_string(id);
-        self.pending.pending_row_record_updates.insert(id_str, None);
+        self.pending
+            .pending_row_record_updates
+            .insert(id_str, (id.clone(), None));
     }
 
     pub fn force_updates(&mut self, ids: &[RowID]) {
@@ -563,48 +569,68 @@ impl CVRStoreHandle {
                 .execute(&mut *tx)
                 .await?;
         }
-        for (id_str, record) in &self.pending.pending_row_record_updates {
-            match record {
-                Some(row) => {
-                    let row_key_json: Value =
-                        serde_json::to_value(&row.id.row_key).unwrap_or(Value::Null);
-                    let ref_counts_json: Option<Value> = row
-                        .ref_counts
-                        .as_ref()
-                        .map(|rc| serde_json::to_value(rc).unwrap_or(Value::Null));
-                    let sql = format!(
-                        r#"INSERT INTO "{}".rows
-                           ("clientGroupID", "schema", "table", "rowKey",
-                            "rowVersion", "patchVersion", "refCounts")
-                           VALUES ($1, $2, $3, $4, $5, $6, $7)
-                           ON CONFLICT ("clientGroupID", "schema", "table", "rowKey")
-                           DO UPDATE SET
-                            "rowVersion" = excluded."rowVersion",
-                            "patchVersion" = excluded."patchVersion",
-                            "refCounts" = excluded."refCounts""#,
-                        self.schema
-                    );
-                    sqlx::query(&sql)
-                        .bind(&self.cvr_id)
-                        .bind(&row.id.schema)
-                        .bind(&row.id.table)
-                        .bind(&row_key_json)
-                        .bind(&row.row_version)
-                        .bind(version_string(&row.patch_version))
-                        .bind(&ref_counts_json)
-                        .execute(&mut *tx)
-                        .await?;
-                    stats.rows += 1;
-                }
-                None => {
-                    // Row delete — need to parse id_str back to RowID
-                    // For simplicity, we store the RowID in force_updates
-                    // In practice, del_row_record stores the id_str and we
-                    // need the RowID components. This is a known limitation.
-                    // The actual SQL uses the rowKey JSONB.
-                    // Skip for now — handled by the refCounts=null tombstone path.
-                }
+        for (_id_str, (row_id, record)) in &self.pending.pending_row_record_updates {
+            // A row leaves the CVR either as an explicit del (`None`) or as a put
+            // with `refCounts = null` (the tombstone form used when a row is no
+            // longer referenced by any query). BOTH must DELETE the row from the
+            // `rows` table, matching TS `executeRowUpdates`, which routes `null`
+            // and `refCounts == null` records into `deletes`. The old code skipped
+            // `None` entirely and wrote tombstones as `refCounts = NULL` upserts —
+            // leaking dead rows and silently dropping real deletions.
+            let is_delete = match record {
+                None => true,
+                Some(row) => row.ref_counts.is_none(),
+            };
+            if is_delete {
+                let row_key_json: Value =
+                    serde_json::to_value(&row_id.row_key).unwrap_or(Value::Null);
+                let sql = format!(
+                    r#"DELETE FROM "{}".rows
+                       WHERE "clientGroupID" = $1 AND "schema" = $2
+                         AND "table" = $3 AND "rowKey" = $4"#,
+                    self.schema
+                );
+                sqlx::query(&sql)
+                    .bind(&self.cvr_id)
+                    .bind(&row_id.schema)
+                    .bind(&row_id.table)
+                    .bind(&row_key_json)
+                    .execute(&mut *tx)
+                    .await?;
+                stats.rows += 1;
+                continue;
             }
+
+            let row = record.as_ref().expect("non-delete row has a record");
+            let row_key_json: Value =
+                serde_json::to_value(&row.id.row_key).unwrap_or(Value::Null);
+            let ref_counts_json: Option<Value> = row
+                .ref_counts
+                .as_ref()
+                .map(|rc| serde_json::to_value(rc).unwrap_or(Value::Null));
+            let sql = format!(
+                r#"INSERT INTO "{}".rows
+                   ("clientGroupID", "schema", "table", "rowKey",
+                    "rowVersion", "patchVersion", "refCounts")
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                   ON CONFLICT ("clientGroupID", "schema", "table", "rowKey")
+                   DO UPDATE SET
+                    "rowVersion" = excluded."rowVersion",
+                    "patchVersion" = excluded."patchVersion",
+                    "refCounts" = excluded."refCounts""#,
+                self.schema
+            );
+            sqlx::query(&sql)
+                .bind(&self.cvr_id)
+                .bind(&row.id.schema)
+                .bind(&row.id.table)
+                .bind(&row_key_json)
+                .bind(&row.row_version)
+                .bind(version_string(&row.patch_version))
+                .bind(&ref_counts_json)
+                .execute(&mut *tx)
+                .await?;
+            stats.rows += 1;
         }
 
         tx.commit().await?;
@@ -1136,10 +1162,12 @@ mod tests {
         };
         pending
             .pending_row_record_updates
-            .insert(id_str.clone(), Some(record));
+            .insert(id_str.clone(), (id.clone(), Some(record)));
         assert!(!pending.is_empty());
         // Now delete
-        pending.pending_row_record_updates.insert(id_str, None);
+        pending
+            .pending_row_record_updates
+            .insert(id_str, (id, None));
     }
 
     #[test]
