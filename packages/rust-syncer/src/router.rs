@@ -177,6 +177,21 @@ pub struct GroupAuthState {
     pub pinned_user_id: Option<String>,
 }
 
+/// Check the incoming userID against the group's pin and, on the first
+/// connection, BIND it. `Ok` = allowed (and now pinned); `Err` = the group is
+/// already pinned to a different userID and the connection must be rejected.
+/// Port of the pin logic in TS `ConnectionContextManager.validateConnection`.
+fn check_and_pin_user(group: &mut GroupAuthState, incoming: &str) -> Result<(), ()> {
+    match group.pinned_user_id.clone() {
+        Some(pinned) if pinned != incoming => Err(()),
+        Some(_) => Ok(()),
+        None => {
+            group.pinned_user_id = Some(incoming.to_string());
+            Ok(())
+        }
+    }
+}
+
 /// The connection router — manages CG threads and routes connections.
 ///
 /// Port of the `Syncer` class's connection management.
@@ -270,21 +285,27 @@ impl ConnectionRouter {
             }
         }
 
-        // 2. Check user ID pinning.
+        // 2. Check (and, on the first connection, BIND) the group's userID.
+        //    Port of TS `ConnectionContextManager.validateConnection`: the first
+        //    successful connection pins the client group to its userID; every
+        //    later connection must match it. Without the bind step the check
+        //    below is inert — the group is never pinned, so two different users
+        //    could share one client group.
         {
             let mut states = self.group_auth_states.lock().unwrap();
             let group = states.entry(client_group_id.clone()).or_default();
-            if let Some(ref pinned) = group.pinned_user_id {
-                let incoming = user_id.as_deref().unwrap_or("");
-                if pinned.as_str() != incoming {
-                    let error = crate::protocol::ErrorBody::unauthorized(
-                        "Client groups are pinned to a single userID. \
-                         Connection userID does not match existing client group userID.",
-                    );
-                    tracing::warn!("User ID mismatch: pinned={pinned}, incoming={incoming}");
-                    ctx.sink.fail(error);
-                    return;
-                }
+            let incoming = user_id.as_deref().unwrap_or("");
+            if check_and_pin_user(group, incoming).is_err() {
+                let error = crate::protocol::ErrorBody::unauthorized(
+                    "Client groups are pinned to a single userID. \
+                     Connection userID does not match existing client group userID.",
+                );
+                tracing::warn!(
+                    "User ID mismatch: pinned={:?}, incoming={incoming}",
+                    group.pinned_user_id
+                );
+                ctx.sink.fail(error);
+                return;
             }
         }
 
@@ -1709,6 +1730,22 @@ mod tests {
         state.on_connection_closed("c1".to_string());
         assert_eq!(state.registered_ws.len(), 0);
         assert_eq!(state.connections.len(), 0);
+    }
+
+    /// The first connection binds the client group's userID; a later connection
+    /// with a different userID is rejected, while the same userID is allowed.
+    #[test]
+    fn group_pins_user_id_on_first_connection() {
+        let mut group = GroupAuthState::default();
+        // First connection binds the pin.
+        assert!(check_and_pin_user(&mut group, "user-1").is_ok());
+        assert_eq!(group.pinned_user_id.as_deref(), Some("user-1"));
+        // Same user → allowed, pin unchanged.
+        assert!(check_and_pin_user(&mut group, "user-1").is_ok());
+        assert_eq!(group.pinned_user_id.as_deref(), Some("user-1"));
+        // Different user → rejected, pin unchanged.
+        assert!(check_and_pin_user(&mut group, "user-2").is_err());
+        assert_eq!(group.pinned_user_id.as_deref(), Some("user-1"));
     }
 
     /// When a client reconnects (same clientID, new wsID) the superseded
