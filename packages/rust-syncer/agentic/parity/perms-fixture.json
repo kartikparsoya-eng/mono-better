@@ -224,6 +224,387 @@
           ]
         ]
       }
+    },
+    {
+      "desc": "nested and/or where is recursed and rule-merged",
+      "query": {
+        "table": "issue",
+        "where": {
+          "type": "or",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "a"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": 1
+              }
+            },
+            {
+              "type": "and",
+              "conditions": [
+                {
+                  "type": "simple",
+                  "left": {
+                    "type": "column",
+                    "name": "b"
+                  },
+                  "op": "=",
+                  "right": {
+                    "type": "literal",
+                    "value": 2
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "permissions": {
+        "tables": {
+          "issue": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "ownerId"
+                    },
+                    "op": "=",
+                    "right": {
+                      "type": "static",
+                      "anchor": "authData",
+                      "field": "sub"
+                    }
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "authData": {
+        "sub": "user-1"
+      },
+      "expected": {
+        "table": "issue",
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "or",
+              "conditions": [
+                {
+                  "type": "simple",
+                  "left": {
+                    "type": "column",
+                    "name": "a"
+                  },
+                  "op": "=",
+                  "right": {
+                    "type": "literal",
+                    "value": 1
+                  }
+                },
+                {
+                  "type": "simple",
+                  "left": {
+                    "type": "column",
+                    "name": "b"
+                  },
+                  "op": "=",
+                  "right": {
+                    "type": "literal",
+                    "value": 2
+                  }
+                }
+              ]
+            },
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "ownerId"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "user-1"
+              }
+            }
+          ]
+        },
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      }
+    },
+    {
+      "desc": "related subquery gets ITS table rules applied transitively",
+      "query": {
+        "table": "issue",
+        "related": [
+          {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueId"
+              ]
+            },
+            "subquery": {
+              "table": "comment",
+              "alias": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            }
+          }
+        ],
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "permissions": {
+        "tables": {
+          "issue": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "and",
+                    "conditions": []
+                  }
+                ]
+              ]
+            }
+          },
+          "comment": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "authorId"
+                    },
+                    "op": "=",
+                    "right": {
+                      "type": "static",
+                      "anchor": "authData",
+                      "field": "sub"
+                    }
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "authData": {
+        "sub": "user-9"
+      },
+      "expected": {
+        "table": "issue",
+        "related": [
+          {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueId"
+              ]
+            },
+            "subquery": {
+              "table": "comment",
+              "alias": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "simple",
+                "left": {
+                  "type": "column",
+                  "name": "authorId"
+                },
+                "op": "=",
+                "right": {
+                  "type": "literal",
+                  "value": "user-9"
+                }
+              }
+            }
+          }
+        ],
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "and",
+          "conditions": []
+        }
+      }
+    },
+    {
+      "desc": "EXISTS correlatedSubquery in where: inner subquery gets its table rules",
+      "query": {
+        "table": "issue",
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueId"
+              ]
+            },
+            "subquery": {
+              "table": "comment",
+              "alias": "c",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            }
+          }
+        },
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "permissions": {
+        "tables": {
+          "issue": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "and",
+                    "conditions": []
+                  }
+                ]
+              ]
+            }
+          },
+          "comment": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "authorId"
+                    },
+                    "op": "=",
+                    "right": {
+                      "type": "static",
+                      "anchor": "authData",
+                      "field": "sub"
+                    }
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "authData": {
+        "sub": "user-9"
+      },
+      "expected": {
+        "table": "issue",
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "correlatedSubquery",
+              "op": "EXISTS",
+              "related": {
+                "correlation": {
+                  "parentField": [
+                    "id"
+                  ],
+                  "childField": [
+                    "issueId"
+                  ]
+                },
+                "subquery": {
+                  "table": "comment",
+                  "alias": "c",
+                  "orderBy": [
+                    [
+                      "id",
+                      "asc"
+                    ]
+                  ],
+                  "where": {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "authorId"
+                    },
+                    "op": "=",
+                    "right": {
+                      "type": "literal",
+                      "value": "user-9"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      }
     }
   ]
 }

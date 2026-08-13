@@ -20,16 +20,17 @@ const lc = {warn() {}, debug() {}, info() {}, error() {}};
 
 // An always-true allow rule (ANYONE_CAN-style: an empty AND is vacuously true).
 const ANYONE = ['allow', {type: 'and', conditions: []}];
-// A simple auth-gated rule: issue.ownerId == $authData.sub (static param).
-const OWNER_RULE = [
+// A simple auth-gated rule: <col> == $authData.sub (static param).
+const ownerRuleFor = col => [
   'allow',
   {
     type: 'simple',
-    left: {type: 'column', name: 'ownerId'},
+    left: {type: 'column', name: col},
     op: '=',
     right: {type: 'static', anchor: 'authData', field: 'sub'},
   },
 ];
+const OWNER_RULE = ownerRuleFor('ownerId');
 
 const CASES = [
   {
@@ -64,6 +65,62 @@ const CASES = [
     },
     permissions: {tables: {issue: {row: {select: [OWNER_RULE]}}}},
     authData: {sub: 'user-123'},
+  },
+  {
+    desc: 'nested and/or where is recursed and rule-merged',
+    query: {
+      table: 'issue',
+      where: {
+        type: 'or',
+        conditions: [
+          {type: 'simple', left: {type: 'column', name: 'a'}, op: '=',
+           right: {type: 'literal', value: 1}},
+          {type: 'and', conditions: [
+            {type: 'simple', left: {type: 'column', name: 'b'}, op: '=',
+             right: {type: 'literal', value: 2}},
+          ]},
+        ],
+      },
+      orderBy: [['id', 'asc']],
+    },
+    permissions: {tables: {issue: {row: {select: [OWNER_RULE]}}}},
+    authData: {sub: 'user-1'},
+  },
+  {
+    desc: 'related subquery gets ITS table rules applied transitively',
+    query: {
+      table: 'issue',
+      related: [{
+        correlation: {parentField: ['id'], childField: ['issueId']},
+        subquery: {table: 'comment', alias: 'comments', orderBy: [['id', 'asc']]},
+      }],
+      orderBy: [['id', 'asc']],
+    },
+    permissions: {tables: {
+      issue: {row: {select: [ANYONE]}},
+      comment: {row: {select: [ownerRuleFor('authorId')]}},
+    }},
+    authData: {sub: 'user-9'},
+  },
+  {
+    desc: 'EXISTS correlatedSubquery in where: inner subquery gets its table rules',
+    query: {
+      table: 'issue',
+      where: {
+        type: 'correlatedSubquery',
+        op: 'EXISTS',
+        related: {
+          correlation: {parentField: ['id'], childField: ['issueId']},
+          subquery: {table: 'comment', alias: 'c', orderBy: [['id', 'asc']]},
+        },
+      },
+      orderBy: [['id', 'asc']],
+    },
+    permissions: {tables: {
+      issue: {row: {select: [ANYONE]}},
+      comment: {row: {select: [ownerRuleFor('authorId')]}},
+    }},
+    authData: {sub: 'user-9'},
   },
 ];
 
