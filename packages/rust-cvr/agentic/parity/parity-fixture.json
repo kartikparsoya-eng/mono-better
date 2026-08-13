@@ -158,5 +158,222 @@
       "sig": "18446744073709551615",
       "hex": "ffffffffffffffff"
     }
+  ],
+  "lexiVersions": [
+    {
+      "value": "0",
+      "lexi": "00",
+      "roundTrip": "0"
+    },
+    {
+      "value": "1",
+      "lexi": "01",
+      "roundTrip": "1"
+    },
+    {
+      "value": "10",
+      "lexi": "0a",
+      "roundTrip": "10"
+    },
+    {
+      "value": "35",
+      "lexi": "0z",
+      "roundTrip": "35"
+    },
+    {
+      "value": "36",
+      "lexi": "110",
+      "roundTrip": "36"
+    },
+    {
+      "value": "37",
+      "lexi": "111",
+      "roundTrip": "37"
+    },
+    {
+      "value": "46655",
+      "lexi": "2zzz",
+      "roundTrip": "46655"
+    },
+    {
+      "value": "46656",
+      "lexi": "31000",
+      "roundTrip": "46656"
+    },
+    {
+      "value": "4294967296",
+      "lexi": "61z141z4",
+      "roundTrip": "4294967296"
+    },
+    {
+      "value": "9007199254740991",
+      "lexi": "a2gosa7pa2gv",
+      "roundTrip": "9007199254740991"
+    },
+    {
+      "value": "9223372036854775808",
+      "lexi": "c1y2p0ij32e8e8",
+      "roundTrip": "9223372036854775808"
+    }
+  ],
+  "cvrVersions": [
+    {
+      "input": {
+        "stateVersion": "00"
+      },
+      "versionString": "00"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9"
+      },
+      "versionString": "1a9"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 1
+      },
+      "versionString": "1a9:01"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 2
+      },
+      "versionString": "1a9:02"
+    },
+    {
+      "input": {
+        "stateVersion": "72ioz88c0",
+        "configVersion": 23
+      },
+      "versionString": "72ioz88c0:0n"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 0
+      },
+      "versionString": "1a9"
+    }
+  ],
+  "cookies": [
+    {
+      "cookie": "00",
+      "version": {
+        "stateVersion": "00"
+      }
+    },
+    {
+      "cookie": "1a9",
+      "version": {
+        "stateVersion": "1a9"
+      }
+    },
+    {
+      "cookie": "1a9:01",
+      "version": {
+        "stateVersion": "1a9",
+        "configVersion": 1
+      }
+    },
+    {
+      "cookie": "72ioz88c0:0n",
+      "version": {
+        "stateVersion": "72ioz88c0",
+        "configVersion": 23
+      }
+    }
+  ],
+  "cmp": [
+    {
+      "a": null,
+      "b": null,
+      "sign": 0
+    },
+    {
+      "a": null,
+      "b": {
+        "stateVersion": "00"
+      },
+      "sign": -1
+    },
+    {
+      "a": {
+        "stateVersion": "00"
+      },
+      "b": null,
+      "sign": 1
+    },
+    {
+      "a": {
+        "stateVersion": "1a9"
+      },
+      "b": {
+        "stateVersion": "1a9"
+      },
+      "sign": 0
+    },
+    {
+      "a": {
+        "stateVersion": "1a9"
+      },
+      "b": {
+        "stateVersion": "1aa"
+      },
+      "sign": -1
+    },
+    {
+      "a": {
+        "stateVersion": "1aa"
+      },
+      "b": {
+        "stateVersion": "1a9"
+      },
+      "sign": 1
+    },
+    {
+      "a": {
+        "stateVersion": "1a9",
+        "configVersion": 1
+      },
+      "b": {
+        "stateVersion": "1a9",
+        "configVersion": 2
+      },
+      "sign": -1
+    },
+    {
+      "a": {
+        "stateVersion": "1a9",
+        "configVersion": 2
+      },
+      "b": {
+        "stateVersion": "1a9",
+        "configVersion": 1
+      },
+      "sign": 1
+    },
+    {
+      "a": {
+        "stateVersion": "1a9"
+      },
+      "b": {
+        "stateVersion": "1a9",
+        "configVersion": 1
+      },
+      "sign": -1
+    },
+    {
+      "a": {
+        "stateVersion": "1a9",
+        "configVersion": 0
+      },
+      "b": {
+        "stateVersion": "1a9"
+      },
+      "sign": 0
+    }
   ]
 }

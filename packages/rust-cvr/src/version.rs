@@ -97,9 +97,14 @@ pub fn cookie_to_version(cookie: Option<&str>) -> NullableCVRVersion {
 
 /// Mirrors TS `versionString(v)`.
 pub fn version_string(v: &CVRVersion) -> String {
+    // TS checks `v.configVersion ? ... : v.stateVersion`, so a configVersion of
+    // `0` is FALSY and serializes as the bare stateVersion (no `:00` suffix).
+    // `Some(0)` is never produced internally (bumps start at 1), but it is
+    // reachable by parsing an externally-supplied `"<state>:00"` cookie — so the
+    // zero case must collapse to `None`'s behavior to stay byte-identical to TS.
     match v.config_version {
-        Some(cv) => format!("{}:{}", v.state_version, version_to_lexi(cv)),
-        None => v.state_version.clone(),
+        Some(cv) if cv != 0 => format!("{}:{}", v.state_version, version_to_lexi(cv)),
+        _ => v.state_version.clone(),
     }
 }
 
