@@ -366,7 +366,9 @@ mod tests {
             .expect("fixture.cases missing")
         {
             let desc = case.get("desc").and_then(|v| v.as_str()).unwrap_or("");
-            let secret = case.get("secret").and_then(|v| v.as_str()).expect("secret");
+            // A case carries either a symmetric `secret` or an asymmetric `jwk`.
+            let secret = case.get("secret").and_then(|v| v.as_str());
+            let jwk = case.get("jwk").and_then(|v| v.as_str());
             let token = case.get("token").and_then(|v| v.as_str()).expect("token");
             let user_id = case.get("userID").and_then(|v| v.as_str()).expect("userID");
             let issuer = case.get("issuer").and_then(|v| v.as_str());
@@ -377,8 +379,8 @@ mod tests {
                 .expect("tsAccept");
 
             let v = JwtAuthValidator {
-                jwk: None,
-                secret: Some(secret.to_string()),
+                jwk: jwk.map(str::to_string),
+                secret: secret.map(str::to_string),
                 jwks_url: None,
                 issuer: issuer.map(str::to_string),
                 audience: audience.map(str::to_string),

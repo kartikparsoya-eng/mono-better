@@ -15,6 +15,7 @@
  */
 
 import crypto from 'node:crypto';
+import {generateKeyPair, exportJWK, SignJWT} from 'jose';
 import {verifyToken} from '../../../zero-cache/src/auth/jwt.ts';
 
 // jose enforces a 256-bit minimum key for HS256, so use a 32-byte secret.
@@ -67,21 +68,22 @@ const CASES = [
    token: signHS256({sub: 'user1', exp: FUTURE}, 'the-wrong-secret-32-bytes-long!!')},
 ];
 
-async function tsAccepts(secret, token, userID, issuer, audience) {
+// verifyOptions the production syncer passes; `config` selects secret vs jwk.
+async function tsAccepts(config, token, userID, issuer, audience) {
   const opts = {
     subject: userID,
     ...(issuer ? {issuer} : {}),
     ...(audience ? {audience} : {}),
   };
   try {
-    await verifyToken({secret}, token, opts);
+    await verifyToken(config, token, opts);
     return true;
   } catch {
     return false;
   }
 }
 
-const cases = await Promise.all(
+const secretCases = await Promise.all(
   CASES.map(async c => {
     const token = c.token ?? signHS256(c.payload);
     const issuer = c.issuer ?? null;
@@ -93,9 +95,61 @@ const cases = await Promise.all(
       userID: c.userID,
       issuer,
       audience,
-      tsAccept: await tsAccepts(SECRET, token, c.userID, issuer, audience),
+      tsAccept: await tsAccepts({secret: SECRET}, token, c.userID, issuer, audience),
     };
   }),
 );
 
-console.log(JSON.stringify({secret: SECRET, cases}, null, 2));
+// ── Asymmetric JWK path (config.jwk = single public JWK) ──────────────────
+// ECDSA signatures are non-deterministic, so regenerating rotates these
+// tokens/keys — that's fine, the committed fixture is a self-consistent
+// snapshot (public JWK matches the signing key).
+async function jwkSetup(alg, kid) {
+  const {publicKey, privateKey} = await generateKeyPair(alg, {extractable: true});
+  const publicJwk = await exportJWK(publicKey);
+  publicJwk.alg = alg;
+  publicJwk.use = 'sig';
+  publicJwk.kid = kid;
+  return {privateKey, publicJwk};
+}
+async function signAsym(privateKey, alg, kid, payload) {
+  return new SignJWT(payload).setProtectedHeader({alg, kid}).sign(privateKey);
+}
+
+const es = await jwkSetup('ES256', 'es-1');
+const rs = await jwkSetup('RS256', 'rs-1');
+const esOther = await jwkSetup('ES256', 'es-1'); // different key, same kid
+
+const JWK_CASES = [
+  {desc: 'JWK ES256 valid', jwk: es.publicJwk,
+   token: await signAsym(es.privateKey, 'ES256', 'es-1', {sub: 'user1', exp: FUTURE})},
+  {desc: 'JWK ES256 expired', jwk: es.publicJwk,
+   token: await signAsym(es.privateKey, 'ES256', 'es-1', {sub: 'user1', exp: PAST})},
+  {desc: 'JWK ES256 not-yet-valid (nbf future)', jwk: es.publicJwk,
+   token: await signAsym(es.privateKey, 'ES256', 'es-1', {sub: 'user1', nbf: FUTURE, exp: FUTURE})},
+  {desc: 'JWK ES256 signed by a DIFFERENT key -> reject', jwk: es.publicJwk,
+   token: await signAsym(esOther.privateKey, 'ES256', 'es-1', {sub: 'user1', exp: FUTURE})},
+  {desc: 'JWK ES256 no-exp (jose accepts)', jwk: es.publicJwk,
+   token: await signAsym(es.privateKey, 'ES256', 'es-1', {sub: 'user1'})},
+  {desc: 'JWK ES256 wrong sub', jwk: es.publicJwk,
+   token: await signAsym(es.privateKey, 'ES256', 'es-1', {sub: 'user2', exp: FUTURE})},
+  {desc: 'JWK RS256 valid', jwk: rs.publicJwk,
+   token: await signAsym(rs.privateKey, 'RS256', 'rs-1', {sub: 'user1', exp: FUTURE})},
+];
+
+const jwkCases = await Promise.all(
+  JWK_CASES.map(async c => {
+    const jwkStr = JSON.stringify(c.jwk);
+    return {
+      desc: c.desc,
+      jwk: jwkStr,
+      token: c.token,
+      userID: 'user1',
+      issuer: null,
+      audience: null,
+      tsAccept: await tsAccepts({jwk: jwkStr}, c.token, 'user1', null, null),
+    };
+  }),
+);
+
+console.log(JSON.stringify({secret: SECRET, cases: [...secretCases, ...jwkCases]}, null, 2));

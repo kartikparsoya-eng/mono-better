@@ -135,6 +135,69 @@
       "issuer": null,
       "audience": null,
       "tsAccept": false
+    },
+    {
+      "desc": "JWK ES256 valid",
+      "jwk": "{\"kty\":\"EC\",\"x\":\"z0NPQStLVxjHm0K8-_8st_lwAFTpxLW0UBa7E5elml4\",\"y\":\"QwXtQoiaiuZfAgaHM9_g5dyn6w5o1r8oGq45D1wwEGM\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"use\":\"sig\",\"kid\":\"es-1\"}",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImVzLTEifQ.eyJzdWIiOiJ1c2VyMSIsImV4cCI6NDEwMjQ0NDgwMH0.VRtS9Q-yXkkPNKcZufkK_CsvCxJWwZ1uBHkcoxs6_d1umkZbn8ISz-b_56ZSuUlLBBGtXEkccVpAtc0Janxjxg",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": true
+    },
+    {
+      "desc": "JWK ES256 expired",
+      "jwk": "{\"kty\":\"EC\",\"x\":\"z0NPQStLVxjHm0K8-_8st_lwAFTpxLW0UBa7E5elml4\",\"y\":\"QwXtQoiaiuZfAgaHM9_g5dyn6w5o1r8oGq45D1wwEGM\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"use\":\"sig\",\"kid\":\"es-1\"}",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImVzLTEifQ.eyJzdWIiOiJ1c2VyMSIsImV4cCI6MTAwMDAwMDAwMH0.ORBL14GmooukNpDaWjMb6ujnCqt9Ww5YKpaRiW8MOmGfJ8Eo2BmMpaMZ5LB3jN7fIKbvmBCYcEJ49wyTmbzPhA",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "JWK ES256 not-yet-valid (nbf future)",
+      "jwk": "{\"kty\":\"EC\",\"x\":\"z0NPQStLVxjHm0K8-_8st_lwAFTpxLW0UBa7E5elml4\",\"y\":\"QwXtQoiaiuZfAgaHM9_g5dyn6w5o1r8oGq45D1wwEGM\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"use\":\"sig\",\"kid\":\"es-1\"}",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImVzLTEifQ.eyJzdWIiOiJ1c2VyMSIsIm5iZiI6NDEwMjQ0NDgwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.erVqSqUWtaKArSDfUsTe0lxCUXEqZToniz2ilEmLUDw9UrhC-DtGMh5o9vb0clnHSbASivkgvMTNSsnhOWoLmA",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "JWK ES256 signed by a DIFFERENT key -> reject",
+      "jwk": "{\"kty\":\"EC\",\"x\":\"z0NPQStLVxjHm0K8-_8st_lwAFTpxLW0UBa7E5elml4\",\"y\":\"QwXtQoiaiuZfAgaHM9_g5dyn6w5o1r8oGq45D1wwEGM\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"use\":\"sig\",\"kid\":\"es-1\"}",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImVzLTEifQ.eyJzdWIiOiJ1c2VyMSIsImV4cCI6NDEwMjQ0NDgwMH0.tNRkYVZaTAMPgBrb8y9RBgPaOPyiE3XrJ15TF59BAri9ZlILMmnUK5OQB-CU6bmb7rnxJ2M7t5yrdz_vcljwjA",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "JWK ES256 no-exp (jose accepts)",
+      "jwk": "{\"kty\":\"EC\",\"x\":\"z0NPQStLVxjHm0K8-_8st_lwAFTpxLW0UBa7E5elml4\",\"y\":\"QwXtQoiaiuZfAgaHM9_g5dyn6w5o1r8oGq45D1wwEGM\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"use\":\"sig\",\"kid\":\"es-1\"}",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImVzLTEifQ.eyJzdWIiOiJ1c2VyMSJ9.Cjua2DDY3QLOQkUw66ZS9fTdQuSdVt7G2-yIOQQyd6L6o9ERIARAi-G0HVgQ7EidGzsqmCw5W8KFPIOqBeC9IA",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": true
+    },
+    {
+      "desc": "JWK ES256 wrong sub",
+      "jwk": "{\"kty\":\"EC\",\"x\":\"z0NPQStLVxjHm0K8-_8st_lwAFTpxLW0UBa7E5elml4\",\"y\":\"QwXtQoiaiuZfAgaHM9_g5dyn6w5o1r8oGq45D1wwEGM\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"use\":\"sig\",\"kid\":\"es-1\"}",
+      "token": "eyJhbGciOiJFUzI1NiIsImtpZCI6ImVzLTEifQ.eyJzdWIiOiJ1c2VyMiIsImV4cCI6NDEwMjQ0NDgwMH0.MeOYERzn9CjeWuZ4KJ-1ddaDOr4qV5dxMNXkoQhLEpbvGmdf4c0xCyQRoeHoKifj6TaVXptOkRe9x-CjPYDrIg",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "JWK RS256 valid",
+      "jwk": "{\"kty\":\"RSA\",\"n\":\"4mnFKqlDpLewGg66jx8ehN8FAs-5Rb-KBL3C_GUOWqyyUfUycrF5vGRZgKIDtbE-Z8NHKMyFXX7gLAyekH2Squ1QdxvEpXa9LEkNgdgicjZ0vE4vQc2B3ejAl2-2n5dUtTNgFPJyKkeq_0Pop_9oepSRqS5Ra0Yp6KJ9GRquah8jDmPhLLIyz1SA39wh2TT1P3Ln5Gc1sK6xNMC1boi3FDboqdKZBJ91pVKh9crGxQnfHD11hnyeUpIjHAjXO7NnOwFtbAMynu5V-5R4zr3eZyIruD42OLeZpyHUK5qpH4n-0NIjAbsgQUghM_IO9KY1-SU1kk2LGWYuXw2kwPkiwQ\",\"e\":\"AQAB\",\"alg\":\"RS256\",\"use\":\"sig\",\"kid\":\"rs-1\"}",
+      "token": "eyJhbGciOiJSUzI1NiIsImtpZCI6InJzLTEifQ.eyJzdWIiOiJ1c2VyMSIsImV4cCI6NDEwMjQ0NDgwMH0.wG_cOmw_IXLydnAev7Os_MNJKWtR9JwFQOrXgxsRvIT6_s2K9iKZOVzEmrZb_aB25wyD0WO7sOaRTSB3LNCsISIpXw88R67U3ReXE8ZyxXPPsZ7xUMt9hoEyGKH7-hN5Yr4JocH2Tav1P1Vnv9wuo5f2dDu_epcAr1hyIB_CdG03ihrMlG5uyXhPeYHZFZeAc575nQatX8Y5U-d0UHaajr9CGsKnFoKu5p89-vJc69-9VL9kkCFtb8BRXFr2qS-ql7PLXzLuEeDi5MeJG3rF5MHd92l98Hd2TbM2bC8pewT4Gkrn7vRHvpYrVgJRU55WduGB8_7D_egEknbJOrUSpg",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": true
     }
   ]
 }
