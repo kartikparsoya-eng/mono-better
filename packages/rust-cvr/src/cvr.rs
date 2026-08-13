@@ -458,4 +458,22 @@ mod tests {
         });
         assert_not_internal(&q);
     }
+
+    // ④ Property invariant for merge_ref_counts.
+    use proptest::prelude::*;
+
+    proptest! {
+        // The null rule (TS: `... .some(v => v > 0) ? merged : null`): a non-null
+        // merge result always contains at least one positive count. Regression
+        // guard for the no-existing zero-retention fix.
+        #[test]
+        fn prop_merge_some_has_positive(
+            ex in proptest::option::of(proptest::collection::btree_map("[a-c]", -3i64..3, 0..4)),
+            rv in proptest::option::of(proptest::collection::btree_map("[a-c]", -3i64..3, 0..4)),
+        ) {
+            if let Some(m) = merge_ref_counts(ex.as_ref(), rv.as_ref(), None) {
+                prop_assert!(m.values().any(|&v| v > 0));
+            }
+        }
+    }
 }

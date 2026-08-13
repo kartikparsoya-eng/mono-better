@@ -308,4 +308,50 @@ mod tests {
         assert_eq!(cmp_versions(&a, &c), Ordering::Less);
         assert_eq!(cmp_versions(&c, &d), Ordering::Less);
     }
+
+    // ④ Property-based invariants — catch edge cases the handpicked golden
+    // vectors miss (base36 length boundaries, tie-breaks, large u64).
+    use proptest::prelude::*;
+
+    proptest! {
+        // LexiVersion round-trips losslessly for every u64.
+        #[test]
+        fn prop_lexi_round_trip(n in any::<u64>()) {
+            let lexi = version_to_lexi(n);
+            prop_assert_eq!(version_from_lexi(&lexi).unwrap(), n as u128);
+        }
+
+        // The DEFINING LexiVersion property: lexicographic string order equals
+        // numeric order. This is what lets version strings sort as keys; a
+        // length-prefix encoding bug at a base36 boundary (36, 36^2, ...) would
+        // break it. Includes cross-length pairs.
+        #[test]
+        fn prop_lexi_order_matches_numeric(a in any::<u64>(), b in any::<u64>()) {
+            let (la, lb) = (version_to_lexi(a), version_to_lexi(b));
+            prop_assert_eq!(a.cmp(&b), la.cmp(&lb));
+        }
+
+        // versionString ∘ versionFromString is identity for well-formed
+        // versions (configVersion > 0; 0 normalizes to None by design).
+        #[test]
+        fn prop_version_string_round_trip(
+            sv in any::<u64>(),
+            cv in proptest::option::of(1u64..=u32::MAX as u64),
+        ) {
+            let v = CVRVersion { state_version: version_to_lexi(sv), config_version: cv };
+            prop_assert_eq!(version_from_string(&version_string(&v)), v);
+        }
+
+        // cmp_versions is a consistent total order: antisymmetric under swap
+        // (Some(0) and None compare equal, which preserves antisymmetry).
+        #[test]
+        fn prop_cmp_antisymmetric(
+            sa in any::<u64>(), ca in proptest::option::of(0u64..1000),
+            sb in any::<u64>(), cb in proptest::option::of(0u64..1000),
+        ) {
+            let a = Some(CVRVersion { state_version: version_to_lexi(sa), config_version: ca });
+            let b = Some(CVRVersion { state_version: version_to_lexi(sb), config_version: cb });
+            prop_assert_eq!(cmp_versions(&a, &b), cmp_versions(&b, &a).reverse());
+        }
+    }
 }
