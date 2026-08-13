@@ -85,6 +85,11 @@ fn apply_claim_validation(
     // false. Without this, a not-yet-valid token (nbf in the future) is honored
     // early by the Rust path but rejected by TS — a real auth divergence.
     validation.validate_nbf = true;
+    // jose's `clockTolerance` defaults to 0 and the syncer never sets it, but
+    // jsonwebtoken's `leeway` defaults to 60s — so without this, Rust would
+    // accept a token up to 60s past `exp` (or 60s before `nbf`) that TS rejects,
+    // partially re-opening the nbf/exp gap. Zero it to match jose.
+    validation.leeway = 0;
     // Required-claim presence must mirror jose: it never requires `exp` (only
     // validates it when present), always requires `sub` (the subject option),
     // and requires `iss`/`aud` to be present when those options are configured.

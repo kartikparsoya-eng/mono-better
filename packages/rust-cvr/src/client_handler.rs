@@ -148,7 +148,7 @@ impl PokeHandler {
         let mut state = self.state.lock().unwrap();
         self.ensure_body(&mut state)?;
 
-        let result = (|| {
+        let result: Result<(), String> = (|| {
             match &patch_to_version.patch {
                 Patch::Query(qp) => {
                     let body = state.body.as_mut().unwrap();
@@ -220,9 +220,15 @@ impl PokeHandler {
         })();
 
         // Once a frame cannot be assembled or delivered, this poke is dead.
-        // Releasing here is essential: a later catch-up poke shares the same
-        // per-client chain and would otherwise spin forever in acquire_chain.
-        if result.is_err() {
+        // Match TS's per-poker addPatch wrapper (client-handler.ts:463), which
+        // catches the throw and calls `downstream.fail(...)` — failing THIS
+        // client's connection so it reconnects and rehydrates, rather than
+        // silently dropping the row and completing the poke. (MultiPoker then
+        // continues to the other clients, mirroring Promise.allSettled.)
+        // Releasing the chain is essential too: a later catch-up poke shares
+        // the same per-client chain and would otherwise spin in acquire_chain.
+        if let Err(e) = &result {
+            self.downstream.fail(e.clone());
             self.release_chain(&mut state);
         }
         result
@@ -376,6 +382,10 @@ impl PokeHandler {
 
         match patch {
             RowPatch::Put { id: _, contents } => {
+                // TS: `normalizeMutationResult(ensureSafeJSON(patch.contents))`
+                // (client-handler.ts:410) — the mutations path is subject to the
+                // same unsafe-integer guard as the rows path.
+                ensure_safe_json(contents)?;
                 let normalized = normalize_mutation_result(contents);
                 let client_id = normalized
                     .get("clientID")

@@ -73,12 +73,20 @@ async fn catchup_matches_ts_golden() {
 
         // checkVersion runs inside the streaming task, so the mismatch surfaces
         // on the first page pull, not on the call itself.
-        if scen.get("expectError").and_then(Value::as_bool).unwrap_or(false) {
+        if scen
+            .get("expectError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             let mut cursor = started.expect("catchup should start");
             let page = cursor.next_page().await;
+            // Assert the SPECIFIC checkVersion error, not merely any Err — a
+            // connection/setup failure would also be Err and pass a blanket
+            // is_err() check for the wrong reason.
+            let err = page.expect_err(&format!("[{name}] expected an error"));
             assert!(
-                page.is_err(),
-                "[{name}] expected checkVersion mismatch error, got {page:?}"
+                err.contains("version mismatch"),
+                "[{name}] expected a checkVersion mismatch, got a different error: {err}"
             );
             continue;
         }
@@ -94,6 +102,9 @@ async fn catchup_matches_ts_golden() {
         let mut expected: Vec<Value> = scen["rows"].as_array().unwrap().clone();
         rows.sort_by_key(sort_key);
         expected.sort_by_key(sort_key);
-        assert_eq!(rows, expected, "[{name}] catchup rows differ from TS golden");
+        assert_eq!(
+            rows, expected,
+            "[{name}] catchup rows differ from TS golden"
+        );
     }
 }
