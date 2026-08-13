@@ -245,7 +245,7 @@ impl SyncEngine {
     async fn flush_to_store(
         &self,
         updater: &mut CVRQueryDrivenUpdater,
-        flushed_cvr: &CVR,
+        flushed_cvr: Arc<CVR>,
         last_connect_time: i64,
         existing_rows: &RowRecordMap,
     ) -> Result<(), String> {
@@ -269,7 +269,7 @@ impl SyncEngine {
         &self,
         ops: Vec<StoreOp>,
         expected_current_version: &CVRVersion,
-        flushed_cvr: &CVR,
+        flushed_cvr: Arc<CVR>,
         last_connect_time: i64,
         existing_rows: &RowRecordMap,
     ) -> Result<(), String> {
@@ -309,9 +309,12 @@ impl SyncEngine {
         // runtime (doc 91 §5.1). The store's `!Send` engine state is not touched
         // here (only the `Send` `Arc<Mutex<CVRStoreHandle>>` / cache), so the
         // whole unit can run off-thread while the executor drives other groups.
+        // `flushed_cvr` is an `Arc<CVR>`: moving it into the task is a refcount
+        // bump, not a deep CVR copy — the caller reclaims the CVR via
+        // `Arc::try_unwrap` once this awaited task drops its clone.
         let cache = self.row_cache.clone();
         let expected = expected_current_version.clone();
-        let flushed = flushed_cvr.clone();
+        let flushed = flushed_cvr;
         self.offload(async move {
             if !ops.is_empty() {
                 store_arc.lock().await.apply_store_ops(ops);
@@ -468,7 +471,7 @@ impl SyncEngine {
                 ttl_clock,
             ));
         }
-        let (cfg_cvr, _stats) = cfg.flush(last_connect_time, last_active, ttl_clock);
+        let (mut cfg_cvr, _stats) = cfg.flush(last_connect_time, last_active, ttl_clock);
         let expected_current_version = cfg.base.orig.version.clone();
         let cfg_ops = cfg.base.drain_store_ops();
         {
@@ -483,14 +486,16 @@ impl SyncEngine {
             for p in &config_patches {
                 pokers.add_patch(p);
             }
+            let cfg_arc = Arc::new(cfg_cvr);
             self.flush_ops_to_store(
                 cfg_ops,
                 &expected_current_version,
-                &cfg_cvr,
+                cfg_arc.clone(),
                 last_connect_time,
                 existing_rows,
             )
             .await?;
+            cfg_cvr = Arc::try_unwrap(cfg_arc).unwrap_or_else(|a| (*a).clone());
             pokers.end(cfg_cvr.version.clone());
         }
 
@@ -948,8 +953,17 @@ impl SyncEngine {
         // persist each hydrated query's signature and flag drift.
         *sigs.lock().unwrap() = sig_acc;
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
-        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)
-            .await?;
+        // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
+        // deep copy); reclaim it after the awaited flush drops its clone.
+        let flushed_arc = Arc::new(flushed_cvr);
+        self.flush_to_store(
+            &mut updater,
+            flushed_arc.clone(),
+            last_connect_time,
+            existing_rows,
+        )
+        .await?;
+        let flushed_cvr = Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone());
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -1058,8 +1072,17 @@ impl SyncEngine {
         // Hand the folded post-advance signatures to the updater's provider.
         *sigs.lock().unwrap() = sig_acc;
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
-        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)
-            .await?;
+        // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
+        // deep copy); reclaim it after the awaited flush drops its clone.
+        let flushed_arc = Arc::new(flushed_cvr);
+        self.flush_to_store(
+            &mut updater,
+            flushed_arc.clone(),
+            last_connect_time,
+            existing_rows,
+        )
+        .await?;
+        let flushed_cvr = Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone());
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -1152,7 +1175,7 @@ impl SyncEngine {
             // A no-op for clients not in this group (returns no patches).
             patches.extend(cfg.delete_client(cid, ttl_clock));
         }
-        let (cfg_cvr, _stats) = cfg.flush(last_connect_time, last_active, ttl_clock);
+        let (mut cfg_cvr, _stats) = cfg.flush(last_connect_time, last_active, ttl_clock);
         let expected_current_version = cfg.base.orig.version.clone();
         let ops = cfg.base.drain_store_ops();
 
@@ -1167,14 +1190,16 @@ impl SyncEngine {
             for p in &patches {
                 pokers.add_patch(p);
             }
+            let cfg_arc = Arc::new(cfg_cvr);
             self.flush_ops_to_store(
                 ops,
                 &expected_current_version,
-                &cfg_cvr,
+                cfg_arc.clone(),
                 last_connect_time,
                 &existing_rows,
             )
             .await?;
+            cfg_cvr = Arc::try_unwrap(cfg_arc).unwrap_or_else(|a| (*a).clone());
             pokers.end(cfg_cvr.version.clone());
         }
 
