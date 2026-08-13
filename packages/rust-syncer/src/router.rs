@@ -106,7 +106,7 @@ pub enum CGMessage {
 /// Handle to a CG thread.
 pub struct CGHandle {
     /// Sender for messages to the CG thread.
-    tx: crossbeam_channel::Sender<CGMessage>,
+    tx: mpsc::UnboundedSender<CGMessage>,
     /// Join handle for the CG thread.
     handle: Option<JoinHandle<()>>,
     /// Number of active connections on this CG.
@@ -115,10 +115,11 @@ pub struct CGHandle {
 }
 
 impl CGHandle {
-    /// Send a message to the CG thread.
-    pub fn send(&self, msg: CGMessage) -> Result<(), crossbeam_channel::SendError<CGMessage>> {
+    /// Send a message to the CG thread. Sends are synchronous on an unbounded
+    /// tokio sender (no `.await`), so the router's async tasks never block here.
+    pub fn send(&self, msg: CGMessage) -> Result<(), mpsc::error::SendError<CGMessage>> {
         if !self.accepting.load(Ordering::SeqCst) {
-            return Err(crossbeam_channel::SendError(msg));
+            return Err(mpsc::error::SendError(msg));
         }
         self.tx.send(msg)
     }
@@ -538,7 +539,7 @@ impl ConnectionRouter {
         }
 
         // Slow path: create new CG thread.
-        let (tx, rx) = crossbeam_channel::unbounded::<CGMessage>();
+        let (tx, rx) = mpsc::unbounded_channel::<CGMessage>();
         let connection_count = Arc::new(AtomicU64::new(1));
         let accepting = Arc::new(AtomicBool::new(true));
 
@@ -646,11 +647,12 @@ impl ConnectionRouter {
 }
 
 /// Forwarder: bridges a connection's tokio inbound channel into the CG's
-/// unified crossbeam channel, so the CG thread never blocks on a single
-/// connection. Runs as a tokio task. Emits `ConnectionClosed` when the WS ends.
+/// unified `tokio::sync::mpsc` channel, so the CG thread never blocks on a
+/// single connection. Runs as a tokio task. Emits `ConnectionClosed` when the
+/// WS ends.
 async fn forward_inbound(
     mut upstream_rx: mpsc::Receiver<String>,
-    cg_tx: crossbeam_channel::Sender<CGMessage>,
+    cg_tx: mpsc::UnboundedSender<CGMessage>,
     client_id: String,
     ws_id: String,
 ) {
@@ -899,9 +901,6 @@ struct CgState {
     inspector_authenticated: bool,
     /// JWT validator, for re-verifying an `updateAuth` token mid-connection.
     auth_validator: Arc<dyn AuthValidator>,
-    /// Runtime handle for `block_on` at async edges on this (runtime-less) CG
-    /// thread (e.g. re-verifying an `updateAuth` token).
-    tokio_handle: tokio::runtime::Handle,
     global_connections: Arc<Mutex<HashMap<String, ConnectionInfo>>>,
     connection_count: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
@@ -946,7 +945,6 @@ impl CgState {
         // Build the SyncEngine on this thread (it is !Send). Retain the table
         // specs + replica path + app id so the pipeline can be re-initialized on
         // an advance reset.
-        let tokio_handle = config.tokio_handle.clone();
         let admin_password = config.admin_password.clone();
         let server_version = config.server_version.clone();
         let metrics = config.metrics.clone();
@@ -1022,7 +1020,6 @@ impl CgState {
             metrics,
             inspector_authenticated: false,
             auth_validator,
-            tokio_handle,
             global_connections,
             connection_count,
             accepting,
@@ -1045,12 +1042,15 @@ impl CgState {
     /// freshly created. Seeds the TTL clock from the CVR's stored value on the
     /// load/create transition (TS `#ttlClock = cvr.ttlClock; #ttlClockBase =
     /// now`). Returns whether a CVR is now available.
-    fn ensure_cvr(&mut self, allow_create: bool) -> Result<bool, crate::sync_engine::LoadCvrError> {
+    async fn ensure_cvr(
+        &mut self,
+        allow_create: bool,
+    ) -> Result<bool, crate::sync_engine::LoadCvrError> {
         if self.cvr.is_some() {
             return Ok(true);
         }
         if self.cvr_pg {
-            match self.sync_engine.load_cvr(self.last_connect_time as f64) {
+            match self.sync_engine.load_cvr(self.last_connect_time as f64).await {
                 Ok(cvr) => self.cvr = cvr,
                 Err(e) => {
                     tracing::error!("CG {}: load_cvr failed: {e}", self.cg_id);
@@ -1098,22 +1098,26 @@ impl CgState {
 
     /// Fired when the eviction timer elapses: remove any now-expired queries and
     /// poke their removals. Port of TS `#removeExpiredQueries`.
-    fn on_expiry_tick(&mut self) {
+    async fn on_expiry_tick(&mut self) {
         let Some(cvr) = self.cvr.take() else {
             return;
         };
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        let existing_rows = self.sync_engine.existing_rows();
-        match self.sync_engine.remove_expired_queries(
-            cvr,
-            &client_ids,
-            &existing_rows,
-            self.last_connect_time,
-            now,
-            ttl_clock,
-        ) {
+        let existing_rows = self.sync_engine.existing_rows().await;
+        match self
+            .sync_engine
+            .remove_expired_queries(
+                cvr,
+                &client_ids,
+                &existing_rows,
+                self.last_connect_time,
+                now,
+                ttl_clock,
+            )
+            .await
+        {
             Ok((cvr, n)) => {
                 if n > 0 {
                     tracing::debug!("CG {}: expired {n} queries", self.cg_id);
@@ -1169,7 +1173,7 @@ impl CgState {
     ///    cadence is identical.
     ///
     /// Re-arms the deadline (or clears it if no authed connection remains).
-    fn on_auth_maintenance_tick(&mut self) {
+    async fn on_auth_maintenance_tick(&mut self) {
         // Snapshot the (client_id, raw_token) pairs to re-verify. Only tokened
         // connections are subject to revalidation.
         let due: Vec<(String, String)> = self
@@ -1196,15 +1200,10 @@ impl CgState {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             });
-            let validator = self.auth_validator.clone();
-            let cg_id = self.cg_id.clone();
-            let cid = client_id.clone();
-            let tok = token.clone();
-            let verify = self.tokio_handle.block_on(async move {
-                validator
-                    .validate_auth(&cg_id, &cid, expected_sub.as_deref(), Some(&tok))
-                    .await
-            });
+            let verify = self
+                .auth_validator
+                .validate_auth(&self.cg_id, &client_id, expected_sub.as_deref(), Some(&token))
+                .await;
             match verify {
                 Err(error_body) => {
                     tracing::info!(
@@ -1230,7 +1229,8 @@ impl CgState {
         let empty_body = serde_json::json!({});
         for client_id in survivors {
             if self.registered_ws.contains_key(&client_id) {
-                self.handle_desired_queries(&client_id, &empty_body, true);
+                self.handle_desired_queries(&client_id, &empty_body, true)
+                    .await;
             }
         }
 
@@ -1240,7 +1240,7 @@ impl CgState {
         self.arm_auth_maintenance();
     }
 
-    fn on_new_connection(&mut self, params: ConnectParams, sink: DirectWebSocketSink) {
+    async fn on_new_connection(&mut self, params: ConnectParams, sink: DirectWebSocketSink) {
         self.last_connect_time = now_ms();
         self.keepalive_until = self.last_connect_time + CG_KEEPALIVE_MS;
         let client_id = params.client_id.clone();
@@ -1379,11 +1379,11 @@ impl CgState {
                 serde_json::Value::Array(mut arr) if arr.len() > 1 => arr.remove(1),
                 other => other,
             };
-            self.handle_desired_queries(&client_id, &body, true);
+            self.handle_desired_queries(&client_id, &body, true).await;
         }
     }
 
-    fn on_inbound(&mut self, client_id: String, ws_id: String, text: String) {
+    async fn on_inbound(&mut self, client_id: String, ws_id: String, text: String) {
         // A superseded socket can have frames already queued when its replacement
         // is installed. Never route those frames through the new connection.
         if self.registered_ws.get(&client_id) != Some(&ws_id) {
@@ -1414,7 +1414,8 @@ impl CgState {
         {
             if tag == "initConnection" || tag == "changeDesiredQueries" {
                 if let Some(body) = arr.get(1) {
-                    self.handle_desired_queries(&client_id, body, tag == "initConnection");
+                    self.handle_desired_queries(&client_id, body, tag == "initConnection")
+                        .await;
                 }
                 return;
             }
@@ -1424,7 +1425,8 @@ impl CgState {
                 if let Some(body) = arr.get(1) {
                     let del_ids = str_array(body.get("clientIDs"));
                     let group_ids = str_array(body.get("clientGroupIDs"));
-                    self.apply_client_deletions(&client_id, None, &del_ids, &group_ids);
+                    self.apply_client_deletions(&client_id, None, &del_ids, &group_ids)
+                        .await;
                 }
                 return;
             }
@@ -1438,7 +1440,7 @@ impl CgState {
                     .and_then(|b| b.get("auth"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                self.handle_update_auth(&client_id, token);
+                self.handle_update_auth(&client_id, token).await;
                 return;
             }
             if tag == "inspect" {
@@ -1463,7 +1465,12 @@ impl CgState {
     /// Route a client's `initConnection` / `changeDesiredQueries` body to the
     /// SyncEngine: record desired queries and hydrate. Loads/creates the group
     /// CVR on first use. (Part 2 — functional cut; see `config_and_hydrate`.)
-    fn handle_desired_queries(&mut self, client_id: &str, body: &serde_json::Value, is_init: bool) {
+    async fn handle_desired_queries(
+        &mut self,
+        client_id: &str,
+        body: &serde_json::Value,
+        is_init: bool,
+    ) {
         let Some(ws_id) = self.registered_ws.get(client_id).cloned() else {
             tracing::warn!(
                 "CG {}: desired queries for unregistered client {client_id}",
@@ -1564,7 +1571,7 @@ impl CgState {
         }
 
         // Ensure a group CVR: load from the store, or start fresh (dev/no-PG).
-        match self.ensure_cvr(true) {
+        match self.ensure_cvr(true).await {
             Ok(true) => {}
             Ok(false) => {
                 self.fail_group("Unable to load the client view state");
@@ -1624,7 +1631,7 @@ impl CgState {
                 .unwrap_or_else(|| cvr.version.state_version.clone());
             let replica_version = self.replica_version.clone();
             // The rows the client already has (from the CVR row cache).
-            let existing_rows = self.sync_engine.existing_rows();
+            let existing_rows = self.sync_engine.existing_rows().await;
             // The client's decoded JWT claims (`authData` for permission rules).
             let auth_data = self
                 .client_auth
@@ -1652,7 +1659,9 @@ impl CgState {
                 self.last_connect_time,
                 now,
                 ttl_clock,
-            ) {
+            )
+            .await
+            {
                 Ok(cvr) => {
                     self.cvr = Some(cvr);
                     config_accepted = true;
@@ -1683,7 +1692,8 @@ impl CgState {
                 active_clients.as_deref(),
                 &deleted_ids,
                 &deleted_groups,
-            );
+            )
+            .await;
         }
     }
 
@@ -1694,7 +1704,7 @@ impl CgState {
     /// config/hydrate pass, which recomputes each query's read-permission
     /// transform against the new `authData` and re-hydrates the pipelines whose
     /// transformation hash drifted.
-    fn handle_update_auth(&mut self, client_id: &str, token: &str) {
+    async fn handle_update_auth(&mut self, client_id: &str, token: &str) {
         if token.is_empty() {
             return;
         }
@@ -1740,14 +1750,10 @@ impl CgState {
         // `sub` — that would be a tautological `sub == sub` check). Falls back to
         // the token's `sub` only for an as-yet-unpinned (anonymous) group.
         let expected_sub = self.pinned_user_id.clone().or_else(|| new_sub.clone());
-        let validator = self.auth_validator.clone();
-        let cg_id = self.cg_id.clone();
-        let cid = client_id.to_string();
-        let verify = self.tokio_handle.block_on(async move {
-            validator
-                .validate_auth(&cg_id, &cid, expected_sub.as_deref(), Some(token))
-                .await
-        });
+        let verify = self
+            .auth_validator
+            .validate_auth(&self.cg_id, client_id, expected_sub.as_deref(), Some(token))
+            .await;
         if let Err(error_body) = verify {
             tracing::warn!(
                 "CG {}: updateAuth verification failed for client {client_id}",
@@ -1790,7 +1796,8 @@ impl CgState {
             ctx.auth = Some(token.to_string());
         }
         let empty_body = serde_json::json!({});
-        self.handle_desired_queries(client_id, &empty_body, true);
+        self.handle_desired_queries(client_id, &empty_body, true)
+            .await;
     }
 
     /// Handle an inspector `["inspect", {op, id, ...}]` message. Port of
@@ -1916,14 +1923,14 @@ impl CgState {
     /// (implicit GC of disconnected clients — no ack). `deleted_client_ids` /
     /// `deleted_group_ids` are explicit client-requested deletions (acked). Port
     /// of the client-deletion portion of TS `#handleConfigUpdate`.
-    fn apply_client_deletions(
+    async fn apply_client_deletions(
         &mut self,
         caller_client_id: &str,
         active_clients: Option<&[String]>,
         deleted_client_ids: &[String],
         deleted_group_ids: &[String],
     ) {
-        if !matches!(self.ensure_cvr(true), Ok(true)) {
+        if !matches!(self.ensure_cvr(true).await, Ok(true)) {
             self.fail_group("Unable to load the client view state");
             return;
         }
@@ -1959,17 +1966,21 @@ impl CgState {
         let poke_ws: Vec<String> = self.registered_ws.values().cloned().collect();
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
-        match self.sync_engine.delete_clients(
-            cvr,
-            &self.shard,
-            &delete_ids,
-            &ack_ids,
-            deleted_group_ids,
-            &poke_ws,
-            self.last_connect_time,
-            now,
-            ttl_clock,
-        ) {
+        match self
+            .sync_engine
+            .delete_clients(
+                cvr,
+                &self.shard,
+                &delete_ids,
+                &ack_ids,
+                deleted_group_ids,
+                &poke_ws,
+                self.last_connect_time,
+                now,
+                ttl_clock,
+            )
+            .await
+        {
             Ok(cvr) => {
                 self.cvr = Some(cvr);
                 crate::metrics::Metrics::add(
@@ -2094,10 +2105,10 @@ impl CgState {
     /// Change-streamer notification: advance the pipelines to head and poke all
     /// clients. Loads the CVR from the store on first use. A no-store / no-CVR
     /// CG (e.g. tests without PG) logs and skips.
-    fn on_notification(&mut self) {
+    async fn on_notification(&mut self) {
         // A notification can only advance an existing CVR (no create): without a
         // loaded CVR there is nothing to advance.
-        if !matches!(self.ensure_cvr(false), Ok(true)) {
+        if !matches!(self.ensure_cvr(false).await, Ok(true)) {
             self.fail_group("Unable to load the client view state");
             return;
         }
@@ -2110,24 +2121,29 @@ impl CgState {
         // pipeline set to be re-synced.
         if self.maybe_reload_permissions() {
             let cvr = self.cvr.take().unwrap();
-            self.reset_pipelines_and_rehydrate(cvr, "read-permissions changed");
+            self.reset_pipelines_and_rehydrate(cvr, "read-permissions changed")
+                .await;
             return;
         }
         let cvr = self.cvr.take().unwrap();
 
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        let existing_rows = self.sync_engine.existing_rows();
+        let existing_rows = self.sync_engine.existing_rows().await;
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
-        match self.sync_engine.advance_and_sync(
-            cvr,
-            self.replica_version.clone(),
-            &client_ids,
-            &existing_rows,
-            self.last_connect_time,
-            now,
-            ttl_clock,
-        ) {
+        match self
+            .sync_engine
+            .advance_and_sync(
+                cvr,
+                self.replica_version.clone(),
+                &client_ids,
+                &existing_rows,
+                self.last_connect_time,
+                now,
+                ttl_clock,
+            )
+            .await
+        {
             Ok(result) => {
                 crate::metrics::Metrics::inc(&self.metrics.advances);
                 if let Some(reason) = result.reset_reason.clone() {
@@ -2136,7 +2152,7 @@ impl CgState {
                     // in-flight poke was already cancelled; re-init the pipeline
                     // and re-hydrate every query from scratch.
                     crate::metrics::Metrics::inc(&self.metrics.resets);
-                    self.reset_pipelines_and_rehydrate(result.cvr, &reason);
+                    self.reset_pipelines_and_rehydrate(result.cvr, &reason).await;
                 } else {
                     self.cvr = Some(result.cvr);
                 }
@@ -2152,7 +2168,7 @@ impl CgState {
     /// re-hydrate every query currently in the CVR. Port of the reset branch in
     /// TS `#syncQueryPipelines`: `#pipelines.reset()` then re-run the query
     /// pipeline set. Called when `advance_and_sync` reports a reset.
-    fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, reason: &str) {
+    async fn reset_pipelines_and_rehydrate(&mut self, cvr: CVR, reason: &str) {
         tracing::warn!(
             "CG {}: pipeline reset ({reason}); re-initializing engine + rehydrating",
             self.cg_id
@@ -2203,7 +2219,7 @@ impl CgState {
                 .current_version()
                 .unwrap_or_else(|| cvr.version.state_version.clone());
             let replica_version = self.replica_version.clone();
-            let existing_rows = self.sync_engine.existing_rows();
+            let existing_rows = self.sync_engine.existing_rows().await;
             let auth_data = self
                 .client_auth
                 .get(&client_id)
@@ -2211,26 +2227,30 @@ impl CgState {
                 .unwrap_or_else(|| serde_json::json!({}));
             let ttl_clock = self.get_ttl_clock(now);
             // Clone the CVR into the call so a failure doesn't consume it.
-            match self.sync_engine.config_and_hydrate_with_profile(
-                cvr.clone(),
-                &client_id,
-                &[ws_id],
-                &self.shard,
-                Vec::new(),
-                Vec::new(),
-                false,
-                None,
-                self.client_profile_ids.get(&client_id).map(String::as_str),
-                self.permissions.as_ref(),
-                &auth_data,
-                self.client_query_ctx.get(&client_id),
-                state_version,
-                replica_version,
-                &existing_rows,
-                self.last_connect_time,
-                now,
-                ttl_clock,
-            ) {
+            match self
+                .sync_engine
+                .config_and_hydrate_with_profile(
+                    cvr.clone(),
+                    &client_id,
+                    &[ws_id],
+                    &self.shard,
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    None,
+                    self.client_profile_ids.get(&client_id).map(String::as_str),
+                    self.permissions.as_ref(),
+                    &auth_data,
+                    self.client_query_ctx.get(&client_id),
+                    state_version,
+                    replica_version,
+                    &existing_rows,
+                    self.last_connect_time,
+                    now,
+                    ttl_clock,
+                )
+                .await
+            {
                 Ok(c) => cvr = c,
                 Err(e) => {
                     tracing::error!("CG {}: rehydrate after reset failed: {e}", self.cg_id);
@@ -2288,12 +2308,20 @@ impl CgState {
     }
 }
 
-/// Run the CG thread: a single-threaded, non-blocking event loop over the
-/// unified [`CGMessage`] channel. Owns the [`SyncEngine`]; drives connection
+/// Run the CG thread: a single-threaded async event loop over the unified
+/// [`CGMessage`] channel. Owns the (`!Send`) [`SyncEngine`]; drives connection
 /// setup, inbound frames, disconnects, and change-streamer notifications.
+///
+/// The thread hosts a `current_thread` tokio runtime driven with a `LocalSet`,
+/// so the `!Send` engine lives on one thread while every CVR/PG/JWKS I/O edge is
+/// `.await`ed rather than `block_on`'d — an I/O round-trip no longer freezes the
+/// CG loop (doc 91, Phase 1). Message handling and the TTL-eviction /
+/// auth-maintenance / idle-shutdown deadline ticks are multiplexed with
+/// `tokio::select!` over `rx.recv()` and `tokio::time::sleep`, preserving the
+/// exact tick semantics of the previous blocking `recv_timeout` loop.
 fn run_cg_thread(
     cg_id: &str,
-    rx: crossbeam_channel::Receiver<CGMessage>,
+    rx: mpsc::UnboundedReceiver<CGMessage>,
     services_factory: &Arc<dyn CGServicesFactory>,
     auth_validator: Arc<dyn AuthValidator>,
     connections: &Arc<Mutex<HashMap<String, ConnectionInfo>>>,
@@ -2301,6 +2329,37 @@ fn run_cg_thread(
     accepting: Arc<AtomicBool>,
 ) {
     tracing::info!("CG thread started: {cg_id}");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build CG current-thread runtime");
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async move {
+        cg_event_loop(
+            cg_id,
+            rx,
+            services_factory,
+            auth_validator,
+            connections,
+            connection_count,
+            accepting,
+        )
+        .await;
+    });
+    tracing::info!("CG thread exited: {cg_id}");
+}
+
+/// The async body of the CG thread, run on the thread's `current_thread`
+/// runtime + `LocalSet`. Extracted so the `!Send` future is clearly confined.
+async fn cg_event_loop(
+    cg_id: &str,
+    mut rx: mpsc::UnboundedReceiver<CGMessage>,
+    services_factory: &Arc<dyn CGServicesFactory>,
+    auth_validator: Arc<dyn AuthValidator>,
+    connections: &Arc<Mutex<HashMap<String, ConnectionInfo>>>,
+    connection_count: Arc<AtomicU64>,
+    accepting: Arc<AtomicBool>,
+) {
     let mut state = CgState::new_with_accepting(
         cg_id,
         services_factory,
@@ -2313,7 +2372,7 @@ fn run_cg_thread(
         // Surface initialization failure to the accepted socket instead of
         // dropping the queued connection silently.
         state.accepting.store(false, Ordering::SeqCst);
-        if let Ok(CGMessage::NewConnection { params, sink }) = rx.recv() {
+        if let Some(CGMessage::NewConnection { params, sink }) = rx.recv().await {
             let mut global = lock_unpoisoned(&state.global_connections);
             if global
                 .get(&params.client_id)
@@ -2331,12 +2390,12 @@ fn run_cg_thread(
         return;
     }
 
-    // Event loop: block on the next message, but wake early when a deadline is
-    // due — a query TTL eviction (TS `#scheduleExpireEviction` /
+    // Event loop: await the next message, but wake early when a deadline is due
+    // — a query TTL eviction (TS `#scheduleExpireEviction` /
     // `#removeExpiredQueries`) or a periodic auth-maintenance tick (TS
     // `#scheduleAuthMaintenance` / `#runAuthMaintenance`). We wake at the
-    // earliest of the two and run whichever ones are actually due. With nothing
-    // pending we block indefinitely.
+    // earliest of the deadlines and run whichever ones are actually due. With
+    // nothing pending we await the channel indefinitely.
     loop {
         let next_delay = [
             state.next_expiry_delay(),
@@ -2346,50 +2405,60 @@ fn run_cg_thread(
         .into_iter()
         .flatten()
         .min();
+
         let msg = match next_delay {
-            Some(delay) => match rx.recv_timeout(delay) {
-                Ok(msg) => msg,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    if state.idle_shutdown_due() {
-                        tracing::info!("CG thread {cg_id}: idle keepalive elapsed; shutting down");
-                        state.shutdown();
-                        break;
+            Some(delay) => {
+                tokio::select! {
+                    biased;
+                    recv = rx.recv() => match recv {
+                        Some(msg) => msg,
+                        None => break,
+                    },
+                    _ = tokio::time::sleep(delay) => {
+                        if state.idle_shutdown_due() {
+                            tracing::info!(
+                                "CG thread {cg_id}: idle keepalive elapsed; shutting down"
+                            );
+                            state.shutdown();
+                            break;
+                        }
+                        // A wake could be for either deadline; run each if due.
+                        if state
+                            .next_auth_maintenance_at
+                            .is_some_and(|at| at <= now_ms())
+                        {
+                            state.on_auth_maintenance_tick().await;
+                        }
+                        // Evict expired queries only when some are pending (running
+                        // early on an auth-only wake would be a needless engine call).
+                        if state.next_expiry_delay().is_some() {
+                            state.on_expiry_tick().await;
+                        }
+                        continue;
                     }
-                    // A wake could be for either deadline; run each if due.
-                    if state
-                        .next_auth_maintenance_at
-                        .is_some_and(|at| at <= now_ms())
-                    {
-                        state.on_auth_maintenance_tick();
-                    }
-                    // Evict expired queries only when some are pending (running
-                    // early on an auth-only wake would be a needless engine call).
-                    if state.next_expiry_delay().is_some() {
-                        state.on_expiry_tick();
-                    }
-                    continue;
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-            },
-            None => match rx.recv() {
-                Ok(msg) => msg,
-                Err(_) => break,
+            }
+            None => match rx.recv().await {
+                Some(msg) => msg,
+                None => break,
             },
         };
         match msg {
-            CGMessage::NewConnection { params, sink } => state.on_new_connection(*params, sink),
+            CGMessage::NewConnection { params, sink } => {
+                state.on_new_connection(*params, sink).await
+            }
             CGMessage::Inbound {
                 client_id,
                 ws_id,
                 text,
-            } => state.on_inbound(client_id, ws_id, text),
+            } => state.on_inbound(client_id, ws_id, text).await,
             CGMessage::ConnectionClosed { client_id, ws_id } => {
                 state.on_connection_closed(client_id, ws_id)
             }
             CGMessage::CloseConnection { client_id, ws_id } => {
                 state.close_connection(client_id, ws_id)
             }
-            CGMessage::Notification(_) => state.on_notification(),
+            CGMessage::Notification(_) => state.on_notification().await,
             CGMessage::Shutdown => {
                 tracing::info!("CG thread {cg_id}: shutting down");
                 state.shutdown();
@@ -2401,8 +2470,6 @@ fn run_cg_thread(
             break;
         }
     }
-
-    tracing::info!("CG thread exited: {cg_id}");
 }
 
 #[cfg(test)]
@@ -2886,10 +2953,10 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid.clone());
 
         let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        state.on_new_connection(
+        rt.block_on(state.on_new_connection(
             authed_params("c1", "ws1", "tok-c1"),
             DirectWebSocketSink::new(tx),
-        );
+        ));
         assert_eq!(state.registered_ws.len(), 1);
 
         // Arming happened on connect (interval set + a token present).
@@ -2897,7 +2964,7 @@ mod tests {
 
         // The token expires; the next maintenance tick must drop the connection.
         valid.store(false, Ordering::SeqCst);
-        state.on_auth_maintenance_tick();
+        rt.block_on(state.on_auth_maintenance_tick());
 
         assert_eq!(
             state.registered_ws.len(),
@@ -2919,15 +2986,15 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        state.on_new_connection(
+        rt.block_on(state.on_new_connection(
             authed_params("c1", "ws1", "tok-c1"),
             DirectWebSocketSink::new(tx),
-        );
+        ));
         seed_test_client_schema(&mut state);
         let armed_before = state.next_auth_maintenance_at;
         assert!(armed_before.is_some());
 
-        state.on_auth_maintenance_tick();
+        rt.block_on(state.on_auth_maintenance_tick());
 
         assert_eq!(
             state.registered_ws.len(),
@@ -2949,17 +3016,17 @@ mod tests {
         // Disabled: interval None.
         let mut disabled = revalidate_state(&rt, None, valid.clone());
         let (tx, _d) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        disabled.on_new_connection(
+        rt.block_on(disabled.on_new_connection(
             authed_params("c1", "ws1", "tok"),
             DirectWebSocketSink::new(tx),
-        );
+        ));
         assert!(disabled.next_auth_maintenance_at.is_none());
         assert!(disabled.next_auth_maintenance_delay().is_none());
 
         // Enabled but the connection carries no token → nothing to revalidate.
         let mut unauthed = revalidate_state(&rt, Some(300_000), valid);
         let (tx2, _d2) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        unauthed.on_new_connection(test_params("c2", "ws2"), DirectWebSocketSink::new(tx2));
+        rt.block_on(unauthed.on_new_connection(test_params("c2", "ws2"), DirectWebSocketSink::new(tx2)));
         assert!(unauthed.next_auth_maintenance_at.is_none());
     }
 
@@ -2974,15 +3041,15 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        state.on_new_connection(
+        rt.block_on(state.on_new_connection(
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
-        );
+        ));
         assert_eq!(state.pinned_user_id.as_deref(), Some("user-1"));
         assert_eq!(state.registered_ws.len(), 1);
 
         // updateAuth with a token for user-2 → rejected, connection closed.
-        state.handle_update_auth("c1", &fake_jwt("user-2"));
+        rt.block_on(state.handle_update_auth("c1", &fake_jwt("user-2")));
         assert_eq!(
             state.registered_ws.len(),
             0,
@@ -2999,13 +3066,13 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        state.on_new_connection(
+        rt.block_on(state.on_new_connection(
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
-        );
+        ));
 
         // Same-user token → not rejected (connection stays open).
-        state.handle_update_auth("c1", &fake_jwt("user-1"));
+        rt.block_on(state.handle_update_auth("c1", &fake_jwt("user-1")));
         assert_eq!(
             state.registered_ws.len(),
             1,
@@ -3041,7 +3108,7 @@ mod tests {
 
         let (tx, mut drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
         let sink = DirectWebSocketSink::new(tx);
-        state.on_new_connection(test_params("c1", "ws1"), sink);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
         // `connected` was pushed to the sink and the client is registered.
         let mut connected = false;
@@ -3057,7 +3124,7 @@ mod tests {
         assert_eq!(state.connections.len(), 1);
 
         // Notification with no loaded CVR (no PG) is a graceful no-op.
-        state.on_notification();
+        rt.block_on(state.on_notification());
 
         // Disconnect unregisters the client.
         state.on_connection_closed("c1".to_string(), "ws1".to_string());
@@ -3146,12 +3213,12 @@ mod tests {
 
         // First connection: client c1 on ws1.
         let (tx1, mut drx1) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx1));
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx1)));
         while drx1.try_recv().is_ok() {} // drain ws1's `connected` frame
 
         // Reconnect: same client c1 on a NEW ws2.
         let (tx2, _drx2) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        state.on_new_connection(test_params("c1", "ws2"), DirectWebSocketSink::new(tx2));
+        rt.block_on(state.on_new_connection(test_params("c1", "ws2"), DirectWebSocketSink::new(tx2)));
 
         // The superseded ws1 socket must have been failed/closed.
         let mut ws1_failed = false;
@@ -3207,7 +3274,7 @@ mod tests {
 
         let (tx, mut drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
         let sink = DirectWebSocketSink::new(tx);
-        state.on_new_connection(test_params("c1", "ws1"), sink);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
         state.shutdown();
 
@@ -3343,7 +3410,7 @@ mod tests {
             ]))
             .unwrap(),
         );
-        state.on_new_connection(params, sink);
+        rt.block_on(state.on_new_connection(params, sink));
 
         assert_eq!(
             init_calls.load(Ordering::SeqCst),
@@ -3375,8 +3442,12 @@ mod tests {
             Arc::new(AtomicU64::new(1)),
         );
         let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
-        state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx));
-        state.handle_desired_queries("c1", &serde_json::json!({"desiredQueriesPatch": []}), true);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx)));
+        rt.block_on(state.handle_desired_queries(
+            "c1",
+            &serde_json::json!({"desiredQueriesPatch": []}),
+            true,
+        ));
 
         let error = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command {
             WsCommand::Send(value)
@@ -3425,7 +3496,7 @@ mod tests {
 
         let (tx, mut drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
         let sink = DirectWebSocketSink::new(tx);
-        state.on_new_connection(test_params("c1", "ws1"), sink);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
         let drain = |drx: &mut tokio::sync::mpsc::Receiver<WsCommand>| -> Vec<serde_json::Value> {
             let mut v = Vec::new();
@@ -3437,11 +3508,11 @@ mod tests {
         let _ = drain(&mut drx); // discard the `connected` frame
 
         // 1) `version` before authenticating → challenge (authenticated:false).
-        state.on_inbound(
+        rt.block_on(state.on_inbound(
             "c1".to_string(),
             "ws1".to_string(),
             r#"["inspect",{"op":"version","id":"1"}]"#.to_string(),
-        );
+        ));
         let frames = drain(&mut drx);
         let last = frames.last().unwrap();
         assert_eq!(last[0], "inspect");
@@ -3449,29 +3520,29 @@ mod tests {
         assert_eq!(last[1]["value"], false);
 
         // 2) authenticate with the wrong password → false.
-        state.on_inbound(
+        rt.block_on(state.on_inbound(
             "c1".to_string(),
             "ws1".to_string(),
             r#"["inspect",{"op":"authenticate","id":"2","value":"nope"}]"#.to_string(),
-        );
+        ));
         assert_eq!(drain(&mut drx).last().unwrap()[1]["value"], false);
         assert!(!state.inspector_authenticated);
 
         // 3) authenticate with the right password → true.
-        state.on_inbound(
+        rt.block_on(state.on_inbound(
             "c1".to_string(),
             "ws1".to_string(),
             r#"["inspect",{"op":"authenticate","id":"3","value":"s3cret"}]"#.to_string(),
-        );
+        ));
         assert_eq!(drain(&mut drx).last().unwrap()[1]["value"], true);
         assert!(state.inspector_authenticated);
 
         // 4) `version` now returns the configured server version.
-        state.on_inbound(
+        rt.block_on(state.on_inbound(
             "c1".to_string(),
             "ws1".to_string(),
             r#"["inspect",{"op":"version","id":"4"}]"#.to_string(),
-        );
+        ));
         let last = drain(&mut drx).into_iter().next_back().unwrap();
         assert_eq!(last[1]["op"], "version");
         assert_eq!(last[1]["value"], "9.9.9");
