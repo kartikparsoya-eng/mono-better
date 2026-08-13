@@ -1,0 +1,198 @@
+{
+  "scenarios": [
+    {
+      "name": "full",
+      "after": null,
+      "upTo": "0c",
+      "current": "0c",
+      "exclude": [],
+      "rows": [
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "1"
+          },
+          "rowVersion": "r1",
+          "patchVersion": "02",
+          "refCounts": {
+            "qA": 1
+          }
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "2"
+          },
+          "rowVersion": "r2",
+          "patchVersion": "04",
+          "refCounts": {
+            "qB": 1
+          }
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "3"
+          },
+          "rowVersion": "r3",
+          "patchVersion": "06",
+          "refCounts": {
+            "qA": 1,
+            "qB": 1
+          }
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "4",
+            "_leaked": "oops"
+          },
+          "rowVersion": "r4",
+          "patchVersion": "08",
+          "refCounts": {
+            "qA": 1
+          }
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "5"
+          },
+          "rowVersion": "r5",
+          "patchVersion": "0a",
+          "refCounts": null
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "6"
+          },
+          "rowVersion": "r6",
+          "patchVersion": "0c",
+          "refCounts": {
+            "qA": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "partial_base_lt_head",
+      "after": "04",
+      "upTo": "08",
+      "current": "0c",
+      "exclude": [],
+      "rows": [
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "3"
+          },
+          "rowVersion": "r3",
+          "patchVersion": "06",
+          "refCounts": {
+            "qA": 1,
+            "qB": 1
+          }
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "4",
+            "_leaked": "oops"
+          },
+          "rowVersion": "r4",
+          "patchVersion": "08",
+          "refCounts": {
+            "qA": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "exclude_qB",
+      "after": null,
+      "upTo": "0c",
+      "current": "0c",
+      "exclude": [
+        "qB"
+      ],
+      "rows": [
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "1"
+          },
+          "rowVersion": "r1",
+          "patchVersion": "02",
+          "refCounts": {
+            "qA": 1
+          }
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "4",
+            "_leaked": "oops"
+          },
+          "rowVersion": "r4",
+          "patchVersion": "08",
+          "refCounts": {
+            "qA": 1
+          }
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "5"
+          },
+          "rowVersion": "r5",
+          "patchVersion": "0a",
+          "refCounts": null
+        },
+        {
+          "clientGroupID": "cg1",
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "6"
+          },
+          "rowVersion": "r6",
+          "patchVersion": "0c",
+          "refCounts": {
+            "qA": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "version_mismatch",
+      "after": null,
+      "upTo": "0c",
+      "current": "0b",
+      "exclude": [],
+      "expectError": true
+    }
+  ]
+}

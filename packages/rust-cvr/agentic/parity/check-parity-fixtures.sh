@@ -49,6 +49,23 @@ sys.exit(1)
 PY
 then :; else fail=1; fi
 
+# catchup: live-Postgres golden. Only checkable when a disposable DB is
+# available; the query is deterministic given the seed, so diff exactly.
+if [ -n "${TEST_CVR_PG_URI:-}" ]; then
+  npx --no-install tsx packages/rust-cvr/agentic/parity/generate-catchup-fixture.mjs \
+    > "$tmp/catchup.json"
+  if diff -q packages/rust-cvr/agentic/parity/catchup-fixture.json "$tmp/catchup.json" >/dev/null 2>&1; then
+    echo "  fresh: catchup (live Postgres)"
+  else
+    echo "STALE FIXTURE: catchup differs from current TS output. Regenerate:"
+    echo "    TEST_CVR_PG_URI=... npx tsx packages/rust-cvr/agentic/parity/generate-catchup-fixture.mjs > packages/rust-cvr/agentic/parity/catchup-fixture.json"
+    diff packages/rust-cvr/agentic/parity/catchup-fixture.json "$tmp/catchup.json" | head -30 || true
+    fail=1
+  fi
+else
+  echo "  skip: catchup freshness (set TEST_CVR_PG_URI to check)"
+fi
+
 if [ "$fail" != 0 ]; then
   echo "parity fixtures STALE — regenerate the listed fixture(s) and re-run the Rust parity tests." >&2
   exit 1
