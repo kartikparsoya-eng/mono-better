@@ -24,14 +24,15 @@ use rust_cvr::change_processor::ChangeProcessor;
 use rust_cvr::client_handler::{ClientHandler, MultiPoker, WebSocketSink};
 use rust_cvr::row_key::row_id_string;
 use rust_cvr::row_record_cache::RowRecordCache;
-use rust_cvr::store::CVRStoreHandle;
+use rust_cvr::store::{CVRStoreError, CVRStoreHandle};
 use rust_cvr::types::{
     CVR, ClientSchema, DesiredQuerySpec, Patch, PatchToVersion, QueryRecord, RowID, RowPatch,
     RowRecord, ShardID, StoreOp, TTLClock,
 };
 use rust_cvr::updater::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, RowRecordMap};
 use rust_cvr::version::{
-    CVRVersion, NullableCVRVersion, cmp_versions, version_from_string, version_string,
+    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_from_string,
+    version_string,
 };
 
 use crate::custom_query::{
@@ -54,6 +55,14 @@ pub struct SyncResult {
     /// Set when the engine requested a reset (rehydrate) rather than advancing.
     pub reset_reason: Option<String>,
     pub reset_msg: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoadCvrError {
+    #[error("no tokio handle for cvr load")]
+    MissingRuntime,
+    #[error(transparent)]
+    Store(#[from] CVRStoreError),
 }
 
 /// Combined engine + CVR driver for a single client group.
@@ -111,18 +120,16 @@ impl SyncEngine {
     }
 
     /// Load the CVR snapshot from the store (or `None` if no store is set).
-    pub fn load_cvr(&self, last_connect_time: f64) -> Result<Option<CVR>, String> {
+    pub fn load_cvr(&self, last_connect_time: f64) -> Result<Option<CVR>, LoadCvrError> {
         let Some(store_arc) = self.store.clone() else {
             return Ok(None);
         };
         let handle = self
             .tokio_handle
             .clone()
-            .ok_or_else(|| "no tokio handle for cvr load".to_string())?;
+            .ok_or(LoadCvrError::MissingRuntime)?;
         let mut store = store_arc.lock().unwrap();
-        let result = handle
-            .block_on(async { store.load(last_connect_time).await })
-            .map_err(|e| format!("cvr load: {e}"))?;
+        let result = handle.block_on(async { store.load(last_connect_time).await })?;
         Ok(Some(result.cvr))
     }
 
@@ -218,8 +225,10 @@ impl SyncEngine {
         flushed_cvr: &CVR,
         last_connect_time: i64,
     ) -> Result<(), String> {
+        let expected_current_version = updater.base.orig.version.clone();
         self.flush_ops_to_store(
             updater.base.drain_store_ops(),
+            &expected_current_version,
             flushed_cvr,
             last_connect_time,
         )
@@ -233,6 +242,7 @@ impl SyncEngine {
     fn flush_ops_to_store(
         &self,
         ops: Vec<StoreOp>,
+        expected_current_version: &CVRVersion,
         flushed_cvr: &CVR,
         last_connect_time: i64,
     ) -> Result<(), String> {
@@ -264,7 +274,11 @@ impl SyncEngine {
             handle
                 .block_on(async {
                     store
-                        .flush(&flushed_cvr.version, flushed_cvr, last_connect_time as f64)
+                        .flush(
+                            expected_current_version,
+                            flushed_cvr,
+                            last_connect_time as f64,
+                        )
                         .await
                 })
                 .map_err(|e| format!("store flush: {e}"))?;
@@ -274,20 +288,20 @@ impl SyncEngine {
         // in-memory cache with the same deltas (`flushed=true` → cache-only, no
         // second PG write). Keeps the cache in lockstep so the next
         // `existing_rows()` needs no reload.
-        if !row_deltas.is_empty() {
-            if let Some(cache) = &self.row_cache {
-                let ver = flushed_cvr.version.clone();
-                handle.block_on(async {
-                    // Ensure the cache is loaded before applying (idempotent).
-                    if let Err(e) = cache.load().await {
-                        tracing::warn!("row cache load before write-back failed: {e}");
-                        return;
-                    }
-                    if let Err(e) = cache.apply(row_deltas, ver, true).await {
-                        tracing::warn!("row cache write-back failed: {e}");
-                    }
-                });
-            }
+        if !row_deltas.is_empty()
+            && let Some(cache) = &self.row_cache
+        {
+            let ver = flushed_cvr.version.clone();
+            handle.block_on(async {
+                // Ensure the cache is loaded before applying (idempotent).
+                if let Err(e) = cache.load().await {
+                    tracing::warn!("row cache load before write-back failed: {e}");
+                    return;
+                }
+                if let Err(e) = cache.apply(row_deltas, ver, true).await {
+                    tracing::warn!("row cache write-back failed: {e}");
+                }
+            });
         }
         Ok(())
     }
@@ -312,10 +326,54 @@ impl SyncEngine {
         shard: &ShardID,
         desired_puts: Vec<DesiredQuerySpec>,
         desired_dels: Vec<String>,
+        desired_clear: bool,
+        client_schema: Option<ClientSchema>,
+        permissions: Option<&serde_json::Value>,
+        auth_data: &serde_json::Value,
+        custom_ctx: Option<&CustomQueryContext>,
+        state_version: String,
+        replica_version: String,
+        existing_rows: &RowRecordMap,
+        last_connect_time: i64,
+        last_active: i64,
+        ttl_clock: TTLClock,
+    ) -> Result<CVR, String> {
+        self.config_and_hydrate_with_profile(
+            cvr,
+            client_id,
+            poke_ws_ids,
+            shard,
+            desired_puts,
+            desired_dels,
+            desired_clear,
+            client_schema,
+            None,
+            permissions,
+            auth_data,
+            custom_ctx,
+            state_version,
+            replica_version,
+            existing_rows,
+            last_connect_time,
+            last_active,
+            ttl_clock,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn config_and_hydrate_with_profile(
+        &mut self,
+        cvr: CVR,
+        client_id: &str,
+        poke_ws_ids: &[String],
+        shard: &ShardID,
+        desired_puts: Vec<DesiredQuerySpec>,
+        desired_dels: Vec<String>,
         // A `clear` op removes ALL of the client's desired queries (applied
         // before puts, so a clear+resubscribe patch replaces the whole set).
         desired_clear: bool,
         client_schema: Option<ClientSchema>,
+        profile_id: Option<&str>,
         // Read-permission transformation inputs. When `permissions` is `None`
         // (no permissions deployed) queries pass through untransformed.
         permissions: Option<&serde_json::Value>,
@@ -348,6 +406,9 @@ impl SyncEngine {
         if let Some(cs) = client_schema {
             cfg.set_client_schema(cs)?;
         }
+        if let Some(profile_id) = profile_id {
+            cfg.set_profile_id(profile_id);
+        }
         // A `clear` drops every desired query for the client first (TS
         // `#patchQueries` → `clearDesiredQueries`); puts below then establish the
         // new set.
@@ -369,15 +430,26 @@ impl SyncEngine {
             ));
         }
         let (cfg_cvr, _stats) = cfg.flush(last_connect_time, last_active, ttl_clock);
+        let expected_current_version = cfg.base.orig.version.clone();
         let cfg_ops = cfg.base.drain_store_ops();
         {
-            let clients = self.clients_for(poke_ws_ids);
+            // TS `#updateCVRConfig` pokes only clients at the pre-config CVR
+            // version. A lagging reconnect must stay on its old cookie until
+            // `catchup_clients`; advancing it here would make every catch-up
+            // patch look stale and silently drop the missed rows.
+            let clients =
+                Self::config_poke_targets(self.clients_for(poke_ws_ids), &expected_current_version);
             let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
             let pokers = MultiPoker::new(&client_refs, cfg_cvr.version.clone());
             for p in &config_patches {
                 pokers.add_patch(p);
             }
-            self.flush_ops_to_store(cfg_ops, &cfg_cvr, last_connect_time)?;
+            self.flush_ops_to_store(
+                cfg_ops,
+                &expected_current_version,
+                &cfg_cvr,
+                last_connect_time,
+            )?;
             pokers.end(cfg_cvr.version.clone());
         }
 
@@ -570,6 +642,25 @@ impl SyncEngine {
             .collect()
     }
 
+    /// Config-poke targets mirror TS `#getClients(cvr.version)`: a client with
+    /// no cookie is treated as being at `EMPTY_CVR_VERSION`, while a reconnect
+    /// with an older cookie is excluded and caught up after pipeline sync.
+    fn config_poke_targets(
+        clients: Vec<Arc<ClientHandler>>,
+        cvr_version: &CVRVersion,
+    ) -> Vec<Arc<ClientHandler>> {
+        clients
+            .into_iter()
+            .filter(|client| {
+                let version = client
+                    .version()
+                    .unwrap_or_else(|| EMPTY_CVR_VERSION.clone());
+                cmp_versions(&Some(version), &Some(cvr_version.clone()))
+                    == std::cmp::Ordering::Equal
+            })
+            .collect()
+    }
+
     /// The catch-up floor: `min(cvr_version, min over clients of their ORIGINAL
     /// cookie)`. A client's original cookie comes from `original_versions` (the
     /// cycle-start snapshot); only if a client is absent there do we fall back to
@@ -652,8 +743,8 @@ impl SyncEngine {
             {
                 rows.extend(page);
             }
-            let store = store_arc.lock().unwrap();
-            let cfg = store
+            let store_reader = store_arc.lock().unwrap().catchup_reader();
+            let cfg = store_reader
                 .catchup_config_patches(catchup_from.clone(), &cvr.version, current)
                 .await
                 .map_err(|e| format!("catchup_config_patches: {e}"))?;
@@ -737,10 +828,10 @@ impl SyncEngine {
     fn seed_signatures_from_cvr(cvr: &CVR) -> HashMap<String, u64> {
         let mut acc = HashMap::new();
         for (qid, q) in &cvr.queries {
-            if let Some(hex) = q.base().row_set_signature.as_deref() {
-                if let Ok(sig) = rust_cvr::row_set_signature::parse_signature(Some(hex)) {
-                    acc.insert(qid.clone(), sig);
-                }
+            if let Some(hex) = q.base().row_set_signature.as_deref()
+                && let Ok(sig) = rust_cvr::row_set_signature::parse_signature(Some(hex))
+            {
+                acc.insert(qid.clone(), sig);
             }
         }
         acc
@@ -915,7 +1006,10 @@ impl SyncEngine {
             for (ct, qid, table, rk, row) in &collected {
                 processor.on_row_change(*ct, qid, table, rk, row.as_ref(), existing_rows);
             }
-            processor.finish(existing_rows);
+            // TS `#advancePipelines` only processes received row changes. It
+            // does not reconcile unreferenced rows because no queries are being
+            // executed/removed in an advance pass.
+            processor.finish_received(existing_rows);
             num_changes = processor.total_processed();
         }
 
@@ -1014,6 +1108,7 @@ impl SyncEngine {
             patches.extend(cfg.delete_client(cid, ttl_clock));
         }
         let (cfg_cvr, _stats) = cfg.flush(last_connect_time, last_active, ttl_clock);
+        let expected_current_version = cfg.base.orig.version.clone();
         let ops = cfg.base.drain_store_ops();
 
         let clients = self.clients_for(poke_ws_ids);
@@ -1023,7 +1118,7 @@ impl SyncEngine {
             for p in &patches {
                 pokers.add_patch(p);
             }
-            self.flush_ops_to_store(ops, &cfg_cvr, last_connect_time)?;
+            self.flush_ops_to_store(ops, &expected_current_version, &cfg_cvr, last_connect_time)?;
             pokers.end(cfg_cvr.version.clone());
         }
 
@@ -1047,15 +1142,15 @@ impl SyncEngine {
 /// Convert a `rust_ivm` `RowChange` into the `(change_type, query_id, table,
 /// row_key, row)` shape `ChangeProcessor::on_row_change` expects. Port of napi
 /// `row_change_to_maps`.
-fn row_change_to_maps(
-    rc: &rust_ivm::streamer::RowChange,
-) -> (
+type RowChangeMaps = (
     u8,
     String,
     String,
     serde_json::Map<String, serde_json::Value>,
     Option<serde_json::Map<String, serde_json::Value>>,
-) {
+);
+
+fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> RowChangeMaps {
     let row_key = {
         let mut m = serde_json::Map::with_capacity(rc.row_key.len());
         for (k, v) in rc.row_key.iter() {
@@ -1908,10 +2003,7 @@ mod tests {
 
         // Cycle-start snapshot (captured before any poke advanced base_version).
         let original: std::collections::HashMap<String, NullableCVRVersion> =
-            std::collections::HashMap::from([(
-                "ws1".to_string(),
-                Some(version_from_string("01")),
-            )]);
+            std::collections::HashMap::from([("ws1".to_string(), Some(version_from_string("01")))]);
 
         // Simulate the config/hydrate pokes advancing base_version to the new "05".
         let clients = engine.clients_for(&["ws1".to_string()]);
@@ -1929,7 +2021,10 @@ mod tests {
         let buggy =
             SyncEngine::catchup_floor(&cvr_version, &clients, &std::collections::HashMap::new());
         assert_eq!(buggy, Some(version_from_string("05")));
-        assert_ne!(floor, buggy, "the fix must not collapse the catch-up interval");
+        assert_ne!(
+            floor, buggy,
+            "the fix must not collapse the catch-up interval"
+        );
     }
 
     /// An advance may only poke clients that are AT the pre-advance cvr.version;
@@ -1954,11 +2049,7 @@ mod tests {
         engine.register_client("cB", "wsB", "cg1", &shard, Some("03"), mk()); // lagging
         engine.register_client("cC", "wsC", "cg1", &shard, None, mk()); // never poked
 
-        let all = engine.clients_for(&[
-            "wsA".to_string(),
-            "wsB".to_string(),
-            "wsC".to_string(),
-        ]);
+        let all = engine.clients_for(&["wsA".to_string(), "wsB".to_string(), "wsC".to_string()]);
         let targets = SyncEngine::advance_poke_targets(all, &version_from_string("05"));
         let ids: Vec<String> = targets.iter().map(|c| c.ws_id.clone()).collect();
         assert_eq!(
@@ -1966,6 +2057,39 @@ mod tests {
             vec!["wsA".to_string()],
             "only the client at cvr.version may receive the advance delta"
         );
+    }
+
+    #[test]
+    fn config_poke_targets_include_new_but_exclude_lagging_clients() {
+        use rust_cvr::version::version_from_string;
+
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        let mk = || -> Arc<dyn WebSocketSink> {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(8);
+            Arc::new(DirectWebSocketSink::new(tx))
+        };
+        engine.register_client("new", "ws-new", "cg1", &shard, None, mk());
+        engine.register_client("current", "ws-current", "cg1", &shard, Some("02"), mk());
+        engine.register_client("lagging", "ws-lagging", "cg1", &shard, Some("01"), mk());
+
+        let new_targets = SyncEngine::config_poke_targets(
+            engine.clients_for(&["ws-new".to_string()]),
+            &version_from_string("00"),
+        );
+        assert_eq!(new_targets.len(), 1, "no cookie is TS empty version 00");
+
+        let targets = SyncEngine::config_poke_targets(
+            engine.clients_for(&["ws-current".to_string(), "ws-lagging".to_string()]),
+            &version_from_string("02"),
+        );
+        let ids: Vec<_> = targets.iter().map(|client| client.ws_id.as_str()).collect();
+        assert_eq!(ids, vec!["ws-current"]);
     }
 
     #[test]
@@ -2074,12 +2198,11 @@ mod tests {
         // client1 received a deleteClients ack naming client2.
         let mut saw_ack = false;
         while let Ok(WsCommand::Send(v)) = rx1.try_recv() {
-            if v[0] == "deleteClients" {
-                if let Some(ids) = v[1]["clientIDs"].as_array() {
-                    if ids.iter().any(|x| x == "client2") {
-                        saw_ack = true;
-                    }
-                }
+            if v[0] == "deleteClients"
+                && let Some(ids) = v[1]["clientIDs"].as_array()
+                && ids.iter().any(|x| x == "client2")
+            {
+                saw_ack = true;
             }
         }
         assert!(saw_ack, "expected deleteClients ack naming client2");

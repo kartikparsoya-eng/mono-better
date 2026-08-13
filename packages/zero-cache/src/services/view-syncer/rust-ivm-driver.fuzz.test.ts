@@ -1,11 +1,12 @@
+/* oxlint-disable typescript/no-explicit-any -- the agentic fuzzer consumes intentionally untyped generated fixtures */
 import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
-import {LogContext} from '@rocicorp/logger';
-import {afterEach, beforeEach, describe, expect, test} from 'vitest';
-import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
 // The corpus generator shared with the engine-level fuzzer (agentic gen.mjs).
 // Same schemas/queries/pushes — incl. PK divergence — now driven through the
 // FULL prod driver path instead of the raw engine.
 import {readFileSync} from 'node:fs';
+import {LogContext} from '@rocicorp/logger';
+import {afterEach, beforeEach, describe, expect, test} from 'vitest';
+import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
 import {genFixture} from '../../../../rust-ivm/agentic/fuzz/gen.mjs';
 import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
 import {

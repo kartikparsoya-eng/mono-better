@@ -60,11 +60,8 @@ try {
     nodeRequire(addonPath) as {RustIvmEngine: new () => RustIvmEngine}
   ).RustIvmEngine;
 } catch (e) {
-  console.error(
-    '[rust-ivm-driver] Failed to load addon from',
-    addonPath,
-    ':',
-    (e as Error).message,
+  process.stderr.write(
+    `[rust-ivm-driver] Failed to load addon from ${addonPath}: ${(e as Error).message}\n`,
   );
 }
 
@@ -368,8 +365,8 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
    * Wait until the buffer drains below maxBuffer. Called by the TSFN
    * callback path when push() returns false.
    */
-  async waitForDrain(): Promise<void> {
-    if (this.#items.length < this.#maxBuffer) return;
+  waitForDrain(): Promise<void> {
+    if (this.#items.length < this.#maxBuffer) return Promise.resolve();
     return new Promise(resolve => {
       this.#drainWaiters.push(resolve);
     });
@@ -402,15 +399,15 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
     this.close();
   }
 
-  async next(): Promise<IteratorResult<T>> {
+  next(): Promise<IteratorResult<T>> {
     if (this.#items.length > 0) {
       const item = this.#items.shift()!;
       this.#notifyDrainWaiters();
-      return {value: item, done: false};
+      return Promise.resolve({value: item, done: false});
     }
     if (this.#done) {
       if (this.#error) throw this.#error;
-      return {value: undefined, done: true};
+      return Promise.resolve({value: undefined, done: true});
     }
     return new Promise((resolve, reject) => {
       this.#waiters.push({resolve, reject});
@@ -448,7 +445,9 @@ export function deferClose<T>(queue: AsyncQueue<T>): void {
 export class RustIVMDriver {
   readonly #engine: RustIvmEngine;
   /** Exposed for unified CVR path (hydrateAndSync / advanceAndSync). */
-  get engine(): RustIvmEngine { return this.#engine; }
+  get engine(): RustIvmEngine {
+    return this.#engine;
+  }
   // Monotonic per-driver stream id (#3 backpressure). Each streaming hydrate/
   // advance mints the next id and passes it to the native call + every
   // grant/cancel so credit is always tagged to the exact stream it belongs to.
@@ -532,20 +531,18 @@ export class RustIVMDriver {
     return {
       get: (sql: string, ...args: unknown[]) => readQuery(sql, args)[0],
       all: (sql: string, ...args: unknown[]) => readQuery(sql, args),
-      prepare: (sql: string) => {
-        return {
-          all: (...args: unknown[]) => readQuery(sql, args),
-          get: (...args: unknown[]) => readQuery(sql, args)[0],
-          iterate: function* (
-            ...args: unknown[]
-          ): Generator<Record<string, unknown>> {
-            yield* readQuery(sql, args);
-          },
-          raw: function* (...args: unknown[]): Generator<unknown[]> {
-            for (const row of readQuery(sql, args)) yield Object.values(row);
-          },
-        };
-      },
+      prepare: (sql: string) => ({
+        all: (...args: unknown[]) => readQuery(sql, args),
+        get: (...args: unknown[]) => readQuery(sql, args)[0],
+        iterate: function* (
+          ...args: unknown[]
+        ): Generator<Record<string, unknown>> {
+          yield* readQuery(sql, args);
+        },
+        raw: function* (...args: unknown[]): Generator<unknown[]> {
+          for (const row of readQuery(sql, args)) yield Object.values(row);
+        },
+      }),
       modify: () => {
         throw new Error('read-only');
       },
@@ -555,7 +552,7 @@ export class RustIVMDriver {
   init(clientSchema: ClientSchema) {
     assert(!this.#initialized, 'Already initialized');
     this.#initialized = true;
-    void this.#initAndResetCommon(clientSchema);
+    this.#initAndResetCommon(clientSchema);
   }
 
   initialized(): boolean {
@@ -567,7 +564,7 @@ export class RustIVMDriver {
     this.#engine.reset();
     this.#queryInfo.clear();
     this.#rowSetSignatures.clear();
-    void this.#initAndResetCommon(clientSchema);
+    this.#initAndResetCommon(clientSchema);
   }
 
   #initAndResetCommon(clientSchema: ClientSchema) {
@@ -675,7 +672,7 @@ export class RustIVMDriver {
     return version;
   }
 
-  async destroy(): Promise<void> {
+  destroy(): Promise<void> {
     if (this.#destroyPromise) {
       return this.#destroyPromise;
     }
@@ -928,7 +925,7 @@ export class RustIVMDriver {
     }
   }
 
-  async advance(timer: Timer): Promise<
+  advance(timer: Timer): Promise<
     | {
         version: string;
         numChanges: number;

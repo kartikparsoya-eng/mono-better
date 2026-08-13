@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-explicit-any -- generated fuzz schemas cross generic builder types at runtime */
 // Shared harness for the RustIVMDriver-vs-PipelineDriver differential tests
 // (both the curated `rust-ivm-driver.differential.test.ts` and the fuzz-driven
 // `rust-ivm-driver.fuzz.test.ts`). Kept framework-free so both import the SAME,
@@ -209,10 +210,10 @@ export function fixtureReplicaDDL(
       );
       vals.push(sqlLiteral(baseVersion));
       stmts.push(
-        `INSERT INTO "${name}" (${cols
-          .map(c => `"${c}"`)
-          .concat('"_0_version"')
-          .join(', ')}) VALUES (${vals.join(', ')});`,
+        `INSERT INTO "${name}" (${[
+          ...cols.map(c => `"${c}"`),
+          '"_0_version"',
+        ].join(', ')}) VALUES (${vals.join(', ')});`,
       );
     }
   }
@@ -257,23 +258,23 @@ export function fixturePushesDML(
       );
       vals.push(sqlLiteral(version));
       stmts.push(
-        `INSERT INTO "${push.table}" (${cols
-          .map(c => `"${c}"`)
-          .concat('"_0_version"')
-          .join(', ')}) VALUES (${vals.join(', ')});`,
+        `INSERT INTO "${push.table}" (${[
+          ...cols.map(c => `"${c}"`),
+          '"_0_version"',
+        ].join(', ')}) VALUES (${vals.join(', ')});`,
       );
       log(push.table, 's', keyFor(push.row));
     } else if (push.type === 'remove') {
       stmts.push(`DELETE FROM "${push.table}" WHERE ${whereFor(push.row)};`);
       log(push.table, 'd', keyFor(push.row));
     } else if (push.type === 'edit') {
-      const set = cols
-        .map(
+      const set = [
+        ...cols.map(
           c =>
             `"${c}" = ${sqlLiteral(sqlValue(push.row[c], baseType(spec.columns[c])))}`,
-        )
-        .concat(`"_0_version" = ${sqlLiteral(version)}`)
-        .join(', ');
+        ),
+        `"_0_version" = ${sqlLiteral(version)}`,
+      ].join(', ');
       stmts.push(
         `UPDATE "${push.table}" SET ${set} WHERE ${whereFor(push.oldRow ?? push.row)};`,
       );

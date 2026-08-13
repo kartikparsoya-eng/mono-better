@@ -15,19 +15,19 @@ Every claim in these docs is anchored to an existing TS source line or a pinned 
 
 ## Specific anchors
 
-| Doc | Claim | Anchor |
-|---|---|---|
-| 81 | Tables: instances, clients, queries, desires, rows, rowsVersion | `schema/cvr.ts:45`, `:83`, `:124`, `:171`, `:289`, `:303` |
-| 81 | `void` UPDATE ownership signal | `cvr-store.ts:395` |
-| 81 | Defer threshold = 100 | `cvr-store.ts:~35` (default param) |
-| 82 | `mergeRefCounts` property | `cvr.ts:1041-1075` |
-| 82 | Internal query IDs `lmids`, `mutationResults` | `cvr.ts:75-76` |
-| 83 | Page size 5000 for cache load | `row-record-cache.ts:~85` |
-| 83 | Deferred threshold default 100 | `row-record-cache.ts`:constructor |
-| 84 | Poke chain `#pokeTail` | `client-handler.ts:297` |
-| 84 | Filter at 100 parts | `client-handler.ts:104` |
-| 84 | Special-table interception | `client-handler.ts:221-270` |
-| 85 | Void-flush code | `cvr-store.ts:388-405` |
+| Doc | Claim                                                           | Anchor                                                    |
+| --- | --------------------------------------------------------------- | --------------------------------------------------------- |
+| 81  | Tables: instances, clients, queries, desires, rows, rowsVersion | `schema/cvr.ts:45`, `:83`, `:124`, `:171`, `:289`, `:303` |
+| 81  | `void` UPDATE ownership signal                                  | `cvr-store.ts:395`                                        |
+| 81  | Defer threshold = 100                                           | `cvr-store.ts:~35` (default param)                        |
+| 82  | `mergeRefCounts` property                                       | `cvr.ts:1041-1075`                                        |
+| 82  | Internal query IDs `lmids`, `mutationResults`                   | `cvr.ts:75-76`                                            |
+| 83  | Page size 5000 for cache load                                   | `row-record-cache.ts:~85`                                 |
+| 83  | Deferred threshold default 100                                  | `row-record-cache.ts`:constructor                         |
+| 84  | Poke chain `#pokeTail`                                          | `client-handler.ts:297`                                   |
+| 84  | Filter at 100 parts                                             | `client-handler.ts:104`                                   |
+| 84  | Special-table interception                                      | `client-handler.ts:221-270`                               |
+| 85  | Void-flush code                                                 | `cvr-store.ts:388-405`                                    |
 
 ## Existing tests to mirror
 

@@ -30,6 +30,7 @@ import {cvrSchema, type ShardID} from '../../types/shards.ts';
 import type {Patch, PatchToVersion} from './client-handler.ts';
 import type {CVR, CVRSnapshot} from './cvr.ts';
 import {RowRecordCache} from './row-record-cache.ts';
+import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 import {
   type ClientsRow,
   type DesiresRow,
@@ -59,7 +60,6 @@ import {
   ttlClockAsNumber,
   ttlClockFromNumber,
 } from './ttl-clock.ts';
-import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 
 interface RustCVRStoreHandle {
   hasPendingWrites(): Promise<boolean>;

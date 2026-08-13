@@ -37,7 +37,7 @@ impl DirectWebSocketSink {
 
     /// Push a downstream message. Blocks if the channel is full (backpressure).
     pub fn push(&self, msg: Value) {
-        let _ = self.tx.blocking_send(WsCommand::Send(msg));
+        let _ = self.send_command(WsCommand::Send(msg));
     }
 
     /// Push a downstream message, serialized from any Serialize type.
@@ -50,12 +50,38 @@ impl DirectWebSocketSink {
 
     /// Send an error message and close the connection with code 3000.
     pub fn fail(&self, error: ErrorBody) {
-        let _ = self.tx.blocking_send(WsCommand::Fail(error));
+        let _ = self.send_command(WsCommand::Fail(error));
     }
 
     /// Close the connection gracefully.
     pub fn close(&self, reason: String) {
-        let _ = self.tx.blocking_send(WsCommand::Close(reason));
+        let _ = self.send_command(WsCommand::Close(reason));
+    }
+
+    /// Deliver from either the dedicated CG thread or a Tokio admission task.
+    /// `blocking_send` panics whenever it is called inside a runtime, even when
+    /// the channel has capacity. Try the non-blocking fast path first; only a
+    /// full channel on the non-runtime CG thread blocks. Runtime callers queue
+    /// the rare overflow asynchronously so rejection/error paths cannot panic
+    /// and poison the router's shared mutexes.
+    fn send_command(&self, command: WsCommand) -> Result<(), String> {
+        match self.tx.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err("ws sink closed".to_string()),
+            Err(mpsc::error::TrySendError::Full(command)) => {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let tx = self.tx.clone();
+                    handle.spawn(async move {
+                        let _ = tx.send(command).await;
+                    });
+                    Ok(())
+                } else {
+                    self.tx
+                        .blocking_send(command)
+                        .map_err(|error| format!("ws sink closed: {error}"))
+                }
+            }
+        }
     }
 }
 
@@ -65,25 +91,41 @@ impl DirectWebSocketSink {
 /// the CVR hot path) with no TSFN — the bounded channel is the backpressure.
 impl rust_cvr::client_handler::WebSocketSink for DirectWebSocketSink {
     fn push(&self, msg: Value) -> Result<(), String> {
-        self.tx
-            .blocking_send(WsCommand::Send(msg))
-            .map_err(|e| format!("ws sink closed: {e}"))
+        self.send_command(WsCommand::Send(msg))
     }
 
     fn fail(&self, e: String) {
         // rust-cvr passes a plain message; the accompanying `["error", ..]`
         // frame is delivered separately via `push`. Close with code 3000.
-        let _ = self
-            .tx
-            .blocking_send(WsCommand::Fail(ErrorBody::Basic(BasicErrorBody {
-                kind: ErrorKind::Internal,
-                message: e,
-                origin: None,
-            })));
+        let _ = self.send_command(WsCommand::Fail(ErrorBody::Basic(BasicErrorBody {
+            kind: ErrorKind::Internal,
+            message: e,
+            origin: None,
+        })));
     }
 
     fn cancel(&self) {
         // Poke-chain cancel: the `pokeEnd {cancel:true}` frame is already sent
         // via `push` by `PokeHandler::cancel`, so nothing to send here.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_error_send_never_uses_blocking_send() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sink = DirectWebSocketSink::new(tx);
+
+        sink.push(serde_json::json!(["first"]));
+        sink.fail(ErrorBody::basic(
+            ErrorKind::Unauthorized,
+            "rejected".to_string(),
+        ));
+
+        assert!(matches!(rx.recv().await, Some(WsCommand::Send(_))));
+        assert!(matches!(rx.recv().await, Some(WsCommand::Fail(_))));
     }
 }

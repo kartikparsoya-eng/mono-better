@@ -36,7 +36,6 @@ pub fn format_signature(sig: u64) -> String {
 mod tests {
     use super::*;
     use crate::row_key::RowID;
-    use serde_json::Map;
 
     fn make_row_id(schema: &str, table: &str, row_key_json: serde_json::Value) -> RowID {
         let row_key = row_key_json.as_object().unwrap().clone();

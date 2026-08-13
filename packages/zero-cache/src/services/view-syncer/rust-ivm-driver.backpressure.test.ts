@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-explicit-any -- test timers and AST fixtures are deliberately minimal structural mocks */
 // #3 backpressure — real NAPI integration test (reviewer requirement: not only
 // the Condvar unit test). Sets a TINY credit window so a slow consumer forces
 // the native producer to PARK on credit, then verifies correctness is preserved
@@ -452,9 +453,7 @@ describe.skipIf(!ADDON_PATH)('view-syncer/rust-ivm-driver backpressure', () => {
     await expect(
       Promise.race([
         rust.destroy().then(() => 'destroyed'),
-        new Promise<string>(resolve =>
-          setTimeout(() => resolve('timed-out'), 1_000),
-        ),
+        new Promise<string>(resolve => setTimeout(resolve, 1_000, 'timed-out')),
       ]),
     ).resolves.toBe('destroyed');
     ts.destroy();

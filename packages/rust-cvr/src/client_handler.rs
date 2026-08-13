@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::Serialize;
-use serde_json::{Map, Value};
+#[cfg(test)]
+use serde_json::Map;
+use serde_json::Value;
 
 use crate::types::*;
 use crate::version::{CVRVersion, NullableCVRVersion, cmp_versions, version_string};
@@ -101,7 +103,6 @@ pub struct PokePartBody {
 struct PokeState {
     poke_id: String,
     base_cookie: Option<String>,
-    cookie: String,
     started: bool,
     body: Option<PokePartBody>,
     part_count: usize,
@@ -109,11 +110,10 @@ struct PokeState {
 }
 
 impl PokeState {
-    fn new(poke_id: String, base_cookie: Option<String>, cookie: String) -> Self {
+    fn new(poke_id: String, base_cookie: Option<String>) -> Self {
         Self {
             poke_id,
             base_cookie,
-            cookie,
             started: false,
             body: None,
             part_count: 0,
@@ -140,7 +140,7 @@ impl PokeHandler {
         let to_version = &patch_to_version.to_version;
         let base = self.base_version.lock().unwrap();
 
-        if cmp_versions(&Some(to_version.clone()), &*base) != Ordering::Greater {
+        if cmp_versions(&Some(to_version.clone()), &base) != Ordering::Greater {
             return Ok(());
         }
         drop(base);
@@ -148,87 +148,100 @@ impl PokeHandler {
         let mut state = self.state.lock().unwrap();
         self.ensure_body(&mut state)?;
 
-        match &patch_to_version.patch {
-            Patch::Query(qp) => {
-                let body = state.body.as_mut().unwrap();
-                match qp {
-                    QueryPatch::Put { id, client_id } => {
-                        let entry = QueryPatchEntry {
-                            op: "put".to_string(),
-                            hash: id.clone(),
-                        };
-                        match client_id {
-                            Some(cid) => {
-                                let dqp = body
-                                    .desired_queries_patches
-                                    .get_or_insert_with(BTreeMap::new);
-                                dqp.entry(cid.clone()).or_default().push(entry);
-                            }
-                            None => {
-                                body.got_queries_patch
-                                    .get_or_insert_with(Vec::new)
-                                    .push(entry);
-                            }
-                        }
-                    }
-                    QueryPatch::Del { id, client_id } => {
-                        let entry = QueryPatchEntry {
-                            op: "del".to_string(),
-                            hash: id.clone(),
-                        };
-                        match client_id {
-                            Some(cid) => {
-                                let dqp = body
-                                    .desired_queries_patches
-                                    .get_or_insert_with(BTreeMap::new);
-                                dqp.entry(cid.clone()).or_default().push(entry);
-                            }
-                            None => {
-                                body.got_queries_patch
-                                    .get_or_insert_with(Vec::new)
-                                    .push(entry);
-                            }
-                        }
-                    }
-                }
-            }
-            Patch::Row(rp) => {
-                let table = match rp {
-                    RowPatch::Put { id, .. } => &id.table,
-                    RowPatch::Del { id } => &id.table,
-                };
-
-                if table == &self.zero_clients_table {
-                    self.update_lmids(&mut state, rp)?;
-                } else if table == &self.zero_mutations_table {
-                    self.add_mutation_patch(&mut state, rp)?;
-                } else {
+        let result = (|| {
+            match &patch_to_version.patch {
+                Patch::Query(qp) => {
                     let body = state.body.as_mut().unwrap();
-                    body.rows_patch
-                        .get_or_insert_with(Vec::new)
-                        .push(make_row_patch(rp));
+                    match qp {
+                        QueryPatch::Put { id, client_id } => {
+                            let entry = QueryPatchEntry {
+                                op: "put".to_string(),
+                                hash: id.clone(),
+                            };
+                            match client_id {
+                                Some(cid) => {
+                                    let dqp = body
+                                        .desired_queries_patches
+                                        .get_or_insert_with(BTreeMap::new);
+                                    dqp.entry(cid.clone()).or_default().push(entry);
+                                }
+                                None => {
+                                    body.got_queries_patch
+                                        .get_or_insert_with(Vec::new)
+                                        .push(entry);
+                                }
+                            }
+                        }
+                        QueryPatch::Del { id, client_id } => {
+                            let entry = QueryPatchEntry {
+                                op: "del".to_string(),
+                                hash: id.clone(),
+                            };
+                            match client_id {
+                                Some(cid) => {
+                                    let dqp = body
+                                        .desired_queries_patches
+                                        .get_or_insert_with(BTreeMap::new);
+                                    dqp.entry(cid.clone()).or_default().push(entry);
+                                }
+                                None => {
+                                    body.got_queries_patch
+                                        .get_or_insert_with(Vec::new)
+                                        .push(entry);
+                                }
+                            }
+                        }
+                    }
+                }
+                Patch::Row(rp) => {
+                    let table = match rp {
+                        RowPatch::Put { id, .. } => &id.table,
+                        RowPatch::Del { id } => &id.table,
+                    };
+
+                    if table == &self.zero_clients_table {
+                        self.update_lmids(&mut state, rp)?;
+                    } else if table == &self.zero_mutations_table {
+                        self.add_mutation_patch(&mut state, rp)?;
+                    } else {
+                        let body = state.body.as_mut().unwrap();
+                        body.rows_patch
+                            .get_or_insert_with(Vec::new)
+                            .push(make_row_patch(rp));
+                    }
                 }
             }
-        }
 
-        state.part_count += 1;
-        if state.part_count >= PART_COUNT_FLUSH_THRESHOLD {
-            self.flush_body(&mut state)?;
-        }
+            state.part_count += 1;
+            if state.part_count >= PART_COUNT_FLUSH_THRESHOLD {
+                self.flush_body(&mut state)?;
+            }
+            Ok(())
+        })();
 
-        Ok(())
+        // Once a frame cannot be assembled or delivered, this poke is dead.
+        // Releasing here is essential: a later catch-up poke shares the same
+        // per-client chain and would otherwise spin forever in acquire_chain.
+        if result.is_err() {
+            self.release_chain(&mut state);
+        }
+        result
     }
 
     pub fn cancel(&self) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
-        if state.started {
+        let result = if state.started {
             self.downstream.push(serde_json::json!([
                 "pokeEnd",
                 {"pokeID": state.poke_id, "cookie": "", "cancel": true}
-            ]))?;
-        }
+            ]))
+        } else {
+            Ok(())
+        };
+        // Socket delivery errors do not change ownership of the chain.
+        // Always unlock it before returning the error.
         self.release_chain(&mut state);
-        Ok(())
+        result
     }
 
     pub fn end(&self, final_version: CVRVersion) -> Result<(), String> {
@@ -237,33 +250,42 @@ impl PokeHandler {
 
         if !state.started {
             let base = self.base_version.lock().unwrap();
-            if cmp_versions(&*base, &Some(final_version.clone())) == Ordering::Equal {
+            if cmp_versions(&base, &Some(final_version.clone())) == Ordering::Equal {
                 self.release_chain(&mut state);
                 return Ok(());
             }
             drop(base);
             self.acquire_chain(&mut state);
-            self.downstream.push(serde_json::json!([
+            if let Err(error) = self.downstream.push(serde_json::json!([
                 "pokeStart",
                 {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
-            ]))?;
+            ])) {
+                self.release_chain(&mut state);
+                return Err(error);
+            }
             state.started = true;
         } else {
             let base = self.base_version.lock().unwrap();
-            if cmp_versions(&*base, &Some(final_version.clone())) != Ordering::Less {
-                return Err(format!(
+            if cmp_versions(&base, &Some(final_version.clone())) != Ordering::Less {
+                let error = format!(
                     "Patches were sent but finalVersion {:?} is not greater than baseVersion {:?}",
                     final_version, *base
-                ));
+                );
+                drop(base);
+                self.release_chain(&mut state);
+                return Err(error);
             }
             drop(base);
         }
 
         self.flush_body(&mut state)?;
-        self.downstream.push(serde_json::json!([
+        if let Err(error) = self.downstream.push(serde_json::json!([
             "pokeEnd",
             {"pokeID": state.poke_id, "cookie": cookie}
-        ]))?;
+        ])) {
+            self.release_chain(&mut state);
+            return Err(error);
+        }
 
         let mut base = self.base_version.lock().unwrap();
         *base = Some(final_version);
@@ -276,10 +298,13 @@ impl PokeHandler {
     fn ensure_body(&self, state: &mut PokeState) -> Result<(), String> {
         if !state.started {
             self.acquire_chain(state);
-            self.downstream.push(serde_json::json!([
+            if let Err(error) = self.downstream.push(serde_json::json!([
                 "pokeStart",
                 {"pokeID": state.poke_id, "baseCookie": state.base_cookie}
-            ]))?;
+            ])) {
+                self.release_chain(state);
+                return Err(error);
+            }
             state.started = true;
         }
         if state.body.is_none() {
@@ -293,8 +318,10 @@ impl PokeHandler {
 
     fn flush_body(&self, state: &mut PokeState) -> Result<(), String> {
         if let Some(body) = state.body.take() {
-            self.downstream
-                .push(serde_json::json!(["pokePart", body]))?;
+            if let Err(error) = self.downstream.push(serde_json::json!(["pokePart", body])) {
+                self.release_chain(state);
+                return Err(error);
+            }
             state.part_count = 0;
         }
         Ok(())
@@ -348,7 +375,7 @@ impl PokeHandler {
         let patches = body.mutations_patch.get_or_insert_with(Vec::new);
 
         match patch {
-            RowPatch::Put { id, contents } => {
+            RowPatch::Put { id: _, contents } => {
                 let normalized = normalize_mutation_result(contents);
                 let client_id = normalized
                     .get("clientID")
@@ -414,16 +441,14 @@ impl Drop for PokeHandler {
 
 /// Defense-in-depth: if `result` arrives as a JSON string, parse it.
 fn normalize_mutation_result(row: &Value) -> Value {
-    if let Value::Object(map) = row {
-        if let Some(result) = map.get("result") {
-            if let Value::String(s) = result {
-                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-                    let mut cloned = map.clone();
-                    cloned.insert("result".to_string(), parsed);
-                    return Value::Object(cloned);
-                }
-            }
-        }
+    if let Value::Object(map) = row
+        && let Some(result) = map.get("result")
+        && let Value::String(s) = result
+        && let Ok(parsed) = serde_json::from_str::<Value>(s)
+    {
+        let mut cloned = map.clone();
+        cloned.insert("result".to_string(), parsed);
+        return Value::Object(cloned);
     }
     row.clone()
 }
@@ -476,7 +501,7 @@ impl ClientHandler {
             zero_mutations_table: format!("{}.mutations", us),
             downstream,
             base_version: Arc::new(StdMutex::new(
-                base_cookie.map(|c| crate::version::version_from_string(c)),
+                base_cookie.map(crate::version::version_from_string),
             )),
             poke_chain: Arc::new(AtomicBool::new(false)),
         }
@@ -511,11 +536,7 @@ impl ClientHandler {
             // NOOP handler — add_patch will skip everything because
             // to_version <= base_version.
             return PokeHandler {
-                state: Arc::new(StdMutex::new(PokeState::new(
-                    poke_id,
-                    None,
-                    version_string(&tentative_version),
-                ))),
+                state: Arc::new(StdMutex::new(PokeState::new(poke_id, None))),
                 downstream: self.downstream.clone(),
                 base_version: base,
                 poke_chain: self.poke_chain.clone(),
@@ -525,17 +546,10 @@ impl ClientHandler {
             };
         }
 
-        let base_cookie = match &base_val {
-            None => None,
-            Some(v) => Some(version_string(v)),
-        };
+        let base_cookie = base_val.as_ref().map(version_string);
 
         PokeHandler {
-            state: Arc::new(StdMutex::new(PokeState::new(
-                poke_id.clone(),
-                base_cookie,
-                version_string(&tentative_version),
-            ))),
+            state: Arc::new(StdMutex::new(PokeState::new(poke_id.clone(), base_cookie))),
             downstream: self.downstream.clone(),
             base_version: base,
             poke_chain: self.poke_chain.clone(),
@@ -675,6 +689,50 @@ mod tests {
         fn cancel(&self) {
             *self.cancelled.lock().unwrap() = true;
         }
+    }
+
+    struct FailingSink {
+        fail_tag: &'static str,
+    }
+
+    impl WebSocketSink for FailingSink {
+        fn push(&self, msg: Value) -> Result<(), String> {
+            if msg
+                .as_array()
+                .and_then(|parts| parts.first())
+                .and_then(Value::as_str)
+                == Some(self.fail_tag)
+            {
+                Err(format!("intentional {} failure", self.fail_tag))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn fail(&self, _e: String) {}
+
+        fn cancel(&self) {}
+    }
+
+    fn make_failing_handler(fail_tag: &'static str) -> ClientHandler {
+        ClientHandler::new(
+            "cg1",
+            "client1",
+            "ws1",
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
+            None,
+            Arc::new(FailingSink { fail_tag }),
+        )
+    }
+
+    fn assert_chain_released(handler: &ClientHandler) {
+        assert!(
+            !handler.poke_chain.load(AtomicOrdering::SeqCst),
+            "failed poke must release the per-client chain"
+        );
     }
 
     fn make_handler() -> (ClientHandler, Arc<StdMutex<Vec<Value>>>) {
@@ -867,6 +925,109 @@ mod tests {
                 config_version: Some(1),
             })
             .unwrap();
+    }
+
+    #[test]
+    fn failed_poke_start_releases_chain() {
+        let handler = make_failing_handler("pokeStart");
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        assert!(
+            poke.end(CVRVersion {
+                state_version: "v2".to_string(),
+                config_version: Some(1),
+            })
+            .is_err()
+        );
+        assert_chain_released(&handler);
+    }
+
+    #[test]
+    fn failed_poke_part_releases_chain() {
+        let handler = make_failing_handler("pokePart");
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        poke.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})))
+            .unwrap();
+        assert!(
+            poke.end(CVRVersion {
+                state_version: "v2".to_string(),
+                config_version: Some(1),
+            })
+            .is_err()
+        );
+        assert_chain_released(&handler);
+    }
+
+    #[test]
+    fn failed_poke_end_and_cancel_release_chain() {
+        let handler = make_failing_handler("pokeEnd");
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        assert!(
+            poke.end(CVRVersion {
+                state_version: "v2".to_string(),
+                config_version: Some(1),
+            })
+            .is_err()
+        );
+        assert_chain_released(&handler);
+
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v3".to_string(),
+            config_version: None,
+        });
+        poke.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})))
+            .unwrap();
+        assert!(poke.cancel().is_err());
+        assert_chain_released(&handler);
+    }
+
+    #[test]
+    fn patch_assembly_error_releases_chain() {
+        let (handler, _messages) = make_handler();
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        let malformed_mutation = make_row_patch_put(
+            "app_0.mutations",
+            serde_json::json!({"mutationID": 1, "result": {"ok": true}}),
+        );
+        assert!(poke.add_patch(&malformed_mutation).is_err());
+        assert_chain_released(&handler);
+    }
+
+    #[test]
+    fn invalid_final_version_after_patches_releases_chain() {
+        let (handler, _messages) = make_handler();
+        *handler.base_version.lock().unwrap() = Some(CVRVersion {
+            state_version: "v1".to_string(),
+            config_version: None,
+        });
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        poke.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})))
+            .unwrap();
+
+        // Once frames have started, ending at the current base is invalid and
+        // must not strand the per-client serialization guard.
+        assert!(
+            poke.end(CVRVersion {
+                state_version: "v1".to_string(),
+                config_version: None,
+            })
+            .is_err()
+        );
+        assert_chain_released(&handler);
     }
 
     #[test]

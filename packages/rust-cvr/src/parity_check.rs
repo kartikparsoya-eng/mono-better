@@ -11,10 +11,6 @@ use crate::row_key::{RowID, row_id_hash, row_id_string_cached};
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
 use serde_json::Value;
 
-fn parse_u128(s: &str) -> u128 {
-    s.parse().expect("invalid u128 in fixture")
-}
-
 fn parse_u64(s: &str) -> u64 {
     s.parse().expect("invalid u64 in fixture")
 }

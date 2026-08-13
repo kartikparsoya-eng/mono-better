@@ -350,9 +350,7 @@ impl IvmPipelines {
         // right after this returns, via `set_query_transformation_hash`; entries
         // hydrated directly (tests) keep an empty-string placeholder hash.
         for (query_id, _) in queries {
-            self.active_queries
-                .entry(query_id.clone())
-                .or_insert_with(String::new);
+            self.active_queries.entry(query_id.clone()).or_default();
         }
         Ok(())
     }

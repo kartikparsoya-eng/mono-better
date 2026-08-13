@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-explicit-any -- optional exposed-gc is a nonstandard Node test hook */
 import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
 import {LogContext} from '@rocicorp/logger';
 import {beforeEach, afterEach, describe, expect, test} from 'vitest';
@@ -55,7 +56,6 @@ const comments = table('comments')
 const CS = createSchema({tables: [issues, comments]});
 
 async function drain(it: AsyncIterable<unknown> | Iterable<unknown>) {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   for await (const _ of it as AsyncIterable<unknown>) {
     /* consume — must fully drain the stream like the view-syncer does */
   }

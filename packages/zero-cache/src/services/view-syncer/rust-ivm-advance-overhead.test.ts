@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-explicit-any -- benchmark adapters intentionally accept both sync and async driver shapes */
 /**
  * ADVANCE FIXED-OVERHEAD BENCH — reproduce the prod finding locally.
  *
@@ -18,30 +19,33 @@
  * Results appended to /tmp/adv-overhead-results.txt
  */
 import './rust-ivm-addon-setup.ts';
+import {appendFileSync, readFileSync, writeFileSync} from 'node:fs';
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test} from 'vitest';
-import {appendFileSync, readFileSync, writeFileSync} from 'node:fs';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
 import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
-import {DbFile} from '../../test/lite.ts';
 import type {AST} from '../../../../zero-protocol/src/ast.ts';
-import {Database} from '../../../../zqlite/src/db.ts';
-import {initReplicationState} from '../replicator/schema/replication-state.ts';
-import {listTables} from '../../db/lite-tables.ts';
-import {populateFromExistingTables} from '../replicator/schema/column-metadata.ts';
-import {upstreamSchema, type ShardID} from '../../types/shards.ts';
 import {
   CREATE_STORAGE_TABLE,
   DatabaseStorage,
 } from '../../../../zqlite/src/database-storage.ts';
+import {Database} from '../../../../zqlite/src/db.ts';
+import {listTables} from '../../db/lite-tables.ts';
 import {InspectorDelegate} from '../../server/inspector-delegate.ts';
+import {DbFile} from '../../test/lite.ts';
+import {upstreamSchema, type ShardID} from '../../types/shards.ts';
+import {populateFromExistingTables} from '../replicator/schema/column-metadata.ts';
+import {initReplicationState} from '../replicator/schema/replication-state.ts';
 import {PipelineDriver} from './pipeline-driver.ts';
-import {Snapshotter} from './snapshotter.ts';
 import {RustIVMDriver} from './rust-ivm-driver.ts';
+import {Snapshotter} from './snapshotter.ts';
 const ADDON_PATH = process.env['RUST_IVM_ADDON_PATH'];
-import {ResetPipelinesSignal} from './snapshotter.ts';
 import {createSchema} from '../../../../zero-schema/src/builder/schema-builder.ts';
-import {string, table} from '../../../../zero-schema/src/builder/table-builder.ts';
+import {
+  string,
+  table,
+} from '../../../../zero-schema/src/builder/table-builder.ts';
+import {ResetPipelinesSignal} from './snapshotter.ts';
 
 const BIG_TIMER = {elapsedLap: () => 0, totalElapsed: () => 10_000_000} as any;
 const NO_TIMER = {elapsedLap: () => 0, totalElapsed: () => 0} as any;
@@ -112,20 +116,31 @@ describe.skipIf(!ADDON_PATH || !RUN)('advance fixed overhead bench', () => {
   }
   function makeRust() {
     const d = new RustIVMDriver(
-      lc, testLogConfig, shardID,
+      lc,
+      testLogConfig,
+      shardID,
       newStorage().createClientGroupStorage('cg-rust'),
-      'cg-rust', new InspectorDelegate(undefined), () => 200,
-      false, undefined, dbFile.path,
+      'cg-rust',
+      new InspectorDelegate(undefined),
+      () => 200,
+      false,
+      undefined,
+      dbFile.path,
     );
     d.init(CS);
     return d;
   }
   function makeTs() {
     const d = new PipelineDriver(
-      lc, testLogConfig,
+      lc,
+      testLogConfig,
       new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
-      shardID, newStorage().createClientGroupStorage('cg-ts'),
-      'cg-ts', new InspectorDelegate(undefined), () => 200, false,
+      shardID,
+      newStorage().createClientGroupStorage('cg-ts'),
+      'cg-ts',
+      new InspectorDelegate(undefined),
+      () => 200,
+      false,
     );
     d.init(CS);
     return d;
@@ -141,7 +156,9 @@ describe.skipIf(!ADDON_PATH || !RUN)('advance fixed overhead bench', () => {
     let n = 0;
     try {
       const res = await d.advance(NO_TIMER);
-      if (!(res instanceof ResetPipelinesSignal)) n = (await drain(res.changes)).length;
+      if (!(res instanceof ResetPipelinesSignal)) {
+        n = (await drain(res.changes)).length;
+      }
     } catch (e) {
       if (!(e instanceof ResetPipelinesSignal)) throw e;
     }
@@ -161,8 +178,9 @@ describe.skipIf(!ADDON_PATH || !RUN)('advance fixed overhead bench', () => {
   }
 
   function stats(xs: number[]) {
-    const s = [...xs].sort((a, b) => a - b);
-    const q = (p: number) => s[Math.min(s.length - 1, Math.floor(p * s.length))];
+    const s = xs.toSorted((a, b) => a - b);
+    const q = (p: number) =>
+      s[Math.min(s.length - 1, Math.floor(p * s.length))];
     const mean = s.reduce((a, b) => a + b, 0) / s.length;
     return `mean=${mean.toFixed(2)}ms p50=${q(0.5).toFixed(2)}ms p95=${q(0.95).toFixed(2)}ms max=${q(1).toFixed(2)}ms`;
   }
@@ -176,52 +194,73 @@ describe.skipIf(!ADDON_PATH || !RUN)('advance fixed overhead bench', () => {
     if (process.env.CONTEND === '1') {
       spinner = setInterval(() => {
         const end = performance.now() + 2;
-        while (performance.now() < end) { /* busy */ }
+        while (performance.now() < end) {
+          /* busy */
+        }
       }, 4);
       out.push('(contended: 2ms sync bursts every 4ms on the JS loop)');
     }
     try {
-    for (const [name, mk] of [
-      ['rust', makeRust],
-      ['ts  ', makeTs],
-    ] as const) {
-      dbFile.delete();
-      dbFile = new DbFile('rust_ivm_adv_overhead');
-      dbFile.connect(lc).pragma('journal_mode = wal2');
-      vCounter = 0;
-      seed();
-      if (name === 'rust' && TRACE_FILE) writeFileSync(TRACE_FILE, '');
-      const d = mk();
-      try {
-        await drain(d.addQuery('h', 'q', AST_SHAPE, BIG_TIMER));
-        // warmup
-        for (let w = 0; w < 10; w++) { commitOne(); await timedAdvance(d); }
-        const walls: number[] = [];
-        for (let k = 0; k < N_ADVANCES; k++) {
-          commitOne();
-          const a = await timedAdvance(d);
-          walls.push(a.ms);
-        }
-        out.push(`${name} wall/advance: ${stats(walls)}  (n=${N_ADVANCES}, single-change advances)`);
-        if (name === 'rust' && TRACE_FILE) {
-          // engine-side totals from the trace file → boundary share = wall - engine
-          const lines = readFileSync(TRACE_FILE, 'utf8').split('\n')
-            .filter(l => l.includes('PERF] advance total='));
-          const engTotals = lines.map(l => parseFloat(l.match(/advance total=([0-9.]+)ms/)?.[1] ?? '0'))
-            .filter(x => x > 0).slice(-N_ADVANCES);
-          if (engTotals.length) {
-            out.push(`rust engine-side total: ${stats(engTotals)}  (from PERF trace, n=${engTotals.length})`);
+      for (const [name, mk] of [
+        ['rust', makeRust],
+        ['ts  ', makeTs],
+      ] as const) {
+        dbFile.delete();
+        dbFile = new DbFile('rust_ivm_adv_overhead');
+        dbFile.connect(lc).pragma('journal_mode = wal2');
+        vCounter = 0;
+        seed();
+        if (name === 'rust' && TRACE_FILE) writeFileSync(TRACE_FILE, '');
+        const d = mk();
+        try {
+          await drain(d.addQuery('h', 'q', AST_SHAPE, BIG_TIMER));
+          // warmup
+          for (let w = 0; w < 10; w++) {
+            commitOne();
+            await timedAdvance(d);
           }
+          const walls: number[] = [];
+          for (let k = 0; k < N_ADVANCES; k++) {
+            commitOne();
+            const a = await timedAdvance(d);
+            walls.push(a.ms);
+          }
+          out.push(
+            `${name} wall/advance: ${stats(walls)}  (n=${N_ADVANCES}, single-change advances)`,
+          );
+          if (name === 'rust' && TRACE_FILE) {
+            // engine-side totals from the trace file → boundary share = wall - engine
+            const lines = readFileSync(TRACE_FILE, 'utf8')
+              .split('\n')
+              .filter(l => l.includes('PERF] advance total='));
+            const engTotals = lines
+              .map(l =>
+                parseFloat(l.match(/advance total=([0-9.]+)ms/)?.[1] ?? '0'),
+              )
+              .filter(x => x > 0)
+              .slice(-N_ADVANCES);
+            if (engTotals.length) {
+              out.push(
+                `rust engine-side total: ${stats(engTotals)}  (from PERF trace, n=${engTotals.length})`,
+              );
+            }
+          }
+        } finally {
+          try {
+            d.removeQuery('q');
+          } catch {}
+          try {
+            await (d as any).destroy?.();
+          } catch {}
         }
-      } finally {
-        try { d.removeQuery('q'); } catch {}
-        try { await (d as any).destroy?.(); } catch {}
       }
-    }
     } finally {
       if (spinner) clearInterval(spinner);
     }
-    appendFileSync('/tmp/adv-overhead-results.txt', `\n=== ${new Date().toISOString()}${process.env.CONTEND === '1' ? ' CONTENDED' : ''} ===\n${out.join('\n')}\n`);
+    appendFileSync(
+      '/tmp/adv-overhead-results.txt',
+      `\n=== ${new Date().toISOString()}${process.env.CONTEND === '1' ? ' CONTENDED' : ''} ===\n${out.join('\n')}\n`,
+    );
     expect(out.length).toBeGreaterThanOrEqual(2);
   }, 300_000);
 });

@@ -77,7 +77,11 @@ import type {
   ConnectionSelector,
   ConnectionValidation,
 } from './connection-context-manager.ts';
-import {ClientNotFoundError, CVRStore, type CVRFlushStats} from './cvr-store.ts';
+import {
+  ClientNotFoundError,
+  CVRStore,
+  type CVRFlushStats,
+} from './cvr-store.ts';
 import type {CVRUpdater} from './cvr.ts';
 import {
   CVRConfigDrivenUpdater,
@@ -89,8 +93,8 @@ import {
 import type {DrainCoordinator} from './drain-coordinator.ts';
 import {handleInspect} from './inspect-handler.ts';
 import type {PipelineDriver} from './pipeline-driver.ts';
-import {RustIVMDriver} from './rust-ivm-driver.ts';
 import {isRustCvrEnabled} from './rust-cvr-addon.ts';
+import {RustIVMDriver} from './rust-ivm-driver.ts';
 
 type PipelineDriverLike = PipelineDriver | RustIVMDriver;
 import {type RowChange} from './pipeline-driver.ts';
@@ -109,7 +113,10 @@ import {
   type QueryRecord,
   type RowID,
 } from './schema/types.ts';
-import {ResetPipelinesSignal, type ResetPipelinesReason} from './snapshotter.ts';
+import {
+  ResetPipelinesSignal,
+  type ResetPipelinesReason,
+} from './snapshotter.ts';
 import {tracer} from './tracer.ts';
 import {
   ttlClockAsNumber,
@@ -393,14 +400,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     this.#runPriorityOp = runPriorityOp;
 
     // Wire the Rust engine's CVR store + client registry if unified path is active.
-    if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver && pgUri) {
+    if (
+      isRustCvrEnabled() &&
+      this.#pipelines instanceof RustIVMDriver &&
+      pgUri
+    ) {
       const engine = this.#pipelines.engine;
-      engine.setCvrStore(
-        pgUri,
-        cvrSchema(shard),
-        clientGroupID,
-        taskID,
-      );
+      engine.setCvrStore(pgUri, cvrSchema(shard), clientGroupID, taskID);
     }
 
     // Wait for the first connection to init.
@@ -1276,7 +1282,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             for (const patch of desiredQueriesPatch) {
               switch (patch.op) {
                 case 'put':
-                  patches.push(...(await updater.putDesiredQueries(clientID, [patch])));
+                  patches.push(
+                    ...(await updater.putDesiredQueries(clientID, [patch])),
+                  );
                   break;
                 case 'del':
                   patches.push(
@@ -1288,7 +1296,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
                   );
                   break;
                 case 'clear':
-                  patches.push(...(await updater.clearDesiredQueries(clientID)));
+                  patches.push(
+                    ...(await updater.clearDesiredQueries(clientID)),
+                  );
                   break;
               }
             }
@@ -1315,7 +1325,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
 
           for (const cid of clientIDsToDelete) {
-            const patchesDueToClient = await updater.deleteClient(cid, ttlClock);
+            const patchesDueToClient = await updater.deleteClient(
+              cid,
+              ttlClock,
+            );
             patches.push(...patchesDueToClient);
             deletedClientIDs.push(cid);
           }
@@ -2020,7 +2033,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
         const engine = this.#pipelines.engine;
         const cvrJson = JSON.stringify(cvr);
-        const addQueriesFlat = addQueries.flatMap(q => [q.id, q.transformationHash]);
+        const addQueriesFlat = addQueries.flatMap(q => [
+          q.id,
+          q.transformationHash,
+        ]);
         const removeQueryIds = removeQueries.map(q => q.id);
         const clientIds = this.#getClients().map(c => c.wsID);
         const existingRowsJson = JSON.stringify(
@@ -2044,7 +2060,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         );
 
         if (result.resetReason) {
-          throw new ResetPipelinesSignal(result.resetMsg ?? '', result.resetReason as ResetPipelinesReason);
+          throw new ResetPipelinesSignal(
+            result.resetMsg ?? '',
+            result.resetReason as ResetPipelinesReason,
+          );
         }
 
         // Clean up inspector/metrics for removed queries (engine removal
@@ -2078,9 +2097,16 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         // The Rust hydrate already poked clients up to the new version,
         // but clients that were behind cvr.version need row patches from
         // the CVR DB that the hydrate didn't cover.
-        await this.#catchupClients(lc, newCVR, newCVR.version, addQueries.map(q => q.id));
+        await this.#catchupClients(
+          lc,
+          newCVR,
+          newCVR.version,
+          addQueries.map(q => q.id),
+        );
 
-        const queryPatches = JSON.parse(result.queryPatchesJson) as PatchToVersion[];
+        const queryPatches = JSON.parse(
+          result.queryPatchesJson,
+        ) as PatchToVersion[];
 
         // Record metrics (matching TS fallback path).
         const wallTime = performance.now() - start;
@@ -2473,7 +2499,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         );
 
         if (result.resetReason) {
-          return new ResetPipelinesSignal(result.resetMsg ?? '', result.resetReason as ResetPipelinesReason);
+          return new ResetPipelinesSignal(
+            result.resetMsg ?? '',
+            result.resetReason as ResetPipelinesReason,
+          );
         }
 
         this.#cvr = JSON.parse(result.cvrJson);

@@ -28,6 +28,7 @@
 //!      (`pending_rows_version` stayed ahead of `flushed_rows_version`). Fixed by
 //!      recording `flush_error` and notifying the watch channel, so `flushed()`
 //!      returns the error instead of hanging.
+//!
 //! Regression coverage: `pg_repro_catchup_from_cg_thread` (the exact CG-thread
 //! model: non-worker thread + `Handle::block_on` + real flush + catchup) and
 //! `pg_repro_failed_flush_does_not_hang` (liveness on flush failure).
@@ -37,7 +38,7 @@ use std::collections::BTreeMap;
 use rust_cvr::store::CVRStoreHandle;
 use rust_cvr::types::{CVR, DesiredQuerySpec, ShardID};
 use rust_cvr::updater::CVRConfigDrivenUpdater;
-use rust_cvr::version::CVRVersion;
+use rust_cvr::version::{CVRVersion, EMPTY_CVR_VERSION};
 
 fn pg_uri() -> Option<String> {
     std::env::var("TEST_CVR_PG_URI")
@@ -199,7 +200,7 @@ fn pg_cvr_store_flush_and_reload_roundtrip() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(&cfg_cvr.version, &cfg_cvr, 0.0)
+            .flush(&EMPTY_CVR_VERSION, &cfg_cvr, 0.0)
             .await
             .expect("store flush");
 
@@ -303,7 +304,10 @@ fn pg_cvr_store_deletes_rows() {
             "task-0".to_string(),
         );
         store.apply_store_ops(ops);
-        store.flush(&cvr.version, &cvr, 0.0).await.expect("flush");
+        store
+            .flush(&EMPTY_CVR_VERSION, &cvr, 0.0)
+            .await
+            .expect("flush");
 
         let row_count = |pool: sqlx::PgPool| async move {
             let c: (i64,) = sqlx::query_as(&format!(
@@ -394,7 +398,7 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
             "task-A".to_string(),
         );
         a.apply_store_ops(ops);
-        a.flush(&cvr_x.version, &cvr_x, 0.0)
+        a.flush(&EMPTY_CVR_VERSION, &cvr_x, 0.0)
             .await
             .expect("A create");
 
@@ -413,13 +417,13 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
             state_version: "09".to_string(),
             config_version: None,
         };
-        a.flush(&cvr_y.version, &cvr_y, 0.0)
+        a.flush(&cvr_x.version, &cvr_y, 0.0)
             .await
             .expect("A advance");
 
         // Store B, still at X, must be rejected as concurrently modified.
         let err = b
-            .flush(&cvr_y.version, &cvr_y, 0.0)
+            .flush(&cvr_x.version, &cvr_y, 0.0)
             .await
             .expect_err("B flush must be rejected");
         assert!(
@@ -498,7 +502,9 @@ fn pg_cvr_store_load_retries_until_rows_catch_up() {
             "task-A".to_string(),
         );
         a.apply_store_ops(ops);
-        a.flush(&cvr_x.version, &cvr_x, 0.0).await.expect("A create");
+        a.flush(&EMPTY_CVR_VERSION, &cvr_x, 0.0)
+            .await
+            .expect("A create");
 
         // Simulate an in-flight advance: the instance version jumps to "05" but
         // the rows table still lags at "01" (pending row writes not flushed).
@@ -671,7 +677,9 @@ fn pg_cvr_store_load_grants_and_transfers_ownership() {
         let mut a = store(&pool, "task-A");
         a.apply_store_ops(ops);
         // A connects at time 1000 → its flush grants ownership @1000.
-        a.flush(&cvr.version, &cvr, 1000.0).await.expect("A create");
+        a.flush(&EMPTY_CVR_VERSION, &cvr, 1000.0)
+            .await
+            .expect("A create");
         a.load(1000.0).await.expect("A reload (still owner)");
 
         // task-B connected EARLIER (500) → A's live lease refuses it.
@@ -765,7 +773,7 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(&cvr1.version, &cvr1, 0.0)
+            .flush(&EMPTY_CVR_VERSION, &cvr1, 0.0)
             .await
             .expect("flush 1");
 
@@ -794,7 +802,7 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
         let ops2 = cfg2.base.drain_store_ops();
         store.apply_store_ops(ops2);
         store
-            .flush(&cvr2.version, &cvr2, 0.0)
+            .flush(&cvr1.version, &cvr2, 0.0)
             .await
             .expect("flush 2");
 
@@ -817,6 +825,13 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
             cs2.inactivated_at,
             Some(1234),
             "inactivation timestamp reloaded — desire is NOT resurrected as active"
+        );
+        assert!(
+            !loaded2.cvr.clients["c1"]
+                .desired_query_ids
+                .iter()
+                .any(|id| id == "q1"),
+            "inactive desires must not be reconstructed as active desiredQueryIDs"
         );
 
         sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
@@ -1088,17 +1103,261 @@ fn pg_repro_failed_flush_does_not_hang() {
     });
 }
 
-/// Full engine hydrate + catchup over PG. The catchup deadlock this once
-/// tracked is root-caused and fixed (see module docs + `pg_repro_catchup_from_cg_thread`
-/// / `pg_repro_failed_flush_does_not_hang`, which drive the exact
-/// `catchup_row_patches` → `flushed()` → `flush_loop` machinery through the same
-/// non-worker-thread + `Handle::block_on` model the CG thread uses).
+/// Production lifecycle gate: connect → hydrate from the SQLite replica →
+/// persist CVR/rows in Postgres → disconnect → advance while offline → reconnect
+/// with the pre-advance cookie → catch up the missed row from Postgres.
 ///
-/// Remaining as a follow-up: a full `SyncEngine::config_and_hydrate` test that
-/// also seeds the IVM pipeline with rows (so `get_row` returns catchup content)
-/// needs a test-only source-seeding hook or a real SQLite replica fixture —
-/// scaffolding beyond the catchup-deadlock fix. Left `#[ignore]`d until that
-/// fixture exists.
+/// This deliberately drives the syncer from a normal OS thread with an injected
+/// Tokio handle, matching the real per-client-group execution model. It covers
+/// the entire read path that the smaller store and in-memory engine tests cannot
+/// cover together.
 #[test]
-#[ignore = "needs IVM source-seeding fixture; catchup deadlock itself fixed + covered by pg_repro_* tests"]
-fn pg_engine_hydrate_and_catchup() {}
+fn pg_engine_hydrate_advance_reconnect_and_catchup() {
+    use std::sync::Arc;
+
+    use rusqlite::Connection;
+    use rust_cvr::client_handler::WebSocketSink;
+    use rust_cvr::updater::RowRecordMap;
+    use rust_cvr::version::version_string;
+    use rust_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_engine_hydrate_advance_reconnect_and_catchup: TEST_CVR_PG_URI not set");
+        return;
+    };
+
+    let schema = "cvr_engine_lifecycle";
+    let db_path = format!("/tmp/rust-syncer-pg-lifecycle-{}.db", std::process::id());
+    let cleanup_sqlite = || {
+        for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    };
+    cleanup_sqlite();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        let _ = conn.pragma_update(None, "journal_mode", "wal2");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                replicaVersion TEXT NOT NULL,
+                publications TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.replicationState" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                stateVersion TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.changeLog2" (
+                "stateVersion" TEXT NOT NULL,
+                "table"        TEXT NOT NULL,
+                "rowKey"       TEXT NOT NULL,
+                "op"           TEXT NOT NULL,
+                "pos"          INTEGER NOT NULL,
+                PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE issue (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                "_0_version" TEXT NOT NULL
+            );
+            INSERT INTO "_zero.replicationConfig" (lock, replicaVersion, publications)
+                VALUES ('singleton', 'replica-1', '[]');
+            INSERT INTO "_zero.replicationState" (lock, stateVersion)
+                VALUES ('singleton', '01');
+            INSERT INTO issue (id, title, "_0_version")
+                VALUES ('i1', 'before advance', '01');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let specs = rust_syncer::compute_table_specs_from_path(&db_path).unwrap();
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init(specs, Some(&db_path), "app").unwrap();
+    let mut engine = SyncEngine::new(pipelines);
+    engine.set_tokio_handle(handle);
+    engine
+        .set_cvr_store(
+            &uri,
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+            5,
+        )
+        .unwrap();
+
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    let (tx1, mut rx1) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink1: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx1));
+    engine.register_client("client1", "ws1", "cg1", &shard, None, sink1);
+
+    let puts = vec![DesiredQuerySpec {
+        hash: "q_issue".to_string(),
+        ast: Some(serde_json::json!({"table": "issue"})),
+        name: None,
+        args: None,
+        ttl: None,
+    }];
+    let hydrated = engine
+        .config_and_hydrate(
+            empty_engine_cvr("cg1", "replica-1"),
+            "client1",
+            &["ws1".to_string()],
+            &shard,
+            puts,
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            None,
+            "01".to_string(),
+            "replica-1".to_string(),
+            &RowRecordMap::new(),
+            0,
+            0,
+            0,
+        )
+        .expect("initial hydrate");
+    let hydrate_cookie = version_string(&hydrated.version);
+
+    let mut hydrate_wire = String::new();
+    while let Ok(WsCommand::Send(frame)) = rx1.try_recv() {
+        hydrate_wire.push_str(&frame.to_string());
+    }
+    assert!(
+        hydrate_wire.contains("before advance"),
+        "initial connection must receive the hydrated SQLite row"
+    );
+
+    // The client goes offline before the replica advances, so no delta poke can
+    // reach it. Its last durable cookie is the post-hydration cookie above.
+    engine.unregister_client("ws1");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            BEGIN;
+            UPDATE issue
+               SET title = 'after advance', "_0_version" = '02'
+             WHERE id = 'i1';
+            INSERT INTO "_zero.changeLog2" ("stateVersion", "table", "rowKey", "op", "pos")
+                VALUES ('02', 'issue', '{"id":"i1"}', 's', 0);
+            UPDATE "_zero.replicationState" SET stateVersion = '02';
+            COMMIT;
+            "#,
+        )
+        .unwrap();
+    }
+
+    let existing_before_advance = engine.existing_rows();
+    let advanced = engine
+        .advance_and_sync(
+            hydrated,
+            "replica-1".to_string(),
+            &[],
+            &existing_before_advance,
+            0,
+            0,
+            0,
+        )
+        .expect("offline advance");
+    assert_eq!(advanced.num_changes, 1, "one replica row changed");
+    assert!(advanced.reset_reason.is_none(), "advance must not reset");
+    assert_ne!(
+        version_string(&advanced.cvr.version),
+        hydrate_cookie,
+        "advance must move the CVR beyond the disconnected client's cookie"
+    );
+
+    // Reconnect the same logical client with its old cookie. No query needs a
+    // new hydrate; config_and_hydrate must take the catch-up branch and rebuild
+    // the missed row contents from the advanced IVM state.
+    let (tx2, mut rx2) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink2: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx2));
+    engine.register_client(
+        "client1",
+        "ws2",
+        "cg1",
+        &shard,
+        Some(&hydrate_cookie),
+        sink2,
+    );
+    let existing_after_advance = engine.existing_rows();
+    let caught_up = engine
+        .config_and_hydrate(
+            advanced.cvr,
+            "client1",
+            &["ws2".to_string()],
+            &shard,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            None,
+            "02".to_string(),
+            "replica-1".to_string(),
+            &existing_after_advance,
+            0,
+            0,
+            0,
+        )
+        .expect("reconnect catchup");
+
+    let mut catchup_wire = String::new();
+    while let Ok(WsCommand::Send(frame)) = rx2.try_recv() {
+        catchup_wire.push_str(&frame.to_string());
+    }
+    assert!(
+        catchup_wire.contains("after advance"),
+        "reconnecting client must receive the row change missed while offline; wire={catchup_wire}"
+    );
+    assert!(
+        !catchup_wire.contains("before advance"),
+        "catchup must rebuild contents from the current IVM row"
+    );
+
+    let reloaded = engine.load_cvr(0.0).unwrap().expect("persisted CVR");
+    assert_eq!(
+        reloaded.version, caught_up.version,
+        "Postgres must hold the exact CVR delivered after catchup"
+    );
+
+    drop(engine);
+    cleanup_sqlite();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}

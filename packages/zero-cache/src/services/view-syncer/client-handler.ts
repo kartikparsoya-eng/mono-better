@@ -34,6 +34,7 @@ import {
 } from '../../types/error-with-level.ts';
 import {upstreamSchema, type ShardID} from '../../types/shards.ts';
 import type {Subscription} from '../../types/subscription.ts';
+import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 import {
   cmpVersions,
   cookieToVersion,
@@ -45,7 +46,6 @@ import {
   type PutQueryPatch,
   type RowID,
 } from './schema/types.ts';
-import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 
 interface RustPokeHandlerHandle {
   addPatch(patch: unknown): Promise<void>;

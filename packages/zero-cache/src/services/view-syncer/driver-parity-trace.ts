@@ -203,7 +203,7 @@ export function firstTraceDifference(
     const tsRecord = ts as Record<string, unknown>;
     const keys = [
       ...new Set([...Object.keys(rustRecord), ...Object.keys(tsRecord)]),
-    ].sort();
+    ].toSorted();
     for (const key of keys) {
       if (!(key in rustRecord) || !(key in tsRecord)) {
         return {
@@ -367,7 +367,7 @@ export class DriverParityTrace {
           queries: [],
         };
       }
-      const queries = [...this.#driver.queries()].map(([queryID, info]) => {
+      const queries = Array.from(this.#driver.queries(), ([queryID, info]) => {
         const queryInfo = info as Record<string, unknown>;
         return {
           queryID,

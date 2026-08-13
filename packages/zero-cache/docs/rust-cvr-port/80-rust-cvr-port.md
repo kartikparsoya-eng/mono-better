@@ -12,36 +12,37 @@ Moving CVR + client-handler into Rust closes the loop: hydrate → advance → d
 
 - The WebSocket server (`syncer.ts`) and HTTP route handling
 - Auth / cookie plumbing / `initConnection` handshake (trivial)
-- The high-level `ViewSyncerService` driver that responds to view-syncer lock, change-streamer notifications, and decides *when* to advance/catchup/hydrate — but the per-decision work is delegated to Rust
+- The high-level `ViewSyncerService` driver that responds to view-syncer lock, change-streamer notifications, and decides _when_ to advance/catchup/hydrate — but the per-decision work is delegated to Rust
 - Broadcasts (change-streamer side) (`broadcast.ts`, `change-streamer-http.ts`)
 - Replicator, schema migrations, copy-pipelines
 
 ## What goes in
 
-| Layer | TS LOC | Rust equivalent | Notes |
-|---|---|---|---|
-| `cvr-store.ts` | 1382 | `packages/rust-cvr/src/store.rs` | Direct DB writes via `sqlx::PgConnection`. TS caller gets opaque handle. |
-| `cvr.ts` | 1194 | `packages/rust-cvr/src/cvr.rs` + `updater.rs` | Two updater classes follow one-to-one (ConfigDriven, QueryDriven). |
-| `client-handler.ts` | 523 | `packages/rust-cvr/src/client_handler.rs` | Per-connection poke chain + body assembly + push. Need a Rust-side WS sink trait. |
-| `row-record-cache.ts` | 469 | `packages/rust-cvr/src/row_record_cache.rs` | LRU + write-back mode + cursor-based `catchupRowPatches`. |
-| `schema/types.ts` | ~380 | `packages/rust-cvr/src/schema.rs` | Serde types + invariants (currently enforced by valita on the JS side). |
-| `schema/cvr.ts` | ~330 | `packages/rust-cvr/src/ddl.rs` | Static SQL strings; run verbatim. |
-| `row-set-signature.ts` | 29 | `packages/rust-cvr/src/row_set_signature.rs` | Pure function; reuse `xxh3_64` (rust already depends on `xxhash-rust`). |
+| Layer                  | TS LOC | Rust equivalent                               | Notes                                                                             |
+| ---------------------- | ------ | --------------------------------------------- | --------------------------------------------------------------------------------- |
+| `cvr-store.ts`         | 1382   | `packages/rust-cvr/src/store.rs`              | Direct DB writes via `sqlx::PgConnection`. TS caller gets opaque handle.          |
+| `cvr.ts`               | 1194   | `packages/rust-cvr/src/cvr.rs` + `updater.rs` | Two updater classes follow one-to-one (ConfigDriven, QueryDriven).                |
+| `client-handler.ts`    | 523    | `packages/rust-cvr/src/client_handler.rs`     | Per-connection poke chain + body assembly + push. Need a Rust-side WS sink trait. |
+| `row-record-cache.ts`  | 469    | `packages/rust-cvr/src/row_record_cache.rs`   | LRU + write-back mode + cursor-based `catchupRowPatches`.                         |
+| `schema/types.ts`      | ~380   | `packages/rust-cvr/src/schema.rs`             | Serde types + invariants (currently enforced by valita on the JS side).           |
+| `schema/cvr.ts`        | ~330   | `packages/rust-cvr/src/ddl.rs`                | Static SQL strings; run verbatim.                                                 |
+| `row-set-signature.ts` | 29     | `packages/rust-cvr/src/row_set_signature.rs`  | Pure function; reuse `xxh3_64` (rust already depends on `xxhash-rust`).           |
 
 **Total egress: ~4300 TS LOC, ~1500-2500 Rust LOC.** The Rust implementation will be smaller because:
+
 - No valita schema parsing en route (invariants enforced at compile time + serde derive)
 - No `structuredClone` / deep-equal (Rust borrows)
 - No async/await ceremony for non-async methods (`flush()` on Updater is sync except for the CVRStore call)
 
 ## Four-phase rollout
 
-| Phase | Ships | What TS does | What Rust does |
-|---|---|---|---|
-| **A. Row-set signature + helpers** | `RUST_CVR_SIGNATURE` | drives existing helper code paths | hashes, format/parse |
-| **B. Row-record-cache** | `RUST_CVR_ROW_CACHE` | wraps Rust handle, calls `apply()` and `catchupRowPatches()` via napi | cache + write-back + read-path |
-| **C. Updaters (Config+Query driven)** | `RUST_CVR_UPDATERS` | constructs updaters via napi, passes them to handler | patch generation, refCount math, version logic |
-| **D. ClientHandler + PokeHandler** | `RUST_CVR_POKER` | calls `startPoke(version) -> PokeHandle`, forwards rows, no body building | poke chain + body assembly + socket frame construction |
-| **E. CVRStore (final)** | `RUST_CVR_STORE` | legacy fallback while `!USE_RUST_IVM` | full DB writer |
+| Phase                                 | Ships                | What TS does                                                              | What Rust does                                         |
+| ------------------------------------- | -------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------ |
+| **A. Row-set signature + helpers**    | `RUST_CVR_SIGNATURE` | drives existing helper code paths                                         | hashes, format/parse                                   |
+| **B. Row-record-cache**               | `RUST_CVR_ROW_CACHE` | wraps Rust handle, calls `apply()` and `catchupRowPatches()` via napi     | cache + write-back + read-path                         |
+| **C. Updaters (Config+Query driven)** | `RUST_CVR_UPDATERS`  | constructs updaters via napi, passes them to handler                      | patch generation, refCount math, version logic         |
+| **D. ClientHandler + PokeHandler**    | `RUST_CVR_POKER`     | calls `startPoke(version) -> PokeHandle`, forwards rows, no body building | poke chain + body assembly + socket frame construction |
+| **E. CVRStore (final)**               | `RUST_CVR_STORE`     | legacy fallback while `!USE_RUST_IVM`                                     | full DB writer                                         |
 
 Each step is independently toggleable via env-var + napi hook. Production runs stock TS until `USE_RUST_CVR=1`.
 

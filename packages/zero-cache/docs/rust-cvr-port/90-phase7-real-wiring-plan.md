@@ -1,7 +1,7 @@
 # 90 — Phase 7: Real Wiring Plan (end-to-end Rust syncer)
 
 **Status:** Execution plan. Follows doc 89 (Full Rust Syncer spec).
-**Goal:** Turn the compiling `rust-syncer` *shell* into a working end-to-end
+**Goal:** Turn the compiling `rust-syncer` _shell_ into a working end-to-end
 syncer by replacing the placeholder trait implementations with real bridges to
 `rust-cvr` (CVR/pokes) and `rust-ivm` (query engine), then prove parity against
 the TS syncer.
@@ -23,11 +23,11 @@ shell is done. This doc covers building and wiring the brain.
 
 ## Current state (verified)
 
-| Crate | State | Notes |
-|---|---|---|
-| `rust-ivm` | ✅ ~production | Pure-Rust `Engine`: `new`, `register_source`, `add_queries_streaming` (mod.rs:466), `advance_to_head_stream` (:774), `get_row` (:1235), `row_set_signature` (:425). SQLite via `Snapshotter`/`TableSource`. Parity-locked, 421 tests. napi kept as TS fallback. |
-| `rust-cvr` | ✅ ~95–100% | Real PG store (sqlx), updaters producing poke patches, `client_handler` (`start_poke` :495, `send_query_transform_failed_error` :575, `PokeHandler` Drop :394), row-record cache. Defines its own `WebSocketSink` trait (client_handler.rs:30). napi kept as TS fallback. |
-| `rust-syncer` | ⚠️ ~25% real | Shell compiles (`cargo check` green). Real: WS server, Connection, MessageHandler, ConnectionContextManager, DrainCoordinator, TTLClock, HTTP server, dispatch-loop skeleton. Brain: all behind placeholders. |
+| Crate         | State          | Notes                                                                                                                                                                                                                                                                     |
+| ------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rust-ivm`    | ✅ ~production | Pure-Rust `Engine`: `new`, `register_source`, `add_queries_streaming` (mod.rs:466), `advance_to_head_stream` (:774), `get_row` (:1235), `row_set_signature` (:425). SQLite via `Snapshotter`/`TableSource`. Parity-locked, 421 tests. napi kept as TS fallback.           |
+| `rust-cvr`    | ✅ ~95–100%    | Real PG store (sqlx), updaters producing poke patches, `client_handler` (`start_poke` :495, `send_query_transform_failed_error` :575, `PokeHandler` Drop :394), row-record cache. Defines its own `WebSocketSink` trait (client_handler.rs:30). napi kept as TS fallback. |
+| `rust-syncer` | ⚠️ ~25% real   | Shell compiles (`cargo check` green). Real: WS server, Connection, MessageHandler, ConnectionContextManager, DrainCoordinator, TTLClock, HTTP server, dispatch-loop skeleton. Brain: all behind placeholders.                                                             |
 
 ### Placeholder / stub inventory (what Phase 7 replaces)
 

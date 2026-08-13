@@ -442,6 +442,12 @@ pub struct PongMessage {
     pub body: PongBody,
 }
 
+impl Default for PongMessage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PongMessage {
     pub fn new() -> Self {
         Self {

@@ -17,6 +17,7 @@ import {rowIDString} from '../../types/row-key.ts';
 import {cvrSchema, type ShardID} from '../../types/shards.ts';
 import {checkVersion, type CVRFlushStats} from './cvr-store.ts';
 import type {CVRSnapshot} from './cvr.ts';
+import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 import {
   rowRecordToRowsRow,
   type RowsRow,
@@ -32,7 +33,6 @@ import {
   versionToNullableCookie,
 } from './schema/types.ts';
 import {tracer} from './tracer.ts';
-import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 
 // Rust handle type — the napi class surface.
 interface RustRowRecordCacheHandle {
@@ -331,10 +331,7 @@ export class RowRecordCache {
     }
     if (this.#rust) {
       // Delegate flush management to Rust.
-      const entries = Array.from(rowRecords.entries()).map(([id, record]) => ({
-        id,
-        record,
-      }));
+      const entries = Array.from(rowRecords, ([id, record]) => ({id, record}));
       return this.#rust.apply(entries, rowsVersion, flushed);
     }
     // TS write-back path.
@@ -566,10 +563,7 @@ export class RowRecordCache {
     lc = this.#lc,
   ): PendingQuery<Row[]>[] {
     if (this.#rust) {
-      const entries = Array.from(rowUpdates.entries()).map(([id, record]) => ({
-        id,
-        record,
-      }));
+      const entries = Array.from(rowUpdates, ([id, record]) => ({id, record}));
       const result = this.#rust.executeRowUpdates(version, entries, mode);
       if (result.kind === 'defer') {
         return [];

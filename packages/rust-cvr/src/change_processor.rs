@@ -135,7 +135,7 @@ impl<'a> ChangeProcessor<'a> {
             }
         }
 
-        if self.rows.len() % self.cursor_page_size == 0 {
+        if self.rows.len().is_multiple_of(self.cursor_page_size) {
             self.flush_batch(existing_rows);
         }
     }
@@ -160,7 +160,7 @@ impl<'a> ChangeProcessor<'a> {
     /// Final flush after all changes have been processed.
     /// Also calls `delete_unreferenced_rows` and routes those patches.
     pub fn finish(&mut self, existing_rows: &RowRecordMap) {
-        self.flush_batch(existing_rows);
+        self.finish_received(existing_rows);
 
         // delete_unreferenced_rows
         let existing_rows_vec: Vec<crate::types::RowRecord> =
@@ -169,6 +169,14 @@ impl<'a> ChangeProcessor<'a> {
         for patch in &patches {
             self.pokers.add_patch(patch);
         }
+    }
+
+    /// Flush only the rows received in this pass. Replica advancement executes
+    /// no query add/remove set, so (matching TS `#advancePipelines`) it must not
+    /// run `deleteUnreferencedRows`; doing so treats a normal advance as a
+    /// query-less reconciliation and panics as soon as one row changes.
+    pub fn finish_received(&mut self, existing_rows: &RowRecordMap) {
+        self.flush_batch(existing_rows);
     }
 
     /// Total rows processed so far.

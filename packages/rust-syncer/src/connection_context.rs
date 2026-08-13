@@ -7,7 +7,6 @@
 //! validated connection currently serves as the group's background connection.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -189,6 +188,8 @@ pub struct MaintenancePlan {
     pub earliest_deadline_at: Option<i64>,
 }
 
+pub type LegacyJwtValidator = dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync;
+
 // ─── Auth resolution ───────────────────────────────────────────────────────
 
 /// Port of `resolveAuth()` from `auth.ts`.
@@ -197,11 +198,9 @@ pub fn resolve_auth(
     previous_auth: Option<&Auth>,
     user_id: Option<&str>,
     wire_auth: Option<&str>,
-    validate_legacy_jwt: Option<
-        &(dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync),
-    >,
+    validate_legacy_jwt: Option<&LegacyJwtValidator>,
 ) -> Result<Option<Auth>, CCMError> {
-    let has_provided_auth = wire_auth.map_or(false, |a| !a.is_empty());
+    let has_provided_auth = wire_auth.is_some_and(|a| !a.is_empty());
 
     if !has_provided_auth && previous_auth.is_some() {
         return Err(CCMError::Unauthorized(
@@ -236,10 +235,10 @@ pub fn resolve_auth(
                     .to_string(),
             ));
         }
-        if let Auth::Opaque { raw } = prev {
-            if raw == wire {
-                return Ok(previous_auth.cloned());
-            }
+        if let Auth::Opaque { raw } = prev
+            && raw == wire
+        {
+            return Ok(previous_auth.cloned());
         }
     }
 
@@ -347,8 +346,7 @@ impl Auth {
 pub struct ConnectionContextManager {
     connections: HashMap<String, ConnectionContext>,
     group: GroupAuthState,
-    validate_legacy_jwt:
-        Option<Box<dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync>>,
+    validate_legacy_jwt: Option<Box<LegacyJwtValidator>>,
     now: Box<dyn Fn() -> i64 + Send + Sync>,
     revalidate_interval_ms: Option<i64>,
     retransform_interval_ms: Option<i64>,
@@ -364,9 +362,7 @@ impl ConnectionContextManager {
         retransform_interval_seconds: Option<u64>,
         query_config: Option<FetchConfig>,
         push_config: Option<FetchConfig>,
-        validate_legacy_jwt: Option<
-            Box<dyn Fn(&str, Option<&str>) -> Result<Auth, CCMError> + Send + Sync>,
-        >,
+        validate_legacy_jwt: Option<Box<LegacyJwtValidator>>,
         now: Option<Box<dyn Fn() -> i64 + Send + Sync>>,
     ) -> Self {
         Self {
@@ -447,7 +443,7 @@ impl ConnectionContextManager {
                 allowed_client_headers: config
                     .as_ref()
                     .and_then(|c| c.allowed_client_headers.clone()),
-                cookie: if config.as_ref().map_or(false, |c| c.forward_cookies) {
+                cookie: if config.as_ref().is_some_and(|c| c.forward_cookies) {
                     params.http_cookie.clone()
                 } else {
                     None
@@ -555,13 +551,13 @@ impl ConnectionContextManager {
 
         let incoming_user_state = validated_user_state.unwrap_or_else(|| connection.user.clone());
 
-        if let Some(ref pinned) = self.group.pinned_user {
-            if pinned.id != incoming_user_state.id {
-                return Err(CCMError::Unauthorized(
+        if let Some(ref pinned) = self.group.pinned_user
+            && pinned.id != incoming_user_state.id
+        {
+            return Err(CCMError::Unauthorized(
                     "Client groups are pinned to a single userID. Connection userID does not match existing client group userID."
                         .to_string(),
                 ));
-            }
         }
 
         if self.group.pinned_user.is_none() {
@@ -703,21 +699,22 @@ impl ConnectionContextManager {
             earliest_deadline_at = min_defined(earliest_deadline_at, Some(revalidate_at));
         }
 
-        let due_retransform = self.group.retransform_at.map_or(false, |at| at <= now);
+        let due_retransform = self.group.retransform_at.is_some_and(|at| at <= now);
 
         let maintenance_not_before_at = self.group.maintenance_not_before_at;
 
-        if let Some(not_before) = maintenance_not_before_at {
-            if not_before > now && earliest_deadline_at.is_some() {
-                return MaintenancePlan {
-                    due_revalidations: Vec::new(),
-                    due_retransform: false,
-                    earliest_deadline_at: Some(earliest_deadline_at.unwrap().max(not_before)),
-                };
-            }
+        if let Some(not_before) = maintenance_not_before_at
+            && not_before > now
+            && earliest_deadline_at.is_some()
+        {
+            return MaintenancePlan {
+                due_revalidations: Vec::new(),
+                due_retransform: false,
+                earliest_deadline_at: Some(earliest_deadline_at.unwrap().max(not_before)),
+            };
         }
 
-        due_revalidations.sort_by(|a, b| compare_by_insertion_order(a, b));
+        due_revalidations.sort_by(compare_by_insertion_order);
 
         MaintenancePlan {
             due_revalidations,
@@ -741,16 +738,16 @@ impl ConnectionContextManager {
     ) -> Option<ConnectionContext> {
         let connection = self.get_connection_context(selector)?;
 
-        if let Some(rev) = revision {
-            if connection.revision != rev {
-                tracing::debug!(
-                    "Ignoring removeConnection for stale revision: {:?} attempted={} current={}",
-                    selector,
-                    rev,
-                    connection.revision
-                );
-                return None;
-            }
+        if let Some(rev) = revision
+            && connection.revision != rev
+        {
+            tracing::debug!(
+                "Ignoring removeConnection for stale revision: {:?} attempted={} current={}",
+                selector,
+                rev,
+                connection.revision
+            );
+            return None;
         }
 
         self.connections.remove(&connection.client_id);
@@ -772,30 +769,31 @@ impl ConnectionContextManager {
     // ─── 5.12 refreshBackgroundConnectionContext ───────────────────────────
 
     fn refresh_background_connection_context(&mut self, preferred: Option<&ConnectionContext>) {
-        if let Some(preferred) = preferred {
-            if preferred.state == ConnectionState::Validated {
-                let current_bg = self.get_background_connection_context();
-                if let Some(ref bg) = current_bg {
-                    if bg.client_id == preferred.client_id && bg.ws_id == preferred.ws_id {
-                        return;
-                    }
-                }
-                if current_bg.is_some() {
-                    return;
-                }
-                self.set_background_connection(Some(ConnectionSelector {
-                    client_id: preferred.client_id.clone(),
-                    ws_id: preferred.ws_id.clone(),
-                }));
+        if let Some(preferred) = preferred
+            && preferred.state == ConnectionState::Validated
+        {
+            let current_bg = self.get_background_connection_context();
+            if let Some(ref bg) = current_bg
+                && bg.client_id == preferred.client_id
+                && bg.ws_id == preferred.ws_id
+            {
                 return;
             }
+            if current_bg.is_some() {
+                return;
+            }
+            self.set_background_connection(Some(ConnectionSelector {
+                client_id: preferred.client_id.clone(),
+                ws_id: preferred.ws_id.clone(),
+            }));
+            return;
         }
 
         let current_bg = self.get_background_connection_context();
-        if let Some(ref bg) = current_bg {
-            if bg.state == ConnectionState::Validated {
-                return;
-            }
+        if let Some(ref bg) = current_bg
+            && bg.state == ConnectionState::Validated
+        {
+            return;
         }
 
         // Find newest validated connection

@@ -21,7 +21,9 @@ if (owner !== this.#taskID) {
       SET owner=${this.#taskID}, grantedAt=${lastConnectTime}
       WHERE clientGroupID=${this.#id} AND (
         grantedAt IS NULL OR grantedAt <= to_timestamp(${lastConnectTime / 1000})
-      )`.execute().catch(this.#failService);
+      )`
+      .execute()
+      .catch(this.#failService);
   }
 }
 ```

@@ -68,8 +68,7 @@ export class WorkerDispatcher implements Service {
     // Sticky within a process lifetime (via assignedSyncer); not sticky across
     // restarts (the map resets), so a CG may land on a different worker and
     // re-hydrate after a dispatcher restart.
-    const useRoundRobin =
-      process.env.ZERO_ROUND_ROBIN_ROUTING === '1';
+    const useRoundRobin = process.env.ZERO_ROUND_ROBIN_ROUTING === '1';
     let roundRobinIdx = 0;
     // Remembers the round-robin worker each CG was assigned, so reconnects
     // stay on that worker (sticky) instead of bouncing to the hash worker.

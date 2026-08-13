@@ -22,7 +22,7 @@ if (
   mode === 'allow-defer' &&
   (this.#flushing !== null || rowUpdates.size > this.#deferredRowFlushThreshold)
 ) {
-  return [];  // don't write now; cache will write later
+  return []; // don't write now; cache will write later
 }
 ```
 
@@ -159,7 +159,7 @@ This invariant is **preserved by construction**: if Rust's flush task dies, the 
 
 ## One place Rust differs legitimately — failures
 
-TS's `#flush()` catches errors with `this.#lc.info?.(\`row record flush failed\`)` and calls `this.#failService(e)`. The Rust port should route errors to the same channel that panics the whole ViewSyncer (not just the cache). **Do not silently swallow** — the TS behavior is already lose-the-CVR; the Rust one is lose-the-CVR-too, with a louder trace.
+TS's `#flush()` catches errors with `this.#lc.info?.(\`row record flush failed\`)`and calls`this.#failService(e)`. The Rust port should route errors to the same channel that panics the whole ViewSyncer (not just the cache). **Do not silently swallow** — the TS behavior is already lose-the-CVR; the Rust one is lose-the-CVR-too, with a louder trace.
 
 ## Testing surface
 

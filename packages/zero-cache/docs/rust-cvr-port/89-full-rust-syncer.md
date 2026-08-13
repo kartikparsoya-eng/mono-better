@@ -19,24 +19,24 @@ boundary-elimination benefits.
 
 A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 
-| # | TS File | LOC | Replaced by |
-|---|---------|-----|-------------|
-| 1 | `workers/syncer.ts` | 382 | `ws_server.rs` + `router.rs` |
-| 2 | `workers/connection.ts` | 457 | `connection.rs` |
-| 3 | `workers/syncer-ws-message-handler.ts` | 283 | `message_handler.rs` |
-| 4 | `services/view-syncer/view-syncer.ts` | 2940 | `view_syncer.rs` |
-| 5 | `services/view-syncer/connection-context-manager.ts` | 874 | `connection_context.rs` |
-| 6 | `services/view-syncer/drain-coordinator.ts` | 76 | `drain.rs` |
-| 7 | `services/view-syncer/cvr-store.ts` | 1492 | Already ported (`store.rs`) |
-| 8 | `services/view-syncer/cvr.ts` | 1399 | Already ported (`cvr.rs` + `updater.rs`) |
-| 9 | `services/view-syncer/client-handler.ts` | 623 | Already ported (`client_handler.rs`) |
-| 10 | `services/view-syncer/row-record-cache.ts` | 686 | Already ported (`row_record_cache.rs`) |
-| 11 | `server/inspector-delegate.ts` | 171 | `inspector.rs` |
-| 12 | `services/view-syncer/inspect-handler.ts` | 215 | `inspect_handler.rs` |
-| 13 | `types/websocket-handoff.ts` | 173 | Not needed (direct accept) |
-| 14 | `server/runner/zero-dispatcher.ts` | 52 | `http_server.rs` |
-| 15 | `server/worker-dispatcher.ts` | 186 | Not needed (single process) |
-| 16 | `workers/connect-params.ts` | 80 | `connect_params.rs` |
+| #   | TS File                                              | LOC  | Replaced by                              |
+| --- | ---------------------------------------------------- | ---- | ---------------------------------------- |
+| 1   | `workers/syncer.ts`                                  | 382  | `ws_server.rs` + `router.rs`             |
+| 2   | `workers/connection.ts`                              | 457  | `connection.rs`                          |
+| 3   | `workers/syncer-ws-message-handler.ts`               | 283  | `message_handler.rs`                     |
+| 4   | `services/view-syncer/view-syncer.ts`                | 2940 | `view_syncer.rs`                         |
+| 5   | `services/view-syncer/connection-context-manager.ts` | 874  | `connection_context.rs`                  |
+| 6   | `services/view-syncer/drain-coordinator.ts`          | 76   | `drain.rs`                               |
+| 7   | `services/view-syncer/cvr-store.ts`                  | 1492 | Already ported (`store.rs`)              |
+| 8   | `services/view-syncer/cvr.ts`                        | 1399 | Already ported (`cvr.rs` + `updater.rs`) |
+| 9   | `services/view-syncer/client-handler.ts`             | 623  | Already ported (`client_handler.rs`)     |
+| 10  | `services/view-syncer/row-record-cache.ts`           | 686  | Already ported (`row_record_cache.rs`)   |
+| 11  | `server/inspector-delegate.ts`                       | 171  | `inspector.rs`                           |
+| 12  | `services/view-syncer/inspect-handler.ts`            | 215  | `inspect_handler.rs`                     |
+| 13  | `types/websocket-handoff.ts`                         | 173  | Not needed (direct accept)               |
+| 14  | `server/runner/zero-dispatcher.ts`                   | 52   | `http_server.rs`                         |
+| 15  | `server/worker-dispatcher.ts`                        | 186  | Not needed (single process)              |
+| 16  | `workers/connect-params.ts`                          | 80   | `connect_params.rs`                      |
 
 **Already ported (reuse directly):** 7-10 (~4200 LOC of Rust already exists).
 
@@ -54,6 +54,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 ### Behaviors to preserve exactly
 
 #### 1.1 Server initialization (syncer.ts:46-70)
+
 - `WebSocketServer` with `noServer: true` (handoff model)
 - `maxPayload` from `config.websocketMaxPayloadBytes`
 - Per-message deflate compression when `config.websocketCompression` is true
@@ -65,6 +66,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
   compression via `tokio-tungstenite`'s deflate feature.
 
 #### 1.2 WebSocket handoff (websocket-handoff.ts)
+
 - The dispatcher (parent process) accepts HTTP upgrade requests and sends the
   raw TCP socket to the syncer worker via IPC.
 - The syncer worker receives the socket via `installWebSocketReceiver` and
@@ -76,11 +78,13 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
   upgrade. This eliminates the entire handoff mechanism.
 
 #### 1.3 HTTP endpoints (zero-dispatcher.ts:30-43)
+
 - `GET /statz` — server statistics (active connections, memory, etc.)
 - `GET /heapz` — heap profiling snapshot
 - **Rust:** `axum` router with `/statz` and `/heapz` routes.
 
 #### 1.4 Drain mechanism (syncer.ts:340-370, drain-coordinator.ts)
+
 - Two drain types:
   1. **Elective drain:** ViewSyncer checks `shouldDrain()` before processing
      a replication event. If true, exits its run loop and calls
@@ -104,6 +108,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 ### Behaviors to preserve exactly
 
 #### 2.1 Connection construction (connection.ts:48-116)
+
 - Store `ws`, `wsID`, `protocolVersion`, `lc`, `onClose`, `messageHandler`.
 - Add `close` and `error` event listeners on the WebSocket.
 - Start proxying inbound messages immediately via `#proxyInbound()`.
@@ -113,6 +118,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
   PING_INTERVAL.
 
 #### 2.2 Protocol version check + `connected` message (connection.ts:118-135)
+
 - `init()` checks `protocolVersion` against `PROTOCOL_VERSION` and
   `MIN_SERVER_SUPPORTED_SYNC_PROTOCOL`.
 - If too high or too low: close with `VersionNotSupported` error.
@@ -122,6 +128,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
   `DirectWebSocketSink`.
 
 #### 2.3 Inbound message handling (connection.ts:137-170)
+
 - Parse incoming WS message as JSON.
 - Parse with `upstreamSchema` (valita union). On parse error: close with
   `InvalidMessage` error.
@@ -133,6 +140,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 - **Rust:** `serde_json::from_str` → match on tag → dispatch.
 
 #### 2.4 HandlerResult processing (connection.ts:172-207)
+
 - `'fatal'`: close with error.
 - `'ok'`: no-op.
 - `'stream'` with `source: 'viewSyncer'`: store as `viewSyncerOutboundStream`,
@@ -143,6 +151,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 - Assert: only one viewSyncer and one pusher outbound stream per connection.
 
 #### 2.5 Outbound proxying (connection.ts:234-250)
+
 - Pipe the outbound `Source<Downstream>` to the WebSocket via `send()`.
 - On error in the pipeline: `#closeWithThrown(e)`.
 - On normal close: `close('downstream closed by ViewSyncer')`.
@@ -150,12 +159,14 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
   writes poke frames to it directly.
 
 #### 2.6 Keepalive pong (connection.ts:289-296)
+
 - Every 3s (`DOWNSTREAM_MSG_INTERVAL_MS / 2`), check if
   `Date.now() - lastDownstreamMsgTime > 6000`.
 - If true: send `['pong', {}]` with `'ignore-backpressure'`.
 - **Rust:** `tokio::time::interval` with 3s period, check last send time.
 
 #### 2.7 Send function (connection.ts:298-326)
+
 - If `ws.readyState === OPEN`: `ws.send(JSON.stringify(data))`.
 - If callback is `'ignore-backpressure'`: don't pass callback (fire-and-forget).
 - If callback is a function: pass it to `ws.send()` for backpressure.
@@ -164,6 +175,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 - **Rust:** Check WS state, serialize to JSON, send via `tokio_tungstenite`.
 
 #### 2.8 Error sending (connection.ts:328-378)
+
 - `sendError(lc, ws, errorBody, thrown?)`:
   - Determine log level:
     - If `thrown instanceof ProtocolErrorWithLevel`: use its `logLevel`.
@@ -178,6 +190,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
   for leveled logging.
 
 #### 2.9 Close handling (connection.ts:142-160, 209-218)
+
 - `close(reason, ...args)`:
   - If already closed: return.
   - Set `#closed = true`.
@@ -192,6 +205,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 - `#handleError`: log at warn level.
 
 #### 2.10 `handleInitConnection` (connection.ts:162-164)
+
 - Takes a string (JSON), calls `#handleMessage({data: initConnectionMsg})`.
 - Used when `initConnection` is piggybacked in the `sec-websocket-protocol`
   header during WS handshake.
@@ -207,6 +221,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 ### Behaviors to preserve exactly
 
 #### 3.1 URL parameter parsing
+
 - `clientID` — required string
 - `clientGroupID` — required string
 - `profileID` — optional string
@@ -218,6 +233,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 - `debugPerf` — optional boolean
 
 #### 3.2 `sec-websocket-protocol` header decoding
+
 - `decodeSecProtocols(header)`:
   - `decodeURIComponent(header)` → `atob()` → UTF-8 decode → `JSON.parse()`.
   - Returns `{initConnectionMessage, authToken}`.
@@ -225,6 +241,7 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
   - `authToken` is a string or `undefined`.
 
 #### 3.3 Other headers
+
 - `cookie` — HTTP cookie header
 - `origin` — HTTP origin header
 
@@ -237,12 +254,14 @@ A single Rust binary (`rust-syncer`) that replaces 16 TS files (~10,089 LOC):
 ### Behaviors to preserve exactly
 
 #### 4.1 Construction
+
 - Takes `lc`, `connectParams`, `connContextManager`, `viewSyncer`, `mutagen?`,
   `pusher?`.
 - Creates a per-connection `Lock` for mutation ordering.
 - Stores `clientGroupID`, `connectionSelector = {clientID, wsID}`.
 
 #### 4.2 Message routing (handleMessage)
+
 Routes by `msg[0]` (message type):
 
 **`'ping'`**: Log error `'Ping is not supported at this layer by Zero'`. Break.
@@ -250,6 +269,7 @@ Routes by `msg[0]` (message type):
 **`'pull'`**: Log error `'Pull is not supported by Zero'`. Break.
 
 **`'push'`**:
+
 1. Extract `traceparent` from `msg[1]`.
 2. Validate `clientGroupID` in mutation matches connection's `clientGroupID`.
    If mismatch: return `[{type: 'fatal', error: {kind: InvalidPush, ...}}]`.
@@ -264,11 +284,13 @@ Routes by `msg[0]` (message type):
    - Collect errors. Return `{type: 'transient', errors}` or `{type: 'ok'}`.
 
 **`'changeDesiredQueries'`**:
+
 1. Extract `traceparent`.
 2. Call `viewSyncer.changeDesiredQueries(selector, msg)`.
 3. Return `[{type: 'ok'}]`.
 
 **`'updateAuth'`**:
+
 1. Get initial `connCtx` via `mustGetConnectionContext`.
 2. Call `connContextManager.updateAuth(selector, msg[1])`.
 3. Check if `authRevisionChanged`.
@@ -276,6 +298,7 @@ Routes by `msg[0]` (message type):
 5. Return `[{type: 'ok'}]`.
 
 **`'deleteClients'`**:
+
 1. Call `viewSyncer.deleteClients(selector, msg)`.
 2. Get `deletedClientIDs` from result.
 3. If `pusher` and `deletedClientIDs.length > 0`: call
@@ -283,26 +306,30 @@ Routes by `msg[0]` (message type):
 4. Return `[{type: 'ok'}]`.
 
 **`'initConnection'`**:
+
 1. Call `connContextManager.initConnection(selector, msg[1])`.
 2. Extract `traceparent`.
 3. Return `[{type: 'stream', source: 'viewSyncer', stream:
-   viewSyncer.initConnection(selector, msg)}]`.
+viewSyncer.initConnection(selector, msg)}]`.
 4. If `pusher` is configured: also return
    `{type: 'stream', source: 'pusher', stream: pusher.initConnection(selector)}`.
 
 **`'closeConnection'`**: Deprecated, no-op. Break.
 
 **`'inspect'`**:
+
 1. Call `viewSyncer.inspect(selector, msg)`.
 2. Return `[{type: 'ok'}]`.
 
 **`'ackMutationResponses'`**:
+
 1. If `pusher`: call `pusher.ackMutationResponses(selector, msg[1])`.
 2. Return `[{type: 'ok'}]`.
 
 **Default**: `unreachable(msgType)` — throws error for unknown message types.
 
 #### 4.3 Traceparent propagation
+
 - `withTraceparent(traceparent, fn)`: extracts W3C traceparent header into
   OTel context, runs `fn` within that context.
 - If no traceparent: just run `fn()`.
@@ -353,6 +380,7 @@ pub struct GroupAuthState {
 ```
 
 ### 5.2 `registerConnection(selector, params, auth?)`
+
 1. Remove any existing connection for this `clientID` (via `#removeConnection`).
 2. Build `queryContext` and `mutateContext` from config:
    - `url`: from `config.query.url[0]` or `config.push.url[0]`
@@ -368,6 +396,7 @@ pub struct GroupAuthState {
 7. Return connection.
 
 ### 5.3 `initConnection(selector, body)`
+
 1. Get existing connection (must exist).
 2. Update `queryContext.url` if `body.userQueryURL` is set.
 3. Update `queryContext.headerOptions.customHeaders` if `body.userQueryHeaders` is set.
@@ -378,6 +407,7 @@ pub struct GroupAuthState {
 8. Return demoted connection.
 
 ### 5.4 `updateAuth(selector, body)` — async
+
 1. Get existing connection (must exist).
 2. Call `resolveAuth(lc, currentAuth, userId, body.auth, validateLegacyJWT)`.
 3. If auth changed: demote connection (set new auth, increment revision).
@@ -386,12 +416,13 @@ pub struct GroupAuthState {
 6. Return connection.
 
 ### 5.5 `validateConnection(selector, revision, validation)`
+
 1. Get connection. If not found: return `None`.
 2. If `connection.revision !== revision`: log debug, return `None` (stale).
 3. If `validation.kind === 'server-validated'`:
    - Check `connection.user.id === validation.validatedUserID`.
    - If mismatch: throw `ProtocolError(Unauthorized, 'Connection userID does
-     not match validated server userID.')`.
+not match validated server userID.')`.
 4. Determine `incomingUserState`:
    - Server-validated: use `validatedUserID`.
    - Client-fallback: use `connection.user`.
@@ -404,31 +435,37 @@ pub struct GroupAuthState {
 10. Return `{connection, group}`.
 
 ### 5.6 `failConnection(selector, revision)`
+
 1. Call `#removeConnection(selector, revision)`.
 2. If revision mismatch: log debug, return `None`.
 3. Remove connection, refresh background, update retransform deadline.
 4. Return removed connection.
 
 ### 5.7 `closeConnection(selector)`
+
 1. Call `#removeConnection(selector)` (no revision check).
 2. Return removed connection.
 
 ### 5.8 `markBackgroundRetransformSuccess(selector, revision)`
+
 1. Get background connection. If none: return.
 2. If `backgroundConnection.clientID/wsID/revision` doesn't match: return.
 3. `updateBackgroundRetransformDeadline(true)` (reset).
 
 ### 5.9 `setSharedRetransformReady(ready)`
+
 1. If unchanged: return.
 2. Set `sharedRetransformReady = ready`.
 3. `updateBackgroundRetransformDeadline(true)`.
 
 ### 5.10 `deferMaintenance(kind)`
+
 1. Get interval for kind (revalidate or retransform).
 2. If no interval configured: return.
 3. Set `maintenanceNotBeforeAt = max(current, now + interval)`.
 
 ### 5.11 `planMaintenance()`
+
 1. Initialize `dueRevalidations = []`, `earliestDeadlineAt = retransformAt`.
 2. For each validated connection with `revalidateAt`:
    - If `revalidateAt <= now`: add to `dueRevalidations`.
@@ -441,6 +478,7 @@ pub struct GroupAuthState {
 6. Return `{dueRevalidations, dueRetransform, earliestDeadlineAt}`.
 
 ### 5.12 Background connection selection (`#refreshBackgroundConnectionContext`)
+
 - If a `preferred` validated connection is provided:
   - If it's already the background: return.
   - If there's already a validated background: return (sticky).
@@ -452,6 +490,7 @@ pub struct GroupAuthState {
   - If none found: clear background.
 
 ### 5.13 Retransform deadline (`#updateBackgroundRetransformDeadline(reset)`)
+
 - If no background connection, or no retransform interval, or
   `!sharedRetransformReady`: clear `retransformAt`.
 - If `reset || retransformAt === undefined`: set
@@ -459,6 +498,7 @@ pub struct GroupAuthState {
 - Otherwise: preserve existing deadline.
 
 ### 5.14 Helper: `#removeConnection(selector, revision?)`
+
 1. Get connection. If not found: return `None`.
 2. If revision is specified and doesn't match: return `None`.
 3. Delete from map.
@@ -467,6 +507,7 @@ pub struct GroupAuthState {
 6. Return removed connection.
 
 ### 5.15 Helper: `#demoteConnection(connection)`
+
 1. Set `state: 'provisional'`, `revalidateAt: undefined`.
 2. Store.
 3. `refreshBackgroundConnectionContext()`.
@@ -474,6 +515,7 @@ pub struct GroupAuthState {
 5. Return demoted connection.
 
 ### 5.16 Comparison functions
+
 - `compareByInsertionOrder`: ascending by `insertionOrder`, then `wsID`
   ascending.
 - `comparePreferredValidatedConnection`: descending by `insertionOrder`,
@@ -490,6 +532,7 @@ This is the largest component. Every method and behavior is documented below.
 ### 6.1 Constructor (lines 344-404)
 
 Parameters:
+
 - `config: NormalizedZeroConfig`
 - `lc: LogContext`
 - `shard: ShardID`
@@ -509,9 +552,10 @@ Parameters:
 - `pgUri?: string`
 
 Initialization:
+
 - Create `CVRStore` with `failService = () => stateChanges.cancel()`.
 - If `RUST_CVR && RustIVMDriver && pgUri`: call `engine.setCvrStore(pgUri,
-  cvrSchema(shard), clientGroupID, taskID)`.
+cvrSchema(shard), clientGroupID, taskID)`.
 - Call `keepalive()`.
 
 **Rust:** The `RustViewSyncer` struct holds all of these. `CVRStoreHandle` is
@@ -523,6 +567,7 @@ the CG thread is single-threaded.
 
 All metrics use `getOrCreateCounter` / `getOrCreateLatencyHistogram` /
 `getOrCreateUpDownCounter` with these names:
+
 - `sync/active-clients` (UpDownCounter) — tagged with `protocol.version`
 - `sync/hydration` (Counter)
 - `sync/hydration-time` (LatencyHistogram)
@@ -567,21 +612,21 @@ implicit. `stateChanges` is a channel. CVR load via `block_on`.
    a. If `drainCoordinator.shouldDrain()`: break (elective drain).
    b. Assert `state === 'version-ready'`.
    c. `#runInLockWithCVR`:
-      - If `!pipelines.initialized()`: `pipelines.init(clientSchema)`.
-      - If `cvr.replicaVersion > pipelines.replicaVersion` and
-        `cvr.version.stateVersion !== '00'`: throw `ClientNotFoundError`.
-      - If `pipelinesSynced`:
-        - `result = #advancePipelines(lc, cvr)`.
-        - If `'success'`: return.
-        - If `ResetPipelinesSignal`: record `pipelineResets.add(1, {reason})`,
-          `pipelines.reset(clientSchema)`, `pipelinesSynced = false`,
-          `setSharedRetransformReady(false)`.
-      - `version = pipelines.advanceWithoutDiff()`.
-      - If `version < cvr.version.stateVersion`: log, return (wait).
-      - `driftedQueryIDs = #hydrateUnchangedQueries(lc, cvr)`.
-      - `#syncQueryPipelineSet(lc, cvr, 'missing', undefined, driftedQueryIDs)`.
-      - `pipelinesSynced = true`.
-      - `setSharedRetransformReady(true)`.
+   - If `!pipelines.initialized()`: `pipelines.init(clientSchema)`.
+   - If `cvr.replicaVersion > pipelines.replicaVersion` and
+     `cvr.version.stateVersion !== '00'`: throw `ClientNotFoundError`.
+   - If `pipelinesSynced`:
+     - `result = #advancePipelines(lc, cvr)`.
+     - If `'success'`: return.
+     - If `ResetPipelinesSignal`: record `pipelineResets.add(1, {reason})`,
+       `pipelines.reset(clientSchema)`, `pipelinesSynced = false`,
+       `setSharedRetransformReady(false)`.
+   - `version = pipelines.advanceWithoutDiff()`.
+   - If `version < cvr.version.stateVersion`: log, return (wait).
+   - `driftedQueryIDs = #hydrateUnchangedQueries(lc, cvr)`.
+   - `#syncQueryPipelineSet(lc, cvr, 'missing', undefined, driftedQueryIDs)`.
+   - `pipelinesSynced = true`.
+   - `setSharedRetransformReady(true)`.
 4. After loop (drained): `drainCoordinator.drainNextIn(totalHydrationTimeMs())`.
 5. `#cleanup()`.
 6. On error: log, `#cleanup(e)`.
@@ -606,18 +651,14 @@ implicit. `stateChanges` is a channel. CVR load via `block_on`.
 7. Store new client in `#clients`.
 8. If `RUST_CVR && RustIVMDriver`:
    - `engine.registerClient(clientID, wsID, id, shard, baseCookie,
-     pushFn, failFn, cancelFn)`.
+pushFn, failFn, cancelFn)`.
    - `pushFn`: `downstream.push(msg)` with catch.
    - `failFn`: `downstream.fail(wrapWithProtocolError(new Error(err)))`.
    - `cancelFn`: `downstream.cancel()`.
 9. Async (not blocking return):
-   - `#runInLockForClient(selector, msg, fn, newClient)`:
-     - If `cvr.clientSchema === null && !msg.clientSchema`: throw
-       `ProtocolError(InvalidConnectionRequest, 'must include client schema')`.
-     - `#validateConnection(connCtx)` — if fails, return.
-     - `#handleConfigUpdate(lc, clientID, msg, cvr, 'all',
-       profileID ?? 'cg${id}', connCtx)`.
-     - Resolve `#initialized`.
+   - `#runInLockForClient(selector, msg, fn, newClient)`: - If `cvr.clientSchema === null && !msg.clientSchema`: throw
+     `ProtocolError(InvalidConnectionRequest, 'must include client schema')`. - `#validateConnection(connCtx)` — if fails, return. - `#handleConfigUpdate(lc, clientID, msg, cvr, 'all',
+profileID ?? 'cg${id}', connCtx)`. - Resolve `#initialized`.
 10. Return `downstream` (the Subscription/Source) synchronously.
 
 **Rust:** `ClientHandler` created directly (Rust struct). `DirectWebSocketSink`
@@ -627,8 +668,8 @@ needed — the `ClientHandler` is directly accessible on the CG thread.
 ### 6.6 `changeDesiredQueries(selector, msg)` (lines 921-933)
 
 1. `#runInLockForClient(selector, msg, (lc, clientID, msg, cvr) =>
-    #handleConfigUpdate(lc, clientID, msg, cvr, 'missing', undefined,
-    connContextManager.mustGetConnectionContext(selector)))`.
+#handleConfigUpdate(lc, clientID, msg, cvr, 'missing', undefined,
+connContextManager.mustGetConnectionContext(selector)))`.
 
 ### 6.7 `updateAuth(selector, msg, authRevisionChanged)` (lines 935-970)
 
@@ -641,8 +682,8 @@ needed — the `ClientHandler` is directly accessible on the CG thread.
 ### 6.8 `deleteClients(selector, msg)` (lines 972-986)
 
 1. `#runInLockForClient(selector, [msg[0], {deleted: msg[1]}], (lc, clientID,
-    msg, cvr) => #handleConfigUpdate(lc, clientID, msg, cvr, 'missing',
-    undefined, connContextManager.mustGetConnectionContext(selector)))`.
+msg, cvr) => #handleConfigUpdate(lc, clientID, msg, cvr, 'missing',
+undefined, connContextManager.mustGetConnectionContext(selector)))`.
 2. Return `deletedClientIDs ?? []`.
 
 ### 6.9 `#runInLockForClient(selector, msg, fn, newClient?)` (lines 1155-1240)
@@ -653,7 +694,7 @@ needed — the `ClientHandler` is directly accessible on the CG thread.
    b. If `client?.wsID !== wsID`: log, return (mismatched wsID).
    c. Get `connCtx = connContextManager.getConnectionContext(selector)`.
    d. If `newClient`: assert `newClient === client`, call
-      `checkClientAndCVRVersions(client.version(), cvr.version)`.
+   `checkClientAndCVRVersions(client.version(), cvr.version)`.
    e. If no client: log warn.
    f. Call `fn(lc, clientID, body, cvr)`.
 3. On error:
@@ -668,28 +709,28 @@ This is an arrow function property (not a method) — preserves `this` binding.
 
 1. `deletedClientIDs = []`, `deletedClientGroupIDs = []`.
 2. `cvr = #updateCVRConfig(lc, cvr, clientID, customQueryTransformMode,
-   connCtx, async updater => { ... })`.
+connCtx, async updater => { ... })`.
 3. In the updater callback:
    a. If `clientSchema`: `updater.setClientSchema(lc, clientSchema)`.
    b. If `profileID`: `updater.setProfileID(lc, profileID)`.
    c. For each `desiredQueriesPatch`:
-      - `'put'`: `updater.putDesiredQueries(clientID, [patch])`.
-      - `'del'`: `updater.markDesiredQueriesAsInactive(clientID, [hash], ttlClock)`.
-      - `'clear'`: `updater.clearDesiredQueries(clientID)`.
-   d. If `activeClients`: find clients not in active set, mark for deletion.
-   e. If `deleted.clientIDs`: add to deletion set.
-   f. For each `cid` to delete: `updater.deleteClient(cid, ttlClock)`,
-      collect patches.
-   g. If `deleted.clientGroupIDs`: log debug (deprecated, ignored).
-   h. Return patches.
+   - `'put'`: `updater.putDesiredQueries(clientID, [patch])`.
+   - `'del'`: `updater.markDesiredQueriesAsInactive(clientID, [hash], ttlClock)`.
+   - `'clear'`: `updater.clearDesiredQueries(clientID)`.
+     d. If `activeClients`: find clients not in active set, mark for deletion.
+     e. If `deleted.clientIDs`: add to deletion set.
+     f. For each `cid` to delete: `updater.deleteClient(cid, ttlClock)`,
+     collect patches.
+     g. If `deleted.clientGroupIDs`: log debug (deprecated, ignored).
+     h. Return patches.
 4. After `#updateCVRConfig` returns:
    a. If `cmpVersions(cvr.version, newCVR.version) < 0`:
-      - Poke clients at `cvr.version` with config patches.
-      - `startPoke(getClients(cvr.version), newCVR.version)`.
-      - For each patch: `pokers.addPatch(patch)`.
-      - `pokers.end(newCVR.version)`.
-   b. If `pipelinesSynced`: `#syncQueryPipelineSet(lc, newCVR,
-      customQueryTransformMode, connCtx)`.
+   - Poke clients at `cvr.version` with config patches.
+   - `startPoke(getClients(cvr.version), newCVR.version)`.
+   - For each patch: `pokers.addPatch(patch)`.
+   - `pokers.end(newCVR.version)`.
+     b. If `pipelinesSynced`: `#syncQueryPipelineSet(lc, newCVR,
+customQueryTransformMode, connCtx)`.
 5. If `deletedClientIDs.length > 0`:
    - For each deleted client: if `clients.has(cid)`: `client.close(...)`,
      `clients.delete(cid)`, `inspectorDelegate.removeQuery(...)` for internal
@@ -712,6 +753,7 @@ This is an arrow function property (not a method) — preserves `this` binding.
 This is the hydrate path. Already partially ported as `HydrateAndSyncTask`.
 
 Full TS behavior:
+
 1. Start span.
 2. If `ttlClock === undefined`: set from `cvr.ttlClock`.
 3. Compute `ttlClock = #getTTLClock(now)`.
@@ -746,6 +788,7 @@ Full TS behavior:
 Already partially ported as `AdvanceAndSyncTask`.
 
 Full TS behavior:
+
 1. Start span, record start time.
 2. **RUST_CVR path**: call `engine.advanceAndSync(...)`, process result,
    return `'success'` or `ResetPipelinesSignal`.
@@ -775,9 +818,9 @@ Runs at init when `pipelinesSynced === false` and `version >= cvr.version.stateV
    e. `addQueryMaterializationServerMetric(queryID, elapsed)`.
    f. `inspectorDelegate.addQuery(queryID, ast)`.
    g. **Drift detection**: compare `pipelines.rowSetSignature(queryID)` with
-      `cvr.queries[queryID].rowSetSignature`.
-      - If mismatch: `rowSetSignatureDrifts.add(1)`,
-        `pipelines.removeQuery(queryID)`, add to `driftedQueryIDs`.
+   `cvr.queries[queryID].rowSetSignature`.
+   - If mismatch: `rowSetSignatureDrifts.add(1)`,
+     `pipelines.removeQuery(queryID)`, add to `driftedQueryIDs`.
 4. Return `driftedQueryIDs`.
 
 ### 6.15 `#catchupClients` (lines 2267-2350)
@@ -818,7 +861,7 @@ Batched de-duplication of row changes. Already ported as `ChangeProcessor`.
 - `#updateTTLClockInCVRWithoutLock(lc)`: Call `#getTTLClock(now)`, then
   `cvrStore.updateTTLClock(ttlClock, now)` (fire-and-forget promise).
 - `#flushUpdater`: Gets TTL clock, calls `updater.flush(lc, lastConnectTime,
-  now, ttlClock)`. If flushed: restart TTL interval.
+now, ttlClock)`. If flushed: restart TTL interval.
 
 ### 6.18 Auth Maintenance (lines 710-800)
 
@@ -932,7 +975,7 @@ Batched de-duplication of row changes. Already ported as `ChangeProcessor`.
   - `query-update-server`: create/append to TDigest per query.
   - Add to global metrics.
 - `getMetricsJSONForQuery(queryID)`: return `{query-hydration-server-ms,
-  query-update-server}` or null.
+query-update-server}` or null.
 - `getMetricsJSON()`: global metrics as JSON.
 - `getASTForQuery(queryID)`: return stored AST.
 - `removeQuery(queryID)`: delete all per-query data.
@@ -967,6 +1010,7 @@ Batched de-duplication of row changes. Already ported as `ChangeProcessor`.
 messages to the mutagen service via HTTP.
 
 ### Behaviors to preserve
+
 - Per-connection mutation lock (ordering within a connection).
 - `mutations[0].type === 'custom'` → forward to pusher.
 - CRUD mutations → forward to mutagen.
@@ -1035,6 +1079,7 @@ packages/rust-syncer/
 ```
 
 **Dependencies:**
+
 - `rust-ivm` (engine, snapshotter, planner)
 - `rust-cvr` (CVR, updater, store, client handler, change processor)
 - `tokio` (async runtime)
@@ -1051,24 +1096,24 @@ packages/rust-syncer/
 
 ## Threading Model
 
-| Component | Thread | Why |
-|---|---|---|
-| WS accept | Tokio runtime | I/O multiplexing |
-| WS read | Tokio runtime | I/O |
-| WS write | Tokio runtime | I/O |
-| HTTP server | Tokio runtime | /statz, /heapz, /notify |
-| CG dispatch loop | Dedicated OS thread | No event loop, no GC |
-| Engine graph | CG thread | Single-threaded (Rc/RefCell) |
-| CVR updater | CG thread | Pure computation |
-| CVRStore flush | CG thread → block_on(tokio) | PG I/O edge |
-| RowRecordCache | CG thread → block_on(tokio) | PG I/O edge |
-| Poke body assembly | CG thread | Same thread as engine |
-| WS push (poke frames) | CG thread → channel → tokio | WS I/O edge |
-| Change notification | Tokio → channel → CG thread | Edge: HTTP recv |
-| Auth JWT validation | Tokio runtime | HTTP/JWKS fetch |
-| TTL timer | CG thread (std::thread::sleep) | No event loop |
-| Expire timer | CG thread | No event loop |
-| Auth maintenance timer | CG thread | No event loop |
+| Component              | Thread                         | Why                          |
+| ---------------------- | ------------------------------ | ---------------------------- |
+| WS accept              | Tokio runtime                  | I/O multiplexing             |
+| WS read                | Tokio runtime                  | I/O                          |
+| WS write               | Tokio runtime                  | I/O                          |
+| HTTP server            | Tokio runtime                  | /statz, /heapz, /notify      |
+| CG dispatch loop       | Dedicated OS thread            | No event loop, no GC         |
+| Engine graph           | CG thread                      | Single-threaded (Rc/RefCell) |
+| CVR updater            | CG thread                      | Pure computation             |
+| CVRStore flush         | CG thread → block_on(tokio)    | PG I/O edge                  |
+| RowRecordCache         | CG thread → block_on(tokio)    | PG I/O edge                  |
+| Poke body assembly     | CG thread                      | Same thread as engine        |
+| WS push (poke frames)  | CG thread → channel → tokio    | WS I/O edge                  |
+| Change notification    | Tokio → channel → CG thread    | Edge: HTTP recv              |
+| Auth JWT validation    | Tokio runtime                  | HTTP/JWKS fetch              |
+| TTL timer              | CG thread (std::thread::sleep) | No event loop                |
+| Expire timer           | CG thread                      | No event loop                |
+| Auth maintenance timer | CG thread                      | No event loop                |
 
 **Zero napi crossings. Zero TSFN calls. Zero event loop involvement.**
 
@@ -1087,6 +1132,7 @@ main.ts (ProcessManager) — still TS
 ```
 
 The Rust syncer binary receives:
+
 - Port to listen on
 - Replica SQLite file path
 - CVR PG connection string
@@ -1102,18 +1148,18 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 
 ## Gap Closure Summary
 
-| Gap | How closed |
-|---|---|
-| 1. Two Rust stores | One `CVRStoreHandle` per CG, on the CG thread |
-| 2. TS CVRStore used | `CVRStoreHandle` is the only store; TS `CVRStore` is dead code |
-| 3. Config-driven not on actor thread | `handle_config_update()` on CG thread, same store + clients |
-| 4. Signature provider not wired | `engine.row_set_signature()` passed as provider |
-| 5. `#hydrateUnchangedQueries` not ported | `hydrate_unchanged()` on CG thread |
-| 6. Catchup not ported | `catchup_clients()` on CG thread, `engine.get_row()` direct |
-| 7. PokeHandler Drop missing | Add `impl Drop for PokeHandler` |
-| 8. `send_query_transform_failed_error` missing | Add method to `ClientHandler` |
-| 9. TS tests not ported | Port as Rust integration tests |
-| 10. `rust-cvr/napi/` not cleaned up | Delete (dead code) |
+| Gap                                            | How closed                                                     |
+| ---------------------------------------------- | -------------------------------------------------------------- |
+| 1. Two Rust stores                             | One `CVRStoreHandle` per CG, on the CG thread                  |
+| 2. TS CVRStore used                            | `CVRStoreHandle` is the only store; TS `CVRStore` is dead code |
+| 3. Config-driven not on actor thread           | `handle_config_update()` on CG thread, same store + clients    |
+| 4. Signature provider not wired                | `engine.row_set_signature()` passed as provider                |
+| 5. `#hydrateUnchangedQueries` not ported       | `hydrate_unchanged()` on CG thread                             |
+| 6. Catchup not ported                          | `catchup_clients()` on CG thread, `engine.get_row()` direct    |
+| 7. PokeHandler Drop missing                    | Add `impl Drop for PokeHandler`                                |
+| 8. `send_query_transform_failed_error` missing | Add method to `ClientHandler`                                  |
+| 9. TS tests not ported                         | Port as Rust integration tests                                 |
+| 10. `rust-cvr/napi/` not cleaned up            | Delete (dead code)                                             |
 
 ---
 
@@ -1133,6 +1179,7 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 ## Implementation Phases
 
 ### Phase 1: Protocol + WebSocket + Connect Params (3-4 days)
+
 - Port zero-protocol schemas to `protocol.rs`
 - Port `connect-params.ts` to `connect_params.rs`
 - Implement `WsServer` (tokio-tungstenite)
@@ -1140,16 +1187,19 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 - Test: accept connection, parse params, send `connected`
 
 ### Phase 2: Connection + Message Handler (3-4 days)
+
 - Implement `Connection` (message parsing, keepalive pong, error handling)
 - Implement `MessageHandler` (all message types)
 - Test: round-trip messages
 
 ### Phase 3: Connection Context Manager (3-4 days)
+
 - Port full state machine (provisional → validated, group auth, maintenance)
 - Port `DrainCoordinator`
 - Test: connection lifecycle, auth validation, background selection
 
 ### Phase 4: ViewSyncer Dispatch Loop (7-10 days)
+
 - Port `#runInLockWithCVR` → channel recv loop
 - Port CVR load
 - Port `#handleConfigUpdate` / `#updateCVRConfig` → `handle_config_update()`
@@ -1163,6 +1213,7 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 - Test: full dispatch loop
 
 ### Phase 5: HTTP + Notification + Process Integration (3-4 days)
+
 - axum HTTP server (/statz, /heapz, /notify)
 - Change-streamer notification → CG thread
 - Process manager integration (launch binary, ready message)
@@ -1170,6 +1221,7 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 - Test: end-to-end
 
 ### Phase 6: Cleanup + Testing (5-7 days)
+
 - `impl Drop for PokeHandler`
 - `send_query_transform_failed_error`
 - Delete `rust-cvr/napi/`

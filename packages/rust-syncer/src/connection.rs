@@ -10,12 +10,12 @@
 //! `DirectWebSocketSink`.
 
 use crate::protocol::{
-    self, ErrorBody, ErrorKind, ErrorOrigin, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION,
+    self, ErrorBody, ErrorKind, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION,
     connected_message, error_message, pong_message,
 };
 use crate::ws_sink::DirectWebSocketSink;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 /// Downstream message interval: slightly longer than client's 5s PING_INTERVAL.
 const DOWNSTREAM_MSG_INTERVAL_MS: u64 = 6000;
@@ -377,14 +377,6 @@ pub fn send_error(sink: &DirectWebSocketSink, error: ErrorBody) {
         LogLevel::Info => tracing::info!("Sending error: {:?}", error),
     }
     sink.push(error_message(&error));
-}
-
-/// Current time in milliseconds since Unix epoch.
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────

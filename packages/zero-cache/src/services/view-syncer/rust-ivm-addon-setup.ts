@@ -19,6 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const rustIvmDir = join(here, '../../../../rust-ivm');
 const addonPath = join(rustIvmDir, 'napi', 'rust-ivm.node');
 const buildScript = join(rustIvmDir, 'scripts', 'build-local-wal2.sh');
+const SYSTEM_SQLITE_PATTERN = /libsqlite3/i;
 
 /**
  * Returns true if `path` does NOT dynamically link a system libsqlite3 — i.e.
@@ -30,7 +31,7 @@ function looksStaticallyLinked(path: string): boolean {
     const [tool, args] =
       process.platform === 'darwin' ? ['otool', ['-L', path]] : ['ldd', [path]];
     const out = execFileSync(tool, args, {encoding: 'utf8'});
-    return !/libsqlite3/i.test(out);
+    return !SYSTEM_SQLITE_PATTERN.test(out);
   } catch {
     return true; // tool missing / not analyzable — don't hard-block on this
   }

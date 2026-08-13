@@ -28,16 +28,16 @@ Rust IVM engine → TSFN → TS AsyncQueue → TS #processChanges
 The following Rust core logic is correct and reusable. Only its **wiring**
 changes:
 
-| Component | File | LOC | What it does | Reusable? |
-|---|---|---|---|---|
-| `CVRUpdater` | `updater.rs` | ~1000 | State machine: trackQueries, received, deleteUnreferencedRows, version math, refCounts merge | ✅ Core logic yes. Remove `store_ops` buffer, call store directly. |
-| `CVRStoreHandle` | `store.rs` | ~800 | PendingWrites buffer, apply_store_ops, flush to PG | ✅ Core logic yes. Sync buffer (std::sync::Mutex), async flush. |
-| `ClientHandler` | `client_handler.rs` | ~880 | Poke chain, body assembly, flushBody, LMIDs, mutations | ✅ Core logic yes. Currently uses tokio::Mutex — needs to work on actor thread. |
-| `PokeHandler` | `client_handler.rs` | (in same file) | Per-poke state, addPatch, end, cancel | ✅ Same as above. |
-| `RowRecordCache` | `row_record_cache.rs` | ~900 | LRU cache, write-back, catchup cursor | ✅ No changes — stays on tokio runtime (async PG reads). |
-| `RowSetSignature` | `row_set_signature.rs` | ~100 | xxHash32 signature | ✅ No changes. |
-| Types | `types.rs` | ~250 | StoreOp, Patch, RowPatch, QueryPatch, CVR, etc. | ✅ No changes. |
-| TTL | `ttl.rs` | ~120 | TTL clamp/compare | ✅ No changes. |
+| Component         | File                   | LOC            | What it does                                                                                 | Reusable?                                                                       |
+| ----------------- | ---------------------- | -------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `CVRUpdater`      | `updater.rs`           | ~1000          | State machine: trackQueries, received, deleteUnreferencedRows, version math, refCounts merge | ✅ Core logic yes. Remove `store_ops` buffer, call store directly.              |
+| `CVRStoreHandle`  | `store.rs`             | ~800           | PendingWrites buffer, apply_store_ops, flush to PG                                           | ✅ Core logic yes. Sync buffer (std::sync::Mutex), async flush.                 |
+| `ClientHandler`   | `client_handler.rs`    | ~880           | Poke chain, body assembly, flushBody, LMIDs, mutations                                       | ✅ Core logic yes. Currently uses tokio::Mutex — needs to work on actor thread. |
+| `PokeHandler`     | `client_handler.rs`    | (in same file) | Per-poke state, addPatch, end, cancel                                                        | ✅ Same as above.                                                               |
+| `RowRecordCache`  | `row_record_cache.rs`  | ~900           | LRU cache, write-back, catchup cursor                                                        | ✅ No changes — stays on tokio runtime (async PG reads).                        |
+| `RowSetSignature` | `row_set_signature.rs` | ~100           | xxHash32 signature                                                                           | ✅ No changes.                                                                  |
+| Types             | `types.rs`             | ~250           | StoreOp, Patch, RowPatch, QueryPatch, CVR, etc.                                              | ✅ No changes.                                                                  |
+| TTL               | `ttl.rs`               | ~120           | TTL clamp/compare                                                                            | ✅ No changes.                                                                  |
 
 ## What changes
 
@@ -132,12 +132,12 @@ Return types (cross the boundary ONCE — just the summary):
 
 ```typescript
 interface HydrateAndSyncResult {
-  version: string;            // new CVR version
-  cvr: unknown;               // updated CVR snapshot
+  version: string; // new CVR version
+  cvr: unknown; // updated CVR snapshot
   flushed: CVRFlushStats | false;
-  queryPatches: PatchToVersion[];   // config patches (for catchup)
+  queryPatches: PatchToVersion[]; // config patches (for catchup)
   numChanges: number;
-  resetReason?: string;       // if advance/hydrate triggered a reset
+  resetReason?: string; // if advance/hydrate triggered a reset
 }
 
 interface AdvanceAndSyncResult {
@@ -457,6 +457,7 @@ The `rust-cvr/napi/` crate shrinks dramatically. The following napi handles are
 - `CVRStoreNapiHandle` → internal, called from actor thread
 
 What **stays** in `rust-cvr/napi/`:
+
 - `RowRecordCacheHandle` — still a separate napi handle (async PG reads, not
   on the actor thread). Or moves to `rust-ivm/napi` if we want one addon.
 - Phase A signature functions — still pure functions exposed via napi.
@@ -467,17 +468,17 @@ surface."
 
 ## Threading summary
 
-| Component | Thread | Locking | Why |
-|---|---|---|---|
-| Engine graph (pipelines, sources) | Actor thread (pinned) | `Rc<RefCell>` (single-threaded) | Existing — unchanged |
-| Snapshotter (SQLite) | Actor thread | `Rc<RefCell>` | Existing — unchanged |
-| CVR updater (state machine) | Actor thread | `&mut self` (borrowed) | Pure computation, no locking |
-| CVRStore pending writes | Actor thread | `&mut self` | Buffer is append-only, flushed once |
-| CVRStore flush (PG write) | Actor thread → tokio | `block_on(async flush)` | Edge: PG I/O |
-| ClientHandler poke state | Actor thread | `std::sync::Mutex` | Single thread, but poke chain needs guard |
-| PokeHandler body assembly | Actor thread | `&mut self` | Pure computation |
-| WebSocketSink::push | Actor thread → JS | TSFN Blocking | Edge: WS I/O (the only hot-path crossing) |
-| RowRecordCache (catchup reads) | Tokio runtime | `tokio::sync::Mutex` | Async PG reads, not on hot path |
+| Component                         | Thread                | Locking                         | Why                                       |
+| --------------------------------- | --------------------- | ------------------------------- | ----------------------------------------- |
+| Engine graph (pipelines, sources) | Actor thread (pinned) | `Rc<RefCell>` (single-threaded) | Existing — unchanged                      |
+| Snapshotter (SQLite)              | Actor thread          | `Rc<RefCell>`                   | Existing — unchanged                      |
+| CVR updater (state machine)       | Actor thread          | `&mut self` (borrowed)          | Pure computation, no locking              |
+| CVRStore pending writes           | Actor thread          | `&mut self`                     | Buffer is append-only, flushed once       |
+| CVRStore flush (PG write)         | Actor thread → tokio  | `block_on(async flush)`         | Edge: PG I/O                              |
+| ClientHandler poke state          | Actor thread          | `std::sync::Mutex`              | Single thread, but poke chain needs guard |
+| PokeHandler body assembly         | Actor thread          | `&mut self`                     | Pure computation                          |
+| WebSocketSink::push               | Actor thread → JS     | TSFN Blocking                   | Edge: WS I/O (the only hot-path crossing) |
+| RowRecordCache (catchup reads)    | Tokio runtime         | `tokio::sync::Mutex`            | Async PG reads, not on hot path           |
 
 ## Implementation plan
 
@@ -532,7 +533,7 @@ surface."
   `RustIvmEngine`
 - Add `NapiWebSocketSink` implementation (TSFN proxy to TS WS)
 - Add napi methods for `ClientHandler` lifecycle: `register_client(wsID,
-  clientID, baseCookie, pushCallback, failCallback, cancelCallback)` and
+clientID, baseCookie, pushCallback, failCallback, cancelCallback)` and
   `unregister_client(wsID)`
 - Update `view-syncer.ts`: `#syncQueryPipelineSet` and `#advancePipelines` call
   the new methods when `RUST_CVR=1`

@@ -77,6 +77,7 @@ pub trait WebSocketSink: Send + Sync {
 ```
 
 Two implementations:
+
 1. `NapiWebSocketSink` — proxies to the TS-side WebSocket via napi's `ThreadsafeFunction::call(Ok::<(), Error>(msg))`. Used during the transition period when the WS server still lives in TS.
 2. `RustWebSocketSink` — the end-state where `tokio-tungstenite` (or similar) hosts the WS directly inside the syncer. Not for the CVR port itself; future work.
 
@@ -92,6 +93,7 @@ Two implementations:
 ## The big-table special cases
 
 `addPatch` for `type: 'row'` walks:
+
 - If `patch.id.table == this.#zeroClientsTable` → merge into `body.lastMutationIDChanges`, do NOT queue to `rowsPatch`.
 - Else if `patch.id.table == this.#zeroMutationsTable` → queue to `body.mutationsPatch` (special shape with `(clientID, mutationID)` and a `result` object). Includes the `normalizeMutationResult` defense-in-depth JSON.parse if `result` is a string.
 - Else → `body.rowsPatch.push(makeRowPatch(patch))`.
@@ -174,9 +176,9 @@ TS parses `result` as JSON if it's a string. Rust: keep an explicit `normalize_m
 
 ## Risk register
 
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Bigint payload byte-diff | Valid rows rejected by client | Diff-test TS vs Rust bodies against the same `RowPatchOp` fixtures; assert equality on every existing test fixture |
-| Poke chain leak (forget to release on cancel) | Next poke hangs forever | Use `Drop` on `PokeHandler` to auto-release the chain if it goes out of scope without `end`/`cancel` |
-| Body flush threshold off-by-one | Valid but differently-shaped bodies | Exact `>=` comparison + unit test at boundary (99, 100, 101) |
-| Row-schema validation difference | Silent schema leakage | Snapshot the JSON bodies for 1000 fixture rows, assert identity between TS and Rust outputs |
+| Risk                                          | Impact                              | Mitigation                                                                                                         |
+| --------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Bigint payload byte-diff                      | Valid rows rejected by client       | Diff-test TS vs Rust bodies against the same `RowPatchOp` fixtures; assert equality on every existing test fixture |
+| Poke chain leak (forget to release on cancel) | Next poke hangs forever             | Use `Drop` on `PokeHandler` to auto-release the chain if it goes out of scope without `end`/`cancel`               |
+| Body flush threshold off-by-one               | Valid but differently-shaped bodies | Exact `>=` comparison + unit test at boundary (99, 100, 101)                                                       |
+| Row-schema validation difference              | Silent schema leakage               | Snapshot the JSON bodies for 1000 fixture rows, assert identity between TS and Rust outputs                        |

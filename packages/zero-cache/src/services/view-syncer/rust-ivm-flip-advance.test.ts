@@ -487,8 +487,9 @@ describe.skipIf(!ADDON_PATH || !RUN)('flip advance A/B', () => {
         const partIds = new Set<string>();
         for (const c of rows) {
           if (c.table === 'channels') channelIds.add(String(c.rowKey.id));
-          else if (c.table === 'channel_participants')
+          else if (c.table === 'channel_participants') {
             partIds.add(String(c.rowKey.id));
+          }
         }
         const kinds = {} as ConfigResult['kinds'];
         for (const kind of KINDS) {
@@ -639,8 +640,12 @@ describe.skipIf(!ADDON_PATH || !RUN)('flip advance A/B', () => {
     // (non-selective 'me', e.g. ME_MOD=4). Same decision ⇒ same emission mode
     // ⇒ identical row sets between the two planner-ON configs.
     expect(rustOn.rowsTotal).toBe(tsOn.rowsTotal);
-    expect([...rustOn.channelIds].sort()).toEqual([...tsOn.channelIds].sort());
-    expect([...rustOn.partIds].sort()).toEqual([...tsOn.partIds].sort());
+    expect([...rustOn.channelIds].toSorted()).toEqual(
+      [...tsOn.channelIds].toSorted(),
+    );
+    expect([...rustOn.partIds].toSorted()).toEqual(
+      [...tsOn.partIds].toSorted(),
+    );
     expect(configs.length).toBe(6);
   }, 900_000);
 });

@@ -272,7 +272,7 @@ class PostgresChangeSource implements ChangeSource {
     replica: Replica,
     context: ServerContext,
     lagReportIntervalMs: number,
-    textCopy?: boolean | undefined,
+    textCopy?: boolean,
   ) {
     this.#lc = lc.withContext('component', 'change-source');
     this.#db = pgClient(lc, upstreamUri, 'replication-monitor', {
@@ -930,8 +930,10 @@ class ChangeMaker {
           err,
         )}`,
         {
-          // 'content' can be a large byte Buffer. Exclude it from logging output.
-          ...{change: {...msg, content: undefined}},
+          change: {
+            ...msg,
+            content: undefined,
+          },
           ...(err instanceof UnsupportedSchemaChangeError && {
             context: err.event.context,
           }),

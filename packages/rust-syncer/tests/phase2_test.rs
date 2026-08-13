@@ -12,8 +12,7 @@ use rust_syncer::message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
     PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
-use rust_syncer::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin, PushBody};
-use std::collections::HashMap;
+use rust_syncer::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin};
 use std::sync::{Arc, Mutex};
 
 // ─── Mock implementations ──────────────────────────────────────────────────

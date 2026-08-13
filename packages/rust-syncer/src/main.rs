@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use rust_syncer::http_server::{bind_http_listener, serve_http};
 use rust_syncer::router::{CGServicesFactory, ConnectionRouter};
-use rust_syncer::ws_server::{WsServerConfig, bind_ws_listener, serve_ws};
+use rust_syncer::ws_server::{WsServerConfig, bind_ws_listener, serve_ws_with_config};
 
 /// Configuration parsed from environment variables.
 pub struct SyncerConfig {
@@ -45,6 +45,10 @@ pub struct SyncerConfig {
     pub auth_audience: Option<String>,
     pub mutagen_url: Option<String>,
     pub pusher_url: Option<String>,
+    /// Normalized custom-query fetch configuration supplied by the TS
+    /// dispatcher. This is the server-side default used when the client does
+    /// not send a `userQueryURL` override.
+    pub query_config: Option<rust_syncer::FetchConfig>,
     pub max_client_groups: usize,
     pub admin_password: Option<String>,
     pub server_version: String,
@@ -83,6 +87,7 @@ impl SyncerConfig {
             auth_audience: env::var("AUTH_AUDIENCE").ok(),
             mutagen_url: env::var("MUTAGEN_URL").ok(),
             pusher_url: env::var("PUSHER_URL").ok(),
+            query_config: parse_query_config(),
             max_client_groups: env::var("MAX_CLIENT_GROUPS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -106,6 +111,24 @@ impl SyncerConfig {
             },
         }
     }
+}
+
+fn parse_query_config() -> Option<rust_syncer::FetchConfig> {
+    let urls = env::var("QUERY_URLS_JSON")
+        .ok()
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+        .filter(|urls| !urls.is_empty())?;
+    let allowed_client_headers = env::var("QUERY_ALLOWED_CLIENT_HEADERS_JSON")
+        .ok()
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok());
+    Some(rust_syncer::FetchConfig {
+        url: Some(urls),
+        api_key: env::var("QUERY_API_KEY")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        allowed_client_headers,
+        forward_cookies: env::var("QUERY_FORWARD_COOKIES").as_deref() == Ok("true"),
+    })
 }
 
 /// Resolve when the process receives a shutdown signal (Ctrl-C / SIGINT, or
@@ -165,7 +188,7 @@ fn main() {
 
     // Create the connection router with the real per-CG services factory and a
     // real JWT auth validator (secret/jwk/jwksUrl from config).
-    let router = Arc::new(ConnectionRouter::new(
+    let router = Arc::new(ConnectionRouter::new_with_limit(
         Arc::new(RealServicesFactory {
             config: config.clone(),
             tokio_handle: runtime.handle().clone(),
@@ -179,6 +202,7 @@ fn main() {
             audience: config.auth_audience.clone(),
         }),
         metrics.clone(),
+        config.max_client_groups,
     ));
 
     // Bind BOTH listeners eagerly so the process is genuinely accepting on its
@@ -218,7 +242,7 @@ fn main() {
 
     let _ = runtime.block_on(async move {
         let ws_router2 = ws_router.clone();
-        let server = serve_ws(ws_listener, move |ctx| {
+        let server = serve_ws_with_config(ws_listener, ws_config, move |ctx| {
             // Route the connection to the appropriate CG thread
             let router = ws_router2.clone();
             tokio::spawn(async move {
@@ -285,20 +309,33 @@ impl CGServicesFactory for RealServicesFactory {
 
     fn create_sync_engine_config(&self, cg_id: &str) -> rust_syncer::SyncEngineConfig {
         let shard_num = self.config.shard.parse::<u32>().unwrap_or(0);
+        let mut initialization_errors = Vec::new();
+        let replica_version =
+            match rust_syncer::read_replica_versions_from_path(&self.config.replica_file) {
+                Ok(versions) => versions.replica_version,
+                Err(error) => {
+                    initialization_errors.push(format!(
+                        "failed to read replica versions from {}: {error}",
+                        self.config.replica_file
+                    ));
+                    String::new()
+                }
+            };
         // Read the syncable table specs + read-permissions from the replica.
         let tables = match rust_syncer::compute_table_specs_from_path(&self.config.replica_file) {
-            Ok(specs) => {
-                tracing::info!(
-                    "CG {cg_id}: loaded {} table specs from replica",
-                    specs.len()
-                );
-                specs
-            }
-            Err(e) => {
-                tracing::error!("CG {cg_id}: failed to read replica table specs: {e}");
+            Ok(tables) => tables,
+            Err(error) => {
+                initialization_errors.push(format!(
+                    "failed to read replica table specs from {}: {error}",
+                    self.config.replica_file
+                ));
                 Vec::new()
             }
         };
+        tracing::info!(
+            "CG {cg_id}: loaded {} table specs from replica",
+            tables.len()
+        );
         let load_result: Result<Option<serde_json::Value>, String> =
             rusqlite::Connection::open(&self.config.replica_file)
                 .map_err(|e| e.to_string())
@@ -328,9 +365,12 @@ impl CGServicesFactory for RealServicesFactory {
         let permissions = rust_syncer::resolve_permissions(load_result);
         let app_id = self.config.app_id.clone();
         rust_syncer::SyncEngineConfig {
+            initialization_error: (!initialization_errors.is_empty())
+                .then(|| initialization_errors.join("; ")),
             tables,
             replica_path: Some(self.config.replica_file.clone()),
             app_id: app_id.clone(),
+            replica_version,
             shard: rust_cvr::types::ShardID {
                 app_id: app_id.clone(),
                 shard_num,
@@ -345,6 +385,7 @@ impl CGServicesFactory for RealServicesFactory {
             permissions,
             permissions_hash,
             revalidate_interval_ms: self.config.revalidate_interval_ms,
+            query_config: self.config.query_config.clone(),
             tokio_handle: self.tokio_handle.clone(),
             admin_password: self.config.admin_password.clone(),
             server_version: self.config.server_version.clone(),

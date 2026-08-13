@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::sync::LazyLock;
 
 /// Mirrors TS `CVRVersion` — `{stateVersion: string, configVersion?: number}`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29,10 +30,9 @@ pub struct CVRVersion {
 /// Mirrors TS `oneAfter(v)`. Bumps the configVersion, or starts at 0 for null.
 pub fn one_after(v: &NullableCVRVersion) -> CVRVersion {
     match v {
-        None => CVRVersion {
-            state_version: String::new(),
-            config_version: Some(0),
-        },
+        // TS: `oneAfter(null) === EMPTY_CVR_VERSION`. The zero major version is
+        // Lexi-encoded as "00"; it is not an empty string/config minor pair.
+        None => EMPTY_CVR_VERSION.clone(),
         Some(v) => CVRVersion {
             state_version: v.state_version.clone(),
             config_version: Some(v.config_version.unwrap_or(0) + 1),
@@ -40,12 +40,13 @@ pub fn one_after(v: &NullableCVRVersion) -> CVRVersion {
     }
 }
 
-pub const EMPTY_CVR_VERSION: CVRVersion = CVRVersion::empty();
+pub static EMPTY_CVR_VERSION: LazyLock<CVRVersion> = LazyLock::new(CVRVersion::empty);
 
 impl CVRVersion {
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         CVRVersion {
-            state_version: String::new(),
+            // `majorVersionToString(0)` in the TypeScript source of truth.
+            state_version: "00".to_string(),
             config_version: None,
         }
     }
@@ -135,7 +136,7 @@ pub fn version_from_string(s: &str) -> CVRVersion {
 pub fn version_to_lexi(v: u64) -> String {
     let base36 = to_base36_u64(v);
     assert!(
-        base36.len() >= 1 && base36.len() <= 37,
+        !base36.is_empty() && base36.len() <= 37,
         "Value too large for LexiVersion: {}",
         v
     );
@@ -225,6 +226,12 @@ mod tests {
             config_version: None,
         };
         assert_eq!(version_string(&v), "01");
+    }
+
+    #[test]
+    fn empty_and_one_after_null_match_typescript_zero_major() {
+        assert_eq!(version_string(&EMPTY_CVR_VERSION), "00");
+        assert_eq!(one_after(&None), *EMPTY_CVR_VERSION);
     }
 
     #[test]

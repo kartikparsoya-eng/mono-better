@@ -4,11 +4,11 @@
 # Build context: root of the mono-v1.7 repo (i.e. this directory).
 #
 # Multi-stage:
-#   1. Build the WAL2 SQLite shared library used by every in-process client
+#   1. Build the WAL2 SQLite shared library used by the TS control path
 #   2. Build Litestream executables (rocicorp fork + v5)
-#   3. Build the Rust IVM NAPI addon
+#   3. Build the full Rust syncer binary (WAL2-only production features)
 #   4. Rebuild zero-sqlite3 against the same WAL2 shared library
-#   5. Runtime — zero-cache from source via tsx + both .node addons baked in
+#   5. Runtime — zero-cache dispatcher + the full Rust syncer binary
 #
 # Deployment-hardened checklist (learned from sandbox incidents):
 #   * Schema/protocol version matches target env (handled outside image).
@@ -102,25 +102,25 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -o /usr/local/bin/litestream ./cmd/litestream
 
 # ---------------------------------------------------------------------------
-# Stage 3: Build the Rust IVM NAPI addon
+# Stage 3: Build the full Rust syncer binary
 # ---------------------------------------------------------------------------
-FROM rust:1-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS napi-builder
+FROM rust:1-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS rust-syncer-builder
 
-COPY --from=sqlite-builder /usr/local/lib/libsqlite3.so* /usr/local/lib/
-COPY --from=sqlite-builder /usr/local/include/sqlite3*.h /usr/local/include/
-
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && rm -rf /var/lib/apt/lists/*
-
-ENV SQLITE3_LIB_DIR=/usr/local/lib \
-    SQLITE3_INCLUDE_DIR=/usr/local/include \
-    SQLITE3_STATIC=0
+RUN apt-get update && apt-get install -y --no-install-recommends gcc pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+COPY packages/rust-cvr/ ./rust-cvr/
 COPY packages/rust-ivm/ ./rust-ivm/
+COPY packages/rust-syncer/ ./rust-syncer/
 
-WORKDIR /build/rust-ivm/napi
-RUN cargo build --release
-RUN cp target/release/librust_ivm_napi.so rust-ivm.node
+# `--no-default-features` disables the plain-WAL test escape hatch. The binary's
+# build.rs statically links the WAL2 amalgamation, so it reads the exact replica
+# format produced by zero-cache without depending on the runtime system SQLite.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/rust-syncer/target \
+    cargo build --release --no-default-features --manifest-path rust-syncer/Cargo.toml \
+    && cp rust-syncer/target/release/rust-syncer /usr/local/bin/rust-syncer
 
 # ---------------------------------------------------------------------------
 # Stage 4: Build zero-sqlite3 against the SAME shared WAL2 library
@@ -151,9 +151,11 @@ RUN npm install --ignore-scripts @rocicorp/zero-sqlite3@1.1.2 node-gyp@11 \
 FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46
 
 ARG ZERO_VERSION=1.7.0
+ARG GIT_REVISION=unknown
 
 LABEL org.opencontainers.image.base.name="node:22-bookworm-slim" \
-      org.opencontainers.image.base.digest="sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46"
+      org.opencontainers.image.base.digest="sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46" \
+      org.opencontainers.image.revision="${GIT_REVISION}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -167,9 +169,7 @@ WORKDIR /app
 # Copy the monorepo source
 COPY . ./mono/
 
-# Copy the built NAPI addon into the package tree so the driver default
-# fallback resolves it.
-COPY --from=napi-builder /build/rust-ivm/napi/rust-ivm.node ./mono/packages/rust-ivm/napi/rust-ivm.node
+COPY --from=rust-syncer-builder /usr/local/bin/rust-syncer /usr/local/bin/rust-syncer
 COPY --from=sqlite-builder /usr/local/lib/libsqlite3.so* /usr/local/lib/
 COPY --from=zero-sqlite-builder /tmp/better_sqlite3.node /tmp/better_sqlite3.node
 
@@ -190,7 +190,6 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     && cp /tmp/better_sqlite3.node "$zero_sqlite/better_sqlite3.node" \
     && rm /tmp/better_sqlite3.node \
     && ldconfig \
-    && ldd packages/rust-ivm/napi/rust-ivm.node | grep '/usr/local/lib/libsqlite3.so.0' \
     && ldd "$zero_sqlite/better_sqlite3.node" | grep '/usr/local/lib/libsqlite3.so.0' \
     && rm -rf /root/.cache \
        /usr/local/lib/node_modules/npm \
@@ -199,28 +198,10 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
        packages/rust-ivm/src packages/rust-ivm/tests
 
 # Required/sane defaults — DO NOT ask Shivral to remember these.
-ENV USE_RUST_IVM=true
-# Absolute path to the native addon (baked below at COPY). The driver's relative
-# fallback ('../../../../packages/rust-ivm/napi/rust-ivm.node') mis-resolves in
-# this layout (doubled 'packages') and silently falls back to TS — so without
-# this env the rust engine never loads. Must match the COPY destination.
-ENV RUST_IVM_ADDON_PATH=/app/mono/packages/rust-ivm/napi/rust-ivm.node
-# Bounded TSFN queue depth for per-row streaming delivery. 1 = actor parks after
-# every row until JS drains it; a busy main thread then stalls delivery per-row
-# (microbench: 0.5–5ms bursts inflate per-row 180–750×). K=64 lets the actor run
-# 64 rows ahead without parking → 134–166× faster delivery under a busy loop,
-# output byte-identical (FIFO queue preserves order). O(64) NapiRowChanges in
-# flight per stream (bounded). Enabled here; set to 1 to revert instantly.
-ENV RUST_IVM_TSFN_QUEUE=64
-# Keep the producer credit window aligned with the callback queue so a slow JS
-# consumer cannot accumulate a second, larger buffer behind the native bound.
-ENV RUST_IVM_STREAM_CREDIT=64
-# Per-stage perf spans (perf_trace.rs): one [rust-ivm][PERF] breakdown line per
-# hydrate, per advance, and on EVERY breaker-trip abort (advance-TRIPPED), so
-# resets self-diagnose compute-vs-delivery in the pod logs. Stderr only —
-# do NOT set a file path here (unbounded append in the container). Overhead
-# ~2-3% on hot scans, zero when unset. Set empty to disable.
-ENV RUST_IVM_PERF_TRACE=1
+# This is the dedicated full-Rust candidate image. Selecting this image is the
+# rollout opt-in; the independently deployed TS control uses the upstream image.
+ENV ZERO_SYNCER=rust
+ENV ZERO_RUST_SYNCER_PATH=/usr/local/bin/rust-syncer
 # Distribute client groups across sync workers by count (round-robin) instead
 # of by CG-id hash. Sticky per CG within a process lifetime; evens out load
 # when hash bucketing leaves workers lopsided.

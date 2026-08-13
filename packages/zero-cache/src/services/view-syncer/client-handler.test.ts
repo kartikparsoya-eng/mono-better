@@ -60,10 +60,7 @@ describe('view-syncer/client-handler', () => {
   // (zero-poke-handler.ts) enforces and drops the connection over.
   function assertNonInterleaved(frames: Downstream[]) {
     let open: string | undefined;
-    for (const [type, body] of frames as [
-      string,
-      {pokeID: string},
-    ][]) {
+    for (const [type, body] of frames as [string, {pokeID: string}][]) {
       if (type === 'pokeStart') {
         expect(
           open,
@@ -210,8 +207,24 @@ describe('view-syncer/client-handler', () => {
   test('the poke guard is per-connection: one open poke does not block another client', async () => {
     const subA = createSubscription();
     const subB = createSubscription();
-    const hA = new ClientHandler(lc, 'g1', 'idA', 'wsA', SHARD, '121', subA.subscription);
-    const hB = new ClientHandler(lc, 'g1', 'idB', 'wsB', SHARD, '121', subB.subscription);
+    const hA = new ClientHandler(
+      lc,
+      'g1',
+      'idA',
+      'wsA',
+      SHARD,
+      '121',
+      subA.subscription,
+    );
+    const hB = new ClientHandler(
+      lc,
+      'g1',
+      'idB',
+      'wsB',
+      SHARD,
+      '121',
+      subB.subscription,
+    );
 
     // Client A opens a poke and leaves it mid-stream (rows still "draining").
     const a = hA.startPoke({stateVersion: '123'});

@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-explicit-any -- optional exposed-gc and storage internals are diagnostic test hooks */
 import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, beforeEach, describe, expect, test} from 'vitest';
@@ -45,7 +46,6 @@ const comments = table('comments')
 const CS = createSchema({tables: [issues, comments]});
 
 async function drain(it: AsyncIterable<unknown> | Iterable<unknown>) {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   for await (const _ of it as AsyncIterable<unknown>) {
     /* consume */
   }
@@ -76,11 +76,13 @@ describe('rust-ivm reconnect-churn bisect', () => {
       CREATE INDEX comments_issueID ON comments (issueID);
     `);
     const ins = db.prepare(`INSERT INTO issues VALUES (?, ?, ?, '${BASE}')`);
-    for (let i = 0; i < nIssues; i++)
+    for (let i = 0; i < nIssues; i++) {
       ins.run(`i${i}`, i % 2 ? 'public' : 'private', `owner${i % 20}`);
+    }
     const insC = db.prepare(`INSERT INTO comments VALUES (?, ?, ?, '${BASE}')`);
-    for (let i = 0; i < nComments; i++)
+    for (let i = 0; i < nComments; i++) {
       insC.run(`c${i}`, `i${i % nIssues}`, 'x'.repeat(80));
+    }
     populateFromExistingTables(db, listTables(db, false));
   }
 

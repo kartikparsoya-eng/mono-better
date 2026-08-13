@@ -406,7 +406,7 @@ function procMutation(
   op: 'insert' | 'upsert' | 'update' | 'delete',
   // oxlint-disable-next-line @typescript-eslint/no-explicit-any
   value: any,
-  uid: string | undefined = undefined,
+  uid?: string | undefined,
 ) {
   return processMutation(
     lc,

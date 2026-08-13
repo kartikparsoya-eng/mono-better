@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 use rustc_hash::FxHashMap;
 
@@ -34,6 +34,7 @@ use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, OutputHandle, 
 use crate::ivm::schema::{ColumnType, SourceSchema, System};
 use crate::ivm::source::Source;
 use crate::ivm::stream::NodeStream;
+use crate::snapshotter::spec::quote_ident;
 use crate::sqlite::query_builder::{SqlParam, SqlQuery, build_select_query};
 
 /// Streaming iterator over a SQLite SELECT result.
@@ -433,6 +434,63 @@ impl TableSource {
 
     pub fn primary_key(&self) -> &[String] {
         &self.primary_key
+    }
+
+    /// Retrieve a row from the currently pinned snapshot by a unique key.
+    /// Port of TS `TableSource.getRow()`, used by reconnect catch-up to rebuild
+    /// persisted row patches with contents from the exact IVM snapshot.
+    pub fn get_row(&self, key: &[(String, Value)]) -> Option<Row> {
+        if key.is_empty() {
+            return None;
+        }
+        let select = self
+            .column_names
+            .iter()
+            .map(|column| quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let predicates = key
+            .iter()
+            .map(|(column, _)| format!("{} = ?", quote_ident(column)))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let sql = format!(
+            "SELECT {select} FROM {} WHERE {predicates} LIMIT 1",
+            quote_ident(&self.table_name)
+        );
+        let params: Vec<SqlParam> = key.iter().map(|(_, value)| SqlParam::from(value)).collect();
+
+        let db = self.db.borrow().clone();
+        let conn = db.borrow();
+        let mut stmt = conn.prepare(&sql).unwrap_or_else(|error| {
+            panic!(
+                "[rust-ivm] get_row prepare error for {}: {}",
+                self.table_name, error
+            )
+        });
+        stmt.query_row(
+            params_from_iter(params.iter().map(|param| param as &dyn rusqlite::ToSql)),
+            |raw| {
+                let mut row = FxHashMap::default();
+                for (index, column) in self.column_names.iter().enumerate() {
+                    let value = sqlite_value_to_ivm(
+                        crate::sqlite::db::read_value_lossy(raw, index),
+                        self.columns.get(column),
+                        &self.table_name,
+                        column,
+                    );
+                    row.insert(column.clone(), value);
+                }
+                Ok(Arc::new(row))
+            },
+        )
+        .optional()
+        .unwrap_or_else(|error| {
+            panic!(
+                "[rust-ivm] get_row query error for {}: {}",
+                self.table_name, error
+            )
+        })
     }
 
     /// Set the SQLite connection (for Snapshotter leapfrog).
@@ -1161,8 +1219,8 @@ impl Source for TableSource {
         self.push(change)
     }
 
-    fn get_row(&self, _pk: &[(String, Value)]) -> Option<Row> {
-        None
+    fn get_row(&self, pk: &[(String, Value)]) -> Option<Row> {
+        TableSource::get_row(self, pk)
     }
 }
 
@@ -1388,6 +1446,41 @@ mod advance_gate_fetch_tests {
             Some(Value::Str("n199".into())),
         );
         assert_eq!(rows[199].get("flag").cloned(), Some(Value::Bool(true)));
+    }
+
+    #[test]
+    fn table_source_get_row_reads_current_snapshot_with_types() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE issue(id TEXT PRIMARY KEY, title TEXT, active INTEGER);\
+             INSERT INTO issue VALUES ('i1', 'caught up', 1);",
+        )
+        .unwrap();
+        let columns = HashMap::from([
+            ("id".to_string(), ColumnType::String { optional: false }),
+            ("title".to_string(), ColumnType::String { optional: true }),
+            (
+                "active".to_string(),
+                ColumnType::Boolean { optional: false },
+            ),
+        ]);
+        let source = TableSource::new(
+            Rc::new(RefCell::new(conn)),
+            "issue",
+            columns,
+            vec!["id".to_string()],
+        );
+
+        let row = source
+            .get_row(&[("id".to_string(), Value::Str("i1".into()))])
+            .expect("row by primary key");
+        assert_eq!(row.get("title"), Some(&Value::Str("caught up".into())));
+        assert_eq!(row.get("active"), Some(&Value::Bool(true)));
+        assert!(
+            source
+                .get_row(&[("id".to_string(), Value::Str("missing".into()))])
+                .is_none()
+        );
     }
 
     #[test]

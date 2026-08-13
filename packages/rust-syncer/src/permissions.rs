@@ -303,11 +303,11 @@ fn is_always_true(c: &Value) -> bool {
 fn flatten(kind: &str, conditions: Vec<Value>) -> Vec<Value> {
     let mut out = Vec::new();
     for c in conditions {
-        if c.get("type").and_then(Value::as_str) == Some(kind) {
-            if let Some(inner) = c.get("conditions").and_then(Value::as_array) {
-                out.extend(inner.iter().cloned());
-                continue;
-            }
+        if c.get("type").and_then(Value::as_str) == Some(kind)
+            && let Some(inner) = c.get("conditions").and_then(Value::as_array)
+        {
+            out.extend(inner.iter().cloned());
+            continue;
         }
         out.push(c);
     }
@@ -357,7 +357,7 @@ pub fn normalize_ast(ast: &Value) -> Value {
     let where_norm = ast
         .get("where")
         .filter(|w| !w.is_null())
-        .and_then(|w| flattened(w))
+        .and_then(flattened)
         .map(|w| normalize_where(&w));
 
     let mut out = Map::new();
@@ -382,10 +382,10 @@ pub fn normalize_ast(ast: &Value) -> Value {
 }
 
 fn insert_if_present(out: &mut Map<String, Value>, key: &str, v: Option<&Value>) {
-    if let Some(v) = v {
-        if !v.is_null() {
-            out.insert(key.to_string(), v.clone());
-        }
+    if let Some(v) = v
+        && !v.is_null()
+    {
+        out.insert(key.to_string(), v.clone());
     }
 }
 
@@ -442,15 +442,15 @@ fn flattened(cond: &Value) -> Option<Value> {
     let mut conditions: Vec<Value> = Vec::new();
     if let Some(conds) = cond.get("conditions").and_then(Value::as_array) {
         for c in conds {
-            if c.get("type").and_then(Value::as_str) == Some(kind) {
-                if let Some(inner) = c.get("conditions").and_then(Value::as_array) {
-                    for ic in inner {
-                        if let Some(f) = flattened(ic) {
-                            conditions.push(f);
-                        }
+            if c.get("type").and_then(Value::as_str) == Some(kind)
+                && let Some(inner) = c.get("conditions").and_then(Value::as_array)
+            {
+                for ic in inner {
+                    if let Some(f) = flattened(ic) {
+                        conditions.push(f);
                     }
-                    continue;
                 }
+                continue;
             }
             if let Some(f) = flattened(c) {
                 conditions.push(f);
@@ -609,6 +609,7 @@ fn base36(mut n: u64) -> String {
 
 /// Loaded permissions: the compiled `PermissionsConfig` JSON and its hash, or
 /// `None` when no permissions have been deployed.
+#[derive(Debug)]
 pub struct LoadedPermissions {
     pub permissions: Option<Value>,
     pub hash: Option<String>,
@@ -626,6 +627,7 @@ pub fn load_permissions(conn: &Connection, app_id: &str) -> Result<LoadedPermiss
         Ok((Some(permissions_json), hash)) => {
             let permissions = serde_json::from_str::<Value>(&permissions_json)
                 .map_err(|e| format!("could not parse upstream permissions: {e}"))?;
+            validate_permissions_config(&permissions)?;
             Ok(LoadedPermissions {
                 permissions: Some(permissions),
                 hash,
@@ -643,6 +645,242 @@ pub fn load_permissions(conn: &Connection, app_id: &str) -> Result<LoadedPermiss
         }),
         Err(e) => Err(format!("load permissions: {e}")),
     }
+}
+
+fn validate_permissions_config(value: &Value) -> Result<(), String> {
+    let root = value
+        .as_object()
+        .ok_or_else(|| "permissions config must be an object".to_string())?;
+    let Some(tables) = root.get("tables") else {
+        return Ok(());
+    };
+    let tables = tables
+        .as_object()
+        .ok_or_else(|| "permissions.tables must be an object".to_string())?;
+    for (table, config) in tables {
+        let config = config
+            .as_object()
+            .ok_or_else(|| format!("permissions table {table} must be an object"))?;
+        if let Some(row) = config.get("row") {
+            validate_permission_asset(row, &format!("tables.{table}.row"))?;
+        }
+        if let Some(cells) = config.get("cell") {
+            let cells = cells
+                .as_object()
+                .ok_or_else(|| format!("tables.{table}.cell must be an object"))?;
+            for (column, asset) in cells {
+                validate_permission_asset(asset, &format!("tables.{table}.cell.{column}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_permission_asset(value: &Value, path: &str) -> Result<(), String> {
+    let asset = value
+        .as_object()
+        .ok_or_else(|| format!("{path} must be an object"))?;
+    for operation in ["select", "insert", "delete"] {
+        if let Some(policy) = asset.get(operation) {
+            validate_policy(policy, &format!("{path}.{operation}"))?;
+        }
+    }
+    if let Some(update) = asset.get("update") {
+        let update = update
+            .as_object()
+            .ok_or_else(|| format!("{path}.update must be an object"))?;
+        for phase in ["preMutation", "postMutation"] {
+            if let Some(policy) = update.get(phase) {
+                validate_policy(policy, &format!("{path}.update.{phase}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy(value: &Value, path: &str) -> Result<(), String> {
+    let rules = value
+        .as_array()
+        .ok_or_else(|| format!("{path} must be an array"))?;
+    for (index, rule) in rules.iter().enumerate() {
+        let rule = rule
+            .as_array()
+            .ok_or_else(|| format!("{path}[{index}] must be a tuple"))?;
+        if rule.len() != 2 || rule[0].as_str() != Some("allow") {
+            return Err(format!("{path}[{index}] must be [\"allow\", condition]"));
+        }
+        validate_permission_condition(&rule[1], &format!("{path}[{index}][1]"))?;
+    }
+    Ok(())
+}
+
+fn validate_permission_condition(value: &Value, path: &str) -> Result<(), String> {
+    let condition = value
+        .as_object()
+        .ok_or_else(|| format!("{path} must be a condition object"))?;
+    match condition.get("type").and_then(Value::as_str) {
+        Some("simple") => {
+            const OPS: &[&str] = &[
+                "=",
+                "!=",
+                "IS",
+                "IS NOT",
+                "<",
+                ">",
+                "<=",
+                ">=",
+                "LIKE",
+                "NOT LIKE",
+                "ILIKE",
+                "NOT ILIKE",
+                "IN",
+                "NOT IN",
+            ];
+            if !condition
+                .get("op")
+                .and_then(Value::as_str)
+                .is_some_and(|op| OPS.contains(&op))
+            {
+                return Err(format!("{path}.op is not a supported operator"));
+            }
+            validate_condition_value(condition.get("left"), true, &format!("{path}.left"))?;
+            validate_condition_value(condition.get("right"), false, &format!("{path}.right"))?;
+        }
+        Some("and") | Some("or") => {
+            let children = condition
+                .get("conditions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{path}.conditions must be an array"))?;
+            for (index, child) in children.iter().enumerate() {
+                validate_permission_condition(child, &format!("{path}.conditions[{index}]"))?;
+            }
+        }
+        Some("correlatedSubquery") => {
+            let related = condition
+                .get("related")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{path}.related must be an object"))?;
+            if !matches!(
+                condition.get("op").and_then(Value::as_str),
+                Some("EXISTS" | "NOT EXISTS")
+            ) {
+                return Err(format!("{path}.op must be EXISTS or NOT EXISTS"));
+            }
+            for flag in ["flip", "scalar"] {
+                if condition.get(flag).is_some_and(|value| !value.is_boolean()) {
+                    return Err(format!("{path}.{flag} must be a boolean"));
+                }
+            }
+            validate_related_subquery(related, &format!("{path}.related"))?;
+        }
+        _ => return Err(format!("{path} has an unknown condition type")),
+    }
+    Ok(())
+}
+
+fn validate_condition_value(
+    value: Option<&Value>,
+    allow_column: bool,
+    path: &str,
+) -> Result<(), String> {
+    let value = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{path} must be a value reference"))?;
+    match value.get("type").and_then(Value::as_str) {
+        Some("column") if allow_column => {
+            if value.get("name").and_then(Value::as_str).is_none() {
+                return Err(format!("{path}.name must be a string"));
+            }
+        }
+        Some("literal") => {
+            let literal = value
+                .get("value")
+                .ok_or_else(|| format!("{path}.value is required"))?;
+            let valid = literal.is_null()
+                || literal.is_string()
+                || literal.is_number()
+                || literal.is_boolean()
+                || literal.as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .all(|item| item.is_string() || item.is_number() || item.is_boolean())
+                });
+            if !valid {
+                return Err(format!("{path}.value is not a protocol literal"));
+            }
+        }
+        Some("static") => {
+            if !matches!(
+                value.get("anchor").and_then(Value::as_str),
+                Some("authData" | "preMutationRow")
+            ) {
+                return Err(format!("{path}.anchor is invalid"));
+            }
+            let field = value.get("field");
+            if !field.is_some_and(|field| {
+                field.is_string()
+                    || field
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().all(Value::is_string))
+            }) {
+                return Err(format!("{path}.field must be a string or string array"));
+            }
+        }
+        _ => return Err(format!("{path} has an invalid value-reference type")),
+    }
+    Ok(())
+}
+
+fn validate_related_subquery(related: &Map<String, Value>, path: &str) -> Result<(), String> {
+    let correlation = related
+        .get("correlation")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{path}.correlation must be an object"))?;
+    for field in ["parentField", "childField"] {
+        let valid = correlation
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|parts| !parts.is_empty() && parts.iter().all(Value::is_string));
+        if !valid {
+            return Err(format!(
+                "{path}.correlation.{field} must be a non-empty string array"
+            ));
+        }
+    }
+    if related
+        .get("hidden")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(format!("{path}.hidden must be a boolean"));
+    }
+    if related
+        .get("system")
+        .is_some_and(|value| !matches!(value.as_str(), Some("permissions" | "client" | "test")))
+    {
+        return Err(format!("{path}.system is invalid"));
+    }
+    let subquery = related
+        .get("subquery")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{path}.subquery must be an AST object"))?;
+    if subquery.get("table").and_then(Value::as_str).is_none() {
+        return Err(format!("{path}.subquery.table must be a string"));
+    }
+    if let Some(condition) = subquery.get("where") {
+        validate_permission_condition(condition, &format!("{path}.subquery.where"))?;
+    }
+    if let Some(nested) = subquery.get("related") {
+        let nested = nested
+            .as_array()
+            .ok_or_else(|| format!("{path}.subquery.related must be an array"))?;
+        for (index, child) in nested.iter().enumerate() {
+            let child = child
+                .as_object()
+                .ok_or_else(|| format!("{path}.subquery.related[{index}] must be an object"))?;
+            validate_related_subquery(child, &format!("{path}.subquery.related[{index}]"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Outcome of a hot-reload check against the deployed permissions doc.
@@ -838,6 +1076,27 @@ mod tests {
             denied, None,
             "a permissions load failure must fail closed, not pass through"
         );
+    }
+
+    #[test]
+    fn load_permissions_rejects_structurally_invalid_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE "zero.permissions" (permissions TEXT, hash TEXT);
+               INSERT INTO "zero.permissions" VALUES
+                 ('{"tables":{"issue":{"row":{"select":"allow-all"}}}}', 'bad');"#,
+        )
+        .unwrap();
+        let err = load_permissions(&conn, "zero").unwrap_err();
+        assert!(err.contains("select must be an array"), "{err}");
+
+        conn.execute(
+            r#"UPDATE "zero.permissions" SET permissions = ?1"#,
+            [r#"{"tables":{"issue":{"row":{"select":[["allow",{"type":"simple","op":"DROP","left":{"type":"column","name":"id"},"right":{"type":"literal","value":1}}]]}}}}"#],
+        )
+        .unwrap();
+        let err = load_permissions(&conn, "zero").unwrap_err();
+        assert!(err.contains("not a supported operator"), "{err}");
     }
 
     /// Build an in-memory replica with a `{app}.permissions(permissions, hash)`

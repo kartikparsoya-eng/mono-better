@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::ttl::DEFAULT_TTL_MS;
+use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
 use crate::types::StoreOp;
 use crate::types::*;
 use crate::version::{
@@ -89,6 +89,32 @@ pub struct QueriesRow {
     pub row_set_signature: Option<String>,
 }
 
+type InstanceLoadRow = (
+    String,
+    f64,
+    f64,
+    Option<String>,
+    Option<Value>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    bool,
+    Option<String>,
+);
+type QueryLoadRow = (
+    String,
+    Option<Value>,
+    Option<String>,
+    Option<Value>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+    Option<bool>,
+    Option<String>,
+);
+type DesireLoadRow = (String, String, String, bool, Option<f64>, Option<f64>);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesiresRow {
     pub client_group_id: String,
@@ -137,10 +163,12 @@ pub struct LoadResult {
 
 #[derive(Default, Clone)]
 pub struct PartialQueriesRow {
-    pub patch_version: Option<String>,
+    /// Outer `None` means "leave unchanged"; inner `None` means SQL NULL.
+    /// TS distinguishes `undefined` from `null` for all nullable partial fields.
+    pub patch_version: Option<Option<String>>,
     pub deleted: Option<bool>,
-    pub transformation_hash: Option<String>,
-    pub transformation_version: Option<String>,
+    pub transformation_hash: Option<Option<String>>,
+    pub transformation_version: Option<Option<String>>,
     pub row_set_signature: Option<String>,
 }
 
@@ -174,6 +202,35 @@ impl PendingWrites {
 
 // ─── CVRStoreHandle ────────────────────────────────────────────────────────
 
+#[derive(Clone)]
+pub struct CVRStoreCatchupReader {
+    pool: PgPool,
+    schema: String,
+    cvr_id: String,
+}
+
+impl CVRStoreCatchupReader {
+    pub async fn catchup_config_patches(
+        &self,
+        after_version: NullableCVRVersion,
+        up_to_version: &CVRVersion,
+        current: &CVRVersion,
+    ) -> Result<Vec<PatchToVersion>, CVRStoreError> {
+        // Catch-up reads are independent of the handle's buffered writes. A
+        // read-only clone lets callers release their std::sync::Mutex before
+        // awaiting PostgreSQL, preventing one slow query from blocking every
+        // other operation on this client group.
+        CVRStoreHandle::new(
+            self.pool.clone(),
+            self.schema.clone(),
+            self.cvr_id.clone(),
+            String::new(),
+        )
+        .catchup_config_patches(after_version, up_to_version, current)
+        .await
+    }
+}
+
 pub struct CVRStoreHandle {
     pool: PgPool,
     schema: String,
@@ -181,14 +238,6 @@ pub struct CVRStoreHandle {
     task_id: String,
     pending: PendingWrites,
     row_count: usize,
-    /// The CVR version this store believes is currently persisted — set on
-    /// `load` and advanced after each successful `flush`. It equals the
-    /// `_orig.version` that TS threads into `flush` as `expectedCurrentVersion`
-    /// (each updater is built from the last-flushed CVR), so tracking it here
-    /// lets the flush do the optimistic version+ownership check without the
-    /// caller having to pass the pre-update version. `None` until first
-    /// load/flush (a brand-new CVR, whose expected version is the empty version).
-    current_version: Option<CVRVersion>,
 }
 
 impl CVRStoreHandle {
@@ -200,12 +249,19 @@ impl CVRStoreHandle {
             task_id,
             pending: PendingWrites::default(),
             row_count: 0,
-            current_version: None,
         }
     }
 
     pub fn has_pending_writes(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    pub fn catchup_reader(&self) -> CVRStoreCatchupReader {
+        CVRStoreCatchupReader {
+            pool: self.pool.clone(),
+            schema: self.schema.clone(),
+            cvr_id: self.cvr_id.clone(),
+        }
     }
 
     pub fn row_count(&self) -> usize {
@@ -249,21 +305,32 @@ impl CVRStoreHandle {
     }
 
     pub fn update_query(&mut self, query: &QueryRecord) {
-        // Partial update — only set changed fields.
+        // TS updateQuery writes all mutable query-state fields. The nested
+        // Options preserve its undefined-vs-null distinction: these fields are
+        // explicitly cleared for internal/untransformed queries rather than
+        // accidentally left at their previous values.
         let existing = self
             .pending
             .pending_query_partial_updates
             .entry(query.id().to_string())
             .or_default();
-        existing.transformation_hash = query.base().transformation_hash.clone();
-        existing.transformation_version = query
-            .base()
-            .transformation_version
-            .as_ref()
-            .map(version_string);
+        existing.patch_version = Some(if query.is_internal() {
+            None
+        } else {
+            query.patch_version().map(version_string)
+        });
+        existing.transformation_hash = Some(query.base().transformation_hash.clone());
+        existing.transformation_version = Some(
+            query
+                .base()
+                .transformation_version
+                .as_ref()
+                .map(version_string),
+        );
+        existing.deleted = Some(false);
     }
 
-    pub fn mark_query_as_deleted(&mut self, _version: &CVRVersion, query_patch: &QueryPatch) {
+    pub fn mark_query_as_deleted(&mut self, version: &CVRVersion, query_patch: &QueryPatch) {
         let id = match query_patch {
             QueryPatch::Del { id, .. } => id,
             QueryPatch::Put { id, .. } => id,
@@ -273,7 +340,10 @@ impl CVRStoreHandle {
             .pending_query_partial_updates
             .entry(id.clone())
             .or_default();
+        existing.patch_version = Some(Some(version_string(version)));
         existing.deleted = Some(true);
+        existing.transformation_hash = Some(None);
+        existing.transformation_version = Some(None);
     }
 
     pub fn update_row_set_signature(&mut self, query_hash: &str, signature: &str) {
@@ -372,12 +442,7 @@ impl CVRStoreHandle {
 
     pub async fn flush(
         &mut self,
-        // Kept for signature parity with TS `flush(expectedCurrentVersion, ...)`,
-        // but the store's own `current_version` (set on load, advanced after each
-        // flush) is authoritative — it equals TS's `_orig.version`. When the store
-        // was never loaded (a brand-new CVR) the expected on-disk version is the
-        // empty version (no instance row yet).
-        _expected_current_version: &CVRVersion,
+        expected_current_version: &CVRVersion,
         cvr: &CVR,
         last_connect_time: f64,
     ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
@@ -399,10 +464,6 @@ impl CVRStoreHandle {
         // Without this, two syncers owning the same client group would clobber
         // each other's CVR (lost updates / cross-owner corruption).
         {
-            let expected = self
-                .current_version
-                .clone()
-                .unwrap_or_else(|| crate::version::EMPTY_CVR_VERSION);
             let row: Option<(String, Option<String>, Option<f64>)> = sqlx::query_as(&format!(
                 r#"SELECT "version", "owner",
                           (extract(epoch from "grantedAt") * 1000.0)::double precision
@@ -433,7 +494,7 @@ impl CVRStoreHandle {
                     last_connect_time,
                 });
             }
-            let expected_str = version_string(&expected);
+            let expected_str = version_string(expected_current_version);
             if db_version != expected_str {
                 return Err(CVRStoreError::ConcurrentModification {
                     expected: expected_str,
@@ -514,7 +575,7 @@ impl CVRStoreHandle {
         }
 
         // 4. Query upserts (full)
-        for (hash, row) in &self.pending.pending_query_updates {
+        for row in self.pending.pending_query_updates.values() {
             let sql = format!(
                 r#"INSERT INTO "{}".queries
                    ("clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs",
@@ -554,23 +615,23 @@ impl CVRStoreHandle {
         for (hash, partial) in &self.pending.pending_query_partial_updates {
             let mut sets = Vec::new();
             let mut bind_idx = 2u32;
-            if let Some(ref pv) = partial.patch_version {
+            if partial.patch_version.is_some() {
                 sets.push(format!(r#""patchVersion" = ${}"#, bind_idx));
                 bind_idx += 1;
             }
-            if let Some(d) = partial.deleted {
+            if partial.deleted.is_some() {
                 sets.push(format!(r#""deleted" = ${}"#, bind_idx));
                 bind_idx += 1;
             }
-            if let Some(ref th) = partial.transformation_hash {
+            if partial.transformation_hash.is_some() {
                 sets.push(format!(r#""transformationHash" = ${}"#, bind_idx));
                 bind_idx += 1;
             }
-            if let Some(ref tv) = partial.transformation_version {
+            if partial.transformation_version.is_some() {
                 sets.push(format!(r#""transformationVersion" = ${}"#, bind_idx));
                 bind_idx += 1;
             }
-            if let Some(ref rs) = partial.row_set_signature {
+            if partial.row_set_signature.is_some() {
                 sets.push(format!(r#""rowSetSignature" = ${}"#, bind_idx));
                 bind_idx += 1;
             }
@@ -605,7 +666,7 @@ impl CVRStoreHandle {
         }
 
         // 6. Desire upserts
-        for (_key, row) in &self.pending.pending_desire_updates {
+        for row in self.pending.pending_desire_updates.values() {
             let sql = format!(
                 r#"INSERT INTO "{}".desires
                    ("clientGroupID", "clientID", "queryHash", "patchVersion",
@@ -655,7 +716,7 @@ impl CVRStoreHandle {
                 .execute(&mut *tx)
                 .await?;
         }
-        for (_id_str, (row_id, record)) in &self.pending.pending_row_record_updates {
+        for (row_id, record) in self.pending.pending_row_record_updates.values() {
             // A row leaves the CVR either as an explicit del (`None`) or as a put
             // with `refCounts = null` (the tombstone form used when a row is no
             // longer referenced by any query). BOTH must DELETE the row from the
@@ -719,10 +780,6 @@ impl CVRStoreHandle {
         }
 
         tx.commit().await?;
-
-        // The write committed at `cvr.version`; that is now the expected on-disk
-        // version for the next flush's optimistic check.
-        self.current_version = Some(cvr.version.clone());
 
         // Clear pending
         self.pending = PendingWrites::default();
@@ -788,18 +845,7 @@ impl CVRStoreHandle {
                WHERE cvr."clientGroupID" = $1"#,
             self.schema
         );
-        let instance: Option<(
-            String,
-            f64,
-            f64,
-            Option<String>,
-            Option<Value>,
-            Option<String>,
-            Option<String>,
-            Option<f64>,
-            bool,
-            Option<String>,
-        )> = sqlx::query_as(&instance_sql)
+        let instance: Option<InstanceLoadRow> = sqlx::query_as(&instance_sql)
             .bind(&self.cvr_id)
             .fetch_optional(&mut *tx)
             .await?;
@@ -820,7 +866,7 @@ impl CVRStoreHandle {
                 // New CVR
                 let cvr = CVR {
                     id: self.cvr_id.clone(),
-                    version: crate::version::EMPTY_CVR_VERSION,
+                    version: crate::version::EMPTY_CVR_VERSION.clone(),
                     last_active: 0,
                     ttl_clock: 0,
                     replica_version: None,
@@ -830,7 +876,6 @@ impl CVRStoreHandle {
                     profile_id: None,
                 };
                 drop(tx);
-                self.current_version = Some(cvr.version.clone());
                 return Ok(LoadResult { cvr, is_new: true });
             }
             Some((
@@ -910,18 +955,7 @@ impl CVRStoreHandle {
                FROM "{}".queries WHERE "clientGroupID" = $1 AND COALESCE("deleted", false) = false"#,
             self.schema
         );
-        let queries: Vec<(
-            String,
-            Option<Value>,
-            Option<String>,
-            Option<Value>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<bool>,
-            Option<bool>,
-            Option<String>,
-        )> = sqlx::query_as(&queries_sql)
+        let queries: Vec<QueryLoadRow> = sqlx::query_as(&queries_sql)
             .bind(&self.cvr_id)
             .fetch_all(&mut *tx)
             .await?;
@@ -932,11 +966,10 @@ impl CVRStoreHandle {
                FROM "{}".desires WHERE "clientGroupID" = $1"#,
             self.schema
         );
-        let desires: Vec<(String, String, String, bool, Option<f64>, Option<f64>)> =
-            sqlx::query_as(&desires_sql)
-                .bind(&self.cvr_id)
-                .fetch_all(&mut *tx)
-                .await?;
+        let desires: Vec<DesireLoadRow> = sqlx::query_as(&desires_sql)
+            .bind(&self.cvr_id)
+            .fetch_all(&mut *tx)
+            .await?;
 
         drop(tx);
 
@@ -978,11 +1011,18 @@ impl CVRStoreHandle {
         // its ttl/version are lost. Port of TS `loadCVR`, which reconstructs
         // `clientState` from the desires rows.
         for (client_id, query_hash, patch_version, deleted, ttl_ms, inactivated_at_ms) in &desires {
-            if *deleted {
-                continue;
-            }
-            if let Some(client) = cvr.clients.get_mut(client_id) {
+            // Only an active desire belongs in desiredQueryIDs. An inactive
+            // desire remains solely in query.clientState until its TTL expires.
+            if !*deleted
+                && inactivated_at_ms.is_none()
+                && let Some(client) = cvr.clients.get_mut(client_id)
+            {
                 client.desired_query_ids.push(query_hash.clone());
+            }
+            // TS retains an inactivated tombstone's state even when `deleted`
+            // is true, because its TTL/version still drive eviction and catchup.
+            if *deleted && inactivated_at_ms.is_none() {
+                continue;
             }
             if let Some(state) = cvr
                 .queries
@@ -993,7 +1033,9 @@ impl CVRStoreHandle {
                     client_id.clone(),
                     ClientState {
                         inactivated_at: (*inactivated_at_ms).map(|ms| ms as TTLClock),
-                        ttl: (*ttl_ms).map(|ms| ms as i64).unwrap_or(DEFAULT_TTL_MS),
+                        ttl: clamp_ttl(TTL::Ms(
+                            (*ttl_ms).map(|ms| ms as i64).unwrap_or(DEFAULT_TTL_MS),
+                        )),
                         version: version_from_string(patch_version),
                     },
                 );
@@ -1029,8 +1071,7 @@ impl CVRStoreHandle {
         }
 
         // Rows-behind: the ownership grant above has signalled the previous
-        // owner to stop and flush; return so `load` waits and retries. Must NOT
-        // set `current_version` (we're discarding this partial load).
+        // owner to stop and flush; return so `load` waits and retries.
         if let Some((cvr_version, rows_version)) = rows_behind {
             return Err(CVRStoreError::RowsVersionBehind {
                 cvr_version,
@@ -1038,7 +1079,6 @@ impl CVRStoreHandle {
             });
         }
 
-        self.current_version = Some(cvr.version.clone());
         Ok(LoadResult { cvr, is_new })
     }
 
@@ -1109,13 +1149,12 @@ impl CVRStoreHandle {
                ORDER BY "patchVersion""#,
             self.schema
         );
-        let desires: Vec<(String, String, String, bool, Option<f64>, Option<f64>)> =
-            sqlx::query_as(&desires_sql)
-                .bind(&self.cvr_id)
-                .bind(&start)
-                .bind(&end)
-                .fetch_all(&mut *tx)
-                .await?;
+        let desires: Vec<DesireLoadRow> = sqlx::query_as(&desires_sql)
+            .bind(&self.cvr_id)
+            .bind(&start)
+            .bind(&end)
+            .fetch_all(&mut *tx)
+            .await?;
 
         drop(tx);
 
@@ -1255,6 +1294,19 @@ pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRo
 mod tests {
     use super::*;
 
+    fn test_store() -> CVRStoreHandle {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgresql://localhost/test")
+            .unwrap();
+        CVRStoreHandle::new(
+            pool,
+            "test/cvr".to_string(),
+            "cg1".to_string(),
+            "task1".to_string(),
+        )
+    }
+
     fn make_cvr() -> CVR {
         CVR {
             id: "cg1".to_string(),
@@ -1292,22 +1344,36 @@ mod tests {
         assert!(pending.is_empty());
     }
 
+    #[tokio::test]
+    async fn catchup_reader_does_not_consume_buffered_writes() {
+        let mut store = test_store();
+        store.put_instance(&make_cvr());
+        assert!(store.has_pending_writes());
+
+        let reader = store.catchup_reader();
+        assert_eq!(reader.schema, "test/cvr");
+        assert_eq!(reader.cvr_id, "cg1");
+        assert!(store.has_pending_writes());
+    }
+
     #[test]
     fn test_put_instance_queues_write() {
         let cvr = make_cvr();
-        let mut pending = PendingWrites::default();
         // Simulate put_instance logic
-        pending.pending_instance_write = Some(InstancesRow {
-            client_group_id: cvr.id,
-            version: "v1".to_string(),
-            last_active: 0.0,
-            ttl_clock: 0.0,
-            replica_version: None,
-            owner: None,
-            granted_at: None,
-            client_schema: None,
-            profile_id: None,
-        });
+        let pending = PendingWrites {
+            pending_instance_write: Some(InstancesRow {
+                client_group_id: cvr.id,
+                version: "v1".to_string(),
+                last_active: 0.0,
+                ttl_clock: 0.0,
+                replica_version: None,
+                owner: None,
+                granted_at: None,
+                client_schema: None,
+                profile_id: None,
+            }),
+            ..Default::default()
+        };
         assert!(!pending.is_empty());
     }
 
@@ -1332,37 +1398,43 @@ mod tests {
         assert!(!pending.is_empty());
     }
 
-    #[test]
-    fn test_update_query_queues_partial_update() {
-        let mut pending = PendingWrites::default();
-        let mut partial = PartialQueriesRow::default();
-        partial.transformation_hash = Some("th2".to_string());
-        pending
-            .pending_query_partial_updates
-            .insert("hash1".to_string(), partial);
-        assert!(!pending.is_empty());
+    #[tokio::test]
+    async fn test_update_query_queues_partial_update() {
+        let mut store = test_store();
+        let mut query = make_client_query("hash1");
+        let QueryRecord::Client(query) = &mut query else {
+            unreachable!()
+        };
+        query.patch_version = Some(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        store.update_query(&QueryRecord::Client(query.clone()));
+
+        let partial = &store.pending.pending_query_partial_updates["hash1"];
+        assert_eq!(partial.patch_version, Some(Some("v2".to_string())));
+        assert_eq!(partial.transformation_hash, Some(Some("th1".to_string())));
+        assert_eq!(partial.deleted, Some(false));
     }
 
-    #[test]
-    fn test_mark_query_as_deleted() {
-        let mut pending = PendingWrites::default();
+    #[tokio::test]
+    async fn test_mark_query_as_deleted() {
+        let mut store = test_store();
         let patch = QueryPatch::Del {
             id: "hash1".to_string(),
             client_id: None,
         };
-        pending
-            .pending_query_partial_updates
-            .entry("hash1".to_string())
-            .or_default()
-            .deleted = Some(true);
-        assert!(!pending.is_empty());
-        assert_eq!(
-            patch,
-            QueryPatch::Del {
-                id: "hash1".to_string(),
-                client_id: None
-            }
-        );
+        let version = CVRVersion {
+            state_version: "v3".to_string(),
+            config_version: None,
+        };
+        store.mark_query_as_deleted(&version, &patch);
+
+        let partial = &store.pending.pending_query_partial_updates["hash1"];
+        assert_eq!(partial.patch_version, Some(Some("v3".to_string())));
+        assert_eq!(partial.deleted, Some(true));
+        assert_eq!(partial.transformation_hash, Some(None));
+        assert_eq!(partial.transformation_version, Some(None));
     }
 
     #[test]

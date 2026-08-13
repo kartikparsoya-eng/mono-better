@@ -190,10 +190,10 @@ impl MessageHandler for SyncerWsMessageHandler {
 
             Upstream::DeleteClients(_) => {
                 let deleted_client_ids = self.view_syncer.delete_clients(selector, msg);
-                if let Some(pusher) = &self.pusher {
-                    if !deleted_client_ids.is_empty() {
-                        pusher.delete_client_mutations(selector, &deleted_client_ids);
-                    }
+                if let Some(pusher) = &self.pusher
+                    && !deleted_client_ids.is_empty()
+                {
+                    pusher.delete_client_mutations(selector, &deleted_client_ids);
                 }
                 vec![HandlerResult::Ok]
             }
@@ -224,10 +224,8 @@ impl MessageHandler for SyncerWsMessageHandler {
                     self.view_syncer.init_connection(selector, msg)
                 });
 
-                if accepted {
-                    if let Some(pusher) = &self.pusher {
-                        pusher.init_connection(selector);
-                    }
+                if accepted && let Some(pusher) = &self.pusher {
+                    pusher.init_connection(selector);
                 }
                 // The TS code returns stream results here. In Rust, the stream
                 // is implicit — the ViewSyncer writes directly to the sink.

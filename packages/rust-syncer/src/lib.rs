@@ -53,13 +53,17 @@ pub use pipeline_driver::{
     AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,
 };
 pub use protocol::*;
-pub use replica_schema::{compute_table_specs, compute_table_specs_from_path};
+pub use replica_schema::{
+    ReplicaVersions, compute_table_specs, compute_table_specs_from_path, read_replica_versions,
+    read_replica_versions_from_path, validate_client_schema,
+};
 pub use router::{
     AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter, CvrPgConfig,
     GroupAuthState, SyncEngineConfig,
 };
 pub use sync_engine::{SyncEngine, SyncResult, parse_existing_rows};
 pub use ws_server::{
-    ConnectionContext, WsServerConfig, accept_connection, bind_ws_listener, run_ws_server, serve_ws,
+    ConnectionContext, WsServerConfig, accept_connection, accept_connection_with_limit,
+    bind_ws_listener, run_ws_server, serve_ws, serve_ws_with_config,
 };
 pub use ws_sink::{DirectWebSocketSink, WsCommand};

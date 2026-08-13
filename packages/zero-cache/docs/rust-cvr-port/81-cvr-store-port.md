@@ -100,7 +100,7 @@ if (owner !== this.#taskID) {
     throw new OwnershipError(owner, grantedAt, lastConnectTime);
   } else {
     // Fire-and-forget UPDATE ... WHERE grantedAt <= lastConnectTime (older owner)
-    void this.#db`UPDATE cvr.instances SET owner=..., grantedAt=... ...`
+    void this.#db`UPDATE cvr.instances SET owner=..., grantedAt=... ...`;
   }
 }
 ```

@@ -1,6 +1,6 @@
-import {spawn, type ChildProcess} from 'node:child_process';
+import {spawn, type ChildProcess, type SendHandle} from 'node:child_process';
 import {EventEmitter} from 'node:events';
-import {type Socket} from 'node:net';
+import {Socket} from 'node:net';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {consoleLogSink, LogContext} from '@rocicorp/logger';
@@ -24,6 +24,7 @@ import {
   parentWorker,
   singleProcessMode,
   wrap,
+  type Message,
   type Worker,
 } from '../types/processes.ts';
 import type {Subscription} from '../types/subscription.ts';
@@ -170,19 +171,30 @@ export default async function runWorker(
     // onMessageType/onceMessageType methods the ProcessManager relies on (e.g.
     // to await the 'ready' message); messages are emitted on `raw` below.
     const raw = new EventEmitter();
-    const emitter = wrap(raw) as unknown as Worker;
-    emitter.kill = (signal?: string) => child.kill(signal as any);
-    (emitter as any).pid = child.pid;
     // The dispatcher hands off a client upgrade via `send(handoffMsg, socket)`.
     // Since the binary has no IPC channel, reverse-proxy the socket to its WS
     // port instead of fd-passing. Non-handoff sends (no socket) are dropped.
-    (emitter as any).send = (msg: unknown, socket?: Socket) => {
-      if (socket && typeof socket.pipe === 'function') {
-        proxyUpgradeToRust(lc, msg as UpgradeHandoff, socket, wsPort);
-        return true;
-      }
-      return false;
-    };
+    const emitter: Worker = Object.assign(wrap(raw), {
+      pid: child.pid,
+      kill(signal?: NodeJS.Signals): void {
+        child.kill(signal);
+      },
+      send<M extends Message<unknown>>(
+        msg: M,
+        sendHandle?: SendHandle,
+      ): boolean {
+        if (sendHandle instanceof Socket) {
+          proxyUpgradeToRust(
+            lc,
+            msg as unknown as UpgradeHandoff,
+            sendHandle,
+            wsPort,
+          );
+          return true;
+        }
+        return false;
+      },
+    });
 
     // Listen for ready message on stdout.
     let buffer = '';

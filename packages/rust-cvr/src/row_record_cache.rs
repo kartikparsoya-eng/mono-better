@@ -247,8 +247,6 @@ pub struct RowRecordCache {
 }
 
 /// The maximum page size for `load()` cursor (matches TS `.cursor(5000)`).
-const LOAD_PAGE_SIZE: usize = 5000;
-
 /// The maximum page size for `catchupRowPatches` cursor (matches TS `.cursor(10000)`).
 const CATCHUP_PAGE_SIZE: usize = 10000;
 
@@ -406,19 +404,16 @@ impl RowRecordCache {
             let flushed_tx = self.flushed_version_tx.clone();
 
             let is_flushing_clone = Arc::clone(&self.is_flushing);
-            tokio::spawn(async move {
-                flush_loop(
-                    state_clone,
-                    pool,
-                    schema,
-                    cvr_id,
-                    fail_service,
-                    metrics_callback,
-                    flushed_tx,
-                    is_flushing_clone,
-                )
-                .await;
-            });
+            tokio::spawn(flush_loop(FlushLoopContext {
+                state: state_clone,
+                pool,
+                schema,
+                cvr_id,
+                fail_service,
+                metrics_callback,
+                flushed_tx,
+                is_flushing: is_flushing_clone,
+            }));
         } else {
             drop(state);
         }
@@ -568,15 +563,12 @@ impl RowRecordCache {
             self.schema
         );
 
-        let (sql, param_count) = if exclude_query_hashes.is_empty() {
-            (base_select, 3)
+        let sql = if exclude_query_hashes.is_empty() {
+            base_select
         } else {
-            (
-                format!(
-                    r#"{} AND ("refCounts" IS NULL OR NOT "refCounts" ?| $4)"#,
-                    base_select
-                ),
-                4,
+            format!(
+                r#"{} AND ("refCounts" IS NULL OR NOT "refCounts" ?| $4)"#,
+                base_select
             )
         };
 
@@ -590,21 +582,18 @@ impl RowRecordCache {
         let cvr_id = self.cvr_id.clone();
         let exclude = exclude_query_hashes.to_vec();
 
-        tokio::spawn(async move {
-            catchup_task(
-                &pool,
-                &schema,
-                &cvr_id,
-                &start,
-                &end,
-                &current_str,
-                &sql,
-                use_exclude,
-                exclude,
-                tx,
-            )
-            .await;
-        });
+        tokio::spawn(catchup_task(CatchupTaskContext {
+            pool,
+            schema,
+            cvr_id,
+            start,
+            end,
+            current_str,
+            sql,
+            use_exclude,
+            exclude_query_hashes: exclude,
+            page_sender: tx,
+        }));
 
         Ok(CatchupCursor { rx })
     }
@@ -643,7 +632,7 @@ impl CatchupCursor {
 ///   flushedRowsVersion = pendingRowsVersion
 /// }
 /// ```
-async fn flush_loop(
+struct FlushLoopContext {
     state: Arc<TokioMutex<CacheState>>,
     pool: sqlx::PgPool,
     schema: String,
@@ -652,7 +641,19 @@ async fn flush_loop(
     metrics_callback: Option<MetricsCallback>,
     flushed_tx: watch::Sender<Option<CVRVersion>>,
     is_flushing: Arc<AtomicBool>,
-) {
+}
+
+async fn flush_loop(context: FlushLoopContext) {
+    let FlushLoopContext {
+        state,
+        pool,
+        schema,
+        cvr_id,
+        fail_service,
+        metrics_callback,
+        flushed_tx,
+        is_flushing,
+    } = context;
     loop {
         let (pending_clone, pending_version) = {
             let mut state = state.lock().await;
@@ -754,7 +755,7 @@ async fn flush_one_iteration(
     // 2. Process deletes and inserts.
     let mut inserts: Vec<RowsRow> = Vec::new();
 
-    for (_id_str, (id, row)) in pending {
+    for (id, row) in pending.values() {
         match row {
             None => {
                 let delete_sql = format!(
@@ -830,21 +831,30 @@ async fn flush_one_iteration(
 }
 
 /// The catchup streaming task. Owns the transaction and sends pages through a channel.
-async fn catchup_task(
-    pool: &sqlx::PgPool,
-    schema: &str,
-    cvr_id: &str,
-    start: &str,
-    end: &str,
-    current_str: &str,
-    sql: &str,
+struct CatchupTaskContext {
+    pool: sqlx::PgPool,
+    schema: String,
+    cvr_id: String,
+    start: String,
+    end: String,
+    current_str: String,
+    sql: String,
     use_exclude: bool,
     exclude_query_hashes: Vec<String>,
     page_sender: mpsc::Sender<Result<Vec<RowsRow>, String>>,
-) {
-    use futures_util::StreamExt;
+}
 
-    let result = catchup_task_inner(
+async fn catchup_task(context: CatchupTaskContext) {
+    let result = catchup_task_inner(&context).await;
+
+    if let Err(e) = result {
+        let _ = context.page_sender.send(Err(e)).await;
+    }
+    // Sender drops here — signals "done" to the receiver.
+}
+
+async fn catchup_task_inner(context: &CatchupTaskContext) -> Result<(), String> {
+    let CatchupTaskContext {
         pool,
         schema,
         cvr_id,
@@ -853,29 +863,9 @@ async fn catchup_task(
         current_str,
         sql,
         use_exclude,
-        &exclude_query_hashes,
-        &page_sender,
-    )
-    .await;
-
-    if let Err(e) = result {
-        let _ = page_sender.send(Err(e)).await;
-    }
-    // Sender drops here — signals "done" to the receiver.
-}
-
-async fn catchup_task_inner(
-    pool: &sqlx::PgPool,
-    schema: &str,
-    cvr_id: &str,
-    start: &str,
-    end: &str,
-    current_str: &str,
-    sql: &str,
-    use_exclude: bool,
-    exclude_query_hashes: &[String],
-    page_sender: &mpsc::Sender<Result<Vec<RowsRow>, String>>,
-) -> Result<(), String> {
+        exclude_query_hashes,
+        page_sender,
+    } = context;
     // Begin READ ONLY transaction (matches Mode.READONLY = REPEATABLE READ READ ONLY).
     let mut tx = pool
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -906,11 +896,13 @@ async fn catchup_task_inner(
         .await
         .map_err(|e| format!("checkVersion query: {}", e))?;
 
-    let actual_version = version_row.map(|(v,)| v).unwrap_or_default(); // EMPTY_CVR_VERSION.stateVersion = ""
+    let actual_version = version_row
+        .map(|(v,)| v)
+        .unwrap_or_else(|| crate::version::EMPTY_CVR_VERSION.state_version.clone());
 
-    if actual_version != current_str {
+    if actual_version != *current_str {
         // Version mismatch — abort (matches TS checkVersion throwing CVRVersionMismatch).
-        let _ = sqlx::query("ROLLBACK").execute(&mut *tx).await;
+        let _ = tx.rollback().await;
         return Err(format!(
             "CVR version mismatch: expected {}, got {}",
             current_str, actual_version
@@ -922,7 +914,7 @@ async fn catchup_task_inner(
         .bind(cvr_id)
         .bind(start)
         .bind(end);
-    if use_exclude {
+    if *use_exclude {
         let arr: Vec<String> = exclude_query_hashes.to_vec();
         query_builder = query_builder.bind(arr);
     }
@@ -935,17 +927,16 @@ async fn catchup_task_inner(
         match row_result {
             Ok(db_row) => {
                 chunk.push(db_row.into());
-                if chunk.len() >= CATCHUP_PAGE_SIZE {
-                    if page_sender
+                if chunk.len() >= CATCHUP_PAGE_SIZE
+                    && page_sender
                         .send(Ok(std::mem::take(&mut chunk)))
                         .await
                         .is_err()
-                    {
-                        // Consumer dropped — abort.
-                        drop(stream);
-                        let _ = sqlx::query("ROLLBACK").execute(&mut *tx).await;
-                        return Ok(());
-                    }
+                {
+                    // Consumer dropped — abort.
+                    drop(stream);
+                    let _ = tx.rollback().await;
+                    return Ok(());
                 }
             }
             Err(e) => {
@@ -964,12 +955,12 @@ async fn catchup_task_inner(
     }
 
     if let Some(e) = stream_error {
-        let _ = sqlx::query("ROLLBACK").execute(&mut *tx).await;
+        let _ = tx.rollback().await;
         return Err(e);
     }
 
     // Commit (doesn't matter for READ ONLY, but matches TS reader.setDone()).
-    let _ = sqlx::query("COMMIT").execute(&mut *tx).await;
+    tx.commit().await.map_err(|e| format!("commit tx: {e}"))?;
 
     Ok(())
 }
@@ -987,7 +978,7 @@ mod tests {
             id: RowID {
                 schema: schema.to_string(),
                 table: table.to_string(),
-                row_key: row_key,
+                row_key,
             },
             row_version: version.to_string(),
             patch_version: CVRVersion {
@@ -1113,6 +1104,10 @@ mod tests {
             res.is_ok(),
             "apply(flushed=true) deadlocked — it re-locked the non-reentrant state Mutex"
         );
-        assert_eq!(res.unwrap().unwrap(), 1, "the applied row should be in cache");
+        assert_eq!(
+            res.unwrap().unwrap(),
+            1,
+            "the applied row should be in cache"
+        );
     }
 }

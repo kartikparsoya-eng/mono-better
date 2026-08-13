@@ -156,6 +156,16 @@ function makeFactories(
 }
 
 function setupSyncer(lc: LogContext, config: ZeroConfig) {
+  const {
+    app = {id: 'test-app', publications: []},
+    shard = {num: 0},
+    ...remainingConfig
+  } = config;
+  const completeConfig: ZeroConfig = {
+    ...remainingConfig,
+    app,
+    shard,
+  };
   const mutagens: MutagenService[] = [];
   const pushers: PusherService[] = [];
   const contextManagers = new Map<string, ConnectionContextManagerImpl>();
@@ -166,7 +176,7 @@ function setupSyncer(lc: LogContext, config: ZeroConfig) {
     contextManagers,
   );
   const validateLegacyJWT: ValidateLegacyJWT | undefined =
-    jwt.tokenConfigOptions(config.auth ?? {}).length === 1
+    jwt.tokenConfigOptions(completeConfig.auth ?? {}).length === 1
       ? async (token, {userID}) => {
           if (!userID) {
             throw new Error('UserID is required for JWT validation.');
@@ -174,7 +184,7 @@ function setupSyncer(lc: LogContext, config: ZeroConfig) {
           return {
             type: 'jwt',
             raw: token,
-            decoded: await jwt.verifyToken(config.auth, token, {
+            decoded: await jwt.verifyToken(completeConfig.auth, token, {
               subject: userID,
             }),
           };
@@ -182,7 +192,7 @@ function setupSyncer(lc: LogContext, config: ZeroConfig) {
       : undefined;
   const syncer = new Syncer(
     lc,
-    config,
+    completeConfig,
     viewSyncerFactory,
     mutagenFactory,
     pusherFactory,

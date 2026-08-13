@@ -618,13 +618,17 @@ describe('view-syncer/cvr-store', () => {
     // base '01' and the latest matches the advanced head '03'.
     const versions = rows.map(r => r.patchVersion);
     expect(versions[0]).toBe('01');
-    expect(versions[versions.length - 1]).toBe('03');
+    expect(versions.at(-1)).toBe('03');
 
     // And a base-version catchup that stops BELOW head must still detect a
     // genuinely concurrent head advance (guards against the version-comparison
     // regression going the other way — treating base<head as always-safe).
     await expect(
-      catchupRows({stateVersion: '00'}, {stateVersion: '02'}, {stateVersion: '02'}),
+      catchupRows(
+        {stateVersion: '00'},
+        {stateVersion: '02'},
+        {stateVersion: '02'},
+      ),
     ).rejects.toThrowErrorMatchingInlineSnapshot(
       `[ConcurrentModificationException: CVR has been concurrently modified. Expected 02, got 03]`,
     );

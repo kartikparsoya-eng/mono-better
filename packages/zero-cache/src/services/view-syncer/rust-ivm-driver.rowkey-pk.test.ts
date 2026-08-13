@@ -1,7 +1,7 @@
 import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
 import {describe, expect, test} from 'vitest';
-import type {LiteAndZqlSpec} from '../../db/specs.ts';
 import type {PrimaryKey} from '../../../../zero-protocol/src/primary-key.ts';
+import type {LiteAndZqlSpec} from '../../db/specs.ts';
 import {buildNapiTableSpecs} from './rust-ivm-driver.ts';
 
 // Regression + discovery guard for the rowKey primary-key derivation bug.
@@ -73,7 +73,13 @@ describe('rust-ivm-driver buildNapiTableSpecs rowKey PK derivation', () => {
   // "engine PK == client PK for every client-schema table" always holds. Any future
   // regression in the derivation (not just line 449) fails here.
   test('property: engine PK always equals the client PK for client-schema tables', () => {
-    const names = ['messageId', 'conversationId', 'reactionId', 'countId', 'id'];
+    const names = [
+      'messageId',
+      'conversationId',
+      'reactionId',
+      'countId',
+      'id',
+    ];
     for (let seed = 0; seed < 200; seed++) {
       const tableSpecs = new Map<string, LiteAndZqlSpec>();
       const primaryKeys = new Map<string, PrimaryKey>();

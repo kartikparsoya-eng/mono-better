@@ -736,9 +736,9 @@ export function makeBinarySelectExprs(
 export function makeDownloadStatements(
   table: PublishedTableSpec,
   cols: string[],
-  sampleRate?: number | undefined,
-  maxRowsPerTable?: number | undefined,
-  selectExprs?: string[] | undefined,
+  sampleRate?: number,
+  maxRowsPerTable?: number,
+  selectExprs?: string[],
 ): DownloadStatements {
   const filterConditions = Object.values(table.publications)
     .map(({rowFilter}) => rowFilter)
@@ -834,8 +834,8 @@ function copy(
   from: PostgresTransaction,
   to: Database,
   textCopy: boolean,
-  sampleRate?: number | undefined,
-  maxRowsPerTable?: number | undefined,
+  sampleRate?: number,
+  maxRowsPerTable?: number,
 ) {
   if (textCopy) {
     return copyText(
@@ -858,8 +858,8 @@ async function copyBinary(
   status: DownloadStatus,
   from: PostgresTransaction,
   to: Database,
-  sampleRate?: number | undefined,
-  maxRowsPerTable?: number | undefined,
+  sampleRate?: number,
+  maxRowsPerTable?: number,
 ) {
   const start = performance.now();
   let flushTime = 0;
@@ -993,8 +993,8 @@ async function copyText(
   dbClient: PostgresDB,
   from: PostgresTransaction,
   to: Database,
-  sampleRate?: number | undefined,
-  maxRowsPerTable?: number | undefined,
+  sampleRate?: number,
+  maxRowsPerTable?: number,
 ) {
   const start = performance.now();
   let flushTime = 0;

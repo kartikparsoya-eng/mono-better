@@ -1,3 +1,4 @@
+/* oxlint-disable typescript/no-explicit-any -- planner tests inspect intentionally unplanned AST runtime fields */
 import './rust-ivm-addon-setup.ts'; // MUST be first: guarantees the wal2 addon.
 import {createRequire} from 'node:module';
 import {LogContext} from '@rocicorp/logger';

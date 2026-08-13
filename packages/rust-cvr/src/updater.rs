@@ -13,7 +13,9 @@
 //! records, the caller passes them in as a parameter (from the RowRecordCache).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cvr::{
     assert_not_internal, get_mutation_results_query, merge_ref_counts, new_query_record,
@@ -25,6 +27,7 @@ use crate::version::{CVRVersion, cmp_versions, max_version, one_after};
 
 /// Row records keyed by rowIDString for O(1) lookup.
 pub type RowRecordMap = HashMap<String, RowRecord>;
+type RowSetSignatureProvider = dyn Fn(&str) -> Option<u64> + Send + Sync;
 
 // ─── Base Updater ──────────────────────────────────────────────────────────
 
@@ -81,7 +84,7 @@ impl CVRUpdater {
     /// The caller (TS) is responsible for calling the real store flush.
     pub fn flush(
         &mut self,
-        last_connect_time: i64,
+        _last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
     ) -> (CVR, Option<CVRFlushStats>) {
@@ -206,10 +209,10 @@ impl CVRConfigDrivenUpdater {
     /// Set the profile ID.
     pub fn set_profile_id(&mut self, profile_id: &str) {
         if self.base.cvr.profile_id.as_deref() != Some(profile_id) {
-            if let Some(ref existing) = self.base.cvr.profile_id {
-                if !existing.starts_with("cg") {
-                    // Warning in TS — here we just proceed.
-                }
+            if let Some(ref existing) = self.base.cvr.profile_id
+                && !existing.starts_with("cg")
+            {
+                // Warning in TS — here we just proceed.
             }
             self.base.cvr.profile_id = Some(profile_id.to_string());
             self.base
@@ -328,7 +331,6 @@ impl CVRConfigDrivenUpdater {
             self.base.cvr.queries.insert(id.clone(), query.clone());
             self.base.store_ops.push(StoreOp::PutQuery(query.clone()));
 
-            let client = self.base.cvr.clients.get(client_id).unwrap().clone();
             self.base.store_ops.push(StoreOp::PutDesiredQuery {
                 version: new_version.clone(),
                 query_id: id.clone(),
@@ -520,12 +522,10 @@ impl CVRConfigDrivenUpdater {
 /// Mirrors the TS `CVRQueryDrivenUpdater` class.
 pub struct CVRQueryDrivenUpdater {
     pub base: CVRUpdater,
-    state_version: String, // LexiVersion string
-
     removed_or_executed_query_ids: HashSet<String>,
     pub received_rows: HashMap<String, Option<RefCounts>>, // keyed by rowIDString
     last_patches: HashMap<String, RowPatchInfo>,           // keyed by rowIDString
-    row_set_signature_provider: Option<Box<dyn Fn(&str) -> Option<u64> + Send + Sync>>,
+    row_set_signature_provider: Option<Box<RowSetSignatureProvider>>,
 
     // Whether trackQueries has been called.
     tracked: bool,
@@ -536,14 +536,14 @@ impl CVRQueryDrivenUpdater {
         cvr: CVR,
         state_version: String,
         replica_version: String,
-        row_set_signature_provider: Option<Box<dyn Fn(&str) -> Option<u64> + Send + Sync>>,
+        row_set_signature_provider: Option<Box<RowSetSignatureProvider>>,
     ) -> Self {
         let cvr_replica = cvr.replica_version.clone();
         let mut base = CVRUpdater::new(cvr, Some(replica_version.clone()));
 
         // Assert: replica version must be >= cvr.replicaVersion
         assert!(
-            cvr_replica.as_ref().map(|r| r.as_str()) <= Some(replica_version.as_str()),
+            cvr_replica.as_deref() <= Some(replica_version.as_str()),
             "Cannot sync from an older replicaVersion"
         );
 
@@ -565,7 +565,6 @@ impl CVRQueryDrivenUpdater {
 
         Self {
             base,
-            state_version,
             removed_or_executed_query_ids: HashSet::new(),
             received_rows: HashMap::new(),
             last_patches: HashMap::new(),
@@ -605,11 +604,6 @@ impl CVRQueryDrivenUpdater {
             let patches = self.track_removed(id);
             query_patches.extend(patches);
         }
-
-        let version_bumped = cmp_versions(
-            &Some(self.base.orig.version.clone()),
-            &Some(self.base.cvr.version.clone()),
-        ) == Ordering::Less;
 
         let patches: Vec<PatchToVersion> = query_patches
             .into_iter()
@@ -748,10 +742,7 @@ impl CVRQueryDrivenUpdater {
 
             let new_row_version: Option<String> = merged.as_ref().and_then(|_| version.clone());
             let patch_version = match existing {
-                Some(e)
-                    if e.row_version
-                        == new_row_version.as_ref().map(|s| s.as_str()).unwrap_or("") =>
-                {
+                Some(e) if e.row_version == new_row_version.as_deref().unwrap_or("") => {
                     e.patch_version.clone()
                 }
                 _ => self.assert_new_version(),
@@ -814,7 +805,7 @@ impl CVRQueryDrivenUpdater {
                             Some(lp) => lp
                                 .row_version
                                 .as_deref()
-                                .map_or(true, |lrv| lrv < rv.as_str()),
+                                .is_none_or(|lrv| lrv < rv.as_str()),
                             None => true,
                         };
                         if should_send {
@@ -1011,7 +1002,7 @@ mod tests {
         let mut updater = CVRConfigDrivenUpdater::new(cvr, shard);
 
         updater.ensure_client("client1");
-        let ops1 = updater.base.drain_store_ops();
+        let _ops1 = updater.base.drain_store_ops();
         updater.ensure_client("client1");
         let ops2 = updater.base.drain_store_ops();
 
@@ -1287,7 +1278,7 @@ mod tests {
         cvr.queries.insert("hash1".to_string(), query);
 
         let mut updater = make_query_driven_updater(cvr, "v2");
-        let (version, patches) = updater.track_queries(&[("hash1", "th1")], &[]);
+        let (_version, patches) = updater.track_queries(&[("hash1", "th1")], &[]);
 
         // Should produce a got query patch
         assert_eq!(patches.len(), 1);
@@ -1375,7 +1366,7 @@ mod tests {
 
     #[test]
     fn test_received_unref_row() {
-        let mut cvr = make_test_cvr();
+        let cvr = make_test_cvr();
         let mut updater = make_query_driven_updater(cvr, "v2");
         updater.track_queries(&[], &[]);
 
@@ -1490,8 +1481,7 @@ mod tests {
         });
         cvr.queries.insert("hash1".to_string(), query);
 
-        let provider: Box<dyn Fn(&str) -> Option<u64> + Send + Sync> =
-            Box::new(|_id: &str| Some(12345u64));
+        let provider: Box<RowSetSignatureProvider> = Box::new(|_id: &str| Some(12345u64));
 
         let mut updater =
             CVRQueryDrivenUpdater::new(cvr, "v2".to_string(), "r1".to_string(), Some(provider));

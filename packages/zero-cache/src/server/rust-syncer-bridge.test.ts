@@ -68,6 +68,12 @@ describe('rustSyncerEnv', () => {
     app: {id: 'myapp'},
     shard: {num: 2},
     auth: {secret: 's3cret'},
+    query: {
+      url: ['https://api.example/query'],
+      apiKey: 'query-key',
+      allowedClientHeaders: ['x-request-id'],
+      forwardCookies: true,
+    },
   };
 
   test('maps resolved config onto the env names main.rs reads', () => {
@@ -82,6 +88,10 @@ describe('rustSyncerEnv', () => {
       ZERO_APP_ID: 'myapp',
       SHARD: '2',
       AUTH_SECRET: 's3cret',
+      QUERY_URLS_JSON: '["https://api.example/query"]',
+      QUERY_API_KEY: 'query-key',
+      QUERY_ALLOWED_CLIENT_HEADERS_JSON: '["x-request-id"]',
+      QUERY_FORWARD_COOKIES: 'true',
     });
   });
 
@@ -112,6 +122,21 @@ describe('rustSyncerEnv', () => {
     expect(env.AUTH_JWK).toBe('{"kty":"oct"}');
     expect(env.AUTH_JWKS_URL).toBe('https://jwks');
     expect(env.AUTH_SECRET).toBeUndefined();
+  });
+
+  test('uses the legacy getQueries config when query has no URL', () => {
+    const env = rustSyncerEnv(
+      {
+        ...base,
+        query: {url: undefined},
+        getQueries: {url: ['https://legacy.example/query']},
+      },
+      'serving',
+      3100,
+      3200,
+      15,
+    );
+    expect(env.QUERY_URLS_JSON).toBe('["https://legacy.example/query"]');
   });
 });
 

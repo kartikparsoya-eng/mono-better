@@ -94,10 +94,10 @@ pub fn get_connect_params(
 pub fn extract_protocol_version(path: &str) -> Option<u32> {
     let parts: Vec<&str> = path.split('/').collect();
     for part in parts {
-        if let Some(num_str) = part.strip_prefix('v') {
-            if let Ok(num) = num_str.parse::<u32>() {
-                return Some(num);
-            }
+        if let Some(num_str) = part.strip_prefix('v')
+            && let Ok(num) = num_str.parse::<u32>()
+        {
+            return Some(num);
         }
     }
     None
@@ -129,13 +129,58 @@ fn get_integer(
     required: bool,
 ) -> Result<i64, ConnectParamsError> {
     match get_string(params, name, required)? {
-        Some(v) => v
-            .parse::<i64>()
-            .map_err(|_| ConnectParamsError::InvalidInt { name, value: v }),
+        // TypeScript's URLParams.getInteger() uses parseInt(), which accepts a
+        // numeric prefix (notably fractional performance.now()-style `ts`
+        // values). Match that behavior instead of Rust's strict i64 parser.
+        Some(v) => parse_js_integer(&v).ok_or(ConnectParamsError::InvalidInt { name, value: v }),
         None => Ok(0),
     }
 }
 
+/// The subset of JavaScript `parseInt(value)` relevant to URL parameters:
+/// trim leading whitespace/sign, honor the optional `0x` prefix, and stop at
+/// the first invalid digit. This deliberately parses `"123.9"` as `123`.
+fn parse_js_integer(value: &str) -> Option<i64> {
+    let value = value.trim_start();
+    let (negative, unsigned) = match value.as_bytes().first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let (radix, digits) = if unsigned.starts_with("0x") || unsigned.starts_with("0X") {
+        (16, &unsigned[2..])
+    } else {
+        (10, unsigned)
+    };
+    let digit_len = digits
+        .bytes()
+        .take_while(|byte| match radix {
+            16 => byte.is_ascii_hexdigit(),
+            _ => byte.is_ascii_digit(),
+        })
+        .count();
+    if digit_len == 0 {
+        return None;
+    }
+    let magnitude = i128::from_str_radix(&digits[..digit_len], radix).ok()?;
+    let signed = if negative { -magnitude } else { magnitude };
+    i64::try_from(signed).ok()
+}
+
 fn get_boolean(params: &HashMap<String, String>, name: &str) -> bool {
     params.get(name).map(|s| s.as_str()) == Some("true")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_js_integer;
+
+    #[test]
+    fn integer_parsing_matches_typescript_parse_int() {
+        assert_eq!(parse_js_integer("1786564382909.802"), Some(1786564382909));
+        assert_eq!(parse_js_integer("  -42tail"), Some(-42));
+        assert_eq!(parse_js_integer("0x10"), Some(16));
+        assert_eq!(parse_js_integer("1e3"), Some(1));
+        assert_eq!(parse_js_integer("not-a-number"), None);
+    }
 }

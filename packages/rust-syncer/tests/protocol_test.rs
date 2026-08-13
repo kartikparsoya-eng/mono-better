@@ -21,7 +21,10 @@ fn test_protocol_version_is_51() {
 #[test]
 fn test_min_supported_is_less_than_protocol_version() {
     // From protocol-version.ts: assert(MIN < PROTOCOL_VERSION)
-    assert!(MIN_SERVER_SUPPORTED_SYNC_PROTOCOL < PROTOCOL_VERSION);
+    assert!(
+        std::hint::black_box(MIN_SERVER_SUPPORTED_SYNC_PROTOCOL)
+            < std::hint::black_box(PROTOCOL_VERSION)
+    );
 }
 
 // ─── connect.test.ts: encode/decode round-trip ─────────────────────────────

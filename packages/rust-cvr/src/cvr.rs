@@ -45,10 +45,10 @@ pub fn merge_ref_counts(
         Some(existing) => {
             // Index 0: existing (with remove_hashes filter)
             for (hash, count) in existing {
-                if let Some(rh) = remove_hashes {
-                    if rh.contains(hash) {
-                        continue;
-                    }
+                if let Some(rh) = remove_hashes
+                    && rh.contains(hash)
+                {
+                    continue;
                 }
                 let val = merged.get(hash).copied().unwrap_or(0) + count;
                 if val == 0 {

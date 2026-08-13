@@ -26,6 +26,16 @@ export type RustSyncerConfig = {
         jwksUrl?: string | undefined;
       }
     | undefined;
+  query?: RustSyncerFetchConfig | undefined;
+  /** @deprecated Legacy name retained by normalized 1.7 configs. */
+  getQueries?: RustSyncerFetchConfig | undefined;
+};
+
+type RustSyncerFetchConfig = {
+  url?: readonly string[] | undefined;
+  apiKey?: string | undefined;
+  allowedClientHeaders?: readonly string[] | undefined;
+  forwardCookies?: boolean | undefined;
 };
 
 /**
@@ -66,6 +76,23 @@ export function rustSyncerEnv(
   }
   if (jwksUrl) {
     out.AUTH_JWKS_URL = jwksUrl;
+  }
+  // Match syncer.ts#getCustomQueryConfig: the modern `query` URL wins, with
+  // `getQueries` retained as the 1.7 compatibility fallback. Serialize arrays
+  // explicitly so Rust receives the normalized TS values rather than reparsing
+  // the original process environment.
+  const query = config.query?.url ? config.query : config.getQueries;
+  if (query?.url?.length) {
+    out.QUERY_URLS_JSON = JSON.stringify(query.url);
+    if (query.apiKey) {
+      out.QUERY_API_KEY = query.apiKey;
+    }
+    if (query.allowedClientHeaders) {
+      out.QUERY_ALLOWED_CLIENT_HEADERS_JSON = JSON.stringify(
+        query.allowedClientHeaders,
+      );
+    }
+    out.QUERY_FORWARD_COOKIES = String(query.forwardCookies ?? false);
   }
   return out;
 }

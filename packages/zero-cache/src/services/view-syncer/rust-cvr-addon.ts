@@ -33,7 +33,9 @@ export function getRustCvrAddon<T = Record<string, unknown>>(): T | null {
       '../../../../packages/rust-cvr/napi/rust-cvr.node';
     cachedAddon = nodeRequire(addonPath) as Record<string, unknown>;
   } catch (e) {
-    console.error('[rust-cvr] Failed to load addon:', (e as Error).message);
+    process.stderr.write(
+      `[rust-cvr] Failed to load addon: ${(e as Error).message}\n`,
+    );
     cachedAddon = null;
   }
 

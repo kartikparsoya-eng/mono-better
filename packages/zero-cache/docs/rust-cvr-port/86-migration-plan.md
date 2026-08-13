@@ -137,24 +137,24 @@ Do **not** proceed to the next phase until:
 
 ## Rollback triggers (any one forces immediate flag-off)
 
-| Trigger | Detection | Action |
-|---|---|---|
-| CVR load failures spike | `sync.cvr.load.count{error=~"true"}` > 5/min sustained for 2 min | Flag to 0, page on-call |
-| Poke body byte-diffs | Differential smoke test in CI fails | Halt rollout, fix forward |
-| Row refCounts divergence | `sync.cvr.rows-flushed` jumps >20% without query-set change | Flag to 0, investigate |
-| Poke chain hang | `sync.poke.time` P99 > 30s | Flag to 0, page on-call |
-| Bigint out-of-range crash | Rust panic log contains `out of safe integer range` | Flag to 0, patch, retry |
+| Trigger                   | Detection                                                        | Action                    |
+| ------------------------- | ---------------------------------------------------------------- | ------------------------- |
+| CVR load failures spike   | `sync.cvr.load.count{error=~"true"}` > 5/min sustained for 2 min | Flag to 0, page on-call   |
+| Poke body byte-diffs      | Differential smoke test in CI fails                              | Halt rollout, fix forward |
+| Row refCounts divergence  | `sync.cvr.rows-flushed` jumps >20% without query-set change      | Flag to 0, investigate    |
+| Poke chain hang           | `sync.poke.time` P99 > 30s                                       | Flag to 0, page on-call   |
+| Bigint out-of-range crash | Rust panic log contains `out of safe integer range`              | Flag to 0, patch, retry   |
 
 ## Risk register
 
-| Risk | Phase | Mitigation |
-|---|---|---|
-| Byte-diff in poke bodies | D | Diff-test against the existing body-shape snapshot fixtures |
-| Slower than TS | All | Benchmarks per phase; do not ship if >10% regression on `sync.cvr.flush-time` or `sync.poke.time` |
-| Bigint coercion drift | B, C, D | Proptest invariants on `merge-ref-counts` and `RowID` keying |
-| Deadlock in poke chain | D | Drop-impl releases chain; watchdog in TS side closes connection after 60s without frame |
-| Postgres silent corruption | E | All writes in single transaction; ownership check on every flush |
-| Bigint literal in prepared-statement bind | E | Verify `sqlx` correctly serializes `i64::MAX`; if not, fall back to `String` bind and `CAST` |
+| Risk                                      | Phase   | Mitigation                                                                                        |
+| ----------------------------------------- | ------- | ------------------------------------------------------------------------------------------------- |
+| Byte-diff in poke bodies                  | D       | Diff-test against the existing body-shape snapshot fixtures                                       |
+| Slower than TS                            | All     | Benchmarks per phase; do not ship if >10% regression on `sync.cvr.flush-time` or `sync.poke.time` |
+| Bigint coercion drift                     | B, C, D | Proptest invariants on `merge-ref-counts` and `RowID` keying                                      |
+| Deadlock in poke chain                    | D       | Drop-impl releases chain; watchdog in TS side closes connection after 60s without frame           |
+| Postgres silent corruption                | E       | All writes in single transaction; ownership check on every flush                                  |
+| Bigint literal in prepared-statement bind | E       | Verify `sqlx` correctly serializes `i64::MAX`; if not, fall back to `String` bind and `CAST`      |
 
 ## What does NOT ship with this port
 

@@ -3,13 +3,19 @@ name = "rust-syncer"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Local/system-SQLite tests need WAL fallback. Production builds disable
+# defaults and require the WAL2 replica format exactly like the TS snapshotter.
+default = ["non-wal2-test-support"]
+non-wal2-test-support = ["rust-ivm/non-wal2-test-support"]
+
 [[bin]]
 name = "rust-syncer"
 path = "src/main.rs"
 
 [dependencies]
 rust-cvr = { path = "../rust-cvr" }
-rust-ivm = { path = "../rust-ivm" }
+rust-ivm = { path = "../rust-ivm", default-features = false }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }

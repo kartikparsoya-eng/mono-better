@@ -20,6 +20,39 @@ use crate::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
 use rusqlite::Connection;
 use std::collections::HashMap;
 
+/// Immutable replica creation version and the live replication watermark.
+/// These are deliberately distinct: a restored replica keeps its creation
+/// version while its watermark advances on every replicated transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplicaVersions {
+    pub replica_version: String,
+    pub watermark: String,
+}
+
+/// Read the subscription versions from the same joined row used by the
+/// TypeScript `getSubscriptionState()` implementation.
+pub fn read_replica_versions(conn: &Connection) -> Result<ReplicaVersions, String> {
+    conn.query_row(
+        r#"SELECT c."replicaVersion", s."stateVersion"
+           FROM "_zero.replicationConfig" AS c
+           JOIN "_zero.replicationState" AS s ON c."lock" = s."lock""#,
+        [],
+        |row| {
+            Ok(ReplicaVersions {
+                replica_version: row.get(0)?,
+                watermark: row.get(1)?,
+            })
+        },
+    )
+    .map_err(|e| format!("read replica subscription state: {e}"))
+}
+
+pub fn read_replica_versions_from_path(replica_path: &str) -> Result<ReplicaVersions, String> {
+    let conn =
+        Connection::open(replica_path).map_err(|e| format!("open replica {replica_path}: {e}"))?;
+    read_replica_versions(&conn)
+}
+
 const NOT_NULL_ATTRIBUTE: &str = "|NOT_NULL";
 const TEXT_ENUM_ATTRIBUTE: &str = "|TEXT_ENUM";
 const TEXT_ARRAY_ATTRIBUTE: &str = "|TEXT_ARRAY";
@@ -44,6 +77,109 @@ pub fn compute_table_specs(conn: &Connection) -> Result<Vec<IvmTableSpec>, Strin
         }
     }
     Ok(specs)
+}
+
+/// Validate the client-declared schema against the syncable replica schema.
+/// This covers the read-path invariants enforced by TS `checkClientSchema`:
+/// referenced tables/columns must exist, value types must agree, and the client
+/// primary key must correspond to a replicated unique key.
+pub fn validate_client_schema(
+    client_schema: &serde_json::Value,
+    specs: &[IvmTableSpec],
+) -> Result<(), String> {
+    let tables = client_schema
+        .get("tables")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "client schema must contain a tables object".to_string())?;
+    if specs.is_empty() {
+        return Err(
+            "No tables have been synced from upstream. Check the upstream replication setup."
+                .to_string(),
+        );
+    }
+    let by_name: HashMap<&str, &IvmTableSpec> =
+        specs.iter().map(|s| (s.table.as_str(), s)).collect();
+    let mut errors = Vec::new();
+    for (table_name, client_table) in tables {
+        let Some(server) = by_name.get(table_name.as_str()) else {
+            errors.push(format!(
+                "The \"{table_name}\" table is not replicated or syncable."
+            ));
+            continue;
+        };
+        let Some(columns) = client_table
+            .get("columns")
+            .and_then(serde_json::Value::as_object)
+        else {
+            errors.push(format!("The \"{table_name}\" table has no columns object."));
+            continue;
+        };
+        for (column, client_column) in columns {
+            match server.columns.get(column) {
+                None => errors.push(format!(
+                    "The \"{table_name}\".\"{column}\" column is not replicated or supported."
+                )),
+                Some(server_column) => {
+                    let client_type = client_column
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if client_type != server_column.r#type {
+                        errors.push(format!(
+                            "The \"{table_name}\".\"{column}\" type \"{}\" does not match client type \"{client_type}\".",
+                            server_column.r#type
+                        ));
+                    }
+                }
+            }
+        }
+        let client_pk: Option<Vec<String>> = client_table
+            .get("primaryKey")
+            .and_then(serde_json::Value::as_array)
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            });
+        let Some(mut client_pk) = client_pk else {
+            errors.push(format!(
+                "The \"{table_name}\" table's client schema does not specify a primary key."
+            ));
+            continue;
+        };
+        client_pk.sort();
+        let candidates: Vec<Vec<String>> = server
+            .unique_keys
+            .clone()
+            .unwrap_or_else(|| vec![server.primary_key.clone()])
+            .into_iter()
+            .filter(|key| {
+                key == &server.primary_key
+                    || key.iter().all(|column| {
+                        server
+                            .columns
+                            .get(column)
+                            .is_some_and(|schema| !schema.optional)
+                    })
+            })
+            .collect();
+        if !candidates.iter().any(|key| {
+            let mut key = key.clone();
+            key.sort();
+            key == client_pk
+        }) {
+            errors.push(format!(
+                "The \"{table_name}\" table's primary key <{}> is not a replicated unique key.",
+                client_pk.join(",")
+            ));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 /// Read the UNIQUE indexes for every syncable table, grouped as
@@ -168,8 +304,7 @@ fn read_table_spec(
     let mut columns = std::collections::HashMap::new();
     // Columns that are NOT NULL upstream (eligible to form a row key). A key over
     // a nullable column can't uniquely identify a row, so only these are usable.
-    let mut not_null_columns: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut not_null_columns: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Columns marked as PRIMARY KEY by `pragma_table_info` (`pk > 0`). These are
     // treated as non-null even if the lite type omitted `|NOT_NULL`, matching TS
     // `fullTable.primaryKey?.includes(col)`.
@@ -339,6 +474,82 @@ mod tests {
     }
 
     #[test]
+    fn reads_immutable_replica_version_separately_from_watermark() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (
+              lock INTEGER PRIMARY KEY, replicaVersion TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.replicationState" (
+              lock INTEGER PRIMARY KEY, stateVersion TEXT NOT NULL
+            );
+            INSERT INTO "_zero.replicationConfig" VALUES (1, 'base-01');
+            INSERT INTO "_zero.replicationState" VALUES (1, 'head-99');
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_replica_versions(&conn).unwrap(),
+            ReplicaVersions {
+                replica_version: "base-01".to_string(),
+                watermark: "head-99".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn validates_client_schema_against_replica_specs() {
+        let spec = IvmTableSpec {
+            table: "users".to_string(),
+            columns: HashMap::from([
+                (
+                    "id".to_string(),
+                    IvmColumnSchema {
+                        r#type: "string".to_string(),
+                        optional: false,
+                    },
+                ),
+                (
+                    "email".to_string(),
+                    IvmColumnSchema {
+                        r#type: "string".to_string(),
+                        optional: true,
+                    },
+                ),
+            ]),
+            primary_key: vec!["id".to_string()],
+            unique_keys: Some(vec![vec!["id".to_string()], vec!["email".to_string()]]),
+            min_row_version: None,
+        };
+        let valid = serde_json::json!({
+            "tables": {"users": {"columns": {"id": {"type": "string"}}, "primaryKey": ["id"]}}
+        });
+        assert!(validate_client_schema(&valid, std::slice::from_ref(&spec)).is_ok());
+
+        let nullable_unique_key = serde_json::json!({
+            "tables": {"users": {
+                "columns": {"email": {"type": "string"}},
+                "primaryKey": ["email"]
+            }}
+        });
+        assert!(
+            validate_client_schema(&nullable_unique_key, std::slice::from_ref(&spec))
+                .unwrap_err()
+                .contains("not a replicated unique key")
+        );
+
+        let wrong = serde_json::json!({
+            "tables": {"users": {"columns": {"id": {"type": "number"}}, "primaryKey": ["id"]}}
+        });
+        assert!(
+            validate_client_schema(&wrong, &[spec])
+                .unwrap_err()
+                .contains("does not match")
+        );
+    }
+
+    #[test]
     fn reads_replica_table_specs() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -366,7 +577,11 @@ mod tests {
             .unwrap();
 
         let specs = compute_table_specs(&conn).unwrap();
-        assert_eq!(specs.len(), 1, "only the keyed user table should be included");
+        assert_eq!(
+            specs.len(),
+            1,
+            "only the keyed user table should be included"
+        );
         let users = &specs[0];
         assert_eq!(users.table, "users");
         // PK is derived from the unique index, not a declared SQL PRIMARY KEY.

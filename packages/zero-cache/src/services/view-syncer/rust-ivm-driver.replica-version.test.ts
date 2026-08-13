@@ -4,13 +4,16 @@ import {afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {testLogConfig} from '../../../../otel/src/test-log-config.ts';
 import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
 import {createSchema} from '../../../../zero-schema/src/builder/schema-builder.ts';
-import {string, table} from '../../../../zero-schema/src/builder/table-builder.ts';
-import type {Database as DB} from '../../../../zqlite/src/db.ts';
-import {Database} from '../../../../zqlite/src/db.ts';
+import {
+  string,
+  table,
+} from '../../../../zero-schema/src/builder/table-builder.ts';
 import {
   CREATE_STORAGE_TABLE,
   DatabaseStorage,
 } from '../../../../zqlite/src/database-storage.ts';
+import type {Database as DB} from '../../../../zqlite/src/db.ts';
+import {Database} from '../../../../zqlite/src/db.ts';
 import {listTables} from '../../db/lite-tables.ts';
 import {InspectorDelegate} from '../../server/inspector-delegate.ts';
 import {DbFile} from '../../test/lite.ts';

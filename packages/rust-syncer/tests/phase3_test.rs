@@ -383,7 +383,7 @@ fn test_allows_multiple_validated_connections_matching_user_ids() {
 
 #[test]
 fn test_returned_contexts_stay_stable_across_updates() {
-    let (now, now_fn) = make_now_fn();
+    let (_now, now_fn) = make_now_fn();
     let mut manager =
         ConnectionContextManager::new(Some(5), Some(10), None, None, None, Some(now_fn));
 
@@ -486,7 +486,7 @@ fn test_returned_group_contexts_stay_stable() {
 
 #[test]
 fn test_does_not_demote_when_auth_unchanged_by_value() {
-    let (now, now_fn) = make_now_fn();
+    let (_now, now_fn) = make_now_fn();
     let mut manager =
         ConnectionContextManager::new(Some(5), Some(10), None, None, None, Some(now_fn));
 
@@ -522,7 +522,7 @@ fn test_does_not_demote_when_auth_unchanged_by_value() {
 
 #[test]
 fn test_demotes_only_connection_whose_auth_changes() {
-    let (now, now_fn) = make_now_fn();
+    let (_now, now_fn) = make_now_fn();
     let mut manager =
         ConnectionContextManager::new(Some(5), Some(10), None, None, None, Some(now_fn));
 
@@ -651,7 +651,6 @@ fn test_stores_normalized_fetch_context() {
             user_push_headers: Some(
                 [("x-push-header".to_string(), "push-value".to_string())].into(),
             ),
-            ..Default::default()
         },
     );
 
@@ -740,8 +739,8 @@ fn test_plans_maintenance_with_revalidation_and_retransform() {
     register_with_user(&mut manager, "c1", "ws1", "user-1");
     register_with_user(&mut manager, "c2", "ws2", "user-1");
     register_with_user(&mut manager, "c3", "ws3", "user-1");
-    validate(&mut manager, "c2", "ws2"); // insertion_order 2
-    validate(&mut manager, "c1", "ws1"); // insertion_order 1
+    validate(&mut manager, "c2", "ws2").unwrap(); // insertion_order 2
+    validate(&mut manager, "c1", "ws1").unwrap(); // insertion_order 1
     manager.set_shared_retransform_ready(true);
 
     // now=1000, revalidate_at=6000, retransform_at=3000
@@ -785,8 +784,8 @@ fn test_plans_maintenance_with_revalidation_and_retransform() {
     assert_eq!(plan.earliest_deadline_at, Some(6000));
 
     // Re-validate to push revalidate_at forward
-    let r1 = validate(&mut manager, "c2", "ws2").unwrap();
-    let r2 = validate(&mut manager, "c1", "ws1").unwrap();
+    validate(&mut manager, "c2", "ws2").unwrap();
+    validate(&mut manager, "c1", "ws1").unwrap();
 
     let plan = manager.plan_maintenance();
     assert_eq!(plan.due_revalidations.len(), 0);

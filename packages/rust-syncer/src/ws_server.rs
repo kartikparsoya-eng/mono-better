@@ -14,15 +14,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::accept_hdr_async_with_config;
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 /// Downstream message interval: slightly longer than client's 5s PING_INTERVAL.
 const DOWNSTREAM_MSG_INTERVAL_MS: u64 = 6000;
 /// Keepalive pong check interval: half of DOWNSTREAM_MSG_INTERVAL_MS.
 const KEEPALIVE_CHECK_INTERVAL_MS: u64 = 3000;
+const DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Configuration for the WebSocket server.
 #[derive(Clone)]
@@ -54,6 +58,16 @@ pub struct ConnectionContext {
 /// 5. Spawns the WS read task (forwards messages to a channel).
 /// 6. Returns the `ConnectionContext` for the CG thread to use.
 pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<ConnectionContext> {
+    accept_connection_with_limit(stream, DEFAULT_MAX_PAYLOAD_BYTES).await
+}
+
+/// Accept a connection while enforcing the configured message and frame cap.
+/// Applying the limit at the tungstenite layer bounds allocation before a
+/// payload reaches the router or its per-connection channels.
+pub async fn accept_connection_with_limit(
+    stream: tokio::net::TcpStream,
+    max_payload_bytes: usize,
+) -> Option<ConnectionContext> {
     // Capture the request path + headers during the handshake callback.
     let path = Arc::new(std::sync::Mutex::new(String::new()));
     let headers = Arc::new(std::sync::Mutex::new(
@@ -86,17 +100,21 @@ pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<Connecti
             .and_then(|v| v.split(',').next())
             .map(str::trim)
             .filter(|s| !s.is_empty())
+            && let Ok(value) = proto.parse()
         {
-            if let Ok(value) = proto.parse() {
-                response
-                    .headers_mut()
-                    .insert("sec-websocket-protocol", value);
-            }
+            response
+                .headers_mut()
+                .insert("sec-websocket-protocol", value);
         }
         Ok(response)
     };
 
-    let ws_stream = match accept_hdr_async(stream, callback).await {
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(max_payload_bytes.max(1)),
+        max_frame_size: Some(max_payload_bytes.max(1)),
+        ..WebSocketConfig::default()
+    };
+    let ws_stream = match accept_hdr_async_with_config(stream, callback, Some(ws_config)).await {
         Ok(ws) => ws,
         Err(e) => {
             tracing::warn!("WebSocket handshake failed: {e}");
@@ -136,8 +154,7 @@ pub async fn accept_connection(stream: tokio::net::TcpStream) -> Option<Connecti
     };
 
     // Validate protocol version.
-    if protocol_version > PROTOCOL_VERSION || protocol_version < MIN_SERVER_SUPPORTED_SYNC_PROTOCOL
-    {
+    if !(MIN_SERVER_SUPPORTED_SYNC_PROTOCOL..=PROTOCOL_VERSION).contains(&protocol_version) {
         let error = ErrorBody::version_not_supported(format!(
             "Server supports protocol versions {MIN_SERVER_SUPPORTED_SYNC_PROTOCOL} to {PROTOCOL_VERSION}, but client requested {protocol_version}"
         ));
@@ -195,7 +212,7 @@ async fn run_ws_writer(
                             tracing::error!("serialization error: {e}");
                             r#"["error",{"kind":"Internal","message":"serialization failed"}]"#.to_string()
                         });
-                        if ws_writer.send(Message::Text(text.into())).await.is_err() {
+                        if ws_writer.send(Message::Text(text)).await.is_err() {
                             break;
                         }
                         last_downstream_msg_time = Instant::now();
@@ -205,7 +222,7 @@ async fn run_ws_writer(
                         let text = serde_json::to_string(&msg).unwrap_or_else(|_| {
                             r#"["error",{"kind":"Internal","message":"error"}]"#.to_string()
                         });
-                        let _ = ws_writer.send(Message::Text(text.into())).await;
+                        let _ = ws_writer.send(Message::Text(text)).await;
                         let _ = ws_writer.send(Message::Close(Some(
                             tokio_tungstenite::tungstenite::protocol::CloseFrame {
                                 code: CloseCode::from(3000u16),
@@ -231,7 +248,7 @@ async fn run_ws_writer(
                     > Duration::from_millis(DOWNSTREAM_MSG_INTERVAL_MS)
                 {
                     let pong = serde_json::to_string(&pong_message()).unwrap_or_default();
-                    if ws_writer.send(Message::Text(pong.into())).await.is_err() {
+                    if ws_writer.send(Message::Text(pong)).await.is_err() {
                         break;
                     }
                     last_downstream_msg_time = Instant::now();
@@ -257,10 +274,10 @@ async fn run_ws_reader(
                 }
             }
             Ok(Message::Binary(data)) => {
-                if let Ok(text) = std::str::from_utf8(&data) {
-                    if upstream_tx.send(text.to_string()).await.is_err() {
-                        break;
-                    }
+                if let Ok(text) = std::str::from_utf8(&data)
+                    && upstream_tx.send(text.to_string()).await.is_err()
+                {
+                    break;
                 }
             }
             Ok(Message::Close(_)) => {
@@ -271,10 +288,34 @@ async fn run_ws_reader(
             Ok(Message::Pong(_)) => {}
             Ok(Message::Frame(_)) => {}
             Err(e) => {
-                tracing::warn!("WebSocket {ws_id} read error: {e}");
+                // Abrupt tab closes, mobile-network changes, and the client's
+                // intentional reconnect path commonly end without an RFC 6455
+                // close handshake. Node's `ws` reports these as ordinary
+                // connection closure; do the same instead of polluting the
+                // production warning/error signal during normal lifecycle churn.
+                if is_expected_disconnect(&e) {
+                    tracing::debug!("WebSocket {ws_id} disconnected: {e}");
+                } else {
+                    tracing::warn!("WebSocket {ws_id} read error: {e}");
+                }
                 break;
             }
         }
+    }
+}
+
+fn is_expected_disconnect(error: &WebSocketError) -> bool {
+    match error {
+        WebSocketError::ConnectionClosed | WebSocketError::AlreadyClosed => true,
+        WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        WebSocketError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
     }
 }
 
@@ -286,7 +327,7 @@ async fn send_error_and_close(
     let (mut writer, _reader) = ws_stream.split();
     let msg = error_message(&error);
     let text = serde_json::to_string(&msg).unwrap_or_default();
-    let _ = writer.send(Message::Text(text.into())).await;
+    let _ = writer.send(Message::Text(text)).await;
     let _ = writer
         .send(Message::Close(Some(
             tokio_tungstenite::tungstenite::protocol::CloseFrame {
@@ -313,7 +354,7 @@ where
     F: Fn(ConnectionContext) + Send + Sync + 'static,
 {
     let listener = bind_ws_listener(config.port).await?;
-    serve_ws(listener, handler).await
+    serve_ws_with_config(listener, config, handler).await
 }
 
 /// Serve the accept loop on an already-bound listener (see `bind_ws_listener`).
@@ -321,6 +362,30 @@ pub async fn serve_ws<F>(listener: TcpListener, handler: F) -> Result<(), std::i
 where
     F: Fn(ConnectionContext) + Send + Sync + 'static,
 {
+    serve_ws_with_config(
+        listener,
+        WsServerConfig {
+            port: 0,
+            max_payload_bytes: DEFAULT_MAX_PAYLOAD_BYTES,
+            compression: false,
+        },
+        handler,
+    )
+    .await
+}
+
+/// Serve an already-bound listener with explicit WebSocket resource limits.
+pub async fn serve_ws_with_config<F>(
+    listener: TcpListener,
+    config: WsServerConfig,
+    handler: F,
+) -> Result<(), std::io::Error>
+where
+    F: Fn(ConnectionContext) + Send + Sync + 'static,
+{
+    if config.compression {
+        tracing::warn!("WebSocket compression requested but is not supported by this server");
+    }
     let handler = Arc::new(handler);
 
     loop {
@@ -328,8 +393,10 @@ where
             Ok((stream, addr)) => {
                 tracing::debug!("TCP connection from {addr}");
                 let handler = handler.clone();
+                let max_payload_bytes = config.max_payload_bytes;
                 tokio::spawn(async move {
-                    if let Some(ctx) = accept_connection(stream).await {
+                    if let Some(ctx) = accept_connection_with_limit(stream, max_payload_bytes).await
+                    {
                         handler(ctx);
                     }
                 });
@@ -338,5 +405,28 @@ where
                 tracing::warn!("TCP accept error: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_normal_transport_disconnects_as_expected() {
+        assert!(is_expected_disconnect(&WebSocketError::ConnectionClosed));
+        assert!(is_expected_disconnect(&WebSocketError::Protocol(
+            ProtocolError::ResetWithoutClosingHandshake,
+        )));
+        assert!(is_expected_disconnect(&WebSocketError::Io(
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+        )));
+    }
+
+    #[test]
+    fn preserves_warnings_for_real_websocket_protocol_errors() {
+        assert!(!is_expected_disconnect(&WebSocketError::Protocol(
+            ProtocolError::InvalidOpcode(3),
+        )));
     }
 }

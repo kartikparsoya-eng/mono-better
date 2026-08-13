@@ -7,11 +7,11 @@
 
 TS splits mutation responsibilities:
 
-| Class | Used when | What it does |
-|---|---|---|
-| `CVRUpdater` | Any flush that just bumps `lastActive` / `ttlClock` | Base class with `flush()` and `_ensureNewVersion()` |
-| `CVRConfigDrivenUpdater` | Client connects, changes desired queries, adds/removes profileID, disconnects | Maintains `clients[]`, `queries[]` metadata; generates `Patch { type: 'query' }` for each desired/got change |
-| `CVRQueryDrivenUpdater` | Data actually arrives from the replicator; queries execute | Runs `trackQueries`, `received`, `deleteUnreferencedRows`, `flush`; generates `Patch { type: 'row' }` and handles refCounts |
+| Class                    | Used when                                                                     | What it does                                                                                                                |
+| ------------------------ | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `CVRUpdater`             | Any flush that just bumps `lastActive` / `ttlClock`                           | Base class with `flush()` and `_ensureNewVersion()`                                                                         |
+| `CVRConfigDrivenUpdater` | Client connects, changes desired queries, adds/removes profileID, disconnects | Maintains `clients[]`, `queries[]` metadata; generates `Patch { type: 'query' }` for each desired/got change                |
+| `CVRQueryDrivenUpdater`  | Data actually arrives from the replicator; queries execute                    | Runs `trackQueries`, `received`, `deleteUnreferencedRows`, `flush`; generates `Patch { type: 'row' }` and handles refCounts |
 
 Both are mutable (unlike the immutable `CVRSnapshot`), so the Rust port shouldn't try to make them immutable. Use a clean `&mut` API.
 
@@ -177,8 +177,8 @@ One-to-one port of `cvr.pg.test.ts` (~3300 LOC, larger than the src itself). Dir
 
 ## Risk register
 
-| Risk | Impact | Mitigation |
-|---|---|---|
-| `rowIDString`-as-key drifts from TS | HKMap lookups silently miss | Unit-test the canonicalization with the same JSON vectors TS uses |
-| `mergeRefCounts` property violations | RefCounts leak rows | Proptest invariants; byte-compare 10000 random cases TS-vs-Rust |
+| Risk                                          | Impact                                 | Mitigation                                                                                     |
+| --------------------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `rowIDString`-as-key drifts from TS           | HKMap lookups silently miss            | Unit-test the canonicalization with the same JSON vectors TS uses                              |
+| `mergeRefCounts` property violations          | RefCounts leak rows                    | Proptest invariants; byte-compare 10000 random cases TS-vs-Rust                                |
 | Flush ordering (signatures before base flush) | Signature drift; spurious re-execution | Explicit docstring + integration test with simulated `rowSetSignatureProvider` returning drift |
