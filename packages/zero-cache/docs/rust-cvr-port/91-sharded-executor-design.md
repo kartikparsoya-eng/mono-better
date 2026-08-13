@@ -59,6 +59,7 @@ By using `block_on` for I/O, a CG thread is **frozen** for the duration of every
 ### Mechanics
 
 - **Executors.** Spawn `K` OS threads at startup (default `K = available_cores`, configurable via e.g. `ZERO_SYNCER_SHARDS`). Each thread runs a **`tokio::runtime::Builder::new_current_thread()`** runtime driven with a **`LocalSet`**. A current-thread runtime can drive `!Send` futures (`spawn_local`), so the IVM engine lives there without ever crossing threads.
+- **CVR pool per executor (critical — see §5.1).** Each executor owns **its own `PgPool`, created on and driven by that executor's runtime**, sized `maxConns / K`. `K` pools × `maxConns/K` keeps the total connection budget bounded (the P0 fix) while ensuring every pool's connections are driven by the same runtime that `.await`s them. A single global pool created on a *different* runtime does **not** work with current-thread executors (proven below). This matches TS, where each sync-worker process has its own `cvrDB` pool.
 - **Placement.** A client group is assigned to a shard by `shard = hash(client_group_id) % K`, computed once. The assignment is stable for the CG's lifetime, so its `!Send` `SyncEngine` is **pinned to exactly one executor thread** — the `!Send` invariant is upheld by construction.
 - **Multiplexing.** Within a shard, many CGs run as concurrent async tasks (or a single `select!` loop over their inbound channels). CVR flush/load, JWKS, and custom-query HTTP are `.await`ed. While CG-A awaits Postgres, the executor runs CG-B, CG-C — no frozen threads, no wasted core.
 - **Compute.** IVM hydrate/advance runs inline on the shard thread (mandatory — `!Send`). With `K` shards on `K` cores this is **true multi-core compute parallelism**.
@@ -86,6 +87,22 @@ The engine is created on its shard thread and never leaves it. Nothing `.await`s
 
 ---
 
+## 5.1. Validated finding: current-thread executors REQUIRE per-executor pools
+
+Phase 1 (async CG loop, still one thread per CG) was implemented and measured on the ART capacity ladder against commit `353ff2488`. It **regressed** capacity hard: p95 at 10 conns went `529 ms → 44,546 ms`, and at 100 conns `100/100 opened → 0/100 opened` (cliff `10 → 0`). Container logs showed the cause directly:
+
+```
+sqlx::pool::acquire: acquired connection, but time to acquire exceeded slow threshold — 4–9 s
+config_and_hydrate failed: store flush: pool timed out while waiting for an open connection
+```
+
+**Root cause — cross-runtime I/O.** The shared `PgPool` was created on the main multi-thread runtime; its TCP connections' readiness is driven by that runtime's reactor. When a CG on its **own** `current_thread` runtime `.await`s `pool.acquire()`/a query, it polls connections whose readiness the CG's reactor never receives — a tokio "resource driven across runtimes" antipattern — so acquires stall for seconds and time out. The pre-Phase-1 `block_on` path was fast *precisely because* `handle.block_on(fut)` drove the future on the pool's own (main) runtime.
+
+**Consequences, now baked into the design:**
+- A current-thread executor must own **all** the I/O resources it awaits. → **per-executor pool** (§3), created on that executor's runtime.
+- **Phase 1 in isolation is a dead end** and was reverted from the branch. A `current_thread`-per-CG runtime cannot use a shared main-runtime pool (cross-runtime starvation) and cannot use per-CG pools (reinstates the P0 exhaustion, `N × maxConns`). Only the bounded `K`-executor model with `K` pools of `maxConns/K` resolves both.
+- Corollary: Phase 1 and Phase 2 are **not separable**. The async loop only pays off, and only becomes *correct*, once it runs on a bounded executor that owns its pool.
+
 ## 5. The one hazard: intra-shard head-of-line blocking
 
 Because a shard multiplexes many CGs on one thread, a large CPU-bound hydrate on CG-A stalls the other CGs sharing that executor until it yields.
@@ -100,8 +117,8 @@ Residual risk is bounded: worst case a shard behaves like *one* TS event loop, w
 
 The tested core — `SyncEngine`, CVR store/updater, `rust-ivm` — does not change. Only the execution shell changes, in three measurable phases, each validated against the ART capacity ladder.
 
-1. **Phase 1 — de-`block_on` the CG loop.** Convert `run_cg_thread`'s blocking `crossbeam` loop to a `current_thread` runtime + `LocalSet` with async message receive; replace every `handle.block_on(...)` with `.await`. (Prerequisite; also independently removes the "frozen thread during I/O" symptom.) *Expected:* modest p95 improvement; still one thread per CG.
-2. **Phase 2 — shard CGs onto K executors.** Replace one-thread-per-CG (`get_or_create_cg` spawn) with a fixed pool of `K` executor threads; route a CG to `hash % K`; host its engine + async task there. *Expected:* the capacity cliff moves from 10 toward 50+ as oversubscription disappears — this is the phase that delivers the throughput.
+1. **Phase 1 — de-`block_on` the CG loop.** Convert `run_cg_thread`'s blocking `crossbeam` loop to a `current_thread` runtime + `LocalSet` with async message receive; replace every `handle.block_on(...)` with `.await`. **Done and measured — REVERTED.** In isolation (one thread per CG, shared main-runtime pool) it *regressed* the ladder (cliff `10 → 0`) via cross-runtime pool starvation (§5.1). Kept in history at `353ff2488` / branch `phase1-async-cg-loop` as the async foundation; **must not ship without Phase 2 + per-executor pool.**
+2. **Phase 2 — shard CGs onto K executors, each owning its pool.** Replace one-thread-per-CG (`get_or_create_cg` spawn) with a fixed pool of `K` executor threads; route a CG to `hash % K`; host its engine + async task there; **create one `PgPool` per executor on that executor's runtime, sized `maxConns/K`** (§3, §5.1). This is the phase that delivers the throughput *and* makes the async loop correct. *Expected:* the cliff moves from 10 toward 50+ as oversubscription and cross-runtime starvation both disappear. **Do Phase 1's async conversion and Phase 2 together** — they are inseparable.
 3. **Phase 3 — cooperative yield** at streaming hydrate/advance chunk boundaries so intra-shard head-of-line is bounded to TS's cadence.
 
 ### Success metric
