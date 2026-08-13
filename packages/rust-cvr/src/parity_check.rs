@@ -12,15 +12,21 @@
 //!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
+use crate::cvr::get_inactive_queries;
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{RowID, row_id_hash, row_id_string_cached};
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
+use crate::types::{
+    BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
+    QueryRecord,
+};
 use crate::version::{
     CVRVersion, NullableCVRVersion, cmp_versions, version_from_lexi, version_from_string,
     version_string, version_to_lexi,
 };
 use serde_json::Value;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 fn parse_u64(s: &str) -> u64 {
     s.parse().expect("invalid u64 in fixture")
@@ -46,6 +52,83 @@ fn make_row_id_from_json(v: &Value) -> RowID {
         schema,
         table,
         row_key: row_key.clone(),
+    }
+}
+
+/// Build a minimal CVR from the compact fixture spec used by the
+/// `inactiveQueries` cases. Only the fields `get_inactive_queries` reads
+/// (query type + per-client `inactivatedAt`/`ttl`) carry meaning; the rest are
+/// dummies. `inactivatedAt` absent in the JSON => `None` (TS `undefined`).
+fn build_client_state(cs: &serde_json::Map<String, Value>) -> BTreeMap<String, ClientState> {
+    let mut m = BTreeMap::new();
+    for (cid, s) in cs {
+        let obj = s.as_object().expect("clientState entry must be object");
+        m.insert(
+            cid.clone(),
+            ClientState {
+                inactivated_at: obj.get("inactivatedAt").and_then(Value::as_i64),
+                ttl: obj.get("ttl").and_then(Value::as_i64).expect("ttl"),
+                version: CVRVersion::empty(),
+            },
+        );
+    }
+    m
+}
+
+fn dummy_base(id: &str) -> BaseQueryRecord {
+    BaseQueryRecord {
+        id: id.to_string(),
+        transformation_hash: None,
+        transformation_version: None,
+        row_set_signature: None,
+    }
+}
+
+fn build_cvr_from_spec(queries: &Value) -> CVR {
+    let mut q = BTreeMap::new();
+    for (hash, spec) in queries.as_object().expect("queries must be object") {
+        let ty = spec
+            .get("type")
+            .and_then(Value::as_str)
+            .expect("query type");
+        let client_state = || {
+            build_client_state(
+                spec.get("clientState")
+                    .and_then(Value::as_object)
+                    .expect("clientState"),
+            )
+        };
+        let record = match ty {
+            "internal" => QueryRecord::Internal(InternalQueryRecord {
+                base: dummy_base(hash),
+                ast: Value::Null,
+            }),
+            "custom" => QueryRecord::Custom(CustomQueryRecord {
+                base: dummy_base(hash),
+                name: "n".to_string(),
+                args: vec![],
+                client_state: client_state(),
+                patch_version: None,
+            }),
+            _ => QueryRecord::Client(ClientQueryRecord {
+                base: dummy_base(hash),
+                ast: Value::Null,
+                client_state: client_state(),
+                patch_version: None,
+            }),
+        };
+        q.insert(hash.clone(), record);
+    }
+    CVR {
+        id: "parity".to_string(),
+        version: CVRVersion::empty(),
+        last_active: 0,
+        ttl_clock: 0,
+        replica_version: None,
+        clients: BTreeMap::new(),
+        queries: q,
+        client_schema: None,
+        profile_id: None,
     }
 }
 
@@ -265,6 +348,63 @@ fn parity_check() {
             actual_sign, expected_sign,
             "cmpVersions mismatch for {:?} vs {:?}",
             a, b
+        );
+    }
+
+    // getInactiveQueries accumulation + sort parity. Two checks:
+    //  (1) the SET of (hash, inactivatedAt, ttl) must match — pins inclusion,
+    //      the furthest-future max-per-query, clampTTL, and internal exclusion;
+    //  (2) the eviction-time SEQUENCE (inactivatedAt + ttl) must match — pins
+    //      sort order while tolerating the benign equal-eviction tie-break
+    //      divergence (TS insertion-order vs Rust BTreeMap order), which every
+    //      caller consumes order-independently. See get_inactive_queries docs.
+    for entry in fixture
+        .get("inactiveQueries")
+        .and_then(Value::as_array)
+        .expect("fixture.inactiveQueries missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let queries = entry.get("queries").expect("inactiveQueries case queries");
+        let expected = entry
+            .get("expected")
+            .and_then(Value::as_array)
+            .expect("inactiveQueries case expected");
+
+        let cvr = build_cvr_from_spec(queries);
+        let actual = get_inactive_queries(&cvr);
+
+        let exp_tuple = |e: &Value| {
+            (
+                e.get("hash").and_then(Value::as_str).unwrap().to_string(),
+                e.get("inactivatedAt").and_then(Value::as_i64).unwrap(),
+                e.get("ttl").and_then(Value::as_i64).unwrap(),
+            )
+        };
+        let mut exp_set: Vec<_> = expected.iter().map(exp_tuple).collect();
+        let mut act_set: Vec<_> = actual
+            .iter()
+            .map(|q| (q.hash.clone(), q.inactivated_at, q.ttl))
+            .collect();
+        exp_set.sort();
+        act_set.sort();
+        assert_eq!(
+            act_set, exp_set,
+            "getInactiveQueries set mismatch [{}]",
+            desc
+        );
+
+        let exp_seq: Vec<i64> = expected
+            .iter()
+            .map(|e| {
+                let t = exp_tuple(e);
+                t.1 + t.2
+            })
+            .collect();
+        let act_seq: Vec<i64> = actual.iter().map(|q| q.inactivated_at + q.ttl).collect();
+        assert_eq!(
+            act_seq, exp_seq,
+            "getInactiveQueries eviction-order mismatch [{}]",
+            desc
         );
     }
 }

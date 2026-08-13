@@ -7,7 +7,9 @@
  * consumed by `packages/rust-cvr/agentic/parity/verify-fixture.rs`.
  *
  * Usage:
- *   node packages/rust-cvr/agentic/parity/generate-fixture.mjs > packages/rust-cvr/agentic/parity/parity-fixture.json
+ *   npx tsx packages/rust-cvr/agentic/parity/generate-fixture.mjs > packages/rust-cvr/agentic/parity/parity-fixture.json
+ *
+ * (tsx, not bare node: cvr.ts's transitive imports remap .js->.ts extensions.)
  */
 
 import {h32, h64, h128} from '../../../shared/src/hash.ts';
@@ -25,6 +27,7 @@ import {
   versionString,
   versionFromString,
 } from '../../../zero-cache/src/services/view-syncer/schema/types.ts';
+import {getInactiveQueries} from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 
 // Handpicked inputs that cover the interesting space:
 // - Empty/short strings for the hash functions
@@ -108,6 +111,82 @@ const CMP_PAIRS = [
 
 const sign = n => (n < 0 ? -1 : n > 0 ? 1 : 0);
 
+// getInactiveQueries accumulation + sort. Compact spec (inactivatedAt: null
+// means "still active for that client" => undefined in TS). Exercises: single
+// inactive client, active-client exclusion, max-eviction-per-query across
+// clients, clampTTL (-1 and > MAX_TTL), internal exclusion, and multi-query
+// eviction-time ordering incl. an equal-eviction-time tie.
+const MAX_TTL = 10 * 60 * 1000;
+const INACTIVE_CASES = [
+  {
+    desc: 'single inactive client -> included',
+    queries: {q1: {type: 'client', clientState: {c1: {inactivatedAt: 100, ttl: 5000}}}},
+  },
+  {
+    desc: 'active for one client (undefined) -> excluded even if inactive for another',
+    queries: {
+      q1: {
+        type: 'client',
+        clientState: {c1: {inactivatedAt: 100, ttl: 5000}, c2: {inactivatedAt: null, ttl: 5000}},
+      },
+    },
+  },
+  {
+    desc: 'multi-client inactive -> take furthest-future eviction',
+    queries: {
+      q1: {
+        type: 'client',
+        clientState: {
+          c1: {inactivatedAt: 100, ttl: 1000}, // evict 1100
+          c2: {inactivatedAt: 200, ttl: 5000}, // evict 5200 (winner)
+        },
+      },
+    },
+  },
+  {
+    desc: 'clampTTL: -1 and > MAX_TTL both clamp to MAX_TTL',
+    queries: {
+      qNeg: {type: 'client', clientState: {c1: {inactivatedAt: 0, ttl: -1}}},
+      qBig: {type: 'custom', clientState: {c1: {inactivatedAt: 0, ttl: 24 * 60 * 60 * 1000}}},
+    },
+  },
+  {
+    desc: 'internal query excluded',
+    queries: {
+      qi: {type: 'internal'},
+      qc: {type: 'client', clientState: {c1: {inactivatedAt: 50, ttl: 2000}}},
+    },
+  },
+  {
+    desc: 'multi-query eviction ordering + equal-eviction tie',
+    queries: {
+      qLate: {type: 'client', clientState: {c1: {inactivatedAt: 1000, ttl: 9000}}}, // 10000
+      qEarly: {type: 'client', clientState: {c1: {inactivatedAt: 100, ttl: 400}}}, // 500
+      qTieA: {type: 'client', clientState: {c1: {inactivatedAt: 300, ttl: 700}}}, // 1000
+      qTieB: {type: 'client', clientState: {c1: {inactivatedAt: 600, ttl: 400}}}, // 1000 (tie)
+    },
+  },
+];
+
+function buildClientState(cs) {
+  const out = {};
+  for (const [cid, s] of Object.entries(cs)) {
+    // Omit inactivatedAt entirely (=> undefined) for the active case.
+    out[cid] = s.inactivatedAt === null ? {ttl: s.ttl} : {inactivatedAt: s.inactivatedAt, ttl: s.ttl};
+  }
+  return out;
+}
+function buildCVR(queries) {
+  const q = {};
+  for (const [hash, spec] of Object.entries(queries)) {
+    q[hash] =
+      spec.type === 'internal'
+        ? {type: 'internal'}
+        : {type: spec.type, clientState: buildClientState(spec.clientState)};
+  }
+  return {queries: q};
+}
+
 const fixture = {
   hashes: STRINGS.map(s => ({
     input: s,
@@ -142,6 +221,11 @@ const fixture = {
     a,
     b,
     sign: sign(cmpVersions(a, b)),
+  })),
+  inactiveQueries: INACTIVE_CASES.map(c => ({
+    desc: c.desc,
+    queries: c.queries,
+    expected: getInactiveQueries(buildCVR(c.queries)),
   })),
 };
 

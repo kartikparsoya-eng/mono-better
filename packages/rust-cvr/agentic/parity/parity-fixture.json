@@ -375,5 +375,194 @@
       },
       "sign": 0
     }
+  ],
+  "inactiveQueries": [
+    {
+      "desc": "single inactive client -> included",
+      "queries": {
+        "q1": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 100,
+              "ttl": 5000
+            }
+          }
+        }
+      },
+      "expected": [
+        {
+          "hash": "q1",
+          "inactivatedAt": 100,
+          "ttl": 5000
+        }
+      ]
+    },
+    {
+      "desc": "active for one client (undefined) -> excluded even if inactive for another",
+      "queries": {
+        "q1": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 100,
+              "ttl": 5000
+            },
+            "c2": {
+              "inactivatedAt": null,
+              "ttl": 5000
+            }
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "desc": "multi-client inactive -> take furthest-future eviction",
+      "queries": {
+        "q1": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 100,
+              "ttl": 1000
+            },
+            "c2": {
+              "inactivatedAt": 200,
+              "ttl": 5000
+            }
+          }
+        }
+      },
+      "expected": [
+        {
+          "hash": "q1",
+          "inactivatedAt": 200,
+          "ttl": 5000
+        }
+      ]
+    },
+    {
+      "desc": "clampTTL: -1 and > MAX_TTL both clamp to MAX_TTL",
+      "queries": {
+        "qNeg": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 0,
+              "ttl": -1
+            }
+          }
+        },
+        "qBig": {
+          "type": "custom",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 0,
+              "ttl": 86400000
+            }
+          }
+        }
+      },
+      "expected": [
+        {
+          "hash": "qNeg",
+          "inactivatedAt": 0,
+          "ttl": 600000
+        },
+        {
+          "hash": "qBig",
+          "inactivatedAt": 0,
+          "ttl": 600000
+        }
+      ]
+    },
+    {
+      "desc": "internal query excluded",
+      "queries": {
+        "qi": {
+          "type": "internal"
+        },
+        "qc": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 50,
+              "ttl": 2000
+            }
+          }
+        }
+      },
+      "expected": [
+        {
+          "hash": "qc",
+          "inactivatedAt": 50,
+          "ttl": 2000
+        }
+      ]
+    },
+    {
+      "desc": "multi-query eviction ordering + equal-eviction tie",
+      "queries": {
+        "qLate": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 1000,
+              "ttl": 9000
+            }
+          }
+        },
+        "qEarly": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 100,
+              "ttl": 400
+            }
+          }
+        },
+        "qTieA": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 300,
+              "ttl": 700
+            }
+          }
+        },
+        "qTieB": {
+          "type": "client",
+          "clientState": {
+            "c1": {
+              "inactivatedAt": 600,
+              "ttl": 400
+            }
+          }
+        }
+      },
+      "expected": [
+        {
+          "hash": "qEarly",
+          "inactivatedAt": 100,
+          "ttl": 400
+        },
+        {
+          "hash": "qTieA",
+          "inactivatedAt": 300,
+          "ttl": 700
+        },
+        {
+          "hash": "qTieB",
+          "inactivatedAt": 600,
+          "ttl": 400
+        },
+        {
+          "hash": "qLate",
+          "inactivatedAt": 1000,
+          "ttl": 9000
+        }
+      ]
+    }
   ]
 }
