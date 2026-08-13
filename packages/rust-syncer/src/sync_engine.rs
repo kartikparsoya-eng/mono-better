@@ -221,6 +221,7 @@ impl SyncEngine {
         updater: &mut CVRQueryDrivenUpdater,
         flushed_cvr: &CVR,
         last_connect_time: i64,
+        existing_rows: &RowRecordMap,
     ) -> Result<(), String> {
         let expected_current_version = updater.base.orig.version.clone();
         self.flush_ops_to_store(
@@ -228,6 +229,7 @@ impl SyncEngine {
             &expected_current_version,
             flushed_cvr,
             last_connect_time,
+            existing_rows,
         )
     }
 
@@ -242,6 +244,7 @@ impl SyncEngine {
         expected_current_version: &CVRVersion,
         flushed_cvr: &CVR,
         last_connect_time: i64,
+        existing_rows: &RowRecordMap,
     ) -> Result<(), String> {
         let Some(store_arc) = self.store.clone() else {
             return Ok(());
@@ -252,20 +255,13 @@ impl SyncEngine {
         // the CVR, or an unreferenced row/delete for a row not in the CVR anyway.
         // Without this, every row touched in a cycle is rewritten even when
         // unchanged (write amplification that inflates flush latency on hot rows).
-        // Only pay for it when the cycle actually has row ops (the common
-        // config-only flush skips the existing-rows read entirely). `force_updates`
-        // is never populated in this port, so no forced-write exception is needed.
-        let has_row_ops = ops
-            .iter()
-            .any(|op| matches!(op, StoreOp::PutRowRecord(_) | StoreOp::DelRowRecord(_)));
-        let ops: Vec<StoreOp> = if has_row_ops {
-            let existing = self.existing_rows();
-            ops.into_iter()
-                .filter(|op| !row_op_is_noop(op, &existing))
-                .collect()
-        } else {
-            ops
-        };
+        // Uses the caller's `existing_rows` snapshot (already read for this cycle),
+        // so no extra cache clone is taken here. `force_updates` is never populated
+        // in this port, so no forced-write exception is needed.
+        let ops: Vec<StoreOp> = ops
+            .into_iter()
+            .filter(|op| !row_op_is_noop(op, existing_rows))
+            .collect();
 
         // Extract the row deltas (from the DEDUPED ops) before they are moved into
         // the store, so we can mirror the same writes into the read cache after
@@ -468,6 +464,7 @@ impl SyncEngine {
                 &expected_current_version,
                 &cfg_cvr,
                 last_connect_time,
+                existing_rows,
             )?;
             pokers.end(cfg_cvr.version.clone());
         }
@@ -926,7 +923,7 @@ impl SyncEngine {
         // persist each hydrated query's signature and flag drift.
         *sigs.lock().unwrap() = sig_acc;
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
-        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time)?;
+        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)?;
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -1035,7 +1032,7 @@ impl SyncEngine {
         // Hand the folded post-advance signatures to the updater's provider.
         *sigs.lock().unwrap() = sig_acc;
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
-        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time)?;
+        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)?;
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -1130,6 +1127,10 @@ impl SyncEngine {
         let expected_current_version = cfg.base.orig.version.clone();
         let ops = cfg.base.drain_store_ops();
 
+        // deleteClients produces config ops (client removal + desire
+        // inactivation), not row writes — but snapshot the CVR rows anyway so the
+        // store flush's row dedup is correct regardless.
+        let existing_rows = self.existing_rows();
         let clients = self.clients_for(poke_ws_ids);
         {
             let refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
@@ -1137,7 +1138,13 @@ impl SyncEngine {
             for p in &patches {
                 pokers.add_patch(p);
             }
-            self.flush_ops_to_store(ops, &expected_current_version, &cfg_cvr, last_connect_time)?;
+            self.flush_ops_to_store(
+                ops,
+                &expected_current_version,
+                &cfg_cvr,
+                last_connect_time,
+                &existing_rows,
+            )?;
             pokers.end(cfg_cvr.version.clone());
         }
 
