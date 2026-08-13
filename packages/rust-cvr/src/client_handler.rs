@@ -207,7 +207,7 @@ impl PokeHandler {
                         let body = state.body.as_mut().unwrap();
                         body.rows_patch
                             .get_or_insert_with(Vec::new)
-                            .push(make_row_patch(rp));
+                            .push(make_row_patch(rp)?);
                     }
                 }
             }
@@ -453,20 +453,52 @@ fn normalize_mutation_result(row: &Value) -> Value {
     row.clone()
 }
 
-fn make_row_patch(patch: &RowPatch) -> RowPatchOp {
+/// The largest integer JS can represent exactly (`Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
+
+/// Port of TS `ensureSafeJSON`: a top-level integer column outside
+/// ±MAX_SAFE_INTEGER cannot be represented by the JS client without silent
+/// precision loss, so TS throws (failing the connection) rather than send it.
+/// serde_json has no bigint type, so we check integer `Number`s directly;
+/// floats and nested values are left alone (matching TS, which only walks the
+/// row's own entries).
+fn ensure_safe_json(contents: &Value) -> Result<(), String> {
+    if let Some(obj) = contents.as_object() {
+        for (k, v) in obj {
+            let n: Option<i128> = v
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| v.as_u64().map(i128::from));
+            if let Some(n) = n
+                && !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&n)
+            {
+                return Err(format!(
+                    "Value of \"{}\" exceeds safe Number range ({})",
+                    k, n
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn make_row_patch(patch: &RowPatch) -> Result<RowPatchOp, String> {
     match patch {
-        RowPatch::Put { id, contents } => RowPatchOp {
-            op: "put".to_string(),
-            table_name: id.table.clone(),
-            value: Some(contents.clone()),
-            id: None,
-        },
-        RowPatch::Del { id } => RowPatchOp {
+        RowPatch::Put { id, contents } => {
+            ensure_safe_json(contents)?;
+            Ok(RowPatchOp {
+                op: "put".to_string(),
+                table_name: id.table.clone(),
+                value: Some(contents.clone()),
+                id: None,
+            })
+        }
+        RowPatch::Del { id } => Ok(RowPatchOp {
             op: "del".to_string(),
             table_name: id.table.clone(),
             value: None,
             id: Some(Value::Object(id.row_key.clone())),
-        },
+        }),
     }
 }
 
@@ -766,6 +798,34 @@ mod tests {
                 config_version: Some(1),
             },
         }
+    }
+
+    #[test]
+    fn make_row_patch_rejects_unsafe_integer() {
+        // Safe integers (<= MAX_SAFE_INTEGER) pass through unchanged.
+        let safe = RowPatch::Put {
+            id: RowID {
+                schema: "s".into(),
+                table: "t".into(),
+                row_key: Map::new(),
+            },
+            contents: serde_json::json!({"id": "1", "big": 9_007_199_254_740_991_i64}),
+        };
+        assert!(make_row_patch(&safe).is_ok());
+
+        // A column beyond the safe range (e.g. a snowflake id) must be rejected
+        // — matching TS ensureSafeJSON, which throws to fail the connection
+        // rather than let the JS client silently truncate the value.
+        let unsafe_i = RowPatch::Put {
+            id: RowID {
+                schema: "s".into(),
+                table: "t".into(),
+                row_key: Map::new(),
+            },
+            contents: serde_json::json!({"id": "1", "big": 9_007_199_254_740_993_u64}),
+        };
+        let err = make_row_patch(&unsafe_i).unwrap_err();
+        assert!(err.contains("exceeds safe Number range"), "got: {err}");
     }
 
     #[test]

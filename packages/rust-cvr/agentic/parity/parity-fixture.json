@@ -565,6 +565,163 @@
       ]
     }
   ],
+  "rowPatches": [
+    {
+      "desc": "put simple",
+      "patch": {
+        "op": "put",
+        "id": {
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "1"
+          }
+        },
+        "contents": {
+          "id": "1",
+          "title": "a",
+          "n": 5
+        }
+      },
+      "expected": {
+        "op": "put",
+        "tableName": "issue",
+        "value": {
+          "id": "1",
+          "title": "a",
+          "n": 5
+        }
+      }
+    },
+    {
+      "desc": "put nested/null/bool",
+      "patch": {
+        "op": "put",
+        "id": {
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "2"
+          }
+        },
+        "contents": {
+          "id": "2",
+          "meta": {
+            "x": [
+              1,
+              2
+            ]
+          },
+          "flag": true,
+          "opt": null
+        }
+      },
+      "expected": {
+        "op": "put",
+        "tableName": "issue",
+        "value": {
+          "id": "2",
+          "meta": {
+            "x": [
+              1,
+              2
+            ]
+          },
+          "flag": true,
+          "opt": null
+        }
+      }
+    },
+    {
+      "desc": "put max-safe int",
+      "patch": {
+        "op": "put",
+        "id": {
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "3"
+          }
+        },
+        "contents": {
+          "id": "3",
+          "big": 9007199254740991
+        }
+      },
+      "expected": {
+        "op": "put",
+        "tableName": "issue",
+        "value": {
+          "id": "3",
+          "big": 9007199254740991
+        }
+      }
+    },
+    {
+      "desc": "del simple",
+      "patch": {
+        "op": "del",
+        "id": {
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "4"
+          }
+        }
+      },
+      "expected": {
+        "op": "del",
+        "tableName": "issue",
+        "id": {
+          "id": "4"
+        }
+      }
+    },
+    {
+      "desc": "del composite key",
+      "patch": {
+        "op": "del",
+        "id": {
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "a": "x",
+            "b": 2
+          }
+        }
+      },
+      "expected": {
+        "op": "del",
+        "tableName": "issue",
+        "id": {
+          "a": "x",
+          "b": 2
+        }
+      }
+    },
+    {
+      "desc": "del poisoned rowKey (non-PK col)",
+      "patch": {
+        "op": "del",
+        "id": {
+          "schema": "public",
+          "table": "issue",
+          "rowKey": {
+            "id": "5",
+            "_leaked": "oops"
+          }
+        }
+      },
+      "expected": {
+        "op": "del",
+        "tableName": "issue",
+        "id": {
+          "id": "5",
+          "_leaked": "oops"
+        }
+      }
+    }
+  ],
   "queryRows": [
     {
       "desc": "internal",

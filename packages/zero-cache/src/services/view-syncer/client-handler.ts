@@ -614,7 +614,7 @@ function normalizeMutationResult(row: SafeJSONObject): SafeJSONObject {
   }
 }
 
-function makeRowPatch(patch: RowPatch): RowPatchOp {
+export function makeRowPatch(patch: RowPatch): RowPatchOp {
   const {
     op,
     id: {table: tableName, rowKey: id},

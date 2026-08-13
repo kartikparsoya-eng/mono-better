@@ -8,11 +8,12 @@
 //!
 //! Coverage: primitives (hash / rowID / signature); the CVR version semantic
 //! layer (lexi, versionString, versionFromString, cmpVersions — incl. the falsy
-//! `configVersion == 0` contract); getInactiveQueries; mergeRefCounts; and
-//! queryRecordToQueryRow.
+//! `configVersion == 0` contract); getInactiveQueries; mergeRefCounts;
+//! queryRecordToQueryRow; and makeRowPatch (poke row serialization).
 //!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
+use crate::client_handler::make_row_patch;
 use crate::cvr::{get_inactive_queries, merge_ref_counts};
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{RowID, row_id_hash, row_id_string_cached};
@@ -20,7 +21,7 @@ use crate::row_set_signature::{format_signature, parse_signature, signature_unit
 use crate::store::query_record_to_query_row;
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
-    QueryRecord, RefCounts,
+    QueryRecord, RefCounts, RowPatch,
 };
 use crate::version::{
     CVRVersion, NullableCVRVersion, cmp_versions, version_from_lexi, version_from_string,
@@ -193,6 +194,31 @@ fn build_query_record_from_spec(spec: &Value) -> QueryRecord {
             client_state: BTreeMap::new(),
             patch_version: ver("patchVersion"),
         }),
+    }
+}
+
+/// Build a RowPatch from the compact `rowPatches` spec.
+fn build_row_patch_from_spec(spec: &Value) -> RowPatch {
+    let id = spec.get("id").and_then(Value::as_object).expect("id");
+    let row_id = RowID {
+        schema: id
+            .get("schema")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string(),
+        table: id.get("table").and_then(Value::as_str).unwrap().to_string(),
+        row_key: id
+            .get("rowKey")
+            .and_then(Value::as_object)
+            .expect("rowKey")
+            .clone(),
+    };
+    match spec.get("op").and_then(Value::as_str).expect("op") {
+        "put" => RowPatch::Put {
+            id: row_id,
+            contents: spec.get("contents").cloned().unwrap_or(Value::Null),
+        },
+        _ => RowPatch::Del { id: row_id },
     }
 }
 
@@ -470,6 +496,24 @@ fn parity_check() {
             "getInactiveQueries eviction-order mismatch [{}]",
             desc
         );
+    }
+
+    // makeRowPatch parity — RowPatch -> rowsPatch wire op (the poke
+    // serialization). Pins put value passthrough and del id shape, incl. the
+    // poisoned-rowKey passthrough. NOTE: TS also runs ensureSafeJSON (throws on
+    // bigints > 2^53); that edge is not representable in JSON/serde_json and is
+    // tracked separately as a known gap, not asserted here.
+    for entry in fixture
+        .get("rowPatches")
+        .and_then(Value::as_array)
+        .expect("fixture.rowPatches missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let spec = entry.get("patch").expect("rowPatch patch");
+        let expected = entry.get("expected").expect("rowPatch expected");
+        let op = make_row_patch(&build_row_patch_from_spec(spec)).expect("make_row_patch");
+        let actual = serde_json::to_value(&op).unwrap();
+        assert_eq!(&actual, expected, "makeRowPatch mismatch [{}]", desc);
     }
 
     // queryRecordToQueryRow parity — QueryRecord -> QueriesRow field mapping

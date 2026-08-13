@@ -32,6 +32,7 @@ import {
   getInactiveQueries,
   mergeRefCounts,
 } from '../../../zero-cache/src/services/view-syncer/cvr.ts';
+import {makeRowPatch} from '../../../zero-cache/src/services/view-syncer/client-handler.ts';
 
 // Handpicked inputs that cover the interesting space:
 // - Empty/short strings for the hash functions
@@ -193,6 +194,24 @@ const REFCOUNT_MERGES = [
 // field mapping: internal=true vs null (NOT false) for client/custom, clientAST
 // null for custom, queryArgs passthrough, and patchVersion via maybeVersionString
 // (which routes through versionString, incl. the falsy configVersion==0 case).
+// makeRowPatch: RowPatch -> rowsPatch wire op (the poke serialization the
+// change_processor feeds). Pins put value passthrough (incl. nested/null/bool,
+// max-safe int), del id shape (simple/composite), and poisoned-rowKey del
+// (non-PK column passed through, matching the catchup finding).
+const RP = (schema, table, rowKey) => ({schema, table, rowKey});
+const ROW_PATCH_CASES = [
+  {desc: 'put simple', patch: {op: 'put', id: RP('public', 'issue', {id: '1'}),
+    contents: {id: '1', title: 'a', n: 5}}},
+  {desc: 'put nested/null/bool', patch: {op: 'put', id: RP('public', 'issue', {id: '2'}),
+    contents: {id: '2', meta: {x: [1, 2]}, flag: true, opt: null}}},
+  {desc: 'put max-safe int', patch: {op: 'put', id: RP('public', 'issue', {id: '3'}),
+    contents: {id: '3', big: 9007199254740991}}},
+  {desc: 'del simple', patch: {op: 'del', id: RP('public', 'issue', {id: '4'})}},
+  {desc: 'del composite key', patch: {op: 'del', id: RP('public', 'issue', {a: 'x', b: 2})}},
+  {desc: 'del poisoned rowKey (non-PK col)', patch: {op: 'del',
+    id: RP('public', 'issue', {id: '5', _leaked: 'oops'})}},
+];
+
 const CVRID = 'cg-parity';
 const QR_CASES = [
   {desc: 'internal', spec: {type: 'internal', id: 'q1', ast: {table: 't'},
@@ -277,6 +296,11 @@ const fixture = {
     desc: c.desc,
     queries: c.queries,
     expected: getInactiveQueries(buildCVR(c.queries)),
+  })),
+  rowPatches: ROW_PATCH_CASES.map(c => ({
+    desc: c.desc,
+    patch: c.patch,
+    expected: makeRowPatch(c.patch),
   })),
   queryRows: QR_CASES.map(c => ({
     desc: c.desc,
