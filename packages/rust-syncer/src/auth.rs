@@ -30,9 +30,16 @@ use std::time::{Duration, Instant};
 static JWKS_CACHE: LazyLock<StdMutex<HashMap<String, CachedJwks>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
-/// How long a fetched JWKS is reused before re-fetching. jose refreshes lazily;
-/// a 5-minute TTL matches its default cooldown/cache window closely enough.
+/// How long a fetched JWKS is reused on the fast path before it is considered
+/// stale and a `kid`-miss is allowed to refetch.
 const JWKS_TTL: Duration = Duration::from_secs(300);
+
+/// Minimum time between refetches of the same URL, regardless of `kid` misses.
+/// Without this, an attacker spamming tokens with random `kid` headers forces
+/// one outbound JWKS fetch per request — hammering the syncer and the identity
+/// provider (which may then rate-limit real traffic). jose's `createRemoteJWKSet`
+/// enforces the same cooldown for exactly this reason.
+const JWKS_REFETCH_COOLDOWN: Duration = Duration::from_secs(30);
 
 struct CachedJwks {
     fetched_at: Instant,
@@ -176,17 +183,24 @@ impl JwtAuthValidator {
             );
         }
 
-        // Miss/stale → fetch, cache, then look up. A concurrent refresh just
-        // re-fetches; the last writer wins (matches jose's lazy refresh).
+        // Cache miss (no entry, stale, or the token's `kid` is not in the cached
+        // set). Refetching on every miss is a DoS amplifier: a storm of tokens
+        // with random `kid`s would trigger one outbound fetch each. Gate the
+        // refetch behind a cooldown — within the window, fail closed against the
+        // cached set instead of hitting the IdP again.
+        if within_refetch_cooldown(jwks_url) {
+            return Err("no matching key in JWKS (refetch on cooldown)".to_string());
+        }
+
+        // Fetch and cache the set BEFORE selecting the key, so `fetched_at` is
+        // recorded even when the fetched set does not contain the requested
+        // `kid` — otherwise repeated unknown-`kid` requests would each refetch.
         let set: JwkSet = reqwest::get(jwks_url)
             .await
             .map_err(|e| format!("JWKS fetch failed: {e}"))?
             .json()
             .await
             .map_err(|e| format!("JWKS parse failed: {e}"))?;
-        let jwk = select_jwk(&set, header.kid.as_deref())
-            .ok_or_else(|| "no matching key in JWKS".to_string())?
-            .clone();
         if let Ok(mut cache) = JWKS_CACHE.lock() {
             cache.insert(
                 jwks_url.to_string(),
@@ -196,6 +210,8 @@ impl JwtAuthValidator {
                 },
             );
         }
+        let jwk = lookup_cached_jwk(jwks_url, header.kid.as_deref())
+            .ok_or_else(|| "no matching key in JWKS".to_string())?;
         verify_with_jwk(
             token,
             &jwk,
@@ -253,6 +269,21 @@ fn lookup_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
         return None;
     }
     select_jwk(&entry.set, kid).cloned()
+}
+
+/// True if `url` was fetched within the refetch cooldown, so a `kid`-miss must
+/// NOT trigger another fetch (DoS protection). False when there is no cache
+/// entry (first fetch) or the last fetch is older than the cooldown.
+fn within_refetch_cooldown(url: &str) -> bool {
+    JWKS_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .get(url)
+                .map(|entry| entry.fetched_at.elapsed() < JWKS_REFETCH_COOLDOWN)
+        })
+        .unwrap_or(false)
 }
 
 /// Verify a token against a single asymmetric JWK. The algorithm is taken from
@@ -348,6 +379,42 @@ mod tests {
             issuer: None,
             audience: None,
         }
+    }
+
+    #[test]
+    fn jwks_refetch_cooldown_gates_fetches() {
+        use jsonwebtoken::jwk::JwkSet;
+        let url = "https://example.test/jwks-cooldown-unit";
+        JWKS_CACHE.lock().unwrap().remove(url);
+
+        // No cache entry -> not on cooldown, so the first fetch is allowed.
+        assert!(!within_refetch_cooldown(url));
+
+        // A fresh fetch puts the URL on cooldown: a subsequent kid-miss must NOT
+        // refetch (this is what stops an unknown-kid storm from hammering the IdP).
+        JWKS_CACHE.lock().unwrap().insert(
+            url.to_string(),
+            CachedJwks {
+                fetched_at: Instant::now(),
+                set: JwkSet { keys: vec![] },
+            },
+        );
+        assert!(within_refetch_cooldown(url));
+
+        // A fetch older than the cooldown is allowed to refetch (key rotation).
+        if let Some(old) =
+            Instant::now().checked_sub(JWKS_REFETCH_COOLDOWN + Duration::from_secs(5))
+        {
+            JWKS_CACHE.lock().unwrap().insert(
+                url.to_string(),
+                CachedJwks {
+                    fetched_at: old,
+                    set: JwkSet { keys: vec![] },
+                },
+            );
+            assert!(!within_refetch_cooldown(url));
+        }
+        JWKS_CACHE.lock().unwrap().remove(url);
     }
 
     /// TS-vs-Rust JWT parity: every token's accept/reject decision must match
