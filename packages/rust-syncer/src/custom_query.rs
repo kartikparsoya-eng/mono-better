@@ -77,7 +77,8 @@ pub enum CustomTransformed {
 /// Transform a batch of named queries against the user's query API server.
 /// Cached results are reused; only cache-missing queries hit the network.
 /// Returns `Err(TransformFailed body)` on a whole-request failure.
-pub async fn transform_custom_queries(
+pub fn transform_custom_queries(
+    handle: &tokio::runtime::Handle,
     ctx: &CustomQueryContext,
     shard: &ShardID,
     specs: &[CustomQuerySpec],
@@ -105,7 +106,7 @@ pub async fn transform_custom_queries(
             .collect::<Vec<_>>()
     ]);
 
-    let response = post_transform(ctx, shard, &body).await?;
+    let response = handle.block_on(post_transform(ctx, shard, &body))?;
 
     // A `QueryResponse` carries `queries: [...]`; a `TransformFailed` (has
     // `kind:"TransformFailed"` or no `queries`) fails the whole request.
@@ -273,9 +274,7 @@ mod tests {
             headers: vec![],
             auth: None,
         };
-        let out = rt
-            .block_on(transform_custom_queries(&ctx, &shard(), &[]))
-            .unwrap();
+        let out = transform_custom_queries(rt.handle(), &ctx, &shard(), &[]).unwrap();
         assert!(out.is_empty());
     }
 
@@ -302,9 +301,7 @@ mod tests {
             name: "myQuery".to_string(),
             args: vec![],
         }];
-        let out = rt
-            .block_on(transform_custom_queries(&ctx, &shard(), &specs))
-            .unwrap();
+        let out = transform_custom_queries(rt.handle(), &ctx, &shard(), &specs).unwrap();
         assert_eq!(out.len(), 1);
         match &out[0] {
             CustomTransformed::Ok(t) => {

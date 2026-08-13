@@ -71,12 +71,8 @@ fn hydrate_real_rows_produces_row_pokes() {
     }];
     let existing_rows: RowRecordMap = HashMap::new();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let result_cvr = rt
-        .block_on(engine.config_and_hydrate(
+    let result_cvr = engine
+        .config_and_hydrate(
             cvr,
             "client1",
             &["ws1".to_string()],
@@ -94,7 +90,7 @@ fn hydrate_real_rows_produces_row_pokes() {
             0,
             0,
             0,
-        ))
+        )
         .unwrap();
 
     // The row-set-signature provider (task 13) persisted a signature for the
@@ -189,12 +185,8 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
     // queries that `ensure_client` creates. They must still hydrate.
     let cvr = empty_cvr("cg1", "01");
     let existing_rows: RowRecordMap = HashMap::new();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let result_cvr = rt
-        .block_on(engine.config_and_hydrate(
+    let result_cvr = engine
+        .config_and_hydrate(
             cvr,
             "client1",
             &["ws1".to_string()],
@@ -212,7 +204,7 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
             0,
             0,
             0,
-        ))
+        )
         .unwrap();
 
     // The internal queries exist in the CVR but produce NO got-query patch.
