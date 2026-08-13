@@ -1,0 +1,140 @@
+{
+  "secret": "0123456789abcdef0123456789abcdef",
+  "cases": [
+    {
+      "desc": "valid: sub matches, exp future",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImV4cCI6NDEwMjQ0NDgwMH0.vC5HLuvZ-0MGi4loCSeoxvQji1qAh9HGnyAjCfI8O00",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": true
+    },
+    {
+      "desc": "expired: exp in the past",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImV4cCI6MTAwMDAwMDAwMH0._JRQfWtQAea8wO-2chO7Q4VlI75B95yWCJHFBIwn7Nk",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "not-yet-valid: nbf in the future",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsIm5iZiI6NDEwMjQ0NDgwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.kh4DHXOQobDMV6pw78HfpO-LIJJDWnpgq9SSkn5bzAE",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "NO exp claim (jose accepts; does the port require it?)",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSJ9.R3bWMFdKo5Q3Fk2uaXyzLUkrOnoEpZ55S9CVI-owYng",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": true
+    },
+    {
+      "desc": "no exp but nbf already valid",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsIm5iZiI6MTAwMDAwMDAwMH0.PrGHuHOKmpcJRGMXLMeCbOdd_P64Xt4tZpWxrgVn2lo",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": true
+    },
+    {
+      "desc": "wrong sub",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMiIsImV4cCI6NDEwMjQ0NDgwMH0.jGtvUoTAuXIC73GWaeszVvb5hWyBe5JXSZ_LY1vq3rY",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "issuer configured + matches",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImlzcyI6Imlzcy1BIiwiZXhwIjo0MTAyNDQ0ODAwfQ.eS3SU-8gQQmBGl0nuWxO_KI5AH1RkbkZY_miRkPt1wk",
+      "userID": "user1",
+      "issuer": "iss-A",
+      "audience": null,
+      "tsAccept": true
+    },
+    {
+      "desc": "issuer configured + mismatch",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImlzcyI6Imlzcy1CIiwiZXhwIjo0MTAyNDQ0ODAwfQ.htFq4-satH0V1l2pnLMqaY61lt1Tm35VbeazTpTJuAI",
+      "userID": "user1",
+      "issuer": "iss-A",
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "issuer configured + missing in token",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImV4cCI6NDEwMjQ0NDgwMH0.vC5HLuvZ-0MGi4loCSeoxvQji1qAh9HGnyAjCfI8O00",
+      "userID": "user1",
+      "issuer": "iss-A",
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "audience configured + matches",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImF1ZCI6ImFwcC0xIiwiZXhwIjo0MTAyNDQ0ODAwfQ.wrWBgPwaiKb12PhbvwU7_scnxCPP0fhwwF0YqRGhmCY",
+      "userID": "user1",
+      "issuer": null,
+      "audience": "app-1",
+      "tsAccept": true
+    },
+    {
+      "desc": "audience configured + mismatch",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImF1ZCI6ImFwcC0yIiwiZXhwIjo0MTAyNDQ0ODAwfQ.mOF1n8LhdzP0BuBv7J9n8lQssSQQq9mFsCTSzIWFIsg",
+      "userID": "user1",
+      "issuer": null,
+      "audience": "app-1",
+      "tsAccept": false
+    },
+    {
+      "desc": "audience configured + missing in token",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImV4cCI6NDEwMjQ0NDgwMH0.vC5HLuvZ-0MGi4loCSeoxvQji1qAh9HGnyAjCfI8O00",
+      "userID": "user1",
+      "issuer": null,
+      "audience": "app-1",
+      "tsAccept": false
+    },
+    {
+      "desc": "no sub claim at all (subject option requires it)",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjQxMDI0NDQ4MDB9.sWsXA_2jSLVj898-a4GCxtzBXdodHLuy769ojE2Ifl4",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    },
+    {
+      "desc": "issuer/aud present in token but NOT configured -> ignored",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImlzcyI6IndoYXRldmVyIiwiYXVkIjoid2hhdGV2ZXIiLCJleHAiOjQxMDI0NDQ4MDB9.BbGiKMvQB5L3RrIomGi_Jfmn8L5eiUpygx6LAi1ax5g",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": true
+    },
+    {
+      "desc": "wrong signature (bad secret)",
+      "secret": "0123456789abcdef0123456789abcdef",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImV4cCI6NDEwMjQ0NDgwMH0.zABw6wqGw-AS3X1UgX2o-fnhNbxzcEuDZ6_mRRNKDyQ",
+      "userID": "user1",
+      "issuer": null,
+      "audience": null,
+      "tsAccept": false
+    }
+  ]
+}
