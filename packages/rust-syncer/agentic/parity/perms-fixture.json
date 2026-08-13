@@ -1,0 +1,229 @@
+{
+  "cases": [
+    {
+      "desc": "deny-by-default: no rules for table -> fail closed",
+      "query": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "permissions": {
+        "tables": {}
+      },
+      "authData": {},
+      "expected": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "or",
+          "conditions": []
+        }
+      }
+    },
+    {
+      "desc": "anyone-can: always-true allow rule",
+      "query": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "permissions": {
+        "tables": {
+          "issue": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "and",
+                    "conditions": []
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "authData": {},
+      "expected": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "and",
+          "conditions": []
+        }
+      }
+    },
+    {
+      "desc": "owner rule binds authData.sub into where",
+      "query": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "permissions": {
+        "tables": {
+          "issue": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "ownerId"
+                    },
+                    "op": "=",
+                    "right": {
+                      "type": "static",
+                      "anchor": "authData",
+                      "field": "sub"
+                    }
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "authData": {
+        "sub": "user-123"
+      },
+      "expected": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "ownerId"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "user-123"
+          }
+        }
+      }
+    },
+    {
+      "desc": "existing where AND-merged with allow rule",
+      "query": {
+        "table": "issue",
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "closed"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": false
+          }
+        },
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "permissions": {
+        "tables": {
+          "issue": {
+            "row": {
+              "select": [
+                [
+                  "allow",
+                  {
+                    "type": "simple",
+                    "left": {
+                      "type": "column",
+                      "name": "ownerId"
+                    },
+                    "op": "=",
+                    "right": {
+                      "type": "static",
+                      "anchor": "authData",
+                      "field": "sub"
+                    }
+                  }
+                ]
+              ]
+            }
+          }
+        }
+      },
+      "authData": {
+        "sub": "user-123"
+      },
+      "expected": {
+        "table": "issue",
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "closed"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": false
+              }
+            },
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "ownerId"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "user-123"
+              }
+            }
+          ]
+        },
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      }
+    }
+  ]
+}
