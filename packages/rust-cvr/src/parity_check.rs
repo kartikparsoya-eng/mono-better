@@ -6,9 +6,10 @@
 //! output exactly. This pins the Rust code to TS's *actual* behavior rather
 //! than the porter's interpretation of it.
 //!
-//! Coverage: primitives (hash / rowID / signature) and the CVR version
-//! semantic layer (lexi encoding, versionString, versionFromString,
-//! cmpVersions — including the falsy `configVersion == 0` contract).
+//! Coverage: primitives (hash / rowID / signature); the CVR version semantic
+//! layer (lexi, versionString, versionFromString, cmpVersions — incl. the falsy
+//! `configVersion == 0` contract); getInactiveQueries; mergeRefCounts; and
+//! queryRecordToQueryRow.
 //!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
@@ -16,6 +17,7 @@ use crate::cvr::{get_inactive_queries, merge_ref_counts};
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{RowID, row_id_hash, row_id_string_cached};
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
+use crate::store::query_record_to_query_row;
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
     QueryRecord, RefCounts,
@@ -141,6 +143,56 @@ fn build_cvr_from_spec(queries: &Value) -> CVR {
         queries: q,
         client_schema: None,
         profile_id: None,
+    }
+}
+
+/// Build a QueryRecord from the compact `queryRows` spec (mirrors the TS
+/// `buildQR` in generate-fixture.mjs).
+fn build_query_record_from_spec(spec: &Value) -> QueryRecord {
+    let id = spec.get("id").and_then(Value::as_str).expect("id");
+    let ver = |k: &str| -> Option<CVRVersion> {
+        spec.get(k)
+            .filter(|v| !v.is_null())
+            .map(|v| serde_json::from_value(v.clone()).expect("bad CVRVersion in spec"))
+    };
+    let base = BaseQueryRecord {
+        id: id.to_string(),
+        transformation_hash: spec
+            .get("transformationHash")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        transformation_version: ver("transformationVersion"),
+        row_set_signature: spec
+            .get("rowSetSignature")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    match spec.get("type").and_then(Value::as_str).expect("type") {
+        "internal" => QueryRecord::Internal(InternalQueryRecord {
+            base,
+            ast: spec.get("ast").cloned().unwrap_or(Value::Null),
+        }),
+        "custom" => QueryRecord::Custom(CustomQueryRecord {
+            base,
+            name: spec
+                .get("name")
+                .and_then(Value::as_str)
+                .expect("name")
+                .to_string(),
+            args: spec
+                .get("args")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            client_state: BTreeMap::new(),
+            patch_version: ver("patchVersion"),
+        }),
+        _ => QueryRecord::Client(ClientQueryRecord {
+            base,
+            ast: spec.get("ast").cloned().unwrap_or(Value::Null),
+            client_state: BTreeMap::new(),
+            patch_version: ver("patchVersion"),
+        }),
     }
 }
 
@@ -416,6 +468,39 @@ fn parity_check() {
         assert_eq!(
             act_seq, exp_seq,
             "getInactiveQueries eviction-order mismatch [{}]",
+            desc
+        );
+    }
+
+    // queryRecordToQueryRow parity — QueryRecord -> QueriesRow field mapping
+    // (internal=true vs null, clientAST null for custom, queryArgs passthrough,
+    // patchVersion via maybeVersionString incl. the falsy configVersion==0 case).
+    for entry in fixture
+        .get("queryRows")
+        .and_then(Value::as_array)
+        .expect("fixture.queryRows missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let spec = entry.get("spec").expect("queryRow spec");
+        let expected = entry.get("expected").expect("queryRow expected");
+        let qr = build_query_record_from_spec(spec);
+        let row = query_record_to_query_row("cg-parity", &qr);
+        let actual = serde_json::json!({
+            "clientGroupID": row.client_group_id,
+            "queryHash": row.query_hash,
+            "clientAST": row.client_ast,
+            "queryName": row.query_name,
+            "queryArgs": row.query_args,
+            "patchVersion": row.patch_version,
+            "transformationHash": row.transformation_hash,
+            "transformationVersion": row.transformation_version,
+            "internal": row.internal,
+            "deleted": row.deleted,
+            "rowSetSignature": row.row_set_signature,
+        });
+        assert_eq!(
+            &actual, expected,
+            "queryRecordToQueryRow mismatch [{}]",
             desc
         );
     }

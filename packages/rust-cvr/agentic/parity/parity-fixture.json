@@ -565,6 +565,163 @@
       ]
     }
   ],
+  "queryRows": [
+    {
+      "desc": "internal",
+      "spec": {
+        "type": "internal",
+        "id": "q1",
+        "ast": {
+          "table": "t"
+        },
+        "transformationHash": "th1"
+      },
+      "expected": {
+        "clientGroupID": "cg-parity",
+        "queryHash": "q1",
+        "clientAST": {
+          "table": "t"
+        },
+        "queryName": null,
+        "queryArgs": null,
+        "patchVersion": null,
+        "transformationHash": "th1",
+        "transformationVersion": null,
+        "internal": true,
+        "deleted": false,
+        "rowSetSignature": null
+      }
+    },
+    {
+      "desc": "client with patchVersion",
+      "spec": {
+        "type": "client",
+        "id": "q2",
+        "ast": {
+          "table": "u"
+        },
+        "patchVersion": {
+          "stateVersion": "1a9",
+          "configVersion": 2
+        }
+      },
+      "expected": {
+        "clientGroupID": "cg-parity",
+        "queryHash": "q2",
+        "clientAST": {
+          "table": "u"
+        },
+        "queryName": null,
+        "queryArgs": null,
+        "patchVersion": "1a9:02",
+        "transformationHash": null,
+        "transformationVersion": null,
+        "internal": null,
+        "deleted": false,
+        "rowSetSignature": null
+      }
+    },
+    {
+      "desc": "custom with args",
+      "spec": {
+        "type": "custom",
+        "id": "q3",
+        "name": "myQuery",
+        "args": [
+          1,
+          "x",
+          null,
+          {
+            "k": true
+          }
+        ],
+        "patchVersion": {
+          "stateVersion": "1aa",
+          "configVersion": 1
+        }
+      },
+      "expected": {
+        "clientGroupID": "cg-parity",
+        "queryHash": "q3",
+        "clientAST": null,
+        "queryName": "myQuery",
+        "queryArgs": [
+          1,
+          "x",
+          null,
+          {
+            "k": true
+          }
+        ],
+        "patchVersion": "1aa:01",
+        "transformationHash": null,
+        "transformationVersion": null,
+        "internal": null,
+        "deleted": false,
+        "rowSetSignature": null
+      }
+    },
+    {
+      "desc": "custom patchVersion configVersion 0 -> bare stateVersion",
+      "spec": {
+        "type": "custom",
+        "id": "q4",
+        "name": "n",
+        "args": [],
+        "patchVersion": {
+          "stateVersion": "1b0",
+          "configVersion": 0
+        }
+      },
+      "expected": {
+        "clientGroupID": "cg-parity",
+        "queryHash": "q4",
+        "clientAST": null,
+        "queryName": "n",
+        "queryArgs": [],
+        "patchVersion": "1b0",
+        "transformationHash": null,
+        "transformationVersion": null,
+        "internal": null,
+        "deleted": false,
+        "rowSetSignature": null
+      }
+    },
+    {
+      "desc": "client full fields",
+      "spec": {
+        "type": "client",
+        "id": "q5",
+        "ast": {
+          "table": "v"
+        },
+        "patchVersion": {
+          "stateVersion": "2z0"
+        },
+        "transformationHash": "th5",
+        "transformationVersion": {
+          "stateVersion": "2z0",
+          "configVersion": 3
+        },
+        "rowSetSignature": "deadbeef"
+      },
+      "expected": {
+        "clientGroupID": "cg-parity",
+        "queryHash": "q5",
+        "clientAST": {
+          "table": "v"
+        },
+        "queryName": null,
+        "queryArgs": null,
+        "patchVersion": "2z0",
+        "transformationHash": "th5",
+        "transformationVersion": "2z0:03",
+        "internal": null,
+        "deleted": false,
+        "rowSetSignature": "deadbeef"
+      }
+    }
+  ],
   "refCountMerges": [
     {
       "existing": null,

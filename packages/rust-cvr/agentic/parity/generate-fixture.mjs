@@ -26,6 +26,7 @@ import {
   cmpVersions,
   versionString,
   versionFromString,
+  queryRecordToQueryRow,
 } from '../../../zero-cache/src/services/view-syncer/schema/types.ts';
 import {
   getInactiveQueries,
@@ -188,6 +189,36 @@ const REFCOUNT_MERGES = [
   {existing: {a: 0, b: 5}, received: {a: 3}}, // -> {b:5,a:3}
 ];
 
+// queryRecordToQueryRow: QueryRecord -> QueriesRow (DB row). Pins the subtle
+// field mapping: internal=true vs null (NOT false) for client/custom, clientAST
+// null for custom, queryArgs passthrough, and patchVersion via maybeVersionString
+// (which routes through versionString, incl. the falsy configVersion==0 case).
+const CVRID = 'cg-parity';
+const QR_CASES = [
+  {desc: 'internal', spec: {type: 'internal', id: 'q1', ast: {table: 't'},
+    transformationHash: 'th1'}},
+  {desc: 'client with patchVersion', spec: {type: 'client', id: 'q2', ast: {table: 'u'},
+    patchVersion: {stateVersion: '1a9', configVersion: 2}}},
+  {desc: 'custom with args', spec: {type: 'custom', id: 'q3', name: 'myQuery',
+    args: [1, 'x', null, {k: true}], patchVersion: {stateVersion: '1aa', configVersion: 1}}},
+  {desc: 'custom patchVersion configVersion 0 -> bare stateVersion', spec: {type: 'custom',
+    id: 'q4', name: 'n', args: [], patchVersion: {stateVersion: '1b0', configVersion: 0}}},
+  {desc: 'client full fields', spec: {type: 'client', id: 'q5', ast: {table: 'v'},
+    patchVersion: {stateVersion: '2z0'},
+    transformationHash: 'th5', transformationVersion: {stateVersion: '2z0', configVersion: 3},
+    rowSetSignature: 'deadbeef'}},
+];
+function buildQR(s) {
+  const base = {id: s.id};
+  if (s.transformationHash !== undefined) base.transformationHash = s.transformationHash;
+  if (s.transformationVersion !== undefined) base.transformationVersion = s.transformationVersion;
+  if (s.rowSetSignature !== undefined) base.rowSetSignature = s.rowSetSignature;
+  if (s.type === 'internal') return {...base, type: 'internal', ast: s.ast};
+  if (s.type === 'custom')
+    return {...base, type: 'custom', name: s.name, args: s.args, patchVersion: s.patchVersion};
+  return {...base, type: 'client', ast: s.ast, patchVersion: s.patchVersion};
+}
+
 function buildClientState(cs) {
   const out = {};
   for (const [cid, s] of Object.entries(cs)) {
@@ -246,6 +277,11 @@ const fixture = {
     desc: c.desc,
     queries: c.queries,
     expected: getInactiveQueries(buildCVR(c.queries)),
+  })),
+  queryRows: QR_CASES.map(c => ({
+    desc: c.desc,
+    spec: c.spec,
+    expected: queryRecordToQueryRow(CVRID, buildQR(c.spec)),
   })),
   refCountMerges: REFCOUNT_MERGES.map(c => ({
     existing: c.existing ?? null,
