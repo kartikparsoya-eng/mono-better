@@ -33,13 +33,12 @@ pub fn merge_ref_counts(
 
     match existing {
         None => {
+            // TS: `merged = received ?? {}` — a raw copy that RETAINS zero
+            // entries (the final positive-count check only decides null-vs-map,
+            // it does not strip zeros). Dropping zeros here diverges from TS for
+            // any `received` carrying a literal 0 alongside a positive count.
             if let Some(recv) = received {
-                for (hash, count) in recv {
-                    let val = *count;
-                    if val != 0 {
-                        merged.insert(hash.clone(), val);
-                    }
-                }
+                merged = recv.clone();
             }
         }
         Some(existing) => {
@@ -342,10 +341,14 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_received_only_drops_zero() {
+    fn test_merge_received_only_retains_zero() {
+        // TS `mergeRefCounts(null, received)` does `merged = received ?? {}` —
+        // a raw copy that RETAINS zero entries (verified by the TS golden
+        // fixture in parity_check). The result is non-null because at least one
+        // count is positive.
         let received = rc(&[("a", 0), ("b", 1)]);
         let result = merge_ref_counts(None, Some(&received), None);
-        assert_eq!(result, Some(rc(&[("b", 1)])));
+        assert_eq!(result, Some(rc(&[("a", 0), ("b", 1)])));
     }
 
     #[test]

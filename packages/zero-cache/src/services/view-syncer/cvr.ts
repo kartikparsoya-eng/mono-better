@@ -1250,7 +1250,7 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
   }
 }
 
-function mergeRefCounts(
+export function mergeRefCounts(
   existing: RefCounts | null | undefined,
   received: RefCounts | null | undefined,
   removeHashes?: Set<string>,

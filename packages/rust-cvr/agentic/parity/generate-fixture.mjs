@@ -27,7 +27,10 @@ import {
   versionString,
   versionFromString,
 } from '../../../zero-cache/src/services/view-syncer/schema/types.ts';
-import {getInactiveQueries} from '../../../zero-cache/src/services/view-syncer/cvr.ts';
+import {
+  getInactiveQueries,
+  mergeRefCounts,
+} from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 
 // Handpicked inputs that cover the interesting space:
 // - Empty/short strings for the hash functions
@@ -168,6 +171,23 @@ const INACTIVE_CASES = [
   },
 ];
 
+// mergeRefCounts: existing + received refcount maps, with optional removeHashes
+// applied to `existing` only. Probes the no-existing branch's zero-entry
+// handling, negative counts cancelling to zero, and the all-zero -> null rule.
+const REFCOUNT_MERGES = [
+  {existing: null, received: null},
+  {existing: null, received: {a: 2}},
+  {existing: null, received: {a: 0, b: 5}}, // no-existing zero-retention probe
+  {existing: null, received: {a: 0}}, // all-zero -> null
+  {existing: {a: 2}, received: {a: -2}}, // cancels to null
+  {existing: {a: 2, b: 1}, received: {a: -2}}, // -> {b:1}
+  {existing: {a: 2}, received: {b: 3}}, // -> {a:2,b:3}
+  {existing: {a: 5}, received: {a: -3}}, // -> {a:2}
+  {existing: {a: 2, b: 3}, received: null, removeHashes: ['a']}, // -> {b:3}
+  {existing: {a: 2}, received: null, removeHashes: ['a']}, // -> null
+  {existing: {a: 0, b: 5}, received: {a: 3}}, // -> {b:5,a:3}
+];
+
 function buildClientState(cs) {
   const out = {};
   for (const [cid, s] of Object.entries(cs)) {
@@ -226,6 +246,16 @@ const fixture = {
     desc: c.desc,
     queries: c.queries,
     expected: getInactiveQueries(buildCVR(c.queries)),
+  })),
+  refCountMerges: REFCOUNT_MERGES.map(c => ({
+    existing: c.existing ?? null,
+    received: c.received ?? null,
+    removeHashes: c.removeHashes ?? null,
+    expected: mergeRefCounts(
+      c.existing,
+      c.received,
+      c.removeHashes ? new Set(c.removeHashes) : undefined,
+    ),
   })),
 };
 

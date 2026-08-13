@@ -12,13 +12,13 @@
 //!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
-use crate::cvr::get_inactive_queries;
+use crate::cvr::{get_inactive_queries, merge_ref_counts};
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{RowID, row_id_hash, row_id_string_cached};
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
-    QueryRecord,
+    QueryRecord, RefCounts,
 };
 use crate::version::{
     CVRVersion, NullableCVRVersion, cmp_versions, version_from_lexi, version_from_string,
@@ -26,7 +26,19 @@ use crate::version::{
 };
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+/// Parse a fixture RefCounts value (`{hash: count}` or `null`) into `Option`.
+fn parse_refcounts(v: &Value) -> Option<RefCounts> {
+    if v.is_null() {
+        return None;
+    }
+    let mut m = RefCounts::new();
+    for (k, val) in v.as_object().expect("refcounts must be object") {
+        m.insert(k.clone(), val.as_i64().expect("refcount value must be int"));
+    }
+    Some(m)
+}
 
 fn parse_u64(s: &str) -> u64 {
     s.parse().expect("invalid u64 in fixture")
@@ -405,6 +417,32 @@ fn parity_check() {
             act_seq, exp_seq,
             "getInactiveQueries eviction-order mismatch [{}]",
             desc
+        );
+    }
+
+    // mergeRefCounts parity — pins the no-existing zero-retention, negative
+    // cancellation, all-zero -> null, and removeHashes-on-existing rules.
+    for entry in fixture
+        .get("refCountMerges")
+        .and_then(Value::as_array)
+        .expect("fixture.refCountMerges missing")
+    {
+        let existing = parse_refcounts(entry.get("existing").expect("existing"));
+        let received = parse_refcounts(entry.get("received").expect("received"));
+        let remove: Option<HashSet<String>> = entry
+            .get("removeHashes")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|s| s.as_str().expect("hash str").to_string())
+                    .collect()
+            });
+        let expected = parse_refcounts(entry.get("expected").expect("expected"));
+        let actual = merge_ref_counts(existing.as_ref(), received.as_ref(), remove.as_ref());
+        assert_eq!(
+            actual, expected,
+            "mergeRefCounts mismatch existing={:?} received={:?} rm={:?}",
+            existing, received, remove
         );
     }
 }

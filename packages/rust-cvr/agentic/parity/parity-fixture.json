@@ -564,5 +564,128 @@
         }
       ]
     }
+  ],
+  "refCountMerges": [
+    {
+      "existing": null,
+      "received": null,
+      "removeHashes": null,
+      "expected": null
+    },
+    {
+      "existing": null,
+      "received": {
+        "a": 2
+      },
+      "removeHashes": null,
+      "expected": {
+        "a": 2
+      }
+    },
+    {
+      "existing": null,
+      "received": {
+        "a": 0,
+        "b": 5
+      },
+      "removeHashes": null,
+      "expected": {
+        "a": 0,
+        "b": 5
+      }
+    },
+    {
+      "existing": null,
+      "received": {
+        "a": 0
+      },
+      "removeHashes": null,
+      "expected": null
+    },
+    {
+      "existing": {
+        "a": 2
+      },
+      "received": {
+        "a": -2
+      },
+      "removeHashes": null,
+      "expected": null
+    },
+    {
+      "existing": {
+        "a": 2,
+        "b": 1
+      },
+      "received": {
+        "a": -2
+      },
+      "removeHashes": null,
+      "expected": {
+        "b": 1
+      }
+    },
+    {
+      "existing": {
+        "a": 2
+      },
+      "received": {
+        "b": 3
+      },
+      "removeHashes": null,
+      "expected": {
+        "a": 2,
+        "b": 3
+      }
+    },
+    {
+      "existing": {
+        "a": 5
+      },
+      "received": {
+        "a": -3
+      },
+      "removeHashes": null,
+      "expected": {
+        "a": 2
+      }
+    },
+    {
+      "existing": {
+        "a": 2,
+        "b": 3
+      },
+      "received": null,
+      "removeHashes": [
+        "a"
+      ],
+      "expected": {
+        "b": 3
+      }
+    },
+    {
+      "existing": {
+        "a": 2
+      },
+      "received": null,
+      "removeHashes": [
+        "a"
+      ],
+      "expected": null
+    },
+    {
+      "existing": {
+        "a": 0,
+        "b": 5
+      },
+      "received": {
+        "a": 3
+      },
+      "removeHashes": null,
+      "expected": {
+        "b": 5,
+        "a": 3
+      }
+    }
   ]
 }
