@@ -2718,13 +2718,16 @@ mod tests {
     #[test]
     fn client_cookie_ahead_of_non_empty_cvr_is_invalid_base_cookie() {
         let client = Some(version_from_string("02"));
+        // "01:00" parses to configVersion Some(0); versionString renders it as
+        // the bare "01" (configVersion 0 is falsy in TS), so the error message
+        // reads "01", not "01:00". See version_string's falsy-zero contract.
         let cvr = version_from_string("01:00");
         let error = check_client_and_cvr_versions(&client, &cvr).unwrap_err();
         assert_eq!(
             error.kind(),
             &crate::protocol::ErrorKind::InvalidConnectionRequestBaseCookie
         );
-        assert_eq!(error.message(), "CVR is at version 01:00");
+        assert_eq!(error.message(), "CVR is at version 01");
     }
 
     #[test]
