@@ -231,6 +231,13 @@ pub type MetricsCallback = Arc<dyn Fn(usize, f64) + Send + Sync + 'static>;
 ///
 /// State is behind `Arc<TokioMutex<CacheState>>` because the background flush
 /// task (spawned via `tokio::spawn`) needs async access to the same state.
+///
+/// `Clone` is cheap — every field is either an `Arc`/`PgPool` (both refcounted)
+/// or a small value — and all clones share the same `state`/`pool`. The syncer
+/// offloads CVR I/O onto its shared-pool runtime by moving a clone of the cache
+/// into a spawned task (doc 91 spawn-offload), so the clone must alias the same
+/// underlying state.
+#[derive(Clone)]
 pub struct RowRecordCache {
     state: Arc<TokioMutex<CacheState>>,
     pool: sqlx::PgPool,

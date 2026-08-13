@@ -1248,8 +1248,8 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         args: None,
         ttl: None,
     }];
-    let hydrated = engine
-        .config_and_hydrate(
+    let hydrated = rt
+        .block_on(engine.config_and_hydrate(
             empty_engine_cvr("cg1", "replica-1"),
             "client1",
             &["ws1".to_string()],
@@ -1267,7 +1267,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             0,
             0,
             0,
-        )
+        ))
         .expect("initial hydrate");
     let hydrate_cookie = version_string(&hydrated.version);
 
@@ -1300,9 +1300,9 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         .unwrap();
     }
 
-    let existing_before_advance = engine.existing_rows();
-    let advanced = engine
-        .advance_and_sync(
+    let existing_before_advance = rt.block_on(engine.existing_rows());
+    let advanced = rt
+        .block_on(engine.advance_and_sync(
             hydrated,
             "replica-1".to_string(),
             &[],
@@ -1310,7 +1310,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             0,
             0,
             0,
-        )
+        ))
         .expect("offline advance");
     assert_eq!(advanced.num_changes, 1, "one replica row changed");
     assert!(advanced.reset_reason.is_none(), "advance must not reset");
@@ -1333,9 +1333,9 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         Some(&hydrate_cookie),
         sink2,
     );
-    let existing_after_advance = engine.existing_rows();
-    let caught_up = engine
-        .config_and_hydrate(
+    let existing_after_advance = rt.block_on(engine.existing_rows());
+    let caught_up = rt
+        .block_on(engine.config_and_hydrate(
             advanced.cvr,
             "client1",
             &["ws2".to_string()],
@@ -1353,7 +1353,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             0,
             0,
             0,
-        )
+        ))
         .expect("reconnect catchup");
 
     let mut catchup_wire = String::new();
@@ -1369,7 +1369,10 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         "catchup must rebuild contents from the current IVM row"
     );
 
-    let reloaded = engine.load_cvr(0.0).unwrap().expect("persisted CVR");
+    let reloaded = rt
+        .block_on(engine.load_cvr(0.0))
+        .unwrap()
+        .expect("persisted CVR");
     assert_eq!(
         reloaded.version, caught_up.version,
         "Postgres must hold the exact CVR delivered after catchup"

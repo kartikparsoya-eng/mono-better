@@ -59,8 +59,6 @@ pub struct SyncResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadCvrError {
-    #[error("no tokio handle for cvr load")]
-    MissingRuntime,
     #[error(transparent)]
     Store(#[from] CVRStoreError),
 }
@@ -68,13 +66,18 @@ pub enum LoadCvrError {
 /// Combined engine + CVR driver for a single client group.
 pub struct SyncEngine {
     pipelines: IvmPipelines,
-    store: Option<Arc<Mutex<CVRStoreHandle>>>,
+    store: Option<Arc<tokio::sync::Mutex<CVRStoreHandle>>>,
     /// Read-source for `existing_rows` (the row records the client already has).
     /// The store persists the `rows` table; this cache reads it back.
     row_cache: Option<RowRecordCache>,
     clients: HashMap<String, Arc<ClientHandler>>,
-    /// Tokio runtime handle for `block_on` at the PG I/O edge. The CG thread has
-    /// no ambient runtime, so the handle is injected (napi passed one in too).
+    /// Handle to the shared-pool runtime (the process's main multi-thread
+    /// runtime) onto which CVR Postgres I/O is offloaded. The client group runs
+    /// on a single-threaded executor whose reactor does NOT drive the shared CVR
+    /// pool's connections; spawning the I/O future here runs it on the runtime
+    /// that DOES drive them (doc 91 §5.1), while the executor only awaits the
+    /// resulting `JoinHandle` and stays free to run its other client groups.
+    /// `None` in unit tests that inject no handle — I/O then runs inline.
     tokio_handle: Option<tokio::runtime::Handle>,
 }
 
@@ -93,14 +96,16 @@ impl SyncEngine {
     /// The cache is loaded once (lazily) and kept warm; the write-back path
     /// (`flush_ops_to_store`) applies each flushed row delta to it, so this never
     /// re-reads Postgres. Empty when there is no store/cache.
-    pub fn existing_rows(&self) -> RowRecordMap {
-        let (Some(cache), Some(handle)) = (&self.row_cache, self.tokio_handle.clone()) else {
+    pub async fn existing_rows(&self) -> RowRecordMap {
+        let Some(cache) = &self.row_cache else {
             return HashMap::new();
         };
-        handle.block_on(async {
-            // `load()` is idempotent: it populates the cache on first call and
-            // returns early once loaded (no reload). The cache stays current via
-            // the write-back in `flush_ops_to_store`, so we never `clear()` here.
+        // Offload the (idempotent) cache load + read onto the shared-pool
+        // runtime. `load()` populates the cache on first call and returns early
+        // once loaded; the cache stays current via the write-back in
+        // `flush_ops_to_store`, so we never `clear()` here.
+        let cache = cache.clone();
+        self.offload(async move {
             if let Err(e) = cache.load().await {
                 tracing::warn!("row cache load failed: {e}");
                 return HashMap::new();
@@ -112,24 +117,45 @@ impl SyncEngine {
                 .map(|(k, v)| (k, cache_record_to_types(v)))
                 .collect()
         })
+        .await
     }
 
-    /// Inject the tokio runtime handle used for CVR store I/O (`block_on`).
+    /// Inject the shared-pool runtime handle used to offload CVR store I/O
+    /// (must be the runtime that owns the CVR `PgPool`).
     pub fn set_tokio_handle(&mut self, handle: tokio::runtime::Handle) {
         self.tokio_handle = Some(handle);
     }
 
+    /// Run a `Send` CVR-I/O future on the shared-pool runtime instead of the
+    /// caller's single-threaded executor runtime. The pool's connections are
+    /// polled by that runtime's reactor, so awaiting them there avoids the
+    /// cross-runtime starvation of doc 91 §5.1; the executor awaits only the
+    /// (cross-runtime-safe) `JoinHandle` and is free to drive its other client
+    /// groups meanwhile. With no handle injected (some unit tests) the future
+    /// runs inline on the current runtime.
+    async fn offload<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        match &self.tokio_handle {
+            Some(handle) => handle.spawn(fut).await.expect("CVR I/O task panicked"),
+            None => fut.await,
+        }
+    }
+
     /// Load the CVR snapshot from the store (or `None` if no store is set).
-    pub fn load_cvr(&self, last_connect_time: f64) -> Result<Option<CVR>, LoadCvrError> {
+    pub async fn load_cvr(&self, last_connect_time: f64) -> Result<Option<CVR>, LoadCvrError> {
         let Some(store_arc) = self.store.clone() else {
             return Ok(None);
         };
-        let handle = self
-            .tokio_handle
-            .clone()
-            .ok_or(LoadCvrError::MissingRuntime)?;
-        let mut store = store_arc.lock().unwrap();
-        let result = handle.block_on(async { store.load(last_connect_time).await })?;
+        // Offload the load onto the shared-pool runtime (doc 91 §5.1).
+        let result = self
+            .offload(async move {
+                let mut store = store_arc.lock().await;
+                store.load(last_connect_time).await
+            })
+            .await?;
         Ok(Some(result.cvr))
     }
 
@@ -160,7 +186,7 @@ impl SyncEngine {
             tracing::warn!("row cache: {e}");
         });
         let cache = RowRecordCache::new(pool, schema, cvr_id, 100, fail, None);
-        self.store = Some(Arc::new(Mutex::new(store)));
+        self.store = Some(Arc::new(tokio::sync::Mutex::new(store)));
         self.row_cache = Some(cache);
         Ok(())
     }
@@ -216,7 +242,7 @@ impl SyncEngine {
     /// Flush the updater's buffered store ops + CVR to Postgres (no-op when no
     /// store is set). Requires a current tokio runtime handle when a store is
     /// present, mirroring the napi path.
-    fn flush_to_store(
+    async fn flush_to_store(
         &self,
         updater: &mut CVRQueryDrivenUpdater,
         flushed_cvr: &CVR,
@@ -231,6 +257,7 @@ impl SyncEngine {
             last_connect_time,
             existing_rows,
         )
+        .await
     }
 
     /// Apply buffered store ops and flush the CVR to Postgres (no-op without a
@@ -238,7 +265,7 @@ impl SyncEngine {
     /// the flush, the same row deltas are written back into the row-record cache
     /// (`RowRecordCache::apply` with `flushed=true`) so `existing_rows()` stays
     /// current without re-reading Postgres.
-    fn flush_ops_to_store(
+    async fn flush_ops_to_store(
         &self,
         ops: Vec<StoreOp>,
         expected_current_version: &CVRVersion,
@@ -277,48 +304,44 @@ impl SyncEngine {
             })
             .collect();
 
-        if !ops.is_empty() {
-            store_arc.lock().unwrap().apply_store_ops(ops);
-        }
-        let handle = self
-            .tokio_handle
-            .clone()
-            .ok_or_else(|| "no tokio handle for store flush".to_string())?;
-        {
-            let mut store = store_arc.lock().unwrap();
-            handle
-                .block_on(async {
-                    store
-                        .flush(
-                            expected_current_version,
-                            flushed_cvr,
-                            last_connect_time as f64,
-                        )
-                        .await
-                })
-                .map_err(|e| format!("store flush: {e}"))?;
-        }
+        // Offload the whole PG-touching section — apply ops, flush the CVR, and
+        // mirror the row deltas back into the read cache — onto the shared-pool
+        // runtime (doc 91 §5.1). The store's `!Send` engine state is not touched
+        // here (only the `Send` `Arc<Mutex<CVRStoreHandle>>` / cache), so the
+        // whole unit can run off-thread while the executor drives other groups.
+        let cache = self.row_cache.clone();
+        let expected = expected_current_version.clone();
+        let flushed = flushed_cvr.clone();
+        self.offload(async move {
+            if !ops.is_empty() {
+                store_arc.lock().await.apply_store_ops(ops);
+            }
+            {
+                let mut store = store_arc.lock().await;
+                store
+                    .flush(&expected, &flushed, last_connect_time as f64)
+                    .await
+                    .map_err(|e| format!("store flush: {e}"))?;
+            }
 
-        // Write-back: the store just persisted these rows to PG, so update the
-        // in-memory cache with the same deltas (`flushed=true` → cache-only, no
-        // second PG write). Keeps the cache in lockstep so the next
-        // `existing_rows()` needs no reload.
-        if !row_deltas.is_empty()
-            && let Some(cache) = &self.row_cache
-        {
-            let ver = flushed_cvr.version.clone();
-            handle.block_on(async {
+            // Write-back: the store just persisted these rows to PG, so update
+            // the in-memory cache with the same deltas (`flushed=true` →
+            // cache-only, no second PG write). Keeps the cache in lockstep so the
+            // next `existing_rows()` needs no reload.
+            if !row_deltas.is_empty()
+                && let Some(cache) = &cache
+            {
+                let ver = flushed.version.clone();
                 // Ensure the cache is loaded before applying (idempotent).
                 if let Err(e) = cache.load().await {
                     tracing::warn!("row cache load before write-back failed: {e}");
-                    return;
-                }
-                if let Err(e) = cache.apply(row_deltas, ver, true).await {
+                } else if let Err(e) = cache.apply(row_deltas, ver, true).await {
                     tracing::warn!("row cache write-back failed: {e}");
                 }
-            });
-        }
-        Ok(())
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Apply a client's desired-queries change (from `initConnection` /
@@ -333,7 +356,7 @@ impl SyncEngine {
     /// skip the transform) and hydrating those not already running — then pokes
     /// got-queries + rows.
     #[allow(clippy::too_many_arguments)]
-    pub fn config_and_hydrate(
+    pub async fn config_and_hydrate(
         &mut self,
         cvr: CVR,
         client_id: &str,
@@ -373,10 +396,11 @@ impl SyncEngine {
             last_active,
             ttl_clock,
         )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn config_and_hydrate_with_profile(
+    pub async fn config_and_hydrate_with_profile(
         &mut self,
         cvr: CVR,
         client_id: &str,
@@ -465,7 +489,8 @@ impl SyncEngine {
                 &cfg_cvr,
                 last_connect_time,
                 existing_rows,
-            )?;
+            )
+            .await?;
             pokers.end(cfg_cvr.version.clone());
         }
 
@@ -520,9 +545,9 @@ impl SyncEngine {
         // a whole-request failure fails the connection with the transform error.
         if !custom_specs.is_empty() {
             let mut transform_errors: Vec<serde_json::Value> = Vec::new();
-            match (custom_ctx, self.tokio_handle.clone()) {
-                (Some(ctx), Some(handle)) => {
-                    match transform_custom_queries(&handle, ctx, shard, &custom_specs) {
+            match custom_ctx {
+                Some(ctx) => {
+                    match transform_custom_queries(ctx, shard, &custom_specs).await {
                         Ok(results) => {
                             for r in results {
                                 match r {
@@ -545,7 +570,7 @@ impl SyncEngine {
                         }
                     }
                 }
-                _ => tracing::warn!(
+                None => tracing::warn!(
                     "custom queries present but no userQueryURL context; skipping {} query(ies)",
                     custom_specs.len()
                 ),
@@ -595,32 +620,36 @@ impl SyncEngine {
                 &[],
                 poke_ws_ids,
                 &original_client_versions,
-            )?;
+            )
+            .await?;
             Ok(cfg_cvr)
         } else {
             let excluded: Vec<String> = add_queries.iter().map(|(id, _)| id.clone()).collect();
-            let result = self.hydrate_and_sync(
-                cfg_cvr,
-                state_version,
-                replica_version,
-                &add_queries,
-                // Removals are TTL-scheduler-driven (a `del` only inactivates
-                // the desired query above); nothing is removed here.
-                &[],
-                poke_ws_ids,
-                &queries,
-                existing_rows,
-                last_connect_time,
-                last_active,
-                ttl_clock,
-            )?;
+            let result = self
+                .hydrate_and_sync(
+                    cfg_cvr,
+                    state_version,
+                    replica_version,
+                    &add_queries,
+                    // Removals are TTL-scheduler-driven (a `del` only inactivates
+                    // the desired query above); nothing is removed here.
+                    &[],
+                    poke_ws_ids,
+                    &queries,
+                    existing_rows,
+                    last_connect_time,
+                    last_active,
+                    ttl_clock,
+                )
+                .await?;
             self.catchup_clients(
                 &result.cvr,
                 &result.cvr.version,
                 &excluded,
                 poke_ws_ids,
                 &original_client_versions,
-            )?;
+            )
+            .await?;
             Ok(result.cvr)
         }
     }
@@ -700,7 +729,7 @@ impl SyncEngine {
         floor
     }
 
-    pub fn catchup_clients(
+    pub async fn catchup_clients(
         &mut self,
         cvr: &CVR,
         current: &CVRVersion,
@@ -719,10 +748,6 @@ impl SyncEngine {
         let (Some(store_arc), Some(cache)) = (self.store.clone(), self.row_cache.as_ref()) else {
             return Ok(()); // no store → nothing persisted to catch up from
         };
-        let handle = self
-            .tokio_handle
-            .clone()
-            .ok_or_else(|| "no tokio handle for catchup".to_string())?;
 
         let clients = self.clients_for(poke_ws_ids);
         if clients.is_empty() {
@@ -741,7 +766,7 @@ impl SyncEngine {
         let (raw_rows, cfg_patches): (
             Vec<rust_cvr::row_record_cache::RowsRow>,
             Vec<PatchToVersion>,
-        ) = handle.block_on(async {
+        ) = {
             let mut cursor = cache_ref
                 .catchup_row_patches(
                     catchup_from.clone(),
@@ -759,13 +784,13 @@ impl SyncEngine {
             {
                 rows.extend(page);
             }
-            let store_reader = store_arc.lock().unwrap().catchup_reader();
+            let store_reader = store_arc.lock().await.catchup_reader();
             let cfg = store_reader
                 .catchup_config_patches(catchup_from.clone(), &cvr.version, current)
                 .await
                 .map_err(|e| format!("catchup_config_patches: {e}"))?;
             Ok::<_, String>((rows, cfg))
-        })?;
+        }?;
 
         if raw_rows.is_empty() && cfg_patches.is_empty() {
             return Ok(());
@@ -861,7 +886,7 @@ impl SyncEngine {
     /// (source-drift assert) propagates out for teardown, after the engine rolls
     /// back its partial source connections.
     #[allow(clippy::too_many_arguments)]
-    pub fn hydrate_and_sync(
+    pub async fn hydrate_and_sync(
         &mut self,
         cvr: CVR,
         state_version: String,
@@ -923,7 +948,8 @@ impl SyncEngine {
         // persist each hydrated query's signature and flag drift.
         *sigs.lock().unwrap() = sig_acc;
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
-        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)?;
+        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)
+            .await?;
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -941,7 +967,7 @@ impl SyncEngine {
     /// Port of napi `AdvanceAndSyncTask::compute`. On a reset, the in-flight
     /// poke is cancelled and the caller is expected to rehydrate.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_and_sync(
+    pub async fn advance_and_sync(
         &mut self,
         cvr: CVR,
         replica_version: String,
@@ -1032,7 +1058,8 @@ impl SyncEngine {
         // Hand the folded post-advance signatures to the updater's provider.
         *sigs.lock().unwrap() = sig_acc;
         let (flushed_cvr, _stats) = updater.flush(last_connect_time, last_active, ttl_clock);
-        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)?;
+        self.flush_to_store(&mut updater, &flushed_cvr, last_connect_time, existing_rows)
+            .await?;
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -1052,7 +1079,7 @@ impl SyncEngine {
     /// `#removeExpiredQueries` → the removal side of `#syncQueryPipelineSet`.
     /// Returns the flushed CVR and the number of queries removed (0 = no-op).
     #[allow(clippy::too_many_arguments)]
-    pub fn remove_expired_queries(
+    pub async fn remove_expired_queries(
         &mut self,
         cvr: CVR,
         client_ids: &[String],
@@ -1078,19 +1105,21 @@ impl SyncEngine {
         // got-query `del` patches + bumps the config version, remove_query
         // tears each pipeline down, and `finish` → delete_unreferenced_rows
         // pokes the now-orphaned rows away.
-        let result = self.hydrate_and_sync(
-            cvr,
-            state_version,
-            replica_version,
-            &[],
-            &expired,
-            client_ids,
-            &[],
-            existing_rows,
-            last_connect_time,
-            last_active,
-            ttl_clock,
-        )?;
+        let result = self
+            .hydrate_and_sync(
+                cvr,
+                state_version,
+                replica_version,
+                &[],
+                &expired,
+                client_ids,
+                &[],
+                existing_rows,
+                last_connect_time,
+                last_active,
+                ttl_clock,
+            )
+            .await?;
         Ok((result.cvr, expired.len()))
     }
 
@@ -1105,7 +1134,7 @@ impl SyncEngine {
     /// the client explicitly asked to delete — TS only acks those (not the
     /// implicit inactive-client cleanup).
     #[allow(clippy::too_many_arguments)]
-    pub fn delete_clients(
+    pub async fn delete_clients(
         &mut self,
         cvr: CVR,
         shard: &ShardID,
@@ -1130,7 +1159,7 @@ impl SyncEngine {
         // deleteClients produces config ops (client removal + desire
         // inactivation), not row writes — but snapshot the CVR rows anyway so the
         // store flush's row dedup is correct regardless.
-        let existing_rows = self.existing_rows();
+        let existing_rows = self.existing_rows().await;
         let clients = self.clients_for(poke_ws_ids);
         {
             let refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
@@ -1144,7 +1173,8 @@ impl SyncEngine {
                 &cfg_cvr,
                 last_connect_time,
                 &existing_rows,
-            )?;
+            )
+            .await?;
             pokers.end(cfg_cvr.version.clone());
         }
 
@@ -1466,8 +1496,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hydrate_and_sync_emits_poke_frames() {
+    #[tokio::test]
+    async fn hydrate_and_sync_emits_poke_frames() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
 
@@ -1504,6 +1534,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
 
         // Store is None → no flush; the got-query patch still produces a poke.
@@ -1536,8 +1567,8 @@ mod tests {
     /// hydration. `make_cvr()` has stateVersion "00", so the old code panicked
     /// here; the fix advances first and uses the header version. Needs a
     /// snapshotter-backed pipeline (advance is unavailable on MemorySource).
-    #[test]
-    fn advance_and_sync_uses_header_version_not_empty() {
+    #[tokio::test]
+    async fn advance_and_sync_uses_header_version_not_empty() {
         use rusqlite::Connection;
 
         let db_path = "/tmp/rust-syncer-advance-and-sync-test.db";
@@ -1602,15 +1633,17 @@ mod tests {
         // make_cvr() has stateVersion "00" and replicaVersion "v1"; advancing a
         // snapshot pinned at "v1" MUST NOT panic (it did before the fix).
         let existing_rows: RowRecordMap = HashMap::new();
-        let result = engine.advance_and_sync(
-            make_cvr(),
-            "v1".to_string(),
-            &["ws1".to_string()],
-            &existing_rows,
-            0,
-            0,
-            0,
-        );
+        let result = engine
+            .advance_and_sync(
+                make_cvr(),
+                "v1".to_string(),
+                &["ws1".to_string()],
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await;
 
         cleanup();
         let result = result.expect("advance_and_sync must not error/panic");
@@ -1621,8 +1654,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn config_and_hydrate_from_desired_queries_pokes_client() {
+    #[tokio::test]
+    async fn config_and_hydrate_from_desired_queries_pokes_client() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
@@ -1666,6 +1699,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
 
         // The client group now tracks the desired query, and the client got
@@ -1688,8 +1722,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn expired_query_is_removed_after_ttl_elapses() {
+    #[tokio::test]
+    async fn expired_query_is_removed_after_ttl_elapses() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
@@ -1733,6 +1767,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(engine.pipelines().has_query("q1"));
 
@@ -1757,12 +1792,14 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(engine.pipelines().has_query("q1"), "inactive query lingers");
 
         // 3) Not yet expired at ttl_clock=500 (< inactivated_at 0 + ttl 1000).
         let (cvr, removed) = engine
             .remove_expired_queries(cvr, &ws, &existing_rows, 0, 0, 500)
+            .await
             .unwrap();
         assert_eq!(removed, 0);
         assert!(engine.pipelines().has_query("q1"));
@@ -1770,6 +1807,7 @@ mod tests {
         // 4) Expired at ttl_clock=2000 → removed from pipeline + CVR.
         let (cvr, removed) = engine
             .remove_expired_queries(cvr, &ws, &existing_rows, 0, 0, 2000)
+            .await
             .unwrap();
         assert_eq!(removed, 1);
         assert!(!engine.pipelines().has_query("q1"));
@@ -1804,8 +1842,8 @@ mod tests {
         assert_eq!(back, original);
     }
 
-    #[test]
-    fn clear_op_drops_all_desired_queries() {
+    #[tokio::test]
+    async fn clear_op_drops_all_desired_queries() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
@@ -1846,6 +1884,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(
             cvr.clients["client1"]
@@ -1874,6 +1913,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(
             !cvr.clients["client1"]
@@ -1883,8 +1923,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn config_and_hydrate_reissue_takes_catchup_branch_without_store() {
+    #[tokio::test]
+    async fn config_and_hydrate_reissue_takes_catchup_branch_without_store() {
         // A second config_and_hydrate for an already-hydrated query has an empty
         // add set, so it takes the catchup branch. With no CVR store wired,
         // catchup is a clean no-op and the call still returns the CVR intact.
@@ -1932,6 +1972,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(engine.pipelines().has_query("q1"));
 
@@ -1956,13 +1997,14 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(cvr.queries.contains_key("q1"));
         assert!(cvr.clients.contains_key("client1"));
     }
 
-    #[test]
-    fn changed_transformation_hash_rehydrates_query() {
+    #[tokio::test]
+    async fn changed_transformation_hash_rehydrates_query() {
         // Simulates the updateAuth re-transform path: a query already hydrated
         // with one transformation hash is re-hydrated when the recomputed hash
         // differs (as it would when authData changes the permission expansion).
@@ -2009,6 +2051,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         let real_hash = engine
             .pipelines()
@@ -2048,6 +2091,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(engine.pipelines().has_query("q1"));
         assert_eq!(
@@ -2057,8 +2101,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn catchup_clients_without_store_is_noop() {
+    #[tokio::test]
+    async fn catchup_clients_without_store_is_noop() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
@@ -2085,6 +2129,7 @@ mod tests {
                 &["ws1".to_string()],
                 &std::collections::HashMap::new(),
             )
+            .await
             .unwrap();
     }
 
@@ -2201,8 +2246,8 @@ mod tests {
         assert_eq!(ids, vec!["ws-current"]);
     }
 
-    #[test]
-    fn delete_clients_removes_client_and_acks() {
+    #[tokio::test]
+    async fn delete_clients_removes_client_and_acks() {
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
@@ -2259,6 +2304,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         let cvr = engine
             .config_and_hydrate(
@@ -2280,6 +2326,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(cvr.clients.contains_key("client1"));
         assert!(cvr.clients.contains_key("client2"));
@@ -2297,6 +2344,7 @@ mod tests {
                 0,
                 0,
             )
+            .await
             .unwrap();
         assert!(cvr.clients.contains_key("client1"));
         assert!(

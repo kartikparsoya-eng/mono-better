@@ -89,7 +89,17 @@ export default async function runWorker(
 
   const processes = new ProcessManager(lc, parent);
 
-  const {numSyncWorkers: numSyncers} = config;
+  // The Rust syncer scales *within a single process* via a bounded pool of
+  // hash-sharded async executors (doc 91: `packages/zero-cache/docs/
+  // rust-cvr-port/91-sharded-executor-design.md`). Running `numSyncWorkers`
+  // separate rust-syncer processes would duplicate the replica per process,
+  // fragment the CVR connection budget into per-process slices too small to
+  // subdivide across executors, and oversubscribe cores (`workers × executors`
+  // threads). So for the rust path we run exactly ONE rust-syncer, hand it the
+  // whole CVR/upstream connection budget, and let it fan out to `K ≈ cores`
+  // executors internally. TS syncers keep the multi-process model unchanged.
+  const numSyncers =
+    useRustSyncer && config.numSyncWorkers > 0 ? 1 : config.numSyncWorkers;
   if (config.enableCrudMutations && config.upstream.maxConns < numSyncers) {
     throw new Error(
       `Insufficient upstream connections (${config.upstream.maxConns}) for ${numSyncers} syncers.` +
