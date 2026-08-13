@@ -31,8 +31,12 @@ const seed = fs.readFileSync(path.join(dir, 'catchup-seed.sql'), 'utf8');
 const CVRID = 'cg1';
 const sql = postgres(URI, {onnotice: () => {}});
 
-// Verbatim TS catchupRowPatches query (row-record-cache.ts). No ORDER BY, so
-// the emitted set — not order — is what must match.
+// LIMITATION: this transcribes the TS catchupRowPatches SQL (row-record-cache.ts)
+// rather than importing/driving the real method (which needs a full RowRecordCache
+// + CVRStore + db). So it pins Rust's query against a hand-copy of the TS query,
+// not the live TS code path — if the real TS query changes, this copy must be
+// updated by hand. Kept verbatim; revisit if the TS query grows non-trivial.
+// No ORDER BY, so the emitted set — not order — is what must match.
 async function catchup(start, end, exclude) {
   if (exclude.length === 0) {
     return sql`SELECT "clientGroupID","schema","table","rowKey","rowVersion","patchVersion","refCounts"

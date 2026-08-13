@@ -40,6 +40,14 @@ npx --no-install tsx packages/rust-syncer/agentic/parity/generate-auth-fixture.m
 if python3 - "$tmp/auth.json" packages/rust-syncer/agentic/parity/auth-fixture.json <<'PY'
 import json, sys
 new = json.load(open(sys.argv[1])); old = json.load(open(sys.argv[2]))
+# The semantic key omits the crypto material (which rotates each run) and keys on
+# `desc`, so `desc` MUST uniquely identify a case — otherwise a collision could
+# hide a flipped decision by preserving the multiset of labels. Enforce it.
+descs = [c['desc'] for c in old['cases']]
+if len(descs) != len(set(descs)):
+    print("STALE FIXTURE: auth cases have duplicate `desc` — the freshness key is"
+          " ambiguous; make each desc unique.")
+    sys.exit(1)
 def key(c): return (c['desc'], c.get('issuer'), c.get('audience'), c['userID'], c['tsAccept'])
 if sorted(map(key, new['cases'])) == sorted(map(key, old['cases'])):
     print("  fresh: JWT auth (semantic)"); sys.exit(0)
