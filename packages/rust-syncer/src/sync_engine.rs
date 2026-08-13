@@ -246,8 +246,30 @@ impl SyncEngine {
         let Some(store_arc) = self.store.clone() else {
             return Ok(());
         };
-        // Extract the row deltas before the ops are moved into the store, so we
-        // can mirror them into the read cache after the PG write succeeds.
+
+        // Row-write dedup (port of TS `#flush`'s pending-row dedup): drop row ops
+        // that would write nothing new — a record identical to what's already in
+        // the CVR, or an unreferenced row/delete for a row not in the CVR anyway.
+        // Without this, every row touched in a cycle is rewritten even when
+        // unchanged (write amplification that inflates flush latency on hot rows).
+        // Only pay for it when the cycle actually has row ops (the common
+        // config-only flush skips the existing-rows read entirely). `force_updates`
+        // is never populated in this port, so no forced-write exception is needed.
+        let has_row_ops = ops
+            .iter()
+            .any(|op| matches!(op, StoreOp::PutRowRecord(_) | StoreOp::DelRowRecord(_)));
+        let ops: Vec<StoreOp> = if has_row_ops {
+            let existing = self.existing_rows();
+            ops.into_iter()
+                .filter(|op| !row_op_is_noop(op, &existing))
+                .collect()
+        } else {
+            ops
+        };
+
+        // Extract the row deltas (from the DEDUPED ops) before they are moved into
+        // the store, so we can mirror the same writes into the read cache after
+        // the PG write succeeds.
         let row_deltas: Vec<(RowID, Option<rust_cvr::row_record_cache::RowRecord>)> = ops
             .iter()
             .filter_map(|op| match op {
@@ -1241,6 +1263,28 @@ fn row_to_contents(row: &rust_ivm::ivm::data::Row) -> serde_json::Value {
 /// Convert a row-record-cache `RowRecord` into the `types::RowRecord` the
 /// updater / ChangeProcessor expect. They differ only in the `ref_counts` map
 /// type (the cache uses `HashMap`, `types::RefCounts` is a `BTreeMap`).
+/// Whether a row op writes nothing new against the current CVR rows — a port of
+/// the two drop conditions in TS `CVRStore.#flush`: (a) an unreferenced row or a
+/// delete for a row that isn't in the CVR anyway, and (b) a record that exactly
+/// equals what's already stored (`deepEqual`). Such ops are pure write
+/// amplification and are filtered out before the store flush.
+fn row_op_is_noop(op: &StoreOp, existing: &RowRecordMap) -> bool {
+    match op {
+        StoreOp::PutRowRecord(r) => {
+            let key = rust_cvr::row_key::row_id_string(&r.id);
+            let ex = existing.get(&key);
+            // (1) unreferenced (tombstone) and not present, or (2) unchanged.
+            (ex.is_none() && r.ref_counts.is_none()) || ex == Some(r)
+        }
+        StoreOp::DelRowRecord(id) => {
+            // Deleting a row that isn't in the CVR is a no-op.
+            let key = rust_cvr::row_key::row_id_string(id);
+            existing.get(&key).is_none()
+        }
+        _ => false,
+    }
+}
+
 fn cache_record_to_types(r: rust_cvr::row_record_cache::RowRecord) -> RowRecord {
     RowRecord {
         id: r.id,
@@ -1305,6 +1349,67 @@ mod tests {
     use rust_cvr::types::{BaseQueryRecord, CVR, ClientQueryRecord, QueryRecord, ShardID};
     use rust_cvr::version::CVRVersion;
     use std::collections::BTreeMap;
+
+    fn row_id(id: &str) -> RowID {
+        let mut key = serde_json::Map::new();
+        key.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        RowID {
+            schema: "public".to_string(),
+            table: "issue".to_string(),
+            row_key: key,
+        }
+    }
+
+    fn row_record(id: &str, patch_version: &str, referenced: bool) -> RowRecord {
+        RowRecord {
+            id: row_id(id),
+            row_version: "r1".to_string(),
+            patch_version: version_from_string(patch_version),
+            ref_counts: referenced.then(|| {
+                let mut m = BTreeMap::new();
+                m.insert("q1".to_string(), 1i64);
+                m
+            }),
+        }
+    }
+
+    /// The row-write dedup (TS `#flush`): unchanged records and unreferenced /
+    /// absent-row deletes are no-ops and must be filtered; real adds, changes, and
+    /// deletes of present rows must NOT be filtered.
+    #[test]
+    fn row_op_is_noop_matches_ts_dedup() {
+        let rec = row_record("i1", "01", true);
+        let mut existing: RowRecordMap = HashMap::new();
+        existing.insert(row_id_string(&rec.id), rec.clone());
+
+        // Unchanged record → no-op (dropped).
+        assert!(row_op_is_noop(
+            &StoreOp::PutRowRecord(rec.clone()),
+            &existing
+        ));
+        // Changed record (different patch_version) → NOT a no-op.
+        let changed = row_record("i1", "02", true);
+        assert!(!row_op_is_noop(&StoreOp::PutRowRecord(changed), &existing));
+        // Brand-new referenced row (not in CVR) → NOT a no-op (a real add).
+        let added = row_record("i2", "01", true);
+        assert!(!row_op_is_noop(&StoreOp::PutRowRecord(added), &existing));
+        // Tombstone (unreferenced) for a row not in the CVR → no-op.
+        let ghost_tombstone = row_record("i3", "01", false);
+        assert!(row_op_is_noop(
+            &StoreOp::PutRowRecord(ghost_tombstone),
+            &existing
+        ));
+        // Delete of a present row → NOT a no-op (a real delete).
+        assert!(!row_op_is_noop(
+            &StoreOp::DelRowRecord(row_id("i1")),
+            &existing
+        ));
+        // Delete of an absent row → no-op.
+        assert!(row_op_is_noop(
+            &StoreOp::DelRowRecord(row_id("gone")),
+            &existing
+        ));
+    }
 
     /// A CVR with a single client query `q1` (mirrors rust-cvr's test helper),
     /// so `track_queries` produces a got-query patch.
