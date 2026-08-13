@@ -5,8 +5,10 @@
 //! Named queries arrive from the client as `{name, args}` (no AST). Before they
 //! can be hydrated, the syncer POSTs them to the user's query API server
 //! (`userQueryURL`), which returns a concrete AST per query. The response is
-//! cached for 5s per (url, auth, query id) — matching TS, which notes the
-//! ViewSyncer would otherwise call the API server 3-4× with identical queries.
+//! cached for 5s per (url, auth, forwarded-headers, query id) — matching TS,
+//! whose `getCacheKey` includes url + token + cookie + origin + userID +
+//! customHeaders (the ViewSyncer would otherwise call the API server 3-4× with
+//! identical queries).
 //!
 //! Whole-request failures (`TransformFailed` / HTTP error) surface as `Err` so
 //! the caller can fail the connection while leaving existing pipelines intact
@@ -27,9 +29,11 @@ use crate::permissions::hash_of_ast;
 /// typical short-lived auth token, so a re-auth re-transforms promptly).
 const CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// Cached per-query transform results, keyed by `url|auth|id`. Mirrors the TS
-/// per-connection `TimedCache`, but process-wide (the key encodes the request
-/// identity that matters: URL, auth, and query id).
+/// Cached per-query transform results, keyed by `url|auth|headers-digest|id`.
+/// Mirrors the TS per-connection `TimedCache`, but process-wide — so the key
+/// MUST encode the full request identity that scopes authorization (URL, token,
+/// AND the forwarded cookie/origin/custom headers). Omitting the headers would
+/// let one connection read another's authorization-scoped transform.
 static TRANSFORM_CACHE: LazyLock<StdMutex<HashMap<String, (Instant, TransformedQuery)>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
@@ -84,7 +88,7 @@ pub fn transform_custom_queries(
 
     // Split into cached vs. uncached (TS `transform()` cache split).
     for spec in specs {
-        if let Some(cached) = cache_get(&ctx.url, ctx.auth.as_deref(), &spec.id) {
+        if let Some(cached) = cache_get(&ctx.url, ctx.auth.as_deref(), &ctx.headers, &spec.id) {
             results.push(CustomTransformed::Ok(cached));
         } else {
             to_fetch.push(spec);
@@ -137,7 +141,13 @@ pub fn transform_custom_queries(
             ast,
             hash,
         };
-        cache_set(&ctx.url, ctx.auth.as_deref(), &id, &transformed);
+        cache_set(
+            &ctx.url,
+            ctx.auth.as_deref(),
+            &ctx.headers,
+            &id,
+            &transformed,
+        );
         results.push(CustomTransformed::Ok(transformed));
     }
 
@@ -195,22 +205,52 @@ async fn post_transform(
         .map_err(|e| transform_failed("Internal", format!("invalid transform response: {e}")))
 }
 
-fn cache_key(url: &str, auth: Option<&str>, id: &str) -> String {
-    format!("{url}|{}|{id}", auth.unwrap_or(""))
+/// A stable digest of the forwarded headers (cookie, origin, X-Api-Key, custom
+/// headers). Folded into the transform cache key so two connections that share a
+/// URL + token but differ in forwarded credentials can NOT read each other's
+/// cached (authorization-scoped) transform. Port of TS `getCacheKey`, which
+/// includes cookie, origin, userID, and customHeaders alongside url+token+id.
+fn headers_digest(headers: &[(String, String)]) -> String {
+    let mut pairs: Vec<&(String, String)> = headers.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let canonical: String = pairs.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+    format!("{:016x}", rust_cvr::hash::h64(&canonical))
 }
 
-fn cache_get(url: &str, auth: Option<&str>, id: &str) -> Option<TransformedQuery> {
+fn cache_key(url: &str, auth: Option<&str>, headers: &[(String, String)], id: &str) -> String {
+    format!(
+        "{url}|{}|{}|{id}",
+        auth.unwrap_or(""),
+        headers_digest(headers)
+    )
+}
+
+fn cache_get(
+    url: &str,
+    auth: Option<&str>,
+    headers: &[(String, String)],
+    id: &str,
+) -> Option<TransformedQuery> {
     let cache = TRANSFORM_CACHE.lock().ok()?;
-    let (at, q) = cache.get(&cache_key(url, auth, id))?;
+    let (at, q) = cache.get(&cache_key(url, auth, headers, id))?;
     if at.elapsed() >= CACHE_TTL {
         return None;
     }
     Some(q.clone())
 }
 
-fn cache_set(url: &str, auth: Option<&str>, id: &str, q: &TransformedQuery) {
+fn cache_set(
+    url: &str,
+    auth: Option<&str>,
+    headers: &[(String, String)],
+    id: &str,
+    q: &TransformedQuery,
+) {
     if let Ok(mut cache) = TRANSFORM_CACHE.lock() {
-        cache.insert(cache_key(url, auth, id), (Instant::now(), q.clone()));
+        cache.insert(
+            cache_key(url, auth, headers, id),
+            (Instant::now(), q.clone()),
+        );
     }
 }
 
@@ -249,7 +289,7 @@ mod tests {
             ast: serde_json::json!({"table": "issue"}),
             hash: "hash1".to_string(),
         };
-        cache_set(url, Some("tok"), "q1", &tq);
+        cache_set(url, Some("tok"), &[], "q1", &tq);
 
         let ctx = CustomQueryContext {
             url: url.to_string(),
@@ -273,19 +313,44 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_distinguishes_url_auth_and_id() {
+    fn cache_key_distinguishes_url_auth_headers_and_id() {
+        let none: &[(String, String)] = &[];
         assert_ne!(
-            cache_key("u", Some("a"), "1"),
-            cache_key("u", Some("b"), "1")
+            cache_key("u", Some("a"), none, "1"),
+            cache_key("u", Some("b"), none, "1")
         );
         assert_ne!(
-            cache_key("u", Some("a"), "1"),
-            cache_key("v", Some("a"), "1")
+            cache_key("u", Some("a"), none, "1"),
+            cache_key("v", Some("a"), none, "1")
         );
         assert_ne!(
-            cache_key("u", Some("a"), "1"),
-            cache_key("u", Some("a"), "2")
+            cache_key("u", Some("a"), none, "1"),
+            cache_key("u", Some("a"), none, "2")
         );
-        assert_eq!(cache_key("u", None, "1"), cache_key("u", None, "1"));
+        assert_eq!(
+            cache_key("u", None, none, "1"),
+            cache_key("u", None, none, "1")
+        );
+        // Forwarded headers (cookie/origin/custom) must partition the cache:
+        // same url+auth+id but a different cookie → different key.
+        let cookie_a = &[("Cookie".to_string(), "session=A".to_string())][..];
+        let cookie_b = &[("Cookie".to_string(), "session=B".to_string())][..];
+        assert_ne!(
+            cache_key("u", Some("a"), cookie_a, "1"),
+            cache_key("u", Some("a"), cookie_b, "1")
+        );
+        // Same headers (order-independent) → same key.
+        let h1 = &[
+            ("Cookie".to_string(), "s=1".to_string()),
+            ("Origin".to_string(), "x".to_string()),
+        ][..];
+        let h2 = &[
+            ("Origin".to_string(), "x".to_string()),
+            ("Cookie".to_string(), "s=1".to_string()),
+        ][..];
+        assert_eq!(
+            cache_key("u", Some("a"), h1, "1"),
+            cache_key("u", Some("a"), h2, "1")
+        );
     }
 }

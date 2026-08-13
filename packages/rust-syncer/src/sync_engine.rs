@@ -142,20 +142,17 @@ impl SyncEngine {
     /// napi `set_cvr_store`.
     pub fn set_cvr_store(
         &mut self,
-        pg_uri: &str,
+        pool: sqlx::PgPool,
         schema: String,
         cvr_id: String,
         task_id: String,
-        max_conns: u32,
     ) -> Result<(), String> {
-        // Creating the pool spawns sqlx's background connection reaper, which
-        // requires an ambient Tokio runtime. This runs on the runtime-less CG
-        // thread, so enter the injected runtime context for the duration.
-        let _guard = self.tokio_handle.as_ref().map(|h| h.enter());
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(max_conns.max(1))
-            .connect_lazy(pg_uri)
-            .map_err(|e| format!("Failed to create PgPool: {e}"))?;
+        // The pool is the ONE process-wide CVR pool, shared across every client
+        // group (cloning it is cheap — `PgPool` is an `Arc` internally, so all
+        // CGs draw from the same bounded set of Postgres connections). Building a
+        // pool per CG previously multiplied connection demand by the number of
+        // groups and exhausted Postgres backends, stalling `block_on` acquires on
+        // the CG loop. Matches TS's one-pool-per-worker model.
         let store = CVRStoreHandle::new(pool.clone(), schema.clone(), cvr_id.clone(), task_id);
         // Row-record cache (reads the `rows` table the store writes). A no-op
         // fail callback + no metrics for now.

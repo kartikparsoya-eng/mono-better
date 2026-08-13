@@ -186,6 +186,35 @@ fn main() {
     // `/statz`) and to every CG's SyncEngineConfig (written on the hot path).
     let metrics = Arc::new(rust_syncer::metrics::Metrics::default());
 
+    // Build the ONE CVR Postgres pool for the whole process, shared across every
+    // client group (TS parity: one `cvrDB` pool per sync worker, sized
+    // `--cvr-max-conns-per-worker`). A per-CG pool multiplied connection demand
+    // by the number of groups and exhausted Postgres. `acquire_timeout` bounds
+    // how long a `block_on` CVR acquire can stall the CG loop under contention
+    // instead of sqlx's 30s default. Built inside the runtime (sqlx's pool
+    // reaper needs an ambient runtime) and a connection is warmed so the first
+    // `initConnection` doesn't pay connect latency inline.
+    let cvr_pool = runtime.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(config.cvr_max_conns.max(1))
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect(&config.cvr_pg_uri)
+            .await;
+        match pool {
+            Ok(p) => p,
+            Err(e) => {
+                // Fall back to lazy so the process still boots (e.g. PG not yet
+                // reachable); connections are established on first use.
+                tracing::error!("CVR pool eager connect failed ({e}); using lazy pool");
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(config.cvr_max_conns.max(1))
+                    .acquire_timeout(std::time::Duration::from_secs(10))
+                    .connect_lazy(&config.cvr_pg_uri)
+                    .expect("build lazy CVR pool")
+            }
+        }
+    });
+
     // Create the connection router with the real per-CG services factory and a
     // real JWT auth validator (secret/jwk/jwksUrl from config).
     let router = Arc::new(ConnectionRouter::new_with_limit(
@@ -193,6 +222,7 @@ fn main() {
             config: config.clone(),
             tokio_handle: runtime.handle().clone(),
             metrics: metrics.clone(),
+            cvr_pool,
         }),
         Arc::new(rust_syncer::JwtAuthValidator {
             jwk: config.auth_jwk.clone(),
@@ -275,6 +305,11 @@ struct RealServicesFactory {
     config: Arc<SyncerConfig>,
     tokio_handle: tokio::runtime::Handle,
     metrics: Arc<rust_syncer::metrics::Metrics>,
+    /// The ONE process-wide CVR Postgres pool, shared by every client group.
+    /// TS parity: a single `cvrDB` pool per sync worker (`server/syncer.ts`),
+    /// sized `--cvr-max-conns-per-worker`. Cloning it into each CG is cheap
+    /// (`PgPool` is an `Arc`); all CGs share the same bounded connection budget.
+    cvr_pool: sqlx::PgPool,
 }
 
 impl CGServicesFactory for RealServicesFactory {
@@ -376,11 +411,12 @@ impl CGServicesFactory for RealServicesFactory {
                 shard_num,
             },
             cvr_pg: Some(rust_syncer::CvrPgConfig {
-                pg_uri: self.config.cvr_pg_uri.clone(),
+                // Clone of the ONE shared process-wide pool (cheap Arc clone) —
+                // every CG draws from the same bounded connection budget.
+                pool: self.cvr_pool.clone(),
                 schema: format!("{}_{}/cvr", app_id, self.config.shard),
                 cvr_id: cg_id.to_string(),
                 task_id: self.config.task_id.clone(),
-                max_conns: self.config.cvr_max_conns,
             }),
             permissions,
             permissions_hash,

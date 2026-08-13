@@ -139,16 +139,20 @@ impl CGHandle {
 }
 
 /// CVR Postgres connection config for a client group.
+///
+/// The `pool` is the ONE process-wide CVR pool shared by every client group in
+/// this syncer (its clone is cheap — `sqlx::PgPool` is an `Arc` internally). TS
+/// parity: one `cvrDB` pool per sync worker sized `--cvr-max-conns-per-worker`,
+/// shared across all that worker's CVRStores (`server/syncer.ts`). Building a
+/// pool per client group (as before) multiplied PG connection demand by the
+/// number of groups and exhausted Postgres backends under load.
 #[derive(Clone)]
 pub struct CvrPgConfig {
-    pub pg_uri: String,
+    pub pool: sqlx::PgPool,
     pub schema: String,
     /// CVR id (== client group id).
     pub cvr_id: String,
     pub task_id: String,
-    /// Max Postgres connections for this CG's CVR pool (TS parity:
-    /// `--cvr-max-conns-per-worker`).
-    pub max_conns: u32,
 }
 
 /// Everything the CG thread needs to build its `SyncEngine` locally. `Send` so
@@ -840,6 +844,13 @@ struct CgState {
     /// when nothing is armed (no authed connection, or feature disabled). Port
     /// of the group's earliest `revalidateAt` deadline.
     next_auth_maintenance_at: Option<i64>,
+    /// The userID this client group is pinned to (the `sub` of the first authed
+    /// connection; `None` for an anonymous group). Admission
+    /// (`check_and_pin_user`) guarantees every connection reaching this CG shares
+    /// it. Enforced on `updateAuth` and periodic revalidation so a validly-signed
+    /// token for a DIFFERENT user cannot re-scope the group mid-connection. Port
+    /// of `GroupAuthState.pinnedUser` + `pickToken`'s single-user pin.
+    pinned_user_id: Option<String>,
     /// The in-memory CVR, lazily loaded from the store on first notification.
     cvr: Option<CVR>,
     /// Monotonic TTL clock (ms), seeded from `cvr.ttl_clock` when the CVR is
@@ -964,13 +975,7 @@ impl CgState {
 
         let mut cvr_pg = false;
         if let Some(pg) = config.cvr_pg {
-            match sync_engine.set_cvr_store(
-                &pg.pg_uri,
-                pg.schema,
-                pg.cvr_id,
-                pg.task_id,
-                pg.max_conns,
-            ) {
+            match sync_engine.set_cvr_store(pg.pool, pg.schema, pg.cvr_id, pg.task_id) {
                 Ok(()) => cvr_pg = true,
                 Err(e) => {
                     tracing::error!("CG {cg_id}: set_cvr_store failed: {e}");
@@ -998,6 +1003,7 @@ impl CgState {
             revalidate_interval_ms,
             query_config,
             next_auth_maintenance_at: None,
+            pinned_user_id: None,
             cvr: None,
             ttl_clock: 0,
             ttl_clock_base: created_at,
@@ -1178,17 +1184,25 @@ impl CgState {
             if !self.registered_ws.contains_key(&client_id) {
                 continue;
             }
-            let user_id = crate::auth::decode_jwt_claims(&token)
-                .get("sub")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+            // Bind the subject to the group's PINNED user (not the token's own
+            // `sub`, which would be a tautological `sub == sub` check). This is
+            // what makes revalidation reject a token that has been swapped for a
+            // DIFFERENT user's — as well as one that has since expired/revoked.
+            // Falls back to the token's `sub` only for an unpinned (anonymous)
+            // group.
+            let expected_sub = self.pinned_user_id.clone().or_else(|| {
+                crate::auth::decode_jwt_claims(&token)
+                    .get("sub")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
             let validator = self.auth_validator.clone();
             let cg_id = self.cg_id.clone();
             let cid = client_id.clone();
             let tok = token.clone();
             let verify = self.tokio_handle.block_on(async move {
                 validator
-                    .validate_auth(&cg_id, &cid, user_id.as_deref(), Some(&tok))
+                    .validate_auth(&cg_id, &cid, expected_sub.as_deref(), Some(&tok))
                     .await
             });
             match verify {
@@ -1294,6 +1308,19 @@ impl CgState {
         }
         if let Some(context) = default_query_context(self.query_config.as_ref(), &params) {
             self.client_query_ctx.insert(client_id.clone(), context);
+        }
+        // Pin the group's userID on the first connection that carries one.
+        // Admission (`check_and_pin_user`) already guarantees every connection
+        // reaching this CG shares the same userID, so capturing the first is
+        // sufficient. This is the identity `updateAuth`/revalidation enforce the
+        // token against, so a validly-signed token for a DIFFERENT user cannot
+        // re-scope the group mid-connection. Port of `GroupAuthState.pinnedUser`.
+        if self.pinned_user_id.is_none() {
+            self.pinned_user_id = params
+                .user_id
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .map(str::to_string);
         }
         // Arm periodic auth maintenance for this (now validated) connection.
         // Port of `validateConnection` setting `revalidateAt = now + interval`.
@@ -1672,20 +1699,53 @@ impl CgState {
             return;
         }
         // Decode the new claims (unverified) — used both to compare against the
-        // stored auth data and to extract the `sub` for signature verification.
+        // stored auth data and to extract the `sub`.
         let new_claims = crate::auth::decode_jwt_claims(token);
-        let user_id = new_claims
+        let new_sub = new_claims
             .get("sub")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Re-verify the token signature with the same validator as the handshake.
+        // Single-user pin (port of `pickToken`): a client group is pinned to one
+        // userID. If this group already has a pinned user, the new token's `sub`
+        // MUST match it — otherwise a validly-signed token for a DIFFERENT user
+        // (the signing key is shared across users) could re-scope the entire
+        // group's `authData` mid-connection. Reject the mismatch as Unauthorized
+        // and close the connection.
+        let pin_mismatch = self
+            .pinned_user_id
+            .as_deref()
+            .is_some_and(|pinned| new_sub.as_deref() != Some(pinned));
+        if pin_mismatch {
+            tracing::warn!(
+                "CG {}: updateAuth userID mismatch (pinned={:?}, new={new_sub:?}); closing",
+                self.cg_id,
+                self.pinned_user_id
+            );
+            crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+            if let Some(conn) = self.connections.get(client_id) {
+                conn.close_with_error(crate::protocol::ErrorBody::unauthorized(
+                    "The user id in the new token does not match the previous token. \
+                     Client groups are pinned to a single user.",
+                ));
+            }
+            if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
+                self.on_connection_closed(client_id.to_string(), ws_id);
+            }
+            return;
+        }
+
+        // Re-verify the token signature with the same validator as the handshake,
+        // binding the subject to the group's PINNED user (not the token's own
+        // `sub` — that would be a tautological `sub == sub` check). Falls back to
+        // the token's `sub` only for an as-yet-unpinned (anonymous) group.
+        let expected_sub = self.pinned_user_id.clone().or_else(|| new_sub.clone());
         let validator = self.auth_validator.clone();
         let cg_id = self.cg_id.clone();
         let cid = client_id.to_string();
         let verify = self.tokio_handle.block_on(async move {
             validator
-                .validate_auth(&cg_id, &cid, user_id.as_deref(), Some(token))
+                .validate_auth(&cg_id, &cid, expected_sub.as_deref(), Some(token))
                 .await
         });
         if let Err(error_body) = verify {
@@ -2717,6 +2777,22 @@ mod tests {
         p
     }
 
+    /// A minimal decodable JWT (`header.payload.sig`) whose payload is `{sub}`.
+    /// Only the payload is read by `decode_jwt_claims`; the signature is unused
+    /// by the pin pre-check.
+    fn fake_jwt(sub: &str) -> String {
+        use base64::Engine;
+        let payload = serde_json::json!({ "sub": sub }).to_string();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        format!("hdr.{b64}.sig")
+    }
+
+    fn pinned_params(client_id: &str, ws_id: &str, user_id: &str) -> ConnectParams {
+        let mut p = authed_params(client_id, ws_id, &fake_jwt(user_id));
+        p.user_id = Some(user_id.to_string());
+        p
+    }
+
     /// AuthValidator whose verdict flips with a shared flag — to simulate a
     /// token that later expires / is revoked.
     struct ToggleAuthValidator {
@@ -2885,6 +2961,56 @@ mod tests {
         let (tx2, _d2) = tokio::sync::mpsc::channel::<WsCommand>(64);
         unauthed.on_new_connection(test_params("c2", "ws2"), DirectWebSocketSink::new(tx2));
         assert!(unauthed.next_auth_maintenance_at.is_none());
+    }
+
+    /// Single-user pin: once a group is pinned to user-1, an `updateAuth` bearing
+    /// a validly-formed token for a DIFFERENT user (user-2) must be REJECTED and
+    /// the connection closed — a group cannot be re-scoped to another user
+    /// mid-connection. Port of `pickToken`'s "pinned to a single user" rule.
+    #[test]
+    fn update_auth_rejects_cross_user_token() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        );
+        assert_eq!(state.pinned_user_id.as_deref(), Some("user-1"));
+        assert_eq!(state.registered_ws.len(), 1);
+
+        // updateAuth with a token for user-2 → rejected, connection closed.
+        state.handle_update_auth("c1", &fake_jwt("user-2"));
+        assert_eq!(
+            state.registered_ws.len(),
+            0,
+            "cross-user updateAuth must close the connection"
+        );
+        assert_eq!(state.metrics.snapshot()["authRevalidationFailures"], 1);
+    }
+
+    /// The pin allows an `updateAuth` whose token stays on the SAME user.
+    #[test]
+    fn update_auth_accepts_same_user_token() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        );
+
+        // Same-user token → not rejected (connection stays open).
+        state.handle_update_auth("c1", &fake_jwt("user-1"));
+        assert_eq!(
+            state.registered_ws.len(),
+            1,
+            "same-user updateAuth must keep the connection open"
+        );
     }
 
     /// The CG event loop: a new connection sends `connected` and registers a

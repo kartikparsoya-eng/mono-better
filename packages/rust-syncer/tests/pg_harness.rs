@@ -128,6 +128,18 @@ CREATE TABLE "{schema}".rows (
     )
 }
 
+/// A minimal MATERIAL buffered write (a client insert). `store.flush` only opens
+/// its transaction — and thus only runs the version/ownership guard — when there
+/// is a material change to write (TS `#flush` short-circuits an empty flush).
+/// Tests that exercise the guard must therefore queue a real change first, as a
+/// production flush always would.
+fn insert_client_op(id: &str) -> rust_cvr::types::StoreOp {
+    rust_cvr::types::StoreOp::InsertClient(rust_cvr::types::ClientRecord {
+        id: id.to_string(),
+        desired_query_ids: vec![],
+    })
+}
+
 fn empty_cvr(id: &str) -> CVR {
     CVR {
         id: id.to_string(),
@@ -411,17 +423,20 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
         );
         assert!(!b.load(0.0).await.expect("B load").is_new);
 
-        // Store A advances the CVR to a higher version Y.
+        // Store A advances the CVR to a higher version Y (with a material write).
         let mut cvr_y = cvr_x.clone();
         cvr_y.version = CVRVersion {
             state_version: "09".to_string(),
             config_version: None,
         };
+        a.apply_store_ops(vec![insert_client_op("client2")]);
         a.flush(&cvr_x.version, &cvr_y, 0.0)
             .await
             .expect("A advance");
 
-        // Store B, still at X, must be rejected as concurrently modified.
+        // Store B, still at X, must be rejected as concurrently modified (it too
+        // has a material write, so it reaches the version guard inside the tx).
+        b.apply_store_ops(vec![insert_client_op("client3")]);
         let err = b
             .flush(&cvr_x.version, &cvr_y, 0.0)
             .await
@@ -441,7 +456,9 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
         .execute(&pool)
         .await
         .unwrap();
-        // A is at version Y (matches DB), so only the ownership check can fire.
+        // A is at version Y (matches DB), so only the ownership check can fire
+        // (again with a material write so the flush reaches the guard).
+        a.apply_store_ops(vec![insert_client_op("client4")]);
         let err = a
             .flush(&cvr_y.version, &cvr_y, 0.0)
             .await
@@ -702,6 +719,8 @@ fn pg_cvr_store_load_grants_and_transfers_ownership() {
         assert_eq!(owner.0.as_deref(), Some("task-C"), "C now owns the CVR");
 
         // The stale ex-owner A can no longer flush (C's lease @2000 > A's 1000).
+        // Queue a material write so the flush reaches the ownership guard.
+        a.apply_store_ops(vec![insert_client_op("c2")]);
         let err = a
             .flush(&cvr.version, &cvr, 1000.0)
             .await
@@ -1195,14 +1214,22 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
     let mut pipelines = IvmPipelines::new();
     pipelines.init(specs, Some(&db_path), "app").unwrap();
     let mut engine = SyncEngine::new(pipelines);
+    // Build the shared CVR pool (the store no longer creates its own — it takes a
+    // clone of the one process-wide pool). Create it inside the runtime context.
+    let pool = {
+        let _g = handle.enter();
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy(&uri)
+            .unwrap()
+    };
     engine.set_tokio_handle(handle);
     engine
         .set_cvr_store(
-            &uri,
+            pool,
             schema.to_string(),
             "cg1".to_string(),
             "task-0".to_string(),
-            5,
         )
         .unwrap();
 

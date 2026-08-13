@@ -446,12 +446,21 @@ impl CVRStoreHandle {
         cvr: &CVR,
         last_connect_time: f64,
     ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
-        // Queue the instance write
-        self.put_instance(cvr);
-
-        if self.pending.is_empty() && self.pending.pending_instance_write.is_none() {
+        // Materiality check FIRST (port of TS `#flush`): the CVR instance row is
+        // only advanced when there are material changes buffered — clients,
+        // queries, desires, rows, or a pre-queued instance write from
+        // `set_client_schema`/`set_profile_id`. Queuing the derivable instance
+        // write *before* this check (as the old code did) made the guard dead, so
+        // every no-op flush advanced `instances.version` (and, since the store is
+        // the single writer, `rowsVersion` too) — defeating the
+        // "instance-updated-only-on-material-change" invariant and adding a PG
+        // round-trip per no-op cycle. `is_empty()` here correctly excludes the
+        // not-yet-queued derivable instance write but includes any pre-queued one.
+        if self.pending.is_empty() {
             return Ok(None);
         }
+        // There ARE material changes — now record the instance write and proceed.
+        self.put_instance(cvr);
 
         let mut stats = CVRFlushStats::default();
         let mut tx = self.pool.begin().await?;
