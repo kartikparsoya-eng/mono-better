@@ -435,6 +435,12 @@ impl ConnectionRouter {
         self.metrics.snapshot()
     }
 
+    /// Prometheus text-format metrics (for `/metrics`), including the live
+    /// active-client-groups gauge.
+    pub fn metrics_prometheus(&self) -> String {
+        self.metrics.render_prometheus(self.cg_count() as u64)
+    }
+
     /// Handle a new WebSocket connection.
     ///
     /// Port of `Syncer.#createConnection()`.
@@ -836,6 +842,20 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Threshold (ms) above which a hydration is logged as a slow query — the prod
+/// signal operators use to find pathological queries. Port of TS's
+/// `slowHydrateThreshold` (view-syncer.ts / pipeline-driver.ts). Read once from
+/// `ZERO_SLOW_HYDRATE_THRESHOLD_MS` (default 1000), cached.
+fn slow_hydrate_threshold_ms() -> f64 {
+    static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("ZERO_SLOW_HYDRATE_THRESHOLD_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000.0)
+    })
 }
 
 /// Balance an admitted connection without allowing duplicate close/error paths
@@ -1828,6 +1848,7 @@ impl CgState {
                 .unwrap_or_else(|| serde_json::json!({}));
             let now = now_ms();
             let ttl_clock = self.get_ttl_clock(now);
+            let hydrate_started = std::time::Instant::now();
             match self
                 .sync_engine
                 .config_and_hydrate_with_profile(
@@ -1855,7 +1876,15 @@ impl CgState {
                 Ok(cvr) => {
                     self.cvr = Some(cvr);
                     config_accepted = true;
-                    crate::metrics::Metrics::inc(&self.metrics.hydrations);
+                    let elapsed_ms = hydrate_started.elapsed().as_secs_f64() * 1000.0;
+                    self.metrics.record_hydration(elapsed_ms);
+                    if elapsed_ms > slow_hydrate_threshold_ms() {
+                        tracing::warn!(
+                            "CG {}: Slow query materialization: config_and_hydrate took \
+                             {elapsed_ms:.0}ms for client {client_id}",
+                            self.cg_id
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::error!("CG {}: config_and_hydrate failed: {e}", self.cg_id);
@@ -2321,6 +2350,7 @@ impl CgState {
         let existing_rows = self.sync_engine.existing_rows().await;
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
+        let advance_started = std::time::Instant::now();
         match self
             .sync_engine
             .advance_and_sync(
@@ -2335,13 +2365,14 @@ impl CgState {
             .await
         {
             Ok(result) => {
-                crate::metrics::Metrics::inc(&self.metrics.advances);
+                self.metrics
+                    .record_advance(advance_started.elapsed().as_secs_f64() * 1000.0);
                 if let Some(reason) = result.reset_reason.clone() {
                     // The engine could not advance in place (snapshot/schema
                     // drift). Port of TS `ResetPipelinesSignal` handling: the
                     // in-flight poke was already cancelled; re-init the pipeline
                     // and re-hydrate every query from scratch.
-                    crate::metrics::Metrics::inc(&self.metrics.resets);
+                    self.metrics.record_reset();
                     self.reset_pipelines_and_rehydrate(result.cvr, &reason)
                         .await;
                 } else {

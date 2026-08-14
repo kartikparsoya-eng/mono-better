@@ -1,7 +1,9 @@
-//! HTTP server — axum-based endpoints for /statz, /heapz, /notify/:cg_id.
+//! HTTP server — axum-based endpoints for /statz, /metrics, /heapz, /notify/:cg_id.
 //!
 //! The HTTP server runs on the tokio runtime. It serves:
 //! - `GET /statz` — server statistics (active CGs, connections, memory)
+//! - `GET /metrics` — Prometheus text-format metrics (scraped by the ART G17
+//!   telemetry gate; `zero_sync_*` counters + latency histograms)
 //! - `GET /heapz` — heap snapshot placeholder (V8 compatibility)
 //! - `POST /notify/:cg_id` — change-streamer notification endpoint
 //!
@@ -14,7 +16,7 @@ use axum::{
     Router,
     extract::{Path, State},
     http::StatusCode,
-    response::Json,
+    response::{IntoResponse, Json},
     routing::{get, post},
 };
 use serde::Serialize;
@@ -56,6 +58,7 @@ pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<Connectio
 
     let app = Router::new()
         .route("/statz", get(statz_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/heapz", get(heapz_handler))
         // Global commit notification — the replicator POSTs here on each commit;
         // every hosted CG advances to the new replica head.
@@ -89,6 +92,17 @@ async fn statz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode
     });
 
     (StatusCode::OK, Json(response))
+}
+
+/// GET /metrics — Prometheus text-format metrics. Scraped by the ART G17
+/// telemetry gate; exposes `zero_sync_*` counters + hydration/advance latency
+/// histograms (TS pushes OTLP; we expose a pull endpoint — same metric names).
+async fn metrics_handler(State(state): State<Arc<HttpServerState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4")],
+        state.router.metrics_prometheus(),
+    )
 }
 
 /// GET /heapz — heap snapshot placeholder.

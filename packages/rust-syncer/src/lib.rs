@@ -13,6 +13,7 @@ pub mod drain;
 pub mod http_server;
 pub mod message_handler;
 pub mod metrics;
+pub mod otel;
 pub mod permissions;
 pub mod pipeline_driver;
 pub mod protocol;

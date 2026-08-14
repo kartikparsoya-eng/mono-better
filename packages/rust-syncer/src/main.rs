@@ -15,7 +15,10 @@
 //! - `AUTH_SECRET` — JWT secret (optional)
 //! - `MUTAGEN_URL` — Mutagen service URL (optional)
 //! - `PUSHER_URL` — Pusher service URL (optional)
-//! - `MAX_CLIENT_GROUPS` — Maximum number of client groups
+//! - `MAX_CLIENT_GROUPS` — Client-group memory backstop (default 1000)
+//! - `ZERO_SLOW_HYDRATE_THRESHOLD_MS` — Slow-query warn threshold (default 1000)
+//! - `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_METRICS_EXPORTER` — enable OTLP metrics
+//!   push (standard OpenTelemetry env; mirrors the TS syncer)
 //! - `ZERO_APP_ID` / `APP_ID` — Application id (schema prefix); default `zero`
 //! - `ZERO_ADMIN_PASSWORD` — Inspector protocol admin password (optional)
 //! - `ZERO_SERVER_VERSION` — Server version for the inspector `version` op
@@ -204,6 +207,19 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
+
+    // Install OTLP metrics export (TS parity — `server/otel-start.ts` pushes
+    // OTLP to a collector) BEFORE creating any instruments, so `Metrics` binds to
+    // the SDK meter provider. Enter the runtime so the tonic exporter can build
+    // its channel. `_otel_provider` is held for the process lifetime; dropping it
+    // on a clean exit flushes a final batch. No-op unless an OTEL_* endpoint/
+    // exporter is configured.
+    let _otel_provider = {
+        let _enter = runtime.enter();
+        rust_syncer::otel::init_metrics(
+            &std::env::var("ZERO_SERVER_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+        )
+    };
 
     // Shared process metrics — the same Arc is handed to the router (read by
     // `/statz`) and to every CG's SyncEngineConfig (written on the hot path).
