@@ -11,8 +11,10 @@
 //! and fully unit-testable.
 
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram as OtelHistogram};
 
@@ -72,6 +74,80 @@ impl Default for Otel {
                 .build(),
         }
     }
+}
+
+/// Custom-query transformation instruments — TS view-syncer's `#queryTransformations`,
+/// `#queryTransformationTime`, `#queryTransformationHashChanges`, and
+/// `#queryTransformationNoOps` (all `zero.sync.query.*`). These fire deep inside
+/// `SyncEngine::config_and_hydrate_with_profile`, which holds no `Metrics`, so —
+/// like the rust-cvr/rust-ivm instruments — they're recorded through free
+/// functions off the *global* `zero` meter (created once via `OnceLock`). No-op
+/// when OTLP is disabled.
+struct QueryTransformOtel {
+    transformations: Counter<u64>,
+    transformation_time: OtelHistogram<f64>,
+    hash_changes: Counter<u64>,
+    no_ops: Counter<u64>,
+}
+
+fn query_transform_otel() -> &'static QueryTransformOtel {
+    static INSTRUMENTS: OnceLock<QueryTransformOtel> = OnceLock::new();
+    INSTRUMENTS.get_or_init(|| {
+        let m = global::meter("zero");
+        QueryTransformOtel {
+            transformations: m
+                .u64_counter("zero.sync.query.transformations")
+                .with_description("Number of query transformations performed")
+                .build(),
+            transformation_time: m
+                .f64_histogram("zero.sync.query.transformation-time")
+                .with_unit("s")
+                .with_description("Time to transform custom queries via API server.")
+                .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
+                .build(),
+            hash_changes: m
+                .u64_counter("zero.sync.query.transformation-hash-changes")
+                .with_description("Number of times query transformation hash changed")
+                .build(),
+            no_ops: m
+                .u64_counter("zero.sync.query.transformation-no-ops")
+                .with_description(
+                    "Number of times query transformation resulted in no-op (hash unchanged)",
+                )
+                .build(),
+        }
+    })
+}
+
+/// Record one custom-query transform invocation — TS
+/// `#queryTransformations.add(1, {result})`. `success` maps to `result=success`,
+/// else `result=error`.
+pub fn record_query_transformation(success: bool) {
+    let result = if success { "success" } else { "error" };
+    query_transform_otel()
+        .transformations
+        .add(1, &[KeyValue::new("result", result)]);
+}
+
+/// Record the wall-clock (ms) of a custom-query transform invocation — TS
+/// `#queryTransformationTime.recordMs` (recorded in the `finally`, so both the
+/// success and error paths observe).
+pub fn record_query_transformation_time(elapsed_ms: f64) {
+    query_transform_otel()
+        .transformation_time
+        .record(elapsed_ms / 1000.0, &[]);
+}
+
+/// Record a custom query whose transformation hash changed vs the CVR — TS
+/// `#queryTransformationHashChanges.add(1)` (drift → re-hydrate).
+pub fn record_query_transformation_hash_change() {
+    query_transform_otel().hash_changes.add(1, &[]);
+}
+
+/// Record a custom query whose transformation hash was unchanged — TS
+/// `#queryTransformationNoOps.add(1)` (no re-hydration needed).
+pub fn record_query_transformation_no_op() {
+    query_transform_otel().no_ops.add(1, &[]);
 }
 
 /// A minimal, thread-safe, exporter-free histogram rendered as Prometheus
@@ -373,5 +449,17 @@ mod tests {
         assert!(text.contains("zero_sync_hydration_time_seconds_count 2"));
         assert!(text.contains("zero_sync_advance_time_seconds_count 1"));
         assert!(text.contains("zero_sync_pipeline_resets_total 1"));
+    }
+
+    #[test]
+    fn query_transformation_records_are_noops_without_provider() {
+        // No meter provider installed → global meter is a no-op. These free
+        // functions must not panic (they fire from SyncEngine, which holds no
+        // Metrics).
+        record_query_transformation(true);
+        record_query_transformation(false);
+        record_query_transformation_time(4.0);
+        record_query_transformation_hash_change();
+        record_query_transformation_no_op();
     }
 }

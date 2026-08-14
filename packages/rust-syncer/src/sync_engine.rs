@@ -552,7 +552,18 @@ impl SyncEngine {
             let mut transform_errors: Vec<serde_json::Value> = Vec::new();
             match custom_ctx {
                 Some(ctx) => {
-                    match transform_custom_queries(ctx, shard, &custom_specs).await {
+                    // TS wraps the transform in try/catch/finally, recording
+                    // `zero.sync.query.transformations{result}` + timing
+                    // (view-syncer.ts:1782-1789). Time the API-server round-trip
+                    // and tag the outcome; the histogram observes on both paths.
+                    let transform_started = std::time::Instant::now();
+                    let transform_result =
+                        transform_custom_queries(ctx, shard, &custom_specs).await;
+                    crate::metrics::record_query_transformation_time(
+                        transform_started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    crate::metrics::record_query_transformation(transform_result.is_ok());
+                    match transform_result {
                         Ok(results) => {
                             for r in results {
                                 match r {
@@ -592,13 +603,30 @@ impl SyncEngine {
         let mut add_queries: Vec<(String, String)> = Vec::new();
         let mut queries: Vec<(String, String)> = Vec::new();
         let mut retransform_removes: Vec<String> = Vec::new();
+        // TS scopes `query.transformation-{hash-changes,no-ops}` to custom
+        // queries with an existing CVR transform hash (view-syncer.ts:1818-1843).
+        // The `Some(_)` arms below imply an existing hash; gate on custom id to
+        // match TS (internal/client re-transforms are not counted here).
+        let custom_ids: std::collections::HashSet<&str> =
+            custom_specs.iter().map(|s| s.id.as_str()).collect();
         for (qid, transformed_ast, transformation_hash) in executed {
+            let is_custom = custom_ids.contains(qid.as_str());
             match self.pipelines.query_transformation_hash(&qid) {
                 // Already running with this exact transform → nothing to do.
-                Some(h) if h == transformation_hash => continue,
+                Some(h) if h == transformation_hash => {
+                    if is_custom {
+                        crate::metrics::record_query_transformation_no_op();
+                    }
+                    continue;
+                }
                 // Running with a DIFFERENT transform → drift: tear the old
                 // pipeline down before re-hydrating with the new transform.
-                Some(_) => retransform_removes.push(qid.clone()),
+                Some(_) => {
+                    if is_custom {
+                        crate::metrics::record_query_transformation_hash_change();
+                    }
+                    retransform_removes.push(qid.clone());
+                }
                 // Not hydrated → a normal add.
                 None => {}
             }
