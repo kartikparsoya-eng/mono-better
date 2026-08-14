@@ -74,6 +74,29 @@ fn check_client_and_cvr_versions(
     Ok(())
 }
 
+/// Returns `Some(message)` when a loaded CVR was written by a NEWER replica than
+/// the one this syncer is serving (an older-replica rollback) — TS's
+/// "Cannot sync from older replica" case. A `state_version == "00"` CVR is brand
+/// new (never synced) so it is exempt. The message string is byte-identical to
+/// TS (`view-syncer.pg.test.ts`), and the caller fails the group with a
+/// `ClientNotFound` carrying it. `None` means it is safe to sync.
+fn older_replica_error(cvr: &CVR, replica_version: &str) -> Option<String> {
+    if cvr.version.state_version != "00"
+        && cvr
+            .replica_version
+            .as_deref()
+            .is_some_and(|v| v > replica_version)
+    {
+        Some(format!(
+            "Cannot sync from older replica: CVR={}, DB={}",
+            cvr.replica_version.as_deref().unwrap_or_default(),
+            replica_version
+        ))
+    } else {
+        None
+    }
+}
+
 /// Message sent to a CG thread's unified event loop.
 ///
 /// All inputs — new connections, inbound WS frames, disconnects, change-streamer
@@ -1271,19 +1294,18 @@ impl CgState {
         }
         match &self.cvr {
             Some(cvr) => {
-                if cvr.version.state_version != "00"
-                    && cvr
-                        .replica_version
-                        .as_deref()
-                        .is_some_and(|v| v > self.replica_version.as_str())
-                {
-                    tracing::error!(
-                        "CG {}: cannot sync from older replica: CVR={}, DB={}",
-                        self.cg_id,
-                        cvr.replica_version.as_deref().unwrap_or_default(),
-                        self.replica_version
-                    );
+                if let Some(message) = older_replica_error(cvr, &self.replica_version) {
+                    // TS fails the client with a ClientNotFound carrying this
+                    // exact message (view-syncer.pg.test.ts "sends reset for CVR
+                    // from older replica version up"), NOT a generic Rehome — the
+                    // client must wipe local state and re-sync fresh, not just
+                    // reconnect elsewhere. Fail the group with that error here; the
+                    // caller's generic `fail_group` is then a no-op (terminal set).
+                    tracing::error!("CG {}: {message}", self.cg_id);
                     self.cvr = None;
+                    self.fail_group_with_error(crate::protocol::ErrorBody::client_not_found(
+                        message,
+                    ));
                     return Ok(false);
                 }
                 self.ttl_clock = cvr.ttl_clock;
@@ -2007,12 +2029,19 @@ impl CgState {
             return;
         }
 
-        // No change in resolved auth → skip re-validation + re-transformation
-        // (TS `authRevisionChanged` guard).
+        // No change in the RAW token → skip re-validation + re-transformation.
+        // TS: `authChanged = !authEquals(prev, next)`, and `authEquals` compares
+        // the raw token string for BOTH opaque and JWT auth (connection-context-
+        // manager.ts:349 → auth.ts `authEquals`). Comparing decoded JWT claims
+        // here (the old behavior) wrongly treated an OPAQUE token refresh as
+        // unchanged — opaque tokens carry no claims, so both decode to `{}` and a
+        // `token-1` → `token-2` swap was skipped, never re-transforming custom
+        // queries against the new Bearer token (view-syncer.pg.test.ts
+        // "retransforms custom queries when opaque auth refreshes").
         let unchanged = self
-            .client_auth
+            .client_raw_auth
             .get(client_id)
-            .map(|prev| prev == &new_claims)
+            .map(|prev| prev == token)
             .unwrap_or(false);
         if unchanged {
             tracing::debug!(
@@ -2545,13 +2574,21 @@ impl CgState {
     /// advancement is not rollbackable after the snapshot swaps; a failed CVR
     /// commit would otherwise cause the next notification to skip that batch.
     fn fail_group(&mut self, message: &str) {
+        self.fail_group_with_error(crate::protocol::ErrorBody::rehome(message));
+    }
+
+    /// Like [`fail_group`], but closes every connection with a specific
+    /// `ErrorBody` instead of the default `Rehome`. Used for the older-replica
+    /// case, where TS fails clients with a `ClientNotFound` (so the client wipes
+    /// local state and re-syncs fresh) rather than a reconnect-elsewhere Rehome.
+    fn fail_group_with_error(&mut self, error: crate::protocol::ErrorBody) {
         if self.terminal {
             return;
         }
         self.terminal = true;
         self.accepting.store(false, Ordering::SeqCst);
         for (_, conn) in self.connections.drain() {
-            conn.close_with_error(crate::protocol::ErrorBody::rehome(message));
+            conn.close_with_error(error.clone());
         }
         for (_, ws_id) in self.registered_ws.drain() {
             self.sync_engine.unregister_client(&ws_id);
@@ -3374,6 +3411,96 @@ mod tests {
             state.client_profile_ids.get("c1").map(String::as_str),
             Some("p-explicit"),
             "explicit profileID must be used verbatim, not defaulted"
+        );
+    }
+
+    /// A CVR written by a NEWER replica than the one we serve must produce the
+    /// exact TS ClientNotFound message (view-syncer.pg.test.ts "sends reset for
+    /// CVR from older replica version up"). This drives the client to wipe local
+    /// state and re-sync fresh rather than reconnect elsewhere.
+    #[test]
+    fn older_replica_error_matches_ts_message() {
+        let mut cvr = empty_cvr("cg1", "01");
+        // A synced CVR (state_version != "00") from replica "101" > our "01".
+        cvr.version.state_version = "07".to_string();
+        cvr.replica_version = Some("101".to_string());
+        assert_eq!(
+            older_replica_error(&cvr, "01").as_deref(),
+            Some("Cannot sync from older replica: CVR=101, DB=01"),
+        );
+    }
+
+    /// No error when the replica is the same/older, or the CVR is brand new
+    /// (state_version "00", never synced — exempt even if its replica is newer).
+    #[test]
+    fn older_replica_error_none_when_not_older() {
+        // Same replica version → safe.
+        let mut same = empty_cvr("cg1", "01");
+        same.version.state_version = "07".to_string();
+        same.replica_version = Some("01".to_string());
+        assert!(older_replica_error(&same, "01").is_none());
+
+        // Brand-new CVR (state_version "00") is exempt even from a newer replica.
+        let mut fresh = empty_cvr("cg1", "01");
+        fresh.replica_version = Some("101".to_string());
+        assert_eq!(fresh.version.state_version, "00");
+        assert!(older_replica_error(&fresh, "01").is_none());
+    }
+
+    /// updateAuth with a refreshed OPAQUE token must re-transform (opaque tokens
+    /// carry no claims, so the change must be detected on the raw token, not
+    /// decoded claims). Ported from view-syncer.pg.test.ts "retransforms custom
+    /// queries when opaque auth refreshes". `auth_changes` increments only on the
+    /// re-transform path, so it is the signal that a re-transform was triggered.
+    #[test]
+    fn update_auth_opaque_token_change_retransforms() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        // Opaque token (not a JWT), user_id None → group stays unpinned.
+        rt.block_on(state.on_new_connection(
+            authed_params("c1", "ws1", "opaque-token-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        assert_eq!(state.metrics.snapshot()["authChanges"], 0);
+        assert_eq!(
+            state.client_raw_auth.get("c1").map(String::as_str),
+            Some("opaque-token-1")
+        );
+
+        // Refresh to a DIFFERENT opaque token → must re-transform. `auth_changes`
+        // is incremented on the re-transform path (before the config/hydrate),
+        // so it is the robust signal that the change was detected — regardless of
+        // what the barebones test factory's config/hydrate then does downstream.
+        rt.block_on(state.handle_update_auth("c1", "opaque-token-2"));
+        assert_eq!(
+            state.metrics.snapshot()["authChanges"],
+            1,
+            "opaque token refresh must trigger a re-transform"
+        );
+    }
+
+    /// updateAuth with the SAME opaque token is a no-op (no re-transform) — the
+    /// raw-token comparison must treat an unchanged token as unchanged.
+    #[test]
+    fn update_auth_same_opaque_token_skips_retransform() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        rt.block_on(state.on_new_connection(
+            authed_params("c1", "ws1", "opaque-token-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+
+        rt.block_on(state.handle_update_auth("c1", "opaque-token-1"));
+        assert_eq!(
+            state.metrics.snapshot()["authChanges"],
+            0,
+            "an unchanged opaque token must NOT trigger a re-transform"
         );
     }
 
