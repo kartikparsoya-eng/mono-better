@@ -476,5 +476,126 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
     );
 }
 
+/// Partial-success custom-query transform: the API server returns one healthy
+/// query and one errored query in the same batch. The healthy query must still
+/// hydrate its rows (the sibling's error does not take the batch down). Ports
+/// view-syncer.pg.test.ts "some individual queries fail". Uses a minimal
+/// one-shot TCP HTTP mock (no network dependency) as the transform endpoint.
+#[test]
+fn partial_success_transform_hydrates_healthy_query() {
+    // One-shot HTTP mock returning `{queries:[{ok, ast}, {err, error}]}`.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf); // drain request (we don't parse it)
+            let body = r#"{"queries":[{"id":"custom_ok","ast":{"table":"issue"}},{"id":"custom_err","error":{"message":"boom"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "issue" (
+            "id"    "text|NOT_NULL",
+            "title" "text",
+            "_0_version" "text",
+            PRIMARY KEY ("id")
+        );
+        INSERT INTO "issue" ("id", "title", "_0_version") VALUES
+            ('i1', 'healthy issue', '01');
+        "#,
+    )
+    .unwrap();
+
+    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init_from_connection(specs, shared_conn).unwrap();
+
+    let mut engine = SyncEngine::new(pipelines);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+
+    let ctx = rust_syncer::custom_query::CustomQueryContext {
+        url: format!("http://{addr}/transform"),
+        headers: vec![],
+        auth: None,
+    };
+
+    // Two custom queries — both uncached, so they batch into the one mock request.
+    let cvr = empty_cvr("cg1", "01");
+    let mk = |hash: &str, name: &str| DesiredQuerySpec {
+        hash: hash.to_string(),
+        ast: None,
+        name: Some(name.to_string()),
+        args: Some(vec![]),
+        ttl: None,
+    };
+    let puts = vec![mk("custom_ok", "healthy"), mk("custom_err", "broken")];
+    let existing_rows: RowRecordMap = HashMap::new();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result_cvr = rt
+        .block_on(engine.config_and_hydrate(
+            cvr,
+            "client1",
+            &["ws1".to_string()],
+            &shard,
+            puts,
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            Some(&ctx),
+            "00".to_string(),
+            "01".to_string(),
+            &existing_rows,
+            0,
+            0,
+            0,
+        ))
+        .unwrap();
+
+    // The healthy query is tracked and hydrated; the errored one did not take the
+    // batch down.
+    assert!(
+        result_cvr.queries.contains_key("custom_ok"),
+        "healthy custom query should be recorded"
+    );
+
+    let mut saw_healthy_row = false;
+    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+        if v[0] == "pokePart" {
+            let s = serde_json::to_string(&v).unwrap();
+            if s.contains("\"i1\"") && s.contains("healthy issue") {
+                saw_healthy_row = true;
+            }
+        }
+    }
+    assert!(
+        saw_healthy_row,
+        "the healthy query's row must still hydrate despite the sibling's transform error"
+    );
+}
+
 // `SharedConn` is `Rc<RefCell<rusqlite::Connection>>`; alias locally for clarity.
 type SharedConnAlias = Rc<RefCell<Connection>>;
