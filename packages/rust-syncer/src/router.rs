@@ -115,6 +115,11 @@ pub struct CGHandle {
     /// Number of active connections on this CG.
     connection_count: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
+    /// Index into `ConnectionRouter::executors` of the executor hosting this CG.
+    /// Fixed at placement for the group's lifetime (the `!Send` `SyncEngine` is
+    /// pinned to that one thread). Read by `place_cg` to compute per-executor
+    /// load; carried on returned/cloned handles only for struct consistency.
+    executor_idx: usize,
 }
 
 impl CGHandle {
@@ -176,10 +181,10 @@ fn default_num_shards() -> usize {
         .max(1)
 }
 
-/// Stable placement of a client group onto one of `num_shards` executors. Uses a
-/// fixed-seed `DefaultHasher` (not `RandomState`), so placement is deterministic
-/// within a process run. Mirrors TS's dispatcher hashing a connection onto a
-/// worker.
+/// Stable hash of a client group into `[0, num_shards)`. Uses a fixed-seed
+/// `DefaultHasher` (not `RandomState`), so the result is deterministic within a
+/// process run. Used by [`ConnectionRouter::place_cg`] to break ties among
+/// equally-loaded executors so a cold/uniform system still spreads groups.
 fn shard_for(cg_id: &str, num_shards: usize) -> usize {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -321,10 +326,11 @@ pub struct ConnectionRouter {
     /// two tasks for the same client group.
     cg_creation_lock: Arc<Mutex<()>>,
     max_client_groups: usize,
-    /// The `K` executor threads. A client group is placed on `shard_for(id, K)`
-    /// and hosted there for its lifetime, pinning its `!Send` `SyncEngine` to one
-    /// thread by construction. Each executor holds its own clone of the services
-    /// factory, so the router does not retain one.
+    /// The `K` executor threads. A new client group is placed on the least-loaded
+    /// executor (see [`place_cg`](Self::place_cg)) and hosted there for its
+    /// lifetime, pinning its `!Send` `SyncEngine` to one thread by construction.
+    /// Each executor holds its own clone of the services factory, so the router
+    /// does not retain one.
     executors: Vec<Executor>,
     /// Auth validator (used to validate a connection's JWT before admission).
     auth_validator: Arc<dyn AuthValidator>,
@@ -598,9 +604,9 @@ impl ConnectionRouter {
     }
 
     /// Get or create the hosting task for a client group ID. On the create path
-    /// the group is placed on `shard_for(id, K)` and a `SpawnCg` is dispatched to
-    /// that executor, which builds the `!Send` `SyncEngine` (bound to its own
-    /// pool) and `spawn_local`s the event loop.
+    /// the group is placed by [`place_cg`](Self::place_cg) (least-loaded) and a
+    /// `SpawnCg` is dispatched to that executor, which builds the `!Send`
+    /// `SyncEngine` (bound to its own pool) and `spawn_local`s the event loop.
     fn get_or_create_cg(&self, client_group_id: &str) -> Result<Arc<CGHandle>, String> {
         let _creation = lock_unpoisoned(&self.cg_creation_lock);
         // Fast path: CG already exists.
@@ -619,6 +625,7 @@ impl ConnectionRouter {
                     tx: handle.tx.clone(),
                     connection_count: handle.connection_count.clone(),
                     accepting: handle.accepting.clone(),
+                    executor_idx: handle.executor_idx,
                 }));
             }
         }
@@ -650,7 +657,7 @@ impl ConnectionRouter {
         let connection_count = Arc::new(AtomicU64::new(1));
         let accepting = Arc::new(AtomicBool::new(true));
 
-        let shard = shard_for(client_group_id, self.executors.len());
+        let shard = self.place_cg(client_group_id);
         let spawn = ExecutorCommand::SpawnCg {
             cg_id: client_group_id.to_string(),
             rx,
@@ -670,6 +677,7 @@ impl ConnectionRouter {
                 tx: tx.clone(),
                 connection_count: connection_count.clone(),
                 accepting: accepting.clone(),
+                executor_idx: shard,
             },
         );
 
@@ -677,7 +685,49 @@ impl ConnectionRouter {
             tx,
             connection_count,
             accepting,
+            executor_idx: shard,
         }))
+    }
+
+    /// Choose the executor to host a NEW client group: the one currently hosting
+    /// the fewest groups (least-loaded placement, doc 91). Replaces blind
+    /// `shard_for` hashing, which is load-oblivious and leaves executors lumpy
+    /// when the hash happens to cluster. A group's `!Send` `SyncEngine` pins it to
+    /// its executor for life, so we balance by *placement*, never by migration
+    /// (migration would force a full IVM rehydrate — rejected by design).
+    ///
+    /// V1 metric is **group count per executor**. Because placement is serialized
+    /// under `cg_creation_lock` and the just-placed group is inserted into
+    /// `cg_handles` before the lock is released, consecutive placements observe
+    /// each other, so this degenerates to round-robin and keeps per-executor group
+    /// counts within 1 of each other (max−min ≤ 1) absent churn. When a group is
+    /// evicted (idle) or exits, it simply drops out of `cg_handles` and its slot is
+    /// refilled by the next placement — no decrement bookkeeping to keep in sync.
+    ///
+    /// Known caveat: group count is a coarse proxy — a single hot group still pins
+    /// one core and this can't correct it post-placement. A connection-weighted or
+    /// advance-cost metric is a deliberate follow-up (V2/V3), not part of V1.
+    ///
+    /// Cost is O(N) over live groups per placement; placement is rare relative to
+    /// message routing and runs under the creation lock, so this is not on any hot
+    /// path. If N grows large this can move to an incremental per-executor counter.
+    fn place_cg(&self, cg_id: &str) -> usize {
+        let k = self.executors.len();
+        let mut load = vec![0u64; k];
+        for entry in self.cg_handles.iter() {
+            // Defensive: an entry's executor_idx is always a valid index (set at
+            // placement), but guard against an out-of-range value rather than
+            // panic on the placement path.
+            if let Some(slot) = load.get_mut(entry.executor_idx) {
+                *slot += 1;
+            }
+        }
+        let min = load.iter().copied().min().unwrap_or(0);
+        // Deterministically break ties AMONG the least-loaded executors by hashing
+        // the cg_id, so a cold/uniform system still spreads groups (rather than
+        // always piling the first ones onto executor 0).
+        let candidates: Vec<usize> = (0..k).filter(|&i| load[i] == min).collect();
+        candidates[shard_for(cg_id, candidates.len())]
     }
 
     /// Drain and stop: fail every connection with a Rehome error (so clients
@@ -3603,6 +3653,115 @@ mod tests {
             1,
             "an idle CG is evicted for the new group"
         );
+        rt.block_on(router.shutdown());
+    }
+
+    /// `place_cg` chooses the executor hosting the FEWEST groups, ignoring the
+    /// cg_id hash except to break ties among equally-loaded executors. Proves the
+    /// least-loaded contract directly: a heavily-loaded executor is avoided even
+    /// when the hash would otherwise select it.
+    #[test]
+    fn place_cg_picks_least_loaded_executor() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+            jwk: None,
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+        });
+        let router = ConnectionRouter::new_sharded(
+            factory,
+            validator,
+            Arc::new(crate::metrics::Metrics::default()),
+            100,
+            3,
+            None,
+        );
+
+        // Fake handles (no real CG task) let us load specific executors without
+        // spawning groups — place_cg only reads `executor_idx`, never the channel.
+        let dummy = |executor_idx: usize| {
+            let (tx, _rx) = mpsc::unbounded_channel::<CGMessage>();
+            CGHandle {
+                tx,
+                connection_count: Arc::new(AtomicU64::new(1)),
+                accepting: Arc::new(AtomicBool::new(true)),
+                executor_idx,
+            }
+        };
+
+        // Empty router: no load anywhere, so every executor ties and the pick is
+        // the deterministic hash tie-break (spreads a cold system).
+        assert_eq!(
+            router.place_cg("some-cg"),
+            shard_for("some-cg", 3),
+            "on an empty router placement falls back to the hash tie-break"
+        );
+
+        // Load executor 0 with two groups and executor 1 with one; executor 2 is
+        // empty, so it MUST be chosen regardless of the cg_id hash.
+        router.cg_handles.insert("a".to_string(), dummy(0));
+        router.cg_handles.insert("b".to_string(), dummy(0));
+        router.cg_handles.insert("c".to_string(), dummy(1));
+        for cg in ["x", "y", "z", "hash-would-pick-0", "another"] {
+            assert_eq!(
+                router.place_cg(cg),
+                2,
+                "least-loaded executor (2) must win for {cg} despite the hash"
+            );
+        }
+
+        rt.block_on(router.shutdown());
+    }
+
+    /// End-to-end, placing many real groups spreads them evenly across executors:
+    /// because placement is serialized and each placed group is registered before
+    /// the next placement, least-loaded degenerates to round-robin and keeps the
+    /// per-executor group counts within 1 of each other.
+    #[test]
+    fn placement_balances_groups_across_executors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+            jwk: None,
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+        });
+        let k = 4;
+        let n = 40;
+        let router = ConnectionRouter::new_sharded(
+            factory,
+            validator,
+            Arc::new(crate::metrics::Metrics::default()),
+            200,
+            k,
+            None,
+        );
+
+        for i in 0..n {
+            router.get_or_create_cg(&format!("cg{i}")).unwrap();
+        }
+
+        let mut counts = vec![0usize; k];
+        for entry in router.cg_handles.iter() {
+            counts[entry.executor_idx] += 1;
+        }
+        let max = *counts.iter().max().unwrap();
+        let min = *counts.iter().min().unwrap();
+        assert!(
+            max - min <= 1,
+            "expected round-robin-balanced placement, got {counts:?}"
+        );
+        assert_eq!(counts.iter().sum::<usize>(), n, "every group placed once");
+
         rt.block_on(router.shutdown());
     }
 
