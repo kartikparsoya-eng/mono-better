@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::Histogram;
+use opentelemetry::metrics::{Counter, Histogram};
 
 /// Latency-histogram bucket boundaries in SECONDS — byte-identical to TS
 /// `LATENCY_HISTOGRAM_BOUNDARIES_S` (observability/metrics.ts).
@@ -53,6 +53,23 @@ pub fn record_ivm_advance(table: &str, elapsed_ms: f64) {
         elapsed_ms / 1000.0,
         &[KeyValue::new("table", table.to_string())],
     );
+}
+
+fn conflict_rows_deleted() -> &'static Counter<u64> {
+    static CONFLICT_ROWS_DELETED: OnceLock<Counter<u64>> = OnceLock::new();
+    CONFLICT_ROWS_DELETED.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.ivm.conflict-rows-deleted")
+            .with_description("Number of rows deleted because they conflicted with added row")
+            .build()
+    })
+}
+
+/// Record a row removed because a different-PK unique conflict was displaced by
+/// an added/edited row — TS `#conflictRowsDeleted.add(1)` (pipeline-driver.ts,
+/// counted only when the change has a `nextValue`).
+pub fn record_conflict_row_deleted() {
+    conflict_rows_deleted().add(1, &[]);
 }
 
 #[cfg(test)]

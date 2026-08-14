@@ -1058,6 +1058,11 @@ struct CgState {
     /// Accepted sockets whose increment of `connection_count` has not yet been
     /// balanced by a close event. This includes superseded sockets.
     open_ws_ids: HashSet<String>,
+    /// ws_id → sync protocol version, for balancing the `zero.sync.active-clients`
+    /// UpDownCounter: +1 (tagged with the version) on register, -1 (same version)
+    /// on disconnect. Only decrement a ws we incremented, so the gauge stays
+    /// balanced across supersede/close races.
+    active_client_pv: HashMap<String, u32>,
     /// client_id → decoded JWT claims (`authData` for permission rules).
     client_auth: HashMap<String, serde_json::Value>,
     /// client_id → raw JWT (for the `Authorization: Bearer` header on
@@ -1210,6 +1215,7 @@ impl CgState {
             registered_ws: HashMap::new(),
             client_base_versions: HashMap::new(),
             open_ws_ids: HashSet::new(),
+            active_client_pv: HashMap::new(),
             client_auth: HashMap::new(),
             client_raw_auth: HashMap::new(),
             client_query_ctx: HashMap::new(),
@@ -1473,6 +1479,7 @@ impl CgState {
                 "Connection superseded by a newer connection for the same clientID",
             );
             self.sync_engine.unregister_client(&prev_ws_id);
+            self.decrement_active_client(&prev_ws_id);
         }
 
         // Register the client with the SyncEngine so notifications can poke it.
@@ -1486,6 +1493,11 @@ impl CgState {
             cvr_sink,
         );
         self.open_ws_ids.insert(ws_id.clone());
+        // Active-clients gauge +1 (TS `#activeClients.add(1, {protocol.version})`).
+        // Remember the version so the matching disconnect decrements the same tag.
+        self.active_client_pv
+            .insert(ws_id.clone(), params.protocol_version);
+        crate::metrics::record_active_client_delta(1, params.protocol_version);
         self.registered_ws.insert(client_id.clone(), ws_id.clone());
         self.client_base_versions.insert(
             client_id.clone(),
@@ -2233,6 +2245,7 @@ impl CgState {
         self.registered_ws.remove(&client_id);
         self.client_base_versions.remove(&client_id);
         self.sync_engine.unregister_client(&ws_id);
+        self.decrement_active_client(&ws_id);
         self.client_auth.remove(&client_id);
         self.client_raw_auth.remove(&client_id);
         self.client_query_ctx.remove(&client_id);
@@ -2488,6 +2501,16 @@ impl CgState {
         self.registered_ws.remove(client_id);
         self.client_base_versions.remove(client_id);
         self.sync_engine.unregister_client(ws_id);
+        self.decrement_active_client(ws_id);
+    }
+
+    /// Active-clients gauge -1 (TS `#activeClients.add(-1, {protocol.version})`),
+    /// balanced: only decrements a ws we incremented at register. Idempotent —
+    /// a superseded-then-closed ws is decremented once.
+    fn decrement_active_client(&mut self, ws_id: &str) {
+        if let Some(pv) = self.active_client_pv.remove(ws_id) {
+            crate::metrics::record_active_client_delta(-1, pv);
+        }
     }
 
     fn shutdown(&mut self) {
@@ -2502,6 +2525,11 @@ impl CgState {
         self.registered_ws.clear();
         self.client_base_versions.clear();
         self.open_ws_ids.clear();
+        // Active-clients gauge: -1 for every still-active client (TS decrements on
+        // each disconnect during cleanup).
+        for (_, pv) in self.active_client_pv.drain() {
+            crate::metrics::record_active_client_delta(-1, pv);
+        }
         self.connection_count.store(0, Ordering::Relaxed);
     }
 
@@ -2519,6 +2547,9 @@ impl CgState {
         }
         for (_, ws_id) in self.registered_ws.drain() {
             self.sync_engine.unregister_client(&ws_id);
+        }
+        for (_, pv) in self.active_client_pv.drain() {
+            crate::metrics::record_active_client_delta(-1, pv);
         }
         self.client_base_versions.clear();
         self.client_auth.clear();

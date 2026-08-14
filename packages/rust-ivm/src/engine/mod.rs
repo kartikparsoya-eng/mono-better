@@ -979,6 +979,13 @@ impl Engine {
                     if same_pk(prev_row) {
                         edit_old_row = Some(sqlite_value_to_row(prev_row, col_types));
                     } else {
+                        // A different-PK prev row displaced by this change is a
+                        // unique-conflict deletion — TS `#conflictRowsDeleted`,
+                        // counted only when the change carries a nextValue
+                        // (pipeline-driver.ts:755-757).
+                        if sc.next_value.is_some() {
+                            crate::otel_metrics::record_conflict_row_deleted();
+                        }
                         let change = crate::ivm::change::make_source_change_remove(
                             sqlite_value_to_row(prev_row, col_types),
                         );

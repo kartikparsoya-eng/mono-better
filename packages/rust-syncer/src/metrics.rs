@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::{Counter, Histogram as OtelHistogram};
+use opentelemetry::metrics::{Counter, Histogram as OtelHistogram, UpDownCounter};
 
 /// Cumulative histogram upper bounds in SECONDS (ascending), a standard latency
 /// ladder covering sub-ms hydrations up to multi-second stalls.
@@ -148,6 +148,30 @@ pub fn record_query_transformation_hash_change() {
 /// `#queryTransformationNoOps.add(1)` (no re-hydration needed).
 pub fn record_query_transformation_no_op() {
     query_transform_otel().no_ops.add(1, &[]);
+}
+
+/// Active sync clients — TS view-syncer's `#activeClients` UpDownCounter
+/// (`zero.sync.active-clients`, dimensioned by protocol version). Recorded from
+/// the router (the rust view-syncer) on client register (+1) / disconnect (-1)
+/// through the *global* `zero` meter. No-op when OTLP is disabled.
+fn active_clients() -> &'static UpDownCounter<i64> {
+    static ACTIVE_CLIENTS: OnceLock<UpDownCounter<i64>> = OnceLock::new();
+    ACTIVE_CLIENTS.get_or_init(|| {
+        global::meter("zero")
+            .i64_up_down_counter("zero.sync.active-clients")
+            .with_description("Number of active sync clients")
+            .build()
+    })
+}
+
+/// Adjust the active-clients gauge by `delta` (+1 on connect, -1 on disconnect),
+/// tagged by the client's sync protocol version — TS `#activeClients.add(delta,
+/// {[PROTOCOL_VERSION_ATTR]: protocolVersion})`.
+pub fn record_active_client_delta(delta: i64, protocol_version: u32) {
+    active_clients().add(
+        delta,
+        &[KeyValue::new("protocol.version", protocol_version as i64)],
+    );
 }
 
 /// A minimal, thread-safe, exporter-free histogram rendered as Prometheus
@@ -461,5 +485,7 @@ mod tests {
         record_query_transformation_time(4.0);
         record_query_transformation_hash_change();
         record_query_transformation_no_op();
+        record_active_client_delta(1, 51);
+        record_active_client_delta(-1, 51);
     }
 }
