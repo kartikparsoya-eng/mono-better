@@ -94,10 +94,18 @@ impl SyncerConfig {
             mutagen_url: env::var("MUTAGEN_URL").ok(),
             pusher_url: env::var("PUSHER_URL").ok(),
             query_config: parse_query_config(),
+            // Memory backstop, NOT a normal-operation limit. TS has no
+            // per-worker client-group reject cap (its only bound is the
+            // dispatcher's 100k routing-map, which just forgets an old CG→worker
+            // mapping, never rejects a connection). A default of 100 produced an
+            // artificial capacity cliff far below the engine's real limit — a
+            // reconnect blip near saturation tripped it and stormed. Default high
+            // and let overflow REHOME (see handle_connection); operators tune
+            // this to their per-instance memory budget via MAX_CLIENT_GROUPS.
             max_client_groups: env::var("MAX_CLIENT_GROUPS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(100),
+                .unwrap_or(1000),
             admin_password: env::var("ZERO_ADMIN_PASSWORD")
                 .ok()
                 .filter(|s| !s.is_empty()),

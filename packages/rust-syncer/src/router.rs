@@ -491,11 +491,16 @@ impl ConnectionRouter {
         let cg_handle = match self.get_or_create_cg(&client_group_id) {
             Ok(handle) => handle,
             Err(message) => {
-                tracing::warn!("rejecting connection for {client_group_id}: {message}");
-                ctx.sink.fail(crate::protocol::ErrorBody::basic(
-                    crate::protocol::ErrorKind::ServerOverloaded,
-                    message,
-                ));
+                // Shed load gracefully: REHOME the client (reconnect — a load
+                // balancer can place it on another instance) rather than a hard
+                // `ServerOverloaded` reject. This mirrors TS, which never rejects
+                // for capacity; it drains/rehomes via DrainCoordinator. A hard
+                // reject at the (formerly too-low) cap turned a reconnect blip
+                // near saturation into a retry storm; Rehome is the retryable,
+                // spread-the-load signal. Covers both cap-overflow and
+                // executor-shutdown Errs from get_or_create_cg.
+                tracing::warn!("rehoming connection for {client_group_id}: {message}");
+                ctx.sink.fail(crate::protocol::ErrorBody::rehome(message));
                 return;
             }
         };
@@ -3653,6 +3658,81 @@ mod tests {
             1,
             "an idle CG is evicted for the new group"
         );
+        rt.block_on(router.shutdown());
+    }
+
+    /// At the client-group cap with no idle CG to evict, a new group's
+    /// connection is REHOMED (retryable, load-shed), not hard-rejected with
+    /// `ServerOverloaded`. Mirrors TS's drain/rehome load-shedding and avoids the
+    /// reject→retry storm the old cap behavior caused near saturation.
+    #[test]
+    fn overflow_rehomes_instead_of_server_overloaded() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+            jwk: None,
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+        });
+        // Cap of 1: the first group fills the only slot.
+        let router = Arc::new(ConnectionRouter::new_with_limit(
+            factory,
+            validator,
+            Arc::new(crate::metrics::Metrics::default()),
+            1,
+        ));
+
+        let make_ctx = |cgid: &str, cid: &str, ws: &str| {
+            let mut params = test_params(cid, ws);
+            params.client_group_id = cgid.to_string();
+            let (up_tx, up_rx) = tokio::sync::mpsc::channel::<String>(8);
+            let (sink_tx, sink_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+            (
+                ConnectionContext {
+                    params,
+                    sink: DirectWebSocketSink::new(sink_tx),
+                    upstream_rx: up_rx,
+                },
+                up_tx,
+                sink_rx,
+            )
+        };
+
+        // 1. First group takes the single slot. Keep its upstream sender alive so
+        //    the connection stays active (connection_count == 1) and the CG is
+        //    NOT idle/evictable.
+        let (ctx1, _keep_alive1, _sink1) = make_ctx("cgA", "cA", "wsA");
+        rt.block_on(router.handle_connection(ctx1));
+        assert_eq!(router.cg_count(), 1);
+
+        // 2. A second, distinct group at cap with no idle CG -> its sink must get
+        //    a Rehome error, never ServerOverloaded.
+        let (ctx2, _keep_alive2, mut sink2) = make_ctx("cgB", "cB", "wsB");
+        rt.block_on(router.handle_connection(ctx2));
+
+        let mut saw_rehome = false;
+        let mut saw_overloaded = false;
+        while let Ok(cmd) = sink2.try_recv() {
+            if let WsCommand::Fail(body) = cmd {
+                match body.kind() {
+                    crate::protocol::ErrorKind::Rehome => saw_rehome = true,
+                    crate::protocol::ErrorKind::ServerOverloaded => saw_overloaded = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_rehome, "overflow must Rehome (load-shed)");
+        assert!(
+            !saw_overloaded,
+            "overflow must NOT ServerOverloaded — that reject was the storm cause"
+        );
+        // The overflow group was not admitted.
+        assert_eq!(router.cg_count(), 1);
+
         rt.block_on(router.shutdown());
     }
 
