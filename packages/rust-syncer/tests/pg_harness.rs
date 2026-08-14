@@ -1298,7 +1298,9 @@ fn pg_advance_lmid_change_with_no_queries() {
         .block_on(engine.advance_and_sync(
             hydrated,
             "replica-1".to_string(),
-            &[],
+            // c1 is still online, so the advance must poke it directly (unlike
+            // the offline-catchup template, which passes no poke targets).
+            &["ws1".to_string()],
             &existing,
             0,
             0,
