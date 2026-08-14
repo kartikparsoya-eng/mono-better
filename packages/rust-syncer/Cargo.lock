@@ -1785,6 +1785,7 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "futures-util",
+ "opentelemetry",
  "parking_lot",
  "rustc-hash",
  "serde",
@@ -1800,6 +1801,7 @@ dependencies = [
 name = "rust-ivm"
 version = "0.1.0"
 dependencies = [
+ "opentelemetry",
  "parking_lot",
  "regex-lite",
  "rusqlite",
