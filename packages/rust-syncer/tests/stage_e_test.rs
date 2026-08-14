@@ -359,5 +359,122 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
     assert!(saw_l1, "expected the label row in pokes");
 }
 
+/// Initial hydration of a CUSTOM (name-based) query: the query is resolved via
+/// the transform path (seeded in the cache to avoid a network call), then
+/// hydrates real rows that reach the client as poke row patches. Exercises the
+/// whole custom-query pipeline end-to-end (custom_specs → transform → executed →
+/// hydrate → poke), which unit tests only cover piecewise. Ports
+/// view-syncer.pg.test.ts "initial hydration of a custom query".
+#[test]
+fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
+    use rust_syncer::custom_query::{CustomQueryContext, TransformedQuery};
+
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "issue" (
+            "id"    "text|NOT_NULL",
+            "title" "text",
+            "_0_version" "text",
+            PRIMARY KEY ("id")
+        );
+        INSERT INTO "issue" ("id", "title", "_0_version") VALUES
+            ('i1', 'custom-hydrated issue', '01');
+        "#,
+    )
+    .unwrap();
+
+    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init_from_connection(specs, shared_conn).unwrap();
+
+    let mut engine = SyncEngine::new(pipelines);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+
+    // The connection's custom-query context (bogus URL — the cache seed proves no
+    // network call happens) and the seeded transform result for our query id.
+    let url = "http://127.0.0.1:1/custom-hydrate-test";
+    let ctx = CustomQueryContext {
+        url: url.to_string(),
+        headers: vec![],
+        auth: None,
+    };
+    rust_syncer::custom_query::seed_transform_cache_for_test(
+        url,
+        None,
+        &[],
+        "custom_q",
+        &TransformedQuery {
+            id: "custom_q".to_string(),
+            ast: serde_json::json!({"table": "issue"}),
+            hash: "thash1".to_string(),
+        },
+    );
+
+    // A desired CUSTOM query (name + args, no inline AST) → resolved via transform.
+    let cvr = empty_cvr("cg1", "01");
+    let puts = vec![DesiredQuerySpec {
+        hash: "custom_q".to_string(),
+        ast: None,
+        name: Some("myIssues".to_string()),
+        args: Some(vec![]),
+        ttl: None,
+    }];
+    let existing_rows: RowRecordMap = HashMap::new();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result_cvr = rt
+        .block_on(engine.config_and_hydrate(
+            cvr,
+            "client1",
+            &["ws1".to_string()],
+            &shard,
+            puts,
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            Some(&ctx),
+            "00".to_string(),
+            "01".to_string(),
+            &existing_rows,
+            0,
+            0,
+            0,
+        ))
+        .unwrap();
+
+    // The custom query is now tracked in the CVR and hydrated its row.
+    assert!(
+        result_cvr.queries.contains_key("custom_q"),
+        "custom query should be recorded in the CVR"
+    );
+
+    let mut saw_row = false;
+    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+        if v[0] == "pokePart" {
+            let s = serde_json::to_string(&v).unwrap();
+            if s.contains("\"i1\"") && s.contains("custom-hydrated issue") {
+                saw_row = true;
+            }
+        }
+    }
+    assert!(
+        saw_row,
+        "expected the custom query's hydrated row in a pokePart"
+    );
+}
+
 // `SharedConn` is `Rc<RefCell<rusqlite::Connection>>`; alias locally for clarity.
 type SharedConnAlias = Rc<RefCell<Connection>>;

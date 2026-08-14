@@ -253,6 +253,22 @@ fn cache_set(
     }
 }
 
+/// Test-only: seed the process-wide transform cache so a custom query resolves
+/// without a network call. Used by parity integration tests
+/// (`tests/stage_e_test.rs`) to drive the full custom-query hydrate path
+/// (transform → executed → hydrate → poke) offline. `#[doc(hidden)]` — not part
+/// of the real API.
+#[doc(hidden)]
+pub fn seed_transform_cache_for_test(
+    url: &str,
+    auth: Option<&str>,
+    headers: &[(String, String)],
+    id: &str,
+    q: &TransformedQuery,
+) {
+    cache_set(url, auth, headers, id, q);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
