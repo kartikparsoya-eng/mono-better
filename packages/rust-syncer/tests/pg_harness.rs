@@ -1122,6 +1122,215 @@ fn pg_repro_failed_flush_does_not_hang() {
     });
 }
 
+/// Advance-driven `lastMutationID` change with NO client queries — bug 3628
+/// (view-syncer.pg.test.ts "process advancement with lmid change, client has no
+/// queries"). A client with only the internal `lmids` query still receives a
+/// `lastMutationIDChanges` poke when an advance bumps its `clients` row, proving
+/// mutation acks flow without any user query subscribed. Gated on TEST_CVR_PG_URI
+/// (needs the PG CVR store + a wal2 replica for advance).
+#[test]
+fn pg_advance_lmid_change_with_no_queries() {
+    use std::sync::Arc;
+
+    use rusqlite::Connection;
+    use rust_cvr::client_handler::WebSocketSink;
+    use rust_cvr::updater::RowRecordMap;
+    use rust_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_advance_lmid_change_with_no_queries: TEST_CVR_PG_URI not set");
+        return;
+    };
+
+    let schema = "cvr_lmid_advance";
+    let db_path = format!("/tmp/rust-syncer-pg-lmid-{}.db", std::process::id());
+    let cleanup_sqlite = || {
+        for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    };
+    cleanup_sqlite();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+
+    // Replica with only the `clients` table (shard app/0 → "app_0.clients"),
+    // holding one client row at lastMutationID = 42. No user data tables.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        let _ = conn.pragma_update(None, "journal_mode", "wal2");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                replicaVersion TEXT NOT NULL,
+                publications TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.replicationState" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                stateVersion TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.changeLog2" (
+                "stateVersion" TEXT NOT NULL,
+                "table"        TEXT NOT NULL,
+                "rowKey"       TEXT NOT NULL,
+                "op"           TEXT NOT NULL,
+                "pos"          INTEGER NOT NULL,
+                PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE "app_0.clients" (
+                "clientGroupID"  TEXT NOT NULL,
+                "clientID"       TEXT NOT NULL,
+                "lastMutationID" INTEGER NOT NULL,
+                "userID"         TEXT,
+                "_0_version"     TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID")
+            );
+            INSERT INTO "_zero.replicationConfig" (lock, replicaVersion, publications)
+                VALUES ('singleton', 'replica-1', '[]');
+            INSERT INTO "_zero.replicationState" (lock, stateVersion)
+                VALUES ('singleton', '01');
+            INSERT INTO "app_0.clients"
+                ("clientGroupID","clientID","lastMutationID","userID","_0_version")
+                VALUES ('cg1', 'c1', 42, NULL, '01');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let specs = rust_syncer::compute_table_specs_from_path(&db_path).unwrap();
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init(specs, Some(&db_path), "app").unwrap();
+    let mut engine = SyncEngine::new(pipelines);
+    let pool = {
+        let _g = handle.enter();
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy(&uri)
+            .unwrap()
+    };
+    engine.set_tokio_handle(handle);
+    engine
+        .set_cvr_store(
+            pool,
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        )
+        .unwrap();
+
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    let (tx1, mut rx1) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink1: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx1));
+    engine.register_client("c1", "ws1", "cg1", &shard, None, sink1);
+
+    // Hydrate with NO client queries — only the internal lmids query. It should
+    // poke lastMutationIDChanges.c1 == 42.
+    let hydrated = rt
+        .block_on(engine.config_and_hydrate(
+            empty_engine_cvr("cg1", "replica-1"),
+            "c1",
+            &["ws1".to_string()],
+            &shard,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            None,
+            "01".to_string(),
+            "replica-1".to_string(),
+            &RowRecordMap::new(),
+            0,
+            0,
+            0,
+        ))
+        .expect("initial hydrate");
+
+    let mut hydrate_wire = String::new();
+    while let Ok(WsCommand::Send(frame)) = rx1.try_recv() {
+        hydrate_wire.push_str(&frame.to_string());
+    }
+    assert!(
+        hydrate_wire.contains("lastMutationIDChanges") && hydrate_wire.contains("42"),
+        "hydrate must poke lastMutationIDChanges c1=42; wire={hydrate_wire}"
+    );
+
+    // Advance: bump the client's lastMutationID 42 → 43 on the replica.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            BEGIN;
+            UPDATE "app_0.clients"
+               SET "lastMutationID" = 43, "_0_version" = '02'
+             WHERE "clientGroupID" = 'cg1' AND "clientID" = 'c1';
+            INSERT INTO "_zero.changeLog2" ("stateVersion","table","rowKey","op","pos")
+                VALUES ('02', 'app_0.clients', '{"clientGroupID":"cg1","clientID":"c1"}', 's', 0);
+            UPDATE "_zero.replicationState" SET stateVersion = '02';
+            COMMIT;
+            "#,
+        )
+        .unwrap();
+    }
+
+    let existing = rt.block_on(engine.existing_rows());
+    let advanced = rt
+        .block_on(engine.advance_and_sync(
+            hydrated,
+            "replica-1".to_string(),
+            &[],
+            &existing,
+            0,
+            0,
+            0,
+        ))
+        .expect("lmid advance");
+    assert_eq!(advanced.num_changes, 1, "one clients row changed");
+    assert!(advanced.reset_reason.is_none(), "advance must not reset");
+
+    let mut advance_wire = String::new();
+    while let Ok(WsCommand::Send(frame)) = rx1.try_recv() {
+        advance_wire.push_str(&frame.to_string());
+    }
+    assert!(
+        advance_wire.contains("lastMutationIDChanges") && advance_wire.contains("43"),
+        "advance must poke lastMutationIDChanges c1=43 with no client queries; wire={advance_wire}"
+    );
+
+    drop(engine);
+    cleanup_sqlite();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// Production lifecycle gate: connect → hydrate from the SQLite replica →
 /// persist CVR/rows in Postgres → disconnect → advance while offline → reconnect
 /// with the pre-advance cookie → catch up the missed row from Postgres.

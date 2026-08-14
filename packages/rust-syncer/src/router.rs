@@ -97,6 +97,35 @@ fn older_replica_error(cvr: &CVR, replica_version: &str) -> Option<String> {
     }
 }
 
+/// Compute which clients to remove on a config/deleteClients pass — the
+/// `activeClients` garbage collection plus explicit deletions. TS
+/// (`ViewSyncer.#patchQueries`/`deleteClients`): any CVR client absent from the
+/// connection's `activeClients` set is inactivated (its queries get a TTL and
+/// are expired later), and explicit `deleted.clientIDs` are removed too (a
+/// client may not delete itself — the caller filters that into `ack_ids`).
+/// `active_clients == None` means no GC (only explicit deletions apply).
+fn clients_to_delete(
+    cvr_client_ids: &[String],
+    active_clients: Option<&[String]>,
+    ack_ids: &[String],
+) -> Vec<String> {
+    let mut delete_ids: Vec<String> = Vec::new();
+    if let Some(active) = active_clients {
+        let active_set: HashSet<&str> = active.iter().map(String::as_str).collect();
+        for id in cvr_client_ids {
+            if !active_set.contains(id.as_str()) {
+                delete_ids.push(id.clone());
+            }
+        }
+    }
+    for id in ack_ids {
+        if !delete_ids.contains(id) {
+            delete_ids.push(id.clone());
+        }
+    }
+    delete_ids
+}
+
 /// Message sent to a CG thread's unified event loop.
 ///
 /// All inputs — new connections, inbound WS frames, disconnects, change-streamer
@@ -2203,28 +2232,18 @@ impl CgState {
             return;
         }
 
-        let mut delete_ids: Vec<String> = Vec::new();
-        if let Some(active) = active_clients {
-            let active_set: HashSet<&str> = active.iter().map(String::as_str).collect();
-            if let Some(cvr) = &self.cvr {
-                for id in cvr.clients.keys() {
-                    if !active_set.contains(id.as_str()) {
-                        delete_ids.push(id.clone());
-                    }
-                }
-            }
-        }
         // Explicit deletions are acked; a client may not delete itself.
         let ack_ids: Vec<String> = deleted_client_ids
             .iter()
             .filter(|c| c.as_str() != caller_client_id)
             .cloned()
             .collect();
-        for id in &ack_ids {
-            if !delete_ids.contains(id) {
-                delete_ids.push(id.clone());
-            }
-        }
+        let cvr_client_ids: Vec<String> = self
+            .cvr
+            .as_ref()
+            .map(|c| c.clients.keys().cloned().collect())
+            .unwrap_or_default();
+        let delete_ids = clients_to_delete(&cvr_client_ids, active_clients, &ack_ids);
 
         if delete_ids.is_empty() && deleted_group_ids.is_empty() {
             return;
@@ -3454,6 +3473,57 @@ mod tests {
             state.registered_ws.get("foo").map(String::as_str),
             Some("ws2"),
             "deleteClients from a stale wsID must not delete the client"
+        );
+    }
+
+    /// `activeClients` GC: any CVR client absent from the active set is selected
+    /// for removal (its queries are then inactivated + TTL-expired). Ports the
+    /// selection core of view-syncer.pg.test.ts "activeClients inactivates queries
+    /// from inactive clients". The inactivate→expire chain itself is covered by
+    /// `delete_clients_removes_client_and_acks` +
+    /// `expired_query_is_removed_after_ttl_elapses`.
+    #[test]
+    fn active_clients_gc_selects_clients_not_in_set() {
+        let cvr_clients = vec![
+            "clientA".to_string(),
+            "clientB".to_string(),
+            "clientC".to_string(),
+        ];
+        // activeClients = [A, B] → C is inactive and must be removed.
+        let del = clients_to_delete(
+            &cvr_clients,
+            Some(&["clientA".to_string(), "clientB".to_string()]),
+            &[],
+        );
+        assert_eq!(del, vec!["clientC".to_string()]);
+    }
+
+    /// activeClients GC unions with explicit deletions, without duplicating a
+    /// client already selected by the GC.
+    #[test]
+    fn active_clients_gc_unions_explicit_deletions() {
+        let cvr_clients = vec![
+            "clientA".to_string(),
+            "clientB".to_string(),
+            "clientC".to_string(),
+        ];
+        // active = [A]; explicit delete of B and C (C also GC-selected → no dup).
+        let del = clients_to_delete(
+            &cvr_clients,
+            Some(&["clientA".to_string()]),
+            &["clientB".to_string(), "clientC".to_string()],
+        );
+        assert_eq!(del, vec!["clientB".to_string(), "clientC".to_string()]);
+    }
+
+    /// No `activeClients` → no GC; only explicit deletions are removed.
+    #[test]
+    fn no_active_clients_means_only_explicit_deletions() {
+        let cvr_clients = vec!["clientA".to_string(), "clientB".to_string()];
+        assert!(clients_to_delete(&cvr_clients, None, &[]).is_empty());
+        assert_eq!(
+            clients_to_delete(&cvr_clients, None, &["clientB".to_string()]),
+            vec!["clientB".to_string()]
         );
     }
 

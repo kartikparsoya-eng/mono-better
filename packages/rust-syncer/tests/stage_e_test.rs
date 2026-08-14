@@ -597,5 +597,128 @@ fn partial_success_transform_hydrates_healthy_query() {
     );
 }
 
+/// A transform failure during one connection's config pass fails ONLY that
+/// connection — a sibling connection is untouched. Ports view-syncer.pg.test.ts
+/// "transform ... fails only that connection" (#20/#21): the whole-batch failed
+/// error is delivered to `clients_for(poke_ws_ids)`, which is just the failing
+/// client. Uses a one-shot TCP mock returning HTTP 401.
+#[test]
+fn transform_failure_fails_only_the_offending_connection() {
+    // Mock transform endpoint that returns 401 for the (single) request.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"kind":"Unauthorized","message":"nope"}"#;
+            let resp = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "issue" (
+            "id" "text|NOT_NULL", "title" "text", "_0_version" "text",
+            PRIMARY KEY ("id")
+        );
+        INSERT INTO "issue" ("id","title","_0_version") VALUES ('i1','x','01');
+        "#,
+    )
+    .unwrap();
+    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init_from_connection(specs, shared_conn).unwrap();
+    let mut engine = SyncEngine::new(pipelines);
+
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    // Two clients, each with its own sink.
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::channel::<WsCommand>(64);
+    let (tx_b, mut rx_b) = tokio::sync::mpsc::channel::<WsCommand>(64);
+    engine.register_client(
+        "clientA",
+        "wsA",
+        "cg1",
+        &shard,
+        None,
+        Arc::new(DirectWebSocketSink::new(tx_a)),
+    );
+    engine.register_client(
+        "clientB",
+        "wsB",
+        "cg1",
+        &shard,
+        None,
+        Arc::new(DirectWebSocketSink::new(tx_b)),
+    );
+
+    let ctx = rust_syncer::custom_query::CustomQueryContext {
+        url: format!("http://{addr}/transform"),
+        headers: vec![],
+        auth: None,
+    };
+    // Only client A's config pass runs (poke_ws_ids = [wsA]); its transform fails.
+    let cvr = empty_cvr("cg1", "01");
+    let puts = vec![DesiredQuerySpec {
+        hash: "cq".to_string(),
+        ast: None,
+        name: Some("q".to_string()),
+        args: Some(vec![]),
+        ttl: None,
+    }];
+    let existing_rows: RowRecordMap = HashMap::new();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(engine.config_and_hydrate(
+        cvr,
+        "clientA",
+        &["wsA".to_string()],
+        &shard,
+        puts,
+        Vec::new(),
+        false,
+        None,
+        None,
+        &serde_json::json!({}),
+        Some(&ctx),
+        "00".to_string(),
+        "01".to_string(),
+        &existing_rows,
+        0,
+        0,
+        0,
+    ))
+    .unwrap();
+
+    // Client A received an error frame (its connection was failed).
+    let mut a_got_error = false;
+    while let Ok(WsCommand::Send(v)) = rx_a.try_recv() {
+        if v[0] == "error" {
+            a_got_error = true;
+        }
+    }
+    assert!(a_got_error, "the offending connection (A) must be failed");
+
+    // Client B received NOTHING — the failure did not leak to the sibling.
+    assert!(
+        rx_b.try_recv().is_err(),
+        "a sibling connection (B) must be untouched by A's transform failure"
+    );
+}
+
 // `SharedConn` is `Rc<RefCell<rusqlite::Connection>>`; alias locally for clarity.
 type SharedConnAlias = Rc<RefCell<Connection>>;
