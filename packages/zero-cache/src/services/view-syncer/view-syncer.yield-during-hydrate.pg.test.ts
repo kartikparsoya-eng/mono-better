@@ -217,7 +217,7 @@ describe('view-syncer/yield-during-hydrate', () => {
       await cvrStore.load(lc, now),
       SHARD,
     );
-    await configUpdater.putDesiredQueries(CLIENT_ID, [
+    configUpdater.putDesiredQueries(CLIENT_ID, [
       {hash: 'query-hash1', ast: ISSUES_QUERY},
     ]);
     const {cvr: updated} = await configUpdater.flush(lc, now, now, ttlClock);
@@ -227,7 +227,7 @@ describe('view-syncer/yield-during-hydrate', () => {
       REPLICA_VERSION,
       REPLICA_VERSION,
     );
-    await updater.trackQueries(
+    updater.trackQueries(
       lc,
       [
         {id: 'query-hash1', transformationHash: 'gojujxnrngdx'},

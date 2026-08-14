@@ -31,7 +31,6 @@ import {upstreamSchema, type ShardID} from '../../types/shards.ts';
 import type {Patch, PatchToVersion} from './client-handler.ts';
 import {type CVRFlushStats, type CVRStore} from './cvr-store.ts';
 import {formatSignature, parseSignature} from './row-set-signature.ts';
-import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 import {
   cmpVersions,
   maxVersion,
@@ -48,50 +47,6 @@ import {
 } from './schema/types.ts';
 import {tracer} from './tracer.ts';
 import {ttlClockAsNumber, type TTLClock} from './ttl-clock.ts';
-
-interface RustCVRConfigDrivenUpdaterHandle {
-  ensureClient(id: string): Promise<unknown>;
-  setClientSchema(schema: unknown): Promise<void>;
-  setProfileID(id: string): Promise<void>;
-  putDesiredQueries(
-    clientID: string,
-    desiredQueries: unknown[],
-  ): Promise<unknown[]>;
-  deleteDesiredQueries(
-    clientID: string,
-    queryIDs: string[],
-  ): Promise<unknown[]>;
-  markDesiredQueriesAsInactive(
-    clientID: string,
-    queryIDs: string[],
-    ttlClock: number,
-  ): Promise<void>;
-  clearDesiredQueries(clientID: string): Promise<unknown[]>;
-  deleteClient(clientID: string, ttlClock: number): Promise<unknown[]>;
-  flush(
-    lastConnectTime: number,
-    lastActive: number,
-    ttlClock: number,
-  ): Promise<{version: unknown; patches: unknown[]}>;
-  getCvr(): Promise<unknown>;
-  getVersion(): Promise<unknown>;
-}
-
-interface RustCVRQueryDrivenUpdaterHandle {
-  updatedVersion(): Promise<unknown>;
-  trackQueries(
-    executed: [string, string][],
-    removed: string[],
-  ): Promise<{version: unknown; patches: unknown[]}>;
-  received(rows: unknown, existingRows: unknown): Promise<unknown[]>;
-  deleteUnreferencedRows(existingRows: unknown[]): Promise<unknown[]>;
-  flush(
-    lastConnectTime: number,
-    lastActive: number,
-    ttlClock: number,
-  ): Promise<{version: unknown; patches: unknown[]}>;
-  getCvr(): Promise<unknown>;
-}
 
 export type RowUpdate = {
   version?: string; // Undefined for an unref.
@@ -256,32 +211,13 @@ export class CVRUpdater {
  */
 export class CVRConfigDrivenUpdater extends CVRUpdater {
   readonly #shard: ShardID;
-  readonly #rust: RustCVRConfigDrivenUpdaterHandle | null = null;
 
   constructor(cvrStore: CVRStore, cvr: CVRSnapshot, shard: ShardID) {
     super(cvrStore, cvr, cvr.replicaVersion);
     this.#shard = shard;
-
-    if (isRustCvrEnabled()) {
-      const addon = getRustCvrAddon<Record<string, unknown>>();
-      const RustHandle = addon?.CVRConfigDrivenUpdaterHandle as
-        | (new (
-            cvrJSON: unknown,
-            shardJSON: unknown,
-            store: unknown,
-          ) => RustCVRConfigDrivenUpdaterHandle)
-        | undefined;
-      if (RustHandle && cvrStore.rustStoreHandle) {
-        this.#rust = new RustHandle(cvr, shard, cvrStore.rustStoreHandle);
-      }
-    }
   }
 
-  async ensureClient(id: string): Promise<ClientRecord> {
-    if (this.#rust) {
-      await this.#rust.ensureClient(id);
-      return this._cvr.clients[id];
-    }
+  ensureClient(id: string): ClientRecord {
     return startSpan(tracer, 'CVRConfigDrivenUpdater.ensureClient', () => {
       let client = this._cvr.clients[id];
       if (client) {
@@ -334,11 +270,7 @@ export class CVRConfigDrivenUpdater extends CVRUpdater {
     });
   }
 
-  async setClientSchema(lc: LogContext, clientSchema: ClientSchema) {
-    if (this.#rust) {
-      await this.#rust.setClientSchema(clientSchema);
-      return;
-    }
+  setClientSchema(lc: LogContext, clientSchema: ClientSchema) {
     startSpan(tracer, 'CVRConfigDrivenUpdater.setClientSchema', () => {
       if (this._cvr.clientSchema === null) {
         this._cvr.clientSchema = clientSchema;
@@ -364,11 +296,7 @@ export class CVRConfigDrivenUpdater extends CVRUpdater {
     });
   }
 
-  async setProfileID(lc: LogContext, profileID: string) {
-    if (this.#rust) {
-      await this.#rust.setProfileID(profileID);
-      return;
-    }
+  setProfileID(lc: LogContext, profileID: string) {
     if (this._cvr.profileID !== profileID) {
       if (
         this._cvr.profileID !== null &&
@@ -386,7 +314,7 @@ export class CVRConfigDrivenUpdater extends CVRUpdater {
     }
   }
 
-  async putDesiredQueries(
+  putDesiredQueries(
     clientID: string,
     queries: Readonly<{
       hash: string;
@@ -395,132 +323,106 @@ export class CVRConfigDrivenUpdater extends CVRUpdater {
       args?: readonly ReadonlyJSONValue[] | undefined;
       ttl?: number | undefined;
     }>[],
-  ): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      const patches = await this.#rust.putDesiredQueries(clientID, queries);
-      return patches as PatchToVersion[];
-    }
-    return startAsyncSpan(
-      tracer,
-      'CVRConfigDrivenUpdater.putDesiredQueries',
-      async () => {
-        const patches: PatchToVersion[] = [];
-        const client = await this.ensureClient(clientID);
-        const current = new Set(client.desiredQueryIDs);
+  ): PatchToVersion[] {
+    return startSpan(tracer, 'CVRConfigDrivenUpdater.putDesiredQueries', () => {
+      const patches: PatchToVersion[] = [];
+      const client = this.ensureClient(clientID);
+      const current = new Set(client.desiredQueryIDs);
 
-        // Find the new/changed desired queries.
-        const needed: Set<string> = new Set();
+      // Find the new/changed desired queries.
+      const needed: Set<string> = new Set();
 
-        const recordQueryForTelemetry = (q: (typeof queries)[0]) => {
-          const {ast, name, args} = q;
-          if (ast) {
-            recordQuery('crud');
-          } else if (name && args) {
-            recordQuery('custom');
-          }
-        };
+      const recordQueryForTelemetry = (q: (typeof queries)[0]) => {
+        const {ast, name, args} = q;
+        if (ast) {
+          recordQuery('crud');
+        } else if (name && args) {
+          recordQuery('custom');
+        }
+      };
 
-        for (const q of queries) {
-          const {hash, ttl = DEFAULT_TTL_MS} = q;
-          const query = this._cvr.queries[hash];
-          if (!query) {
-            // New query - record for telemetry
-            recordQueryForTelemetry(q);
-            needed.add(hash);
-            continue;
-          }
-          if (query.type === 'internal') {
-            continue;
-          }
-
-          const oldClientState = query.clientState[clientID];
-          // Old query was inactivated or never desired by this client.
-          if (!oldClientState || oldClientState.inactivatedAt !== undefined) {
-            // Reactivated query - record for telemetry
-            recordQueryForTelemetry(q);
-            needed.add(hash);
-            continue;
-          }
-
-          if (compareTTL(ttl, oldClientState.ttl) > 0) {
-            // TTL update only - don't record for telemetry
-            needed.add(hash);
-          }
+      for (const q of queries) {
+        const {hash, ttl = DEFAULT_TTL_MS} = q;
+        const query = this._cvr.queries[hash];
+        if (!query) {
+          // New query - record for telemetry
+          recordQueryForTelemetry(q);
+          needed.add(hash);
+          continue;
+        }
+        if (query.type === 'internal') {
+          continue;
         }
 
-        if (needed.size === 0) {
-          return patches;
+        const oldClientState = query.clientState[clientID];
+        // Old query was inactivated or never desired by this client.
+        if (!oldClientState || oldClientState.inactivatedAt !== undefined) {
+          // Reactivated query - record for telemetry
+          recordQueryForTelemetry(q);
+          needed.add(hash);
+          continue;
         }
-        const newVersion = this._ensureNewVersion();
-        client.desiredQueryIDs = toSorted(
-          union(current, needed),
-          stringCompare,
-        );
 
-        for (const id of needed) {
-          const q = must(queries.find(({hash}) => hash === id));
-          const {ast, name, args} = q;
-
-          const ttl = clampTTL(q.ttl ?? DEFAULT_TTL_MS);
-          const query =
-            this._cvr.queries[id] ?? newQueryRecord(id, ast, name, args);
-          assertNotInternal(query);
-
-          const inactivatedAt = undefined;
-
-          query.clientState[clientID] = {
-            inactivatedAt,
-            ttl,
-            version: newVersion,
-          };
-          this._cvr.queries[id] = query;
-          patches.push({
-            toVersion: newVersion,
-            patch: {type: 'query', op: 'put', id, clientID},
-          });
-
-          this._cvrStore.putQuery(query);
-          this._cvrStore.putDesiredQuery(
-            newVersion,
-            query,
-            client,
-            false,
-            inactivatedAt,
-            ttl,
-          );
+        if (compareTTL(ttl, oldClientState.ttl) > 0) {
+          // TTL update only - don't record for telemetry
+          needed.add(hash);
         }
+      }
+
+      if (needed.size === 0) {
         return patches;
-      },
-    );
+      }
+      const newVersion = this._ensureNewVersion();
+      client.desiredQueryIDs = toSorted(union(current, needed), stringCompare);
+
+      for (const id of needed) {
+        const q = must(queries.find(({hash}) => hash === id));
+        const {ast, name, args} = q;
+
+        const ttl = clampTTL(q.ttl ?? DEFAULT_TTL_MS);
+        const query =
+          this._cvr.queries[id] ?? newQueryRecord(id, ast, name, args);
+        assertNotInternal(query);
+
+        const inactivatedAt = undefined;
+
+        query.clientState[clientID] = {
+          inactivatedAt,
+          ttl,
+          version: newVersion,
+        };
+        this._cvr.queries[id] = query;
+        patches.push({
+          toVersion: newVersion,
+          patch: {type: 'query', op: 'put', id, clientID},
+        });
+
+        this._cvrStore.putQuery(query);
+        this._cvrStore.putDesiredQuery(
+          newVersion,
+          query,
+          client,
+          false,
+          inactivatedAt,
+          ttl,
+        );
+      }
+      return patches;
+    });
   }
 
-  async markDesiredQueriesAsInactive(
+  markDesiredQueriesAsInactive(
     clientID: string,
     queryHashes: string[],
     ttlClock: TTLClock,
-  ): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      await this.#rust.markDesiredQueriesAsInactive(
-        clientID,
-        queryHashes,
-        ttlClockAsNumber(ttlClock),
-      );
-      return [];
-    }
+  ): PatchToVersion[] {
     return this.#deleteQueries(clientID, queryHashes, ttlClock);
   }
 
-  async deleteDesiredQueries(
+  deleteDesiredQueries(
     clientID: string,
     queryHashes: string[],
-  ): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      const patches = await this.#rust.deleteDesiredQueries(
-        clientID,
-        queryHashes,
-      );
-      return patches as PatchToVersion[];
-    }
+  ): PatchToVersion[] {
     return this.#deleteQueries(clientID, queryHashes, undefined);
   }
 
@@ -528,151 +430,99 @@ export class CVRConfigDrivenUpdater extends CVRUpdater {
     clientID: string,
     queryHashes: string[],
     inactivatedAt: TTLClock | undefined,
-  ): Promise<PatchToVersion[]> {
-    return startAsyncSpan(
-      tracer,
-      'CVRConfigDrivenUpdater.#deleteQueries',
-      async () => {
-        const patches: PatchToVersion[] = [];
-        const client = await this.ensureClient(clientID);
-        const current = new Set(client.desiredQueryIDs);
-        const unwanted = new Set(queryHashes);
-        const remove = intersection(unwanted, current);
-        if (remove.size === 0) {
-          return patches;
-        }
-
-        const newVersion = this._ensureNewVersion();
-        client.desiredQueryIDs = toSorted(
-          difference(current, remove),
-          stringCompare,
-        );
-
-        for (const id of remove) {
-          const query = this._cvr.queries[id];
-          if (!query) {
-            continue; // Query itself has already been removed. Should not happen?
-          }
-          assertNotInternal(query);
-
-          let ttl = DEFAULT_TTL_MS;
-          if (inactivatedAt === undefined) {
-            delete query.clientState[clientID];
-          } else {
-            // client state can be missing if the query never transformed so we never
-            // recorded it.
-            const clientState = query.clientState[clientID];
-            if (clientState !== undefined) {
-              assert(
-                clientState.inactivatedAt === undefined,
-                `Query ${id} is already inactivated`,
-              );
-              // Clamp TTL to ensure we don't propagate historical unclamped values.
-              ttl = clampTTL(clientState.ttl);
-              query.clientState[clientID] = {
-                inactivatedAt,
-                ttl,
-                version: newVersion,
-              };
-            }
-          }
-
-          this._cvrStore.putQuery(query);
-          this._cvrStore.putDesiredQuery(
-            newVersion,
-            query,
-            client,
-            true,
-            inactivatedAt,
-            ttl,
-          );
-          patches.push({
-            toVersion: newVersion,
-            patch: {type: 'query', op: 'del', id, clientID},
-          });
-        }
+  ): PatchToVersion[] {
+    return startSpan(tracer, 'CVRConfigDrivenUpdater.#deleteQueries', () => {
+      const patches: PatchToVersion[] = [];
+      const client = this.ensureClient(clientID);
+      const current = new Set(client.desiredQueryIDs);
+      const unwanted = new Set(queryHashes);
+      const remove = intersection(unwanted, current);
+      if (remove.size === 0) {
         return patches;
-      },
-    );
+      }
+
+      const newVersion = this._ensureNewVersion();
+      client.desiredQueryIDs = toSorted(
+        difference(current, remove),
+        stringCompare,
+      );
+
+      for (const id of remove) {
+        const query = this._cvr.queries[id];
+        if (!query) {
+          continue; // Query itself has already been removed. Should not happen?
+        }
+        assertNotInternal(query);
+
+        let ttl = DEFAULT_TTL_MS;
+        if (inactivatedAt === undefined) {
+          delete query.clientState[clientID];
+        } else {
+          // client state can be missing if the query never transformed so we never
+          // recorded it.
+          const clientState = query.clientState[clientID];
+          if (clientState !== undefined) {
+            assert(
+              clientState.inactivatedAt === undefined,
+              `Query ${id} is already inactivated`,
+            );
+            // Clamp TTL to ensure we don't propagate historical unclamped values.
+            ttl = clampTTL(clientState.ttl);
+            query.clientState[clientID] = {
+              inactivatedAt,
+              ttl,
+              version: newVersion,
+            };
+          }
+        }
+
+        this._cvrStore.putQuery(query);
+        this._cvrStore.putDesiredQuery(
+          newVersion,
+          query,
+          client,
+          true,
+          inactivatedAt,
+          ttl,
+        );
+        patches.push({
+          toVersion: newVersion,
+          patch: {type: 'query', op: 'del', id, clientID},
+        });
+      }
+      return patches;
+    });
   }
 
-  async clearDesiredQueries(clientID: string): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      const patches = await this.#rust.clearDesiredQueries(clientID);
-      return patches as PatchToVersion[];
-    }
-    const client = (await this.ensureClient(clientID)) as ClientRecord;
+  clearDesiredQueries(clientID: string): PatchToVersion[] {
+    const client = this.ensureClient(clientID);
     return this.#deleteQueries(clientID, client.desiredQueryIDs, undefined);
   }
 
-  async deleteClient(
-    clientID: string,
-    ttlClock: TTLClock,
-  ): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      const patches = await this.#rust.deleteClient(
-        clientID,
-        ttlClockAsNumber(ttlClock),
-      );
-      return patches as PatchToVersion[];
-    }
-    return startAsyncSpan(
-      tracer,
-      'CVRConfigDrivenUpdater.deleteClient',
-      async () => {
-        // clientID might not be part of this client group but if it is, this delete
-        // may generate changes to the desired queries.
+  deleteClient(clientID: string, ttlClock: TTLClock): PatchToVersion[] {
+    return startSpan(tracer, 'CVRConfigDrivenUpdater.deleteClient', () => {
+      // clientID might not be part of this client group but if it is, this delete
+      // may generate changes to the desired queries.
 
-        const client = this._cvr.clients[clientID];
-        if (!client) {
-          // Clients in different client groups are no longer deleted, leaving
-          // cleanup to inactive CVR purging logic.
-          return [];
-        }
-
-        // When a client is deleted we mark all of its desired queries as inactive.
-        // They will then be removed when the queries expire.
-        const patches = await this.markDesiredQueriesAsInactive(
-          clientID,
-          client.desiredQueryIDs,
-          ttlClock,
-        );
-        delete this._cvr.clients[clientID];
-        this._cvrStore.deleteClient(clientID);
-
-        return patches;
-      },
-    );
-  }
-
-  override async flush(
-    lc: LogContext,
-    lastConnectTime: number,
-    lastActive: number,
-    ttlClock: TTLClock,
-  ): Promise<{
-    cvr: CVRSnapshot;
-    flushed: CVRFlushStats | false;
-  }> {
-    if (this.#rust) {
-      const result = await this.#rust.flush(
-        lastConnectTime,
-        lastActive,
-        ttlClockAsNumber(ttlClock),
-      );
-      this._cvr.version = result.version as CVRVersion;
-      const flushed = await this._cvrStore.flush(
-        lc,
-        this._orig.version,
-        this._cvr,
-        lastConnectTime,
-      );
-      if (!flushed) {
-        return {cvr: this._orig, flushed: false};
+      const client = this._cvr.clients[clientID];
+      if (!client) {
+        // Clients in different client groups are no longer deleted, leaving
+        // cleanup to inactive CVR purging logic.
+        return [];
       }
-      return {cvr: this._cvr, flushed};
-    }
-    return super.flush(lc, lastConnectTime, lastActive, ttlClock);
+
+      // When a client is deleted we mark all of its desired queries as inactive.
+      // They will then be removed when the queries expire.
+      const patches = this.markDesiredQueriesAsInactive(
+        clientID,
+        client.desiredQueryIDs,
+        ttlClock,
+      );
+      delete this._cvr.clients[clientID];
+      this._cvrStore.deleteClient(clientID);
+
+      return patches;
+    });
   }
 }
 
@@ -714,7 +564,6 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
   );
   readonly #lastPatches = new CustomKeyMap<RowID, RowPatchInfo>(rowIDString);
   readonly #rowSetSignature: RowSetSignatureProvider | undefined;
-  readonly #rust: RustCVRQueryDrivenUpdaterHandle | null = null;
 
   #existingRows: Promise<Iterable<RowRecord>> | undefined = undefined;
 
@@ -750,13 +599,6 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
     if (stateVersion > cvr.version.stateVersion) {
       this._setVersion({stateVersion});
     }
-    // At an UNCHANGED stateVersion, no bump happens here: an eager bump
-    // spuriously churned configVersion for no-op same-version query updates
-    // (cvr.pg.test "unchanged queries"). Callers that KNOW row changes will
-    // flow at an unchanged version (the advance path's poisoned-CVR /
-    // same-version re-advance recovery, numChanges > 0) must call
-    // {@link ensureNewVersion} BEFORE startPoke — received()/#assertNewVersion
-    // requires the final version to be decided before any rows are poked.
   }
 
   /**
@@ -772,24 +614,11 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
    *
    * @returns The new CVRVersion to be used when all changes are committed.
    */
-  async trackQueries(
+  trackQueries(
     lc: LogContext,
     executed: {id: string; transformationHash: string}[],
     removed: {id: string}[],
-  ): Promise<{newVersion: CVRVersion; queryPatches: PatchToVersion[]}> {
-    if (this.#rust) {
-      const executedPairs: [string, string][] = executed.map(q => [
-        q.id,
-        q.transformationHash,
-      ]);
-      const removedIds = removed.map(q => q.id);
-      const result = await this.#rust.trackQueries(executedPairs, removedIds);
-      this._cvr.version = result.version as CVRVersion;
-      return {
-        newVersion: result.version as CVRVersion,
-        queryPatches: result.patches as PatchToVersion[],
-      };
-    }
+  ): {newVersion: CVRVersion; queryPatches: PatchToVersion[]} {
     return startSpan(tracer, 'CVRQueryDrivenUpdater.trackQueries', () => {
       assert(this.#existingRows === undefined, `trackQueries already called`);
 
@@ -970,22 +799,12 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
     return this._ensureNewVersion();
   }
 
-  override async flush(
+  override flush(
     lc: LogContext,
     lastConnectTime: number,
     lastActive: number,
     ttlClock: TTLClock,
   ): Promise<{cvr: CVRSnapshot; flushed: CVRFlushStats | false}> {
-    if (this.#rust) {
-      const rust = this.#rust;
-      const result = await rust.flush(
-        lastConnectTime,
-        lastActive,
-        ttlClockAsNumber(ttlClock),
-      );
-      this._cvr.version = result.version as CVRVersion;
-      return super.flush(lc, lastConnectTime, lastActive, ttlClock);
-    }
     if (this.#rowSetSignature) {
       // Persist the per-query row-set signature for any query whose
       // pipeline-driver signature differs from what's on disk. Queries
@@ -1018,25 +837,6 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
     _lc: LogContext,
     rows: Map<RowID, RowUpdate>,
   ): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      const rust = this.#rust;
-      return startAsyncSpan(
-        tracer,
-        'CVRQueryDrivenUpdater.received',
-        async () => {
-          const rowsObj: Record<string, unknown> = {};
-          for (const [id, update] of rows.entries()) {
-            rowsObj[rowIDString(id)] = {id, update};
-          }
-          const existingRows = await this._cvrStore.getRowRecords();
-          const patches = await rust.received(
-            rowsObj,
-            Object.fromEntries(existingRows),
-          );
-          return patches as PatchToVersion[];
-        },
-      );
-    }
     return startAsyncSpan(
       tracer,
       'CVRQueryDrivenUpdater.received',
@@ -1157,19 +957,6 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
    * [CVR Sync Algorithm](https://www.notion.so/replicache/Sync-and-Client-View-Records-CVR-a18e02ec3ec543449ea22070855ff33d?pvs=4#7874f9b80a514be2b8cd5cf538b88d37).
    */
   deleteUnreferencedRows(lc?: LogContext): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      const rust = this.#rust;
-      return startAsyncSpan(
-        tracer,
-        'CVRQueryDrivenUpdater.deleteUnreferencedRows',
-        async () => {
-          const existingRows = await this._cvrStore.getRowRecords();
-          const rowsArr = [...existingRows.values()];
-          const patches = await rust.deleteUnreferencedRows(rowsArr);
-          return patches as PatchToVersion[];
-        },
-      );
-    }
     return startAsyncSpan(
       tracer,
       'CVRQueryDrivenUpdater.deleteUnreferencedRows',
@@ -1250,7 +1037,7 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
   }
 }
 
-export function mergeRefCounts(
+function mergeRefCounts(
   existing: RefCounts | null | undefined,
   received: RefCounts | null | undefined,
   removeHashes?: Set<string>,

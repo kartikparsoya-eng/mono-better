@@ -1,3 +1,0 @@
-target/
-*.node
-packages/rust-cvr/napi/rust-cvr.node

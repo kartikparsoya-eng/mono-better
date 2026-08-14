@@ -1,92 +1,30 @@
 import {h64} from '../../../../shared/src/hash.ts';
-import {rowIDString, type RowID} from '../../types/row-key.ts';
-import {getRustCvrAddon} from './rust-cvr-addon.ts';
+import {rowIDString} from '../../types/row-key.ts';
+import type {RowID} from './schema/types.ts';
 
 /**
- * A 64-bit fingerprint of the rows of a result set, computed by XOR-ing
- * the 64-bit signatures of each row.
- */
-export type RowSetSignature = bigint;
-
-/**
- * A 64-bit (rowID-agnostic) signature unit representing a row in some set.
+ * The hash of a row ID used as the unit XOR'd into a query's
+ * {@link rowSetSignature}. Includes schema + table + rowKey, so the hash is
+ * unique across tables in the same query.
  */
 export function rowIDSignatureUnit(id: RowID): bigint {
-  const fns = tryLoadRustSignatureFns();
-  return fns ? fns.rustCvrRowIdSignatureUnit(id) : rowIDSignatureUnitTs(id);
-}
-
-/**
- * Parses a signature from its hex string representation.
- */
-export function parseSignature(hex: string | undefined | null): bigint {
-  const fns = tryLoadRustSignatureFns();
-  return fns ? fns.rustCvrParseSignature(hex) : parseSignatureTs(hex);
-}
-
-/**
- * Formats a signature into a hex string.
- */
-export function formatSignature(sig: RowSetSignature): string {
-  const fns = tryLoadRustSignatureFns();
-  return fns ? fns.rustCvrFormatSignature(sig) : formatSignatureTs(sig);
-}
-
-function rowIDSignatureUnitTs(id: RowID): bigint {
   return h64(rowIDString(id));
 }
 
-function parseSignatureTs(hex: string | undefined | null): bigint {
-  return hex ? BigInt(`0x${hex}`) : BigInt(0);
+/**
+ * Parses a hex-encoded signature back to its bigint form. Empty / undefined
+ * is the identity (`0n`).
+ */
+export function parseSignature(hex: string | undefined | null): bigint {
+  if (!hex) {
+    return 0n;
+  }
+  return BigInt('0x' + hex);
 }
 
-function formatSignatureTs(sig: RowSetSignature): string {
+/**
+ * Serializes a bigint signature to lowercase hex. `0n` serializes to `'0'`.
+ */
+export function formatSignature(sig: bigint): string {
   return sig.toString(16);
 }
-
-type RustSignatureUnit = (id: RowID) => bigint;
-type RustParseSignature = (hex: string | undefined | null) => bigint;
-type RustFormatSignature = (sig: bigint) => string;
-
-type RustSignatureFns = {
-  rustCvrRowIdSignatureUnit: RustSignatureUnit;
-  rustCvrParseSignature: RustParseSignature;
-  rustCvrFormatSignature: RustFormatSignature;
-};
-
-// `undefined` = not yet attempted; `null` = attempted and unavailable.
-let cachedRustSignatureFns: RustSignatureFns | null | undefined;
-
-function tryLoadRustSignatureFns(): RustSignatureFns | null {
-  if (cachedRustSignatureFns !== undefined) {
-    return cachedRustSignatureFns;
-  }
-
-  const addon = getRustCvrAddon<{
-    rustCvrRowIdSignatureUnit?: RustSignatureUnit;
-    rustCvrParseSignature?: RustParseSignature;
-    rustCvrFormatSignature?: RustFormatSignature;
-  }>();
-  if (!addon) {
-    cachedRustSignatureFns = null;
-    return null;
-  }
-
-  if (
-    typeof addon.rustCvrRowIdSignatureUnit === 'function' &&
-    typeof addon.rustCvrParseSignature === 'function' &&
-    typeof addon.rustCvrFormatSignature === 'function'
-  ) {
-    cachedRustSignatureFns = {
-      rustCvrRowIdSignatureUnit: addon.rustCvrRowIdSignatureUnit,
-      rustCvrParseSignature: addon.rustCvrParseSignature,
-      rustCvrFormatSignature: addon.rustCvrFormatSignature,
-    };
-  } else {
-    cachedRustSignatureFns = null;
-  }
-
-  return cachedRustSignatureFns;
-}
-
-export type {RowID};

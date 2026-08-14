@@ -75,6 +75,5 @@ bundle-sizes.json
 # Rust build artifacts (avoid sending multi-gigabyte host caches to Docker)
 **/target/
 packages/rust-ivm/*.node
-packages/rust-ivm/napi/*.node
 packages/rust-ivm/agentic/logs/
 packages/rust-ivm/.shared-target-w*/

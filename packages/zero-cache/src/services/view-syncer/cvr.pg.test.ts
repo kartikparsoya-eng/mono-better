@@ -380,7 +380,7 @@ describe('view-syncer/cvr', () => {
     } satisfies CVRSnapshot);
 
     const updater = new CVRConfigDrivenUpdater(pgStore, cvr, SHARD);
-    await updater.setClientSchema(lc, {
+    updater.setClientSchema(lc, {
       tables: {
         foo: {
           columns: {
@@ -470,7 +470,7 @@ describe('view-syncer/cvr', () => {
     const updater2 = new CVRConfigDrivenUpdater(pgStore, updated, SHARD);
 
     // Setting the same client schema should be fine.
-    await updater2.setClientSchema(lc, {
+    updater2.setClientSchema(lc, {
       tables: {
         foo: {
           columns: {
@@ -518,7 +518,7 @@ describe('view-syncer/cvr', () => {
     });
 
     const updater = new CVRConfigDrivenUpdater(pgStore, cvr, SHARD);
-    await updater.setProfileID(lc, 'cgabc123');
+    updater.setProfileID(lc, 'cgabc123');
 
     const {cvr: updated} = await updater.flush(
       lc,
@@ -564,7 +564,7 @@ describe('view-syncer/cvr', () => {
     const updater2 = new CVRConfigDrivenUpdater(pgStore, updated, SHARD);
 
     // Setting the same profile ID should be a noop.
-    await updater2.setProfileID(lc, 'cgabc123');
+    updater2.setProfileID(lc, 'cgabc123');
     const {flushed} = await updater2.flush(
       lc,
       LAST_CONNECT,
@@ -574,7 +574,7 @@ describe('view-syncer/cvr', () => {
     expect(flushed).toBe(false);
 
     // Setting the a new profile ID should result in a change.
-    await updater2.setProfileID(lc, 'p0000039s8200d9a0');
+    updater2.setProfileID(lc, 'p0000039s8200d9a0');
     const {cvr: updated2} = await updater2.flush(
       lc,
       LAST_CONNECT,
@@ -872,7 +872,7 @@ describe('view-syncer/cvr', () => {
     await cvrDb`UPDATE "dapp_3/cvr".instances SET version = '1a9:03' WHERE "clientGroupID" = 'abc123'`;
 
     // force a flush to trigger detection
-    await updater.ensureClient('client-foo');
+    updater.ensureClient('client-foo');
 
     await expect(
       updater.flush(
@@ -928,7 +928,7 @@ describe('view-syncer/cvr', () => {
     WHERE "clientGroupID" = 'abc123'`;
 
     // force flush to trigger detection
-    await updater.ensureClient('client-bar');
+    updater.ensureClient('client-bar');
 
     await expect(
       updater.flush(
@@ -1897,7 +1897,7 @@ describe('view-syncer/cvr', () => {
     const cvr = await cvrStore.load(lc, LAST_CONNECT);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1aa', '123');
 
-    const {newVersion, queryPatches} = await updater.trackQueries(
+    const {newVersion, queryPatches} = updater.trackQueries(
       lc,
       [{id: 'oneHash', transformationHash: 'serverOneHash'}],
       [],
@@ -2385,7 +2385,7 @@ describe('view-syncer/cvr', () => {
     let cvr = await cvrStore.load(lc, LAST_CONNECT);
     let updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
 
-    let {newVersion, queryPatches} = await updater.trackQueries(
+    let {newVersion, queryPatches} = updater.trackQueries(
       lc,
       [{id: 'oneHash', transformationHash: 'serverTwoHash'}],
       [],
@@ -2698,7 +2698,7 @@ describe('view-syncer/cvr', () => {
     });
 
     updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
-    ({newVersion, queryPatches} = await updater.trackQueries(
+    ({newVersion, queryPatches} = updater.trackQueries(
       lc,
       [{id: 'oneHash', transformationHash: 'newXFormHash'}],
       [],
@@ -2943,7 +2943,7 @@ describe('view-syncer/cvr', () => {
     const cvr = await cvrStore.load(lc, LAST_CONNECT);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
 
-    const {newVersion, queryPatches} = await updater.trackQueries(
+    const {newVersion, queryPatches} = updater.trackQueries(
       lc,
       [
         {id: 'oneHash', transformationHash: 'updatedServerOneHash'},
@@ -3461,7 +3461,7 @@ describe('view-syncer/cvr', () => {
     const cvr = await cvrStore.load(lc, LAST_CONNECT);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '123');
 
-    const {newVersion, queryPatches} = await updater.trackQueries(
+    const {newVersion, queryPatches} = updater.trackQueries(
       lc,
       [],
       [{id: 'oneHash'}],
@@ -3944,7 +3944,7 @@ describe('view-syncer/cvr', () => {
     `);
     const updater = new CVRQueryDrivenUpdater(cvrStore, cvr, '1ba', '120');
 
-    const {newVersion, queryPatches} = await updater.trackQueries(
+    const {newVersion, queryPatches} = updater.trackQueries(
       lc,
       [
         {id: 'oneHash', transformationHash: 'serverOneHash'},
@@ -5371,11 +5371,7 @@ describe('view-syncer/cvr', () => {
       `);
 
       const updater = new CVRConfigDrivenUpdater(cvrStore, cvr, SHARD);
-      await updater.markDesiredQueriesAsInactive(
-        'fooClient',
-        ['oneHash'],
-        ttlClock,
-      );
+      updater.markDesiredQueriesAsInactive('fooClient', ['oneHash'], ttlClock);
 
       const {cvr: updated} = await updater.flush(
         lc,
@@ -5529,11 +5525,7 @@ describe('view-syncer/cvr', () => {
       });
 
       const updater = new CVRConfigDrivenUpdater(cvrStore, cvr, SHARD);
-      await updater.markDesiredQueriesAsInactive(
-        'fooClient',
-        ['oneHash'],
-        ttlClock,
-      );
+      updater.markDesiredQueriesAsInactive('fooClient', ['oneHash'], ttlClock);
 
       const {cvr: updated} = await updater.flush(
         lc,
@@ -6869,7 +6861,7 @@ describe('view-syncer/cvr', () => {
 
     const updater = new CVRConfigDrivenUpdater(cvrStore, cvr, SHARD);
 
-    await updater.deleteClient(clientID, ttlClockFromNumber(Date.now()));
+    updater.deleteClient(clientID, ttlClockFromNumber(Date.now()));
     await updater.flush(
       lc,
       LAST_CONNECT,

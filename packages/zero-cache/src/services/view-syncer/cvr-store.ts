@@ -30,7 +30,6 @@ import {cvrSchema, type ShardID} from '../../types/shards.ts';
 import type {Patch, PatchToVersion} from './client-handler.ts';
 import type {CVR, CVRSnapshot} from './cvr.ts';
 import {RowRecordCache} from './row-record-cache.ts';
-import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 import {
   type ClientsRow,
   type DesiresRow,
@@ -60,28 +59,6 @@ import {
   ttlClockAsNumber,
   ttlClockFromNumber,
 } from './ttl-clock.ts';
-
-interface RustCVRStoreHandle {
-  hasPendingWrites(): Promise<boolean>;
-  rowCount(): Promise<number>;
-  applyStoreOps(ops: unknown[]): Promise<void>;
-  flush(
-    version: unknown,
-    cvr: unknown,
-    lastConnectTime: number,
-  ): Promise<{
-    clients: number;
-    queries: number;
-    rows: number;
-    desires: number;
-    instances: number;
-  }>;
-  load(lastConnectTime: number): Promise<unknown>;
-  catchupConfigPatches(
-    afterVersion: unknown | null,
-    upToVersion: unknown,
-  ): Promise<unknown[]>;
-}
 
 export type CVRFlushStats = {
   instances: number;
@@ -225,7 +202,6 @@ export class CVRStore {
   readonly #pendingQueryUpdates = new Map<string, StringifiedQueriesRow>();
   readonly #pendingDesireUpdates = new Map<string, DesiresRow>();
   readonly #pendingQueryPartialUpdates = new Map<string, Partial<QueriesRow>>();
-  readonly #rust: RustCVRStoreHandle | null = null;
 
   constructor(
     lc: LogContext,
@@ -238,7 +214,6 @@ export class CVRStore {
     maxLoadAttempts = MAX_LOAD_ATTEMPTS,
     deferredRowFlushThreshold = 100, // somewhat arbitrary
     setTimeoutFn = setTimeout,
-    pgUri?: string,
   ) {
     this.#failService = failService;
     this.#db = cvrDb;
@@ -253,30 +228,9 @@ export class CVRStore {
       failService,
       deferredRowFlushThreshold,
       setTimeoutFn,
-      pgUri,
     );
     this.#loadAttemptIntervalMs = loadAttemptIntervalMs;
     this.#maxLoadAttempts = maxLoadAttempts;
-
-    if (isRustCvrEnabled() && pgUri) {
-      const addon = getRustCvrAddon<Record<string, unknown>>();
-      const RustCVRStoreNapiHandle = addon?.CVRStoreNapiHandle as
-        | (new (
-            pgUri: string,
-            schema: string,
-            cvrId: string,
-            taskId: string,
-          ) => RustCVRStoreHandle)
-        | undefined;
-      if (RustCVRStoreNapiHandle) {
-        this.#rust = new RustCVRStoreNapiHandle(
-          pgUri,
-          this.#schema,
-          cvrID,
-          taskID,
-        );
-      }
-    }
   }
 
   #cvr(table: string) {
@@ -294,19 +248,7 @@ export class CVRStore {
     );
   }
 
-  /** Exposed for CVR updaters to share the same Rust store handle. */
-  get rustStoreHandle(): RustCVRStoreHandle | null {
-    return this.#rust;
-  }
-
   load(lc: LogContext, lastConnectTime: number): Promise<CVR> {
-    if (this.#rust) {
-      const rust = this.#rust;
-      return startAsyncSpan(tracer, 'cvr.load', async () => {
-        const result = await rust.load(lastConnectTime);
-        return result as CVR;
-      });
-    }
     return startAsyncSpan(tracer, 'cvr.load', async () => {
       let err: RowsVersionBehindError | undefined;
       for (let i = 0; i < this.#maxLoadAttempts; i++) {
@@ -539,18 +481,6 @@ export class CVRStore {
     return this.#rowCache.getRowRecords();
   }
 
-  /** Invalidate the in-memory row record cache. Call after the Rust
-   *  engine flushes row records to PG directly (hydrateAndSync /
-   *  advanceAndSync), so the next getRowRecords() reloads from PG. */
-  clearRowCache(): void {
-    this.#rowCache.clear();
-  }
-
-  /** Record flush stats metrics after the Rust engine flushes directly. */
-  recordFlushStats(stats: CVRFlushStats, elapsedMs: number): void {
-    this.#rowCache.recordSyncFlushStats(stats, elapsedMs);
-  }
-
   putRowRecord(row: RowRecord): void {
     this.#pendingRowRecordUpdates.set(row.id, row);
   }
@@ -758,13 +688,6 @@ export class CVRStore {
     upToCVR: CVRSnapshot,
     current: CVRVersion,
   ): Promise<PatchToVersion[]> {
-    if (this.#rust) {
-      const patches = await this.#rust.catchupConfigPatches(
-        afterVersion,
-        upToCVR.version,
-      );
-      return patches as PatchToVersion[];
-    }
     if (cmpVersions(afterVersion, upToCVR.version) >= 0) {
       return [];
     }
@@ -1271,39 +1194,6 @@ export class CVRStore {
     cvr: CVRSnapshot,
     lastConnectTime: number,
   ): Promise<CVRFlushStats | null> {
-    if (this.#rust) {
-      const start = performance.now();
-      lc = lc.withContext('cvrFlushID', flushCounter++);
-      try {
-        const rustStats = await this.#rust.flush(
-          expectedCurrentVersion,
-          cvr,
-          lastConnectTime,
-        );
-        if (rustStats) {
-          const stats: CVRFlushStats = {
-            instances: rustStats.instances,
-            queries: rustStats.queries,
-            desires: rustStats.desires,
-            clients: rustStats.clients,
-            rows: rustStats.rows,
-            rowsDeferred: 0,
-            statements: 0,
-          };
-          const elapsed = performance.now() - start;
-          lc.info?.(
-            `flushed cvr@${versionString(cvr.version)} ` +
-              `${JSON.stringify(stats)} in (${elapsed} ms) [rust]`,
-          );
-          this.#rowCache.recordSyncFlushStats(stats, elapsed);
-          return stats;
-        }
-        return null;
-      } catch (e) {
-        this.#rowCache.clear();
-        throw e;
-      }
-    }
     const start = performance.now();
     lc = lc.withContext('cvrFlushID', flushCounter++);
     try {

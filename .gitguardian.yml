@@ -12,4 +12,3 @@ secret:
     - 'packages/rust-ivm/agentic/.recoveries'
     # The vendored SQLite amalgamation is public-domain upstream code.
     - 'packages/rust-ivm/wal2-sqlite/**'
-    - 'packages/rust-ivm/napi/wal2-sqlite/**'

@@ -34,7 +34,6 @@ import {
 } from '../../types/error-with-level.ts';
 import {upstreamSchema, type ShardID} from '../../types/shards.ts';
 import type {Subscription} from '../../types/subscription.ts';
-import {getRustCvrAddon, isRustCvrEnabled} from './rust-cvr-addon.ts';
 import {
   cmpVersions,
   cookieToVersion,
@@ -46,25 +45,6 @@ import {
   type PutQueryPatch,
   type RowID,
 } from './schema/types.ts';
-
-interface RustPokeHandlerHandle {
-  addPatch(patch: unknown): Promise<void>;
-  cancel(): Promise<void>;
-  end(finalVersion: unknown): Promise<void>;
-}
-
-interface RustClientHandlerHandle {
-  version(): Promise<unknown>;
-  fail(e: string): void;
-  close(reason: string): void;
-  startPoke(tentativeVersion: unknown): RustPokeHandlerHandle;
-  sendDeleteClients(
-    clientIDs: string[],
-    clientGroupIDs: string[],
-  ): Promise<void>;
-  sendQueryTransformApplicationErrors(errors: unknown[]): Promise<void>;
-  sendInspectResponse(response: unknown): void;
-}
 
 export type PutRowPatch = {
   type: 'row';
@@ -128,31 +108,6 @@ export function startPoke(
 // When row size is being computed, that should be used as a threshold instead.
 const PART_COUNT_FLUSH_THRESHOLD = 100;
 
-// Upper bound on how long a single downstream push may remain unconsumed
-// before the connection is failed (closed) as unrecoverably slow.
-//
-// The poke path awaits each push's `result`, which resolves only when the
-// outbound ws pipeline consumes the message. A stalled-but-open socket — a
-// silently dead peer before the kernel's TCP timeout (~15-25 min), or a
-// suspended/backgrounded tab whose kernel keeps ACKing into a zero-window
-// (which never times out) — leaves that await pending indefinitely. Because
-// pokes run inside the view-syncer lock (`#advancePipelines` →
-// `pokers.addPatch`/`end`, and initConnection catchup), ONE such client
-// freezes advances for the entire client group: the snapshotter's pinned
-// read-marks stop moving, wal2 checkpointing is starved behind them, and the
-// replica WAL grows at the write rate, unbounded. The server sends pongs but
-// enforces NO inbound liveness on client sockets, and the advancement-timeout
-// breaker only runs while rows are flowing — nothing else bounds this stall.
-//
-// Failing the one stalled connection settles every pending push (Subscription
-// cleanup resolves them 'unconsumed'), releases the poke chain (#pokeTail),
-// and lets the rest of the client group advance; the client reconnects and
-// catches up normally.
-const PUSH_CONSUME_TIMEOUT_MS = (() => {
-  const v = Number(process.env['ZERO_PUSH_CONSUME_TIMEOUT_MS']);
-  return Number.isFinite(v) && v > 0 ? v : 60_000;
-})();
-
 /**
  * Handles a single `ViewSyncer` connection.
  */
@@ -165,11 +120,6 @@ export class ClientHandler {
   readonly #lc: LogContext;
   readonly #downstream: Subscription<Downstream>;
   #baseVersion: NullableCVRVersion;
-  // Tail of the per-connection poke chain. Each poke transaction gates its
-  // first frame on the previous transaction's completion so that pokes to this
-  // connection never interleave. See startPoke() for why.
-  #pokeTail: Promise<void> = Promise.resolve();
-  readonly #rust: RustClientHandlerHandle | null = null;
 
   readonly #pokeTime = getOrCreateLatencyHistogram(
     'sync',
@@ -207,82 +157,18 @@ export class ClientHandler {
     this.#lc = lc;
     this.#downstream = downstream;
     this.#baseVersion = cookieToVersion(baseCookie);
-
-    if (isRustCvrEnabled()) {
-      const addon = getRustCvrAddon<Record<string, unknown>>();
-      const RustClientHandlerHandle = addon?.ClientHandlerHandle as
-        | (new (
-            clientGroupID: string,
-            clientID: string,
-            wsID: string,
-            shard: unknown,
-            baseCookie: string | null,
-            pushFn: (msg: unknown) => void,
-            failFn: (err: string) => void,
-            cancelFn: () => void,
-          ) => RustClientHandlerHandle)
-        | undefined;
-      if (RustClientHandlerHandle) {
-        this.#rust = new RustClientHandlerHandle(
-          clientGroupID,
-          clientID,
-          wsID,
-          shard,
-          baseCookie,
-          (msg: unknown) => {
-            // Fire-and-forget push to WS
-            const {result} = downstream.push(msg as Downstream);
-            result.catch(() => {});
-          },
-          (err: string) => {
-            lc.error?.(`rust client handler error: ${err}`);
-            downstream.fail(wrapWithProtocolError(new Error(err)));
-          },
-          () => downstream.cancel(),
-        );
-      }
-    }
   }
 
   version(): NullableCVRVersion {
-    if (this.#rust) {
-      // Rust version() is async but TS version() is sync.
-      // Return the cached baseVersion — it's updated after each poke end().
-      return this.#baseVersion;
-    }
     return this.#baseVersion;
   }
 
   async #push(msg: Downstream): Promise<void> {
     const {result} = this.#downstream.push(msg);
-    // Bound the wait (see PUSH_CONSUME_TIMEOUT_MS): a stalled-but-open
-    // connection must fail rather than hold the view-syncer lock forever.
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<'push-timeout'>(resolve => {
-      timer = setTimeout(resolve, PUSH_CONSUME_TIMEOUT_MS, 'push-timeout');
-      // Don't let a pending poke keep the process alive.
-      timer.unref?.();
-    });
-    try {
-      const won = await Promise.race([result, timeout]);
-      if (won === 'push-timeout') {
-        this.fail(
-          new Error(
-            `client not consuming pokes for ${PUSH_CONSUME_TIMEOUT_MS}ms ` +
-              `(stalled connection); closing to unblock the client group`,
-          ),
-        );
-      }
-    } finally {
-      clearTimeout(timer);
-    }
+    await result;
   }
 
   fail(e: unknown) {
-    if (this.#rust) {
-      this.#rust.fail(String(e));
-      return;
-    }
     this.#lc[getLogLevel(e)]?.(
       `view-syncer closing connection with error: ${String(e)}`,
       e,
@@ -291,31 +177,11 @@ export class ClientHandler {
   }
 
   close(reason: string) {
-    if (this.#rust) {
-      this.#rust.close(reason);
-      return;
-    }
     this.#lc.debug?.(`view-syncer closing connection: ${reason}`);
     this.#downstream.cancel();
   }
 
   startPoke(tentativeVersion: CVRVersion): PokeHandler {
-    if (this.#rust) {
-      const rust = this.#rust;
-      const rustPoke = rust.startPoke(tentativeVersion);
-      return {
-        addPatch: async patch => {
-          await rustPoke.addPatch(patch);
-        },
-        cancel: async () => {
-          await rustPoke.cancel();
-        },
-        end: async finalVersion => {
-          await rustPoke.end(finalVersion);
-          this.#baseVersion = finalVersion;
-        },
-      };
-    }
     const pokeID = versionToCookie(tentativeVersion);
     const lc = this.#lc.withContext('pokeID', pokeID);
 
@@ -332,42 +198,11 @@ export class ClientHandler {
 
     const pokeStart: PokeStartBody = {pokeID, baseCookie};
 
-    // Serialize poke transactions to this connection. The client
-    // (zero-poke-handler.ts) permits only ONE in-flight poke: a `pokeStart`
-    // arriving while another poke is still streaming makes it clear its state
-    // and reconnect (surfaced to users as "Connection Lost"). Stock TS upheld
-    // this implicitly because hydration was a *synchronous* generator, so a
-    // poke opened and closed without yielding. The rust-ivm driver streams
-    // rows across async TSFN macrotask boundaries
-    // (rust-ivm-driver.ts#addQueryStreaming), so a following poke's frames can
-    // otherwise interleave with a hydrate poke still draining. Gate this poke's
-    // first frame on the previous poke's completion, and chain the tail so the
-    // next poke waits for us — even if we send nothing.
-    const priorPoke = this.#pokeTail;
-    let releasePoke!: () => void;
-    const pokeDone = new Promise<void>(resolve => (releasePoke = resolve));
-    this.#pokeTail = priorPoke.then(() => pokeDone);
-    let pokeReleased = false;
-    const endPoke = () => {
-      if (!pokeReleased) {
-        pokeReleased = true;
-        releasePoke();
-      }
-    };
-    let awaitedPrior = false;
-    const awaitPrior = async () => {
-      if (!awaitedPrior) {
-        awaitedPrior = true;
-        await priorPoke;
-      }
-    };
-
     let pokeStarted = false;
     let body: PokePartBody | undefined;
     let partCount = 0;
     const ensureBody = async () => {
       if (!pokeStarted) {
-        await awaitPrior();
         await this.#push(['pokeStart', pokeStart]);
         pokeStarted = true;
       }
@@ -408,7 +243,7 @@ export class ClientHandler {
             const patches = (body.mutationsPatch ??= []);
             if (op === 'put') {
               const row = v.parse(
-                normalizeMutationResult(ensureSafeJSON(patch.contents)),
+                ensureSafeJSON(patch.contents),
                 mutationRowSchema,
                 'passthrough',
               );
@@ -467,42 +302,33 @@ export class ClientHandler {
       },
 
       cancel: async () => {
-        try {
-          if (pokeStarted) {
-            await this.#push(['pokeEnd', {pokeID, cookie: '', cancel: true}]);
-          }
-        } finally {
-          endPoke();
+        if (pokeStarted) {
+          await this.#push(['pokeEnd', {pokeID, cookie: '', cancel: true}]);
         }
       },
 
       end: async (finalVersion: CVRVersion) => {
-        try {
-          const cookie = versionToCookie(finalVersion);
-          if (!pokeStarted) {
-            if (cmpVersions(this.#baseVersion, finalVersion) === 0) {
-              return; // Nothing changed and nothing was sent.
-            }
-            await awaitPrior();
-            await this.#push(['pokeStart', pokeStart]);
-          } else if (cmpVersions(this.#baseVersion, finalVersion) >= 0) {
-            // Sanity check: If the poke was started, the finalVersion
-            // must be > #baseVersion.
-            throw new Error(
-              `Patches were sent but finalVersion ${finalVersion} is ` +
-                `not greater than baseVersion ${this.#baseVersion}`,
-            );
+        const cookie = versionToCookie(finalVersion);
+        if (!pokeStarted) {
+          if (cmpVersions(this.#baseVersion, finalVersion) === 0) {
+            return; // Nothing changed and nothing was sent.
           }
-          await flushBody();
-          await this.#push(['pokeEnd', {pokeID, cookie}]);
-          this.#baseVersion = finalVersion;
-
-          const elapsed = performance.now() - start;
-          this.#pokeTransactions.add(1);
-          this.#pokeTime.recordMs(elapsed);
-        } finally {
-          endPoke();
+          await this.#push(['pokeStart', pokeStart]);
+        } else if (cmpVersions(this.#baseVersion, finalVersion) >= 0) {
+          // Sanity check: If the poke was started, the finalVersion
+          // must be > #baseVersion.
+          throw new Error(
+            `Patches were sent but finalVersion ${finalVersion} is ` +
+              `not greater than baseVersion ${this.#baseVersion}`,
+          );
         }
+        await flushBody();
+        await this.#push(['pokeEnd', {pokeID, cookie}]);
+        this.#baseVersion = finalVersion;
+
+        const elapsed = performance.now() - start;
+        this.#pokeTransactions.add(1);
+        this.#pokeTime.recordMs(elapsed);
       },
     };
   }
@@ -512,13 +338,6 @@ export class ClientHandler {
     deletedClientIDs: string[],
     deletedClientGroupIDs: string[],
   ) {
-    if (this.#rust) {
-      await this.#rust.sendDeleteClients(
-        deletedClientIDs,
-        deletedClientGroupIDs,
-      );
-      return;
-    }
     const deleteClientsBody: Writable<DeleteClientsBody> = {};
     if (deletedClientIDs.length > 0) {
       deleteClientsBody.clientIDs = deletedClientIDs;
@@ -531,10 +350,6 @@ export class ClientHandler {
   }
 
   sendQueryTransformApplicationErrors(errors: ErroredQuery[]) {
-    if (this.#rust) {
-      void this.#rust.sendQueryTransformApplicationErrors(errors);
-      return;
-    }
     void this.#push(['transformError', errors]);
   }
 
@@ -543,10 +358,6 @@ export class ClientHandler {
   }
 
   sendInspectResponse(lc: LogContext, response: InspectDownBody): void {
-    if (this.#rust) {
-      this.#rust.sendInspectResponse(response);
-      return;
-    }
     lc.debug?.('sending inspect response', response);
     this.#downstream.push(['inspect', response]);
   }
@@ -588,33 +399,7 @@ const mutationRowSchema = v.object({
   result: mutationResultSchema,
 });
 
-/**
- * Defense-in-depth: the `{app}_{shard}.mutations.result` column is Postgres
- * type JSON, stored in the SQLite replica as stringified text, and must be
- * re-parsed to an OBJECT on read (see zqlite `fromSQLiteTypes` →
- * `case 'json': JSON.parse(v)`). `mutationRowSchema` REQUIRES `result` to be an
- * object and never parses it itself. If the engine ever emits `result` as a
- * JSON string (an encoding slip in the source column typing), `v.parse` below
- * would throw a fatal `ProtocolError` that tears down the WebSocket connection
- * — even for a LAWFUL failed-mutation result (e.g. a `MutationACLError` app
- * error). A lawful app error must NEVER fatal the connection. So mirror
- * `fromSQLiteTypes` here: if `result` arrives as a string, JSON.parse it back
- * to an object before validation, degrading a slip to a normal failed mutation.
- */
-function normalizeMutationResult(row: SafeJSONObject): SafeJSONObject {
-  const {result} = row;
-  if (typeof result !== 'string') {
-    return row;
-  }
-  try {
-    return {...row, result: JSON.parse(result)};
-  } catch {
-    // Not valid JSON — leave as-is and let v.parse produce its normal error.
-    return row;
-  }
-}
-
-export function makeRowPatch(patch: RowPatch): RowPatchOp {
+function makeRowPatch(patch: RowPatch): RowPatchOp {
   const {
     op,
     id: {table: tableName, rowKey: id},

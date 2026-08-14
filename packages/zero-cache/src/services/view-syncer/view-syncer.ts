@@ -58,7 +58,7 @@ import {
 } from '../../types/error-with-level.ts';
 import type {PostgresDB} from '../../types/pg.ts';
 import {rowIDString, type RowKey} from '../../types/row-key.ts';
-import {cvrSchema, type ShardID} from '../../types/shards.ts';
+import type {ShardID} from '../../types/shards.ts';
 import type {Source} from '../../types/streams.ts';
 import {Subscription} from '../../types/subscription.ts';
 import type {ReplicaState} from '../replicator/replicator.ts';
@@ -77,11 +77,7 @@ import type {
   ConnectionSelector,
   ConnectionValidation,
 } from './connection-context-manager.ts';
-import {
-  ClientNotFoundError,
-  CVRStore,
-  type CVRFlushStats,
-} from './cvr-store.ts';
+import {ClientNotFoundError, CVRStore} from './cvr-store.ts';
 import type {CVRUpdater} from './cvr.ts';
 import {
   CVRConfigDrivenUpdater,
@@ -93,10 +89,6 @@ import {
 import type {DrainCoordinator} from './drain-coordinator.ts';
 import {handleInspect} from './inspect-handler.ts';
 import type {PipelineDriver} from './pipeline-driver.ts';
-import {isRustCvrEnabled} from './rust-cvr-addon.ts';
-import {RustIVMDriver} from './rust-ivm-driver.ts';
-
-type PipelineDriverLike = PipelineDriver | RustIVMDriver;
 import {type RowChange} from './pipeline-driver.ts';
 import {parseSignature} from './row-set-signature.ts';
 import {
@@ -113,10 +105,7 @@ import {
   type QueryRecord,
   type RowID,
 } from './schema/types.ts';
-import {
-  ResetPipelinesSignal,
-  type ResetPipelinesReason,
-} from './snapshotter.ts';
+import {ResetPipelinesSignal} from './snapshotter.ts';
 import {tracer} from './tracer.ts';
 import {
   ttlClockAsNumber,
@@ -213,7 +202,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
   readonly #shard: ShardID;
   readonly #lc: LogContext;
-  readonly #pipelines: PipelineDriverLike;
+  readonly #pipelines: PipelineDriver;
   readonly #stateChanges: Subscription<ReplicaState>;
   readonly #drainCoordinator: DrainCoordinator;
   readonly #keepaliveMs: number;
@@ -353,7 +342,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     taskID: string,
     clientGroupID: string,
     cvrDb: PostgresDB,
-    pipelineDriver: PipelineDriverLike,
+    pipelineDriver: PipelineDriver,
     versionChanges: Subscription<ReplicaState>,
     drainCoordinator: DrainCoordinator,
     slowHydrateThreshold: number,
@@ -367,7 +356,6 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     ) => Promise<T>,
     keepaliveMs = DEFAULT_KEEPALIVE_MS,
     setTimeoutFn: SetTimeout = setTimeout.bind(globalThis),
-    pgUri?: string,
   ) {
     this.#config = config;
     this.id = clientGroupID;
@@ -390,25 +378,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // On failure, cancel the #stateChanges subscription. The run()
       // loop will then await #cvrStore.flushed() which rejects if necessary.
       () => this.#stateChanges.cancel(),
-      undefined, // loadAttemptIntervalMs — default
-      undefined, // maxLoadAttempts — default
-      undefined, // deferredRowFlushThreshold — default
-      undefined, // setTimeoutFn — default
-      pgUri,
     );
     this.#setTimeout = setTimeoutFn;
     this.#runPriorityOp = runPriorityOp;
-
-    // Wire the Rust engine's CVR store + client registry if unified path is active.
-    if (
-      isRustCvrEnabled() &&
-      this.#pipelines instanceof RustIVMDriver &&
-      pgUri
-    ) {
-      const engine = this.#pipelines.engine;
-      engine.setCvrStore(pgUri, cvrSchema(shard), clientGroupID, taskID);
-    }
-
     // Wait for the first connection to init.
     this.keepalive();
   }
@@ -693,11 +665,6 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     if (c === client) {
       this.#clients.delete(clientID);
 
-      // Unregister from the Rust engine.
-      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
-        this.#pipelines.engine.unregisterClient(client.wsID);
-      }
-
       if (this.#clients.size === 0) {
         // It is possible to delete a client before we read the ttl clock from
         // the CVR.
@@ -853,27 +820,6 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         ?.close(`replaced by wsID: ${connCtx.wsID}`);
       this.#clients.set(connCtx.clientID, newClient);
 
-      // Register the client with the Rust engine for unified CVR poke delivery.
-      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
-        const engine = this.#pipelines.engine;
-        engine.registerClient(
-          connCtx.clientID,
-          connCtx.wsID,
-          this.id,
-          this.#shard,
-          connCtx.baseCookie,
-          (msg: unknown) => {
-            const {result} = downstream.push(msg as Downstream);
-            result.catch(() => {});
-          },
-          (err: string) => {
-            lc.error?.(`rust client handler error: ${err}`);
-            downstream.fail(wrapWithProtocolError(new Error(err)));
-          },
-          () => downstream.cancel(),
-        );
-      }
-
       // Note: initConnection() must be synchronous so that `downstream` is
       // immediately returned to the caller (connection.ts). This ensures
       // that if the connection is subsequently closed, the `downstream`
@@ -1012,16 +958,6 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   }
 
   #getTTLClock(now: number): TTLClock {
-    // INVARIANT: this must stay fully SYNCHRONOUS (no `await`). It is called
-    // out-of-lock by the TTL-clock interval timer (#updateTTLClockInCVRWithoutLock)
-    // as well as from locked paths, and it does a read-modify-write of
-    // #ttlClock/#ttlClockBase. With the rust-ivm async (TSFN-streamed) hydrate,
-    // the timer can now fire during a macrotask yield in the middle of an
-    // in-flight hydrate/advance — a window that barely existed under the old
-    // synchronous generator. Because this function has no yield point, the
-    // read-modify-write is atomic w.r.t. the event loop, so the two callers
-    // cannot tear the value (both only advance the clock monotonically by real
-    // elapsed wall-time). Adding an `await` here would reopen that race.
     // We will update ttlClock with delta from the ttlClockBase to the current time.
     const delta = now - this.#ttlClockBase;
     assert(this.#ttlClock !== undefined, 'ttlClock should be defined');
@@ -1098,15 +1034,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     clientID: string,
     customQueryTransformMode: CustomQueryTransformMode,
     connCtx: ConnectionContext | undefined,
-    fn: (updater: CVRConfigDrivenUpdater) => Promise<PatchToVersion[]>,
+    fn: (updater: CVRConfigDrivenUpdater) => PatchToVersion[],
   ): Promise<CVRSnapshot> {
     const updater = new CVRConfigDrivenUpdater(
       this.#cvrStore,
       cvr,
       this.#shard,
     );
-    await updater.ensureClient(clientID);
-    const patches = await fn(updater);
+    updater.ensureClient(clientID);
+    const patches = fn(updater);
 
     this.#cvr = await this.#flushUpdater(lc, updater);
 
@@ -1114,7 +1050,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // Send pokes to catch up clients that are up to date.
       // (Clients that are behind the cvr.version need to be caught up in
       //  #syncQueryPipelineSet(), as row data may be needed for catchup)
-      const newCVR = this.#cvr!;
+      const newCVR = this.#cvr;
       await startAsyncSpan(
         tracer,
         'vs.#updateCVRConfig.pokeClients',
@@ -1263,15 +1199,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         clientID,
         customQueryTransformMode,
         connCtx,
-        async updater => {
+        updater => {
           const {ttlClock} = cvr;
           const patches: PatchToVersion[] = [];
 
           if (clientSchema) {
-            await updater.setClientSchema(lc, clientSchema);
+            updater.setClientSchema(lc, clientSchema);
           }
           if (profileID) {
-            await updater.setProfileID(lc, profileID);
+            updater.setProfileID(lc, profileID);
           }
 
           // Apply requested patches.
@@ -1282,23 +1218,19 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             for (const patch of desiredQueriesPatch) {
               switch (patch.op) {
                 case 'put':
-                  patches.push(
-                    ...(await updater.putDesiredQueries(clientID, [patch])),
-                  );
+                  patches.push(...updater.putDesiredQueries(clientID, [patch]));
                   break;
                 case 'del':
                   patches.push(
-                    ...(await updater.markDesiredQueriesAsInactive(
+                    ...updater.markDesiredQueriesAsInactive(
                       clientID,
                       [patch.hash],
                       ttlClock,
-                    )),
+                    ),
                   );
                   break;
                 case 'clear':
-                  patches.push(
-                    ...(await updater.clearDesiredQueries(clientID)),
-                  );
+                  patches.push(...updater.clearDesiredQueries(clientID));
                   break;
               }
             }
@@ -1325,10 +1257,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
 
           for (const cid of clientIDsToDelete) {
-            const patchesDueToClient = await updater.deleteClient(
-              cid,
-              ttlClock,
-            );
+            const patchesDueToClient = updater.deleteClient(cid, ttlClock);
             patches.push(...patchesDueToClient);
             deletedClientIDs.push(cid);
           }
@@ -1575,16 +1504,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           if (queryName !== undefined) {
             span.setAttribute('queryName', queryName);
           }
-          const addResult = this.#pipelines.addQuery(
+          for (const change of this.#pipelines.addQuery(
             transformationHash,
             queryID,
             transformedAst,
             await timer.start(),
             queryName,
-          );
-          const addIterable =
-            addResult instanceof Promise ? await addResult : addResult;
-          for await (const change of addIterable) {
+          )) {
             if (change === 'yield') {
               await timer.yieldProcess('yield in hydrateUnchangedQueries');
             } else {
@@ -2026,111 +1952,6 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       lc = lc.withContext('stateVersion', stateVersion);
       lc.info?.(`hydrating ${addQueries.length} queries`);
 
-      // ─── Unified Rust CVR path ─────────────────────────────────────
-      // When RUST_CVR=1 and the driver is RustIVMDriver, the entire pipeline
-      // (hydrate → CVR → poke) runs on the engine actor thread. Row data
-      // never crosses the napi boundary.
-      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
-        const engine = this.#pipelines.engine;
-        const cvrJson = JSON.stringify(cvr);
-        const addQueriesFlat = addQueries.flatMap(q => [
-          q.id,
-          q.transformationHash,
-        ]);
-        const removeQueryIds = removeQueries.map(q => q.id);
-        const clientIds = this.#getClients().map(c => c.wsID);
-        const existingRowsJson = JSON.stringify(
-          await this.#cvrStore.getRowRecords(),
-        );
-        const result = await engine.hydrateAndSync(
-          addQueries.map(q => ({
-            queryId: q.id,
-            astJson: JSON.stringify(q.ast),
-          })),
-          cvrJson,
-          stateVersion,
-          this.#pipelines.replicaVersion,
-          addQueriesFlat,
-          removeQueryIds,
-          clientIds,
-          existingRowsJson,
-          this.#lastConnectTime,
-          Date.now(),
-          ttlClockAsNumber(this.#getTTLClock(Date.now())),
-        );
-
-        if (result.resetReason) {
-          throw new ResetPipelinesSignal(
-            result.resetMsg ?? '',
-            result.resetReason as ResetPipelinesReason,
-          );
-        }
-
-        // Clean up inspector/metrics for removed queries (engine removal
-        // already happened inside hydrateAndSync).
-        for (const q of removeQueries) {
-          this.#inspectorDelegate.removeQuery(q.id);
-          this.#queryReplacements.delete(q.id);
-        }
-
-        this.#cvr = JSON.parse(result.cvrJson);
-        const newCVR = this.#cvr!;
-
-        // The Rust engine flushed row records directly to PG. Invalidate
-        // the TS row record cache and record flush stats metrics.
-        if (result.flushedJson) {
-          this.#cvrStore.clearRowCache();
-          this.#cvrStore.recordFlushStats(
-            JSON.parse(result.flushedJson) as CVRFlushStats,
-            performance.now() - start,
-          );
-        }
-
-        // Update TTL clock state from the flushed CVR.
-        this.#ttlClock = newCVR.ttlClock;
-        this.#ttlClockBase = Date.now();
-        if (result.flushedJson) {
-          this.#startTTLClockInterval(lc);
-        }
-
-        // Catch up clients that were behind the old CVR version.
-        // The Rust hydrate already poked clients up to the new version,
-        // but clients that were behind cvr.version need row patches from
-        // the CVR DB that the hydrate didn't cover.
-        await this.#catchupClients(
-          lc,
-          newCVR,
-          newCVR.version,
-          addQueries.map(q => q.id),
-        );
-
-        const queryPatches = JSON.parse(
-          result.queryPatchesJson,
-        ) as PatchToVersion[];
-
-        // Record metrics (matching TS fallback path).
-        const wallTime = performance.now() - start;
-        this.#hydrations.add(1);
-        this.#hydrationTime.recordMs(wallTime);
-        for (const q of addQueries) {
-          this.#addQueryMaterializationServerMetric(q.id, wallTime);
-          this.#inspectorDelegate.addQuery(q.id, q.ast);
-        }
-        manualSpan(tracer, 'vs.addAndConsumeQuery', wallTime, {
-          numQueries: addQueries.length,
-        });
-
-        lc.info?.(
-          `hydrated ${addQueries.length} queries: ` +
-            `${result.numChanges} changes, ` +
-            `${queryPatches.length} query patches ` +
-            `(${wallTime} ms)`,
-        );
-        return;
-      }
-
-      // ─── TS fallback path ───────────────────────────────────────────
-
       const updater = new CVRQueryDrivenUpdater(
         this.#cvrStore,
         cvr,
@@ -2150,7 +1971,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
       // Note: This kicks off background PG queries for CVR data associated with the
       // executed and removed queries.
-      const {queryPatches, newVersion} = await updater.trackQueries(
+      const {queryPatches, newVersion} = updater.trackQueries(
         lc,
         addQueries,
         removeQueries,
@@ -2186,7 +2007,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       // is properly processed by the time-slice queue.
       await yieldProcess(lc);
 
-      async function* generateRowChanges(slowHydrateThreshold: number) {
+      function* generateRowChanges(slowHydrateThreshold: number) {
         for (const q of addQueries) {
           let queryLC = lc
             .withContext('hash', q.id)
@@ -2197,17 +2018,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
           queryLC.debug?.(`adding pipeline for query`, q.ast);
 
-          const result = pipelines.addQuery(
+          yield* pipelines.addQuery(
             q.transformationHash,
             q.id,
             q.ast,
             timer.startWithoutYielding(),
             q.name,
           );
-          const iterable = result instanceof Promise ? await result : result;
-          for await (const c of iterable) {
-            yield c;
-          }
           const elapsed = timer.stop();
           totalProcessTime += elapsed;
 
@@ -2300,7 +2117,6 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   ) {
     return startAsyncSpan(tracer, 'vs.#catchupClients', async span => {
       current ??= cvr.version;
-
       const clients = this.#getClients();
       const pokers = usePokers ?? startPoke(clients, cvr.version);
       span.setAttribute('numClients', clients.length);
@@ -2376,7 +2192,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   #processChanges(
     lc: LogContext,
     timer: TimeSliceTimer,
-    changes: Iterable<RowChange | 'yield'> | AsyncIterable<RowChange | 'yield'>,
+    changes: Iterable<RowChange | 'yield'>,
     updater: CVRQueryDrivenUpdater,
     pokers: PokeHandler,
   ) {
@@ -2409,7 +2225,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         });
 
       await startAsyncSpan(tracer, 'loopingChanges', async span => {
-        for await (const change of changes) {
+        for (const change of changes) {
           if (change === 'yield') {
             await timer.yieldProcess('yield in processChanges');
             continue;
@@ -2480,140 +2296,39 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       );
       const start = performance.now();
 
-      // ─── Unified Rust CVR path ─────────────────────────────────────
-      if (isRustCvrEnabled() && this.#pipelines instanceof RustIVMDriver) {
-        const engine = this.#pipelines.engine;
-        const cvrJson = JSON.stringify(cvr);
-        const clientIds = this.#getClients(cvr.version).map(c => c.wsID);
-        const existingRowsJson = JSON.stringify(
-          await this.#cvrStore.getRowRecords(),
-        );
-        const result = await engine.advanceAndSync(
-          cvrJson,
-          this.#pipelines.replicaVersion,
-          clientIds,
-          existingRowsJson,
-          this.#lastConnectTime,
-          Date.now(),
-          ttlClockAsNumber(this.#getTTLClock(Date.now())),
-        );
-
-        if (result.resetReason) {
-          return new ResetPipelinesSignal(
-            result.resetMsg ?? '',
-            result.resetReason as ResetPipelinesReason,
-          );
-        }
-
-        this.#cvr = JSON.parse(result.cvrJson);
-        const newCVR = this.#cvr!;
-
-        // The Rust engine flushed row records directly to PG. Invalidate
-        // the TS row record cache and record flush stats metrics.
-        if (result.flushedJson) {
-          this.#cvrStore.clearRowCache();
-          this.#cvrStore.recordFlushStats(
-            JSON.parse(result.flushedJson) as CVRFlushStats,
-            performance.now() - start,
-          );
-        }
-
-        // Update TTL clock state from the flushed CVR.
-        this.#ttlClock = newCVR.ttlClock;
-        this.#ttlClockBase = Date.now();
-        if (result.flushedJson) {
-          this.#startTTLClockInterval(lc);
-        }
-
-        span.setAttribute('numChanges', result.numChanges);
-        const wallTime = performance.now() - start;
-        this.#transactionAdvanceTime.recordMs(wallTime);
-        lc.debug?.(
-          `advance_and_sync: ${result.numChanges} changes, version ${result.version}` +
-            (result.flushedJson ? ' (flushed)' : '') +
-            ` (${wallTime} ms)`,
-        );
-        return 'success';
-      }
-
-      // ─── TS fallback path ───────────────────────────────────────────
       const timer = new TimeSliceTimer(lc);
-      // await: RustIVMDriver.advance is async (runs on the engine actor thread);
-      // the TS PipelineDriver.advance is sync — await handles both.
-      const advanceResult = await this.#pipelines.advance(timer);
-      if (advanceResult instanceof ResetPipelinesSignal) {
-        return advanceResult;
-      }
-      const {version, numChanges, changes} = advanceResult;
+      const {version, numChanges, changes} = this.#pipelines.advance(timer);
       lc = lc.withContext('newVersion', version);
 
       // Probably need a new updater type. CVRAdvancementUpdater?
-      let pokers: ReturnType<typeof startPoke> | undefined;
-      let updater: CVRQueryDrivenUpdater;
-      try {
-        updater = new CVRQueryDrivenUpdater(
-          this.#cvrStore,
-          cvr,
-          version,
-          this.#pipelines.replicaVersion,
-          queryID => this.#pipelines.rowSetSignature(queryID),
-        );
-        // Same-version re-advance WITH changes (poisoned CVR from the prior
-        // replicaVersion conflation bug, or a same-version re-advance): row
-        // changes require a version bump before received(), and the pokeStart
-        // cookie below must carry the final version. The updater constructor
-        // deliberately does NOT auto-bump at an unchanged stateVersion (that
-        // spuriously churned configVersion for no-op query updates — see
-        // cvr.pg.test "unchanged queries"); bump here, where numChanges tells
-        // us rows will actually flow.
-        if (
-          numChanges > 0 &&
-          cmpVersions(cvr.version, updater.updatedVersion()) === 0
-        ) {
-          updater.ensureNewVersion();
-        }
-        // Only poke clients that are at the cvr.version. New clients that
-        // are behind need to first be caught up when their initConnection
-        // message is processed (and #syncQueryPipelines is called).
-        pokers = startPoke(
-          this.#getClients(cvr.version),
-          updater.updatedVersion(),
-        );
-        lc.debug?.(`applying ${numChanges} to advance to ${version}`);
+      const updater = new CVRQueryDrivenUpdater(
+        this.#cvrStore,
+        cvr,
+        version,
+        this.#pipelines.replicaVersion,
+        queryID => this.#pipelines.rowSetSignature(queryID),
+      );
+      // Only poke clients that are at the cvr.version. New clients that
+      // are behind need to first be caught up when their initConnection
+      // message is processed (and #syncQueryPipelines is called).
+      const pokers = startPoke(
+        this.#getClients(cvr.version),
+        updater.updatedVersion(),
+      );
+      lc.debug?.(`applying ${numChanges} to advance to ${version}`);
 
+      try {
         await this.#processChanges(
           lc,
           await timer.start(),
-          changes as
-            | Iterable<RowChange | 'yield'>
-            | AsyncIterable<RowChange | 'yield'>,
+          changes,
           updater,
           pokers,
         );
       } catch (e) {
         if (e instanceof ResetPipelinesSignal) {
-          await pokers?.cancel();
+          await pokers.cancel();
           return e;
-        }
-        // A throw between advance() resolving and #processChanges iterating
-        // (updater/startPoke/timer.start) abandons the streaming `changes`
-        // generator UN-STARTED — and .return() on a never-started async
-        // generator does NOT run its body, so its finally (which cancels the
-        // native stream) would never fire: the rust producer would stay
-        // parked on credit until the watchdog abort, wedging the engine
-        // actor behind a dead consumer. The rust driver exposes an explicit
-        // cancel() for exactly this: it tears down the eager engine job /
-        // credit generation / row queue regardless of whether iteration ever
-        // started, and is idempotent with the generator's own finally. Stock
-        // TS's `changes` is a lazy sync generator holding no eager
-        // resources, so it has no cancel and needs none.
-        const cancel = (advanceResult as {cancel?: () => Promise<void>}).cancel;
-        if (typeof cancel === 'function') {
-          try {
-            await cancel();
-          } catch {
-            // the stream is already dead; the original error wins
-          }
         }
         throw e;
       }
@@ -2828,7 +2543,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     // Wait for existing lock logic to complete before
     // cleaning up the pipelines and closing db connections.
     await this.#lock.withLock(() => {});
-    await this.#pipelines.destroy();
+    this.#pipelines.destroy();
   }
 
   /**
@@ -2840,14 +2555,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   }
 }
 
-// Update CVR after every N rows. Lower values stream patches to clients
-// sooner (less buffering) at the cost of more frequent CVR updater calls.
-// Default 10000 matches Go IVM's hydrateChunkSize / advanceChunkSize so
-// the streaming chunk boundary aligns with the CVR flush boundary.
-const CURSOR_PAGE_SIZE = parseInt(
-  process.env.ZERO_CURSOR_PAGE_SIZE ?? '10000',
-  10,
-);
+// Update CVR after every 10000 rows.
+const CURSOR_PAGE_SIZE = 10000;
 
 // A global Lock acts as a queue to run a single IVM time slice per iteration
 // of the node event loop, thus bounding I/O delay to the duration of a single

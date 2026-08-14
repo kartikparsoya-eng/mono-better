@@ -3,18 +3,20 @@
 //! The zero-cache replicator writes the SQLite replica in `wal2` journal mode
 //! (rocicorp's custom SQLite). Vanilla/system SQLite rejects such a file with
 //! "file is not a database", so the rust-syncer binary must link the same WAL2
-//! amalgamation the production NAPI build uses (see `rust-ivm`'s build notes:
-//! the Dockerfile installs WAL2 SQLite as the system library). Compiling the
-//! amalgamation here produces `libsqlite3.a` in OUT_DIR and points the linker at
-//! it, so `libsqlite3-sys`'s `-lsqlite3` resolves to the WAL2 build.
+//! amalgamation. The canonical vendored amalgamation lives in
+//! `rust-ivm/wal2-sqlite` (also consumed by the Dockerfile and rust-ivm itself);
+//! we compile it directly rather than keeping a second copy. (It formerly also
+//! existed under `rust-ivm/napi`, which was the removed NAPI hybrid.) Compiling
+//! it here produces `libsqlite3.a` in OUT_DIR and points the linker at it, so
+//! `libsqlite3-sys`'s `-lsqlite3` resolves to the WAL2 build.
 fn main() {
-    let src = "../rust-ivm/napi/wal2-sqlite/sqlite3.c";
+    let src = "../rust-ivm/wal2-sqlite/sqlite3.c";
     println!("cargo:rerun-if-changed={src}");
-    println!("cargo:rerun-if-changed=../rust-ivm/napi/wal2-sqlite/sqlite3.h");
+    println!("cargo:rerun-if-changed=../rust-ivm/wal2-sqlite/sqlite3.h");
 
     cc::Build::new()
         .file(src)
-        .include("../rust-ivm/napi/wal2-sqlite")
+        .include("../rust-ivm/wal2-sqlite")
         .flag_if_supported("-O2")
         .warnings(false)
         // Match a standard threadsafe build; WAL2 support is baked into the

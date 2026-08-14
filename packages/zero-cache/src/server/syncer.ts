@@ -26,7 +26,6 @@ import {
 } from '../services/view-syncer/connection-context-manager.ts';
 import type {DrainCoordinator} from '../services/view-syncer/drain-coordinator.ts';
 import {PipelineDriver} from '../services/view-syncer/pipeline-driver.ts';
-import {RustIVMDriver} from '../services/view-syncer/rust-ivm-driver.ts';
 import {Snapshotter} from '../services/view-syncer/snapshotter.ts';
 import {ViewSyncerService} from '../services/view-syncer/view-syncer.ts';
 import {ProtocolErrorWithLevel} from '../types/error-with-level.ts';
@@ -208,37 +207,21 @@ export default async function runWorker(
       config.taskID,
       id,
       cvrDB,
-      process.env.USE_RUST_IVM === 'true'
-        ? new RustIVMDriver(
-            logger,
-            config.log,
-            shard,
-            operatorStorage.createClientGroupStorage(id),
-            id,
-            inspectorDelegate,
-            () =>
-              isPriorityOpRunning()
-                ? priorityOpRunningYieldThresholdMs
-                : normalYieldThresholdMs,
-            config.enableQueryPlanner,
-            config,
-            replicaFile,
-          )
-        : new PipelineDriver(
-            logger,
-            config.log,
-            new Snapshotter(logger, replicaFile, shard),
-            shard,
-            operatorStorage.createClientGroupStorage(id),
-            id,
-            inspectorDelegate,
-            () =>
-              isPriorityOpRunning()
-                ? priorityOpRunningYieldThresholdMs
-                : normalYieldThresholdMs,
-            config.enableQueryPlanner,
-            config,
-          ),
+      new PipelineDriver(
+        logger,
+        config.log,
+        new Snapshotter(logger, replicaFile, shard),
+        shard,
+        operatorStorage.createClientGroupStorage(id),
+        id,
+        inspectorDelegate,
+        () =>
+          isPriorityOpRunning()
+            ? priorityOpRunningYieldThresholdMs
+            : normalYieldThresholdMs,
+        config.enableQueryPlanner,
+        config,
+      ),
       sub,
       drainCoordinator,
       config.log.slowHydrateThreshold,
@@ -246,9 +229,6 @@ export default async function runWorker(
       connContextManager,
       customQueryTransformer,
       runPriorityOp,
-      undefined, // keepaliveMs — default
-      undefined, // setTimeoutFn — default
-      cvr.db, // pgUri
     );
   };
 
