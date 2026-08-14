@@ -1159,7 +1159,7 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 | 7. PokeHandler Drop missing                    | Add `impl Drop for PokeHandler`                                |
 | 8. `send_query_transform_failed_error` missing | Add method to `ClientHandler`                                  |
 | 9. TS tests not ported                         | Port as Rust integration tests                                 |
-| 10. `rust-cvr/napi/` not cleaned up            | Delete (dead code)                                             |
+| 10. `rust-cvr/napi/` not cleaned up            | ✅ DONE (a5e502ad9): `rust-cvr/napi` + `rust-ivm/napi` deleted; TS hybrid wiring reverted to zero/v1.7.0 |
 
 ---
 
@@ -1224,6 +1224,6 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 
 - `impl Drop for PokeHandler`
 - `send_query_transform_failed_error`
-- Delete `rust-cvr/napi/`
+- Delete `rust-cvr/napi/` — ✅ DONE (a5e502ad9); also deleted `rust-ivm/napi` and reverted the TS rust-IVM hybrid wiring to zero/v1.7.0 (napi/rust-IVM lives on a separate branch)
 - Port TS tests to Rust integration tests
 - Parity testing: `ZERO_SYNCER=rust` vs `ZERO_SYNCER=ts`

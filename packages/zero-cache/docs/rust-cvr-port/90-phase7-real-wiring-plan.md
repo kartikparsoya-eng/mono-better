@@ -8,6 +8,36 @@ the TS syncer.
 
 ---
 
+## ⚠️ STATUS UPDATE (2026-08-14) — the body below is largely historical
+
+Stages A–D are effectively **done**: the pure `rust-syncer`
+(`ZERO_SYNCER=rust`) runs real end-to-end — real `PipelineDriver`→`rust-ivm`,
+real `CVRStoreOps`+poke emission→`rust-cvr`, notification loop, auth,
+mutations. The old `view_syncer.rs` placeholder is gone; `sync_engine.rs`,
+`pipeline_driver.rs`, `cvr_store`, `auth.rs`, `permissions.rs` are the real
+impls. A live capacity ladder held **~93 concurrent connections** (vs TS ~65 at
+the same 4-core cap) — you cannot serve that without the full brain wired.
+
+Changed since this plan was written:
+
+- **NAPI rust-IVM hybrid REMOVED on this branch** (commit `a5e502ad9`). The napi
+  crates (`rust-ivm/napi`, `rust-cvr/napi`) and all TS hybrid wiring
+  (`rust-ivm-driver.ts`, `rust-cvr-addon.ts`, `USE_RUST_IVM`, the differential
+  harness/tests) are deleted; the TS view-syncer is restored to `zero/v1.7.0`.
+  The napi/rust-IVM work continues on a **separate branch** — it is no longer
+  this branch's fallback. This supersedes the "napi crates stay until parity
+  green" decision below.
+- **Exactly one flag** now selects the engine: `ZERO_SYNCER=rust` (rust-syncer)
+  vs unset/`ts` (pure TS, upstream 1.7.0 behavior). Rust-specific tuning flags
+  may still exist, but there is no second engine toggle.
+
+**Remaining to ship (unchanged in spirit — Stage E):** full ART gate on the
+current image (G4/G8/G13; G22 capacity already passes), multi-day zero-diff
+shadow-parity soak, then flip the default to `ZERO_SYNCER=rust`. Port any
+remaining TS view-syncer tests (gap #9).
+
+---
+
 ## Why this doc exists
 
 Doc 89's phases 1–6 were completed as commits, but "Phase 6: Process manager
