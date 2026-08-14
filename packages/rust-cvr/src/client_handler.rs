@@ -133,6 +133,10 @@ pub struct PokeHandler {
     zero_clients_table: String,
     zero_mutations_table: String,
     client_group_id: String,
+    /// Wall-clock start of this poke transaction — TS `const start =
+    /// performance.now()` in `startPoke`. Read once in `end()` for
+    /// `zero.sync.poke.time`.
+    start: std::time::Instant,
 }
 
 impl PokeHandler {
@@ -194,6 +198,9 @@ impl PokeHandler {
                     }
                 }
                 Patch::Row(rp) => {
+                    // TS `#pokedRows.add(1)` fires for every `type === 'row'`
+                    // patch delivered to the poker (client-handler.ts:297).
+                    crate::otel_metrics::record_poked_row();
                     let table = match rp {
                         RowPatch::Put { id, .. } => &id.table,
                         RowPatch::Del { id } => &id.table,
@@ -298,6 +305,11 @@ impl PokeHandler {
         drop(base);
 
         self.release_chain(&mut state);
+
+        // OTLP: this poke transaction completed (pokeEnd pushed). Canceled/noop
+        // pokes return before reaching here, matching TS `#pokeTime.recordMs` /
+        // `#pokeTransactions.add(1)` at the end of `ClientHandler` `end()`.
+        crate::otel_metrics::record_poke(self.start.elapsed().as_secs_f64() * 1000.0);
         Ok(())
     }
 
@@ -585,6 +597,7 @@ impl ClientHandler {
                 zero_clients_table: self.zero_clients_table.clone(),
                 zero_mutations_table: self.zero_mutations_table.clone(),
                 client_group_id: self.client_group_id.clone(),
+                start: std::time::Instant::now(),
             };
         }
 
@@ -598,6 +611,7 @@ impl ClientHandler {
             zero_clients_table: self.zero_clients_table.clone(),
             zero_mutations_table: self.zero_mutations_table.clone(),
             client_group_id: self.client_group_id.clone(),
+            start: std::time::Instant::now(),
         }
     }
 

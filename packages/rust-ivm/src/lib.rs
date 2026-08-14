@@ -18,6 +18,7 @@ pub mod credit;
 pub mod engine;
 pub mod ivm;
 pub mod live_count;
+pub mod otel_metrics;
 pub mod perf_trace;
 pub mod planner;
 pub mod replay;

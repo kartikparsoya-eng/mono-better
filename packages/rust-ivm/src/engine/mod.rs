@@ -929,6 +929,13 @@ impl Engine {
                 }
                 pos += 1;
 
+                // Per-change wall-clock start for `zero.sync.ivm.advance-time`
+                // (TS `#advanceTime`, pipeline-driver.ts: `const start =
+                // timer.totalElapsed()`). Recorded only on the successful tail
+                // below — the inactive-source early return, like TS's `continue`,
+                // does not record.
+                let change_timer = std::time::Instant::now();
+
                 // PipelineDriver creates TableSources lazily and skips a diff entry
                 // when no live pipeline reads that table. Rust keeps schema sources
                 // registered up front, so explicitly distinguish an inactive source
@@ -1052,6 +1059,12 @@ impl Engine {
                     ));
                 }
 
+                // This change fully processed — record its advance time (TS
+                // `#advanceTime.recordMs(elapsed, {table})` at pipeline-driver.ts).
+                crate::otel_metrics::record_ivm_advance(
+                    &sc.table,
+                    change_timer.elapsed().as_secs_f64() * 1000.0,
+                );
                 Ok(())
             },
         );

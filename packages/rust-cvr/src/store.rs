@@ -460,6 +460,9 @@ impl CVRStoreHandle {
             return Ok(None);
         }
         // There ARE material changes — now record the instance write and proceed.
+        // Time the flush for `zero.sync.cvr.flush-time` (TS `recordSyncFlushStats`).
+        // A no-op flush returns above without recording, matching TS.
+        let flush_started = std::time::Instant::now();
         self.put_instance(cvr);
 
         let mut stats = CVRFlushStats::default();
@@ -795,6 +798,18 @@ impl CVRStoreHandle {
 
         stats.statements =
             stats.instances + stats.clients + stats.queries + stats.desires + stats.rows;
+
+        // OTLP: this store is the single atomic PG writer, so every flush here is
+        // the "sync" flush TS records via `recordSyncFlushStats` (flush.type=sync).
+        // TS only counts rows-flushed when nothing was deferred; mirror that.
+        let elapsed_ms = flush_started.elapsed().as_secs_f64() * 1000.0;
+        let rows_flushed = if stats.rows_deferred == 0 {
+            stats.rows as u64
+        } else {
+            0
+        };
+        crate::otel_metrics::record_cvr_flush(elapsed_ms, rows_flushed, "sync");
+
         Ok(Some(stats))
     }
 

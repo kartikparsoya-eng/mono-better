@@ -26,6 +26,10 @@ thiserror = "2"
 tokio-stream = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"
+# OTel API only — instruments bind to the global `zero` meter installed by the
+# rust-syncer binary (which owns the SDK + OTLP exporter). No SDK dep here, so a
+# standalone rust-cvr (no provider) makes these instruments cheap no-ops.
+opentelemetry = "0.32.0"
 
 [dev-dependencies]
 proptest = "1"

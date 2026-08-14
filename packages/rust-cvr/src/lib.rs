@@ -16,6 +16,7 @@ pub mod change_processor;
 pub mod client_handler;
 pub mod cvr;
 pub mod hash;
+pub mod otel_metrics;
 pub mod row_key;
 pub mod row_record_cache;
 pub mod row_set_signature;
