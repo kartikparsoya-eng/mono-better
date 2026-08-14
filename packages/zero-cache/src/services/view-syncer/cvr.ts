@@ -1037,7 +1037,10 @@ export class CVRQueryDrivenUpdater extends CVRUpdater {
   }
 }
 
-function mergeRefCounts(
+// Exported for the rust-cvr parity fixture generator (agentic/parity), which
+// pins the Rust port to the REAL TS behavior. Not part of the removed rust-IVM
+// NAPI hybrid — keep this export when syncing against upstream.
+export function mergeRefCounts(
   existing: RefCounts | null | undefined,
   received: RefCounts | null | undefined,
   removeHashes?: Set<string>,

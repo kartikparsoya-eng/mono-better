@@ -399,7 +399,10 @@ const mutationRowSchema = v.object({
   result: mutationResultSchema,
 });
 
-function makeRowPatch(patch: RowPatch): RowPatchOp {
+// Exported for the rust-cvr parity fixture generator (agentic/parity), which
+// pins the Rust port to the REAL TS behavior. Not part of the removed rust-IVM
+// NAPI hybrid — keep this export when syncing against upstream.
+export function makeRowPatch(patch: RowPatch): RowPatchOp {
   const {
     op,
     id: {table: tableName, rowKey: id},
