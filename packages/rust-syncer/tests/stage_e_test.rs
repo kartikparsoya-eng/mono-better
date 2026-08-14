@@ -235,5 +235,129 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
     );
 }
 
+/// Initial hydration with rows in MULTIPLE queries (two queries over two tables):
+/// each query hydrates its own rows and BOTH sets reach the client in the same
+/// version-ready poke, with the CVR carrying a persisted row-set signature per
+/// query. Ports view-syncer.pg.test.ts "initial hydration, rows in multiple
+/// queries" to the in-memory harness.
+#[test]
+fn hydrate_multiple_queries_pokes_rows_from_each() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "issue" (
+            "id"    "text|NOT_NULL",
+            "title" "text",
+            "_0_version" "text",
+            PRIMARY KEY ("id")
+        );
+        CREATE TABLE "label" (
+            "id"   "text|NOT_NULL",
+            "name" "text",
+            "_0_version" "text",
+            PRIMARY KEY ("id")
+        );
+        INSERT INTO "issue" ("id", "title", "_0_version") VALUES
+            ('i1', 'first issue', '01'),
+            ('i2', 'second issue', '01');
+        INSERT INTO "label" ("id", "name", "_0_version") VALUES
+            ('l1', 'bug', '01');
+        "#,
+    )
+    .unwrap();
+
+    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init_from_connection(specs, shared_conn).unwrap();
+
+    let mut engine = SyncEngine::new(pipelines);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+
+    // Two desired queries over two different tables.
+    let cvr = empty_cvr("cg1", "01");
+    let puts = vec![
+        DesiredQuerySpec {
+            hash: "q_issue".to_string(),
+            ast: Some(serde_json::json!({"table": "issue"})),
+            name: None,
+            args: None,
+            ttl: None,
+        },
+        DesiredQuerySpec {
+            hash: "q_label".to_string(),
+            ast: Some(serde_json::json!({"table": "label"})),
+            name: None,
+            args: None,
+            ttl: None,
+        },
+    ];
+    let existing_rows: RowRecordMap = HashMap::new();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result_cvr = rt
+        .block_on(engine.config_and_hydrate(
+            cvr,
+            "client1",
+            &["ws1".to_string()],
+            &shard,
+            puts,
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            None,
+            "00".to_string(),
+            "01".to_string(),
+            &existing_rows,
+            0,
+            0,
+            0,
+        ))
+        .unwrap();
+
+    // Both queries hydrated and each persisted a row-set signature.
+    for q in ["q_issue", "q_label"] {
+        assert!(
+            result_cvr
+                .queries
+                .get(q)
+                .and_then(|r| r.base().row_set_signature.clone())
+                .is_some(),
+            "expected a persisted row_set_signature for {q}"
+        );
+    }
+
+    // Rows from BOTH queries reached the client as poke row patches.
+    let (mut saw_i1, mut saw_i2, mut saw_l1) = (false, false, false);
+    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+        if v[0] == "pokePart" {
+            let s = serde_json::to_string(&v).unwrap();
+            if s.contains("first issue") {
+                saw_i1 = true;
+            }
+            if s.contains("second issue") {
+                saw_i2 = true;
+            }
+            if s.contains("\"l1\"") && s.contains("bug") {
+                saw_l1 = true;
+            }
+        }
+    }
+    assert!(saw_i1 && saw_i2, "expected both issue rows in pokes");
+    assert!(saw_l1, "expected the label row in pokes");
+}
+
 // `SharedConn` is `Rc<RefCell<rusqlite::Connection>>`; alias locally for clarity.
 type SharedConnAlias = Rc<RefCell<Connection>>;

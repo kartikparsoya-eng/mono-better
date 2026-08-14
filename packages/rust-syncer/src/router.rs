@@ -3414,6 +3414,49 @@ mod tests {
         );
     }
 
+    /// A `deleteClients` frame arriving on a SUPERSEDED (old) wsID must be
+    /// ignored — the stale-frame guard drops it, so the targeted client is not
+    /// deleted. Ports view-syncer.pg.test.ts "ignores deleteClients from old
+    /// wsID".
+    #[test]
+    fn delete_clients_from_stale_ws_id_is_ignored() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        // Connect "foo" on ws1, then reconnect "foo" on ws2 (supersedes ws1).
+        let (tx1, _d1) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        rt.block_on(state.on_new_connection(
+            authed_params("foo", "ws1", "tok"),
+            DirectWebSocketSink::new(tx1),
+        ));
+        let (tx2, _d2) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        rt.block_on(state.on_new_connection(
+            authed_params("foo", "ws2", "tok"),
+            DirectWebSocketSink::new(tx2),
+        ));
+        assert_eq!(
+            state.registered_ws.get("foo").map(String::as_str),
+            Some("ws2"),
+            "reconnect should supersede ws1 with ws2"
+        );
+
+        // deleteClients targeting "foo" arrives on the STALE ws1 → must be dropped.
+        rt.block_on(state.on_inbound(
+            "foo".to_string(),
+            "ws1".to_string(),
+            r#"["deleteClients",{"clientIDs":["foo"]}]"#.to_string(),
+        ));
+
+        // The stale frame was ignored: "foo" is still registered (on ws2), not
+        // deleted.
+        assert_eq!(
+            state.registered_ws.get("foo").map(String::as_str),
+            Some("ws2"),
+            "deleteClients from a stale wsID must not delete the client"
+        );
+    }
+
     /// A CVR written by a NEWER replica than the one we serve must produce the
     /// exact TS ClientNotFound message (view-syncer.pg.test.ts "sends reset for
     /// CVR from older replica version up"). This drives the client to wipe local
