@@ -1506,10 +1506,18 @@ impl CgState {
         self.client_raw_auth.remove(&client_id);
         self.client_query_ctx.remove(&client_id);
         self.client_profile_ids.remove(&client_id);
-        if let Some(profile_id) = params.profile_id.as_ref() {
-            self.client_profile_ids
-                .insert(client_id.clone(), profile_id.clone());
-        }
+        // Until profileID is required in the URL, default it to `cg{clientGroupID}`
+        // (the value the schema migration writes), exactly as TS does at the
+        // initConnection config-update call site (view-syncer.ts:862:
+        // `connCtx.profileID ?? \`cg${this.id}\``, where `this.id` is the client
+        // group ID). set_profile_id is materiality-guarded, so re-passing this on
+        // later config updates is a no-op once the CVR has it.
+        let profile_id = params
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| format!("cg{}", self.cg_id));
+        self.client_profile_ids
+            .insert(client_id.clone(), profile_id);
 
         // Decode the (already-verified) JWT claims for use as `authData` in
         // read-permission rules. Opaque/no token → empty claims.
@@ -3321,6 +3329,52 @@ mod tests {
         assert_eq!(state.metrics.snapshot()["authRevalidationFailures"], 1);
         // No authed connection remains → disarmed.
         assert!(state.next_auth_maintenance_at.is_none());
+    }
+
+    /// initConnection with NO profileID must default the CVR profileID to
+    /// `cg{clientGroupID}` — TS view-syncer.ts:862
+    /// (`connCtx.profileID ?? `cg${this.id}``). Ported from
+    /// view-syncer.pg.test.ts "initConnectionMessage with no profileID sets a
+    /// default profileID based on the client group ID".
+    #[test]
+    fn absent_profile_id_defaults_to_cg_client_group_id() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        // authed_params → test_params, which sets profile_id = None,
+        // client_group_id = "cg1".
+        rt.block_on(state.on_new_connection(
+            authed_params("c1", "ws1", "tok-c1"),
+            DirectWebSocketSink::new(tx),
+        ));
+
+        assert_eq!(
+            state.client_profile_ids.get("c1").map(String::as_str),
+            Some("cgcg1"),
+            "absent profileID must default to cg{{clientGroupID}}"
+        );
+    }
+
+    /// A profileID supplied in the connection URL is used verbatim (the default
+    /// only applies when absent).
+    #[test]
+    fn present_profile_id_is_used_verbatim() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let mut params = authed_params("c1", "ws1", "tok-c1");
+        params.profile_id = Some("p-explicit".to_string());
+        rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+
+        assert_eq!(
+            state.client_profile_ids.get("c1").map(String::as_str),
+            Some("p-explicit"),
+            "explicit profileID must be used verbatim, not defaulted"
+        );
     }
 
     /// A still-valid token survives the tick and the deadline is re-armed for the
