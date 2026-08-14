@@ -15,7 +15,7 @@
  */
 
 import crypto from 'node:crypto';
-import {generateKeyPair, exportJWK, SignJWT} from 'jose';
+import {generateKeyPair, exportJWK, exportSPKI, SignJWT} from 'jose';
 import {verifyToken} from '../../../zero-cache/src/auth/jwt.ts';
 
 // jose enforces a 256-bit minimum key for HS256, so use a 32-byte secret.
@@ -110,8 +110,16 @@ async function jwkSetup(alg, kid) {
   publicJwk.alg = alg;
   publicJwk.use = 'sig';
   publicJwk.kid = kid;
-  return {privateKey, publicJwk};
+  return {privateKey, publicKey, publicJwk};
 }
+// An alg-less copy of a public JWK — mimics Microsoft/Azure AD, whose JWKS
+// entries omit `alg` (RFC 7517 makes it optional). jose falls back to the token
+// header alg constrained by the key type; the Rust port must do the same.
+const withoutAlg = jwk => {
+  const c = {...jwk};
+  delete c.alg;
+  return c;
+};
 async function signAsym(privateKey, alg, kid, payload) {
   return new SignJWT(payload).setProtectedHeader({alg, kid}).sign(privateKey);
 }
@@ -120,7 +128,22 @@ const es = await jwkSetup('ES256', 'es-1');
 const rs = await jwkSetup('RS256', 'rs-1');
 const esOther = await jwkSetup('ES256', 'es-1'); // different key, same kid
 
+// Algorithm-confusion probe: forge an HS256 token using the RSA public key
+// (its SPKI PEM bytes) as the HMAC secret, then present it against the RSA JWK.
+// A naive verifier that trusts the token's `alg` header would HMAC-verify it and
+// accept. Both jose and the Rust port MUST reject (asymmetric key, HS token).
+const rsSpki = await exportSPKI(rs.publicKey);
+const confusionToken = await new SignJWT({sub: 'user1', exp: FUTURE})
+  .setProtectedHeader({alg: 'HS256', kid: 'rs-1'})
+  .sign(new TextEncoder().encode(rsSpki));
+
 const JWK_CASES = [
+  {desc: 'JWK ES256 alg-less (Azure-AD style) valid', jwk: withoutAlg(es.publicJwk),
+   token: await signAsym(es.privateKey, 'ES256', 'es-1', {sub: 'user1', exp: FUTURE})},
+  {desc: 'JWK RS256 alg-less valid', jwk: withoutAlg(rs.publicJwk),
+   token: await signAsym(rs.privateKey, 'RS256', 'rs-1', {sub: 'user1', exp: FUTURE})},
+  {desc: 'JWK alg-confusion: HS256 forged with RSA public key -> reject',
+   jwk: withoutAlg(rs.publicJwk), token: confusionToken},
   {desc: 'JWK ES256 valid', jwk: es.publicJwk,
    token: await signAsym(es.privateKey, 'ES256', 'es-1', {sub: 'user1', exp: FUTURE})},
   {desc: 'JWK ES256 expired', jwk: es.publicJwk,

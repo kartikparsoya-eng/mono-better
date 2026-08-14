@@ -296,11 +296,28 @@ fn verify_with_jwk(
     issuer: Option<&str>,
     audience: Option<&str>,
 ) -> Result<(), String> {
-    let alg = jwk
-        .common
-        .key_algorithm
-        .ok_or_else(|| "JWK missing `alg`".to_string())
-        .and_then(key_algorithm_to_signature_alg)?;
+    let alg = match jwk.common.key_algorithm {
+        Some(ka) => key_algorithm_to_signature_alg(ka)?,
+        None => {
+            // RFC 7517 makes `alg` OPTIONAL and some identity providers — notably
+            // Microsoft / Azure AD — omit it in their JWKS. jose falls back to the
+            // token header's alg (constrained by the key type), so a hard reject
+            // here would fail-closed on legitimate Azure AD tokens. Match jose:
+            // use the header alg, but reject any HMAC alg so an asymmetric public
+            // key can NEVER verify an HS token (the algorithm-confusion attack).
+            // jsonwebtoken additionally rejects a key-family mismatch at verify
+            // time (e.g. an EC key against an RS token), so RS/ES/PS confusion is
+            // caught by the signature check.
+            let header = decode_header(token).map_err(|e| format!("invalid JWT header: {e}"))?;
+            if matches!(
+                header.alg,
+                Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512
+            ) {
+                return Err("token uses an HMAC alg but the JWK is asymmetric".to_string());
+            }
+            header.alg
+        }
+    };
     let key = DecodingKey::from_jwk(jwk).map_err(|e| format!("invalid JWK: {e}"))?;
     let mut validation = Validation::new(alg);
     validation.algorithms = vec![alg];
