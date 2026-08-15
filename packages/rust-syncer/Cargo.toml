@@ -42,7 +42,14 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 opentelemetry = "0.32.0"
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
+# OTLP over HTTP/protobuf — matches the TS zero-cache
+# (@opentelemetry/exporter-metrics-otlp-http, port 4318), so both engines push to
+# the same collector endpoint (OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318).
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = [
+  "metrics",
+  "http-proto",
+  "reqwest-client",
+] }
 
 [build-dependencies]
 cc = "1"

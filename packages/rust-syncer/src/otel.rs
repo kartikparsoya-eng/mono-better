@@ -1,14 +1,20 @@
 //! OpenTelemetry OTLP metrics export — the same mechanism the TS zero-cache
 //! uses (`server/otel-start.ts`: a NodeSDK that PUSHES OTLP to a collector).
 //!
-//! We build an `SdkMeterProvider` with a `PeriodicReader` + OTLP exporter and
-//! install it as the global meter provider, so instruments created from
+//! Transport is OTLP over **HTTP/protobuf**, matching the TS exporter
+//! (`@opentelemetry/exporter-metrics-otlp-http`, collector port 4318) — NOT
+//! gRPC — so both engines push to the same collector endpoint the sandbox wires
+//! (`OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`). Using gRPC/tonic
+//! here would target 4317 and fail against the HTTP receiver.
+//!
+//! We build an `SdkMeterProvider` with a `PeriodicReader` + OTLP/HTTP exporter
+//! and install it as the global meter provider, so instruments created from
 //! `global::meter("zero")` (see [`crate::metrics`]) export over OTLP. Gating and
 //! endpoint discovery mirror TS `otel/src/enabled.ts` / the standard `OTEL_*`
 //! env vars: metrics are enabled iff `OTEL_EXPORTER_OTLP_ENDPOINT`,
 //! `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, or `OTEL_METRICS_EXPORTER` is set. The
-//! exporter itself reads `OTEL_EXPORTER_OTLP_ENDPOINT` (default
-//! `http://localhost:4317`) for its target.
+//! HTTP exporter reads `OTEL_EXPORTER_OTLP_ENDPOINT` (default
+//! `http://localhost:4318`) and POSTs to its `/v1/metrics` path.
 
 use opentelemetry::KeyValue;
 use opentelemetry::global;
@@ -39,7 +45,7 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
     }
 
     let exporter = match opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
+        .with_http()
         .build()
     {
         Ok(e) => e,
