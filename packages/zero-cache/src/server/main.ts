@@ -328,9 +328,17 @@ export default async function runWorker(
     await replicaReady;
 
     const notifier = createNotifierFrom(lc, replicator);
+    // Readiness of each spawned rust-syncer's HTTP `/notify` port. rust emits
+    // `["ready", …]` only AFTER binding both its WS and HTTP listeners
+    // (rust-syncer main.rs), so awaiting it guarantees the port is accepting.
+    const rustSyncersReady: Promise<void>[] = [];
     for (let i = 0; i < numSyncers; i++) {
       if (useRustSyncer) {
-        syncers.push(loadRustSyncer(i, mode));
+        const {promise: ready, resolve: onReady} = resolver();
+        const rustSyncer = loadRustSyncer(i, mode);
+        rustSyncer.onceMessageType('ready', () => onReady());
+        rustSyncersReady.push(ready);
+        syncers.push(rustSyncer);
       } else {
         syncers.push(loadWorker(SYNCER_URL, 'user-facing', i, mode, String(i)));
       }
@@ -340,6 +348,16 @@ export default async function runWorker(
       // over HTTP: on each `version-ready` from the replicator, POST /notify to
       // every rust-syncer so it advances its hosted CGs and pokes clients. The
       // subscription is cancelled on dispatcher shutdown (below).
+      //
+      // Subscribe only AFTER every rust-syncer's HTTP port is bound. The TS
+      // Notifier immediately replays the latest ReplicaState to a new subscriber
+      // (see notifier.ts), so if we subscribed before rust was accepting, that
+      // first replay would race the bind and be lost — nothing re-delivers it
+      // until the next commit, which on a quiet upstream can be arbitrarily far
+      // away (the observed `advances=0` startup race). Gating the subscribe on
+      // readiness makes the replay land on a listening server: the cross-process
+      // analog of the in-process latest-state-on-subscribe guarantee.
+      await Promise.all(rustSyncersReady);
       rustNotifySubscription = notifier.subscribe();
       const subscription = rustNotifySubscription;
       void (async () => {

@@ -1,6 +1,7 @@
 import net, {type Socket} from 'node:net';
 import type {LogContext} from '@rocicorp/logger';
 import {must} from '../../../shared/src/must.ts';
+import {sleep} from '../../../shared/src/sleep.ts';
 import type {IncomingMessageSubset} from '../types/http.ts';
 import {getShardID} from '../types/shards.ts';
 import {replicaFileName, type ReplicaFileMode} from '../workers/replicator.ts';
@@ -175,25 +176,58 @@ export function proxyUpgradeToRust(
 }
 
 /**
+ * Bounded retry schedule for a single `/notify` POST. The in-process TS
+ * `Notifier` never permanently loses a `version-ready` — a busy subscriber
+ * coalesces to the latest state but always eventually observes it. A single
+ * fire-and-forget POST does not give that guarantee: a transient failure (the
+ * rust HTTP server briefly unavailable across a restart / GC pause, a dropped
+ * connection) would silently drop the notification, leaving the syncer stale
+ * until the *next* commit happens to fire another POST. Retrying restores the
+ * "eventually delivered" guarantee. Retries are safe because `/notify` is
+ * idempotent (rust advances its CGs to replica head regardless of how many
+ * times it is told) and the payload is constant, so a slightly stale retry
+ * simply re-triggers advance-to-head. Exponential backoff: 50, 100, 200, 400ms.
+ */
+const NOTIFY_MAX_ATTEMPTS = 5;
+const NOTIFY_RETRY_BASE_MS = 50;
+
+async function notifyOne(lc: LogContext, port: number): Promise<void> {
+  for (let attempt = 1; attempt <= NOTIFY_MAX_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(`http://127.0.0.1:${port}/notify`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({state: 'version-ready'}),
+      });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      return;
+    } catch (e) {
+      if (attempt === NOTIFY_MAX_ATTEMPTS) {
+        lc.warn?.(
+          `failed to notify rust-syncer :${port} after ${attempt} attempts: ${String(e)}`,
+        );
+        return;
+      }
+      await sleep(NOTIFY_RETRY_BASE_MS * 2 ** (attempt - 1));
+    }
+  }
+}
+
+/**
  * POSTs a `version-ready` notification to each rust-syncer's HTTP `/notify`
  * endpoint. rust-syncer has no IPC channel, so replica commit notifications are
  * relayed over HTTP (the analog of the in-process `Subscription<ReplicaState>`
- * the TS syncer consumes). Failures are logged, not thrown — a single
+ * the TS syncer consumes). Each port is retried with bounded backoff (see
+ * {@link notifyOne}) so a transient failure does not permanently drop the
+ * notification — the cross-process analog of the TS Notifier's coalesce-to-
+ * latest delivery guarantee. Failures are logged, not thrown — a single
  * unreachable syncer must not stall the others.
  */
 export async function notifyRustSyncers(
   lc: LogContext,
   httpPorts: readonly number[],
 ): Promise<void> {
-  await Promise.all(
-    httpPorts.map(port =>
-      fetch(`http://127.0.0.1:${port}/notify`, {
-        method: 'POST',
-        headers: {'content-type': 'application/json'},
-        body: JSON.stringify({state: 'version-ready'}),
-      }).catch(e =>
-        lc.warn?.(`failed to notify rust-syncer :${port}: ${String(e)}`),
-      ),
-    ),
-  );
+  await Promise.all(httpPorts.map(port => notifyOne(lc, port)));
 }

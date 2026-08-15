@@ -304,4 +304,37 @@ describe('notifyRustSyncers', () => {
     expect(paths).toEqual(['/notify']);
     expect(JSON.parse(bodies[0])).toEqual({state: 'version-ready'});
   });
+
+  test('retries a transient failure until it is delivered', async () => {
+    // Fail the first two requests (503), then succeed — the notification must
+    // still be delivered, matching the TS Notifier's eventually-delivered
+    // guarantee rather than being dropped on the first failure.
+    let attempts = 0;
+    const {promise: delivered, resolve} = resolver<void>();
+    const server = createHttpServer((req, res) => {
+      attempts++;
+      req.on('data', () => {});
+      req.on('end', () => {
+        if (attempts < 3) {
+          res.writeHead(503);
+          res.end();
+          return;
+        }
+        res.writeHead(200, {'content-type': 'application/json'});
+        res.end('{"ok":true}');
+        resolve();
+      });
+    });
+    servers.push(server);
+    const port = await new Promise<number>(res => {
+      server.listen(0, '127.0.0.1', () =>
+        res((server.address() as {port: number}).port),
+      );
+    });
+
+    await notifyRustSyncers(lc, [port]);
+    await delivered;
+
+    expect(attempts).toBe(3);
+  });
 });
