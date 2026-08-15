@@ -44,10 +44,23 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
         return None;
     }
 
-    let exporter = match opentelemetry_otlp::MetricExporter::builder()
-        .with_http()
-        .build()
+    // opentelemetry-otlp 0.32's HTTP exporter does NOT append the `/v1/metrics`
+    // signal path to `OTEL_EXPORTER_OTLP_ENDPOINT` — it POSTs to the base URL,
+    // which the collector's OTLP/HTTP receiver answers with 404 (verified: POST
+    // `:4318` → 404, `:4318/v1/metrics` → 200), so metrics are silently dropped.
+    // Per the OTLP spec the base endpoint must have the signal path appended,
+    // while `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` is used verbatim. Build the URL
+    // ourselves so metrics land at the same path the TS/node exporter uses.
+    use opentelemetry_otlp::WithExportConfig as _;
+    let mut builder = opentelemetry_otlp::MetricExporter::builder().with_http();
+    if std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_err()
+        && let Ok(base) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        && !base.is_empty()
     {
+        let base = base.trim_end_matches('/');
+        builder = builder.with_endpoint(format!("{base}/v1/metrics"));
+    }
+    let exporter = match builder.build() {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("OTLP metrics exporter init failed; metrics disabled: {e}");
