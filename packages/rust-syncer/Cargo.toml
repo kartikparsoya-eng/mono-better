@@ -48,7 +48,11 @@ opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = [
   "metrics",
   "http-proto",
-  "reqwest-client",
+  # BLOCKING reqwest client: the SDK's PeriodicReader exports on its own dedicated
+  # thread (not a tokio runtime), so the async client panics there with "no
+  # reactor running". The blocking client makes the synchronous POST that thread
+  # needs.
+  "reqwest-blocking-client",
 ] }
 
 [build-dependencies]

@@ -68,7 +68,11 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
         }
     };
 
-    let reader = PeriodicReader::builder(exporter).build();
+    // Export every 10s (a manual PeriodicReader ignores OTEL_METRIC_EXPORT_INTERVAL;
+    // the default is 60s). 10s gives timely delivery without excessive traffic.
+    let reader = PeriodicReader::builder(exporter)
+        .with_interval(std::time::Duration::from_secs(10))
+        .build();
     let resource = Resource::builder()
         .with_service_name("zero-cache")
         .with_attribute(KeyValue::new(
