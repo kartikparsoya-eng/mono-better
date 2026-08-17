@@ -370,8 +370,8 @@ export default async function runWorker(
       rustNotifySubscription = notifier.subscribe();
       const subscription = rustNotifySubscription;
       void (async () => {
-        for await (const _state of subscription) {
-          await notifyRustSyncers(lc, rustSyncerHttpPorts);
+        for await (const state of subscription) {
+          await notifyRustSyncers(lc, rustSyncerHttpPorts, state);
         }
       })();
     } else {

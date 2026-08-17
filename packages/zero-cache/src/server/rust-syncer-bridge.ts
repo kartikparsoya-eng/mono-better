@@ -197,13 +197,17 @@ export function proxyUpgradeToRust(
 const NOTIFY_MAX_ATTEMPTS = 5;
 const NOTIFY_RETRY_BASE_MS = 50;
 
-async function notifyOne(lc: LogContext, port: number): Promise<void> {
+async function notifyOne(
+  lc: LogContext,
+  port: number,
+  body: string,
+): Promise<void> {
   for (let attempt = 1; attempt <= NOTIFY_MAX_ATTEMPTS; attempt++) {
     try {
       const resp = await fetch(`http://127.0.0.1:${port}/notify`, {
         method: 'POST',
         headers: {'content-type': 'application/json'},
-        body: JSON.stringify({state: 'version-ready'}),
+        body,
       });
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
@@ -234,6 +238,19 @@ async function notifyOne(lc: LogContext, port: number): Promise<void> {
 export async function notifyRustSyncers(
   lc: LogContext,
   httpPorts: readonly number[],
+  state?:
+    | {watermark?: string | undefined; upstreamCommitTimeMs?: number | undefined}
+    | undefined,
 ): Promise<void> {
-  await Promise.all(httpPorts.map(port => notifyOne(lc, port)));
+  // Carry the version-ready watermark + upstream commit time so the rust-syncer
+  // can compute end-to-end serving lag (zero/v1.9.0 #6157). Omitted fields are
+  // simply absent — the rust tracker ignores a notification missing either.
+  const body = JSON.stringify({
+    state: 'version-ready',
+    ...(state?.watermark !== undefined ? {watermark: state.watermark} : {}),
+    ...(state?.upstreamCommitTimeMs !== undefined
+      ? {upstreamCommitTimeMs: state.upstreamCommitTimeMs}
+      : {}),
+  });
+  await Promise.all(httpPorts.map(port => notifyOne(lc, port, body)));
 }

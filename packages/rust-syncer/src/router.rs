@@ -1103,6 +1103,10 @@ struct CgState {
     pinned_user_id: Option<String>,
     /// The in-memory CVR, lazily loaded from the store on first notification.
     cvr: Option<CVR>,
+    /// End-to-end serving-lag tracker: pairs each `version-ready`'s upstream
+    /// commit time with the moment its version is served, feeding the
+    /// `zero.sync.e2e_serving_lag` histogram. Port of TS `#e2eServingLagTracker`.
+    e2e_serving_lag: crate::e2e_serving_lag::E2EServingLagTracker,
     /// Monotonic TTL clock (ms), seeded from `cvr.ttl_clock` when the CVR is
     /// loaded and advanced by wall-time delta while this CG runs — so a long
     /// downtime does not mass-expire queries. Port of TS `#ttlClock`.
@@ -1275,6 +1279,7 @@ impl CgState {
             next_auth_maintenance_at: None,
             pinned_user_id: None,
             cvr: None,
+            e2e_serving_lag: crate::e2e_serving_lag::E2EServingLagTracker::new(),
             ttl_clock: 0,
             ttl_clock_base: created_at,
             last_connect_time: created_at,
@@ -2409,7 +2414,33 @@ impl CgState {
     /// Change-streamer notification: advance the pipelines to head and poke all
     /// clients. Loads the CVR from the store on first use. A no-store / no-CVR
     /// CG (e.g. tests without PG) logs and skips.
-    async fn on_notification(&mut self) {
+    /// Pair the just-served version with the pending upstream commit for the
+    /// end-to-end serving-lag histogram (no-op when nothing is pending or the
+    /// served version does not yet cover it). Port of TS `#markVersionServed`.
+    fn mark_version_served(&mut self, version: &CVRVersion) {
+        if let Some(obs) = self
+            .e2e_serving_lag
+            .on_version_served(&version.state_version, now_ms() as f64)
+        {
+            crate::metrics::record_e2e_serving_lag(obs.lag_ms);
+            if obs.clamped {
+                crate::metrics::record_e2e_serving_lag_clamp();
+            }
+        }
+    }
+
+    async fn on_notification(&mut self, notification: serde_json::Value) {
+        // Record the upstream commit behind this `version-ready` so the served
+        // version can be paired with it for the end-to-end serving-lag histogram.
+        // Coalesced notifications keep the oldest commit time / newest watermark.
+        // Port of TS `#e2eServingLagTracker.onVersionReady(replicaState)`.
+        self.e2e_serving_lag.on_version_ready(
+            notification.get("watermark").and_then(|v| v.as_str()),
+            notification
+                .get("upstreamCommitTimeMs")
+                .and_then(|v| v.as_f64()),
+        );
+
         // A notification can only advance an existing CVR (no create): without a
         // loaded CVR there is nothing to advance.
         if !matches!(self.ensure_cvr(false).await, Ok(true)) {
@@ -2461,6 +2492,7 @@ impl CgState {
                     self.reset_pipelines_and_rehydrate(result.cvr, &reason)
                         .await;
                 } else {
+                    self.mark_version_served(&result.cvr.version);
                     self.cvr = Some(result.cvr);
                 }
             }
@@ -2566,6 +2598,7 @@ impl CgState {
                 }
             }
         }
+        self.mark_version_served(&cvr.version);
         self.cvr = Some(cvr);
     }
 
@@ -2881,7 +2914,7 @@ async fn cg_event_loop(
             CGMessage::CloseConnection { client_id, ws_id } => {
                 state.close_connection(client_id, ws_id)
             }
-            CGMessage::Notification(_) => state.on_notification().await,
+            CGMessage::Notification(n) => state.on_notification(n).await,
             CGMessage::Shutdown => {
                 tracing::info!("CG thread {cg_id}: shutting down");
                 state.shutdown();
@@ -3825,7 +3858,7 @@ mod tests {
         assert_eq!(state.connections.len(), 1);
 
         // Notification with no loaded CVR (no PG) is a graceful no-op.
-        rt.block_on(state.on_notification());
+        rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
 
         // Disconnect unregisters the client.
         state.on_connection_closed("c1".to_string(), "ws1".to_string());

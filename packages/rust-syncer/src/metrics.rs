@@ -150,6 +150,56 @@ pub fn record_query_transformation_no_op() {
     query_transform_otel().no_ops.add(1, &[]);
 }
 
+/// End-to-end serving-lag instruments — TS view-syncer's `#e2eServingLag`
+/// (`zero.sync.e2e_serving_lag`, seconds) + `#e2eServingLagClamps`
+/// (`zero.sync.e2e_serving_lag_clamps`). Recorded once per served version from
+/// the CG thread through the *global* `zero` meter. No-op when OTLP is disabled.
+struct ServingLagOtel {
+    e2e_serving_lag: OtelHistogram<f64>,
+    e2e_serving_lag_clamps: Counter<u64>,
+}
+
+fn serving_lag_otel() -> &'static ServingLagOtel {
+    static INSTRUMENTS: OnceLock<ServingLagOtel> = OnceLock::new();
+    INSTRUMENTS.get_or_init(|| {
+        let m = global::meter("zero");
+        ServingLagOtel {
+            e2e_serving_lag: m
+                .f64_histogram("zero.sync.e2e_serving_lag")
+                .with_unit("s")
+                .with_description(
+                    "End-to-end lag from upstream commit to ViewSyncer output. Spans the whole \
+                     pipeline: the upstream transaction commit, replication to the replica, IVM \
+                     advancement, CVR flush, and pokeEnd. Recorded once per served version.",
+                )
+                .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
+                .build(),
+            e2e_serving_lag_clamps: m
+                .u64_counter("zero.sync.e2e_serving_lag_clamps")
+                .with_description(
+                    "Observations of sync.e2e_serving_lag that came out negative and were clamped \
+                     to zero (upstream DB clock running ahead of this pod by more than the entire \
+                     pipeline latency).",
+                )
+                .build(),
+        }
+    })
+}
+
+/// Record one end-to-end serving-lag observation (ms) — TS
+/// `#e2eServingLag.recordMs(observation.lagMs)`.
+pub fn record_e2e_serving_lag(lag_ms: f64) {
+    serving_lag_otel()
+        .e2e_serving_lag
+        .record(lag_ms / 1000.0, &[]);
+}
+
+/// Record a clamped (negative) serving-lag observation — TS
+/// `#e2eServingLagClamps.add(1)`.
+pub fn record_e2e_serving_lag_clamp() {
+    serving_lag_otel().e2e_serving_lag_clamps.add(1, &[]);
+}
+
 /// Active sync clients — TS view-syncer's `#activeClients` UpDownCounter
 /// (`zero.sync.active-clients`, dimensioned by protocol version). Recorded from
 /// the router (the rust view-syncer) on client register (+1) / disconnect (-1)

@@ -10,6 +10,7 @@ pub mod connection;
 pub mod connection_context;
 pub mod custom_query;
 pub mod drain;
+pub mod e2e_serving_lag;
 pub mod http_server;
 pub mod message_handler;
 pub mod metrics;
