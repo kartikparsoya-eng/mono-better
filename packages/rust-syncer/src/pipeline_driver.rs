@@ -88,6 +88,11 @@ pub struct IvmPipelines {
     /// hash changes (e.g. after an auth change re-transforms read-permission
     /// rules), not only when it is absent — so we track the hash, not just the id.
     active_queries: HashMap<String, String>,
+    /// query_id → the TS-shaped transformed AST JSON the pipeline was hydrated
+    /// with. Port of the `transformedAst` carried by TS `pipelineDriver.queries()`
+    /// (`QueryInfo`). Only consumed by the shadow-mode query-covering index
+    /// (`enable_query_covering`); it has no effect on what is served.
+    query_asts: HashMap<String, String>,
     /// Set when a non-scalar panic was caught mid-advance; forces the next
     /// advance to emit a reset instead of running on a half-mutated graph.
     poisoned: bool,
@@ -109,6 +114,7 @@ impl IvmPipelines {
             sources: HashMap::new(),
             primary_keys: HashMap::new(),
             active_queries: HashMap::new(),
+            query_asts: HashMap::new(),
             poisoned: false,
         }
     }
@@ -141,6 +147,22 @@ impl IvmPipelines {
     /// `pipelineDriver.queries()`.
     pub fn active_query_ids(&self) -> Vec<String> {
         self.active_queries.keys().cloned().collect()
+    }
+
+    /// The currently-hydrated queries as `(query_id, transformed_ast_json,
+    /// transformation_hash)`. Full port of TS `pipelineDriver.queries()` (which
+    /// carries `transformedAst` + `transformationHash`), used to seed the
+    /// shadow-mode query-covering index. Queries whose AST was not captured
+    /// (e.g. hydrated directly in a unit test) are omitted.
+    pub fn running_queries(&self) -> Vec<(String, String, String)> {
+        self.active_queries
+            .iter()
+            .filter_map(|(qid, hash)| {
+                self.query_asts
+                    .get(qid)
+                    .map(|ast| (qid.clone(), ast.clone(), hash.clone()))
+            })
+            .collect()
     }
 
     /// Whether the engine has been initialized.
@@ -303,6 +325,7 @@ impl IvmPipelines {
             eng.remove_query(query_id);
         }
         self.active_queries.remove(query_id);
+        self.query_asts.remove(query_id);
     }
 
     /// Hydrate the given queries against the current snapshot, streaming each
@@ -349,8 +372,9 @@ impl IvmPipelines {
         // transformation hash is recorded by the caller (`hydrate_and_sync`)
         // right after this returns, via `set_query_transformation_hash`; entries
         // hydrated directly (tests) keep an empty-string placeholder hash.
-        for (query_id, _) in queries {
+        for (query_id, ast_json) in queries {
             self.active_queries.entry(query_id.clone()).or_default();
+            self.query_asts.insert(query_id.clone(), ast_json.clone());
         }
         Ok(())
     }
@@ -464,6 +488,7 @@ impl IvmPipelines {
         self.all_table_names.clear();
         self.primary_keys.clear();
         self.active_queries.clear();
+        self.query_asts.clear();
     }
 }
 

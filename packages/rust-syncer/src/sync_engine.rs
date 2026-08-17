@@ -40,6 +40,7 @@ use crate::custom_query::{
 };
 use crate::permissions::{hash_of_ast, transform_and_hash};
 use crate::pipeline_driver::{AdvanceOutcome, IvmPipelines, json_to_value};
+use crate::query_covering::{QueryCoverageShadowHit, QueryCoveringIndex, RunningQuery};
 
 /// Result of `hydrate_and_sync` / `advance_and_sync`.
 #[derive(Debug)]
@@ -79,6 +80,11 @@ pub struct SyncEngine {
     /// resulting `JoinHandle` and stays free to run its other client groups.
     /// `None` in unit tests that inject no handle — I/O then runs inline.
     tokio_handle: Option<tokio::runtime::Handle>,
+    /// Shadow-mode query-covering detection during hydration. Port of TS
+    /// `zeroConfig.enableQueryCovering` (default true). When on, each hydration
+    /// batch compares its queries against the running set and logs aggregate
+    /// coverage stats — it has NO effect on what is served.
+    enable_query_covering: bool,
 }
 
 impl SyncEngine {
@@ -89,7 +95,14 @@ impl SyncEngine {
             row_cache: None,
             clients: HashMap::new(),
             tokio_handle: None,
+            enable_query_covering: true,
         }
+    }
+
+    /// Enable/disable shadow-mode query-covering logging. Port of
+    /// `zeroConfig.enableQueryCovering` (default true).
+    pub fn set_enable_query_covering(&mut self, enabled: bool) {
+        self.enable_query_covering = enabled;
     }
 
     /// Read the current row records from the CVR (the client's `existing_rows`).
@@ -523,6 +536,10 @@ impl SyncEngine {
         // use the raw ast; client queries go through the read-permission
         // transform; custom (named) queries are resolved in a single batch call
         // to the user's query API server (`custom_ctx`).
+        // Start of the query-driven hydration span for the
+        // `zero.sync.view_syncer_hydration` histogram (TS `start` at the top of
+        // `#syncQueryPipelineSet`); recorded below only when ≥1 query hydrated.
+        let hydration_start = std::time::Instant::now();
         let mut executed: Vec<(String, serde_json::Value, String)> = Vec::new();
         let mut custom_specs: Vec<CustomQuerySpec> = Vec::new();
         for (qid, record) in &cfg_cvr.queries {
@@ -598,6 +615,29 @@ impl SyncEngine {
             }
         }
 
+        // Shadow-mode query covering (#6182): seed an index from the queries the
+        // pipeline is ALREADY running, then check each query hydrated below
+        // against it. Purely observational — no effect on what is served.
+        let mut covering_index = self.enable_query_covering.then(|| {
+            let mut idx = QueryCoveringIndex::new();
+            for (qid, ast_json, hash) in self.pipelines.running_queries() {
+                if let Ok(ast) = serde_json::from_str::<serde_json::Value>(&ast_json) {
+                    idx.add(
+                        &qid,
+                        &RunningQuery {
+                            transformed_ast: ast,
+                            transformation_hash: hash,
+                            query_name: query_name_of(&cfg_cvr, &qid),
+                        },
+                    );
+                }
+            }
+            idx
+        });
+        let mut total_hydrated_queries = 0usize;
+        let mut covered_hydrated_queries = 0usize;
+        let mut first_covered: Option<QueryCoverageShadowHit> = None;
+
         // Drift check: (re-)hydrate a query when it is missing OR its
         // transformation hash changed (auth re-transform / a new custom AST).
         let mut add_queries: Vec<(String, String)> = Vec::new();
@@ -630,6 +670,33 @@ impl SyncEngine {
                 // Not hydrated → a normal add.
                 None => {}
             }
+            // Shadow coverage check for this to-be-hydrated query (before it
+            // joins the batch index), mirroring TS `#findQueryCoverageShadowHit`.
+            if let Some(idx) = covering_index.as_mut() {
+                let query_name = query_name_of(&cfg_cvr, &qid);
+                total_hydrated_queries += 1;
+                if let Some(cov) = idx.find_covering_query(&qid, &transformed_ast) {
+                    covered_hydrated_queries += 1;
+                    if first_covered.is_none() {
+                        first_covered = Some(QueryCoverageShadowHit {
+                            covered_query_hash: qid.clone(),
+                            covered_transformation_hash: transformation_hash.clone(),
+                            covered_query_name: query_name.clone(),
+                            covering_query_hash: cov.query_id,
+                            covering_transformation_hash: cov.transformation_hash,
+                            covering_query_name: cov.query_name,
+                        });
+                    }
+                }
+                idx.add(
+                    &qid,
+                    &RunningQuery {
+                        transformed_ast: transformed_ast.clone(),
+                        transformation_hash: transformation_hash.clone(),
+                        query_name,
+                    },
+                );
+            }
             add_queries.push((qid.clone(), transformation_hash));
             queries.push((qid, transformed_ast.to_string()));
         }
@@ -637,6 +704,20 @@ impl SyncEngine {
         // still desired; only its compiled pipeline is rebuilt).
         for qid in &retransform_removes {
             self.pipelines.remove_query(qid);
+        }
+
+        // Emit the shadow-mode coverage summary for this hydration batch (TS
+        // `#logQueryCoverageShadowSummary`, hydrationPath 'add').
+        if self.enable_query_covering {
+            crate::query_covering::log_shadow_summary(
+                &shard.app_id,
+                shard.shard_num,
+                &cfg_cvr.id,
+                "add",
+                total_hydrated_queries,
+                covered_hydrated_queries,
+                first_covered.as_ref(),
+            );
         }
 
         // Mirror TS `#syncQueryPipelineSet`'s terminal branch: when there are
@@ -683,6 +764,12 @@ impl SyncEngine {
                 &original_client_versions,
             )
             .await?;
+            // TS `#viewSyncerHydration.recordMs(performance.now() - start)` —
+            // recorded once per sync that hydrated ≥1 query, after pokeEnd +
+            // catchup.
+            crate::metrics::record_view_syncer_hydration(
+                hydration_start.elapsed().as_secs_f64() * 1000.0,
+            );
             Ok(result.cvr)
         }
     }
@@ -1258,6 +1345,16 @@ type RowChangeMaps = (
     serde_json::Map<String, serde_json::Value>,
     Option<serde_json::Map<String, serde_json::Value>>,
 );
+
+/// The custom-query name for a query id, or `None` for internal/client queries.
+/// Mirrors TS `query.type === 'custom' ? query.name : undefined`, used to label
+/// shadow-mode coverage log entries.
+fn query_name_of(cvr: &CVR, qid: &str) -> Option<String> {
+    match cvr.queries.get(qid) {
+        Some(QueryRecord::Custom(r)) => Some(r.name.clone()),
+        _ => None,
+    }
+}
 
 fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> RowChangeMaps {
     let row_key = {

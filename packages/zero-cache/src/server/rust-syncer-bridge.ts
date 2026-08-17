@@ -30,6 +30,12 @@ export type RustSyncerConfig = {
   query?: RustSyncerFetchConfig | undefined;
   /** @deprecated Legacy name retained by normalized 1.7 configs. */
   getQueries?: RustSyncerFetchConfig | undefined;
+  /**
+   * Shadow-mode query-covering detection during hydration (zero-config
+   * `enableQueryCovering`, default true). Log-only; forwarded so the Rust
+   * syncer's coverage logging matches the TS syncer's.
+   */
+  enableQueryCovering?: boolean | undefined;
 };
 
 type RustSyncerFetchConfig = {
@@ -100,6 +106,11 @@ export function rustSyncerEnv(
       );
     }
     out.QUERY_FORWARD_COOKIES = String(query.forwardCookies ?? false);
+  }
+  // Only forward an explicit opt-out; Rust defaults the flag to true, matching
+  // the zero-config default.
+  if (config.enableQueryCovering === false) {
+    out.ENABLE_QUERY_COVERING = 'false';
   }
   return out;
 }
@@ -239,7 +250,10 @@ export async function notifyRustSyncers(
   lc: LogContext,
   httpPorts: readonly number[],
   state?:
-    | {watermark?: string | undefined; upstreamCommitTimeMs?: number | undefined}
+    | {
+        watermark?: string | undefined;
+        upstreamCommitTimeMs?: number | undefined;
+      }
     | undefined,
 ): Promise<void> {
   // Carry the version-ready watermark + upstream commit time so the rust-syncer

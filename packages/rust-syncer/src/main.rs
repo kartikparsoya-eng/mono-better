@@ -68,6 +68,9 @@ pub struct SyncerConfig {
     /// live connections (TS `--auth-revalidate-interval-seconds`, default 300s).
     /// `0` disables periodic auth maintenance.
     pub revalidate_interval_ms: Option<i64>,
+    /// Shadow-mode query-covering detection during hydration. Port of TS
+    /// `zeroConfig.enableQueryCovering` (default true); log-only.
+    pub enable_query_covering: bool,
 }
 
 impl SyncerConfig {
@@ -135,6 +138,8 @@ impl SyncerConfig {
                     .unwrap_or(300);
                 (secs > 0).then_some(secs * 1000)
             },
+            // TS default: true. Only an explicit "false" disables it.
+            enable_query_covering: env::var("ENABLE_QUERY_COVERING").as_deref() != Ok("false"),
         }
     }
 }
@@ -468,6 +473,7 @@ impl CGServicesFactory for RealServicesFactory {
             permissions_hash,
             revalidate_interval_ms: self.config.revalidate_interval_ms,
             query_config: self.config.query_config.clone(),
+            enable_query_covering: self.config.enable_query_covering,
             tokio_handle: self.tokio_handle.clone(),
             admin_password: self.config.admin_password.clone(),
             server_version: self.config.server_version.clone(),

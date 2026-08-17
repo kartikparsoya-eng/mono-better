@@ -18,6 +18,7 @@ pub mod otel;
 pub mod permissions;
 pub mod pipeline_driver;
 pub mod protocol;
+pub mod query_covering;
 pub mod replica_schema;
 pub mod router;
 pub mod sync_engine;

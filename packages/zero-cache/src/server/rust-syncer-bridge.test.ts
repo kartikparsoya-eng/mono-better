@@ -140,6 +140,32 @@ describe('rustSyncerEnv', () => {
     );
     expect(env.QUERY_URLS_JSON).toBe('["https://legacy.example/query"]');
   });
+
+  test('omits ENABLE_QUERY_COVERING unless explicitly disabled', () => {
+    // Default / unset: Rust defaults to true, so no env is forwarded.
+    expect(
+      rustSyncerEnv(base, 'serving', 3100, 3200, 15).ENABLE_QUERY_COVERING,
+    ).toBeUndefined();
+    expect(
+      rustSyncerEnv(
+        {...base, enableQueryCovering: true},
+        'serving',
+        3100,
+        3200,
+        15,
+      ).ENABLE_QUERY_COVERING,
+    ).toBeUndefined();
+    // Explicit opt-out is forwarded.
+    expect(
+      rustSyncerEnv(
+        {...base, enableQueryCovering: false},
+        'serving',
+        3100,
+        3200,
+        15,
+      ).ENABLE_QUERY_COVERING,
+    ).toBe('false');
+  });
 });
 
 describe('proxyUpgradeToRust', () => {

@@ -200,6 +200,45 @@ pub fn record_e2e_serving_lag_clamp() {
     serving_lag_otel().e2e_serving_lag_clamps.add(1, &[]);
 }
 
+// NOTE ON `zero.sync.view_syncer_lag` (TS `Syncer.#viewSyncerLag`, zero/v1.9.0):
+// this is the periodic *backlog* companion to `e2e_serving_lag` — a setInterval
+// in the TS Syncer worker that, every tick, samples `now - replicaReadyTime` for
+// EVERY active client group and records one observation each, so a stuck CG
+// re-reports its growing age on every tick. It is intentionally NOT ported: the
+// rust syncer runs each CG on its own single-threaded executor + LocalSet with
+// no central, timer-driven CG registry to enumerate, and the completion-based
+// `e2e_serving_lag` (ported) already captures served-version lag. Adding a
+// cross-executor lag registry sampled on a process timer would introduce shared
+// mutable state on the advance hot path for a purely-observational metric.
+
+/// View-syncer hydration native histogram — TS view-syncer's
+/// `#viewSyncerHydration` (`zero.sync.view_syncer_hydration`, seconds, zero/v1.9.0
+/// #6207/#6209). Recorded once per query-sync that actually hydrated ≥1 query,
+/// spanning transformation → materialization → CVR flush → catchup → pokeEnd.
+/// This is the aggregable native-histogram companion to the legacy
+/// `zero.sync.hydration-time` latency histogram. No-op when OTLP is disabled.
+fn view_syncer_hydration_otel() -> &'static OtelHistogram<f64> {
+    static INSTRUMENT: OnceLock<OtelHistogram<f64>> = OnceLock::new();
+    INSTRUMENT.get_or_init(|| {
+        global::meter("zero")
+            .f64_histogram("zero.sync.view_syncer_hydration")
+            .with_unit("s")
+            .with_description(
+                "Time from ViewSyncer query sync requiring hydration to output for a client \
+                 group. Includes query transformation, query materialization, CVR flush, \
+                 catchup, and pokeEnd.",
+            )
+            .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
+            .build()
+    })
+}
+
+/// Record one view-syncer hydration observation (ms) — TS
+/// `#viewSyncerHydration.recordMs(performance.now() - start)`.
+pub fn record_view_syncer_hydration(elapsed_ms: f64) {
+    view_syncer_hydration_otel().record(elapsed_ms / 1000.0, &[]);
+}
+
 /// Active sync clients — TS view-syncer's `#activeClients` UpDownCounter
 /// (`zero.sync.active-clients`, dimensioned by protocol version). Recorded from
 /// the router (the rust view-syncer) on client register (+1) / disconnect (-1)

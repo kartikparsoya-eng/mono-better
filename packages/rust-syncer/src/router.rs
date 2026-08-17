@@ -293,6 +293,9 @@ pub struct SyncEngineConfig {
     /// Normalized server-side query endpoint configuration. The first URL is
     /// the default; the full list is the allow-list for client overrides.
     pub query_config: Option<FetchConfig>,
+    /// Shadow-mode query-covering detection during hydration (TS
+    /// `zeroConfig.enableQueryCovering`, default true); log-only.
+    pub enable_query_covering: bool,
     /// Runtime handle for the `block_on` PG I/O edge on the CG thread.
     pub tokio_handle: tokio::runtime::Handle,
     /// Admin password gating the inspector protocol (TS `isAdminPasswordValid`).
@@ -1217,6 +1220,7 @@ impl CgState {
         let app_id = config.app_id.clone();
         let mut sync_engine = SyncEngine::new(IvmPipelines::new());
         sync_engine.set_tokio_handle(config.tokio_handle.clone());
+        sync_engine.set_enable_query_covering(config.enable_query_covering);
         let mut initialization_failed = config.initialization_error.is_some();
         if let Some(error) = &config.initialization_error {
             tracing::error!("CG {cg_id}: initialization failed: {error}");
@@ -3050,6 +3054,7 @@ mod tests {
                 permissions_hash: None,
                 revalidate_interval_ms: None,
                 query_config: None,
+                enable_query_covering: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -3090,6 +3095,7 @@ mod tests {
                 permissions_hash: None,
                 revalidate_interval_ms: None,
                 query_config: None,
+                enable_query_covering: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -3136,6 +3142,7 @@ mod tests {
                 permissions_hash: self.initial_hash.clone(),
                 revalidate_interval_ms: None,
                 query_config: None,
+                enable_query_covering: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -3419,6 +3426,7 @@ mod tests {
                 permissions_hash: None,
                 revalidate_interval_ms: self.revalidate_interval_ms,
                 query_config: None,
+                enable_query_covering: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
