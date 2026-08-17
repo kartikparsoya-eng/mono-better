@@ -16,9 +16,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 	--mount=type=cache,target=/go/pkg \
 	go build -ldflags "-s -w -X 'main.Version=${LITESTREAM_VERSION}' -extldflags '-static'" -tags osusergo,netgo,sqlite_omit_load_extension -o /usr/local/bin/litestream ./cmd/litestream
 
-FROM litestream/litestream:0.5.11 AS litestream-v5
+FROM litestream/litestream:0.5.15 AS litestream-v5
 
-FROM node:22.22.3-alpine3.23@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920
+FROM node:22.23.1-alpine3.23@sha256:8516dce0483394d5708d4b2ee6cacb79fb1d617ea4e2787c2120bcca92ce372e
 
 ARG ZERO_VERSION
 ARG ZERO_PACKAGE
@@ -56,8 +56,11 @@ allowBuilds:
   '@rocicorp/zero-sqlite3': true
   esbuild: true
   protobufjs: true
+patchedDependencies:
+  postgres@3.4.7: patches/postgres@3.4.7.patch
 EOF
 
+COPY patches/ patches/
 COPY pkgs/ /tmp/pkgs/
 
 # Install zero package based on install source format (tarball or pnpm)

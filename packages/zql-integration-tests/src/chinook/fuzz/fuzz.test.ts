@@ -16,9 +16,10 @@ import {consume} from '../../../../zql/src/ivm/stream.ts';
 import {RandomYieldSource} from '../../../../zql/src/ivm/test/random-yield-source.ts';
 import {asQueryInternals} from '../../../../zql/src/query/query-internals.ts';
 import type {AnyQuery} from '../../../../zql/src/query/query.ts';
+import {newStaticQuery} from '../../../../zql/src/query/static-query.ts';
 import {QueryDelegateImpl as TestMemoryQueryDelegate} from '../../../../zql/src/query/test/query-delegate.ts';
 import {schema} from '../schema.ts';
-import {hasText, pkOf, relsOf, tables} from './axes.ts';
+import {AXES, hasText, pkOf, relsOf, tables} from './axes.ts';
 import {CostModel} from './cost.ts';
 import {
   decorate,
@@ -42,11 +43,9 @@ import {
 } from './regressions.ts';
 import {rng} from './rng.ts';
 import {
-  buildScalar,
   hasScalarSubquery,
-  makeScalarExecutor,
-  resolveScalarForIvm,
-  scalarCandidates,
+  scalarizableExistsCount,
+  setScalars,
 } from './scalar.ts';
 import {constructCount, shrinkAst} from './shrink.ts';
 import {
@@ -98,7 +97,7 @@ describe('coverage', () => {
     }
     expect(cov.fraction()).toBe(1);
     expect(cov.missed()).toEqual([]);
-    // Far smaller than the full cross-product (16·7·4·3 = 1344) …
+    // Far smaller than the full cross-product (16·7·4·3·4 = 5376) …
     expect(rows.length).toBeLessThan(200);
     // … but at least the largest single-pair domain product (filter·exists = 16·7).
     expect(rows.length).toBeGreaterThanOrEqual(16 * 7);
@@ -107,15 +106,20 @@ describe('coverage', () => {
   test('observe marks every t-subset; total is the pairwise tuple count', () => {
     const cov = new Coverage(2);
     expect(cov.hitCount()).toBe(0);
-    // domains [16,7,4,3] ⇒ Σ over the 6 axis-pairs of dom_i·dom_j = 285.
+    // Pairwise total is Σ over axis-pairs of dom_i·dom_j.
+    const domains = AXES.map(a => a.values.length);
+    const expected = domains.flatMap((d, i) =>
+      domains.slice(i + 1).map(e => d * e),
+    );
+    const pairCount = (AXES.length * (AXES.length - 1)) / 2;
     const total = cov.total();
-    expect(total).toBe(16 * 7 + 16 * 4 + 16 * 3 + 7 * 4 + 7 * 3 + 4 * 3);
-    cov.observe([0, 0, 0, 0]); // one assignment hits C(4,2) = 6 pairwise tuples
-    expect(cov.hitCount()).toBe(6);
-    cov.observe([1, 1, 1, 1]); // a fully-different assignment adds 6 fresh tuples
-    expect(cov.hitCount()).toBe(12);
-    cov.observe([0, 0, 0, 0]); // re-observing is idempotent
-    expect(cov.hitCount()).toBe(12);
+    expect(total).toBe(expected.reduce((acc, n) => acc + n, 0));
+    cov.observe([0, 0, 0, 0, 0]); // one assignment hits C(N_AXES,2) tuples
+    expect(cov.hitCount()).toBe(pairCount);
+    cov.observe([1, 1, 1, 1, 1]); // a fully-different assignment adds fresh tuples
+    expect(cov.hitCount()).toBe(pairCount * 2);
+    cov.observe([0, 0, 0, 0, 0]); // re-observing is idempotent
+    expect(cov.hitCount()).toBe(pairCount * 2);
   });
 });
 
@@ -171,7 +175,7 @@ describe('L1 covering array', () => {
     const delegate = memoryDelegate();
     const rows = greedyCover(2);
     for (const r of rows) {
-      const res = decorate('track', r);
+      const res = decorate('track', r, data);
       expect(res, `track could not realize ${r}`).not.toBeNull();
       await hydrates(delegate, res![0]);
     }
@@ -183,7 +187,7 @@ describe('L1 covering array', () => {
     const cov = new Coverage(2);
     for (const r of rows) {
       for (const root of decoratableRoots()) {
-        const res = decorate(root, r);
+        const res = decorate(root, r, data);
         if (!res) {
           continue; // unrealizable on this root (text filter on a textless table)
         }
@@ -199,7 +203,7 @@ describe('L1 covering array', () => {
     const rows = greedyCover(2);
     let realized = 0;
     for (const r of rows) {
-      const res = decorateChild('album', 'tracks', r);
+      const res = decorateChild('album', 'tracks', r, data);
       if (!res) {
         continue;
       }
@@ -225,6 +229,9 @@ describe('data-driven literals', () => {
     const comps = data.values('track', 'composer');
     expect(comps.length).toBeGreaterThan(0);
     expect(comps.every(v => v !== null)).toBe(true);
+    const start = data.startRow('track', [['milliseconds', 'asc']]);
+    expect(start?.id).toBeDefined();
+    expect(start?.milliseconds).toBeDefined();
   });
 
   test('text-filter realizability tracks the presence of a text column', () => {
@@ -399,7 +406,7 @@ describe('swarm (L2)', () => {
     let made = 0;
     for (let i = 0; i < 400; i++) {
       const mask = Mask.random(r);
-      const res = swarmGen(r, mask);
+      const res = swarmGen(r, mask, data);
       if (!res) {
         continue; // unrealizable pick (text filter on a textless table) — retry
       }
@@ -414,13 +421,14 @@ describe('swarm (L2)', () => {
 
   test('a disabled axis is pinned to its baseline (none)', () => {
     // Every axis off, no nesting ⇒ a bare decorated root: every axis at value 0 = none.
-    const mask = new Mask([false, false, false, false], false);
-    const res = swarmGen(rng(1), mask);
+    const mask = new Mask([false, false, false, false, false], false);
+    const res = swarmGen(rng(1), mask, data);
     expect(res).not.toBeNull();
     const ast = asQueryInternals(res![0]).ast;
     expect(ast.where).toBeUndefined();
     expect(ast.orderBy ?? []).toHaveLength(0);
     expect(ast.limit).toBeUndefined();
+    expect(ast.start).toBeUndefined();
     expect(ast.related ?? []).toHaveLength(0);
   });
 });
@@ -705,64 +713,87 @@ describe('regressions', () => {
   });
 });
 
-// ── scalar subqueries (production resolve mirror) ─────────────────────────────────────
+// ── scalar subqueries (scalar-invariance axis) ────────────────────────────────────────
 
 describe('scalar subqueries', () => {
-  test('candidates are one-hop (no junctions) with a single-col-PK child', () => {
-    const cands = scalarCandidates();
-    expect(cands.length).toBeGreaterThan(0);
-    for (const c of cands) {
-      expect(relsOf(c.table).find(r => r.name === c.rel)?.junction).toBe(false);
-      expect(pkOf(c.child)).toEqual([c.childPk]);
-    }
-  });
-
-  test('a built gate carries scalar:true and the resolver rewrites it to a literal =', async () => {
-    const delegate = memoryDelegate();
-    let checked = 0;
-    for (const c of scalarCandidates()) {
-      const q = buildScalar(c, data);
-      if (!q) {
+  test('the count matches the gates setScalars actually marks', () => {
+    let covered = 0;
+    for (const s of enumerate({depth: 2, related: 1, exists: 2})) {
+      const ast = asQueryInternals(lower(s)).ast;
+      const k = scalarizableExistsCount(ast);
+      if (k === 0) {
+        expect(hasScalarSubquery(setScalars(ast, []))).toBe(false);
         continue;
       }
-      const ast = asQueryInternals(q).ast;
-      // The raw gate is a scalar correlated subquery …
-      expect(hasScalarSubquery(ast), `${c.table}.${c.rel} not scalar`).toBe(
-        true,
-      );
-      // … which the production resolver rewrites away to a plain comparison …
-      const resolved = resolveScalarForIvm(ast, miniData);
+      covered += 1;
+      // All-on marks every gate; all-off leaves none set.
       expect(
-        hasScalarSubquery(resolved),
-        `unresolved scalar for ${c.table}.${c.rel}`,
-      ).toBe(false);
-      expect(resolved.where?.type).toBe('simple');
-      // … and the resolved query hydrates through the IVM.
-      await hydrates(delegate, wrapAst(resolved));
-      checked += 1;
+        hasScalarSubquery(setScalars(ast, Array(k).fill(true))),
+        `${label(s)} not marked`,
+      ).toBe(true);
+      expect(hasScalarSubquery(setScalars(ast, Array(k).fill(false)))).toBe(
+        false,
+      );
     }
-    expect(checked).toBeGreaterThan(0);
+    expect(covered).toBeGreaterThan(0);
   });
 
-  test('the executor returns the childField of the constrained row', () => {
-    // album.tracks: SELECT track.albumId WHERE track.id = <mid> ⇒ that track's albumId
-    // (childField ≠ the constrained PK — the non-trivial direction).
-    const c = must(
-      scalarCandidates().find(x => x.table === 'album' && x.rel === 'tracks'),
-      'album.tracks candidate missing',
+  test('junction wrappers are not marked — the builder puts scalar on the inner hop', () => {
+    // `playlist.tracks` is a two-hop junction. `{scalar: true}` through the builder lands
+    // on the second hop, so the wrapper must not be counted as a markable gate.
+    const junctionRel = must(
+      relsOf('playlist').find(r => r.junction),
+      'playlist has no junction relationship',
     );
-    const mid = data.pkMid('track');
-    const wantRow = must(miniData.track.find(r => r.id === mid));
-    const gate = must(asQueryInternals(must(buildScalar(c, data))).ast.where);
+    const viaBuilder = asQueryInternals(
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any
+      (newStaticQuery(schema, 'playlist') as any).whereExists(
+        junctionRel.name,
+        // oxlint-disable-next-line @typescript-eslint/no-explicit-any
+        (q: any) => q,
+        {scalar: true},
+      ),
+    ).ast;
+    const gate = must(viaBuilder.where);
     expect(gate.type).toBe('correlatedSubquery');
     if (gate.type !== 'correlatedSubquery') {
       return;
     }
-    const childField = gate.related.correlation.childField[0];
-    expect(childField).toBe('albumId');
-    expect(
-      makeScalarExecutor(miniData)(gate.related.subquery, childField),
-    ).toBe(wantRow.albumId);
+    // The wrapper itself is unmarked by the builder …
+    expect(gate.scalar).toBeUndefined();
+    // … and setScalars agrees: one markable gate (the inner hop), not two.
+    const bare = asQueryInternals(
+      lower({
+        table: 'playlist',
+        children: [
+          {
+            rel: junctionRel.name,
+            kind: 'exists',
+            sub: {table: junctionRel.child, children: []},
+          },
+        ],
+      }),
+    ).ast;
+    expect(scalarizableExistsCount(bare)).toBe(1);
+  });
+
+  test('marking a gate scalar leaves hydration unchanged', async () => {
+    const delegate = memoryDelegate();
+    let checked = 0;
+    for (const s of enumerate({depth: 1, related: 0, exists: 1})) {
+      const ast = asQueryInternals(lower(s)).ast;
+      const k = scalarizableExistsCount(ast);
+      if (k === 0) {
+        continue;
+      }
+      const marked = setScalars(ast, Array(k).fill(true));
+      expect(hasScalarSubquery(marked)).toBe(true);
+      const before = await delegate.run(wrapAst(ast));
+      const after = await delegate.run(wrapAst(marked));
+      expect(after, `${label(s)} changed under scalar`).toEqual(before);
+      checked += 1;
+    }
+    expect(checked).toBeGreaterThan(0);
   });
 });
 

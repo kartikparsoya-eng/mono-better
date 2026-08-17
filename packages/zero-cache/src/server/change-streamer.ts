@@ -5,12 +5,13 @@ import {DatabaseInitError} from '../../../zqlite/src/db.ts';
 import {getServerContext} from '../config/server-context.ts';
 import {getNormalizedZeroConfig} from '../config/zero-config.ts';
 import {deleteLiteDB} from '../db/delete-lite-db.ts';
+import {registerSQLiteCorruptionDiagnosticTarget} from '../db/sqlite-corruption.ts';
 import {warmupConnections} from '../db/warmup.ts';
 import {initEventSink, publishCriticalEvent} from '../observability/events.ts';
 import {upgradeReplica} from '../services/change-source/common/replica-schema.ts';
 import {initializeCustomChangeSource} from '../services/change-source/custom/change-source.ts';
 import {initializePostgresChangeSource} from '../services/change-source/pg/change-source.ts';
-import {BackupMonitor} from '../services/change-streamer/backup-monitor.ts';
+import {createBackupCleanupMonitor} from '../services/change-streamer/backup-cleanup-monitor-factory.ts';
 import {ChangeStreamerHttpServer} from '../services/change-streamer/change-streamer-http.ts';
 import {initializeStreamer} from '../services/change-streamer/change-streamer-service.ts';
 import type {ChangeStreamerService} from '../services/change-streamer/change-streamer.ts';
@@ -21,7 +22,6 @@ import {PurgeLocker} from '../services/change-streamer/storer.ts';
 import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
 import {
   BackupNotFoundException,
-  getLastBackupTime,
   restoreReplica,
 } from '../services/litestream/commands.ts';
 import {
@@ -62,8 +62,8 @@ export default async function runWorker(
     change,
     replica,
     initialSync,
-    litestream,
     keepaliveTimeoutMs,
+    sqliteCorruptionChecks,
   } = config;
 
   startOtelAuto(
@@ -72,6 +72,13 @@ export default async function runWorker(
     0,
   );
   lc = createLogContext(config, 'change-streamer');
+  registerSQLiteCorruptionDiagnosticTarget(
+    {
+      debugName: 'change-streamer replica',
+      dbPath: replica.file,
+    },
+    sqliteCorruptionChecks,
+  );
   initEventSink(lc, config);
 
   // Kick off DB connection warmup in the background.
@@ -89,11 +96,16 @@ export default async function runWorker(
   const {autoReset, replicationLag} = config;
   const shard = getShardConfig(config);
 
-  // Ensure the change DB schema is initialized/up-to-date, then acquire
-  // a lock to prevent change-lock purges. This ensures that (this)
-  // change-streamer will be able to resume from the backup.
+  // Ensure the change DB schema is initialized/up-to-date.
   await initChangeStreamerSchema(lc, changeDB, shard);
-  let purgeLock = await new PurgeLocker(lc, shard, changeDB).acquire();
+
+  // When restoring from litestream, acquire a lock to prevent change-log
+  // purges. This ensures that (this) change-streamer will be able to resume
+  // from the backup.
+  let purgeLock =
+    config.litestream.backupURL && config.litestream.executable
+      ? await new PurgeLocker(lc, shard, changeDB).acquire()
+      : null;
 
   // Restore from litestream if the change-log has entries.
   if (purgeLock) {
@@ -103,10 +115,7 @@ export default async function runWorker(
       // If the restore failed, e.g. due to a corrupt or missing backup, the
       // replication-manager recovers by re-syncing.
       const log = e instanceof BackupNotFoundException ? 'warn' : 'error';
-      lc[log]?.(
-        `error restoring backup. resyncing the replica: ${String(e)}`,
-        e,
-      );
+      lc[log]?.(`error restoring backup. resyncing the replica`, e);
 
       // The purgeLock must be released if the backup could not be restored,
       // or it will otherwise prevent the change-db update after the resync
@@ -136,6 +145,7 @@ export default async function runWorker(
               },
               context,
               replicationLag.reportIntervalMs,
+              upstream.pgStreamInboundTimeoutMs,
             )
           : await initializeCustomChangeSource(
               lc,
@@ -164,6 +174,7 @@ export default async function runWorker(
           backPressureLimitHeapProportion,
           flowControlConsensusPaddingSeconds,
           statementTimeoutMs: change.statementTimeoutMs,
+          changeLogBatchSize: change.logBatchSize,
         },
         setTimeout,
       );
@@ -208,35 +219,30 @@ export default async function runWorker(
   // upgrade logic redundantly since it is idempotent.
   await upgradeReplica(lc, 'change-streamer-init', replica.file);
 
-  const {backupURL, port: metricsPort} = litestream;
-  const monitor = backupURL
-    ? new BackupMonitor(
-        lc,
-        replica.file,
-        backupURL,
-        `http://localhost:${metricsPort}/metrics`,
-        changeStreamer,
-        // The time between when the zero-cache was started to when the
-        // change-streamer is ready to start serves as the initial delay for
-        // watermark cleanup (as it either includes a similar replica
-        // restoration/preparation step, or an initial-sync, which
-        // generally takes longer).
-        //
-        // Consider: Also account for permanent volumes?
-        Date.now() - workerStartTime,
-        // Verifies litestream's claimed backup progress against the actual
-        // backup state in the replica destination before advancing the
-        // change-log cleanup watermark.
-        () => getLastBackupTime(lc, config),
-      )
-    : new ReplicaMonitor(lc, replica.file, changeStreamer);
+  const backupMonitor = createBackupCleanupMonitor({
+    lc,
+    config,
+    replicaFile: replica.file,
+    changeStreamer,
+    // The time between when the zero-cache was started to when the
+    // change-streamer is ready to start serves as the initial delay for
+    // watermark cleanup (as it either includes a similar replica
+    // restoration/preparation step, or an initial-sync, which
+    // generally takes longer).
+    //
+    // Consider: Also account for permanent volumes?
+    initialCleanupDelayMs: Date.now() - workerStartTime,
+    env,
+  });
+  const monitor =
+    backupMonitor ?? new ReplicaMonitor(lc, replica.file, changeStreamer);
 
   const changeStreamerWebServer = new ChangeStreamerHttpServer(
     lc,
     {port, keepaliveTimeoutMs, startupDelayMs},
     parent,
     changeStreamer,
-    monitor instanceof BackupMonitor ? monitor : null,
+    backupMonitor,
   );
 
   parent.send(['ready', {ready: true}]);
@@ -248,15 +254,19 @@ export default async function runWorker(
 
 // fork()
 if (!singleProcessMode()) {
-  void exitAfter(lc, () =>
-    runWorker(must(parentWorker), process.env, ...process.argv.slice(2)).catch(
-      async e => {
+  void exitAfter(
+    () => lc,
+    () =>
+      runWorker(
+        must(parentWorker),
+        process.env,
+        ...process.argv.slice(2),
+      ).catch(async e => {
         await publishCriticalEvent(
           lc,
           replicationStatusError(lc, 'Initializing', e),
         );
         throw e;
-      },
-    ),
+      }),
   );
 }

@@ -53,6 +53,25 @@ test('zero-cache --help', () => {
                                                                                                                                                                                                    
                                                                         (Note that this option has no effect for Postgres versions before 17.)                                                     
                                                                                                                                                                                                    
+     --upstream-pg-stream-inbound-timeout-ms number                     optional                                                                                                                   
+       ZERO_UPSTREAM_PG_STREAM_INBOUND_TIMEOUT_MS env                                                                                                                                              
+                                                                        The time (in milliseconds) without any inbound message from the upstream                                                   
+                                                                        wal sender after which the replication stream is considered unresponsive                                                   
+                                                                        and torn down to force a reconnect.                                                                                        
+                                                                                                                                                                                                   
+                                                                        Defaults to 2x the server's wal_sender_timeout. That suits idle                                                            
+                                                                        streams, but a busy wal sender can be legitimately silent for longer —                                                     
+                                                                        e.g. while decoding through WAL from unpublished tables, or assembling a                                                   
+                                                                        large transaction that is only sent at commit. If the server's                                                             
+                                                                        wal_sender_timeout is aggressive (some managed environments                                                                
+                                                                        default it as low as 5 seconds), the resulting teardown aborts and                                                         
+                                                                        replays the in-flight transaction, which can prevent replication from                                                      
+                                                                        ever catching up on a large backlog. Set this option to widen the                                                          
+                                                                        client-side threshold without changing the server setting.                                                                 
+                                                                                                                                                                                                   
+                                                                        (This option has no effect when wal_sender_timeout is 0, which                                                             
+                                                                        disables inbound liveness detection entirely.)                                                                             
+                                                                                                                                                                                                   
      --mutate-url string[]                                              optional                                                                                                                   
        ZERO_MUTATE_URL env                                                                                                                                                                         
                                                                         The URL of the API server to which zero-cache will push mutations.                                                         
@@ -110,8 +129,18 @@ test('zero-cache --help', () => {
                                                                         A list of header names that clients are allowed to set via custom headers.                                                 
                                                                         If specified, only headers in this list will be forwarded to the push URL.                                                 
                                                                         Header names are case-insensitive.                                                                                         
-                                                                        If not specified, no client-provided headers are forwarded (secure by default).                                            
+                                                                        If not specified, no client-provided headers are forwarded.                                                                
                                                                         Example: ZERO_MUTATE_ALLOWED_CLIENT_HEADERS=x-request-id,x-correlation-id                                                  
+                                                                                                                                                                                                   
+     --mutate-allowed-request-headers string[]                          optional                                                                                                                   
+       ZERO_MUTATE_ALLOWED_REQUEST_HEADERS env                                                                                                                                                     
+                                                                        A list of header names to forward from the incoming HTTP request to the push URL.                                          
+                                                                        Unlike allowed-client-headers (which forwards headers set by the client), these are taken                                  
+                                                                        from the HTTP request that established the connection (e.g. headers injected by a proxy or load balancer).                 
+                                                                        If a listed header is present on the request, its value is forwarded upstream under the same header name.                  
+                                                                        Header names are case-insensitive.                                                                                         
+                                                                        If not specified, no request headers are forwarded.                                                                        
+                                                                        Example: ZERO_MUTATE_ALLOWED_REQUEST_HEADERS=x-forwarded-for,cf-ray                                                        
                                                                                                                                                                                                    
      --query-url string[]                                               optional                                                                                                                   
        ZERO_QUERY_URL env                                                                                                                                                                          
@@ -170,8 +199,18 @@ test('zero-cache --help', () => {
                                                                         A list of header names that clients are allowed to set via custom headers.                                                 
                                                                         If specified, only headers in this list will be forwarded to the query URL.                                                
                                                                         Header names are case-insensitive.                                                                                         
-                                                                        If not specified, no client-provided headers are forwarded (secure by default).                                            
+                                                                        If not specified, no client-provided headers are forwarded.                                                                
                                                                         Example: ZERO_QUERY_ALLOWED_CLIENT_HEADERS=x-request-id,x-correlation-id                                                   
+                                                                                                                                                                                                   
+     --query-allowed-request-headers string[]                           optional                                                                                                                   
+       ZERO_QUERY_ALLOWED_REQUEST_HEADERS env                                                                                                                                                      
+                                                                        A list of header names to forward from the incoming HTTP request to the query URL.                                         
+                                                                        Unlike allowed-client-headers (which forwards headers set by the client), these are taken                                  
+                                                                        from the HTTP request that established the connection (e.g. headers injected by a proxy or load balancer).                 
+                                                                        If a listed header is present on the request, its value is forwarded upstream under the same header name.                  
+                                                                        Header names are case-insensitive.                                                                                         
+                                                                        If not specified, no request headers are forwarded.                                                                        
+                                                                        Example: ZERO_QUERY_ALLOWED_REQUEST_HEADERS=x-forwarded-for,cf-ray                                                         
                                                                                                                                                                                                    
      --enable-crud-mutations boolean                                    default: true                                                                                                              
        ZERO_ENABLE_CRUD_MUTATIONS env                                                                                                                                                              
@@ -227,6 +266,15 @@ test('zero-cache --help', () => {
                                                                         the most efficient join strategies.                                                                                        
                                                                                                                                                                                                    
                                                                         You can disable the planner if it is picking bad strategies.                                                               
+                                                                                                                                                                                                   
+     --enable-query-covering boolean                                    default: true                                                                                                              
+       ZERO_ENABLE_QUERY_COVERING env                                                                                                                                                              
+                                                                        Enable shadow-mode query covering detection during query hydration.                                                        
+                                                                                                                                                                                                   
+                                                                        When enabled, view-syncers compare newly hydrated queries against running                                                  
+                                                                        queries with the same root table and log aggregate coverage stats.                                                         
+                                                                                                                                                                                                   
+                                                                        You can disable this if covering detection adds too much CPU overhead.                                                     
                                                                                                                                                                                                    
      --yield-threshold-ms number                                        default: 10                                                                                                                
        ZERO_YIELD_THRESHOLD_MS env                                                                                                                                                                 
@@ -462,10 +510,10 @@ test('zero-cache --help', () => {
      --replication-lag-report-interval-ms number                        default: 30000                                                                                                             
        ZERO_REPLICATION_LAG_REPORT_INTERVAL_MS env                                                                                                                                                 
                                                                         The minimum interval at which replication lag reports are written upstream and                                             
-                                                                        reported via the zero.replication.total_lag opentelemetry metric. Because                                                  
-                                                                        replication lag reports are only issued after the previous one was received, the                                           
-                                                                        actual interval between reports may be longer when there is a backlog in the                                               
-                                                                        replication stream. A negative or 0 value disables lag reporting.                                                          
+                                                                        reported via the zero.replication.total_lag opentelemetry metric. If                                                       
+                                                                        an expected report is not received before the next interval, Zero retries with                                             
+                                                                        a new report and increments zero.replication.lag_report_retries. A                                                         
+                                                                        negative or 0 value disables lag reporting.                                                                                
                                                                                                                                                                                                    
                                                                         This monitoring feature is only support on the postgres upstream type.                                                     
                                                                                                                                                                                                    
@@ -516,9 +564,17 @@ test('zero-cache --help', () => {
                                                                         affording forwards compatibility with a future zero-cache                                                                  
                                                                         version that will use litestream v0.5.x to backup the replica.                                                             
                                                                                                                                                                                                    
-     --litestream-restore-using-v5 boolean                              default: false                                                                                                             
+     --litestream-restore-using-v5 boolean                              default: true                                                                                                              
        ZERO_LITESTREAM_RESTORE_USING_V5 env                                                                                                                                                        
                                                                         Restores the backup using the ZERO_LITESTREAM_EXECUTABLE_V5 if specified.                                                  
+                                                                        This provides a recovery path if rolling back from ZERO_LITESTREAM_BACKUP_USING_V5                                         
+                                                                        as v5 restores from both v3 and v5 backups (whichever is more recent).                                                     
+                                                                                                                                                                                                   
+     --litestream-backup-using-v5 boolean                               default: false                                                                                                             
+       ZERO_LITESTREAM_BACKUP_USING_V5 env                                                                                                                                                         
+                                                                        Backs up the replica using Litestream v0.5.x and monitors cleanup                                                          
+                                                                        watermarks by reading the backup through the Litestream SQLite VFS.                                                        
+                                                                        This requires ZERO_LITESTREAM_RESTORE_USING_V5.                                                                            
                                                                                                                                                                                                    
      --litestream-config-path string                                    default: "./src/services/litestream/config.yml"                                                                            
        ZERO_LITESTREAM_CONFIG_PATH env                                                                                                                                                             
@@ -529,6 +585,27 @@ test('zero-cache --help', () => {
                                                                         * ZERO_LITESTREAM_BACKUP_LOCATION for the db replica url                                                                   
                                                                         * ZERO_LITESTREAM_LOG_LEVEL for the log level                                                                              
                                                                         * ZERO_LOG_FORMAT for the log type                                                                                         
+                                                                                                                                                                                                   
+     --litestream-vfs-extension-path string                             default: "/usr/local/lib/litestream-vfs.so"                                                                                
+       ZERO_LITESTREAM_VFS_EXTENSION_PATH env                                                                                                                                                      
+                                                                        Path to the Litestream v0.5.x SQLite VFS loadable extension used by                                                        
+                                                                        the backup watermark reader to query the backup directly.                                                                  
+                                                                                                                                                                                                   
+     --litestream-vfs-probe-interval-ms number                          default: 30000                                                                                                             
+       ZERO_LITESTREAM_VFS_PROBE_INTERVAL_MS env                                                                                                                                                   
+                                                                        Interval in milliseconds at which the standalone backup watermark reader                                                   
+                                                                        logs the watermark when it is run without a parent worker. The integrated                                                  
+                                                                        backup monitor requests watermarks on demand.                                                                              
+                                                                                                                                                                                                   
+     --litestream-vfs-probe-timeout-ms number                           default: 30000                                                                                                             
+       ZERO_LITESTREAM_VFS_PROBE_TIMEOUT_MS env                                                                                                                                                    
+                                                                        Timeout in milliseconds for requests to the Litestream VFS backup                                                          
+                                                                        watermark reader worker.                                                                                                   
+                                                                                                                                                                                                   
+     --litestream-vfs-log-file string                                   optional                                                                                                                   
+       ZERO_LITESTREAM_VFS_LOG_FILE env                                                                                                                                                            
+                                                                        Optional file path for logs emitted by the Litestream VFS native                                                           
+                                                                        extension. If unset, the extension writes to stdout.                                                                       
                                                                                                                                                                                                    
      --litestream-log-level debug,info,warn,error                       default: "warn"                                                                                                            
        ZERO_LITESTREAM_LOG_LEVEL env                                                                                                                                                               
@@ -726,6 +803,17 @@ test.each([['isok'], ['has_underscores'], ['1'], ['123']])(
     expect(config.app.id).toBe(appID);
   },
 );
+
+test('--enable-query-covering can be disabled', () => {
+  const {config} = parseOptionsAdvanced(zeroOptions, {
+    argv: ['--enable-query-covering', 'false'],
+    envNamePrefix: 'ZERO_',
+    allowUnknown: false,
+    allowPartial: true,
+  });
+
+  expect(config.enableQueryCovering).toBe(false);
+});
 
 test('--shard-id disallowed', () => {
   const logger = {info: vi.fn()};

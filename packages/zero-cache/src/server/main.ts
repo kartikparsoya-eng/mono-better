@@ -7,10 +7,12 @@ import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
 import {must} from '../../../shared/src/must.ts';
 import {getNormalizedZeroConfig} from '../config/zero-config.ts';
+import {registerSQLiteCorruptionDiagnosticTarget} from '../db/sqlite-corruption.ts';
 import {initEventSink} from '../observability/events.ts';
 import {
   exitAfter,
   ProcessManager,
+  recordStartupDurationMs,
   runUntilKilled,
   type WorkerType,
 } from '../services/life-cycle.ts';
@@ -85,6 +87,13 @@ export default async function runWorker(
     0,
   );
   lc = createLogContext(config, 'dispatcher');
+  registerSQLiteCorruptionDiagnosticTarget(
+    {
+      debugName: 'dispatcher replica',
+      dbPath: config.replica.file,
+    },
+    config.sqliteCorruptionChecks,
+  );
   initEventSink(lc, config);
 
   const processes = new ProcessManager(lc, parent);
@@ -381,7 +390,9 @@ export default async function runWorker(
   );
   await processes.allWorkersReady();
   clearInterval(logWaiting);
-  lc.info?.(`all workers ready (${Date.now() - startMs} ms)`);
+  const startupDurationMs = Date.now() - startMs;
+  lc.info?.(`all workers ready (${startupDurationMs} ms)`);
+  recordStartupDurationMs(startupDurationMs);
 
   parent.send(['ready', {ready: true}]);
 
@@ -409,5 +420,8 @@ export default async function runWorker(
 }
 
 if (!singleProcessMode()) {
-  void exitAfter(lc, () => runWorker(must(parentWorker), process.env));
+  void exitAfter(
+    () => lc,
+    () => runWorker(must(parentWorker), process.env),
+  );
 }

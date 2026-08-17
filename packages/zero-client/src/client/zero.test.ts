@@ -73,6 +73,7 @@ import {
 import {createBuilder} from '../../../zql/src/query/create-builder.ts';
 import type {Row} from '../../../zql/src/query/query.ts';
 import {nanoid} from '../util/nanoid.ts';
+import {ActiveClientsManager} from './active-clients-manager.ts';
 import {ClientErrorKind} from './client-error-kind.ts';
 import {ConnectionStatus} from './connection-status.ts';
 import type {ConnectionState} from './connection.ts';
@@ -1748,6 +1749,127 @@ test('pusher sends one mutation per push message', async () => {
   ]);
 });
 
+const pushMutation = (clientID: string, id: number): Mutation => ({
+  type: MutationType.Custom,
+  clientID,
+  id,
+  name: 'mut1',
+  args: [{}],
+  timestamp: id,
+});
+
+// Pushes the given mutations as if they were the client group's pending
+// mutations and returns what actually went out on the socket, as
+// "clientID:mutationID" strings.
+const pushAndReadSocket = async (
+  z: TestZero<Schema>,
+  mutations: Mutation[],
+) => {
+  const mockSocket = await z.socket;
+  mockSocket.messages.length = 0;
+  await z.pusher(
+    {
+      profileID: 'p1',
+      clientGroupID: await z.clientGroupID,
+      pushVersion: 1,
+      schemaVersion: '1',
+      mutations,
+    },
+    'test-request-id',
+  );
+  return mockSocket.messages.map(raw => {
+    const [, {mutations}] = valita.parse(JSON.parse(raw), pushMessageSchema);
+    return `${mutations[0].clientID}:${mutations[0].id}`;
+  });
+};
+
+test('pusher does not skip mutations when the pending list is reordered', async () => {
+  // A client pushes the whole client group's commit chain, so the mutations it
+  // sends include ones made by the other tabs in the group. The order of that
+  // chain changes from one push to the next: when this tab persists its own
+  // mutations they move to the end of the chain, behind whatever the other tabs
+  // persisted in the meantime. So a mutation from another tab can show up in
+  // front of one we already sent. We still have to send it, and we must never
+  // leave a hole in a client's run of mutation IDs, because the server rejects
+  // a hole as an invalid push.
+  const z = zeroForTest();
+  await z.triggerConnected();
+
+  // Our own mutations are the ones that get moved to the end of the chain, so
+  // use this client's real ID for them.
+  const self = z.clientID;
+  const other = 'other-tab';
+  const push = (mutations: Mutation[]) => pushAndReadSocket(z, mutations);
+
+  expect(await push([pushMutation(other, 1), pushMutation(self, 1)])).toEqual([
+    `${other}:1`,
+    `${self}:1`,
+  ]);
+
+  // The other tab's second mutation now sits in front of our own, which was the
+  // last mutation we sent.
+  expect(
+    await push([
+      pushMutation(other, 1),
+      pushMutation(other, 2),
+      pushMutation(self, 1),
+    ]),
+  ).toEqual([`${other}:2`]);
+
+  // The other tab's third mutation must not go out unless its second one
+  // already did.
+  expect(
+    await push([
+      pushMutation(other, 1),
+      pushMutation(other, 2),
+      pushMutation(self, 1),
+      pushMutation(other, 3),
+    ]),
+  ).toEqual([`${other}:3`]);
+});
+
+test('pusher resends every pending mutation after a reconnect', async () => {
+  // We track what we have sent per connection. On a new connection we don't
+  // know how much of what we sent on the old socket actually got there, so we
+  // send everything still pending again and let the server ignore the ones it
+  // has already applied.
+  const z = zeroForTest();
+  await z.triggerConnected();
+
+  const self = z.clientID;
+  const other = 'other-tab';
+  const push = (mutations: Mutation[]) => pushAndReadSocket(z, mutations);
+
+  expect(await push([pushMutation(other, 1), pushMutation(self, 1)])).toEqual([
+    `${other}:1`,
+    `${self}:1`,
+  ]);
+
+  // Still on the same connection, so only the mutations we haven't sent go out.
+  expect(
+    await push([
+      pushMutation(other, 1),
+      pushMutation(other, 2),
+      pushMutation(other, 3),
+      pushMutation(self, 1),
+    ]),
+  ).toEqual([`${other}:2`, `${other}:3`]);
+
+  await z.triggerClose();
+  await z.waitForConnectionStatus(ConnectionStatus.Connecting);
+  await vi.advanceTimersByTimeAsync(RUN_LOOP_INTERVAL_MS);
+  await z.triggerConnected();
+
+  expect(
+    await push([
+      pushMutation(other, 1),
+      pushMutation(other, 2),
+      pushMutation(other, 3),
+      pushMutation(self, 1),
+    ]),
+  ).toEqual([`${other}:1`, `${other}:2`, `${other}:3`, `${self}:1`]);
+});
+
 test('pusher maps CRUD mutation names', async () => {
   const t = async (
     pushes: {
@@ -2603,7 +2725,7 @@ test('Runtime pingTimeoutMs configuration', async () => {
   expect(z.connectionStatus).toBe(ConnectionStatus.Connecting);
 });
 
-const connectTimeoutMessage = 'Rejecting connect resolver due to timeout';
+const connectTimeoutMessage = 'Connection attempt timed out';
 
 function expectLogMessages(z: TestZero<Schema>) {
   return expect(
@@ -2611,6 +2733,26 @@ function expectLogMessages(z: TestZero<Schema>) {
       level === 'debug' ? msg : [],
     ),
   );
+}
+
+function connectTimeoutErrors(z: TestZero<Schema>): ClientError[] {
+  return z.testLogSink.messages
+    .flatMap(([_level, _context, messages]) => messages)
+    .filter(
+      (message): message is ClientError =>
+        message instanceof ClientError &&
+        message.kind === ClientErrorKind.ConnectTimeout,
+    );
+}
+
+function connectEvents(
+  error: ClientError | undefined,
+): [date: string, event: string][] {
+  assert(error);
+  const marker = 'Connect events: ';
+  const markerIndex = error.message.indexOf(marker);
+  assert(markerIndex >= 0, 'Expected timeout error to contain connect events');
+  return JSON.parse(error.message.slice(markerIndex + marker.length));
 }
 
 test('Connect timeout', async () => {
@@ -2643,6 +2785,21 @@ test('Connect timeout', async () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(z.connectionStatus).toBe(ConnectionStatus.Connecting);
     expectLogMessages(z).contain(connectTimeoutMessage);
+    const events = connectEvents(connectTimeoutErrors(z).at(-1));
+    expect(events.map(([_date, event]) => event)).toEqual([
+      'starting the connection',
+      'reading the cookie',
+      'reading the client group ID',
+      'initializing active clients',
+      'reading the profile ID',
+      'reading deleted clients',
+      'reading desired queries',
+      'creating the WebSocket',
+      'waiting for the server acknowledgement',
+    ]);
+    expect(events.every(([date]) => !Number.isNaN(Date.parse(date)))).toBe(
+      true,
+    );
     const nextSocketPromise = z.socket;
 
     // We stay in connecting state and sleep for RUN_LOOP_INTERVAL_MS before trying again
@@ -2684,6 +2841,58 @@ test('Connect timeout', async () => {
   ]);
 
   connectionStatusCleanup();
+});
+
+test('connect timeout during setup retries without an unhandled rejection', async () => {
+  const unhandledRejections: PromiseRejectionEvent[] = [];
+  const onUnhandled = (event: PromiseRejectionEvent) => {
+    unhandledRejections.push(event);
+    event.preventDefault();
+  };
+  window.addEventListener('unhandledrejection', onUnhandled);
+
+  vi.spyOn(ActiveClientsManager, 'create').mockReturnValue(
+    new Promise(() => {}),
+  );
+
+  try {
+    const z = zeroForTest({logLevel: 'debug'});
+    const connectAttempts = () =>
+      z.testLogSink.messages.filter(
+        ([level, _context, messages]) =>
+          level === 'info' && messages.includes('Connecting...'),
+      ).length;
+
+    await z.waitForConnectionStatus(ConnectionStatus.Connecting);
+    await tickAFewTimes(vi, 0);
+    expect(connectAttempts()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS + 1);
+    await tickAFewTimes(vi);
+
+    expect(
+      unhandledRejections.filter(
+        event =>
+          event.reason instanceof ClientError &&
+          event.reason.kind === ClientErrorKind.ConnectTimeout,
+      ),
+    ).toEqual([]);
+    expect(
+      connectEvents(connectTimeoutErrors(z).at(-1)).map(
+        ([_date, event]) => event,
+      ),
+    ).toEqual([
+      'starting the connection',
+      'reading the cookie',
+      'reading the client group ID',
+      'initializing active clients',
+    ]);
+
+    await tickAFewTimes(vi, RUN_LOOP_INTERVAL_MS);
+    expect(connectAttempts()).toBe(2);
+  } finally {
+    window.removeEventListener('unhandledrejection', onUnhandled);
+  }
 });
 
 test('socketOrigin', async () => {

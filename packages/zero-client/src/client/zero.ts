@@ -152,6 +152,7 @@ import {
   isAuthError,
   isClientError,
   isServerError,
+  isZeroError,
 } from './error.ts';
 import {
   type HTTPString,
@@ -218,6 +219,22 @@ interface TestZero {
   }) => LogOptions;
 }
 
+type ConnectAttemptControl = {
+  readonly controller: AbortController;
+  readonly connected: Resolver<void>;
+  readonly events: [date: Date, event: string][];
+};
+
+function connectionReadyResolver(): Resolver<void> {
+  const ready = resolver<void>();
+  // A connection attempt can fail without any push, pull, or inspector
+  // currently waiting on it. The run loop handles the corresponding attempt
+  // failure; this handler prevents the optional readiness listener from
+  // becoming an unhandled rejection.
+  void ready.promise.catch(() => {});
+  return ready;
+}
+
 function asTestZero<
   S extends BaseDefaultSchema,
   MD extends CustomMutatorDefs | undefined,
@@ -256,8 +273,6 @@ export const DEFAULT_DISCONNECT_TIMEOUT_MS = 60 * 1_000;
 export const CONNECT_TIMEOUT_MS = 10_000;
 
 const CHECK_CONNECTIVITY_ON_ERROR_FREQUENCY = 6;
-
-const NULL_LAST_MUTATION_ID_SENT = {clientID: '', id: -1} as const;
 
 const DEFAULT_QUERY_CHANGE_THROTTLE_MS = 10;
 
@@ -376,8 +391,30 @@ export class Zero<
    */
   #deletedClients: DeleteClientsBody | undefined;
 
-  #lastMutationIDSent: {clientID: string; id: number} =
-    NULL_LAST_MUTATION_ID_SENT;
+  /**
+   * The highest mutation ID we have sent on the current connection, for each
+   * client in our client group.
+   *
+   * The mutations we push are the client group's local commit chain, so they
+   * include mutations made by every tab in the group, not just this one. The
+   * order of that chain changes from one push to the next: when we persist our
+   * own mutations they move to the end of the chain, behind whatever the other
+   * tabs persisted in the meantime. So a mutation from another tab can end up
+   * in front of one we already sent, which means we cannot decide what to send
+   * next by remembering a single position in the chain. Remembering the last ID
+   * we sent for each client works no matter how the chain is ordered: we never
+   * skip a mutation, and we never leave a hole in a client's run of mutation
+   * IDs (the server rejects a hole as an invalid push).
+   *
+   * Cleared whenever the connection is established or torn down. The server
+   * does remember what it has processed, in a last mutation ID per client, and
+   * it ignores anything it has already applied. But we don't know which of our
+   * sends actually made it across before the socket died, so we start over and
+   * let the server drop the duplicates. The only mutations we don't resend are
+   * the ones the server has acknowledged in a poke, because those have already
+   * been rebased out of the commit chain.
+   */
+  readonly #lastMutationIDsSent: Map<ClientID, number> = new Map();
 
   #onPong: () => void = () => undefined;
 
@@ -425,12 +462,14 @@ export class Zero<
 
   #socket: WebSocket | undefined = undefined;
   #socketResolver = resolver<WebSocket>();
-  /**
-   * Utility promise that resolves when the socket transitions to connected.
-   * It rejects if we hit an error or timeout before the connected message.
-   * Used by push/pull helpers to queue work until the connection is usable.
-   */
-  #connectResolver = resolver<void>();
+
+  // Resolves when the run loop establishes a usable connection. The run loop
+  // replaces it if the attempt fails or the established connection disconnects.
+  #connectionReadyResolver = connectionReadyResolver();
+
+  // Installed and removed by the run loop so socket events and disconnects can
+  // deliver inputs to the active attempt without settling its returned promise.
+  #currentConnectAttempt: ConnectAttemptControl | undefined;
 
   #closeAbortController = new AbortController();
 
@@ -823,7 +862,12 @@ export class Zero<
     this.#metrics.tags.push(`version:${this.version}`);
 
     this.#pokeHandler = new PokeHandler(
-      poke => this.#rep.poke(poke),
+      async poke => {
+        await this.#rep.poke(poke);
+        // poke() fires the got-queries watch synchronously, so `#gotQueries` is
+        // up to date and safe to trust now that the server has caught us up.
+        this.#queryManager.markGotQueriesAuthoritative();
+      },
       e => this.#onPokeError(e),
       rep.clientID,
       schema,
@@ -980,9 +1024,8 @@ export class Zero<
   /**
    * Executes a query once and returns the results.
    *
-   * By default, waits for any pending data to sync before running the query.
-   * This ensures fresh results from the server. Use `{type: 'unknown'}` to
-   * run immediately with whatever data is available locally.
+   * By default, runs immediately with whatever data is available locally.
+   * Use `{type: 'complete'}` to wait for fresh results from the server.
    *
    * @param query - The query to execute
    * @param runOptions - Options controlling query execution
@@ -990,11 +1033,11 @@ export class Zero<
    *
    * @example
    * ```ts
-   * // Wait for server sync
+   * // Run with local data only
    * const users = await zero.run(userQuery);
    *
-   * // Run with local data only
-   * const cachedUsers = await zero.run(userQuery, {type: 'unknown'});
+   * // Wait for server sync
+   * const freshUsers = await zero.run(userQuery, {type: 'complete'});
    * ```
    */
   run<
@@ -1438,7 +1481,6 @@ export class Zero<
             'large files to object storage and storing only the URL in Zero.' +
             recentMessagesInfo,
         });
-        this.#connectResolver.reject(messageTooLargeError);
         this.#disconnect(lc, messageTooLargeError);
 
         await this.#rep.disableClientGroup();
@@ -1458,7 +1500,6 @@ export class Zero<
                 message: 'WebSocket connection closed abruptly',
               },
         );
-        this.#connectResolver.reject(closeError);
         this.#disconnect(lc, closeError);
       }
     } catch (e) {
@@ -1470,7 +1511,6 @@ export class Zero<
         },
         {cause: e},
       );
-      this.#connectResolver.reject(internalError);
       this.#disconnect(lc, internalError);
     }
   };
@@ -1486,7 +1526,7 @@ export class Zero<
     // We really don't want to disconnect and reconnect a rate limited user as
     // it'll use more resources on the server
     if (kind === ErrorKind.MutationRateLimited) {
-      this.#lastMutationIDSent = NULL_LAST_MUTATION_ID_SENT;
+      this.#lastMutationIDsSent.clear();
       lc.error?.(kind, 'Mutation rate limited', {message});
       return;
     }
@@ -1495,8 +1535,6 @@ export class Zero<
     const error = new ProtocolError(downMessage[1]);
     lc.error?.(`${error.kind}:\n\n${error.errorBody.message}`, error);
 
-    lc.debug?.('Rejecting connect resolver due to error', error);
-    this.#connectResolver.reject(error);
     this.#disconnect(lc, error);
 
     if (kind === ErrorKind.VersionNotSupported) {
@@ -1529,9 +1567,14 @@ export class Zero<
     lc: LogContext,
     connectedMessage: ConnectedMessage,
   ): Promise<void> {
+    const attempt = must(
+      this.#currentConnectAttempt,
+      'Connected message received without an active connection attempt',
+    );
     const now = Date.now();
     const [, connectBody] = connectedMessage;
     lc = addWebSocketIDToLogContext(connectBody.wsid, lc);
+    this.#addConnectEvent(lc, attempt, 'processing the server acknowledgement');
 
     // Remember the server's app id / shard so a direct-mutation push can
     // address the mutate endpoint identically to a zero-cache relay.
@@ -1582,7 +1625,7 @@ export class Zero<
       connectedCount: this.#connectedCount,
       proceedingConnectErrorCount,
     });
-    this.#lastMutationIDSent = NULL_LAST_MUTATION_ID_SENT;
+    this.#lastMutationIDsSent.clear();
 
     lc.debug?.('Resolving connect resolver');
     must(this.#socket);
@@ -1636,42 +1679,40 @@ export class Zero<
     maybeSendDeletedClients();
 
     this.#connectionManager.connected();
-    this.#connectResolver.resolve();
+    attempt.connected.resolve();
   }
 
   /**
    * Starts a new connection. This will create the WebSocket that does the HTTP
    * request to the server.
    *
-   * {@link #connect} will throw an assertion error if the
+   * {@link #connectAttempt} will throw an assertion error if the
    * {@link #connectionManager} status is not {@link ConnectionManagerState.Disconnected}
    * or {@link ConnectionManagerState.Connecting}.
    * Callers MUST check the connection status before calling this method and log
    * an error as needed.
    *
-   * The function will resolve once the socket is connected. If you need to know
-   * when a connection has been established, as in we have received the
-   * {@link ConnectedMessage}, you should await the {@link #connectResolver}
-   * promise. The {@link #connectResolver} promise rejects if an error message
-   * is received before the connected message is received or if the connection
-   * attempt times out.
+   * The returned promise resolves after receiving the {@link ConnectedMessage}
+   * and rejects if setup, the socket, or the connection handshake fails.
    */
-  async #connect(
+  async #connectAttempt(
     lc: LogContext,
     additionalConnectParams: Record<string, string> | undefined,
+    attempt: ConnectAttemptControl,
   ): Promise<void> {
     if (this.closed) {
       return;
     }
 
     assert(this.#server, 'No server provided');
+    const socketOrigin = toWSString(this.#server);
 
     // can be called from both disconnected and connecting states.
     // connecting() handles incrementing attempt counter if already connecting.
     assert(
       this.#connectionManager.is(ConnectionStatus.Disconnected) ||
         this.#connectionManager.is(ConnectionStatus.Connecting),
-      'connect() called from invalid state: ' +
+      'connectAttempt() called from invalid state: ' +
         this.#connectionManager.state.name,
     );
 
@@ -1681,7 +1722,7 @@ export class Zero<
 
     this.#connectionManager.connecting();
 
-    // connect() called but connect start time is defined. This should not
+    // connectAttempt() called but connect start time is defined. This should not
     // happen.
     assert(this.#connectStart === undefined, 'connect start time is defined');
 
@@ -1691,42 +1732,32 @@ export class Zero<
       this.#totalToConnectStart = now;
     }
 
-    if (this.closed) {
-      return;
-    }
-    this.#connectCookie = valita.parse(
+    const {signal} = attempt.controller;
+    this.#addConnectEvent(lc, attempt, 'reading the cookie');
+    const connectCookie = valita.parse(
       await this.#rep.cookie,
       nullableVersionSchema,
       'passthrough',
     );
-    if (this.closed) {
-      return;
-    }
+    this.#addConnectEvent(lc, attempt, 'reading the client group ID');
+    const clientGroupID = await this.clientGroupID;
+    this.#addConnectEvent(lc, attempt, 'initializing active clients');
+    const activeClientsManager = await this.#activeClientsManager;
 
-    // Reject connect after a timeout.
-    const timeoutID = setTimeout(() => {
-      lc.debug?.('Rejecting connect resolver due to timeout');
-      const timeoutError = new ClientError({
-        kind: ClientErrorKind.ConnectTimeout,
-        message: `Connection attempt timed out after ${CONNECT_TIMEOUT_MS / 1000} seconds`,
-      });
-      this.#connectResolver.reject(timeoutError);
-      this.#disconnect(lc, timeoutError);
-    }, CONNECT_TIMEOUT_MS);
-    const abortHandler = () => {
-      clearTimeout(timeoutID);
-    };
-    // signal.aborted cannot be true here because we checked for `this.closed` above.
-    this.#closeAbortController.signal.addEventListener('abort', abortHandler);
+    // The run loop has already stopped waiting for this attempt if it was
+    // canceled. Do not let setup that completed late create a socket.
+    if (signal.aborted) {
+      throw signal.reason;
+    }
 
     const [ws, initConnectionQueries, deletedClients] = await createSocket(
       this.#rep,
       this.#queryManager,
       this.#deleteClientsManager,
-      toWSString(this.#server),
-      this.#connectCookie,
+      socketOrigin,
+      connectCookie,
       this.clientID,
-      await this.clientGroupID,
+      clientGroupID,
       this.#clientSchema,
       this.userID,
       fromReplicacheAuthToken(this.#rep.auth),
@@ -1739,14 +1770,25 @@ export class Zero<
       this.#options.queryURL ?? this.#options.getQueriesURL,
       this.#options.queryHeaders,
       additionalConnectParams,
-      await this.#activeClientsManager,
+      activeClientsManager,
       this.#options.maxHeaderLength,
+      event => this.#addConnectEvent(lc, attempt, event),
     );
 
+    // createSocket performs asynchronous preparation before constructing the
+    // WebSocket. If the attempt was canceled during that work, the late socket
+    // still belongs to this attempt and must be closed.
+    if (signal.aborted) {
+      ws.close();
+      throw signal.reason;
+    }
+
     if (this.closed) {
+      ws.close();
       return;
     }
 
+    this.#connectCookie = connectCookie;
     this.#initConnectionQueries = initConnectionQueries;
     this.#deletedClients = deletedClients;
     ws.addEventListener('message', this.#onMessage);
@@ -1755,22 +1797,33 @@ export class Zero<
     this.#socket = ws;
     this.#socketResolver.resolve(ws);
 
-    try {
-      lc.debug?.('Waiting for connection to be acknowledged');
-      await this.#connectResolver.promise;
-      this.#mutationTracker.onConnected(this.#lastMutationIDReceived);
-      // push any outstanding mutations on reconnect.
-      this.#rep.push().catch(() => {});
-    } finally {
-      clearTimeout(timeoutID);
-      this.#closeAbortController.signal.removeEventListener(
-        'abort',
-        abortHandler,
-      );
+    this.#addConnectEvent(
+      lc,
+      attempt,
+      'waiting for the server acknowledgement',
+    );
+    lc.debug?.('Waiting for connection to be acknowledged');
+    await attempt.connected.promise;
+    if (signal.aborted) {
+      throw signal.reason;
     }
+    this.#mutationTracker.onConnected(this.#lastMutationIDReceived);
+    // push any outstanding mutations on reconnect.
+    this.#rep.push().catch(() => {});
+  }
+
+  #addConnectEvent(
+    lc: LogContext,
+    attempt: ConnectAttemptControl,
+    event: string,
+  ): void {
+    attempt.events.push([new Date(), event]);
+    lc.debug?.('Connect event', event);
   }
 
   #disconnect(lc: LogContext, reason: ZeroError, closeCode?: CloseCode): void {
+    this.#currentConnectAttempt?.controller.abort(reason);
+
     if (shouldReportConnectError(reason)) {
       this.#connectErrorCount++;
       this.#metrics.lastConnectError.set(getLastConnectErrorValue(reason));
@@ -1824,8 +1877,6 @@ export class Zero<
     }
 
     this.#socketResolver = resolver();
-    lc.debug?.('Creating new connect resolver');
-    this.#connectResolver = resolver();
     this.#messageCount = 0;
     this.#connectStart = undefined; // don't reset this._totalToConnectStart
     this.#connectedAt = 0;
@@ -1834,8 +1885,9 @@ export class Zero<
     this.#socket?.removeEventListener('close', this.#onClose);
     this.#socket?.close(closeCode);
     this.#socket = undefined;
-    this.#lastMutationIDSent = NULL_LAST_MUTATION_ID_SENT;
+    this.#lastMutationIDsSent.clear();
     this.#pokeHandler.handleDisconnect();
+    this.#queryManager.clearGotQueriesAuthoritative();
 
     const transition = getErrorConnectionTransition(reason);
 
@@ -1931,31 +1983,30 @@ export class Zero<
     // The deprecation of pushVersion 0 predates zero-client
     assert(req.pushVersion === 1, 'Expected pushVersion 1');
     // If we are connecting we wait until we are connected.
-    await this.#connectResolver.promise;
+    await this.#connectionReadyResolver.promise;
     const lc = this.#lc.withContext('requestID', requestID);
     lc.debug?.(`pushing ${req.mutations.length} mutations`);
     assert(this.#socket, 'Expected socket to be connected for push');
 
     const isMutationRecoveryPush =
       req.clientGroupID !== (await this.clientGroupID);
-    const start = isMutationRecoveryPush
-      ? 0
-      : req.mutations.findIndex(
-          m =>
-            m.clientID === this.#lastMutationIDSent.clientID &&
-            m.id === this.#lastMutationIDSent.id,
-        ) + 1;
+    // A recovery push is for a different client group, so nothing has been sent
+    // for it on this connection.
+    const toSend = isMutationRecoveryPush
+      ? req.mutations
+      : req.mutations.filter(
+          m => m.id > (this.#lastMutationIDsSent.get(m.clientID) ?? 0),
+        );
     lc.debug?.(
       isMutationRecoveryPush ? 'pushing for recovery' : 'pushing',
-      req.mutations.length - start,
+      toSend.length,
       'mutations of',
       req.mutations.length,
       'mutations.',
     );
     const now = Date.now();
     const zeroMutations = [];
-    for (let i = start; i < req.mutations.length; i++) {
-      const m = req.mutations[i];
+    for (const m of toSend) {
       const timestamp = now - Math.round(performance.now() - m.timestamp);
       const zeroM =
         m.name === CRUD_MUTATION_NAME
@@ -1976,9 +2027,6 @@ export class Zero<
               args: [m.args],
             } satisfies CustomMutation);
       zeroMutations.push(zeroM);
-      if (!isMutationRecoveryPush) {
-        this.#lastMutationIDSent = {clientID: m.clientID, id: m.id};
-      }
     }
 
     // Direct-mutation mode: POST the whole batch to the app's mutate endpoint
@@ -2006,6 +2054,11 @@ export class Zero<
         pushVersion: req.pushVersion,
         requestID,
       });
+      if (!isMutationRecoveryPush) {
+        for (const zeroM of zeroMutations) {
+          this.#lastMutationIDsSent.set(zeroM.clientID, zeroM.id);
+        }
+      }
       return {
         httpRequestInfo: {
           errorMessage: result.errorMessage,
@@ -2028,6 +2081,9 @@ export class Zero<
         },
       ];
       this.#send(msg);
+      if (!isMutationRecoveryPush) {
+        this.#lastMutationIDsSent.set(zeroM.clientID, zeroM.id);
+      }
     }
     return {
       httpRequestInfo: {
@@ -2124,8 +2180,73 @@ export class Zero<
               break;
             }
 
-            await this.#connect(lc, additionalConnectParams);
-            additionalConnectParams = undefined;
+            const ready = this.#connectionReadyResolver;
+            assert(
+              this.#currentConnectAttempt === undefined,
+              'Connection attempt already active',
+            );
+            const attempt: ConnectAttemptControl = {
+              controller: new AbortController(),
+              connected: resolver(),
+              events: [],
+            };
+            this.#currentConnectAttempt = attempt;
+            this.#addConnectEvent(lc, attempt, 'starting the connection');
+            const canceled = resolver<never>();
+            const abortHandler = () =>
+              canceled.reject(attempt.controller.signal.reason);
+            attempt.controller.signal.addEventListener('abort', abortHandler, {
+              once: true,
+            });
+            const timeoutID = setTimeout(() => {
+              lc.debug?.('Connection attempt timed out');
+              this.#disconnect(
+                lc,
+                new ClientError({
+                  kind: ClientErrorKind.ConnectTimeout,
+                  message:
+                    `Connection attempt timed out after ${CONNECT_TIMEOUT_MS / 1000} seconds. ` +
+                    `Connect events: ${JSON.stringify(attempt.events)}`,
+                }),
+              );
+            }, CONNECT_TIMEOUT_MS);
+            try {
+              try {
+                await Promise.race([
+                  this.#connectAttempt(lc, additionalConnectParams, attempt),
+                  canceled.promise,
+                ]);
+              } catch (ex) {
+                const error = isZeroError(ex)
+                  ? ex
+                  : new ClientError(
+                      {
+                        kind: ClientErrorKind.Internal,
+                        message: getErrorMessage(ex),
+                      },
+                      {cause: ex},
+                    );
+                if (!attempt.controller.signal.aborted) {
+                  this.#disconnect(lc, error);
+                }
+                ready.reject(error);
+                if (this.#connectionReadyResolver === ready) {
+                  this.#connectionReadyResolver = connectionReadyResolver();
+                }
+                throw error;
+              }
+              ready.resolve();
+              additionalConnectParams = undefined;
+            } finally {
+              clearTimeout(timeoutID);
+              attempt.controller.signal.removeEventListener(
+                'abort',
+                abortHandler,
+              );
+              if (this.#currentConnectAttempt === attempt) {
+                this.#currentConnectAttempt = undefined;
+              }
+            }
 
             throwIfConnectionError(this.#connectionManager.state);
 
@@ -2138,6 +2259,7 @@ export class Zero<
           }
 
           case ConnectionStatus.Connected: {
+            const ready = this.#connectionReadyResolver;
             // When connected we wait for whatever happens first out of:
             // - After pingTimeoutMs we send a ping
             // - We get a message
@@ -2151,38 +2273,47 @@ export class Zero<
               controller.signal,
             );
 
-            const raceResult = await promiseRace({
-              waitForPing: pingTimeoutPromise,
-              waitForPingAborted: pingTimeoutAborted,
-              tabHidden: this.#visibilityWatcher.waitForHidden(),
-              stateChange: this.#connectionManager.waitForStateChange(),
-            });
+            try {
+              const raceResult = await promiseRace({
+                waitForPing: pingTimeoutPromise,
+                waitForPingAborted: pingTimeoutAborted,
+                tabHidden: this.#visibilityWatcher.waitForHidden(),
+                stateChange: this.#connectionManager.waitForStateChange(),
+              });
 
-            switch (raceResult.key) {
-              case 'waitForPing': {
-                await this.#ping(lc);
-                break;
+              switch (raceResult.key) {
+                case 'waitForPing': {
+                  await this.#ping(lc);
+                  break;
+                }
+
+                case 'waitForPingAborted':
+                  break;
+
+                case 'tabHidden': {
+                  const hiddenError = new ClientError({
+                    kind: ClientErrorKind.Hidden,
+                    message: 'Connection closed because tab was hidden',
+                  });
+                  this.#disconnect(lc, hiddenError);
+                  break;
+                }
+
+                case 'stateChange': {
+                  throwIfConnectionError(raceResult.result);
+                  break;
+                }
+
+                default:
+                  unreachable(raceResult);
               }
-
-              case 'waitForPingAborted':
-                break;
-
-              case 'tabHidden': {
-                const hiddenError = new ClientError({
-                  kind: ClientErrorKind.Hidden,
-                  message: 'Connection closed because tab was hidden',
-                });
-                this.#disconnect(lc, hiddenError);
-                break;
+            } finally {
+              if (
+                !this.#connectionManager.is(ConnectionStatus.Connected) &&
+                this.#connectionReadyResolver === ready
+              ) {
+                this.#connectionReadyResolver = connectionReadyResolver();
               }
-
-              case 'stateChange': {
-                throwIfConnectionError(raceResult.result);
-                break;
-              }
-
-              default:
-                unreachable(raceResult);
             }
 
             break;
@@ -2350,7 +2481,7 @@ export class Zero<
     }
 
     // If we are connecting we wait until we are connected.
-    await this.#connectResolver.promise;
+    await this.#connectionReadyResolver.promise;
     assert(
       this.#socket,
       'Expected socket to be connected for mutation recovery pull',
@@ -2568,7 +2699,7 @@ export class Zero<
         this.#queryManager,
         this.#zeroContext,
         async () => {
-          await this.#connectResolver.promise;
+          await this.#connectionReadyResolver.promise;
           return must(this.#socket);
         },
       ));
@@ -2673,6 +2804,7 @@ export async function createSocket(
   additionalConnectParams: Record<string, string> | undefined,
   activeClientsManager: Pick<ActiveClientsManager, 'activeClients'>,
   maxHeaderLength = 1024 * 8,
+  onEvent?: (event: string) => void,
 ): Promise<
   [
     WebSocket,
@@ -2680,6 +2812,7 @@ export async function createSocket(
     DeleteClientsBody | undefined,
   ]
 > {
+  onEvent?.('reading the profile ID');
   const url = await createConnectionURL(
     socketOrigin,
     clientID,
@@ -2701,9 +2834,11 @@ export async function createSocket(
   // for a `protocol`.
   const WS = mustGetBrowserGlobal('WebSocket');
   const queriesPatchP = rep.query(tx => queryManager.getQueriesPatch(tx));
+  onEvent?.('reading deleted clients');
   const deletedClientsArray = await deleteClientsManager.getDeletedClients();
   let deletedClients: DeleteClientsBody | undefined =
     convertDeletedClientsToBody(deletedClientsArray, clientGroupID);
+  onEvent?.('reading desired queries');
   let queriesPatch: Map<string, UpQueriesPatchOp> | undefined =
     await queriesPatchP;
   const {activeClients} = activeClientsManager;
@@ -2739,6 +2874,7 @@ export async function createSocket(
   } else {
     deletedClients = undefined;
   }
+  onEvent?.('creating the WebSocket');
   return [
     new WS(
       // toString() required for RN URL polyfill.

@@ -71,13 +71,22 @@ export class IncrementalSyncer {
 
   async run() {
     const lc = this.#lc;
-    this.#worker.onError(err => this.#state.stop(lc, err));
+    let workerError: Error | undefined;
+    this.#worker.onError(err => {
+      workerError ??= err;
+      this.#state.stop(lc, err);
+    });
     lc.info?.(`Starting IncrementalSyncer`);
     const {watermark: initialWatermark} =
       await this.#worker.getSubscriptionState();
 
     // Notify any waiting subscribers that the replica is ready to be read.
-    void this.#notifier.notifySubscribers();
+    // This initial notification intentionally omits replicaReadyTimeMs because
+    // it represents already-current state, not newly-unserved work.
+    void this.#notifier.notifySubscribers({
+      state: 'version-ready',
+      watermark: initialWatermark,
+    });
 
     while (this.#state.shouldRun()) {
       const {replicaVersion, watermark} =
@@ -195,6 +204,9 @@ export class IncrementalSyncer {
       await this.#state.backoff(lc, err);
     }
     lc.info?.('IncrementalSyncer stopped');
+    if (workerError) {
+      throw workerError;
+    }
   }
 
   #handleResult(lc: LogContext, result: CommitResult | null) {
@@ -215,7 +227,12 @@ export class IncrementalSyncer {
       this.#statusPublisher?.publish(lc, 'Replicating', 'Schema updated');
     }
     if (result.watermark && result.changeLogUpdated) {
-      void this.#notifier.notifySubscribers({state: 'version-ready'});
+      void this.#notifier.notifySubscribers({
+        state: 'version-ready',
+        watermark: result.watermark,
+        replicaReadyTimeMs: Date.now(),
+        upstreamCommitTimeMs: result.upstreamCommitTimeMs,
+      });
     }
   }
 

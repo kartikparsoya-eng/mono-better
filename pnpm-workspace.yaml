@@ -26,6 +26,7 @@ minimumReleaseAgeExclude:
   - postcss@8.5.10
   - '@rocicorp/zero-sqlite3'
   - '@rocicorp/logger@6.1.0'
+  - '@rocicorp/zero-virtual@0.6.0'
 
 overrides:
   '@hono/node-server@<1.19.13': ^1.19.13
@@ -40,3 +41,6 @@ overrides:
   serialize-javascript@<=7.0.2: ^7.0.3
   undici@<6.24.0: ^6.24.0
   webpackbar: ^7.0.0
+
+patchedDependencies:
+  postgres@3.4.7: packages/zero/patches/postgres@3.4.7.patch

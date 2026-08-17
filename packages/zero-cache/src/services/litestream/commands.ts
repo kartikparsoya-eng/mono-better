@@ -1,6 +1,7 @@
 import type {ChildProcess} from 'node:child_process';
 import {spawn} from 'node:child_process';
-import {existsSync} from 'node:fs';
+import {existsSync, readdirSync, rmSync, statSync} from 'node:fs';
+import {basename, dirname, join} from 'node:path';
 import type {LogContext, LogLevel} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
 import {must} from '../../../../shared/src/must.ts';
@@ -9,6 +10,10 @@ import {Database} from '../../../../zqlite/src/db.ts';
 import {assertNormalized} from '../../config/normalize.ts';
 import type {ZeroConfig} from '../../config/zero-config.ts';
 import {deleteLiteDB} from '../../db/delete-lite-db.ts';
+import {
+  isSQLiteCorruption,
+  logSQLiteCorruptionDiagnostics,
+} from '../../db/sqlite-corruption.ts';
 import {StatementRunner} from '../../db/statements.ts';
 import {getShardConfig} from '../../types/shards.ts';
 import type {Source} from '../../types/streams.ts';
@@ -18,16 +23,44 @@ import type {
   SnapshotStatus,
 } from '../change-streamer/snapshot.ts';
 import {getSubscriptionState} from '../replicator/schema/replication-state.ts';
+import {
+  litestreamBackupListDuration,
+  litestreamBackupMetricAttrs,
+  litestreamBackupProcessMetricAttrs,
+  litestreamBackupProcessDuration,
+  litestreamBackupProcessRuns,
+  litestreamRestoreAttempts,
+  litestreamRestoredDbBytes,
+  litestreamRestoreDuration,
+  litestreamRestoreMetricAttrs,
+  litestreamRestoreProcessDuration,
+  litestreamRestoreRuns,
+  litestreamRestoreValidationDuration,
+  litestreamRestoreWaitDuration,
+  type LitestreamRole,
+} from './metrics.ts';
 
-// Retry for up to 3 minutes (60 times with 3 second delay).
-// Beyond that, let the container runner restart the task.
-const MAX_RETRIES = 60;
 const RETRY_INTERVAL_MS = 3000;
+// A short retry is much cheaper than an initial Postgres sync, while keeping a
+// persistent failure from delaying startup appreciably.
+const MAX_RESTORE_ATTEMPTS = 3;
+const RESTORE_RETRY_DELAY_MS = 5_000;
 
 type ReplicaConstraints = {
   replicaVersion: string;
   minWatermark: string;
 };
+
+type RestoreResult = 'success' | 'no_backup' | 'invalid_replica' | 'error';
+
+type RestoreAttempt = {
+  restored: boolean;
+  backupURL: string | undefined;
+  result: RestoreResult;
+};
+
+const MAX_LOGGED_RESTORE_DIRECTORY_ENTRIES = 100;
+const LEGACY_RESTORE_WAL_INDEX = /^[0-9a-f]{8}$/;
 
 export class BackupNotFoundException extends Error {
   static readonly name = 'BackupNotFoundException';
@@ -48,34 +81,67 @@ export async function restoreReplica(
   config: ZeroConfig,
   replicaConstraints: ReplicaConstraints | null,
 ) {
-  for (let i = 0; i < MAX_RETRIES; i++) {
-    try {
-      if (await tryRestore(lc, config, replicaConstraints)) {
-        return;
-      }
-    } catch (e) {
-      if (i === 0) {
-        // A restore will fail if the `replicate` process creates a new
-        // snapshot (and compacts old files) at the same time. Snapshots are
-        // infrequent (e.g. once every 12 hours), and the scenario is
-        // recoverable with a retry.
-        lc.warn?.(`initial restore attempt failed. retrying once`, e);
+  const start = performance.now();
+  const role: LitestreamRole = replicaConstraints
+    ? 'replication_manager'
+    : 'view_syncer';
+  let backupURL = config.litestream.backupURL;
+  let result: RestoreResult | undefined;
+  // View-syncers (no replicaConstraints) wait indefinitely for the
+  // replication-manager to publish a restorable backup. On a fresh stack the
+  // first backup is not durable until the initial sync completes and litestream
+  // uploads the initial snapshot, which can take many minutes for a large
+  // replica. The platform's startup probe budget (which scales with replica
+  // size) is the backstop, so restoreReplica must not impose its own shorter
+  // cap and self-terminate while the backup is still being produced.
+  try {
+    for (let attemptNum = 1; ; attemptNum++) {
+      let attempt: RestoreAttempt;
+      try {
+        attempt = await tryRestore(lc, config, replicaConstraints, role);
+      } catch (e) {
+        // View-syncers retain their existing startup behavior. For replication
+        // managers, retry a transient restore failure twice before falling back
+        // to the existing initial-sync recovery path.
+        if (!replicaConstraints || attemptNum === MAX_RESTORE_ATTEMPTS) {
+          throw e;
+        }
+        lc.warn?.(
+          `litestream restore attempt ${attemptNum} failed; retrying in ${RESTORE_RETRY_DELAY_MS}ms (attempt ${attemptNum + 1} of ${MAX_RESTORE_ATTEMPTS})`,
+          e,
+        );
+        await sleep(RESTORE_RETRY_DELAY_MS);
         continue;
       }
-      // If it fails again on the retry, though, bail.
-      throw e;
+      backupURL = attempt.backupURL;
+      if (attempt.restored) {
+        result = attempt.result;
+        return;
+      }
+      if (replicaConstraints) {
+        // The replication-manager restores against explicit constraints, so a
+        // missing backup is fatal (e.g. the litestream URL was purposefully
+        // changed to force a resync). Only the view-syncer (no constraints)
+        // waits for a backup to appear.
+        result = attempt.result;
+        throw new BackupNotFoundException(config.litestream.backupURL);
+      }
+      lc.info?.(
+        `replica not found. retrying in ${RETRY_INTERVAL_MS / 1000} seconds`,
+      );
+      await sleep(RETRY_INTERVAL_MS);
     }
-    if (replicaConstraints) {
-      // This can happen if the litestream URL is purposefully changed to
-      // force a resync.
-      throw new BackupNotFoundException(config.litestream.backupURL);
+  } catch (e) {
+    if (e instanceof BackupNotFoundException && result === undefined) {
+      result = 'no_backup';
     }
-    lc.info?.(
-      `replica not found. retrying in ${RETRY_INTERVAL_MS / 1000} seconds`,
-    );
-    await sleep(RETRY_INTERVAL_MS);
+    throw e;
+  } finally {
+    const attrs = litestreamRestoreMetricAttrs(config, role, backupURL);
+    const labels = {...attrs, result: result ?? 'error'};
+    litestreamRestoreRuns().add(1, labels);
+    litestreamRestoreDuration().recordMs(performance.now() - start, labels);
   }
-  throw new Error(`max attempts exceeded restoring replica`);
 }
 
 function getLitestream(
@@ -106,10 +172,6 @@ function getLitestream(
     multipartSize,
   } = config.litestream;
 
-  // Set the snapshot interval to something smaller than x hours so that
-  // the hourly check triggers on the hour, rather than the hour after.
-  const snapshotBackupIntervalMinutes = snapshotBackupIntervalHours * 60 - 5;
-
   const litestream =
     // The v0.5.8+ litestream executable can restore from either the new LTX
     // format or the legacy WAL format, allowing forwards-compatibility /
@@ -132,8 +194,11 @@ function getLitestream(
         incrementalBackupIntervalMinutes,
       ),
       ['ZERO_LITESTREAM_LOG_LEVEL']: logLevelOverride ?? logLevel,
-      ['ZERO_LITESTREAM_SNAPSHOT_BACKUP_INTERVAL_MINUTES']: String(
-        snapshotBackupIntervalMinutes,
+      ['ZERO_LITESTREAM_SNAPSHOT_BACKUP_INTERVAL_HOURS']: String(
+        snapshotBackupIntervalHours,
+      ),
+      ['ZERO_LITESTREAM_SNAPSHOT_RETENTION_INTERVAL_HOURS']: String(
+        snapshotBackupIntervalHours + 6, // delete old snapshots after 6 hours
       ),
       ['ZERO_LITESTREAM_MULTIPART_CONCURRENCY']: String(multipartConcurrency),
       ['ZERO_LITESTREAM_MULTIPART_SIZE']: String(multipartSize),
@@ -150,56 +215,200 @@ async function tryRestore(
   lc: LogContext,
   config: ZeroConfig,
   replicaConstraints: ReplicaConstraints | null,
-) {
+  role: LitestreamRole,
+): Promise<RestoreAttempt> {
   let snapshotStatus: SnapshotStatus | undefined;
   if (!replicaConstraints) {
     // view-syncers fetch replica constraints from the replication-manager
     // via the snapshot protocol.
+    const waitStart = performance.now();
     snapshotStatus = await reserveAndGetSnapshotStatus(lc, config);
+    litestreamRestoreWaitDuration().recordMs(
+      performance.now() - waitStart,
+      litestreamRestoreMetricAttrs(config, role, snapshotStatus.backupURL),
+    );
     lc.info?.(`restoring backup from ${snapshotStatus.backupURL}`);
     replicaConstraints = snapshotStatus;
   }
 
-  const {litestream, env} = getLitestream(
-    'restore',
-    config,
-    'debug', // Include all output from `litestream restore`, as it's minimal.
-    snapshotStatus?.backupURL,
-  );
-  const {restoreParallelism: parallelism} = config.litestream;
-  const proc = spawn(
-    litestream,
-    [
+  const backupURL = snapshotStatus?.backupURL ?? config.litestream.backupURL;
+  const attrs = litestreamRestoreMetricAttrs(config, role, backupURL);
+  const replicaFile = config.replica.file;
+  let result: RestoreResult = 'error';
+  try {
+    logRestoreDirectoryContents(lc, replicaFile, 'before-temp-cleanup');
+    deleteRestoreTempFiles(replicaFile);
+    const replicaExistedBeforeRestore = existsSync(replicaFile);
+    const {litestream, env} = getLitestream(
       'restore',
-      '-if-db-not-exists',
-      '-if-replica-exists',
-      '-parallelism',
-      String(parallelism),
-      config.replica.file,
-    ],
-    {env, stdio: 'inherit', windowsHide: true},
-  );
-  const {promise, resolve, reject} = resolver();
-  proc.on('error', reject);
-  proc.on('close', (code, signal) => {
-    if (signal) {
-      reject(`litestream killed with ${signal}`);
-    } else if (code !== 0) {
-      reject(`litestream exited with code ${code}`);
-    } else {
-      resolve();
+      config,
+      'debug', // Include all output from `litestream restore`, as it's minimal.
+      snapshotStatus?.backupURL,
+    );
+    const {
+      restoreParallelism: parallelism,
+      multipartConcurrency,
+      multipartSize,
+    } = config.litestream;
+    lc.info?.(`starting litestream restore`, {
+      restoreParallelism: parallelism,
+      multipartConcurrency,
+      multipartSize,
+    });
+    // Pipe (rather than inherit) litestream's stdout/stderr so that its own
+    // `"level":"ERROR"` output on a failed restore does not go straight to the
+    // pod's stdout — where a log-scraper alert would page on it — before our
+    // code has decided how to handle the failure. The captured output is
+    // included in the thrown error so the caller can log the final outcome.
+    // See INC-961.
+    const proc = spawn(
+      litestream,
+      [
+        'restore',
+        '-if-db-not-exists',
+        '-if-replica-exists',
+        '-parallelism',
+        String(parallelism),
+        config.replica.file,
+      ],
+      {env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true},
+    );
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.setEncoding('utf-8');
+    proc.stderr.setEncoding('utf-8');
+    proc.stdout.on('data', chunk => (stdout += chunk));
+    proc.stderr.on('data', chunk => (stderr += chunk));
+    const {promise, resolve, reject} = resolver();
+    proc.on('error', reject);
+    proc.on('close', (code, signal) => {
+      if (signal) {
+        reject(`litestream killed with ${signal}`);
+      } else if (code !== 0) {
+        reject(`litestream exited with code ${code}`);
+      } else {
+        resolve();
+      }
+    });
+    const processStart = performance.now();
+    try {
+      await promise;
+      litestreamRestoreProcessDuration().recordMs(
+        performance.now() - processStart,
+        {...attrs, result: 'success'},
+      );
+      // A successful restore does not emit ERROR-level output; forward
+      // litestream's own (minimal, debug-level) restore logging to the pod's
+      // stdout/stderr, matching the previous `stdio: 'inherit'` behavior.
+      if (stdout) {
+        process.stdout.write(stdout);
+      }
+      if (stderr) {
+        process.stderr.write(stderr);
+      }
+    } catch (e) {
+      litestreamRestoreProcessDuration().recordMs(
+        performance.now() - processStart,
+        {...attrs, result: 'error'},
+      );
+      const output = [stdout, stderr]
+        .map(value => value.trim())
+        .filter(Boolean)
+        .join('\n');
+      throw new Error(output ? `${String(e)}\n${output}` : String(e), {
+        cause: e,
+      });
     }
-  });
-  await promise;
-  if (!existsSync(config.replica.file)) {
-    return false;
+    if (!existsSync(config.replica.file)) {
+      result = 'no_backup';
+      return {restored: false, backupURL, result};
+    }
+    const validationStart = performance.now();
+    const valid = replicaIsValid(lc, config.replica.file, replicaConstraints);
+    litestreamRestoreValidationDuration().recordMs(
+      performance.now() - validationStart,
+      {...attrs, result: valid ? 'success' : 'invalid_replica'},
+    );
+    if (!valid) {
+      result = 'invalid_replica';
+      lc.info?.(`Deleting local replica and retrying restore`);
+      deleteLiteDB(config.replica.file);
+      return {restored: false, backupURL, result};
+    }
+    result = 'success';
+    if (!replicaExistedBeforeRestore) {
+      litestreamRestoredDbBytes().add(statSync(config.replica.file).size, {
+        ...attrs,
+        result: 'success',
+      });
+    }
+    return {restored: true, backupURL, result};
+  } finally {
+    try {
+      deleteRestoreTempFiles(replicaFile);
+    } catch (e) {
+      lc.warn?.('Unable to clean up Litestream restore temporary files', {
+        replicaFile,
+        error: String(e),
+      });
+    }
+    logRestoreDirectoryContents(lc, replicaFile, 'after-temp-cleanup');
+    litestreamRestoreAttempts().add(1, {...attrs, result});
   }
-  if (!replicaIsValid(lc, config.replica.file, replicaConstraints)) {
-    lc.info?.(`Deleting local replica and retrying restore`);
-    deleteLiteDB(config.replica.file);
-    return false;
+}
+
+function deleteRestoreTempFiles(replicaFile: string) {
+  const temporaryReplicaFile = `${replicaFile}.tmp`;
+  deleteLiteDB(temporaryReplicaFile);
+
+  // rocicorp/litestream zero@v0.0.9 downloads WAL indexes in parallel to
+  // `<output>.tmp-<8 lowercase hex digits>-wal` before applying them.
+  const directory = dirname(temporaryReplicaFile);
+  if (!existsSync(directory)) {
+    return;
   }
-  return true;
+  const prefix = `${basename(temporaryReplicaFile)}-`;
+  for (const name of readdirSync(directory)) {
+    if (!name.startsWith(prefix) || !name.endsWith('-wal')) {
+      continue;
+    }
+    const index = name.slice(prefix.length, -'-wal'.length);
+    if (LEGACY_RESTORE_WAL_INDEX.test(index)) {
+      rmSync(join(directory, name), {force: true});
+    }
+  }
+}
+
+function logRestoreDirectoryContents(
+  lc: LogContext,
+  replicaFile: string,
+  phase: 'before-temp-cleanup' | 'after-temp-cleanup',
+) {
+  const directory = dirname(replicaFile);
+  try {
+    const names = readdirSync(directory).sort();
+    const entries = names
+      .slice(0, MAX_LOGGED_RESTORE_DIRECTORY_ENTRIES)
+      .map(name => ({name, sizeBytes: statSync(join(directory, name)).size}));
+    lc.info?.('Litestream restore directory contents', {
+      phase,
+      directory,
+      replicaFile,
+      entryCount: names.length,
+      omittedEntryCount: Math.max(
+        0,
+        names.length - MAX_LOGGED_RESTORE_DIRECTORY_ENTRIES,
+      ),
+      entries,
+    });
+  } catch (e) {
+    lc.warn?.('Unable to inspect Litestream restore directory', {
+      phase,
+      directory,
+      replicaFile,
+      error: String(e),
+    });
+  }
 }
 
 function replicaIsValid(
@@ -207,8 +416,9 @@ function replicaIsValid(
   replica: string,
   constraints: ReplicaConstraints,
 ) {
-  const db = new Database(lc, replica);
+  let db: Database | undefined;
   try {
+    db = new Database(lc, replica);
     const {replicaVersion, watermark} = getSubscriptionState(
       new StatementRunner(db),
     );
@@ -231,10 +441,13 @@ function replicaIsValid(
     );
     return true;
   } catch (e) {
+    if (isSQLiteCorruption(e)) {
+      logSQLiteCorruptionDiagnostics(lc, 'restored replica', replica, e);
+    }
     lc.error?.('Error while validating restored replica', e);
     return false;
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
@@ -243,12 +456,43 @@ export function startReplicaBackupProcess(
   config: ZeroConfig,
 ): ChildProcess {
   const {litestream, env} = getLitestream('replicate', config);
+  const attrs = litestreamBackupProcessMetricAttrs(config);
   lc.info?.(`starting litestream backup to ${config.litestream.backupURL}`);
-  return spawn(litestream, ['replicate'], {
+  const start = performance.now();
+  const proc = spawn(litestream, ['replicate'], {
     env,
     stdio: 'inherit',
     windowsHide: true,
   });
+  let recorded = false;
+  const record = (result: 'success' | 'error' | 'stopped') => {
+    if (recorded) {
+      return;
+    }
+    recorded = true;
+    const labels = {...attrs, result};
+    litestreamBackupProcessRuns().add(1, labels);
+    litestreamBackupProcessDuration().recordMs(
+      performance.now() - start,
+      labels,
+    );
+  };
+  proc.on('error', e => {
+    lc.warn?.(`litestream backup process error`, e);
+    record('error');
+  });
+  proc.on('close', (code, signal) => {
+    if (signal) {
+      lc.info?.(`litestream backup process stopped`, {signal});
+      record('stopped');
+    } else if (code === 0) {
+      record('success');
+    } else {
+      lc.warn?.(`litestream backup process exited with code ${code}`);
+      record('error');
+    }
+  });
+  return proc;
 }
 
 // Listing the backup state requires a few S3 LIST requests, which should
@@ -308,6 +552,8 @@ async function listBackupCreatedTimes(
   config: ZeroConfig,
   command: 'snapshots' | 'wal',
 ): Promise<Date[]> {
+  const start = performance.now();
+  let result: 'success' | 'empty' | 'timeout' | 'error' = 'error';
   const {litestream, env} = getLitestream('replicate', config);
   const proc = spawn(litestream, [command, config.replica.file], {
     env,
@@ -329,18 +575,24 @@ async function listBackupCreatedTimes(
     }
   });
   const timeout = setTimeout(() => {
+    result = 'timeout';
     reject(new Error(`timed out listing backup state (litestream ${command})`));
     proc.kill('SIGKILL');
   }, LIST_BACKUP_TIMEOUT_MS);
 
-  let output: string;
   try {
-    output = await promise;
+    const output = await promise;
+    const times = parseBackupCreatedTimes(lc, command, output);
+    result = times.length ? 'success' : 'empty';
+    return times;
   } finally {
     clearTimeout(timeout);
+    litestreamBackupListDuration().recordMs(performance.now() - start, {
+      ...litestreamBackupMetricAttrs(config),
+      command,
+      result,
+    });
   }
-
-  return parseBackupCreatedTimes(lc, command, output);
 }
 
 /**
@@ -394,7 +646,7 @@ function reserveAndGetSnapshotStatus(
         const stream = await reserveSnapshot(lc, config);
         for await (const msg of stream) {
           // Capture the value of the status message that the change-streamer
-          // (i.e. BackupMonitor) returns, and hold the connection open to
+          // backup monitor returns, and hold the connection open to
           // "reserve" the snapshot and prevent change log cleanup.
           resolve(msg[1]);
           resolved = true;

@@ -1,9 +1,11 @@
+import {constants as bufferConstants} from 'node:buffer';
 import type {LogContext} from '@rocicorp/logger';
 import {SqliteError} from '@rocicorp/zero-sqlite3';
 import {AbortError} from '../../../../shared/src/abort-error.ts';
 import {assert, unreachable} from '../../../../shared/src/asserts.ts';
 import {stringify} from '../../../../shared/src/bigint-json.ts';
 import {must} from '../../../../shared/src/must.ts';
+import {mapEntries} from '../../../../shared/src/objects.ts';
 import type {DownloadStatus} from '../../../../zero-events/src/status.ts';
 import {
   createLiteIndexStatement,
@@ -66,11 +68,24 @@ import {TableMetadataTracker} from './schema/table-metadata.ts';
 
 export type ChangeProcessorMode = ReplicatorMode | 'initial-sync';
 
+const BIND_VALUE_TOO_BIG_ERROR =
+  'The bound string, buffer, or bigint is too big';
+const MAX_SQLITE_BIND_BYTES = Math.min(
+  bufferConstants.MAX_LENGTH,
+  bufferConstants.MAX_STRING_LENGTH,
+);
+
 export type CommitResult = {
   watermark: string;
   completedBackfill: DownloadStatus | undefined;
   schemaUpdated: boolean;
   changeLogUpdated: boolean;
+  /**
+   * Millisecond epoch at which the transaction committed upstream, if the
+   * ChangeSource reported one. Propagated to ViewSyncers as the origin
+   * timestamp of the end-to-end serving lag measurement.
+   */
+  upstreamCommitTimeMs?: number | undefined;
 };
 
 /**
@@ -351,14 +366,11 @@ class TransactionProcessor {
 
     switch (mode) {
       case 'serving':
-        // Although the Replicator / Incremental Syncer is the only writer of the replica,
-        // a `BEGIN CONCURRENT` transaction is used to allow View Syncers to simulate
-        // (i.e. and `ROLLBACK`) changes on historic snapshots of the database for the
-        // purpose of IVM).
-        //
-        // This TransactionProcessor is the only logic that will actually
-        // `COMMIT` any transactions to the replica.
-        db.beginConcurrent();
+        // This is the only transaction that commits to the serving replica.
+        // Snapshotters use BEGIN CONCURRENT for private changes that are
+        // always rolled back, while BEGIN IMMEDIATE lets this writer spill
+        // dirty pages during large transactions.
+        db.beginImmediate();
         break;
       case 'backup':
         // For the backup-replicator (i.e. replication-manager), there are no View Syncers
@@ -508,19 +520,46 @@ class TransactionProcessor {
     const conds = Object.keys(currKey).map(col => `${id(col)}=?`);
     const setExprs = Object.keys(row).map(col => `${id(col)}=?`);
 
-    const {changes} = this.#db.run(
-      `
-      UPDATE ${id(table)}
-        SET ${setExprs.join(',')}
-        WHERE ${conds.join(' AND ')}
-      `,
-      [...Object.values(row), ...Object.values(currKey)],
-    );
+    try {
+      const {changes} = this.#db.run(
+        `
+        UPDATE ${id(table)}
+          SET ${setExprs.join(',')}
+          WHERE ${conds.join(' AND ')}
+        `,
+        [...Object.values(row), ...Object.values(currKey)],
+      );
 
-    // If the UPDATE did not affect any rows, perform an UPSERT of the
-    // new row for resumptive replication.
-    if (changes === 0) {
-      this.#upsert(table, row);
+      // If the UPDATE did not affect any rows, perform an UPSERT of the
+      // new row for resumptive replication.
+      if (changes === 0) {
+        this.#upsert(table, row);
+      }
+    } catch (e) {
+      if (
+        !(e instanceof RangeError) ||
+        e.message !== BIND_VALUE_TOO_BIG_ERROR
+      ) {
+        throw e;
+      }
+
+      const binding = [...Object.entries(row), ...Object.entries(currKey)]
+        .map(
+          ([column, value]) =>
+            [column, oversizedValueDescription(value)] as const,
+        )
+        .find(([, description]) => description);
+      const relationOid =
+        'relationOid' in update.relation &&
+        typeof update.relation.relationOid === 'number'
+          ? ` relationOid=${update.relation.relationOid}`
+          : '';
+      const error = new Error(
+        `Oversized SQLite update binding: tx=${this.#version}${relationOid} table=${update.relation.schema}.${update.relation.name} column=${binding?.[0] ?? 'unknown'}${binding?.[1] ? ` ${binding[1]}` : ''}`,
+        {cause: e},
+      );
+      error.name = 'OversizedUpdateBindingError';
+      throw error;
     }
   }
 
@@ -647,33 +686,60 @@ class TransactionProcessor {
     const oldSpec = mapPostgresToLiteColumn(table, msg.old, 'ignore-default');
     const newSpec = mapPostgresToLiteColumn(table, msg.new, 'ignore-default');
 
-    // The only updates that are relevant are the column name and the data type.
+    // If neither the column name nor the SQLite data type changes, only the
+    // upstream metadata needs to be updated. This includes changes such as a
+    // varchar character limit, which SQLite does not enforce but a freshly
+    // built replica still records.
     if (oldName === newName && oldSpec.dataType === newSpec.dataType) {
-      this.#lc.info?.(msg.tag, 'no thing to update', oldSpec, newSpec);
+      this.#columnMetadata.update(
+        table,
+        msg.old.name,
+        msg.new.name,
+        msg.new.spec,
+      );
+      this.#lc.info?.(msg.tag, 'updated metadata only', oldSpec, newSpec);
       return;
     }
     // If the data type changes, we have to make a new column with the new data type
     // and copy the values over.
     if (oldSpec.dataType !== newSpec.dataType) {
-      // Remember (and drop) the indexes that reference the column.
-      const indexes = listIndexes(this.#db.db).filter(
-        idx => idx.tableName === table && oldName in idx.columns,
+      const tableSpec = must(
+        listTables(this.#db.db, false, false).find(
+          tableSpec => tableSpec.name === table,
+        ),
       );
-      const stmts = indexes.map(idx => `DROP INDEX IF EXISTS ${id(idx.name)};`);
-      const tmpName = `tmp.${newName}`;
-      stmts.push(`
-        ALTER TABLE ${id(table)} ADD ${id(tmpName)} ${liteColumnDef(newSpec)};
-        UPDATE ${id(table)} SET ${id(tmpName)} = ${id(oldName)};
-        ALTER TABLE ${id(table)} DROP ${id(oldName)};
-        `);
-      for (const idx of indexes) {
-        // Re-create the indexes to reference the new column.
-        idx.columns[tmpName] = idx.columns[oldName];
-        delete idx.columns[oldName];
-        stmts.push(createLiteIndexStatement(idx));
-      }
+      const indexes = listIndexes(this.#db.db).filter(
+        idx => idx.tableName === table,
+      );
+      const tmpTable = `tmp.${table}`;
+      const newColumns = mapEntries(tableSpec.columns, (column, spec) => [
+        column === oldName ? newName : column,
+        column === oldName ? {...newSpec, pos: spec.pos} : spec,
+      ]);
+      const sourceColumns = Object.keys(tableSpec.columns);
+      const destinationColumns = Object.keys(newColumns);
+      const stmts = [
+        createLiteTableStatement({
+          ...tableSpec,
+          name: tmpTable,
+          columns: newColumns,
+        }),
+        `INSERT INTO ${id(tmpTable)} (${destinationColumns.map(id).join(',')})
+         SELECT ${sourceColumns.map(id).join(',')} FROM ${id(table)};`,
+        `DROP TABLE ${id(table)};`,
+        `ALTER TABLE ${id(tmpTable)} RENAME TO ${id(table)};`,
+        ...indexes.map(idx =>
+          createLiteIndexStatement({
+            ...idx,
+            columns: mapEntries(idx.columns, (column, direction) => [
+              column === oldName ? newName : column,
+              direction,
+            ]),
+          }),
+        ),
+      ];
       this.#db.db.exec(stmts.join(''));
-      oldName = tmpName;
+      oldName = newName;
     }
     if (oldName !== newName) {
       this.#db.db.exec(
@@ -914,6 +980,7 @@ class TransactionProcessor {
       completedBackfill: this.#completedBackfill,
       schemaUpdated: this.#schemaChanged,
       changeLogUpdated: this.#numChangeLogEntries > 0,
+      upstreamCommitTimeMs: commit.commitTimeMs,
     };
   }
 
@@ -931,6 +998,27 @@ function getBackfilledColumns(
     return undefined; // common case
   }
   return backfilling.filter(col => col in row);
+}
+
+function oversizedValueDescription(value: LiteValueType): string | undefined {
+  if (typeof value === 'bigint') {
+    return BigInt.asIntN(64, value) !== value
+      ? 'valueType=bigint fitsInt64=false'
+      : undefined;
+  }
+
+  const sizeBytes =
+    typeof value === 'string'
+      ? Buffer.byteLength(value)
+      : value instanceof Uint8Array
+        ? value.byteLength
+        : undefined;
+  if (sizeBytes !== undefined && sizeBytes > MAX_SQLITE_BIND_BYTES) {
+    const valueType = typeof value === 'string' ? 'string' : 'buffer';
+    return `valueType=${valueType} sizeBytes=${sizeBytes} limitBytes=${MAX_SQLITE_BIND_BYTES}`;
+  }
+
+  return undefined;
 }
 
 function ensureError(err: unknown): Error {

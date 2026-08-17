@@ -1,4 +1,11 @@
-import {mkdtempSync, writeFileSync} from 'node:fs';
+import * as childProcess from 'node:child_process';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {LogContext} from '@rocicorp/logger';
@@ -7,8 +14,75 @@ import {
   createSilentLogContext,
   TestLogSink,
 } from '../../../../shared/src/logging-test-utils.ts';
+import {Database} from '../../../../zqlite/src/db.ts';
 import type {ZeroConfig} from '../../config/zero-config.ts';
-import {getLastBackupTime, parseBackupCreatedTimes} from './commands.ts';
+import {initReplicationState} from '../replicator/schema/replication-state.ts';
+import {
+  BackupNotFoundException,
+  getLastBackupTime,
+  parseBackupCreatedTimes,
+  restoreReplica,
+} from './commands.ts';
+import * as litestreamMetrics from './metrics.ts';
+
+// Wrap (don't replace) node:child_process.spawn so tests can assert the args it
+// was called with while it still spawns the fake litestream executable. Node's
+// built-in module exports are non-configurable, so vi.spyOn cannot be used here.
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof childProcess>();
+  return {...actual, spawn: vi.fn(actual.spawn)};
+});
+
+// Writes a fake `litestream` executable that emits `sh` (a POSIX shell
+// snippet that can branch on `$1`, the litestream subcommand) and returns the
+// config pointing at it.
+function configWithFakeLitestream(
+  sh: string,
+  replicaFile?: string,
+): ZeroConfig {
+  const dir = mkdtempSync(join(tmpdir(), 'litestream-test-'));
+  const executable = join(dir, 'fake-litestream');
+  writeFileSync(executable, `#!/bin/sh\n${sh}\n`, {mode: 0o755});
+  return {
+    port: 4848,
+    log: {format: 'text'},
+    replica: {file: replicaFile ?? join(dir, 'replica.db')},
+    litestream: {
+      executable,
+      backupURL: 's3://fake-bucket/backup',
+      configPath: './src/services/litestream/config.yml',
+      logLevel: 'warn',
+      restoreUsingV5: false,
+      checkpointThresholdMB: 40,
+      incrementalBackupIntervalMinutes: 15,
+      snapshotBackupIntervalHours: 12,
+      multipartConcurrency: 48,
+      multipartSize: 16 * 1024 * 1024,
+      restoreParallelism: 48,
+    },
+  } as unknown as ZeroConfig;
+}
+
+function createRestorableReplica(file: string, watermark: string) {
+  const db = new Database(createSilentLogContext(), file);
+  try {
+    initReplicationState(db, ['zero_pub'], watermark);
+  } finally {
+    db.close();
+  }
+}
+
+const SQLITE_FAMILY_SUFFIXES = ['', '-wal', '-wal2', '-shm', '-journal'];
+
+function sqliteFamilyFiles(file: string) {
+  return SQLITE_FAMILY_SUFFIXES.map(suffix => `${file}${suffix}`);
+}
+
+function writeSQLiteFamily(file: string, contents = 'test data') {
+  for (const familyFile of sqliteFamilyFiles(file)) {
+    writeFileSync(familyFile, contents);
+  }
+}
 
 describe('litestream/commands parseBackupCreatedTimes', () => {
   const lc = createSilentLogContext();
@@ -81,33 +155,6 @@ describe('litestream/commands getLastBackupTime', () => {
     vi.useRealTimers();
   });
 
-  // Writes a fake `litestream` executable that emits `sh` (a POSIX shell
-  // snippet that can branch on `$1`, the snapshots|wal subcommand) and
-  // returns the config pointing at it.
-  function configWithFakeLitestream(sh: string): ZeroConfig {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-test-'));
-    const executable = join(dir, 'fake-litestream');
-    writeFileSync(executable, `#!/bin/sh\n${sh}\n`, {mode: 0o755});
-    return {
-      port: 4848,
-      log: {format: 'text'},
-      replica: {file: join(dir, 'replica.db')},
-      litestream: {
-        executable,
-        backupURL: 's3://fake-bucket/backup',
-        configPath: './src/services/litestream/config.yml',
-        logLevel: 'warn',
-        restoreUsingV5: false,
-        checkpointThresholdMB: 40,
-        incrementalBackupIntervalMinutes: 15,
-        snapshotBackupIntervalHours: 12,
-        multipartConcurrency: 48,
-        multipartSize: 16 * 1024 * 1024,
-        restoreParallelism: 48,
-      },
-    } as unknown as ZeroConfig;
-  }
-
   const lc = createSilentLogContext();
 
   test('returns the most recent created time across snapshots and wal', async () => {
@@ -156,5 +203,378 @@ describe('litestream/commands getLastBackupTime', () => {
     expect(String(outcome.ok === false && outcome.e)).toMatch(
       /timed out listing backup state/,
     );
+  });
+});
+
+describe('litestream/commands restoreReplica', () => {
+  const lc = createSilentLogContext();
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test('restores and validates a compatible replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(source, '01');
+    const restoredDbBytesAdd = vi.fn();
+    vi.spyOn(litestreamMetrics, 'litestreamRestoredDbBytes').mockReturnValue({
+      add: restoredDbBytesAdd,
+    } as unknown as ReturnType<
+      typeof litestreamMetrics.litestreamRestoredDbBytes
+    >);
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  cp "${source}" "$6"\n` +
+        `  exit 0\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await restoreReplica(lc, config, {
+      replicaVersion: '01',
+      minWatermark: '01',
+    });
+
+    expect(existsSync(replica)).toBe(true);
+    expect(restoredDbBytesAdd).toHaveBeenCalledWith(
+      statSync(replica).size,
+      expect.objectContaining({result: 'success'}),
+    );
+  });
+
+  test('does not record restored bytes when reusing an existing replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(replica, '01');
+    const restoredDbBytesAdd = vi.fn();
+    vi.spyOn(litestreamMetrics, 'litestreamRestoredDbBytes').mockReturnValue({
+      add: restoredDbBytesAdd,
+    } as unknown as ReturnType<
+      typeof litestreamMetrics.litestreamRestoredDbBytes
+    >);
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` + `  exit 0\n` + `fi\n` + `exit 1`,
+      replica,
+    );
+
+    await restoreReplica(lc, config, {
+      replicaVersion: '01',
+      minWatermark: '01',
+    });
+
+    expect(restoredDbBytesAdd).not.toHaveBeenCalled();
+  });
+
+  test('reports a missing backup when restore exits without a replica', async () => {
+    const restoreAttemptsAdd = vi.fn();
+    vi.spyOn(litestreamMetrics, 'litestreamRestoreAttempts').mockReturnValue({
+      add: restoreAttemptsAdd,
+    } as unknown as ReturnType<
+      typeof litestreamMetrics.litestreamRestoreAttempts
+    >);
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` + `  exit 0\n` + `fi\n` + `exit 1`,
+    );
+
+    await expect(
+      restoreReplica(lc, config, {
+        replicaVersion: '01',
+        minWatermark: '01',
+      }),
+    ).rejects.toThrow(BackupNotFoundException);
+    expect(restoreAttemptsAdd).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({result: 'no_backup'}),
+    );
+  });
+
+  test('deletes a stale temporary SQLite family before restore', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    const temporaryReplica = `${replica}.tmp`;
+    const stagedWAL = `${temporaryReplica}-deadbeef-wal`;
+    createRestorableReplica(source, '01');
+    writeSQLiteFamily(temporaryReplica);
+    writeFileSync(stagedWAL, 'stale WAL data');
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  for suffix in "" "-wal" "-wal2" "-shm" "-journal"; do\n` +
+        `    if [ -e "$6.tmp$suffix" ]; then exit 9; fi\n` +
+        `  done\n` +
+        `  if [ -e "$6.tmp-deadbeef-wal" ]; then exit 9; fi\n` +
+        `  cp "${source}" "$6"\n` +
+        `  exit 0\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await restoreReplica(lc, config, {
+      replicaVersion: '01',
+      minWatermark: '01',
+    });
+
+    expect(sqliteFamilyFiles(temporaryReplica).some(existsSync)).toBe(false);
+    expect(existsSync(stagedWAL)).toBe(false);
+  });
+
+  test('deletes a temporary SQLite family left by a failed restore', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const replica = join(dir, 'replica.db');
+    const temporaryReplica = `${replica}.tmp`;
+    const stagedWAL = `${temporaryReplica}-deadbeef-wal`;
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  for suffix in "" "-wal" "-wal2" "-shm" "-journal"; do\n` +
+        `    printf "temporary" > "$6.tmp$suffix"\n` +
+        `  done\n` +
+        `  printf "temporary WAL" > "${stagedWAL}"\n` +
+        `  exit 1\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await expect(
+      restoreReplica(lc, config, {
+        replicaVersion: '01',
+        minWatermark: '01',
+      }),
+    ).rejects.toThrow('litestream exited with code 1');
+
+    expect(sqliteFamilyFiles(temporaryReplica).some(existsSync)).toBe(false);
+    expect(existsSync(stagedWAL)).toBe(false);
+  }, 15_000);
+
+  test('temporary restore cleanup preserves the real replica family', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const replica = join(dir, 'replica.db');
+    const temporaryReplica = `${replica}.tmp`;
+    writeSQLiteFamily(replica, 'real replica');
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  printf "temporary" > "$6.tmp"\n` +
+        `  printf "temporary journal" > "$6.tmp-journal"\n` +
+        `  exit 1\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await expect(
+      restoreReplica(lc, config, {
+        replicaVersion: '01',
+        minWatermark: '01',
+      }),
+    ).rejects.toThrow('litestream exited with code 1');
+
+    for (const familyFile of sqliteFamilyFiles(replica)) {
+      expect(readFileSync(familyFile, 'utf8')).toBe('real replica');
+    }
+    expect(sqliteFamilyFiles(temporaryReplica).some(existsSync)).toBe(false);
+  }, 15_000);
+
+  test('logs restore directory contents before and after temporary cleanup', async () => {
+    const sink = new TestLogSink();
+    const loggingLC = new LogContext('debug', undefined, sink);
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    const temporaryReplica = `${replica}.tmp`;
+    const unexpectedFile = join(dir, 'unexpected-restore-file');
+    createRestorableReplica(source, '01');
+    writeFileSync(temporaryReplica, 'stale temporary data');
+    writeFileSync(unexpectedFile, 'unexpected data');
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  cp "${source}" "$6"\n` +
+        `  exit 0\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await restoreReplica(loggingLC, config, {
+      replicaVersion: '01',
+      minWatermark: '01',
+    });
+
+    const snapshots = sink.messages
+      .filter(
+        ([, , args]) => args[0] === 'Litestream restore directory contents',
+      )
+      .map(
+        ([, , args]) =>
+          args[1] as {
+            phase: string;
+            entryCount: number;
+            entries: {name: string; sizeBytes: number}[];
+          },
+      );
+    expect(snapshots.map(snapshot => snapshot.phase)).toEqual([
+      'before-temp-cleanup',
+      'after-temp-cleanup',
+    ]);
+    expect(snapshots[0]?.entries).toContainEqual(
+      expect.objectContaining({
+        name: 'replica.db.tmp',
+        sizeBytes: 20,
+      }),
+    );
+    expect(snapshots[1]?.entries.map(entry => entry.name)).not.toContain(
+      'replica.db.tmp',
+    );
+    for (const snapshot of snapshots) {
+      expect(snapshot.entryCount).toBeGreaterThan(0);
+      expect(snapshot.entries).toContainEqual(
+        expect.objectContaining({
+          name: 'unexpected-restore-file',
+          sizeBytes: 15,
+        }),
+      );
+    }
+  });
+
+  test('includes captured output when restore fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const attempts = join(dir, 'attempts');
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  count=$(cat "${attempts}" 2>/dev/null || echo 0)\n` +
+        `  count=$((count + 1))\n` +
+        `  echo "$count" > "${attempts}"\n` +
+        `  if [ "$count" -eq 3 ]; then mkdir "$6.tmp"; fi\n` +
+        `  echo "restore stdout"\n` +
+        `  echo "restore stderr" >&2\n` +
+        `  exit 1\n` +
+        `fi\n` +
+        `exit 1`,
+    );
+
+    const error = await restoreReplica(lc, config, {
+      replicaVersion: '01',
+      minWatermark: '01',
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain('litestream exited with code 1');
+    expect(String(error)).toContain('restore stdout');
+    expect(String(error)).toContain('restore stderr');
+  }, 15_000);
+
+  test('retries a transient replication-manager restore failure', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    const attempts = join(dir, 'attempts');
+    createRestorableReplica(source, '01');
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  attempts="${attempts}"\n` +
+        `  count=$(cat "$attempts" 2>/dev/null || echo 0)\n` +
+        `  count=$((count + 1))\n` +
+        `  echo "$count" > "$attempts"\n` +
+        `  if [ "$count" -eq 1 ]; then exit 1; fi\n` +
+        `  cp "${source}" "$6"\n` +
+        `  exit 0\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await restoreReplica(lc, config, {
+      replicaVersion: '01',
+      minWatermark: '01',
+    });
+
+    expect(readFileSync(attempts, 'utf-8').trim()).toBe('2');
+    expect(existsSync(replica)).toBe(true);
+  }, 10_000);
+
+  test('deletes an incompatible restored replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(source, '01');
+    const restoreRunsAdd = vi.fn();
+    const restoreValidationRecordMs = vi.fn();
+    vi.spyOn(litestreamMetrics, 'litestreamRestoreRuns').mockReturnValue({
+      add: restoreRunsAdd,
+    } as unknown as ReturnType<typeof litestreamMetrics.litestreamRestoreRuns>);
+    vi.spyOn(
+      litestreamMetrics,
+      'litestreamRestoreValidationDuration',
+    ).mockReturnValue({
+      recordMs: restoreValidationRecordMs,
+    } as unknown as ReturnType<
+      typeof litestreamMetrics.litestreamRestoreValidationDuration
+    >);
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  cp "${source}" "$6"\n` +
+        `  exit 0\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await expect(
+      restoreReplica(lc, config, {
+        replicaVersion: '02',
+        minWatermark: '02',
+      }),
+    ).rejects.toThrow(BackupNotFoundException);
+
+    expect(existsSync(replica)).toBe(false);
+    expect(restoreValidationRecordMs).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({result: 'invalid_replica'}),
+    );
+    expect(restoreRunsAdd).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({result: 'invalid_replica'}),
+    );
+  });
+
+  // INC-961: the mechanism that actually prevents the paging is spawning
+  // `litestream restore` with piped (captured) stdio rather than inheriting the
+  // pod's streams — with `stdio: 'inherit'` litestream's own ERROR would reach
+  // the pod's stdout directly, before our retry logic could downgrade it.
+  // Assert the spawn options so a regression back to inheriting is caught.
+  test('spawns `litestream restore` with piped stdio (not inherited)', async () => {
+    const spawnMock = vi.mocked(childProcess.spawn);
+    spawnMock.mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(source, '01');
+    const config = configWithFakeLitestream(
+      `if [ "$1" = "restore" ]; then\n` +
+        `  cp "${source}" "$6"\n` +
+        `  exit 0\n` +
+        `fi\n` +
+        `exit 1`,
+      replica,
+    );
+
+    await restoreReplica(lc, config, {
+      replicaVersion: '01',
+      minWatermark: '01',
+    });
+
+    const restoreCall = spawnMock.mock.calls.find(
+      call => Array.isArray(call[1]) && call[1][0] === 'restore',
+    );
+    expect(restoreCall).toBeDefined();
+    // stdio is [stdin, stdout, stderr]; stdout/stderr must be piped so
+    // litestream's output is captured rather than sent to the pod's stdout.
+    expect(restoreCall?.[2]?.stdio).toEqual(['ignore', 'pipe', 'pipe']);
   });
 });

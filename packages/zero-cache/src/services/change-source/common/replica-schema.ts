@@ -1,5 +1,4 @@
 import type {LogContext} from '@rocicorp/logger';
-import {SqliteError} from '@rocicorp/zero-sqlite3';
 import type {Database} from '../../../../../zqlite/src/db.ts';
 import {listTables} from '../../../db/lite-tables.ts';
 import {
@@ -7,6 +6,10 @@ import {
   type IncrementalMigrationMap,
   type Migration,
 } from '../../../db/migration-lite.ts';
+import {
+  isSQLiteCorruption,
+  logSQLiteCorruptionDiagnostics,
+} from '../../../db/sqlite-corruption.ts';
 import {AutoResetSignal} from '../../change-streamer/schema/tables.ts';
 import {populateFromExistingTables} from '../../replicator/schema/column-metadata.ts';
 import {
@@ -34,10 +37,7 @@ export async function initReplica(
       schemaVersionMigrationMap,
     );
   } catch (e) {
-    if (e instanceof SqliteError && e.code === 'SQLITE_CORRUPT') {
-      throw new AutoResetSignal(e.message);
-    }
-    throw e;
+    throwAutoResetForCorruption(log, debugName, dbPath, e);
   }
 }
 
@@ -46,20 +46,40 @@ export async function upgradeReplica(
   debugName: string,
   dbPath: string,
 ) {
-  await runSchemaMigrations(
-    log,
-    debugName,
-    dbPath,
-    // setupMigration should never be invoked
-    {
-      migrateSchema: () => {
-        throw new Error(
-          'This should only be called for already synced replicas',
-        );
+  try {
+    await runSchemaMigrations(
+      log,
+      debugName,
+      dbPath,
+      // setupMigration should never be invoked
+      {
+        migrateSchema: () => {
+          throw new Error(
+            'This should only be called for already synced replicas',
+          );
+        },
       },
-    },
-    schemaVersionMigrationMap,
-  );
+      schemaVersionMigrationMap,
+    );
+  } catch (e) {
+    throwAutoResetForCorruption(log, debugName, dbPath, e);
+  }
+}
+
+function throwAutoResetForCorruption(
+  log: LogContext,
+  debugName: string,
+  dbPath: string,
+  e: unknown,
+): never {
+  if (isSQLiteCorruption(e)) {
+    logSQLiteCorruptionDiagnostics(log, debugName, dbPath, e);
+    throw new AutoResetSignal(
+      `replica database appears corrupt: ${String(e)}`,
+      {cause: e},
+    );
+  }
+  throw e;
 }
 
 export const CREATE_V6_COLUMN_METADATA_TABLE = /*sql*/ `

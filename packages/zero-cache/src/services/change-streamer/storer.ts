@@ -13,6 +13,7 @@ import {runTx} from '../../db/run-transaction.ts';
 import {TransactionPool} from '../../db/transaction-pool.ts';
 import {type PostgresDB, type PostgresTransaction} from '../../types/pg.ts';
 import {cdcSchema, type ShardID} from '../../types/shards.ts';
+import {orTimeout} from '../../types/timeout.ts';
 import {
   backfillRequestSchema,
   isDataChange,
@@ -69,6 +70,11 @@ type PendingTransaction = {
   pos: number;
   startingReplicationState: Promise<ReplicationOwner>;
   ack: boolean;
+  // changeLog rows buffered for the next multi-row INSERT flush.
+  batch: ChangeLogRow[];
+  // The most recently issued flush (or metadata) process, awaited to bound
+  // pipeline depth and to order the commit-time replicationState update.
+  lastFlush: Promise<unknown> | undefined;
 };
 
 type ReplicationOwner = {
@@ -80,6 +86,19 @@ const backfillRequestsSchema = v.array(backfillRequestSchema);
 export type TuningOptions = {
   backPressureLimitHeapProportion: number;
   statementTimeoutMs: number;
+  changeLogBatchSize: number;
+  drainTimeoutMs?: number | undefined;
+};
+
+/**
+ * A single `changeLog` row, accumulated in {@link PendingTransaction.batch}
+ * and written via `json_to_recordset()` (see `#flushChangeLog()`).
+ */
+type ChangeLogRow = {
+  watermark: string;
+  precommit: string | null;
+  pos: number;
+  change: string;
 };
 
 /**
@@ -126,6 +145,8 @@ export class Storer implements Service {
   readonly #queue = new Queue<QueueEntry>();
   readonly #backPressureThresholdBytes: number;
   readonly #statementTimeoutMs: number;
+  readonly #changeLogBatchSize: number;
+  readonly #drainTimeoutMs: number;
 
   #approximateQueuedBytes = 0;
   #running = false;
@@ -140,7 +161,12 @@ export class Storer implements Service {
     replicaVersion: string,
     onConsumed: (c: Commit | UpstreamStatusMessage) => void,
     onFatal: (err: Error) => void,
-    {backPressureLimitHeapProportion, statementTimeoutMs}: TuningOptions,
+    {
+      backPressureLimitHeapProportion,
+      statementTimeoutMs,
+      changeLogBatchSize,
+      drainTimeoutMs = 30_000,
+    }: TuningOptions,
   ) {
     this.#lc = lc.withContext('component', 'change-log');
     this.#shard = shard;
@@ -152,6 +178,8 @@ export class Storer implements Service {
     this.#onConsumed = onConsumed;
     this.#onFatal = onFatal;
     this.#statementTimeoutMs = statementTimeoutMs;
+    this.#changeLogBatchSize = Math.max(1, changeLogBatchSize);
+    this.#drainTimeoutMs = drainTimeoutMs;
 
     const heapStats = getHeapStatistics();
     this.#backPressureThresholdBytes =
@@ -317,6 +345,7 @@ export class Storer implements Service {
   }
 
   #readyForMore: Resolver<void> | null = null;
+  #backpressureTimeout: NodeJS.Timeout | undefined;
 
   readyForMore(): Promise<void> | undefined {
     if (!this.#running) {
@@ -340,22 +369,73 @@ export class Storer implements Service {
           `  LIMIT 20;`,
       );
       this.#readyForMore = resolver();
+      this.#resetBackpressureTimeout(true);
     }
     return this.#readyForMore?.promise;
   }
 
+  #resetBackpressureTimeout(reschedule: boolean) {
+    clearTimeout(this.#backpressureTimeout);
+    this.#backpressureTimeout = reschedule
+      ? setTimeout(() => {
+          this.#readyForMore?.reject(
+            new AbortError(
+              `No statement processed within the last ${this.#statementTimeoutMs}ms. Considering the change-log to be wedged.`,
+            ),
+          );
+          this.#readyForMore = null;
+        }, this.#statementTimeoutMs)
+      : undefined;
+  }
+
   #maybeReleaseBackPressure() {
-    if (
-      this.#readyForMore !== null &&
+    if (this.#readyForMore !== null) {
       // Wait for at least 20% of the threshold to free up.
-      this.#approximateQueuedBytes < this.#backPressureThresholdBytes * 0.8
-    ) {
-      this.#lc.info?.(
-        `releasing back pressure with ${this.#queue.size()} queued changes (~${(this.#approximateQueuedBytes / 1024 ** 2).toFixed(2)} MB)`,
-      );
-      this.#readyForMore.resolve();
-      this.#readyForMore = null;
+      if (
+        this.#approximateQueuedBytes <
+        this.#backPressureThresholdBytes * 0.8
+      ) {
+        this.#lc.info?.(
+          `releasing back pressure with ${this.#queue.size()} queued changes (~${(this.#approximateQueuedBytes / 1024 ** 2).toFixed(2)} MB)`,
+        );
+        this.#readyForMore.resolve();
+        this.#readyForMore = null;
+        this.#resetBackpressureTimeout(false);
+      } else {
+        this.#resetBackpressureTimeout(true);
+      }
     }
+  }
+
+  /**
+   * Flushes any buffered {@link PendingTransaction.batch} rows to the changeLog.
+   *
+   * Uses `json_to_recordset()` so the batch is a single JSON parameter: the
+   * statement text stays constant regardless of batch size, avoiding the
+   * unbounded prepared-statement variants (and Postgres memory growth) that a
+   * multi-row INSERT would produce. See rocicorp/mono#3511.
+   *
+   * Returns (and updates) {@link PendingTransaction.lastFlush}; a no-op when the
+   * batch is empty.
+   */
+  #flushChangeLog(tx: PendingTransaction): Promise<unknown> | undefined {
+    const {batch} = tx;
+    if (batch.length === 0) {
+      return tx.lastFlush;
+    }
+    tx.batch = [];
+    tx.lastFlush = tx.pool.process(sql => [
+      sql`
+        INSERT INTO ${this.#cdc('changeLog')} ("watermark", "pos", "change", "precommit")
+        SELECT "watermark", "pos", "change"::json, "precommit"
+          FROM json_to_recordset(${batch}) AS x(
+            "watermark" TEXT,
+            "pos" INT8,
+            "change" TEXT,
+            "precommit" TEXT
+          )`,
+    ]);
+    return tx.lastFlush;
   }
 
   #stopped = promiseVoid;
@@ -384,6 +464,7 @@ export class Storer implements Service {
         this.#readyForMore.resolve();
         this.#readyForMore = null;
       }
+      this.#resetBackpressureTimeout(false);
       this.#cancelQueueEntries(
         this.#queue.drain().filter(entry => entry !== undefined),
         err,
@@ -476,6 +557,8 @@ export class Storer implements Service {
             pos: 0,
             startingReplicationState: promise,
             ack: !change.skipAck,
+            batch: [],
+            lastFlush: undefined,
           };
           tx.pool.run(this.#db);
           // Acquire a lock on the replicationState row to detect and/or prevent
@@ -493,7 +576,7 @@ export class Storer implements Service {
           tx.pos++;
         }
 
-        const entry = {
+        const entry: ChangeLogRow = {
           watermark: tag === 'commit' ? watermark : tx.preCommitWatermark,
           precommit: tag === 'commit' ? tx.preCommitWatermark : null,
           pos: tx.pos,
@@ -502,22 +585,42 @@ export class Storer implements Service {
           change: extractChangeSubstring(json, tag),
         };
 
-        const processed = tx.pool.process(sql => [
-          sql`INSERT INTO ${this.#cdc('changeLog')} ${sql(entry)}`,
-          ...(change !== null && isSchemaChange(change)
-            ? this.#trackBackfillMetadata(sql, change)
-            : []),
-        ]);
-
-        if (tx.pos % 100 === 0) {
-          // Backpressure is exerted on commit when awaiting tx.pool.done().
-          // However, backpressure checks need to be regularly done for
-          // very large transactions in order to avoid memory blowup.
-          await processed;
+        if (change !== null && isSchemaChange(change)) {
+          // Schema changes carry backfill / table-metadata statements that
+          // must be applied in stream order relative to the changeLog rows.
+          // Flush any buffered rows first, then write this row together with
+          // its metadata statements as a single unit (preserving the previous
+          // per-change ordering for schema changes).
+          await this.#flushChangeLog(tx);
+          tx.lastFlush = tx.pool.process(sql => [
+            sql`INSERT INTO ${this.#cdc('changeLog')} ${sql(entry)}`,
+            ...this.#trackBackfillMetadata(sql, change),
+          ]);
+        } else {
+          // Accumulate plain changeLog rows (begin, data changes, commit) and
+          // write them as a single multi-row INSERT. Collapsing the per-change
+          // single-row INSERTs into batches is the dominant cost reduction for
+          // large transactions, where the previous one-statement-per-change
+          // path dominated the upstream replication lag.
+          tx.batch.push(entry);
+          if (tx.batch.length >= this.#changeLogBatchSize) {
+            // Bound pipeline depth (and thus memory) by awaiting the previous
+            // flush before issuing the next. This is the batched analog of the
+            // previous per-100-statement backpressure await, and likewise
+            // guards against memory blowup on very large transactions.
+            const prevFlush = tx.lastFlush;
+            void this.#flushChangeLog(tx);
+            await prevFlush;
+          }
         }
         this.#maybeReleaseBackPressure();
 
         if (tag === 'commit') {
+          // Flush any remaining buffered changeLog rows (including this commit
+          // row) before updating the replication state, so the state update is
+          // ordered after all changeLog inserts for this transaction.
+          void this.#flushChangeLog(tx);
+
           const {owner} = await tx.startingReplicationState;
           if (owner !== this.#taskID) {
             // Ownership change reflected in the replicationState read in 'begin'.
@@ -680,9 +783,11 @@ export class Storer implements Service {
               `change DB to catch up`,
           );
         }
-        // Flushes the backlog of messages buffered during catchup and
-        // allows the subscription to forward subsequent messages immediately.
-        sub.setCaughtUp();
+        // Start draining messages buffered during catchup. The returned promise
+        // is intentionally not awaited here: while the drain is in progress,
+        // new sends keep appending to the subscriber backlog and inherit its
+        // byte-based backpressure.
+        void sub.setCaughtUp();
       });
     } catch (err) {
       this.#lc.error?.(`error while catching up subscriber ${sub.id}`, err);
@@ -842,12 +947,23 @@ export class Storer implements Service {
     }
   }
 
-  stop() {
+  /**
+   * Stops the storer and waits up to a drain timeout for entries to drain,
+   * throwing an exception if it doesn't drain in time, in order to abort
+   * the server when PG (or the connection to it) appears to be wedged.
+   */
+  async stop() {
     if (this.#running) {
       this.#lc.info?.(`draining ${this.#queue.size()} changeLog entries`);
       this.#queue.enqueue('stop');
     }
-    return this.#stopped;
+    if (
+      (await orTimeout(this.#stopped, this.#drainTimeoutMs)) === 'timed-out'
+    ) {
+      throw new AbortError(
+        `changeLog did not drain within ${this.#drainTimeoutMs}ms`,
+      );
+    }
   }
 }
 

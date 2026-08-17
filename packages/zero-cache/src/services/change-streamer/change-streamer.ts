@@ -59,7 +59,7 @@ export interface ChangeStreamer {
 //     subscription is valid (i.e. starting at the requested watermark).
 // v3: v0.20
 //   - Adds the "taskID" to the subscription context, and support for
-//     the BackupMonitor-mediated "/snapshot" request.
+//     the backup monitor-mediated "/snapshot" request.
 // v4: v0.25
 //   - Adds the "replicaVersion" and "minWatermark" fields to the "/snapshot"
 //     status request so that a subscriber can verify whether its replica,
@@ -75,6 +75,12 @@ export interface ChangeStreamer {
 //   - Adds support for `backfill` messages
 // v6: v1.0.1  (backwards compatible, no version change)
 //   - Adds lag reporting to status messages
+// v6: (backwards compatible, no version change)
+//   - Adds the optional `commitTimeMs` field to `commit` messages, carrying
+//     the upstream commit timestamp for end-to-end serving lag measurement.
+//     The stream is parsed in 'passthrough' mode, so an older peer ignores the
+//     field, and a newer peer treats its absence (including in changes
+//     replayed from the Change DB) as "no commit time reported".
 
 export const PROTOCOL_VERSION = 6;
 

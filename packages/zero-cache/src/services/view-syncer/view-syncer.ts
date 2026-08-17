@@ -48,6 +48,7 @@ import type {
 import {
   getOrCreateCounter,
   getOrCreateLatencyHistogram,
+  getOrCreateNativeHistogram,
   getOrCreateUpDownCounter,
 } from '../../observability/metrics.ts';
 import type {InspectorDelegate} from '../../server/inspector-delegate.ts';
@@ -87,9 +88,11 @@ import {
   type RowUpdate,
 } from './cvr.ts';
 import type {DrainCoordinator} from './drain-coordinator.ts';
+import {E2EServingLagTracker} from './e2e-serving-lag.ts';
 import {handleInspect} from './inspect-handler.ts';
 import type {PipelineDriver} from './pipeline-driver.ts';
 import {type RowChange} from './pipeline-driver.ts';
+import {QueryCoveringIndex} from './query-covering.ts';
 import {parseSignature} from './row-set-signature.ts';
 import {
   cmpVersions,
@@ -114,6 +117,17 @@ import {
 } from './ttl-clock.ts';
 
 const PROTOCOL_VERSION_ATTR = 'protocol.version';
+
+type QueryCoverageHydrationPath = 'add' | 'hydrate-unchanged';
+
+type QueryCoverageShadowHit = {
+  readonly coveredQueryHash: string;
+  readonly coveredTransformationHash: string;
+  readonly coveredQueryName?: string | undefined;
+  readonly coveringQueryHash: string;
+  readonly coveringTransformationHash: string;
+  readonly coveringQueryName?: string | undefined;
+};
 
 export interface ViewSyncer {
   initConnection(
@@ -143,6 +157,9 @@ export interface ViewSyncer {
 
   readonly queryCount: number;
   readonly rowCount: number;
+  readonly createdAtMs: number;
+  readonly servedVersion: string | null;
+  readonly servingLagEligible: boolean;
 }
 
 export type SyncContext = ConnectionSelector & {
@@ -196,6 +213,7 @@ type CustomQueryTransformMode = 'all' | 'missing';
 
 export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
   readonly id: string;
+  readonly createdAtMs = Date.now();
   // Centralized connection/group auth bookkeeping plus maintenance policy.
   // Network validation still happens in ViewSyncerService.
   readonly connContextManager: ConnectionContextManager;
@@ -254,6 +272,8 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
   #cvr: CVRSnapshot | undefined;
   #pipelinesSynced = false;
+  #servedVersion: string | null = null;
+  readonly #e2eServingLagTracker = new E2EServingLagTracker();
 
   #expiredQueriesTimer: ReturnType<SetTimeout> | 0 = 0;
   #authMaintenanceTimer: ReturnType<SetTimeout> | 0 = 0;
@@ -280,6 +300,43 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     'sync',
     'hydration-time',
     'Time to hydrate a query.',
+  );
+  readonly #viewSyncerHydration = getOrCreateNativeHistogram(
+    'sync',
+    'view_syncer_hydration',
+    {
+      description:
+        'Time from ViewSyncer query sync requiring hydration to output for a ' +
+        'client group. Includes query transformation, query materialization, ' +
+        'CVR flush, catchup, and pokeEnd.',
+      unit: 's',
+    },
+  );
+  readonly #e2eServingLag = getOrCreateNativeHistogram(
+    'sync',
+    'e2e_serving_lag',
+    {
+      description:
+        'End-to-end lag from upstream commit to ViewSyncer output. Spans the ' +
+        'whole pipeline: the upstream transaction commit, replication to the ' +
+        'replica, IVM advancement, CVR flush, and pokeEnd. Recorded once per ' +
+        'served version, not sampled, so each observation is the completion ' +
+        'latency of real replicated work.',
+      unit: 's',
+    },
+  );
+  readonly #e2eServingLagClamps = getOrCreateCounter(
+    'sync',
+    'e2e_serving_lag_clamps',
+    {
+      description:
+        'Observations of sync.e2e_serving_lag that came out negative and were ' +
+        'clamped to zero. Non-zero means the upstream database clock is ' +
+        'running ahead of this pod by more than the entire pipeline latency, ' +
+        'so sync.e2e_serving_lag is biased low and reads healthier than ' +
+        'reality. See replication.upstream_clock_skew for the magnitude.',
+      unit: '{observation}',
+    },
   );
   readonly #transactionAdvanceTime = getOrCreateLatencyHistogram(
     'sync',
@@ -324,6 +381,15 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       'bump and full re-execution). Expected to be near-zero in steady state; ' +
       'persistent non-zero values indicate non-deterministic query execution ' +
       '(e.g. Cap operator picking different N-row subsets).',
+  );
+  readonly #sameHashRehydrationVersionBumps = getOrCreateCounter(
+    'sync',
+    'query.same-hash-rehydrations-forced-bump',
+    'Number of times query-set reconciliation forced a configVersion bump ' +
+      'for already-gotten same-transformation-hash query rehydration because ' +
+      'trackQueries would not otherwise bump. Expected to be near-zero; ' +
+      'non-zero values indicate ' +
+      'pipeline/CVR row-set drift reached query-set reconciliation.',
   );
 
   readonly #inspectorDelegate: InspectorDelegate;
@@ -469,12 +535,14 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         this.#lc.debug?.(`draining view-syncer ${this.id} before running`);
         void this.stop();
       }
-      for await (const {state} of this.#stateChanges) {
+      for await (const replicaState of this.#stateChanges) {
+        const {state} = replicaState;
         if (this.#drainCoordinator.shouldDrain()) {
           this.#lc.debug?.(`draining view-syncer ${this.id} (elective)`);
           break;
         }
         assert(state === 'version-ready', 'state should be version-ready'); // This is the only state change used.
+        this.#e2eServingLagTracker.onVersionReady(replicaState);
 
         await this.#runInLockWithCVR(async (lc, cvr) => {
           const clientSchema = must(
@@ -593,6 +661,31 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
   get rowCount(): number {
     return this.#cvrStore.rowCount;
+  }
+
+  get servedVersion(): string | null {
+    return this.#servedVersion;
+  }
+
+  get servingLagEligible(): boolean {
+    return (
+      this.#clients.size > 0 &&
+      this.connContextManager.getBackgroundConnectionContext() !== undefined
+    );
+  }
+
+  #markVersionServed(version: CVRVersion) {
+    this.#servedVersion = version.stateVersion;
+    const observation = this.#e2eServingLagTracker.onVersionServed(
+      version.stateVersion,
+      Date.now(),
+    );
+    if (observation !== null) {
+      this.#e2eServingLag.recordMs(observation.lagMs);
+      if (observation.clamped) {
+        this.#e2eServingLagClamps.add(1);
+      }
+    }
   }
 
   #keepAliveUntil: number = 0;
@@ -1484,6 +1577,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     );
 
     const driftedQueryIDs = new Set<string>();
+    const queryCoveringIndex = this.#config.enableQueryCovering
+      ? new QueryCoveringIndex(this.#pipelines.queries())
+      : undefined;
+    let totalHydratedQueries = 0;
+    let coveredHydratedQueries = 0;
+    let firstCoveredQuery: QueryCoverageShadowHit | undefined;
 
     for (const {
       id: queryID,
@@ -1492,6 +1591,20 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     } of transformedQueries) {
       const query = cvr.queries[queryID];
       const queryName = query.type === 'custom' ? query.name : undefined;
+      const covered = queryCoveringIndex
+        ? this.#findQueryCoverageShadowHit(
+            queryCoveringIndex,
+            queryID,
+            transformationHash,
+            transformedAst,
+            queryName,
+          )
+        : undefined;
+      totalHydratedQueries++;
+      if (covered) {
+        coveredHydratedQueries++;
+        firstCoveredQuery ??= covered;
+      }
       const timer = new TimeSliceTimer(lc);
       let count = 0;
       await startAsyncSpan(
@@ -1510,6 +1623,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
             transformedAst,
             await timer.start(),
             queryName,
+            'unchanged-query-rehydrate',
           )) {
             if (change === 'yield') {
               await timer.yieldProcess('yield in hydrateUnchangedQueries');
@@ -1527,6 +1641,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       this.#inspectorDelegate.addQuery(transformationHash, transformedAst);
       lc.debug?.(`hydrated ${count} rows for ${queryID} (${elapsed} ms)`);
 
+      let drifted = false;
       // Drift detection: compare the just-computed candidate signature against
       // the signature stored in the CVR. They should match for a deterministic
       // query at the same db state. A mismatch indicates a query containing
@@ -1554,9 +1669,26 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           this.#rowSetSignatureDrifts.add(1);
           this.#pipelines.removeQuery(queryID);
           driftedQueryIDs.add(queryID);
+          drifted = true;
         }
       }
+
+      if (!drifted && queryCoveringIndex) {
+        queryCoveringIndex.add(queryID, {
+          transformedAst,
+          transformationHash,
+          ...(queryName !== undefined && {queryName}),
+        });
+      }
     }
+
+    this.#logQueryCoverageShadowSummary(
+      lc,
+      'hydrate-unchanged',
+      totalHydratedQueries,
+      coveredHydratedQueries,
+      firstCoveredQuery,
+    );
 
     return driftedQueryIDs;
   }
@@ -1646,6 +1778,89 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     );
   }
 
+  #findQueryCoverageShadowHit(
+    queryCoveringIndex: QueryCoveringIndex,
+    queryID: string,
+    transformationHash: string,
+    ast: AST,
+    queryName?: string | undefined,
+  ): QueryCoverageShadowHit | undefined {
+    const covering = queryCoveringIndex.findCoveringQuery(queryID, ast);
+    if (!covering) {
+      return undefined;
+    }
+
+    return {
+      coveredQueryHash: queryID,
+      coveredTransformationHash: transformationHash,
+      ...(queryName !== undefined && {coveredQueryName: queryName}),
+      coveringQueryHash: covering.queryID,
+      coveringTransformationHash: covering.transformationHash,
+      ...(covering.queryName !== undefined && {
+        coveringQueryName: covering.queryName,
+      }),
+    };
+  }
+
+  #logQueryCoverageShadowSummary(
+    lc: LogContext,
+    hydrationPath: QueryCoverageHydrationPath,
+    totalHydratedQueries: number,
+    coveredHydratedQueries: number,
+    firstCoveredQuery: QueryCoverageShadowHit | undefined,
+  ) {
+    if (!this.#config.enableQueryCovering || totalHydratedQueries === 0) {
+      return;
+    }
+
+    let coverageLC = lc
+      .withContext('appID', this.#shard.appID)
+      .withContext('shardNum', this.#shard.shardNum)
+      .withContext('clientGroupID', this.id)
+      .withContext('queryCoverageMode', 'shadow')
+      .withContext('hydrationPath', hydrationPath)
+      .withContext('totalHydratedQueries', totalHydratedQueries)
+      .withContext('coveredHydratedQueries', coveredHydratedQueries)
+      .withContext(
+        'uncoveredHydratedQueries',
+        totalHydratedQueries - coveredHydratedQueries,
+      );
+
+    if (firstCoveredQuery) {
+      coverageLC = coverageLC
+        .withContext(
+          'firstCoveredQueryHash',
+          firstCoveredQuery.coveredQueryHash,
+        )
+        .withContext(
+          'firstCoveredTransformationHash',
+          firstCoveredQuery.coveredTransformationHash,
+        )
+        .withContext(
+          'firstCoveringQueryHash',
+          firstCoveredQuery.coveringQueryHash,
+        )
+        .withContext(
+          'firstCoveringTransformationHash',
+          firstCoveredQuery.coveringTransformationHash,
+        );
+      if (firstCoveredQuery.coveredQueryName !== undefined) {
+        coverageLC = coverageLC.withContext(
+          'firstCoveredQueryName',
+          firstCoveredQuery.coveredQueryName,
+        );
+      }
+      if (firstCoveredQuery.coveringQueryName !== undefined) {
+        coverageLC = coverageLC.withContext(
+          'firstCoveringQueryName',
+          firstCoveredQuery.coveringQueryName,
+        );
+      }
+    }
+
+    coverageLC.info?.('query coverage shadow summary');
+  }
+
   /**
    * Adds and/or removes queries to/from the PipelineDriver to bring it
    * in sync with the set of queries in the CVR (both got and desired).
@@ -1662,6 +1877,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     driftedQueryIDs: Set<string> = new Set(),
   ) {
     return startAsyncSpan(tracer, 'vs.#syncQueryPipelineSet', async span => {
+      const start = performance.now();
       span.setAttribute('clientGroupID', this.id);
       assert(
         this.#pipelines.initialized(),
@@ -1889,6 +2105,9 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           Array.from(removeQueriesQueryIds, id => ({id})),
           driftedQueryIDs,
         );
+        if (addQueries.length > 0) {
+          this.#viewSyncerHydration.recordMs(performance.now() - start);
+        }
       } else {
         await this.#catchupClients(lc, cvr);
       }
@@ -1960,12 +2179,38 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         queryID => this.#pipelines.rowSetSignature(queryID),
       );
 
-      // For queries being re-executed solely due to rowSetSignature drift
-      // (not a transformationHash change), trackQueries does not bump
-      // configVersion. Force a bump so the row diff produced by received()
-      // gets propagated to the client via a poke. Must happen before
-      // startPoke so the pokers see the final cookie version.
-      if (addQueries.some(q => driftedQueryIDs.has(q.id))) {
+      const sameHashRehydratedQueryIDs = addQueries
+        .filter(
+          q => cvr.queries[q.id]?.transformationHash === q.transformationHash,
+        )
+        .map(q => q.id);
+      const trackQueriesWillBumpVersion =
+        stateVersion > cvr.version.stateVersion ||
+        removeQueries.length > 0 ||
+        addQueries.some(
+          q => cvr.queries[q.id]?.transformationHash !== q.transformationHash,
+        );
+
+      // For already-gotten queries being re-executed without a stateVersion
+      // or transformationHash change, trackQueries does not bump configVersion.
+      // Force a bump so any row diff produced by received() gets propagated to
+      // the client via a poke. Must happen before startPoke so the pokers see
+      // the final cookie version.
+      if (
+        sameHashRehydratedQueryIDs.length > 0 &&
+        !trackQueriesWillBumpVersion
+      ) {
+        const drifted = sameHashRehydratedQueryIDs.filter(id =>
+          driftedQueryIDs.has(id),
+        ).length;
+        const missing = sameHashRehydratedQueryIDs.length - drifted;
+        const reason =
+          drifted && missing
+            ? 'mixed'
+            : drifted
+              ? 'row-set-signature-drift'
+              : 'missing-pipeline';
+        this.#sameHashRehydrationVersionBumps.add(1, {reason});
         updater.ensureNewVersion();
       }
 
@@ -2000,6 +2245,12 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       const pipelines = this.#pipelines;
       const hydrations = this.#hydrations;
       const hydrationTime = this.#hydrationTime;
+      const queryCoveringIndex = this.#config.enableQueryCovering
+        ? new QueryCoveringIndex(this.#pipelines.queries())
+        : undefined;
+      let totalHydratedQueries = 0;
+      let coveredHydratedQueries = 0;
+      let firstCoveredQuery: QueryCoverageShadowHit | undefined;
       // oxlint-disable-next-line @typescript-eslint/no-this-alias
       const self = this;
 
@@ -2018,18 +2269,38 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
           }
           queryLC.debug?.(`adding pipeline for query`, q.ast);
 
+          const covered = queryCoveringIndex
+            ? self.#findQueryCoverageShadowHit(
+                queryCoveringIndex,
+                q.id,
+                q.transformationHash,
+                q.ast,
+                q.name,
+              )
+            : undefined;
+          totalHydratedQueries++;
+          if (covered) {
+            coveredHydratedQueries++;
+            firstCoveredQuery ??= covered;
+          }
           yield* pipelines.addQuery(
             q.transformationHash,
             q.id,
             q.ast,
             timer.startWithoutYielding(),
             q.name,
+            'query-set-sync',
           );
           const elapsed = timer.stop();
           totalProcessTime += elapsed;
 
           self.#addQueryMaterializationServerMetric(q.id, elapsed);
           self.#inspectorDelegate.addQuery(q.id, q.ast);
+          queryCoveringIndex?.add(q.id, {
+            transformedAst: q.ast,
+            transformationHash: q.transformationHash,
+            ...(q.name !== undefined && {queryName: q.name}),
+          });
 
           if (elapsed > slowHydrateThreshold) {
             queryLC.warn?.('Slow query materialization', elapsed, q.ast);
@@ -2051,6 +2322,13 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
         generateRowChanges(this.#slowHydrateThreshold),
         updater,
         pokers,
+      );
+      this.#logQueryCoverageShadowSummary(
+        lc,
+        'add',
+        totalHydratedQueries,
+        coveredHydratedQueries,
+        firstCoveredQuery,
       );
 
       await startAsyncSpan(
@@ -2081,6 +2359,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       await startAsyncSpan(tracer, 'vs.#syncQueryPipelineSet.pokeEnd', () =>
         pokers.end(finalVersion),
       );
+      this.#markVersionServed(finalVersion);
 
       const wallTime = performance.now() - start;
       lc.info?.(
@@ -2185,6 +2464,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
 
       if (!usePokers) {
         await pokers.end(cvr.version);
+        this.#markVersionServed(cvr.version);
       }
     });
   }
@@ -2341,6 +2621,7 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
       await startAsyncSpan(tracer, 'vs.#advancePipelines.pokeEnd', () =>
         pokers.end(finalVersion),
       );
+      this.#markVersionServed(finalVersion);
 
       const wallTime = performance.now() - start;
       const totalProcessTime = timer.totalElapsed();
@@ -2531,6 +2812,10 @@ export class ViewSyncerService implements ViewSyncer, ActivityBasedService {
     this.#stopTTLClockInterval();
     this.#stopExpireTimer();
     this.#stopAuthMaintenanceTimer();
+    // The InspectorDelegate shares this transformer and may still use it
+    // after cleanup; a destroyed transformer is safe to use (it just stops
+    // caching and never restarts its cleanup interval).
+    this.#customQueryTransformer?.destroy();
 
     for (const client of this.#clients.values()) {
       if (err) {

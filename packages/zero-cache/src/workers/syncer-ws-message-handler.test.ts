@@ -49,6 +49,11 @@ function createMockViewSyncer(
     deleteClients: vi.fn().mockResolvedValue([]),
     initConnection: vi.fn(),
     inspect: vi.fn().mockResolvedValue(undefined),
+    queryCount: 0,
+    rowCount: 0,
+    createdAtMs: Date.now(),
+    servedVersion: null,
+    servingLagEligible: true,
   } as unknown as MockViewSyncer;
 }
 

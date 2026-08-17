@@ -1,5 +1,5 @@
 import type {LogContext} from '@rocicorp/logger';
-import {beforeEach, describe, expect, test} from 'vitest';
+import {beforeEach, describe, expect, test, vi} from 'vitest';
 import type {JSONObject} from '../../../../shared/src/bigint-json.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import {must} from '../../../../shared/src/must.ts';
@@ -25,6 +25,7 @@ import {createChangeProcessor, ReplicationMessages} from './test-utils.ts';
 describe('replicator/change-processor', () => {
   let lc: LogContext;
   let servingReplica: Database;
+  let servingRunner: StatementRunner;
   let servingProcessor: ChangeProcessor;
   let backupReplica: Database;
   let backupProcessor: ChangeProcessor;
@@ -33,8 +34,9 @@ describe('replicator/change-processor', () => {
     lc = createSilentLogContext();
     servingReplica = new Database(lc, ':memory:');
     initReplicationState(servingReplica, ['zero_data'], '02');
+    servingRunner = new StatementRunner(servingReplica);
     servingProcessor = new ChangeProcessor(
-      new StatementRunner(servingReplica),
+      servingRunner,
       'serving',
       (_, err) => {
         throw err;
@@ -73,6 +75,25 @@ describe('replicator/change-processor', () => {
   const fooBarBaz = new ReplicationMessages({foo: 'id', bar: 'id', baz: 'id'});
   const tables = new ReplicationMessages({transaction: 'column'});
   const bff = new ReplicationMessages({bff: ['b', 'a', 'c']});
+
+  test('starts serving transactions with BEGIN IMMEDIATE', () => {
+    const beginImmediate = vi.spyOn(servingRunner, 'beginImmediate');
+    const beginConcurrent = vi.spyOn(servingRunner, 'beginConcurrent');
+
+    servingProcessor.processMessage(lc, [
+      'begin',
+      issues.begin(),
+      {commitWatermark: '03'},
+    ]);
+    servingProcessor.processMessage(lc, [
+      'commit',
+      issues.commit(),
+      {watermark: '03'},
+    ]);
+
+    expect(beginImmediate).toHaveBeenCalledOnce();
+    expect(beginConcurrent).not.toHaveBeenCalled();
+  });
 
   const cases: Case[] = [
     {
@@ -1737,7 +1758,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 3,
+              pos: 2,
             },
             ['_0_version']: {
               characterMaximumLength: null,
@@ -1745,7 +1766,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 2,
+              pos: 3,
             },
           },
           backfilling: [],
@@ -1848,7 +1869,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 3,
+              pos: 2,
             },
             ['_0_version']: {
               characterMaximumLength: null,
@@ -1856,7 +1877,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 2,
+              pos: 3,
             },
           },
           backfilling: [],
@@ -2071,7 +2092,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 3,
+              pos: 2,
             },
             ['_0_version']: {
               characterMaximumLength: null,
@@ -2079,7 +2100,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 2,
+              pos: 3,
             },
           },
           backfilling: [],
@@ -2181,7 +2202,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 3,
+              pos: 2,
             },
             ['_0_version']: {
               characterMaximumLength: null,
@@ -2189,7 +2210,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 2,
+              pos: 3,
             },
           },
           backfilling: [],
@@ -2301,7 +2322,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 3,
+              pos: 2,
             },
             ['_0_version']: {
               characterMaximumLength: null,
@@ -2309,7 +2330,7 @@ describe('replicator/change-processor', () => {
               dflt: null,
               notNull: false,
               elemPgTypeClass: null,
-              pos: 2,
+              pos: 3,
             },
           },
           backfilling: [],
@@ -3589,6 +3610,49 @@ describe('replicator/change-processor', () => {
     },
   ];
 
+  test('SET NOT NULL preserves compound index column order', () => {
+    initDB(
+      backupReplica,
+      `
+        CREATE TABLE foo(
+          id INT8,
+          tenant_id TEXT,
+          _0_version TEXT
+        );
+        CREATE UNIQUE INDEX foo_pkey ON foo(id);
+        CREATE INDEX foo_tenant_id_id ON foo(tenant_id, id);
+      `,
+    );
+
+    const messages = new ReplicationMessages({foo: 'id'});
+    backupProcessor.processMessage(lc, [
+      'begin',
+      messages.begin(),
+      {commitWatermark: '03'},
+    ]);
+    backupProcessor.processMessage(lc, [
+      'data',
+      messages.updateColumn(
+        'foo',
+        {name: 'tenant_id', spec: {pos: 2, dataType: 'TEXT'}},
+        {
+          name: 'tenant_id',
+          spec: {pos: 2, dataType: 'TEXT', notNull: true},
+        },
+      ),
+    ]);
+    backupProcessor.processMessage(lc, [
+      'commit',
+      messages.commit(),
+      {watermark: '03'},
+    ]);
+
+    const index = must(
+      listIndexes(backupReplica).find(({name}) => name === 'foo_tenant_id_id'),
+    );
+    expect(Object.keys(index.columns)).toEqual(['tenant_id', 'id']);
+  });
+
   for (const c of cases) {
     test(c.name, () => {
       for (const [replica, processor, log] of [
@@ -3758,6 +3822,44 @@ describe('replicator/change-processor-errors', () => {
     expect(replica.inTransaction).toBe(true);
     processor.abort(lc);
     expect(replica.inTransaction).toBe(false);
+  });
+
+  test('wraps oversized update binding errors with context', () => {
+    const failures: unknown[] = [];
+    const processor = new ChangeProcessor(
+      new StatementRunner(replica),
+      'backup',
+      (_, error) => failures.push(error),
+    );
+    const update = messages.update('foo', {id: 1, big: 1n << 63n});
+    const relation = {
+      ...update.relation,
+      relationOid: 42,
+    } as typeof update.relation & {relationOid: number};
+
+    processor.processMessage(lc, [
+      'begin',
+      messages.begin(),
+      {commitWatermark: '0e'},
+    ]);
+    processor.processMessage(lc, [
+      'data',
+      {
+        ...update,
+        relation,
+      },
+    ]);
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      name: 'OversizedUpdateBindingError',
+      message:
+        'Oversized SQLite update binding: tx=0e relationOid=42 table=public.foo column=big valueType=bigint fitsInt64=false',
+      cause: {
+        name: 'RangeError',
+        message: 'The bound string, buffer, or bigint is too big',
+      },
+    });
   });
 
   test('preserves original sqlite auto-rollback error', () => {

@@ -28,6 +28,7 @@ import type {
   PublishedTableSpec,
 } from '../../../db/specs.ts';
 import {StatementRunner} from '../../../db/statements.ts';
+import {getOrCreateCounter} from '../../../observability/metrics.ts';
 import {type LexiVersion} from '../../../types/lexi-version.ts';
 import {PG_17} from '../../../types/pg-versions.ts';
 import {
@@ -90,6 +91,7 @@ import type {
 } from './logical-replication/pgoutput.types.ts';
 import {subscribe, type StreamMessage} from './logical-replication/stream.ts';
 import {fromBigInt, toBigInt, toStateVersionString, type LSN} from './lsn.ts';
+import {registerReplicationSlotHealthMetrics} from './replication-slot-health.ts';
 import {dropOldReplicasAndSlots} from './replication-slots.ts';
 import {replicationEventSchema, type ReplicationEvent} from './schema/ddl.ts';
 import {updateShardSchema} from './schema/init.ts';
@@ -125,6 +127,7 @@ export async function initializePostgresChangeSource(
   syncOptions: InitialSyncOptions,
   context: ServerContext,
   lagReportIntervalMs = 0,
+  streamInboundTimeoutMs?: number | undefined,
 ): Promise<{subscriptionState: SubscriptionState; changeSource: ChangeSource}> {
   await initReplica(
     lc,
@@ -158,6 +161,7 @@ export async function initializePostgresChangeSource(
       context,
       lagReportIntervalMs,
       syncOptions.textCopy,
+      streamInboundTimeoutMs,
     );
 
     return {subscriptionState, changeSource};
@@ -264,6 +268,8 @@ class PostgresChangeSource implements ChangeSource {
   readonly #context: ServerContext;
   readonly #lagReporter: LagReporter | null;
   readonly #textCopy: boolean;
+  readonly #streamInboundTimeoutMs: number | undefined;
+  #stopped = false;
 
   constructor(
     lc: LogContext,
@@ -272,7 +278,8 @@ class PostgresChangeSource implements ChangeSource {
     replica: Replica,
     context: ServerContext,
     lagReportIntervalMs: number,
-    textCopy?: boolean,
+    textCopy?: boolean | undefined,
+    streamInboundTimeoutMs?: number | undefined,
   ) {
     this.#lc = lc.withContext('component', 'change-source');
     this.#db = pgClient(lc, upstreamUri, 'replication-monitor', {
@@ -285,6 +292,7 @@ class PostgresChangeSource implements ChangeSource {
     this.#replica = replica;
     this.#context = context;
     this.#textCopy = textCopy ?? false;
+    this.#streamInboundTimeoutMs = streamInboundTimeoutMs;
     this.#lagReporter =
       lagReportIntervalMs > 0
         ? new LagReporter(
@@ -294,9 +302,16 @@ class PostgresChangeSource implements ChangeSource {
             lagReportIntervalMs,
           )
         : null;
+    registerReplicationSlotHealthMetrics(
+      this.#lc,
+      this.#db,
+      replica.slot,
+      () => this.#stopped,
+    );
   }
 
   async stop(): Promise<void> {
+    this.#stopped = true;
     this.#lagReporter?.stop();
     clearTimeout(this.#cleanupTimer);
     await this.#db.end();
@@ -353,6 +368,9 @@ class PostgresChangeSource implements ChangeSource {
       slot,
       [...shardConfig.publications],
       clientStart,
+      undefined,
+      undefined,
+      this.#streamInboundTimeoutMs,
     );
     const acker = new Acker(acks);
 
@@ -651,7 +669,7 @@ export type LagReport = v.Infer<typeof lagReportSchema>;
 
 type InitiatedLagReport = LagReport & {lsn: bigint};
 
-class LagReporter {
+export class LagReporter {
   static readonly MESSAGE_SUFFIX = '/lag-report/v1';
 
   readonly #lc: LogContext;
@@ -660,6 +678,16 @@ class LagReporter {
   // oxlint-disable-next-line no-unused-private-class-members
   readonly #db: PostgresDB;
   readonly #lagIntervalMs: number;
+  readonly #lagReportRetries = getOrCreateCounter(
+    'replication',
+    'lag_report_retries',
+    {
+      description:
+        'Number of replication lag reports retried because the expected ' +
+        'report was not received before the next report interval.',
+      unit: '{report}',
+    },
+  );
 
   #pgVersion: number | undefined;
   #expectingLagReport: InitiatedLagReport | null = null;
@@ -702,38 +730,45 @@ class LagReporter {
     let commitTimeMs: number;
     let lsn: string;
 
-    if (pgVersion >= PG_17) {
-      [{commitTimeMs, lsn}] = await this.#db /*sql*/ `
-        WITH CTE AS (SELECT extract(epoch from now()) * 1000 AS "commitTimeMs")
-        SELECT "commitTimeMs", pg_logical_emit_message(
-          false,
-          ${this.messagePrefix},
-          json_build_object(
-            'id', ${id}::text,
-            'sendTimeMs', ${now}::int8,
-            'commitTimeMs', "commitTimeMs"
-          )::text,
-          true
-        ) as lsn FROM CTE;
-    `;
-    } else {
-      // Versions before PG 17 do not support the final `flush` option of
-      // pg_logical_emit_message(). This results in an extra 50~100ms latency
-      // for replication reports when the db is idle, which is still
-      // acceptable for the purpose for alerting on pathological lag, for
-      // which the threshold is much higher (e.g. many seconds).
-      [{commitTimeMs, lsn}] = await this.#db /*sql*/ `
-        WITH CTE AS (SELECT extract(epoch from now()) * 1000 as "commitTimeMs")
-        SELECT "commitTimeMs", pg_logical_emit_message(
-          false,
-          ${this.messagePrefix},
-          json_build_object(
-            'id', ${id}::text,
-            'sendTimeMs', ${now}::int8,
-            'commitTimeMs', "commitTimeMs"
-          )::text
-        ) as lsn FROM CTE;
-    `;
+    try {
+      if (pgVersion >= PG_17) {
+        [{commitTimeMs, lsn}] = await this.#db /*sql*/ `
+          WITH CTE AS (SELECT extract(epoch from now()) * 1000 AS "commitTimeMs")
+          SELECT "commitTimeMs", pg_logical_emit_message(
+            false,
+            ${this.messagePrefix},
+            json_build_object(
+              'id', ${id}::text,
+              'sendTimeMs', ${now}::int8,
+              'commitTimeMs', "commitTimeMs"
+            )::text,
+            true
+          ) as lsn FROM CTE;
+      `;
+      } else {
+        // Versions before PG 17 do not support the final `flush` option of
+        // pg_logical_emit_message(). This results in an extra 50~100ms latency
+        // for replication reports when the db is idle, which is still
+        // acceptable for the purpose for alerting on pathological lag, for
+        // which the threshold is much higher (e.g. many seconds).
+        [{commitTimeMs, lsn}] = await this.#db /*sql*/ `
+          WITH CTE AS (SELECT extract(epoch from now()) * 1000 as "commitTimeMs")
+          SELECT "commitTimeMs", pg_logical_emit_message(
+            false,
+            ${this.messagePrefix},
+            json_build_object(
+              'id', ${id}::text,
+              'sendTimeMs', ${now}::int8,
+              'commitTimeMs', "commitTimeMs"
+            )::text
+          ) as lsn FROM CTE;
+      `;
+      }
+    } catch (e) {
+      if (this.#expectingLagReport?.id === id) {
+        this.#expectingLagReport = null;
+      }
+      throw e;
     }
 
     // Note: We don't know the lsn until after pg_logical_emit_message()
@@ -742,6 +777,9 @@ class LagReporter {
     //       is okay since this.#expectingLagReport will have be updated.
     lagReport.lsn = toBigInt(lsn);
     lagReport.commitTimeMs = commitTimeMs;
+    if (this.#expectingLagReport?.id === id) {
+      this.#scheduleMissingReportRetry(id);
+    }
 
     if (log) {
       this.#lc.info?.(`initiated lag report at lsn ${lsn}`, {
@@ -796,6 +834,7 @@ class LagReporter {
     this.#expectingLagReport = null;
     clearTimeout(this.#timer);
     this.#timer = setTimeout(async () => {
+      this.#timer = undefined;
       try {
         await this.initiateLagReport();
       } catch (e) {
@@ -803,6 +842,30 @@ class LagReporter {
         this.#scheduleNextReport(this.#lagIntervalMs);
       }
     }, delayMs);
+  }
+
+  #scheduleMissingReportRetry(reportID: string) {
+    clearTimeout(this.#timer);
+    this.#timer = setTimeout(async () => {
+      this.#timer = undefined;
+      const missingReport = this.#expectingLagReport;
+      if (missingReport?.id !== reportID) {
+        return;
+      }
+
+      this.#lagReportRetries.add(1);
+      this.#lc.warn?.(`retrying missing lag report`, {
+        id: missingReport.id,
+        lsn: fromBigInt(missingReport.lsn),
+        sendTimeMs: missingReport.sendTimeMs,
+      });
+      try {
+        await this.initiateLagReport();
+      } catch (e) {
+        this.#lc.warn?.(`error retrying lag report`, e);
+        this.#scheduleNextReport(this.#lagIntervalMs);
+      }
+    }, this.#lagIntervalMs);
   }
 
   processLagReportMessage(msg: MessageMessage): DownstreamStatusMessage {
@@ -822,11 +885,10 @@ class LagReporter {
     watermark: string,
   ): DownstreamStatusMessage {
     const now = Date.now();
-    const nextSendTimeMs = Math.max(
-      now,
-      report.sendTimeMs + this.#lagIntervalMs,
-    );
-    if (report.id === this.#expectingLagReport?.id) {
+    const expectedReport = this.#expectingLagReport;
+    let nextSendTimeMs: number;
+    if (report.id === expectedReport?.id) {
+      nextSendTimeMs = Math.max(now, report.sendTimeMs + this.#lagIntervalMs);
       this.#scheduleNextReport(nextSendTimeMs - now);
     } else {
       // Only schedule the next report when receiving the previous report.
@@ -834,6 +896,9 @@ class LagReporter {
       // replication-managers, status messages are still sent downstream,
       // but the next report is not actually scheduled.
       this.#lc.debug?.(`received extraneous lag report`, {report});
+      nextSendTimeMs =
+        expectedReport?.sendTimeMs ??
+        Math.max(now, report.sendTimeMs + this.#lagIntervalMs);
     }
     const {sendTimeMs, commitTimeMs} = report;
     return [
@@ -1019,7 +1084,10 @@ class ChangeMaker {
         return [
           [
             'commit',
-            msg,
+            // `commitTime` is microseconds since the unix epoch. Carrying it
+            // as milliseconds gives the ViewSyncer the origin timestamp for
+            // the end-to-end serving lag histogram.
+            {...msg, commitTimeMs: Number(msg.commitTime / 1000n)},
             {watermark: toStateVersionString(must(msg.commitLsn))},
           ],
         ];
@@ -1072,6 +1140,17 @@ class ChangeMaker {
     // Store the new event to understand the context of the next event.
     this.#lastReplicationEvent = event;
 
+    const {schema} = event;
+    if (schema === undefined) {
+      // A schema-less (protocol v2) ddlStart event signifies that there was
+      // no schema change; it is stored (above) only to provide the command
+      // tag context for a subsequent event with a schema change.
+      lc.debug?.(`received context-only ${msg.prefix}/${type} event`, {
+        event: summarizeReplicationEventForLog(event),
+      });
+      return [];
+    }
+
     const prevSchema =
       event.previousSchema === undefined // pre-v21 event => use prevEvent
         ? prevEvent?.schema
@@ -1111,15 +1190,15 @@ class ChangeMaker {
     const changes = this.#makeSchemaChanges(
       lc,
       prevSchema,
+      schema,
       event,
       effectiveTag,
     ).map(change => ['data', change] satisfies Data);
 
     lc.info?.(`${changes.length} schema change(s)`, {changes});
 
-    const replicaIdentities = replicaIdentitiesForTablesWithoutPrimaryKeys(
-      event.schema,
-    );
+    const replicaIdentities =
+      replicaIdentitiesForTablesWithoutPrimaryKeys(schema);
     if (replicaIdentities) {
       this.#replicaIdentityTimer = setTimeout(async () => {
         try {
@@ -1163,12 +1242,13 @@ class ChangeMaker {
   #makeSchemaChanges(
     lc: LogContext,
     preSchema: PublishedSchema,
+    nextSchema: PublishedSchema,
     event: ReplicationEvent,
     tag: string,
   ): SchemaChange[] {
     try {
       const [prevTbl, prevIdx] = specsByID(preSchema);
-      const [nextTbl, nextIdx] = specsByID(event.schema);
+      const [nextTbl, nextIdx] = specsByID(nextSchema);
       const changes: SchemaChange[] = [];
 
       // Validate the new table schemas
@@ -1640,7 +1720,7 @@ function makeRelation(relation: PostgresRelation): MessageRelation {
   };
 }
 
-function summarizeSchemaForLog(schema: ReplicationEvent['schema']) {
+function summarizeSchemaForLog(schema: PublishedSchema) {
   return {
     tables: schema.tables.length,
     indexes: schema.indexes.length,
@@ -1652,7 +1732,7 @@ function summarizeReplicationEventForLog(event: ReplicationEvent): JSONObject {
   const {previousSchema, ...eventWithoutSchemas} = rest;
   return {
     ...eventWithoutSchemas,
-    schema: summarizeSchemaForLog(schema),
+    ...(schema !== undefined && {schema: summarizeSchemaForLog(schema)}),
     ...(previousSchema !== undefined && {
       previousSchema:
         previousSchema === null ? null : summarizeSchemaForLog(previousSchema),

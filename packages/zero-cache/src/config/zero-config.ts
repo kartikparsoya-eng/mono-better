@@ -290,13 +290,32 @@ const makeMutatorQueryOptions = (
       `A list of header names that clients are allowed to set via custom headers.`,
       `If specified, only headers in this list will be forwarded to the ${suffix === 'push mutations' ? 'push' : 'query'} URL.`,
       `Header names are case-insensitive.`,
-      `If not specified, no client-provided headers are forwarded (secure by default).`,
+      `If not specified, no client-provided headers are forwarded.`,
       `Example: ZERO_${replacement ? replacement.toUpperCase() : suffix === 'push mutations' ? 'MUTATE' : 'QUERY'}_ALLOWED_CLIENT_HEADERS=x-request-id,x-correlation-id`,
     ],
     ...(replacement
       ? {
           deprecated: [
             makeDeprecationMessage(`${replacement}-allowed-client-headers`),
+          ],
+        }
+      : {}),
+  },
+  allowedRequestHeaders: {
+    type: v.array(v.string()).optional(),
+    desc: [
+      `A list of header names to forward from the incoming HTTP request to the ${suffix === 'push mutations' ? 'push' : 'query'} URL.`,
+      `Unlike {bold allowed-client-headers} (which forwards headers set by the client), these are taken`,
+      `from the HTTP request that established the connection (e.g. headers injected by a proxy or load balancer).`,
+      `If a listed header is present on the request, its value is forwarded upstream under the same header name.`,
+      `Header names are case-insensitive.`,
+      `If not specified, no request headers are forwarded.`,
+      `Example: ZERO_${replacement ? replacement.toUpperCase() : suffix === 'push mutations' ? 'MUTATE' : 'QUERY'}_ALLOWED_REQUEST_HEADERS=x-forwarded-for,cf-ray`,
+    ],
+    ...(replacement
+      ? {
+          deprecated: [
+            makeDeprecationMessage(`${replacement}-allowed-request-headers`),
           ],
         }
       : {}),
@@ -372,6 +391,28 @@ export const zeroOptions = {
         `https://www.postgresql.org/docs/current/logicaldecoding-explanation.html#LOGICALDECODING-REPLICATION-SLOTS-SYNCHRONIZATION`,
         ``,
         `(Note that this option has no effect for Postgres versions before 17.)`,
+      ],
+    },
+
+    pgStreamInboundTimeoutMs: {
+      type: v.number().optional(),
+      desc: [
+        `The time (in milliseconds) without any inbound message from the upstream`,
+        `wal sender after which the replication stream is considered unresponsive`,
+        `and torn down to force a reconnect.`,
+        ``,
+        `Defaults to 2x the server's {bold wal_sender_timeout}. That suits idle`,
+        `streams, but a busy wal sender can be legitimately silent for longer —`,
+        `e.g. while decoding through WAL from unpublished tables, or assembling a`,
+        `large transaction that is only sent at commit. If the server's`,
+        `{bold wal_sender_timeout} is aggressive (some managed environments`,
+        `default it as low as 5 seconds), the resulting teardown aborts and`,
+        `replays the in-flight transaction, which can prevent replication from`,
+        `ever catching up on a large backlog. Set this option to widen the`,
+        `client-side threshold without changing the server setting.`,
+        ``,
+        `(This option has no effect when {bold wal_sender_timeout} is 0, which`,
+        `disables inbound liveness detection entirely.)`,
       ],
     },
   },
@@ -457,6 +498,15 @@ export const zeroOptions = {
     ],
   },
 
+  sqliteCorruptionChecks: {
+    type: v.boolean().default(false),
+    desc: [
+      `Run SQLite quick_check and integrity_check when corruption is detected.`,
+      `These checks scan the replica and can take a long time on large databases.`,
+    ],
+    hidden: true,
+  },
+
   enableQueryPlanner: {
     type: v.boolean().default(true),
     desc: [
@@ -466,6 +516,18 @@ export const zeroOptions = {
       `the most efficient join strategies.`,
       ``,
       `You can disable the planner if it is picking bad strategies.`,
+    ],
+  },
+
+  enableQueryCovering: {
+    type: v.boolean().default(true),
+    desc: [
+      `Enable shadow-mode query covering detection during query hydration.`,
+      ``,
+      `When enabled, view-syncers compare newly hydrated queries against running`,
+      `queries with the same root table and log aggregate coverage stats.`,
+      ``,
+      `You can disable this if covering detection adds too much CPU overhead.`,
     ],
   },
 
@@ -505,6 +567,25 @@ export const zeroOptions = {
         `the specified timeout. This differs from a postgres {bold statement_timeout} in that`,
         `it is implemented to handle a pathological case in which Postgres does not return a`,
         `response but otherwise believes the transaction to be idle.`,
+      ],
+      hidden: true, // make visible if proven to be effective/necessary
+    },
+
+    logBatchSize: {
+      type: v
+        .number()
+        .assert(
+          n => Number.isInteger(n) && n >= 1,
+          `change.logBatchSize must be an integer >= 1`,
+        )
+        .default(2000),
+      desc: [
+        `The maximum number of change-log rows written per multi-row INSERT to the change`,
+        `database. Larger upstream transactions are persisted in batches of this size rather`,
+        `than one INSERT per change, which is the dominant cost when replicating large`,
+        `transactions (e.g. bulk backfills or migrations). Larger values increase throughput`,
+        `at the cost of higher transient memory; the effective batch is internally capped to`,
+        `stay within Postgres's bind-parameter limit. Set to {bold 1} to disable batching.`,
       ],
       hidden: true, // make visible if proven to be effective/necessary
     },
@@ -714,10 +795,10 @@ export const zeroOptions = {
       type: v.number().default(30000),
       desc: [
         `The minimum interval at which replication lag reports are written upstream and`,
-        `reported via the {bold zero.replication.total_lag} opentelemetry metric. Because`,
-        `replication lag reports are only issued after the previous one was received, the`,
-        `actual interval between reports may be longer when there is a backlog in the`,
-        `replication stream. A negative or 0 value disables lag reporting.`,
+        `reported via the {bold zero.replication.total_lag} opentelemetry metric. If`,
+        `an expected report is not received before the next interval, Zero retries with`,
+        `a new report and increments {bold zero.replication.lag_report_retries}. A`,
+        `negative or 0 value disables lag reporting.`,
         ``,
         `This monitoring feature is only support on the postgres upstream type.`,
       ],
@@ -791,9 +872,20 @@ export const zeroOptions = {
     },
 
     restoreUsingV5: {
-      type: v.boolean().default(false),
+      type: v.boolean().default(true),
       desc: [
         `Restores the backup using the {bold ZERO_LITESTREAM_EXECUTABLE_V5} if specified.`,
+        `This provides a recovery path if rolling back from {bold ZERO_LITESTREAM_BACKUP_USING_V5}`,
+        `as v5 restores from both v3 and v5 backups (whichever is more recent).`,
+      ],
+    },
+
+    backupUsingV5: {
+      type: v.boolean().default(false),
+      desc: [
+        `Backs up the replica using Litestream v0.5.x and monitors cleanup`,
+        `watermarks by reading the backup through the Litestream SQLite VFS.`,
+        `This requires {bold ZERO_LITESTREAM_RESTORE_USING_V5}.`,
       ],
     },
 
@@ -807,6 +899,39 @@ export const zeroOptions = {
         `* {bold ZERO_LITESTREAM_BACKUP_LOCATION} for the db replica url`,
         `* {bold ZERO_LITESTREAM_LOG_LEVEL} for the log level`,
         `* {bold ZERO_LOG_FORMAT} for the log type`,
+      ],
+    },
+
+    vfsExtensionPath: {
+      type: v.string().default('/usr/local/lib/litestream-vfs.so'),
+      desc: [
+        `Path to the Litestream v0.5.x SQLite VFS loadable extension used by`,
+        `the backup watermark reader to query the backup directly.`,
+      ],
+    },
+
+    vfsProbeIntervalMs: {
+      type: v.number().default(30 * 1000),
+      desc: [
+        `Interval in milliseconds at which the standalone backup watermark reader`,
+        `logs the watermark when it is run without a parent worker. The integrated`,
+        `backup monitor requests watermarks on demand.`,
+      ],
+    },
+
+    vfsProbeTimeoutMs: {
+      type: v.number().default(30 * 1000),
+      desc: [
+        `Timeout in milliseconds for requests to the Litestream VFS backup`,
+        `watermark reader worker.`,
+      ],
+    },
+
+    vfsLogFile: {
+      type: v.string().optional(),
+      desc: [
+        `Optional file path for logs emitted by the Litestream VFS native`,
+        `extension. If unset, the extension writes to stdout.`,
       ],
     },
 
