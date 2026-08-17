@@ -33,10 +33,105 @@ use std::time::{Duration, Instant};
 /// independent `const`s).
 pub const MIN_ADVANCEMENT_TIME_LIMIT_MS: f64 = 50.0;
 
+// Smarter load-shedding tunables — byte-identical to TS pipeline-driver.ts
+// (#6206). We project the total cost of pushing the change backlog and bail if
+// it materially exceeds a fresh hydrate, catch a single pathological change, and
+// let an already-mostly-done advance finish.
+const MIN_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES: usize = 8;
+const PROJECTED_ADVANCEMENT_SAMPLE_FRACTION: f64 = 0.25;
+const MAX_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES: usize = 50;
+const MIN_PROJECTED_ADVANCEMENT_SAMPLE_MS: f64 = 5.0;
+const MIN_PROJECTED_ADVANCEMENT_CHANGES: usize = 16;
+const PROJECTED_ADVANCEMENT_RESET_MULTIPLIER: f64 = 1.5;
+const LATE_ADVANCEMENT_FINISH_PROGRESS: f64 = 0.8;
+
+/// Which arm of the economic budget tripped. Distinct reasons so the engine can
+/// emit the same diagnostic messages TS does. Mirrors TS pipeline-driver.ts
+/// `#shouldAdvanceYieldMaybeAbortAdvance`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AdvanceReset {
+    /// One source change alone exceeded the hydration budget.
+    SlowCurrentChange { current_change_ms: f64 },
+    /// The whole batch projects to cost more than a rehydrate.
+    Projected { projected_ms: f64 },
+    /// The original economic time-limit arm.
+    Timeout,
+}
+
+/// Project total advancement time from the elapsed cost of the processed prefix.
+/// `None` until at least one change has been processed. TS
+/// `projectedAdvancementTimeMs`.
+fn projected_advancement_time_ms(
+    elapsed_ms: f64,
+    processed_changes: usize,
+    num_changes: usize,
+) -> Option<f64> {
+    if processed_changes == 0 || num_changes == 0 {
+        return None;
+    }
+    Some((elapsed_ms / processed_changes as f64) * num_changes as f64)
+}
+
+/// The advancement time budget: the total original hydration time (floored at 1
+/// to avoid a zero budget). TS `advancementResetTimeLimitMs`.
+fn advancement_reset_time_limit_ms(total_hydration_time_ms: f64) -> f64 {
+    total_hydration_time_ms.max(1.0)
+}
+
+/// How many changes must be sampled before the projection is trusted, scaled by
+/// batch size. TS `minProjectedAdvancementSampleChanges`.
+fn min_projected_advancement_sample_changes(num_changes: usize) -> usize {
+    let scaled = (num_changes as f64 * PROJECTED_ADVANCEMENT_SAMPLE_FRACTION).ceil() as usize;
+    MIN_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES
+        .max(MAX_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES.min(scaled))
+}
+
+/// Whether the projected batch cost warrants a reset. TS
+/// `shouldResetProjectedAdvancement`.
+fn should_reset_projected_advancement(
+    elapsed_ms: f64,
+    projected_total_ms: Option<f64>,
+    processed_changes: usize,
+    num_changes: usize,
+    total_hydration_time_ms: f64,
+) -> bool {
+    let Some(projected) = projected_total_ms else {
+        return false;
+    };
+    if num_changes < MIN_PROJECTED_ADVANCEMENT_CHANGES
+        || processed_changes < min_projected_advancement_sample_changes(num_changes)
+        || elapsed_ms < MIN_PROJECTED_ADVANCEMENT_SAMPLE_MS
+    {
+        return false;
+    }
+    projected
+        > advancement_reset_time_limit_ms(total_hydration_time_ms)
+            * PROJECTED_ADVANCEMENT_RESET_MULTIPLIER
+}
+
+/// Whether the advance is far enough along that it should finish rather than
+/// reset. TS `shouldFinishLateAdvancement`.
+fn should_finish_late_advancement(processed_changes: usize, num_changes: usize) -> bool {
+    num_changes > 0
+        && processed_changes as f64 / num_changes as f64 >= LATE_ADVANCEMENT_FINISH_PROGRESS
+}
+
+/// Whether the CURRENT single change alone has exceeded the hydration budget.
+/// This always resets — the late-finish exception does not apply. TS
+/// `shouldResetSlowCurrentChange`.
+fn should_reset_slow_current_change(
+    current_change_elapsed_ms: f64,
+    total_hydration_time_ms: f64,
+) -> bool {
+    current_change_elapsed_ms > MIN_ADVANCEMENT_TIME_LIMIT_MS
+        && current_change_elapsed_ms > advancement_reset_time_limit_ms(total_hydration_time_ms)
+}
+
 /// Shared, thread-safe economic budget for one in-flight advance. `start`,
-/// `budget_ms` and `num_changes` are fixed for the advance; only `pos` (progress)
-/// advances. Evaluated by both the per-change check (via `over_budget`) and the
-/// per-row fetch check (`should_stop_fetch`).
+/// `budget_ms` and `num_changes` are fixed for the advance; `pos` (progress) and
+/// `current_change_start` advance. Evaluated by both the per-change check (via
+/// `advance_reset`/`over_budget`) and the per-row fetch check
+/// (`should_stop_fetch`).
 pub struct AdvanceGate {
     start: Instant,
     budget_ms: f64,
@@ -44,6 +139,11 @@ pub struct AdvanceGate {
     pos: AtomicUsize,
     tripped: AtomicBool,
     excluded_nanos: AtomicU64,
+    /// Elapsed-ms at which the current change's push began; `active` gates it
+    /// (a change boundary clears it so the slow-current-change arm only applies
+    /// mid-push). TS `AdvanceContext.currentChangeStartMs`.
+    current_change_start_bits: AtomicU64,
+    current_change_active: AtomicBool,
 }
 
 impl AdvanceGate {
@@ -57,7 +157,34 @@ impl AdvanceGate {
             pos: AtomicUsize::new(0),
             tripped: AtomicBool::new(false),
             excluded_nanos: AtomicU64::new(0),
+            current_change_start_bits: AtomicU64::new(0),
+            current_change_active: AtomicBool::new(false),
         })
+    }
+
+    /// Mark the start (elapsed-ms) of the current change's push so the
+    /// slow-current-change arm can measure it. TS sets `currentChangeStartMs` at
+    /// the top of each change's processing.
+    pub fn set_current_change_start(&self, elapsed_ms: f64) {
+        self.current_change_start_bits
+            .store(elapsed_ms.to_bits(), Ordering::Relaxed);
+        self.current_change_active.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear the current-change marker at a change boundary (TS resets
+    /// `currentChangeStartMs = undefined` after each change).
+    pub fn clear_current_change(&self) {
+        self.current_change_active.store(false, Ordering::Relaxed);
+    }
+
+    fn current_change_start_ms(&self) -> Option<f64> {
+        if self.current_change_active.load(Ordering::Relaxed) {
+            Some(f64::from_bits(
+                self.current_change_start_bits.load(Ordering::Relaxed),
+            ))
+        } else {
+            None
+        }
     }
 
     /// Exclude time spent synchronously delivering rows across the NAPI
@@ -83,17 +210,60 @@ impl AdvanceGate {
         self.tripped.load(Ordering::Relaxed)
     }
 
-    /// The exact TS/per-change formula. Latches `tripped` once it fires.
+    /// The smarter load-shedding decision (TS #6206
+    /// `#shouldAdvanceYieldMaybeAbortAdvance`): three arms evaluated in order —
+    /// (1) a single slow change (always resets), (2) the projected batch cost
+    /// (skipped once the advance is late enough to finish), (3) the original
+    /// economic time limit (also skipped when late enough to finish). Returns the
+    /// arm that tripped, or `None` to keep advancing.
+    pub fn advance_reset(&self) -> Option<AdvanceReset> {
+        let elapsed = self.elapsed_ms();
+        let pos = self.pos.load(Ordering::Relaxed);
+        let num = self.num_changes;
+        let budget = self.budget_ms;
+
+        // Arm 1: the current change alone blew the budget. No late-finish
+        // exception — a single pathological push always resets.
+        if let Some(cc_start) = self.current_change_start_ms() {
+            let cc_elapsed = elapsed - cc_start;
+            if should_reset_slow_current_change(cc_elapsed, budget) {
+                return Some(AdvanceReset::SlowCurrentChange {
+                    current_change_ms: cc_elapsed,
+                });
+            }
+        }
+
+        let should_finish = should_finish_late_advancement(pos, num);
+
+        // Arm 2: the batch projects to cost more than a rehydrate.
+        if !should_finish {
+            let projected = projected_advancement_time_ms(elapsed, pos, num);
+            if should_reset_projected_advancement(elapsed, projected, pos, num, budget) {
+                return Some(AdvanceReset::Projected {
+                    projected_ms: projected.unwrap_or(0.0),
+                });
+            }
+        }
+
+        // Arm 3: the original economic time-limit model, now also gated by the
+        // late-finish exception.
+        if !should_finish
+            && elapsed > MIN_ADVANCEMENT_TIME_LIMIT_MS
+            && (elapsed > budget || (elapsed > budget / 2.0 && pos <= num / 2))
+        {
+            return Some(AdvanceReset::Timeout);
+        }
+
+        None
+    }
+
+    /// Whether the advance has blown its budget (any arm). Latches `tripped`
+    /// once it fires — used by the per-row fetch check.
     pub fn over_budget(&self) -> bool {
         if self.tripped.load(Ordering::Relaxed) {
             return true;
         }
-        let elapsed = self.elapsed_ms();
-        if elapsed > MIN_ADVANCEMENT_TIME_LIMIT_MS
-            && (elapsed > self.budget_ms
-                || (elapsed > self.budget_ms / 2.0
-                    && self.pos.load(Ordering::Relaxed) <= self.num_changes / 2))
-        {
+        if self.advance_reset().is_some() {
             self.tripped.store(true, Ordering::Relaxed);
             return true;
         }
@@ -209,5 +379,71 @@ mod tests {
     fn should_stop_fetch_is_false_when_unarmed() {
         // No gate armed on this thread → hydrate/worker fetches never stop.
         assert!(!should_stop_fetch());
+    }
+
+    #[test]
+    fn projected_batch_cost_trips() {
+        // 50ms to process 25 of 100 changes → projected ~200ms. Budget 10ms, so
+        // ~200 > 10*1.5=15 → reset. num≥16, processed≥ceil(100*.25)=25, elapsed≥5.
+        let g = gate(50, 10.0, 100, 25);
+        match g.advance_reset() {
+            Some(AdvanceReset::Projected { projected_ms }) => {
+                assert!(
+                    projected_ms >= 200.0,
+                    "projected {projected_ms} should be ≈200"
+                );
+            }
+            other => panic!("expected Projected reset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn projected_reset_needs_enough_samples() {
+        // Same projection ratio, but only 5 of 100 processed (< 25 sample floor)
+        // and elapsed 6ms < old-model floor → no reset yet.
+        let g = gate(6, 10.0, 100, 5);
+        assert_eq!(g.advance_reset(), None);
+    }
+
+    #[test]
+    fn projected_reset_disabled_for_small_batches() {
+        // num=8 < MIN_PROJECTED_ADVANCEMENT_CHANGES (16): projection never applies,
+        // and elapsed 20ms < 50 floor → the old arm doesn't fire either.
+        let g = gate(20, 5.0, 8, 4);
+        assert_eq!(g.advance_reset(), None);
+    }
+
+    #[test]
+    fn late_advancement_finishes_instead_of_resetting() {
+        // 85 of 100 done (≥0.8) → let it finish even though elapsed (200ms) far
+        // exceeds the budget (10ms). Neither the projected nor the old arm fires.
+        let g = gate(200, 10.0, 100, 85);
+        assert_eq!(g.advance_reset(), None);
+    }
+
+    #[test]
+    fn slow_current_change_trips_regardless_of_late_finish() {
+        // Even when 85% done (late-finish), a single change that alone took
+        // 60ms (> 50 floor and > budget 10ms) always resets.
+        let g = gate(200, 10.0, 100, 85);
+        g.set_current_change_start(g.elapsed_ms() - 60.0);
+        match g.advance_reset() {
+            Some(AdvanceReset::SlowCurrentChange { current_change_ms }) => {
+                assert!(
+                    (60.0..70.0).contains(&current_change_ms),
+                    "current change {current_change_ms} should be ≈60",
+                );
+            }
+            other => panic!("expected SlowCurrentChange reset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cleared_current_change_disables_slow_arm() {
+        let g = gate(200, 10.0, 100, 85);
+        g.set_current_change_start(g.elapsed_ms() - 60.0);
+        g.clear_current_change();
+        // Slow arm gone; late-finish suppresses the other arms → no reset.
+        assert_eq!(g.advance_reset(), None);
     }
 }

@@ -898,34 +898,37 @@ impl Engine {
                 // (run inside the row-read loop during this change's push) uses the
                 // same `pos` as the per-change check below.
                 advance_gate.set_pos(pos);
-                // Economic abort check per-change (TS parity).
-                let elapsed_ms = advance_gate.elapsed_ms();
-                if elapsed_ms > MIN_ADVANCEMENT_TIME_LIMIT_MS {
-                    // Budget is the total original hydration time — no floor, to
-                    // match TS (pipeline-driver.ts:855) and `should_abort` above.
+                // Smarter load-shedding per-change abort (TS #6206): project the
+                // cost of pushing the remaining backlog and bail if it materially
+                // exceeds a rehydrate, catch a single pathological change, and let
+                // an already-mostly-done advance finish. `advance_reset` owns the
+                // three-arm decision; both this per-change site and the per-fetch
+                // `should_stop_fetch` evaluate the same formula.
+                if let Some(reset) = advance_gate.advance_reset() {
+                    let elapsed_ms = advance_gate.elapsed_ms();
                     let budget = total_hydration_time_ms;
-                    if elapsed_ms > budget {
-                        return Err(crate::snapshotter::DiffError::Reset(
-                            crate::snapshotter::ResetPipelinesSignal {
-                                reason: "advancement-timeout",
-                                msg: format!(
-                                    "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
-                                    elapsed_ms, budget, pos, num_changes
-                                ),
-                            },
-                        ));
-                    }
-                    if elapsed_ms > budget / 2.0 && pos <= num_changes / 2 {
-                        return Err(crate::snapshotter::DiffError::Reset(
-                            crate::snapshotter::ResetPipelinesSignal {
-                                reason: "advancement-timeout",
-                                msg: format!(
-                                    "Advancement timed out at half-budget ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
-                                    elapsed_ms, budget, pos, num_changes
-                                ),
-                            },
-                        ));
-                    }
+                    let msg = match reset {
+                        crate::advance_gate::AdvanceReset::SlowCurrentChange {
+                            current_change_ms,
+                        } => format!(
+                            "Advancement aborted: current change took {:.0}ms (> hydration budget {:.0}ms) at {}/{}",
+                            current_change_ms, budget, pos, num_changes
+                        ),
+                        crate::advance_gate::AdvanceReset::Projected { projected_ms } => format!(
+                            "Advancement aborted: projected {:.0}ms exceeds hydration budget {:.0}ms at {}/{} ({:.0}ms elapsed)",
+                            projected_ms, budget, pos, num_changes, elapsed_ms
+                        ),
+                        crate::advance_gate::AdvanceReset::Timeout => format!(
+                            "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
+                            elapsed_ms, budget, pos, num_changes
+                        ),
+                    };
+                    return Err(crate::snapshotter::DiffError::Reset(
+                        crate::snapshotter::ResetPipelinesSignal {
+                            reason: "advancement-timeout",
+                            msg,
+                        },
+                    ));
                 }
                 pos += 1;
 
@@ -947,6 +950,12 @@ impl Engine {
                 {
                     return Ok(());
                 }
+
+                // Mark the start of this change's push so the slow-current-change
+                // arm (checked per-row via `should_stop_fetch`) can measure a
+                // single pathological push. Cleared at the change boundary below.
+                // TS `AdvanceContext.currentChangeStartMs = start`.
+                advance_gate.set_current_change_start(advance_gate.elapsed_ms());
 
                 // Port of TS pipeline-driver.ts #advance (744-776): the prev_value
                 // whose PK equals next's PK becomes the EDIT old-row and is NOT
@@ -1040,6 +1049,11 @@ impl Engine {
                         ));
                     }
                 }
+
+                // Change boundary: the slow-current-change arm no longer applies
+                // until the next change's push begins. TS resets
+                // `currentChangeStartMs = undefined` after each change.
+                advance_gate.clear_current_change();
 
                 // Per-fetch arm: a fetch during this change's push blew the budget
                 // and ended its stream early (truncated — discarded on rehydrate).
