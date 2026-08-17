@@ -136,7 +136,7 @@ COPY --from=sqlite-builder /usr/local/include/sqlite3*.h /usr/local/include/
 COPY packages/rust-ivm/zero-sqlite3-shared.binding.gyp /tmp/binding.gyp
 
 WORKDIR /build
-RUN npm install --ignore-scripts @rocicorp/zero-sqlite3@1.1.2 node-gyp@11 \
+RUN npm install --ignore-scripts @rocicorp/zero-sqlite3@1.1.4 node-gyp@11 \
     && cp /tmp/binding.gyp node_modules/@rocicorp/zero-sqlite3/binding.gyp \
     && node node_modules/@rocicorp/zero-sqlite3/deps/gen-unicode-case.mjs \
          > node_modules/@rocicorp/zero-sqlite3/src/util/unicode_case_data.h \
@@ -185,12 +185,13 @@ WORKDIR /app/mono
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --prod \
       --filter @rocicorp/mono --filter zero-cache... --filter ast-to-zql... \
-    && zero_sqlite=$(find node_modules/.pnpm -path '*/@rocicorp/zero-sqlite3/build/Release' -type d -print -quit) \
+    && zero_sqlite=$(find node_modules/.pnpm -path '*/@rocicorp/zero-sqlite3' -type d -print -quit) \
     && test -n "$zero_sqlite" \
-    && cp /tmp/better_sqlite3.node "$zero_sqlite/better_sqlite3.node" \
+    && mkdir -p "$zero_sqlite/build/Release" \
+    && cp /tmp/better_sqlite3.node "$zero_sqlite/build/Release/better_sqlite3.node" \
     && rm /tmp/better_sqlite3.node \
     && ldconfig \
-    && ldd "$zero_sqlite/better_sqlite3.node" | grep '/usr/local/lib/libsqlite3.so.0' \
+    && ldd "$zero_sqlite/build/Release/better_sqlite3.node" | grep '/usr/local/lib/libsqlite3.so.0' \
     && rm -rf /root/.cache \
        /usr/local/lib/node_modules/npm \
        /usr/local/bin/npm /usr/local/bin/npx \
