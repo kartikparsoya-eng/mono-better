@@ -22,6 +22,11 @@ pub struct ConnectParams {
     pub init_connection_msg: Option<InitConnectionMessage>,
     pub http_cookie: Option<String>,
     pub origin: Option<String>,
+    /// All incoming HTTP request headers (lowercased names, multi-values joined
+    /// with `, `). Forwarded to the query API filtered by the
+    /// `query-allowed-request-headers` allowlist. Port of `requestHeaders`
+    /// added in zero/v1.9.0 (#6144).
+    pub request_headers: HashMap<String, String>,
 }
 
 /// Error during connect-param parsing.
@@ -48,6 +53,7 @@ pub fn get_connect_params(
     sec_websocket_protocol: Option<&str>,
     cookie: Option<&str>,
     origin: Option<&str>,
+    request_headers: HashMap<String, String>,
 ) -> Result<ConnectParams, ConnectParamsError> {
     let parsed = url::Url::parse(url).map_err(|_| ConnectParamsError::MissingParam("url"))?;
     let params: HashMap<String, String> = parsed
@@ -86,6 +92,7 @@ pub fn get_connect_params(
         init_connection_msg: init_connection_message,
         http_cookie: cookie.map(|s| s.to_string()),
         origin: origin.map(|s| s.to_string()),
+        request_headers,
     })
 }
 

@@ -1004,6 +1004,22 @@ fn default_query_context(
     if let Some(origin) = params.origin.as_ref() {
         headers.push(("Origin".to_string(), origin.clone()));
     }
+    // Forward allowlisted incoming request headers (e.g. `x-forwarded-for`) to
+    // the query API. Port of #6144 (`filterHeaders` by the
+    // `query-allowed-request-headers` allowlist, case-insensitive). Sorted so the
+    // forwarded set is deterministic regardless of the header map's iteration
+    // order.
+    if let Some(allowed) = config.allowed_request_headers.as_ref() {
+        let allowed: HashSet<String> = allowed.iter().map(|h| h.to_ascii_lowercase()).collect();
+        let mut forwarded: Vec<(String, String)> = params
+            .request_headers
+            .iter()
+            .filter(|(name, _)| allowed.contains(&name.to_ascii_lowercase()))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        forwarded.sort();
+        headers.extend(forwarded);
+    }
     Some(CustomQueryContext {
         url,
         headers,
@@ -3187,6 +3203,7 @@ mod tests {
             init_connection_msg: None,
             http_cookie: None,
             origin: None,
+            request_headers: Default::default(),
         }
     }
 
@@ -3202,6 +3219,7 @@ mod tests {
             url: Some(vec!["https://api.example/query".to_string()]),
             api_key: Some("secret".to_string()),
             allowed_client_headers: Some(vec!["X-Request-ID".to_string()]),
+            allowed_request_headers: None,
             forward_cookies: true,
         };
         let mut params = test_params("c1", "w1");
@@ -3246,6 +3264,47 @@ mod tests {
             Some(&config),
             "https://evil.example/query"
         ));
+    }
+
+    #[test]
+    fn forwards_allowlisted_incoming_request_headers() {
+        // Port of #6144: only headers on `allowed_request_headers` (case-
+        // insensitive) are forwarded from the incoming request to the query API.
+        let config = FetchConfig {
+            url: Some(vec!["https://api.example/query".to_string()]),
+            api_key: None,
+            allowed_client_headers: None,
+            allowed_request_headers: Some(vec![
+                "X-Forwarded-For".to_string(),
+                "x-tenant".to_string(),
+            ]),
+            forward_cookies: false,
+        };
+        let mut params = test_params("c1", "w1");
+        params.request_headers = std::collections::HashMap::from([
+            ("x-forwarded-for".to_string(), "203.0.113.7".to_string()),
+            ("x-tenant".to_string(), "acme".to_string()),
+            ("authorization".to_string(), "secret".to_string()),
+        ]);
+
+        let context = default_query_context(Some(&config), &params).unwrap();
+        // Allowlisted (case-insensitive) headers forwarded; others dropped.
+        assert!(
+            context
+                .headers
+                .contains(&("x-forwarded-for".to_string(), "203.0.113.7".to_string()))
+        );
+        assert!(
+            context
+                .headers
+                .contains(&("x-tenant".to_string(), "acme".to_string()))
+        );
+        assert!(
+            !context
+                .headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        );
     }
 
     fn authed_params(client_id: &str, ws_id: &str, token: &str) -> ConnectParams {

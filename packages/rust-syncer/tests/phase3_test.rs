@@ -618,12 +618,14 @@ fn test_stores_normalized_fetch_context() {
         url: Some(vec!["https://default.example/query".to_string()]),
         api_key: Some("query-api-key".to_string()),
         allowed_client_headers: Some(vec!["x-query-header".to_string()]),
+        allowed_request_headers: None,
         forward_cookies: true,
     };
     let push_config = FetchConfig {
         url: Some(vec!["https://default.example/push".to_string()]),
         api_key: Some("push-api-key".to_string()),
         allowed_client_headers: Some(vec!["x-push-header".to_string()]),
+        allowed_request_headers: None,
         forward_cookies: false,
     };
 

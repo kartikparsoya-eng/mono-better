@@ -138,12 +138,37 @@ pub async fn accept_connection_with_limit(
     let cookie = headers.get("cookie").and_then(|v| v.to_str().ok());
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
 
+    // Normalize ALL incoming request headers (lowercased names, multi-values
+    // joined with ", ") so allowlisted ones can be forwarded to the query API.
+    // Port of connect-params.ts `normalizeHeaders` (zero/v1.9.0 #6144).
+    let request_headers: std::collections::HashMap<String, String> = {
+        let mut normalized = std::collections::HashMap::new();
+        for (name, value) in headers.iter() {
+            if let Ok(v) = value.to_str() {
+                normalized
+                    .entry(name.as_str().to_string())
+                    .and_modify(|existing: &mut String| {
+                        existing.push_str(", ");
+                        existing.push_str(v);
+                    })
+                    .or_insert_with(|| v.to_string());
+            }
+        }
+        normalized
+    };
+
     // Build the full URL for parsing (path + query).
     let full_url = format!("http://localhost{}", path);
 
     // Parse connect params.
-    let params = match get_connect_params(protocol_version, &full_url, sec_protocol, cookie, origin)
-    {
+    let params = match get_connect_params(
+        protocol_version,
+        &full_url,
+        sec_protocol,
+        cookie,
+        origin,
+        request_headers,
+    ) {
         Ok(params) => params,
         Err(e) => {
             tracing::warn!("connect params error: {e}");

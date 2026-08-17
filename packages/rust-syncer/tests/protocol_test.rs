@@ -495,6 +495,7 @@ fn test_connect_params_full() {
         Some(&sec),
         Some("cookie=abc"),
         Some("https://example.com"),
+        Default::default(),
     )
     .unwrap();
 
@@ -516,7 +517,7 @@ fn test_connect_params_missing_required_field() {
     let sec = make_sec_protocol(None);
     // Missing clientID
     let url = "http://localhost/sync/v51/connect?clientGroupID=cg1&ts=123&lmid=42";
-    assert!(get_connect_params(51, url, Some(&sec), None, None).is_err());
+    assert!(get_connect_params(51, url, Some(&sec), None, None, Default::default()).is_err());
 }
 
 #[test]
@@ -524,7 +525,7 @@ fn test_connect_params_optional_defaults() {
     let sec = make_sec_protocol(None);
     let url = "http://localhost/sync/v51/connect?clientID=c1&clientGroupID=cg1&ts=123&lmid=42";
 
-    let params = get_connect_params(51, url, Some(&sec), None, None).unwrap();
+    let params = get_connect_params(51, url, Some(&sec), None, None, Default::default()).unwrap();
 
     assert_eq!(params.ws_id, "");
     assert_eq!(params.user_id, None);
@@ -536,21 +537,21 @@ fn test_connect_params_optional_defaults() {
 #[test]
 fn test_connect_params_missing_sec_protocol() {
     let url = "http://localhost/sync/v51/connect?clientID=c1&clientGroupID=cg1&ts=123&lmid=42";
-    assert!(get_connect_params(51, url, None, None, None).is_err());
+    assert!(get_connect_params(51, url, None, None, None, Default::default()).is_err());
 }
 
 #[test]
 fn test_connect_params_invalid_integer() {
     let sec = make_sec_protocol(None);
     let url = "http://localhost/sync/v51/connect?clientID=c1&clientGroupID=cg1&ts=abc&lmid=42";
-    assert!(get_connect_params(51, url, Some(&sec), None, None).is_err());
+    assert!(get_connect_params(51, url, Some(&sec), None, None, Default::default()).is_err());
 }
 
 #[test]
 fn test_connect_params_debug_perf_false_by_default() {
     let sec = make_sec_protocol(None);
     let url = "http://localhost/sync/v51/connect?clientID=c1&clientGroupID=cg1&ts=123&lmid=42&debugPerf=false";
-    let params = get_connect_params(51, url, Some(&sec), None, None).unwrap();
+    let params = get_connect_params(51, url, Some(&sec), None, None, Default::default()).unwrap();
     assert!(!params.debug_perf);
 }
 
@@ -558,7 +559,7 @@ fn test_connect_params_debug_perf_false_by_default() {
 fn test_connect_params_with_optional_fields() {
     let sec = make_sec_protocol(None);
     let url = "http://localhost/sync/v51/connect?clientID=c1&clientGroupID=cg1&ts=123&lmid=42&profileID=p1&baseCookie=bc1&wsid=ws-2";
-    let params = get_connect_params(51, url, Some(&sec), None, None).unwrap();
+    let params = get_connect_params(51, url, Some(&sec), None, None, Default::default()).unwrap();
     assert_eq!(params.profile_id, Some("p1".to_string()));
     assert_eq!(params.base_cookie, Some("bc1".to_string()));
     assert_eq!(params.ws_id, "ws-2");

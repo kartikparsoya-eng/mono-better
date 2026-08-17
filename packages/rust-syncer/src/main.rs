@@ -147,12 +147,16 @@ fn parse_query_config() -> Option<rust_syncer::FetchConfig> {
     let allowed_client_headers = env::var("QUERY_ALLOWED_CLIENT_HEADERS_JSON")
         .ok()
         .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok());
+    let allowed_request_headers = env::var("QUERY_ALLOWED_REQUEST_HEADERS_JSON")
+        .ok()
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok());
     Some(rust_syncer::FetchConfig {
         url: Some(urls),
         api_key: env::var("QUERY_API_KEY")
             .ok()
             .filter(|value| !value.is_empty()),
         allowed_client_headers,
+        allowed_request_headers,
         forward_cookies: env::var("QUERY_FORWARD_COOKIES").as_deref() == Ok("true"),
     })
 }

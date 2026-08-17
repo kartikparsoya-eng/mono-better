@@ -36,6 +36,7 @@ type RustSyncerFetchConfig = {
   url?: readonly string[] | undefined;
   apiKey?: string | undefined;
   allowedClientHeaders?: readonly string[] | undefined;
+  allowedRequestHeaders?: readonly string[] | undefined;
   forwardCookies?: boolean | undefined;
 };
 
@@ -91,6 +92,11 @@ export function rustSyncerEnv(
     if (query.allowedClientHeaders) {
       out.QUERY_ALLOWED_CLIENT_HEADERS_JSON = JSON.stringify(
         query.allowedClientHeaders,
+      );
+    }
+    if (query.allowedRequestHeaders) {
+      out.QUERY_ALLOWED_REQUEST_HEADERS_JSON = JSON.stringify(
+        query.allowedRequestHeaders,
       );
     }
     out.QUERY_FORWARD_COOKIES = String(query.forwardCookies ?? false);

@@ -72,6 +72,7 @@ describe('rustSyncerEnv', () => {
       url: ['https://api.example/query'],
       apiKey: 'query-key',
       allowedClientHeaders: ['x-request-id'],
+      allowedRequestHeaders: ['x-forwarded-for'],
       forwardCookies: true,
     },
   };
@@ -91,6 +92,7 @@ describe('rustSyncerEnv', () => {
       QUERY_URLS_JSON: '["https://api.example/query"]',
       QUERY_API_KEY: 'query-key',
       QUERY_ALLOWED_CLIENT_HEADERS_JSON: '["x-request-id"]',
+      QUERY_ALLOWED_REQUEST_HEADERS_JSON: '["x-forwarded-for"]',
       QUERY_FORWARD_COOKIES: 'true',
     });
   });

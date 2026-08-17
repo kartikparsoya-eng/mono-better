@@ -44,6 +44,13 @@ pub struct ConnectionSelector {
     pub ws_id: String,
 }
 
+/// NOTE: the outgoing query-API request headers (including the #6144
+/// incoming-request-header forwarding) are actually built by `router.rs`
+/// (`default_query_context` + `filtered_query_headers`) directly from
+/// [`FetchConfig`] and [`ConnectParams`]. This `HeaderOptions`/`build_fetch_context`
+/// port of `connection-context-manager.ts` is retained for structural parity but
+/// is not on the runtime fetch path, so it keeps the pre-#6144 `allowed_client_headers`
+/// shape rather than the renamed `requestHeaders` record.
 #[derive(Debug, Clone, Default)]
 pub struct HeaderOptions {
     pub api_key: Option<String>,
@@ -119,7 +126,13 @@ pub struct ConnectParamsForRegistration {
 pub struct FetchConfig {
     pub url: Option<Vec<String>>,
     pub api_key: Option<String>,
+    /// Allowlist for headers provided in the client's `initConnection` options
+    /// (`userQueryHeaders` / `userPushHeaders`).
     pub allowed_client_headers: Option<Vec<String>>,
+    /// Allowlist for headers forwarded from the incoming HTTP request (e.g.
+    /// `x-forwarded-for`). Port of the `query-/mutate-allowed-request-headers`
+    /// config added in zero/v1.9.0 (#6144).
+    pub allowed_request_headers: Option<Vec<String>>,
     pub forward_cookies: bool,
 }
 
