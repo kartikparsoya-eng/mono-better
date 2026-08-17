@@ -129,26 +129,24 @@ fn test_send_query_transform_failed_error() {
 fn test_client_handler_start_poke_noop_when_base_equal() {
     let (handler, sink) = make_handler();
 
-    // Set base version to "1"
-    handler.set_base_version_for_test(rust_cvr::version::CVRVersion {
+    let v = rust_cvr::version::CVRVersion {
         state_version: "1".to_string(),
         config_version: Some(1),
-    });
+    };
 
-    // Start poke with same version — should be a NOOP
-    let poke = handler.start_poke(rust_cvr::version::CVRVersion {
-        state_version: "1".to_string(),
-        config_version: Some(1),
-    });
+    // Set base version to "1" (client is caught up).
+    handler.set_base_version_for_test(v.clone());
 
-    // End should be a no-op (base == final)
-    poke.end(rust_cvr::version::CVRVersion {
-        state_version: "1".to_string(),
-        config_version: Some(1),
-    })
-    .unwrap();
+    // The first poke on connect is forced (an empty poke) even when caught up,
+    // so the client learns its got-queries state was reconciled (TS `#everPoked`,
+    // zero/v1.9.0). Consume it before asserting the true-NOOP behavior.
+    handler.start_poke(v.clone()).end(v.clone()).unwrap();
+    sink.messages.lock().unwrap().clear();
 
-    // No messages should have been sent
+    // A subsequent poke at the same version is a genuine NOOP.
+    let poke = handler.start_poke(v.clone());
+    poke.end(v).unwrap();
+
     let messages = sink.messages.lock().unwrap();
     assert_eq!(messages.len(), 0);
 }

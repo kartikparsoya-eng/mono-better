@@ -873,12 +873,31 @@ impl CVRQueryDrivenUpdater {
             self.base.store_ops.push(StoreOp::PutRowRecord(row_record));
 
             if new_ref_counts.is_none() {
-                patches.push(PatchToVersion {
-                    patch: Patch::Row(RowPatch::Del {
-                        id: existing.id.clone(),
-                    }),
-                    to_version: self.base.cvr.version.clone(),
-                });
+                // Dedupe against lastPatch: skip if we already emitted a delete
+                // for this row (rowVersion == None), and never let toVersion
+                // backtrack. Mirrors TS deleteUnreferencedRows (zero/v1.9.0).
+                let (already_deleted, to_version) = match self.last_patches.get(&id_str) {
+                    Some(lp) => (
+                        lp.row_version.is_none(),
+                        max_version(self.base.cvr.version.clone(), Some(lp.to_version.clone())),
+                    ),
+                    None => (false, self.base.cvr.version.clone()),
+                };
+                if !already_deleted {
+                    patches.push(PatchToVersion {
+                        patch: Patch::Row(RowPatch::Del {
+                            id: existing.id.clone(),
+                        }),
+                        to_version: to_version.clone(),
+                    });
+                    self.last_patches.insert(
+                        id_str.clone(),
+                        RowPatchInfo {
+                            row_version: None,
+                            to_version,
+                        },
+                    );
+                }
             }
         }
 

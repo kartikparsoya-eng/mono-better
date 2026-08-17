@@ -130,6 +130,13 @@ pub struct PokeHandler {
     downstream: Arc<dyn WebSocketSink>,
     base_version: Arc<StdMutex<NullableCVRVersion>>,
     poke_chain: Arc<AtomicBool>,
+    /// Shared with the owning `ClientHandler`: set true once this client has
+    /// received a completed poke. Mirrors TS ClientHandler `#everPoked`.
+    ever_poked: Arc<AtomicBool>,
+    /// `!ever_poked` captured at `start_poke` time (TS `forceInitialPoke`).
+    /// Forces one (empty) poke on connect even when already caught up, so the
+    /// client learns its got-queries state was reconciled with the server.
+    force_initial_poke: bool,
     zero_clients_table: String,
     zero_mutations_table: String,
     client_group_id: String,
@@ -263,7 +270,11 @@ impl PokeHandler {
 
         if !state.started {
             let base = self.base_version.lock().unwrap();
-            if cmp_versions(&base, &Some(final_version.clone())) == Ordering::Equal {
+            // Force the initial empty poke even when nothing changed; see
+            // `force_initial_poke`. Mirrors TS ClientHandler `end` (zero/v1.9.0).
+            if cmp_versions(&base, &Some(final_version.clone())) == Ordering::Equal
+                && !self.force_initial_poke
+            {
                 self.release_chain(&mut state);
                 return Ok(());
             }
@@ -303,6 +314,8 @@ impl PokeHandler {
         let mut base = self.base_version.lock().unwrap();
         *base = Some(final_version);
         drop(base);
+        // TS `this.#everPoked = true` — after this, caught-up pokes NOOP again.
+        self.ever_poked.store(true, AtomicOrdering::SeqCst);
 
         self.release_chain(&mut state);
 
@@ -535,6 +548,10 @@ pub struct ClientHandler {
     downstream: Arc<dyn WebSocketSink>,
     base_version: Arc<StdMutex<NullableCVRVersion>>,
     poke_chain: Arc<AtomicBool>,
+    /// Set true once this client has received a completed poke. On the first
+    /// poke after connect we force an (empty) poke even when caught up. Mirrors
+    /// TS ClientHandler `#everPoked` (zero/v1.9.0).
+    ever_poked: Arc<AtomicBool>,
 }
 
 impl ClientHandler {
@@ -558,6 +575,7 @@ impl ClientHandler {
                 base_cookie.map(crate::version::version_from_string),
             )),
             poke_chain: Arc::new(AtomicBool::new(false)),
+            ever_poked: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -586,7 +604,12 @@ impl ClientHandler {
         let base = self.base_version.clone();
         let base_val = self.base_version.lock().unwrap().clone();
 
-        if cmp_versions(&base_val, &Some(tentative_version.clone())) != Ordering::Less {
+        // Force one (empty) poke on connect even when caught up, so the client
+        // learns its got-queries state was reconciled; thereafter only poke when
+        // behind. Mirrors TS ClientHandler.startPoke (zero/v1.9.0).
+        let force_initial_poke = !self.ever_poked.load(AtomicOrdering::SeqCst);
+        let cmp = cmp_versions(&base_val, &Some(tentative_version.clone()));
+        if cmp == Ordering::Greater || (cmp == Ordering::Equal && !force_initial_poke) {
             // NOOP handler — add_patch will skip everything because
             // to_version <= base_version.
             return PokeHandler {
@@ -594,6 +617,8 @@ impl ClientHandler {
                 downstream: self.downstream.clone(),
                 base_version: base,
                 poke_chain: self.poke_chain.clone(),
+                ever_poked: self.ever_poked.clone(),
+                force_initial_poke,
                 zero_clients_table: self.zero_clients_table.clone(),
                 zero_mutations_table: self.zero_mutations_table.clone(),
                 client_group_id: self.client_group_id.clone(),
@@ -608,6 +633,8 @@ impl ClientHandler {
             downstream: self.downstream.clone(),
             base_version: base,
             poke_chain: self.poke_chain.clone(),
+            ever_poked: self.ever_poked.clone(),
+            force_initial_poke,
             zero_clients_table: self.zero_clients_table.clone(),
             zero_mutations_table: self.zero_mutations_table.clone(),
             client_group_id: self.client_group_id.clone(),
@@ -855,24 +882,40 @@ mod tests {
     #[test]
     fn test_noop_poke_sends_nothing() {
         let (handler, messages) = make_handler();
-        // Set base version to v2
-        {
-            let mut bv = handler.base_version.lock().unwrap();
-            *bv = Some(CVRVersion {
-                state_version: "v2".to_string(),
-                config_version: None,
-            });
-        }
-        let poke = handler.start_poke(CVRVersion {
+        let v2 = CVRVersion {
             state_version: "v2".to_string(),
             config_version: None,
-        });
-        poke.end(CVRVersion {
-            state_version: "v2".to_string(),
-            config_version: None,
-        })
-        .unwrap();
+        };
+        // Set base version to v2 (client is caught up).
+        *handler.base_version.lock().unwrap() = Some(v2.clone());
+        // The first poke on connect is forced (an empty poke) even when caught
+        // up — see `force_initial_poke`. Consume it, then verify a *subsequent*
+        // caught-up poke is a true NOOP.
+        handler.start_poke(v2.clone()).end(v2.clone()).unwrap();
+        messages.lock().unwrap().clear();
+
+        let poke = handler.start_poke(v2.clone());
+        poke.end(v2).unwrap();
         assert!(messages.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_initial_poke_forced_when_caught_up() {
+        // Even when the client connects already caught up (base == tentative),
+        // the FIRST poke sends an empty pokeStart/pokeEnd so the client learns
+        // its got-queries state has been reconciled with the server. Mirrors TS
+        // ClientHandler `#everPoked` (zero/v1.9.0).
+        let (handler, messages) = make_handler();
+        let v2 = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        };
+        *handler.base_version.lock().unwrap() = Some(v2.clone());
+        handler.start_poke(v2.clone()).end(v2).unwrap();
+        let msgs = messages.lock().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0][0], "pokeStart");
+        assert_eq!(msgs[1][0], "pokeEnd");
     }
 
     #[test]
