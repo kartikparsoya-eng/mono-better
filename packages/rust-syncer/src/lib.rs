@@ -12,6 +12,7 @@ pub mod custom_query;
 pub mod drain;
 pub mod e2e_serving_lag;
 pub mod http_server;
+pub mod live_count;
 pub mod message_handler;
 pub mod metrics;
 pub mod otel;
@@ -23,6 +24,7 @@ pub mod query_covering;
 pub mod replica_schema;
 pub mod router;
 pub mod sync_engine;
+pub mod trace;
 // NOTE: the former `view_syncer` module (the placeholder `RustViewSyncer` +
 // `PipelineDriver`/`CVRStoreOps` traits) was removed. The real dispatch lives on
 // the CG thread: `router::CgState` owns a `sync_engine::SyncEngine`, which drives

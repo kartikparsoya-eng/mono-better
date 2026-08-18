@@ -105,6 +105,9 @@ impl CVRUpdater {
 pub struct CVRConfigDrivenUpdater {
     pub base: CVRUpdater,
     shard: ShardID,
+    /// Live-instance census guard (leak hunting). Transient per-advance; the
+    /// census should return to 0 at rest. Not `Clone`, so a field guard is fine.
+    _census: crate::live_count::Guard,
 }
 
 impl CVRConfigDrivenUpdater {
@@ -113,6 +116,7 @@ impl CVRConfigDrivenUpdater {
         Self {
             base: CVRUpdater::new(cvr, replica_version),
             shard,
+            _census: crate::live_count::Guard::new(&crate::live_count::CONFIG_DRIVEN_UPDATER),
         }
     }
 
@@ -529,6 +533,9 @@ pub struct CVRQueryDrivenUpdater {
 
     // Whether trackQueries has been called.
     tracked: bool,
+    /// Live-instance census guard (leak hunting). Transient per-advance; the
+    /// census should return to 0 at rest. Not `Clone`, so a field guard is fine.
+    _census: crate::live_count::Guard,
 }
 
 impl CVRQueryDrivenUpdater {
@@ -570,6 +577,7 @@ impl CVRQueryDrivenUpdater {
             last_patches: HashMap::new(),
             row_set_signature_provider,
             tracked: false,
+            _census: crate::live_count::Guard::new(&crate::live_count::QUERY_DRIVEN_UPDATER),
         }
     }
 
@@ -718,6 +726,16 @@ impl CVRQueryDrivenUpdater {
         rows: &HashMap<String, (RowID, RowUpdate)>, // keyed by rowIDString
         existing_rows: &RowRecordMap,
     ) -> Vec<PatchToVersion> {
+        if crate::trace::enabled() {
+            crate::trace::recv(
+                "QueryUpdater",
+                &format!(
+                    "received batch={} existing={}",
+                    rows.len(),
+                    existing_rows.len()
+                ),
+            );
+        }
         let mut patches: Vec<PatchToVersion> = Vec::new();
 
         for (id_str, (id, update)) in rows {

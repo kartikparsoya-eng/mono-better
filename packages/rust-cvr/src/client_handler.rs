@@ -151,6 +151,10 @@ pub struct PokeHandler {
     /// "Greater" case emitted a fabricated `pokeStart {baseCookie: null}` +
     /// `pokeEnd` that REGRESSED the client's cookie.
     noop: bool,
+    /// Live-instance census guard (leak hunting). A `PokeHandler` is transient
+    /// (one per `start_poke`), not `Clone`, so a plain field guard is correct;
+    /// the census should return to 0 between pokes.
+    _census: crate::live_count::Guard,
 }
 
 impl PokeHandler {
@@ -340,7 +344,17 @@ impl PokeHandler {
         // OTLP: this poke transaction completed (pokeEnd pushed). Canceled/noop
         // pokes return before reaching here, matching TS `#pokeTime.recordMs` /
         // `#pokeTransactions.add(1)` at the end of `ClientHandler` `end()`.
-        crate::otel_metrics::record_poke(self.start.elapsed().as_secs_f64() * 1000.0);
+        let elapsed_ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        crate::otel_metrics::record_poke(elapsed_ms);
+        if crate::trace::enabled() {
+            crate::trace::note(
+                "PokeHandler",
+                &format!(
+                    "end poke_id={} cookie={} elapsed_ms={:.2}",
+                    state.poke_id, cookie, elapsed_ms,
+                ),
+            );
+        }
         Ok(())
     }
 
@@ -570,6 +584,9 @@ pub struct ClientHandler {
     /// poke after connect we force an (empty) poke even when caught up. Mirrors
     /// TS ClientHandler `#everPoked` (zero/v1.9.0).
     ever_poked: Arc<AtomicBool>,
+    /// Live-instance census guard (leak hunting). Inc on `new`, dec on Drop.
+    /// `ClientHandler` is not `Clone`, so a plain field guard is correct here.
+    _census: crate::live_count::Guard,
 }
 
 impl ClientHandler {
@@ -594,6 +611,7 @@ impl ClientHandler {
             )),
             poke_chain: Arc::new(AtomicBool::new(false)),
             ever_poked: Arc::new(AtomicBool::new(false)),
+            _census: crate::live_count::Guard::new(&crate::live_count::CLIENT_HANDLER),
         }
     }
 
@@ -644,10 +662,21 @@ impl ClientHandler {
                 client_group_id: self.client_group_id.clone(),
                 start: std::time::Instant::now(),
                 noop: true,
+                _census: crate::live_count::Guard::new(&crate::live_count::POKE_HANDLER),
             };
         }
 
         let base_cookie = base_val.as_ref().map(version_string);
+
+        if crate::trace::enabled() {
+            crate::trace::note(
+                "PokeHandler",
+                &format!(
+                    "start client_id={} poke_id={} force_initial={}",
+                    self.client_id, poke_id, force_initial_poke,
+                ),
+            );
+        }
 
         PokeHandler {
             state: Arc::new(StdMutex::new(PokeState::new(poke_id.clone(), base_cookie))),
@@ -661,6 +690,7 @@ impl ClientHandler {
             client_group_id: self.client_group_id.clone(),
             start: std::time::Instant::now(),
             noop: false,
+            _census: crate::live_count::Guard::new(&crate::live_count::POKE_HANDLER),
         }
     }
 

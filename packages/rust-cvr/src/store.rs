@@ -238,6 +238,27 @@ pub struct CVRStoreHandle {
     task_id: String,
     pending: PendingWrites,
     row_count: usize,
+    /// Live-instance census guard (leak hunting). Inc on `new`, dec on Drop.
+    _census: crate::live_count::Guard,
+}
+
+impl Drop for CVRStoreHandle {
+    fn drop(&mut self) {
+        // Dropping the single PG writer with buffered writes still queued means
+        // those material changes never reach Postgres — a leak-suspect teardown
+        // (the version won't advance and the client can't catch up). Name the
+        // drop path via a gated backtrace so the field can identify who bypassed
+        // the flush. `RUST_CVR_DROP_BACKTRACE=1` to enable; prod pays nothing.
+        if !self.pending.is_empty() {
+            eprintln!(
+                "[cvr] CVRStoreHandle dropped with pending writes (cvr_id={}) \
+                 — buffered changes were NOT flushed [census {}]",
+                self.cvr_id,
+                crate::live_count::snapshot(),
+            );
+            crate::live_count::drop_backtrace("CVRStoreHandle(pending)");
+        }
+    }
 }
 
 impl CVRStoreHandle {
@@ -249,6 +270,7 @@ impl CVRStoreHandle {
             task_id,
             pending: PendingWrites::default(),
             row_count: 0,
+            _census: crate::live_count::Guard::new(&crate::live_count::CVR_STORE),
         }
     }
 
@@ -464,6 +486,22 @@ impl CVRStoreHandle {
         // A no-op flush returns above without recording, matching TS.
         let flush_started = std::time::Instant::now();
         self.put_instance(cvr);
+
+        if crate::trace::enabled() {
+            crate::trace::note(
+                "CVRStore",
+                &format!(
+                    "flush start cvr_id={} rows={} clients={} queries={} desires={}",
+                    self.cvr_id,
+                    self.pending.pending_row_record_updates.len(),
+                    self.pending.pending_clients_insert.len()
+                        + self.pending.pending_clients_delete.len(),
+                    self.pending.pending_query_updates.len()
+                        + self.pending.pending_query_partial_updates.len(),
+                    self.pending.pending_desire_updates.len(),
+                ),
+            );
+        }
 
         let mut stats = CVRFlushStats::default();
         let mut tx = self.pool.begin().await?;
@@ -810,6 +848,16 @@ impl CVRStoreHandle {
         };
         crate::otel_metrics::record_cvr_flush(elapsed_ms, rows_flushed, "sync");
 
+        if crate::trace::enabled() {
+            crate::trace::note(
+                "CVRStore",
+                &format!(
+                    "flush end cvr_id={} rows={} rows_deferred={} elapsed_ms={:.2}",
+                    self.cvr_id, stats.rows, stats.rows_deferred, elapsed_ms,
+                ),
+            );
+        }
+
         Ok(Some(stats))
     }
 
@@ -821,6 +869,7 @@ impl CVRStoreHandle {
     /// wait (having signalled it via the ownership grant) and retry up to
     /// `MAX_LOAD_ATTEMPTS` before declaring the CVR invalid.
     pub async fn load(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
+        crate::trace::note("CVRStore", &format!("load cvr_id={}", self.cvr_id));
         let mut last_behind: Option<CVRStoreError> = None;
         for attempt in 0..MAX_LOAD_ATTEMPTS {
             if attempt > 0 {

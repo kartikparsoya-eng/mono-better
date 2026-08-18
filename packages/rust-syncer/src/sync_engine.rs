@@ -85,6 +85,8 @@ pub struct SyncEngine {
     /// batch compares its queries against the running set and logs aggregate
     /// coverage stats — it has NO effect on what is served.
     enable_query_covering: bool,
+    /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
+    _census: crate::live_count::Guard,
 }
 
 impl SyncEngine {
@@ -96,6 +98,7 @@ impl SyncEngine {
             clients: HashMap::new(),
             tokio_handle: None,
             enable_query_covering: true,
+            _census: crate::live_count::Guard::new(&crate::live_count::SYNC_ENGINE),
         }
     }
 
@@ -1595,6 +1598,26 @@ mod tests {
     use rust_cvr::types::{BaseQueryRecord, CVR, ClientQueryRecord, QueryRecord, ShardID};
     use rust_cvr::version::CVRVersion;
     use std::collections::BTreeMap;
+
+    /// A censused type must return its live-object counter to baseline once it
+    /// drops — otherwise the census leaks and defeats the leak hunt. `SyncEngine`
+    /// carries a `live_count::Guard` on `SYNC_ENGINE`; construct one, assert the
+    /// counter went up, drop it, assert it came back down.
+    #[test]
+    fn sync_engine_census_returns_to_baseline_after_drop() {
+        use crate::live_count::SYNC_ENGINE;
+        use std::sync::atomic::Ordering;
+        let base = SYNC_ENGINE.load(Ordering::Relaxed);
+        {
+            let _engine = SyncEngine::new(IvmPipelines::new());
+            assert_eq!(SYNC_ENGINE.load(Ordering::Relaxed), base + 1);
+        }
+        assert_eq!(
+            SYNC_ENGINE.load(Ordering::Relaxed),
+            base,
+            "SyncEngine census leaked on drop"
+        );
+    }
 
     fn row_id(id: &str) -> RowID {
         let mut key = serde_json::Map::new();

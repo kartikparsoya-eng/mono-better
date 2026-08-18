@@ -78,6 +78,8 @@ pub struct Connection {
     handler: Box<dyn MessageHandler>,
     /// Called when the connection is closed.
     on_close: Box<dyn Fn() + Send + Sync>,
+    /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
+    _census: crate::live_count::Guard,
 }
 
 impl Connection {
@@ -110,6 +112,7 @@ impl Connection {
             last_downstream_msg_time: std::sync::Mutex::new(Instant::now()),
             handler,
             on_close,
+            _census: crate::live_count::Guard::new(&crate::live_count::CONNECTION),
         }
     }
 

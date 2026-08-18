@@ -1177,6 +1177,20 @@ struct CgState {
     /// A fatal sync/store failure makes the CG unusable: the snapshot and IVM
     /// graph may already have advanced while the CVR did not commit.
     terminal: bool,
+    /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
+    /// THE most important census — a CgState owns the `SyncEngine` (IVM graph +
+    /// CVR store), so a residual count after all clients disconnect pins
+    /// everything below. See the `Drop` impl for the teardown backtrace hook.
+    _census: crate::live_count::Guard,
+}
+
+impl Drop for CgState {
+    fn drop(&mut self) {
+        // Attribute *who* tore down this client group when
+        // `RUST_SYNCER_DROP_BACKTRACE=1`. The census counter dec's via the
+        // `_census` guard's own `Drop`.
+        crate::live_count::drop_backtrace("CgState");
+    }
 }
 
 impl CgState {
@@ -1316,6 +1330,7 @@ impl CgState {
             connection_count,
             accepting,
             terminal: initialization_failed,
+            _census: crate::live_count::Guard::new(&crate::live_count::CLIENT_GROUP),
         }
     }
 
@@ -1544,6 +1559,13 @@ impl CgState {
     }
 
     async fn on_new_connection(&mut self, params: ConnectParams, sink: DirectWebSocketSink) {
+        crate::trace::note(
+            "conn-open",
+            &format!(
+                "cg={} client={} ws={}",
+                self.cg_id, params.client_id, params.ws_id
+            ),
+        );
         self.last_connect_time = now_ms();
         self.keepalive_until = self.last_connect_time + CG_KEEPALIVE_MS;
         let client_id = params.client_id.clone();
@@ -1974,6 +1996,10 @@ impl CgState {
             let now = now_ms();
             let ttl_clock = self.get_ttl_clock(now);
             let hydrate_started = std::time::Instant::now();
+            crate::trace::note(
+                "hydrate-start",
+                &format!("cg={} client={client_id}", self.cg_id),
+            );
             match self
                 .sync_engine
                 .config_and_hydrate_with_profile(
@@ -2009,6 +2035,13 @@ impl CgState {
                     self.cvr = Some(cvr);
                     config_accepted = true;
                     let elapsed_ms = hydrate_started.elapsed().as_secs_f64() * 1000.0;
+                    crate::trace::note(
+                        "hydrate-end",
+                        &format!(
+                            "cg={} client={client_id} elapsed_ms={elapsed_ms:.1}",
+                            self.cg_id
+                        ),
+                    );
                     self.metrics.record_hydration(elapsed_ms);
                     if elapsed_ms > slow_hydrate_threshold_ms() {
                         tracing::warn!(
@@ -2347,6 +2380,10 @@ impl CgState {
     }
 
     fn on_connection_closed(&mut self, client_id: String, ws_id: String) {
+        crate::trace::note(
+            "conn-close",
+            &format!("cg={} client={client_id} ws={ws_id}", self.cg_id),
+        );
         // Every accepted socket increments the CG handle count, including a
         // socket later superseded by another wsID.
         if self.open_ws_ids.remove(&ws_id) {
@@ -2458,6 +2495,15 @@ impl CgState {
     /// end-to-end serving-lag histogram (no-op when nothing is pending or the
     /// served version does not yet cover it). Port of TS `#markVersionServed`.
     fn mark_version_served(&mut self, version: &CVRVersion) {
+        crate::trace::note(
+            "poke-sent",
+            &format!(
+                "cg={} version={} clients={}",
+                self.cg_id,
+                version.state_version,
+                self.registered_ws.len()
+            ),
+        );
         if let Some(obs) = self
             .e2e_serving_lag
             .on_version_served(&version.state_version, now_ms() as f64)
@@ -2524,6 +2570,10 @@ impl CgState {
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
         let advance_started = std::time::Instant::now();
+        crate::trace::note(
+            "advance-start",
+            &format!("cg={} clients={}", self.cg_id, client_ids.len()),
+        );
         match self
             .sync_engine
             .advance_and_sync(
@@ -2538,8 +2588,16 @@ impl CgState {
             .await
         {
             Ok(result) => {
-                self.metrics
-                    .record_advance(advance_started.elapsed().as_secs_f64() * 1000.0);
+                let advance_ms = advance_started.elapsed().as_secs_f64() * 1000.0;
+                crate::trace::note(
+                    "advance-end",
+                    &format!(
+                        "cg={} elapsed_ms={advance_ms:.1} reset={}",
+                        self.cg_id,
+                        result.reset_reason.is_some()
+                    ),
+                );
+                self.metrics.record_advance(advance_ms);
                 if let Some(reason) = result.reset_reason.clone() {
                     // The engine could not advance in place (snapshot/schema
                     // drift). Port of TS `ResetPipelinesSignal` handling: the

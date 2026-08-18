@@ -206,6 +206,12 @@ struct CacheState {
     /// instead of blocking forever (in TS a flush failure calls `failService`,
     /// tearing down the whole service; here we surface it to awaiters).
     flush_error: Option<String>,
+    /// Live-instance census guard (leak hunting). `RowRecordCache` is `Clone` —
+    /// clones share this `Arc<TokioMutex<CacheState>>`, so the guard lives here,
+    /// in the single shared inner state, and the census counts logical caches,
+    /// not handle-clones. Inc on `CacheState::new`, dec when the last clone (and
+    /// thus the Arc) drops.
+    _census: crate::live_count::Guard,
 }
 
 impl CacheState {
@@ -217,6 +223,30 @@ impl CacheState {
             flushed_rows_version: None,
             flushing: false,
             flush_error: None,
+            _census: crate::live_count::Guard::new(&crate::live_count::ROW_RECORD_CACHE),
+        }
+    }
+}
+
+impl Drop for CacheState {
+    fn drop(&mut self) {
+        // This drops exactly once — when the last `RowRecordCache` clone (and
+        // thus the shared `Arc<TokioMutex<CacheState>>`) is gone. Dropping with
+        // deferred writes still pending means those row updates never reached
+        // Postgres and `flushed_rows_version` never caught up to
+        // `pending_rows_version` — a leak-suspect teardown. Gated backtrace
+        // (`RUST_CVR_DROP_BACKTRACE=1`) names the drop path; prod pays nothing.
+        if !self.pending.is_empty() || self.pending_rows_version != self.flushed_rows_version {
+            eprintln!(
+                "[cvr] RowRecordCache dropped with pending row writes \
+                 (pending={}, pending_version={:?}, flushed_version={:?}) \
+                 — deferred rows were NOT flushed [census {}]",
+                self.pending.len(),
+                self.pending_rows_version,
+                self.flushed_rows_version,
+                crate::live_count::snapshot(),
+            );
+            crate::live_count::drop_backtrace("RowRecordCache(pending)");
         }
     }
 }

@@ -33,6 +33,8 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Relays custom pushes to the TS push endpoint over HTTP, in order.
 pub struct HttpRelayPusher {
     tx: mpsc::UnboundedSender<serde_json::Value>,
+    /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
+    _census: crate::live_count::Guard,
 }
 
 impl HttpRelayPusher {
@@ -71,7 +73,10 @@ impl HttpRelayPusher {
                 }
             }
         });
-        Self { tx }
+        Self {
+            tx,
+            _census: crate::live_count::Guard::new(&crate::live_count::PUSHER),
+        }
     }
 
     fn relay_body(

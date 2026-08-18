@@ -133,6 +133,8 @@ pub struct SyncerWsMessageHandler {
     /// Raw auth/header material for this connection, forwarded on a relayed
     /// push so the TS endpoint can rebuild the `userPushURL` request.
     push_relay_headers: PushRelayHeaders,
+    /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
+    _census: crate::live_count::Guard,
 }
 
 impl SyncerWsMessageHandler {
@@ -156,6 +158,7 @@ impl SyncerWsMessageHandler {
             client_group_id,
             connection_selector: ConnectionSelector { client_id, ws_id },
             push_relay_headers,
+            _census: crate::live_count::Guard::new(&crate::live_count::WS_MESSAGE_HANDLER),
         }
     }
 }

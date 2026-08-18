@@ -101,6 +101,10 @@ pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<Connectio
         .route("/statz", get(statz_handler))
         .route("/metrics", get(metrics_handler))
         .route("/heapz", get(heapz_handler))
+        // Live-object census across all three Rust crates (leak hunt). Poll with
+        // `curl http://<http-port>/census` during a load run to see which
+        // counter climbs.
+        .route("/census", get(census_handler))
         // Global commit notification — the replicator POSTs here on each commit;
         // every hosted CG advances to the new replica head.
         .route("/notify", post(notify_broadcast_handler))
@@ -143,6 +147,27 @@ async fn metrics_handler(State(state): State<Arc<HttpServerState>>) -> impl Into
         StatusCode::OK,
         [("content-type", "text/plain; version=0.0.4")],
         state.router.metrics_prometheus(),
+    )
+}
+
+/// GET /census — live-object census aggregated across the three Rust crates.
+///
+/// Plaintext, one line per crate. Each crate's `live_count::snapshot()` renders
+/// its own `AtomicI64` census (inc on construct / dec on Drop). Poll this during
+/// a load run to attribute a process RSS climb: a `syncer: cg=N` that never
+/// returns to zero after clients disconnect means a client-group task is being
+/// retained (and with it its `SyncEngine` → IVM graph + CVR store).
+async fn census_handler() -> impl IntoResponse {
+    let body = format!(
+        "syncer: {}\ncvr:    {}\nivm:    {}\n",
+        crate::live_count::snapshot(),
+        rust_cvr::live_count::snapshot(),
+        rust_ivm::live_count::snapshot(),
+    );
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; charset=utf-8")],
+        body,
     )
 }
 
@@ -248,5 +273,37 @@ async fn notify_handler(
             StatusCode::NOT_FOUND,
             Json(json!({"error": "client group not found"})),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    /// The `/census` handler returns a 200 text/plain body with one line per
+    /// Rust crate (syncer/cvr/ivm), each rendering that crate's live-object
+    /// census. This is the endpoint polled during a load run to watch which
+    /// counter climbs.
+    #[tokio::test]
+    async fn census_handler_returns_all_three_crates() {
+        let resp = census_handler().await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(ct.starts_with("text/plain"), "content-type was {ct}");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("syncer:"), "body: {body}");
+        assert!(body.contains("cvr:"), "body: {body}");
+        assert!(body.contains("ivm:"), "body: {body}");
+        // The syncer line renders our own census statics.
+        assert!(body.contains("cg="), "body: {body}");
     }
 }
