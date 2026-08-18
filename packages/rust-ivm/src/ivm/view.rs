@@ -75,9 +75,9 @@ impl Entry {
 
     /// Compare two entries by their row data using a comparator.
     pub fn compare(&self, other: &Entry, cmp: &Comparator) -> CmpOrdering {
-        let a: Row = Arc::new(self.row.clone());
-        let b: Row = Arc::new(other.row.clone());
-        cmp(&a, &b)
+        // `Entry.row` is already an owned `FxHashMap`; the comparator borrows it
+        // directly — no `Arc::new(row.clone())` per comparison.
+        cmp(&self.row, &other.row)
     }
 }
 
@@ -404,11 +404,11 @@ fn apply_add_singular(
     let existing = get_optional_singular_entry(parent_entry, relationship);
     match existing {
         Some(old_entry) => {
-            // Duplicate add: increment refCount
-            let old_row: Row = Arc::new(old_entry.row.clone());
-            let node_row = node.row().clone();
+            // Duplicate add: increment refCount. Borrow both row maps directly —
+            // `old_entry.row` is an owned `FxHashMap`, `node.row()` derefs through
+            // its `Arc` — instead of cloning into throwaway `Arc<FxHashMap>`s.
             assert_eq!(
-                (schema.compare_rows)(&old_row, &node_row),
+                (schema.compare_rows)(&old_entry.row, &**node.row()),
                 CmpOrdering::Equal,
                 "Singular relationship should not have multiple rows"
             );
@@ -856,13 +856,18 @@ fn value_to_json_string(v: &Value) -> String {
 /// Binary search returning a number.
 /// - If found at index `i`: returns `i` (>= 0).
 /// - If not found, insertion point is `low`: returns `~low` (< 0).
-fn binary_search(view: &[Rc<Entry>], target: &Row, comparator: &Comparator) -> i64 {
+fn binary_search(
+    view: &[Rc<Entry>],
+    target: &FxHashMap<String, Value>,
+    comparator: &Comparator,
+) -> i64 {
     let mut low: i64 = 0;
     let mut high: i64 = view.len() as i64 - 1;
     while low <= high {
         let mid = (low + high) >> 1;
-        let mid_entry_row: Row = Arc::new(view[mid as usize].row.clone());
-        let cmp = comparator(&mid_entry_row, target);
+        // `Entry.row` is an owned `FxHashMap`; borrow it directly — no per-probe
+        // `Arc::new(row.clone())`.
+        let cmp = comparator(&view[mid as usize].row, target);
         if cmp == CmpOrdering::Less {
             low = mid + 1;
         } else if cmp == CmpOrdering::Greater {
@@ -1004,5 +1009,3 @@ pub fn change_to_view_change(change: &crate::ivm::change::Change) -> ViewChange 
 pub fn empty_root_entry() -> Entry {
     Entry::new(FxHashMap::default(), 0)
 }
-
-use std::sync::Arc;

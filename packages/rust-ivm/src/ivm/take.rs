@@ -10,8 +10,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering as CmpOrdering;
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use crate::ivm::change::{Change, ChangeType, make_add_change, make_remove_change};
 use crate::ivm::constraint::{Constraint, constraint_matches_primary_key};
@@ -228,7 +231,7 @@ impl Take {
         let mut key = String::new();
         for col in partition_key {
             let value = row.get(col).unwrap_or(&Value::Null);
-            key.push_str(&format!("{}={:?};", col, value));
+            let _ = write!(key, "{}={:?};", col, value);
         }
         key
     }
@@ -240,7 +243,7 @@ impl Take {
         let mut key = String::new();
         for col in partition_key {
             let value = constraint.get(col).unwrap_or(&Value::Null);
-            key.push_str(&format!("{}={:?};", col, value));
+            let _ = write!(key, "{}={:?};", col, value);
         }
         key
     }
@@ -981,7 +984,7 @@ impl Input for Take {
                         let mut key = String::new();
                         for col in &partition_key {
                             let value = node.row.get(col).unwrap_or(&Value::Null);
-                            key.push_str(&format!("{}={:?};", col, value));
+                            let _ = write!(key, "{}={:?};", col, value);
                         }
                         let bound = storage
                             .borrow()
@@ -1032,7 +1035,7 @@ impl Output for TakeOutput {
 /// Make a partition key comparator.
 fn make_partition_key_comparator(partition_key: &PartitionKey) -> Comparator {
     let pk = partition_key.clone();
-    Rc::new(move |a: &Row, b: &Row| {
+    Rc::new(move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
         for col in &pk {
             let av = a.get(col).unwrap_or(&Value::Null);
             let bv = b.get(col).unwrap_or(&Value::Null);
