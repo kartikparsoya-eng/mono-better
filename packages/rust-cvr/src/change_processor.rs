@@ -77,7 +77,9 @@ impl<'a> ChangeProcessor<'a> {
         };
         let id_str = row_id_string(&row_id);
 
-        let entry = self.rows.entry(id_str.clone()).or_insert_with(|| {
+        // `id_str` is not used after keying the entry, so move it in rather than
+        // clone. `row_id` is moved into the freshly-inserted entry's value.
+        let entry = self.rows.entry(id_str).or_insert_with(|| {
             (
                 row_id,
                 RowUpdate {
@@ -97,9 +99,20 @@ impl<'a> ChangeProcessor<'a> {
                 .get(ZERO_VERSION_COLUMN_NAME)
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            // Build contents without `_0_version` (TS `contentsAndVersion`).
+            // Filtering into a fresh map is byte-identical to `row.clone()` +
+            // `remove(_0_version)` — same remaining keys, same insertion order —
+            // but skips cloning the stripped value and avoids the O(n) shift a
+            // `remove` triggers on the insertion-ordered (preserve_order) map.
+            // The engine hands us the row as a shared borrow (`Arc<...>`
+            // upstream), so `contents` must be an owned copy regardless.
             let contents = {
-                let mut c = row.clone();
-                c.remove(ZERO_VERSION_COLUMN_NAME);
+                let mut c = Map::with_capacity(row.len().saturating_sub(1));
+                for (k, v) in row {
+                    if k != ZERO_VERSION_COLUMN_NAME {
+                        c.insert(k.clone(), v.clone());
+                    }
+                }
                 Value::Object(c)
             };
             entry.1.version = version;
