@@ -1722,7 +1722,7 @@ mod tests {
 
         // Wire a client whose sink drains into a channel (buffer large enough
         // that blocking_send never blocks for the few poke frames).
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         engine.register_client(
             "client1",
@@ -1833,7 +1833,7 @@ mod tests {
             .unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
-        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         engine.register_client(
             "client1",
@@ -1877,7 +1877,7 @@ mod tests {
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(128);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         let shard = ShardID {
             app_id: "app".to_string(),
@@ -1945,7 +1945,7 @@ mod tests {
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
-        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         let shard = ShardID {
             app_id: "app".to_string(),
@@ -2040,7 +2040,7 @@ mod tests {
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
-        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(128);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         let shard = ShardID {
             app_id: "app".to_string(),
@@ -2124,7 +2124,7 @@ mod tests {
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
-        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(128);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         let shard = ShardID {
             app_id: "app".to_string(),
@@ -2204,7 +2204,7 @@ mod tests {
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
-        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(128);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         let shard = ShardID {
             app_id: "app".to_string(),
@@ -2302,7 +2302,7 @@ mod tests {
             app_id: "app".to_string(),
             shard_num: 0,
         };
-        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(16);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         engine.register_client(
             "client1",
             "ws1",
@@ -2338,7 +2338,7 @@ mod tests {
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
         let mut engine = SyncEngine::new(pipelines);
 
-        let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(8);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
         let shard = ShardID {
             app_id: "app".to_string(),
@@ -2388,7 +2388,7 @@ mod tests {
             shard_num: 0,
         };
         let mk = || -> Arc<dyn WebSocketSink> {
-            let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(8);
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
             Arc::new(DirectWebSocketSink::new(tx))
         };
         engine.register_client("cA", "wsA", "cg1", &shard, Some("05"), mk()); // at cvr.version
@@ -2417,7 +2417,7 @@ mod tests {
             shard_num: 0,
         };
         let mk = || -> Arc<dyn WebSocketSink> {
-            let (tx, _rx) = tokio::sync::mpsc::channel::<WsCommand>(8);
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
             Arc::new(DirectWebSocketSink::new(tx))
         };
         engine.register_client("new", "ws-new", "cg1", &shard, None, mk());
@@ -2448,7 +2448,7 @@ mod tests {
             shard_num: 0,
         };
 
-        let (tx1, mut rx1) = tokio::sync::mpsc::channel::<WsCommand>(256);
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         engine.register_client(
             "client1",
             "ws1",
@@ -2457,7 +2457,7 @@ mod tests {
             None,
             Arc::new(DirectWebSocketSink::new(tx1)),
         );
-        let (tx2, _rx2) = tokio::sync::mpsc::channel::<WsCommand>(256);
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         engine.register_client(
             "client2",
             "ws2",

@@ -3684,7 +3684,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid.clone());
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             authed_params("c1", "ws1", "tok-c1"),
             DirectWebSocketSink::new(tx),
@@ -3720,7 +3720,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         // authed_params → test_params, which sets profile_id = None,
         // client_group_id = "cg1".
         rt.block_on(state.on_new_connection(
@@ -3743,7 +3743,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let mut params = authed_params("c1", "ws1", "tok-c1");
         params.profile_id = Some("p-explicit".to_string());
         rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
@@ -3766,12 +3766,12 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
         // Connect "foo" on ws1, then reconnect "foo" on ws2 (supersedes ws1).
-        let (tx1, _d1) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx1, _d1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             authed_params("foo", "ws1", "tok"),
             DirectWebSocketSink::new(tx1),
         ));
-        let (tx2, _d2) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx2, _d2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             authed_params("foo", "ws2", "tok"),
             DirectWebSocketSink::new(tx2),
@@ -3893,7 +3893,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         // Opaque token (not a JWT), user_id None → group stays unpinned.
         rt.block_on(state.on_new_connection(
             authed_params("c1", "ws1", "opaque-token-1"),
@@ -3925,7 +3925,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             authed_params("c1", "ws1", "opaque-token-1"),
             DirectWebSocketSink::new(tx),
@@ -3947,7 +3947,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             authed_params("c1", "ws1", "tok-c1"),
             DirectWebSocketSink::new(tx),
@@ -3977,7 +3977,7 @@ mod tests {
 
         // Disabled: interval None.
         let mut disabled = revalidate_state(&rt, None, valid.clone());
-        let (tx, _d) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _d) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(disabled.on_new_connection(
             authed_params("c1", "ws1", "tok"),
             DirectWebSocketSink::new(tx),
@@ -3987,7 +3987,7 @@ mod tests {
 
         // Enabled but the connection carries no token → nothing to revalidate.
         let mut unauthed = revalidate_state(&rt, Some(300_000), valid);
-        let (tx2, _d2) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx2, _d2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(
             unauthed.on_new_connection(test_params("c2", "ws2"), DirectWebSocketSink::new(tx2)),
         );
@@ -4004,7 +4004,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
@@ -4029,7 +4029,7 @@ mod tests {
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
@@ -4070,7 +4070,7 @@ mod tests {
             count,
         );
 
-        let (tx, mut drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
         rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
@@ -4176,14 +4176,14 @@ mod tests {
         );
 
         // First connection: client c1 on ws1.
-        let (tx1, mut drx1) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx1, mut drx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(
             state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx1)),
         );
         while drx1.try_recv().is_ok() {} // drain ws1's `connected` frame
 
         // Reconnect: same client c1 on a NEW ws2.
-        let (tx2, _drx2) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx2, _drx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(
             state.on_new_connection(test_params("c1", "ws2"), DirectWebSocketSink::new(tx2)),
         );
@@ -4240,7 +4240,7 @@ mod tests {
             count,
         );
 
-        let (tx, mut drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
         rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
@@ -4368,7 +4368,7 @@ mod tests {
             let mut params = test_params(cid, ws);
             params.client_group_id = cgid.to_string();
             let (up_tx, up_rx) = tokio::sync::mpsc::channel::<String>(8);
-            let (sink_tx, sink_rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+            let (sink_tx, sink_rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
             (
                 ConnectionContext {
                     params,
@@ -4550,7 +4550,7 @@ mod tests {
             count,
         );
 
-        let (tx, _drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
         seed_test_client_schema(&mut state);
         let mut params = test_params("c1", "ws1");
@@ -4593,7 +4593,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(1)),
         );
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(
             state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx)),
         );
@@ -4648,11 +4648,12 @@ mod tests {
         state.admin_password = Some("s3cret".to_string());
         state.server_version = "9.9.9".to_string();
 
-        let (tx, mut drx) = tokio::sync::mpsc::channel::<WsCommand>(64);
+        let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
         rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
-        let drain = |drx: &mut tokio::sync::mpsc::Receiver<WsCommand>| -> Vec<serde_json::Value> {
+        let drain =
+            |drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| -> Vec<serde_json::Value> {
             let mut v = Vec::new();
             while let Ok(WsCommand::Send(m)) = drx.try_recv() {
                 v.push(m);

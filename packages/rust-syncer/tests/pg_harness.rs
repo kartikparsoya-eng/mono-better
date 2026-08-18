@@ -1236,7 +1236,7 @@ fn pg_advance_lmid_change_with_no_queries() {
         app_id: "app".to_string(),
         shard_num: 0,
     };
-    let (tx1, mut rx1) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink1: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx1));
     engine.register_client("c1", "ws1", "cg1", &shard, None, sink1);
 
@@ -1446,7 +1446,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         app_id: "app".to_string(),
         shard_num: 0,
     };
-    let (tx1, mut rx1) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink1: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx1));
     engine.register_client("client1", "ws1", "cg1", &shard, None, sink1);
 
@@ -1532,7 +1532,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
     // Reconnect the same logical client with its old cookie. No query needs a
     // new hydrate; config_and_hydrate must take the catch-up branch and rebuild
     // the missed row contents from the advanced IVM state.
-    let (tx2, mut rx2) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink2: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx2));
     engine.register_client(
         "client1",

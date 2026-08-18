@@ -52,7 +52,7 @@ fn hydrate_real_rows_produces_row_pokes() {
     pipelines.init_from_connection(specs, shared_conn).unwrap();
 
     let mut engine = SyncEngine::new(pipelines);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -177,7 +177,7 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
     pipelines.init_from_connection(specs, shared_conn).unwrap();
 
     let mut engine = SyncEngine::new(pipelines);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -273,7 +273,7 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
     pipelines.init_from_connection(specs, shared_conn).unwrap();
 
     let mut engine = SyncEngine::new(pipelines);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -390,7 +390,7 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
     pipelines.init_from_connection(specs, shared_conn).unwrap();
 
     let mut engine = SyncEngine::new(pipelines);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -521,7 +521,7 @@ fn partial_success_transform_hydrates_healthy_query() {
     pipelines.init_from_connection(specs, shared_conn).unwrap();
 
     let mut engine = SyncEngine::new(pipelines);
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<WsCommand>(256);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
     let shard = ShardID {
         app_id: "app".to_string(),
@@ -643,8 +643,8 @@ fn transform_failure_fails_only_the_offending_connection() {
         shard_num: 0,
     };
     // Two clients, each with its own sink.
-    let (tx_a, mut rx_a) = tokio::sync::mpsc::channel::<WsCommand>(64);
-    let (tx_b, mut rx_b) = tokio::sync::mpsc::channel::<WsCommand>(64);
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+    let (tx_b, mut rx_b) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
     engine.register_client(
         "clientA",
         "wsA",

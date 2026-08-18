@@ -1,9 +1,23 @@
 //! DirectWebSocketSink — replaces `NapiWebSocketSink` + TSFN.
 //!
-//! The CG thread writes poke frames to a bounded channel; a tokio task
-//! drains the channel and writes to the WebSocket. Backpressure is natural
-//! (bounded channel — the CG thread blocks when the channel is full, exactly
-//! like the TS `ws.send()` backpressure model).
+//! The CG thread writes poke frames to a channel; a tokio task drains it and
+//! writes to the WebSocket.
+//!
+//! ## Ordering
+//!
+//! Poke frame order is a hard protocol invariant (pokeStart → pokePart* →
+//! pokeEnd). `push()` is synchronous and is invoked from inside the CG's
+//! `current_thread` runtime, where `blocking_send` panics and there is no way to
+//! `.await`. The channel is therefore **unbounded**: `UnboundedSender::send` is
+//! non-blocking, never fails on capacity, and preserves send order.
+//!
+//! A bounded channel cannot be used here without breaking ordering: on a full
+//! bounded channel the only non-panicking, non-blocking option is to defer the
+//! overflow frame (which lets a later frame overtake it — a reorder bug) or to
+//! drop the connection mid-hydration. Unbounded avoids both. Backpressure now
+//! lives at the socket/writer layer rather than in this channel's depth; this is
+//! no worse than the previous behavior, which spawned an unbounded number of
+//! deferred-send tasks under sustained overload.
 
 use crate::protocol::{BasicErrorBody, ErrorBody, ErrorKind};
 use serde::Serialize;
@@ -22,16 +36,16 @@ pub enum WsCommand {
 
 /// The sink that the CG thread uses to push downstream messages.
 ///
-/// `push()` is **synchronous** — it blocks the CG thread if the channel
-/// is full. This matches the TS `ws.send()` backpressure behavior where
-/// a slow client slows down the server.
+/// `push()` is **synchronous** and non-blocking: it enqueues onto an unbounded
+/// channel, so frames are delivered to the writer task in exact send order and
+/// the call can never panic on a full channel (see module docs on ordering).
 #[derive(Clone)]
 pub struct DirectWebSocketSink {
-    tx: mpsc::Sender<WsCommand>,
+    tx: mpsc::UnboundedSender<WsCommand>,
 }
 
 impl DirectWebSocketSink {
-    pub fn new(tx: mpsc::Sender<WsCommand>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<WsCommand>) -> Self {
         Self { tx }
     }
 
@@ -58,30 +72,13 @@ impl DirectWebSocketSink {
         let _ = self.send_command(WsCommand::Close(reason));
     }
 
-    /// Deliver from either the dedicated CG thread or a Tokio admission task.
-    /// `blocking_send` panics whenever it is called inside a runtime, even when
-    /// the channel has capacity. Try the non-blocking fast path first; only a
-    /// full channel on the non-runtime CG thread blocks. Runtime callers queue
-    /// the rare overflow asynchronously so rejection/error paths cannot panic
-    /// and poison the router's shared mutexes.
+    /// Enqueue a command onto the unbounded, order-preserving channel. Never
+    /// blocks and never panics; the only failure is a dropped receiver (the WS
+    /// writer task has exited), reported as "ws sink closed".
     fn send_command(&self, command: WsCommand) -> Result<(), String> {
-        match self.tx.try_send(command) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err("ws sink closed".to_string()),
-            Err(mpsc::error::TrySendError::Full(command)) => {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    let tx = self.tx.clone();
-                    handle.spawn(async move {
-                        let _ = tx.send(command).await;
-                    });
-                    Ok(())
-                } else {
-                    self.tx
-                        .blocking_send(command)
-                        .map_err(|error| format!("ws sink closed: {error}"))
-                }
-            }
-        }
+        self.tx
+            .send(command)
+            .map_err(|_| "ws sink closed".to_string())
     }
 }
 
@@ -116,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_error_send_never_uses_blocking_send() {
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let sink = DirectWebSocketSink::new(tx);
 
         sink.push(serde_json::json!(["first"]));
@@ -127,5 +124,30 @@ mod tests {
 
         assert!(matches!(rx.recv().await, Some(WsCommand::Send(_))));
         assert!(matches!(rx.recv().await, Some(WsCommand::Fail(_))));
+    }
+
+    /// A burst larger than any previous bounded capacity must arrive in exact
+    /// send order (no reorder under "backpressure") — the invariant the old
+    /// try_send-then-spawn path violated.
+    #[tokio::test]
+    async fn burst_preserves_frame_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = DirectWebSocketSink::new(tx);
+
+        // Push far more than the old 256-slot bound, synchronously, before the
+        // reader drains anything.
+        const N: i64 = 1000;
+        for i in 0..N {
+            sink.push(serde_json::json!(["pokePart", i]));
+        }
+        sink.close("done".to_string());
+
+        for i in 0..N {
+            match rx.recv().await {
+                Some(WsCommand::Send(v)) => assert_eq!(v[1], serde_json::json!(i)),
+                _ => panic!("expected Send({i}) in order"),
+            }
+        }
+        assert!(matches!(rx.recv().await, Some(WsCommand::Close(_))));
     }
 }

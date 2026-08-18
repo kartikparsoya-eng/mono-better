@@ -225,8 +225,10 @@ pub async fn accept_connection_with_limit(
     // Channel: CG thread receives upstream messages from the WS reader.
     let (upstream_tx, upstream_rx) = mpsc::channel::<String>(256);
 
-    // Channel: CG thread sends downstream messages to the WS writer.
-    let (downstream_tx, downstream_rx) = mpsc::channel::<WsCommand>(256);
+    // Channel: CG thread sends downstream messages to the WS writer. Unbounded
+    // to preserve poke frame order from the sync, in-runtime `push` path (see
+    // `ws_sink` module docs).
+    let (downstream_tx, downstream_rx) = mpsc::unbounded_channel::<WsCommand>();
     let sink = DirectWebSocketSink::new(downstream_tx);
 
     // The `connected` message is sent by `Connection::init()` on the CG thread
@@ -253,7 +255,7 @@ async fn run_ws_writer(
         tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
         Message,
     >,
-    mut rx: mpsc::Receiver<WsCommand>,
+    mut rx: mpsc::UnboundedReceiver<WsCommand>,
 ) {
     let mut last_downstream_msg_time = Instant::now();
 
