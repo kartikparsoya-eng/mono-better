@@ -267,7 +267,7 @@ fn condition_implies(covered: Option<&Value>, covering: Option<&Value>) -> bool 
     let Some(covered) = covered else {
         return false;
     };
-    if covered == covering {
+    if json_value_eq(covered, covering) {
         return true;
     }
 
@@ -324,7 +324,7 @@ fn correlated_condition_implies(covered: &Value, covering: &Value) -> bool {
 }
 
 fn same_related_edge(a: &Value, b: &Value) -> bool {
-    a.get("correlation") == b.get("correlation")
+    json_eq(a.get("correlation"), b.get("correlation"))
         && a.get("hidden") == b.get("hidden")
         && a.get("system") == b.get("system")
         && subquery(a).get("alias") == subquery(b).get("alias")
@@ -370,8 +370,8 @@ fn simple_condition_implies(covered: &Value, covering: &Value) -> bool {
 
 fn equality_implies(value: &Value, covering_op: &str, covering_value: &Value) -> bool {
     match covering_op {
-        "=" | "IS" => value == covering_value,
-        "!=" | "IS NOT" => value != covering_value,
+        "=" | "IS" => json_value_eq(value, covering_value),
+        "!=" | "IS NOT" => !json_value_eq(value, covering_value),
         "IN" => covering_value
             .as_array()
             .is_some_and(|a| literal_array_includes(a, value)),
@@ -440,7 +440,7 @@ fn is_non_null_scalar_literal(value: &Value) -> bool {
 }
 
 fn literal_array_includes(values: &[Value], value: &Value) -> bool {
-    values.iter().any(|v| v == value)
+    values.iter().any(|v| json_value_eq(v, value))
 }
 
 // ─── small helpers ───────────────────────────────────────────────────────────
@@ -454,12 +454,35 @@ fn present(v: Option<&Value>) -> Option<&Value> {
     }
 }
 
+/// Structural equality with JS number semantics: `serde_json` distinguishes
+/// integer and float representations (`1 != 1.0`), but TS `deepEqual` compares
+/// JS doubles — under plain `Value` equality a mixed `1`-vs-`1.0` encoding
+/// would (worse than conservatively) claim a `!=`/`IS NOT` implication that TS
+/// denies. Numbers compare via f64; everything else recurses structurally.
+fn json_value_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| json_value_eq(a, b))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, va)| y.get(k).is_some_and(|vb| json_value_eq(va, vb)))
+        }
+        _ => a == b,
+    }
+}
+
 fn field_eq(a: &Value, b: &Value, key: &str) -> bool {
-    present(a.get(key)) == present(b.get(key))
+    json_eq(a.get(key), b.get(key))
 }
 
 fn json_eq(a: Option<&Value>, b: Option<&Value>) -> bool {
-    present(a) == present(b)
+    match (present(a), present(b)) {
+        (Some(a), Some(b)) => json_value_eq(a, b),
+        (a, b) => a == b,
+    }
 }
 
 fn ctype(v: &Value) -> &str {

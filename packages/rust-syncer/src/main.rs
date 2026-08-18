@@ -138,8 +138,13 @@ impl SyncerConfig {
                     .unwrap_or(300);
                 (secs > 0).then_some(secs * 1000)
             },
-            // TS default: true. Only an explicit "false" disables it.
-            enable_query_covering: env::var("ENABLE_QUERY_COVERING").as_deref() != Ok("false"),
+            // TS default: true. An explicit false/0 (case-insensitive) disables.
+            enable_query_covering: !env::var("ENABLE_QUERY_COVERING")
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "false" || v == "0"
+                })
+                .unwrap_or(false),
         }
     }
 }

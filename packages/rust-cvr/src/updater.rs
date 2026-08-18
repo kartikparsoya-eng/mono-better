@@ -849,7 +849,30 @@ impl CVRQueryDrivenUpdater {
         for existing in existing_rows {
             let id_str = crate::row_key::row_id_string(&existing.id);
 
-            if self.received_rows.contains_key(&id_str) {
+            // TS `#receivedRows.get(id)` is a TRUTHY check: an entry whose
+            // merged refCounts collapsed to null (received then fully
+            // retracted within this pass) is falsy, and TS REPROCESSES the
+            // row below — persisting `existing.rowVersion` rather than the
+            // retracted update's. `contains_key` skipped those.
+            if self
+                .received_rows
+                .get(&id_str)
+                .is_some_and(|rc| rc.is_some())
+            {
+                continue;
+            }
+
+            // TS only looks up rows that reference an executed or removed
+            // query (`#lookupRowsForExecutedAndRemovedQueries`); rows
+            // referencing neither are untouched. For those, the merge below
+            // is an identity (nothing to subtract), so skipping is
+            // behavior-identical and turns the per-pass cost from O(all CVR
+            // rows) into O(rows of the executed/removed queries).
+            let references_relevant = existing.ref_counts.as_ref().is_some_and(|rc| {
+                rc.keys()
+                    .any(|q| self.removed_or_executed_query_ids.contains(q))
+            });
+            if !references_relevant {
                 continue;
             }
 

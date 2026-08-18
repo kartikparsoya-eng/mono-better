@@ -245,8 +245,11 @@ impl SyncEngine {
         }
     }
 
-    fn clients_for(&self, client_ids: &[String]) -> Vec<Arc<ClientHandler>> {
-        client_ids
+    /// Resolve handlers by WebSocket id — `self.clients` is keyed by `ws_id`
+    /// (see `register_client`), and every caller passes ws ids. The parameter
+    /// was previously named `client_ids`, inviting a real keying bug.
+    fn clients_for(&self, ws_ids: &[String]) -> Vec<Arc<ClientHandler>> {
+        ws_ids
             .iter()
             .filter_map(|id| self.clients.get(id).cloned())
             .collect()
@@ -638,33 +641,13 @@ impl SyncEngine {
             }
         }
 
-        // Shadow-mode query covering (#6182): seed an index from the queries the
-        // pipeline is ALREADY running, then check each query hydrated below
-        // against it. Purely observational — no effect on what is served.
-        let mut covering_index = self.enable_query_covering.then(|| {
-            let mut idx = QueryCoveringIndex::new();
-            for (qid, ast_json, hash) in self.pipelines.running_queries() {
-                if let Ok(ast) = serde_json::from_str::<serde_json::Value>(&ast_json) {
-                    idx.add(
-                        &qid,
-                        &RunningQuery {
-                            transformed_ast: ast,
-                            transformation_hash: hash,
-                            query_name: query_name_of(&cfg_cvr, &qid),
-                        },
-                    );
-                }
-            }
-            idx
-        });
-        let mut total_hydrated_queries = 0usize;
-        let mut covered_hydrated_queries = 0usize;
-        let mut first_covered: Option<QueryCoverageShadowHit> = None;
-
         // Drift check: (re-)hydrate a query when it is missing OR its
         // transformation hash changed (auth re-transform / a new custom AST).
         let mut add_queries: Vec<(String, String)> = Vec::new();
         let mut queries: Vec<(String, String)> = Vec::new();
+        // The to-be-hydrated queries with their parsed ASTs, kept for the
+        // shadow-mode covering pass below (avoids re-parsing the JSON strings).
+        let mut covering_candidates: Vec<(String, serde_json::Value, String)> = Vec::new();
         let mut retransform_removes: Vec<String> = Vec::new();
         // TS scopes `query.transformation-{hash-changes,no-ops}` to custom
         // queries with an existing CVR transform hash (view-syncer.ts:1818-1843).
@@ -693,12 +676,52 @@ impl SyncEngine {
                 // Not hydrated → a normal add.
                 None => {}
             }
-            // Shadow coverage check for this to-be-hydrated query (before it
-            // joins the batch index), mirroring TS `#findQueryCoverageShadowHit`.
-            if let Some(idx) = covering_index.as_mut() {
-                let query_name = query_name_of(&cfg_cvr, &qid);
+            if self.enable_query_covering {
+                covering_candidates.push((
+                    qid.clone(),
+                    transformed_ast.clone(),
+                    transformation_hash.clone(),
+                ));
+            }
+            add_queries.push((qid.clone(), transformation_hash));
+            queries.push((qid, transformed_ast.to_string()));
+        }
+        // Tear down drifted pipelines directly (no CVR removal — the query is
+        // still desired; only its compiled pipeline is rebuilt).
+        for qid in &retransform_removes {
+            self.pipelines.remove_query(qid);
+        }
+
+        // Shadow-mode query covering (#6182): seeded lazily and AFTER the
+        // drifted-pipeline teardown — TS builds its index from
+        // `pipelines.queries()` after `removeQuery` runs, so a stale drifted
+        // AST never acts as a covering query; and a config change that hydrates
+        // nothing skips the (parse + normalize all running ASTs) cost entirely.
+        // Purely observational — no effect on what is served.
+        if self.enable_query_covering && !covering_candidates.is_empty() {
+            let mut idx = QueryCoveringIndex::new();
+            for (qid, ast_json, hash) in self.pipelines.running_queries() {
+                match serde_json::from_str::<serde_json::Value>(&ast_json) {
+                    Ok(ast) => idx.add(
+                        &qid,
+                        &RunningQuery {
+                            transformed_ast: ast,
+                            transformation_hash: hash,
+                            query_name: query_name_of(&cfg_cvr, &qid),
+                        },
+                    ),
+                    Err(e) => {
+                        tracing::warn!("query covering: unparseable stored AST for {qid}: {e}")
+                    }
+                }
+            }
+            let mut total_hydrated_queries = 0usize;
+            let mut covered_hydrated_queries = 0usize;
+            let mut first_covered: Option<QueryCoverageShadowHit> = None;
+            for (qid, transformed_ast, transformation_hash) in &covering_candidates {
+                let query_name = query_name_of(&cfg_cvr, qid);
                 total_hydrated_queries += 1;
-                if let Some(cov) = idx.find_covering_query(&qid, &transformed_ast) {
+                if let Some(cov) = idx.find_covering_query(qid, transformed_ast) {
                     covered_hydrated_queries += 1;
                     if first_covered.is_none() {
                         first_covered = Some(QueryCoverageShadowHit {
@@ -712,7 +735,7 @@ impl SyncEngine {
                     }
                 }
                 idx.add(
-                    &qid,
+                    qid,
                     &RunningQuery {
                         transformed_ast: transformed_ast.clone(),
                         transformation_hash: transformation_hash.clone(),
@@ -720,18 +743,7 @@ impl SyncEngine {
                     },
                 );
             }
-            add_queries.push((qid.clone(), transformation_hash));
-            queries.push((qid, transformed_ast.to_string()));
-        }
-        // Tear down drifted pipelines directly (no CVR removal — the query is
-        // still desired; only its compiled pipeline is rebuilt).
-        for qid in &retransform_removes {
-            self.pipelines.remove_query(qid);
-        }
-
-        // Emit the shadow-mode coverage summary for this hydration batch (TS
-        // `#logQueryCoverageShadowSummary`, hydrationPath 'add').
-        if self.enable_query_covering {
+            // TS `#logQueryCoverageShadowSummary`, hydrationPath 'add'.
             crate::query_covering::log_shadow_summary(
                 &shard.app_id,
                 shard.shard_num,

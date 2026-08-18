@@ -91,8 +91,15 @@ pub struct IvmPipelines {
     /// query_id → the TS-shaped transformed AST JSON the pipeline was hydrated
     /// with. Port of the `transformedAst` carried by TS `pipelineDriver.queries()`
     /// (`QueryInfo`). Only consumed by the shadow-mode query-covering index
-    /// (`enable_query_covering`); it has no effect on what is served.
-    query_asts: HashMap<String, String>,
+    /// (`enable_query_covering`); it has no effect on what is served. `Arc<str>`
+    /// so `running_queries()` snapshots are refcount bumps, not string copies
+    /// (these ASTs can be large and per-CG RSS matters).
+    query_asts: HashMap<String, std::sync::Arc<str>>,
+    /// Hydration insertion order of `query_asts` keys — TS `queries()` is a Map
+    /// with insertion order, and the covering index's "first covering query"
+    /// tie-break depends on it; iterating the HashMap made it nondeterministic
+    /// run-to-run.
+    query_order: Vec<String>,
     /// Set when a non-scalar panic was caught mid-advance; forces the next
     /// advance to emit a reset instead of running on a half-mutated graph.
     poisoned: bool,
@@ -115,6 +122,7 @@ impl IvmPipelines {
             primary_keys: HashMap::new(),
             active_queries: HashMap::new(),
             query_asts: HashMap::new(),
+            query_order: Vec::new(),
             poisoned: false,
         }
     }
@@ -154,13 +162,13 @@ impl IvmPipelines {
     /// carries `transformedAst` + `transformationHash`), used to seed the
     /// shadow-mode query-covering index. Queries whose AST was not captured
     /// (e.g. hydrated directly in a unit test) are omitted.
-    pub fn running_queries(&self) -> Vec<(String, String, String)> {
-        self.active_queries
+    pub fn running_queries(&self) -> Vec<(String, std::sync::Arc<str>, String)> {
+        self.query_order
             .iter()
-            .filter_map(|(qid, hash)| {
-                self.query_asts
-                    .get(qid)
-                    .map(|ast| (qid.clone(), ast.clone(), hash.clone()))
+            .filter_map(|qid| {
+                let hash = self.active_queries.get(qid)?;
+                let ast = self.query_asts.get(qid)?;
+                Some((qid.clone(), ast.clone(), hash.clone()))
             })
             .collect()
     }
@@ -325,7 +333,9 @@ impl IvmPipelines {
             eng.remove_query(query_id);
         }
         self.active_queries.remove(query_id);
-        self.query_asts.remove(query_id);
+        if self.query_asts.remove(query_id).is_some() {
+            self.query_order.retain(|q| q != query_id);
+        }
     }
 
     /// Hydrate the given queries against the current snapshot, streaming each
@@ -374,7 +384,13 @@ impl IvmPipelines {
         // hydrated directly (tests) keep an empty-string placeholder hash.
         for (query_id, ast_json) in queries {
             self.active_queries.entry(query_id.clone()).or_default();
-            self.query_asts.insert(query_id.clone(), ast_json.clone());
+            if self
+                .query_asts
+                .insert(query_id.clone(), std::sync::Arc::from(ast_json.as_str()))
+                .is_none()
+            {
+                self.query_order.push(query_id.clone());
+            }
         }
         Ok(())
     }
@@ -489,6 +505,7 @@ impl IvmPipelines {
         self.primary_keys.clear();
         self.active_queries.clear();
         self.query_asts.clear();
+        self.query_order.clear();
     }
 }
 
