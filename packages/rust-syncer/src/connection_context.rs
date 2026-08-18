@@ -1,5 +1,14 @@
 //! Connection Context Manager — port of `connection-context-manager.ts`.
 //!
+//! ## STATUS: REFERENCE IMPLEMENTATION — NOT WIRED INTO PRODUCTION
+//!
+//! Production installs `PlaceholderConnContextManager` (see `main.rs`); the
+//! live auth model is the simplified per-CG state in `CgState`
+//! (`pinned_user_id` / `client_raw_auth` + the folded revalidate/retransform
+//! tick in `router.rs`). This module is the full TS state machine kept as a
+//! tested reference for a future promotion — behavior changes to auth
+//! maintenance belong in `router.rs`, NOT here.
+//!
 //! State machine for the auth state of a single `ViewSyncerService` (one CG).
 //! Connections are registered as `provisional`, optionally backfilled with
 //! `initConnection` metadata, and then promoted to `validated` once their

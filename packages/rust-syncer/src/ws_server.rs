@@ -8,12 +8,13 @@ use crate::connect_params::{ConnectParams, extract_protocol_version, get_connect
 use crate::protocol::{
     ErrorBody, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION, error_message, pong_message,
 };
-use crate::ws_sink::{DirectWebSocketSink, WsCommand};
+use crate::ws_sink::{DirectWebSocketSink, SinkLimits, WsCommand};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::accept_hdr_async_with_config;
 use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
@@ -27,6 +28,36 @@ const DOWNSTREAM_MSG_INTERVAL_MS: u64 = 6000;
 /// Keepalive pong check interval: half of DOWNSTREAM_MSG_INTERVAL_MS.
 const KEEPALIVE_CHECK_INTERVAL_MS: u64 = 3000;
 const DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Slow-client shed: max queued downstream commands before the connection is
+/// force-closed (the client reconnects + rehydrates). Each `Send` command is
+/// one WS frame; poke parts batch up to 100 patches per frame, so 4096 frames
+/// is a very large in-flight backlog — a healthy client never approaches it,
+/// while a stalled TCP window would otherwise buffer pokes in process memory
+/// without bound. Env override: `ZERO_WS_DOWNSTREAM_HWM`.
+const DEFAULT_DOWNSTREAM_QUEUE_HWM: i64 = 4096;
+
+/// Server-side liveness: close a connection that has sent NOTHING for this
+/// long. zero-client pings every ~5s, so 60s = 12 missed pings; a half-open
+/// socket (pulled cable, sleeping laptop) otherwise queues pokes until the OS
+/// TCP timeout (~15-30 min) — or forever against a zero-window peer. Env
+/// override: `ZERO_WS_LIVENESS_TIMEOUT_MS` (0 disables).
+const DEFAULT_LIVENESS_TIMEOUT_MS: u64 = 60_000;
+
+fn downstream_queue_hwm() -> i64 {
+    std::env::var("ZERO_WS_DOWNSTREAM_HWM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &i64| *v > 0)
+        .unwrap_or(DEFAULT_DOWNSTREAM_QUEUE_HWM)
+}
+
+fn liveness_timeout_ms() -> u64 {
+    std::env::var("ZERO_WS_LIVENESS_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_LIVENESS_TIMEOUT_MS)
+}
 
 /// Configuration for the WebSocket server.
 #[derive(Clone)]
@@ -227,9 +258,18 @@ pub async fn accept_connection_with_limit(
 
     // Channel: CG thread sends downstream messages to the WS writer. Unbounded
     // to preserve poke frame order from the sync, in-runtime `push` path (see
-    // `ws_sink` module docs).
+    // `ws_sink` module docs); memory is bounded by the slow-client shed policy
+    // (queue-depth HWM trips `kill`, which the writer reacts to immediately).
     let (downstream_tx, downstream_rx) = mpsc::unbounded_channel::<WsCommand>();
-    let sink = DirectWebSocketSink::new(downstream_tx);
+    let (kill_tx, kill_rx) = watch::channel(false);
+    let limits = Arc::new(SinkLimits {
+        depth: Arc::new(AtomicI64::new(0)),
+        hwm: downstream_queue_hwm(),
+        kill: kill_tx,
+    });
+    let sink = DirectWebSocketSink::with_limits(downstream_tx, limits.clone());
+    // Wall-clock of the last frame received FROM the client (liveness).
+    let last_inbound = Arc::new(AtomicI64::new(now_epoch_ms()));
 
     // The `connected` message is sent by `Connection::init()` on the CG thread
     // (TS parity — the connection handler owns it, and it needs the server's
@@ -237,10 +277,21 @@ pub async fn accept_connection_with_limit(
     // here too would double-send.
 
     // Spawn the WS writer task.
-    tokio::spawn(run_ws_writer(ws_writer, downstream_rx));
+    tokio::spawn(run_ws_writer(
+        ws_writer,
+        downstream_rx,
+        limits,
+        kill_rx,
+        last_inbound.clone(),
+    ));
 
     // Spawn the WS reader task.
-    tokio::spawn(run_ws_reader(ws_reader, upstream_tx, params.ws_id.clone()));
+    tokio::spawn(run_ws_reader(
+        ws_reader,
+        upstream_tx,
+        params.ws_id.clone(),
+        last_inbound,
+    ));
 
     Some(ConnectionContext {
         params,
@@ -256,15 +307,40 @@ async fn run_ws_writer(
         Message,
     >,
     mut rx: mpsc::UnboundedReceiver<WsCommand>,
+    limits: Arc<SinkLimits>,
+    mut kill_rx: watch::Receiver<bool>,
+    last_inbound: Arc<AtomicI64>,
 ) {
     let mut last_downstream_msg_time = Instant::now();
+    let liveness_timeout = liveness_timeout_ms();
 
     let mut keepalive_interval =
         tokio::time::interval(Duration::from_millis(KEEPALIVE_CHECK_INTERVAL_MS));
 
     loop {
         tokio::select! {
+            // Slow-client shed tripped: close IMMEDIATELY, ahead of the queued
+            // backlog (which is exactly what crossed the limit).
+            _ = kill_rx.changed() => {
+                tracing::warn!("closing slow client: downstream queue exceeded HWM");
+                let error = ErrorBody::rehome("Server buffer overflow (slow connection)");
+                let msg = error_message(&error);
+                if let Ok(text) = serde_json::to_string(&msg) {
+                    let _ = ws_writer.send(Message::Text(text)).await;
+                }
+                let _ = ws_writer.send(Message::Close(Some(
+                    tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code: CloseCode::from(3000u16),
+                        reason: "slow client".into(),
+                    }
+                ))).await;
+                break;
+            }
             cmd = rx.recv() => {
+                if cmd.is_some() {
+                    limits.depth.fetch_sub(1, Ordering::SeqCst);
+                    crate::metrics::record_ws_queued_delta(-1);
+                }
                 match cmd {
                     Some(WsCommand::Send(value)) => {
                         let text = serde_json::to_string(&value).unwrap_or_else(|e| {
@@ -303,6 +379,24 @@ async fn run_ws_writer(
                 }
             }
             _ = keepalive_interval.tick() => {
+                // Liveness: a client that has sent NOTHING (zero-client pings
+                // every ~5s) for the timeout is half-open — close it rather than
+                // queue pokes against a dead socket until the OS TCP timeout.
+                if liveness_timeout > 0 {
+                    let idle_ms = now_epoch_ms() - last_inbound.load(Ordering::Relaxed);
+                    if idle_ms > liveness_timeout as i64 {
+                        tracing::info!(
+                            "closing unresponsive client (no inbound frame for {idle_ms}ms)"
+                        );
+                        let _ = ws_writer.send(Message::Close(Some(
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: CloseCode::from(1001u16),
+                                reason: "liveness timeout".into(),
+                            }
+                        ))).await;
+                        break;
+                    }
+                }
                 if last_downstream_msg_time.elapsed()
                     > Duration::from_millis(DOWNSTREAM_MSG_INTERVAL_MS)
                 {
@@ -317,6 +411,14 @@ async fn run_ws_writer(
     }
 }
 
+/// Wall-clock millis (liveness bookkeeping shared between reader and writer).
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// WS reader task: reads WS messages, forwards raw text to upstream channel.
 async fn run_ws_reader(
     mut ws_reader: futures_util::stream::SplitStream<
@@ -324,8 +426,12 @@ async fn run_ws_reader(
     >,
     upstream_tx: mpsc::Sender<String>,
     ws_id: String,
+    last_inbound: Arc<AtomicI64>,
 ) {
     while let Some(msg_result) = ws_reader.next().await {
+        // Any frame from the client — including protocol-level ping/pong —
+        // counts as liveness.
+        last_inbound.store(now_epoch_ms(), Ordering::Relaxed);
         match msg_result {
             Ok(Message::Text(text)) => {
                 if upstream_tx.send(text.to_string()).await.is_err() {

@@ -156,7 +156,17 @@ impl SyncEngine {
         T: Send + 'static,
     {
         match &self.tokio_handle {
-            Some(handle) => handle.spawn(fut).await.expect("CVR I/O task panicked"),
+            Some(handle) => match handle.spawn(fut).await {
+                Ok(v) => v,
+                Err(e) => {
+                    // Log with context BEFORE escalating: the resulting CG-task
+                    // panic is caught + logged by the executor wrapper, but this
+                    // is the only place that knows it originated in an offloaded
+                    // CVR I/O future (vs the CG loop itself).
+                    tracing::error!("offloaded CVR I/O task failed: {e}");
+                    panic!("CVR I/O task panicked: {e}");
+                }
+            },
             None => fut.await,
         }
     }
@@ -355,7 +365,13 @@ impl SyncEngine {
                 store
                     .flush(&expected, &flushed, last_connect_time as f64)
                     .await
-                    .map_err(|e| format!("store flush: {e}"))?
+                    .map_err(|e| {
+                        // Counted, not just logged: a rising flush-failure rate
+                        // (pool exhaustion, ownership churn) is the leading
+                        // indicator of the fail_group → reconnect storm.
+                        crate::metrics::record_cvr_flush_failure();
+                        format!("store flush: {e}")
+                    })?
                     .is_some()
             };
 

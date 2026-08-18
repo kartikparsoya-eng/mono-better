@@ -48,6 +48,11 @@ pub struct HttpServerState {
     /// notify routes require it in the `x-notify-auth` header. Unset (manual /
     /// standalone runs) preserves the open behavior.
     pub notify_auth_token: Option<String>,
+    /// For `/readyz`: the shared CVR pool (PG reachability probe). `None` in
+    /// tests / standalone runs — the probe then passes vacuously.
+    pub cvr_pool: Option<sqlx::PgPool>,
+    /// For `/readyz`: the replica file path (existence probe). `None` skips.
+    pub replica_file: Option<String>,
 }
 
 /// Notify-route guard: shared-secret check (when configured) + `state` check.
@@ -87,7 +92,13 @@ pub async fn bind_http_listener(addr: SocketAddr) -> tokio::net::TcpListener {
 }
 
 /// Serve the axum app on an already-bound listener (see `bind_http_listener`).
-pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<ConnectionRouter>) {
+/// `cvr_pool`/`replica_file` power the `/readyz` probes (pass `None` in tests).
+pub async fn serve_http(
+    listener: tokio::net::TcpListener,
+    router: Arc<ConnectionRouter>,
+    cvr_pool: Option<sqlx::PgPool>,
+    replica_file: Option<String>,
+) {
     let state = Arc::new(HttpServerState {
         router,
         stats: Arc::new(Mutex::new(ServerStats::default())),
@@ -95,9 +106,12 @@ pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<Connectio
         notify_auth_token: std::env::var("NOTIFY_AUTH_TOKEN")
             .ok()
             .filter(|t| !t.is_empty()),
+        cvr_pool,
+        replica_file,
     });
 
     let app = Router::new()
+        .route("/readyz", get(readyz_handler))
         .route("/statz", get(statz_handler))
         .route("/metrics", get(metrics_handler))
         .route("/heapz", get(heapz_handler))
@@ -122,7 +136,37 @@ pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<Connectio
 /// Run the HTTP server on the given address (bind + serve).
 pub async fn run_http_server(addr: SocketAddr, router: Arc<ConnectionRouter>) {
     let listener = bind_http_listener(addr).await;
-    serve_http(listener, router).await;
+    serve_http(listener, router, None, None).await;
+}
+
+/// GET /readyz — readiness probe suitable for k8s/orchestrators: verifies the
+/// CVR PG pool can execute a query (a lazy pool that has never connected fails
+/// here — the stdout "ready" handshake alone can lie about PG) and that the
+/// replica file exists. 200 when ready, 503 with per-probe detail otherwise.
+async fn readyz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json<Value>) {
+    let pg_ok = match &state.cvr_pool {
+        Some(pool) => tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sqlx::query("SELECT 1").execute(pool),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false),
+        None => true,
+    };
+    let replica_ok = state
+        .replica_file
+        .as_ref()
+        .map(|p| std::path::Path::new(p).exists())
+        .unwrap_or(true);
+    if pg_ok && replica_ok {
+        (StatusCode::OK, Json(json!({"status": "ready"})))
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "unready", "pg": pg_ok, "replica": replica_ok})),
+        )
+    }
 }
 
 /// GET /statz — return server statistics.

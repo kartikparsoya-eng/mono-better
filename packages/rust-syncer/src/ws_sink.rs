@@ -22,7 +22,9 @@
 use crate::protocol::{BasicErrorBody, ErrorBody, ErrorKind};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use tokio::sync::{mpsc, watch};
 
 /// Messages sent from the CG thread to the WS writer task.
 pub enum WsCommand {
@@ -34,6 +36,23 @@ pub enum WsCommand {
     Close(String),
 }
 
+/// Shed policy for the unbounded downstream channel: the channel itself must be
+/// unbounded (ordering — see module docs), so the memory bound is enforced by
+/// DISCONNECTING a client whose queue depth crosses the high-water mark. The
+/// client's reconnect + rehydrate protocol makes this safe; unbounded growth
+/// against a stalled TCP window is not.
+pub struct SinkLimits {
+    /// Commands queued but not yet drained by the writer task (sink increments,
+    /// writer decrements).
+    pub depth: Arc<AtomicI64>,
+    /// Queue-depth high-water mark; crossing it trips `kill`.
+    pub hwm: i64,
+    /// Fired once when the HWM is crossed. The WRITER selects on this and
+    /// closes the socket immediately — sending a `Fail` through the queue would
+    /// deliver it only after the very backlog that tripped the limit.
+    pub kill: watch::Sender<bool>,
+}
+
 /// The sink that the CG thread uses to push downstream messages.
 ///
 /// `push()` is **synchronous** and non-blocking: it enqueues onto an unbounded
@@ -42,14 +61,26 @@ pub enum WsCommand {
 #[derive(Clone)]
 pub struct DirectWebSocketSink {
     tx: mpsc::UnboundedSender<WsCommand>,
+    limits: Option<Arc<SinkLimits>>,
 }
 
 impl DirectWebSocketSink {
     pub fn new(tx: mpsc::UnboundedSender<WsCommand>) -> Self {
-        Self { tx }
+        Self { tx, limits: None }
     }
 
-    /// Push a downstream message. Blocks if the channel is full (backpressure).
+    /// A sink with a slow-client shed policy (production WS path). `new` (no
+    /// limits) is retained for in-process sinks and tests, where the consumer
+    /// is not a client socket.
+    pub fn with_limits(tx: mpsc::UnboundedSender<WsCommand>, limits: Arc<SinkLimits>) -> Self {
+        Self {
+            tx,
+            limits: Some(limits),
+        }
+    }
+
+    /// Push a downstream message. Never blocks (unbounded, ordered channel);
+    /// a sink with limits sheds the connection past the high-water mark.
     pub fn push(&self, msg: Value) {
         let _ = self.send_command(WsCommand::Send(msg));
     }
@@ -73,9 +104,28 @@ impl DirectWebSocketSink {
     }
 
     /// Enqueue a command onto the unbounded, order-preserving channel. Never
-    /// blocks and never panics; the only failure is a dropped receiver (the WS
-    /// writer task has exited), reported as "ws sink closed".
+    /// blocks and never panics; failures are a dropped receiver (the WS writer
+    /// task has exited) or a tripped slow-client high-water mark.
     fn send_command(&self, command: WsCommand) -> Result<(), String> {
+        if let Some(limits) = &self.limits {
+            let depth = limits.depth.fetch_add(1, Ordering::SeqCst) + 1;
+            if depth > limits.hwm {
+                // Signal the writer to close NOW (it selects on `kill`), and
+                // reject the command — the queue is already `hwm` deep.
+                limits.depth.fetch_sub(1, Ordering::SeqCst);
+                let _ = limits.kill.send(true);
+                return Err(format!(
+                    "ws downstream queue overflow (depth > {}): slow client shed",
+                    limits.hwm
+                ));
+            }
+            if self.tx.send(command).is_err() {
+                limits.depth.fetch_sub(1, Ordering::SeqCst);
+                return Err("ws sink closed".to_string());
+            }
+            crate::metrics::record_ws_queued_delta(1);
+            return Ok(());
+        }
         self.tx
             .send(command)
             .map_err(|_| "ws sink closed".to_string())
@@ -85,7 +135,8 @@ impl DirectWebSocketSink {
 /// Adapt `DirectWebSocketSink` to `rust-cvr`'s `WebSocketSink` trait so
 /// `ClientHandler` / `PokeHandler` can push poke frames straight to the WS
 /// writer task. Replaces `NapiWebSocketSink` (the one napi-specific piece of
-/// the CVR hot path) with no TSFN — the bounded channel is the backpressure.
+/// the CVR hot path) with no TSFN — ordering comes from the unbounded channel,
+/// memory bounds from the slow-client shed policy (see module docs).
 impl rust_cvr::client_handler::WebSocketSink for DirectWebSocketSink {
     fn push(&self, msg: Value) -> Result<(), String> {
         self.send_command(WsCommand::Send(msg))
@@ -124,6 +175,40 @@ mod tests {
 
         assert!(matches!(rx.recv().await, Some(WsCommand::Send(_))));
         assert!(matches!(rx.recv().await, Some(WsCommand::Fail(_))));
+    }
+
+    /// Crossing the downstream high-water mark rejects the frame and trips the
+    /// kill signal (the writer closes the socket immediately); frames under the
+    /// mark are unaffected.
+    #[tokio::test]
+    async fn hwm_overflow_trips_kill_and_rejects() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (kill_tx, kill_rx) = watch::channel(false);
+        let limits = Arc::new(SinkLimits {
+            depth: Arc::new(AtomicI64::new(0)),
+            hwm: 3,
+            kill: kill_tx,
+        });
+        let sink = DirectWebSocketSink::with_limits(tx, limits.clone());
+
+        for i in 0..3 {
+            assert!(
+                sink.send_command(WsCommand::Send(serde_json::json!([i]))).is_ok(),
+                "frame {i} under the HWM must be accepted"
+            );
+        }
+        assert!(!*kill_rx.borrow(), "kill must not fire under the HWM");
+        // 4th frame crosses hwm=3 → rejected + kill fired.
+        assert!(sink.send_command(WsCommand::Send(serde_json::json!([3]))).is_err());
+        assert!(*kill_rx.borrow(), "kill fires on overflow");
+        assert_eq!(limits.depth.load(Ordering::SeqCst), 3, "rejected frame not counted");
+        // The queued (accepted) frames are still there, in order.
+        for i in 0..3 {
+            match rx.recv().await {
+                Some(WsCommand::Send(v)) => assert_eq!(v[0], serde_json::json!(i)),
+                _ => panic!("expected queued frame {i}"),
+            }
+        }
     }
 
     /// A burst larger than any previous bounded capacity must arrive in exact

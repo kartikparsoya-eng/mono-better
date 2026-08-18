@@ -1,5 +1,12 @@
 //! Drain coordinator — port of `drain-coordinator.ts` (~76 LOC).
 //!
+//! ## STATUS: PORTED BUT NOT WIRED INTO PRODUCTION
+//!
+//! No production loop consults `should_drain()` yet: SIGTERM currently rehomes
+//! every connection at once via `ConnectionRouter::shutdown` (`main.rs`),
+//! which is a reconnect thundering herd on deploys. Wiring this into the CG
+//! event loop (staggered elective drain) is the intended follow-up.
+//!
 //! Two drain types:
 //! 1. Elective drain: ViewSyncer checks `should_drain()` before processing
 //!    a replication event. If true, exits its run loop and calls

@@ -60,12 +60,14 @@ pub struct SyncerConfig {
     pub server_version: String,
     /// Max CVR Postgres connections for this worker (parity with the TS
     /// `--cvr-max-conns-per-worker` flag: whole budget divided across syncers).
-    /// This is the process-wide budget; it is split across the `num_shards`
-    /// executors, each owning a pool of `cvr_max_conns / num_shards`.
+    /// The whole budget is ONE shared pool on the main runtime (doc 91
+    /// Iteration C); executors offload CVR I/O onto it via `SyncEngine::offload`.
     pub cvr_max_conns: u32,
-    /// Number of executor threads (doc 91). Client groups are hash-sharded across
-    /// them; each runs a `current_thread` runtime + `LocalSet` and owns its own
-    /// CVR pool. Defaults to the core count (`ZERO_SYNCER_SHARDS` to override).
+    /// Number of executor threads (doc 91). Client groups are least-loaded
+    /// placed across them; each runs a `current_thread` runtime + `LocalSet`
+    /// and draws CVR I/O from the shared pool. Defaults to the core count
+    /// (`ZERO_SYNCER_SHARDS` to override — set it explicitly in containers
+    /// with a CPU quota, since `available_parallelism` is quota-blind).
     pub num_shards: usize,
     /// Interval (ms) between periodic JWT re-validation + query re-transform for
     /// live connections (TS `--auth-revalidate-interval-seconds`, default 300s).
@@ -265,9 +267,10 @@ fn main() {
         config.task_id
     );
 
-    // Create the tokio runtime first — its handle is injected into each CG's
-    // SyncEngine for the `block_on` PG I/O edge (the CG threads have no ambient
-    // runtime of their own).
+    // Create the tokio runtime first — it owns the shared CVR pool, and its
+    // handle is injected into each CG's SyncEngine so CVR I/O is offloaded onto
+    // this runtime (`SyncEngine::offload`; the CG executors are current_thread
+    // runtimes that must not poll another reactor's connections — doc 91 §5.1).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -324,6 +327,10 @@ fn main() {
     tracing::info!(
         "CVR pool: 1 shared pool × {budget} conns, {num_shards} executor(s) offloading I/O onto it",
     );
+    // Pool size/idle gauges — the pool is the prime capacity-cliff suspect;
+    // without these an acquire convoy is invisible until it becomes
+    // 10s-timeout fail_groups.
+    rust_syncer::metrics::register_cvr_pool_gauges(cvr_pool.clone());
 
     // Create the connection router with the real per-CG services factory and a
     // real JWT auth validator (secret/jwk/jwksUrl from config). Spawns the
@@ -344,7 +351,7 @@ fn main() {
         metrics.clone(),
         config.max_client_groups,
         num_shards,
-        Some(cvr_pool),
+        Some(cvr_pool.clone()),
     ));
 
     // Bind BOTH listeners eagerly so the process is genuinely accepting on its
@@ -370,9 +377,13 @@ fn main() {
         (http_listener, ws_listener)
     });
 
-    // Serve HTTP in the background now that its listener is bound.
+    // Serve HTTP in the background now that its listener is bound. The pool +
+    // replica path power /readyz (a lazy, never-connected pool fails the PG
+    // probe there — the stdout "ready" handshake alone can lie about PG).
+    let readyz_pool = cvr_pool.clone();
+    let readyz_replica = Some(config.replica_file.clone());
     runtime.spawn(async move {
-        serve_http(http_listener, http_router).await;
+        serve_http(http_listener, http_router, Some(readyz_pool), readyz_replica).await;
     });
 
     // Both ports are bound → announce readiness to the parent ProcessManager.

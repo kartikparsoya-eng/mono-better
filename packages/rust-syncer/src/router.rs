@@ -1,7 +1,8 @@
 //! Connection router — port of the connection lifecycle in `syncer.ts`.
 //!
-//! Routes incoming WebSocket connections to the appropriate CG (client group)
-//! thread. Each CG gets a dedicated OS thread. The router maintains a
+//! Routes incoming WebSocket connections to the appropriate client group. Each
+//! CG runs as a `spawn_local` task on one of the `K` sharded executor threads
+//! (doc 91 — there is no per-CG OS thread). The router maintains a
 //! `DashMap<client_group_id, CGHandle>` for lookup.
 //!
 //! Connection lifecycle (port of `Syncer.#createConnection`):
@@ -258,13 +259,11 @@ fn shard_for(cg_id: &str, num_shards: usize) -> usize {
 /// CVR Postgres store identity for a client group.
 ///
 /// This carries only the *identity* of the CVR (schema + ids); the `PgPool` it
-/// binds to is supplied by the executor hosting the client group, NOT by the
-/// factory. Each of the `K` executors owns its own pool, created on and driven
-/// by that executor's `current_thread` runtime and sized `cvr_max_conns / K`, so
-/// every connection is polled by the same reactor that `.await`s it (doc 91,
-/// §5.1 — a pool built on a different runtime starves current-thread executors).
-/// The `K × maxConns/K` split keeps the process-wide connection budget bounded,
-/// matching TS's one-`cvrDB`-pool-per-sync-worker model (`server/syncer.ts`).
+/// binds to is the ONE process-wide shared pool, built on the main runtime and
+/// handed to each executor (doc 91 Iteration C). CVR I/O is offloaded onto that
+/// pool's own runtime via `SyncEngine::offload`, so every connection is polled
+/// by the reactor that created it (§5.1) while the whole `cvr_max_conns` budget
+/// stays one shared pool — matching TS's one-`cvrDB`-pool-per-worker model.
 #[derive(Clone)]
 pub struct CvrPgConfig {
     pub schema: String,
@@ -1250,11 +1249,11 @@ impl CgState {
         )
     }
 
-    /// `cvr_pool` is the pool of the executor hosting this client group. When the
-    /// factory config requests a CVR store (`cvr_pg`), the store binds to THIS
-    /// pool — created on the executor's own runtime — so its Postgres connections
-    /// are driven by the same reactor that `.await`s them (doc 91, §5.1). `None`
-    /// selects an in-memory / storeless CG (tests, no-PG dev).
+    /// `cvr_pool` is the ONE process-wide shared CVR pool (built on the main
+    /// runtime — doc 91 Iteration C). When the factory config requests a CVR
+    /// store (`cvr_pg`), the store binds to this pool; the engine then offloads
+    /// its CVR I/O onto the pool's own runtime (`SyncEngine::offload`, §5.1).
+    /// `None` selects an in-memory / storeless CG (tests, no-PG dev).
     fn new_with_accepting(
         cg_id: &str,
         services_factory: &Arc<dyn CGServicesFactory>,
@@ -2849,6 +2848,7 @@ impl CgState {
             return;
         }
         self.terminal = true;
+        crate::metrics::record_fail_group();
         self.accepting.store(false, Ordering::SeqCst);
         for (_, conn) in self.connections.drain() {
             conn.close_with_error(error.clone());
@@ -2869,8 +2869,6 @@ impl CgState {
     }
 }
 
-/// Build an executor's CVR Postgres pool on the *current* runtime (the executor's
-/// own `current_thread` runtime). Every connection this pool opens is therefore
 /// Run one executor thread (doc 91): a `current_thread` tokio runtime + `LocalSet`
 /// that hosts a hash-shard of client groups as `spawn_local` tasks. The `!Send`
 /// `SyncEngine` of each hosted group lives on this one thread and its IVM compute
@@ -2955,15 +2953,33 @@ async fn executor_loop(
                 };
                 let task = tokio::task::spawn_local(async move {
                     let _cleanup = cleanup;
-                    cg_event_loop(
-                        &cg_id,
-                        rx,
-                        connection_count,
-                        accepting,
-                        ctx,
-                        last_notification,
+                    // Catch panics HERE so they are logged with the cg_id and
+                    // counted. The executor's reaper (`retain(!is_finished)`)
+                    // and drain (`let _ = task.await`) discard JoinErrors — a
+                    // recurring per-CG panic otherwise looks like "clients keep
+                    // reconnecting" with no correlating log line.
+                    let result = futures_util::FutureExt::catch_unwind(
+                        std::panic::AssertUnwindSafe(cg_event_loop(
+                            &cg_id,
+                            rx,
+                            connection_count,
+                            accepting,
+                            ctx,
+                            last_notification,
+                        )),
                     )
                     .await;
+                    if let Err(panic) = result {
+                        let msg = panic
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "non-string panic payload".to_string());
+                        tracing::error!("CG {cg_id} task panicked: {msg}");
+                        // A panic bypasses fail_group (which counts terminal
+                        // teardowns), so count the group death here.
+                        crate::metrics::record_fail_group();
+                    }
                 });
                 tasks.push(task);
             }

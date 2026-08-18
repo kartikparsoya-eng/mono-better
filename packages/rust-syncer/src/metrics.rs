@@ -354,6 +354,92 @@ pub fn record_active_client_delta(delta: i64, protocol_version: u32) {
     );
 }
 
+// ─── Failure/pressure telemetry (the signals that precede a capacity incident;
+// previously error-log-only, i.e. invisible to dashboards/alerts) ────────────
+
+/// CVR flush failures. A rising rate here (pool exhaustion, ownership churn,
+/// PG trouble) is the leading indicator of the fail_group → reconnect storm.
+fn cvr_flush_failures() -> &'static Counter<u64> {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.cvr.flush-failures")
+            .with_description("Number of failed CVR store flushes")
+            .build()
+    })
+}
+
+pub fn record_cvr_flush_failure() {
+    cvr_flush_failures().add(1, &[]);
+}
+
+/// Client groups torn down via `fail_group` (all their clients rehomed).
+fn failed_client_groups() -> &'static Counter<u64> {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.failed-client-groups")
+            .with_description("Number of client groups torn down by a sync failure")
+            .build()
+    })
+}
+
+pub fn record_fail_group() {
+    failed_client_groups().add(1, &[]);
+}
+
+/// Total WS downstream frames queued (all connections) — the unbounded
+/// channel's aggregate depth. Observable gauge backed by a process atomic; the
+/// per-connection HWM shed policy bounds each connection, this makes the
+/// aggregate visible.
+static WS_QUEUED_FRAMES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn ws_queued_frames_gauge() -> &'static opentelemetry::metrics::ObservableGauge<i64> {
+    static G: OnceLock<opentelemetry::metrics::ObservableGauge<i64>> = OnceLock::new();
+    G.get_or_init(|| {
+        global::meter("zero")
+            .i64_observable_gauge("zero.sync.websocket.queued-frames")
+            .with_description("Downstream WS frames queued across all connections")
+            .with_callback(|o| o.observe(WS_QUEUED_FRAMES.load(Ordering::Relaxed), &[]))
+            .build()
+    })
+}
+
+pub fn record_ws_queued_delta(delta: i64) {
+    // Touch the gauge so its callback is registered on first use.
+    let _ = ws_queued_frames_gauge();
+    WS_QUEUED_FRAMES.fetch_add(delta, Ordering::Relaxed);
+}
+
+/// CVR PgPool gauges (size + idle). The pool is the prime capacity-cliff
+/// suspect (per-flush contention against `CVR_MAX_CONNS`); without these an
+/// acquire convoy is invisible until it becomes 10s-timeout fail_groups.
+/// Called once from main after the pool is built; the instruments live in a
+/// static so their observe callbacks stay registered.
+pub fn register_cvr_pool_gauges(pool: sqlx::PgPool) {
+    static G: OnceLock<
+        (
+            opentelemetry::metrics::ObservableGauge<u64>,
+            opentelemetry::metrics::ObservableGauge<u64>,
+        ),
+    > = OnceLock::new();
+    G.get_or_init(|| {
+        let m = global::meter("zero");
+        let p1 = pool.clone();
+        let size = m
+            .u64_observable_gauge("zero.sync.cvr.pool-connections")
+            .with_description("Open connections in the shared CVR PgPool")
+            .with_callback(move |o| o.observe(p1.size() as u64, &[]))
+            .build();
+        let idle = m
+            .u64_observable_gauge("zero.sync.cvr.pool-idle-connections")
+            .with_description("Idle connections in the shared CVR PgPool")
+            .with_callback(move |o| o.observe(pool.num_idle() as u64, &[]))
+            .build();
+        (size, idle)
+    });
+}
+
 /// A minimal, thread-safe, exporter-free histogram rendered as Prometheus
 /// `_bucket{le=...}` / `_sum` / `_count` series. `sum` is accumulated in
 /// microseconds (integer atomic) and divided to seconds at render time.
