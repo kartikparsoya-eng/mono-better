@@ -26,6 +26,9 @@ export type RustSyncerConfig = {
         secret?: string | undefined;
         jwk?: string | undefined;
         jwksUrl?: string | undefined;
+        issuer?: string | undefined;
+        audience?: string | undefined;
+        revalidateIntervalSeconds?: number | undefined;
       }
     | undefined;
   query?: RustSyncerFetchConfig | undefined;
@@ -76,7 +79,8 @@ export function rustSyncerEnv(
     ZERO_APP_ID: shard.appID,
     SHARD: String(shard.shardNum),
   };
-  const {secret, jwk, jwksUrl} = config.auth ?? {};
+  const {secret, jwk, jwksUrl, issuer, audience, revalidateIntervalSeconds} =
+    config.auth ?? {};
   if (secret) {
     out.AUTH_SECRET = secret;
   }
@@ -85,6 +89,18 @@ export function rustSyncerEnv(
   }
   if (jwksUrl) {
     out.AUTH_JWKS_URL = jwksUrl;
+  }
+  // iss/aud pinning and the revalidation cadence must reach rust, or JWT
+  // validation silently degrades to signature+sub-only under the rust syncer
+  // while the operator believes issuer/audience are enforced.
+  if (issuer) {
+    out.AUTH_ISSUER = issuer;
+  }
+  if (audience) {
+    out.AUTH_AUDIENCE = audience;
+  }
+  if (revalidateIntervalSeconds !== undefined) {
+    out.AUTH_REVALIDATE_INTERVAL_SECONDS = String(revalidateIntervalSeconds);
   }
   // Match syncer.ts#getCustomQueryConfig: the modern `query` URL wins, with
   // `getQueries` retained as the 1.7 compatibility fallback. Serialize arrays

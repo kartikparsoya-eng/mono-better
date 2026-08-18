@@ -330,7 +330,13 @@ impl PokeHandler {
             drop(base);
         }
 
-        self.flush_body(&mut state)?;
+        // Release the chain on failure — like every other error path here. A
+        // `?` propagation would leave the chain held and the NEXT poke for this
+        // client spinning forever in `acquire_chain`.
+        if let Err(error) = self.flush_body(&mut state) {
+            self.release_chain(&mut state);
+            return Err(error);
+        }
         if let Err(error) = self.downstream.push(serde_json::json!([
             "pokeEnd",
             {"pokeID": state.poke_id, "cookie": cookie}
@@ -799,7 +805,15 @@ impl MultiPoker {
     pub fn end(&self, final_version: CVRVersion) {
         for poker in &self.pokers {
             if let Err(e) = poker.end(final_version.clone()) {
+                // A client whose poke cannot complete (delivery failure, or the
+                // "finalVersion not greater" invariant) is mid-poke with no
+                // `pokeEnd`: its cookie hasn't advanced and the next poke would
+                // nest a second `pokeStart`. Fail the connection — the client
+                // reconnects and rehydrates — matching the per-client failure
+                // handling in `add_patch` (TS Promise.allSettled semantics: the
+                // other clients' pokes proceed).
                 eprintln!("Poke end failed: {}", e);
+                poker.downstream.fail(e);
             }
         }
     }

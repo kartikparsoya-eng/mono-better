@@ -28,8 +28,7 @@ use crate::ws_sink::DirectWebSocketSink;
 use dashmap::DashMap;
 use rust_cvr::types::{CVR, DesiredQuerySpec, ShardID, TTLClock};
 use rust_cvr::version::{
-    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_from_string,
-    version_string,
+    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_string,
 };
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
@@ -227,6 +226,13 @@ struct Executor {
     /// Joined once, during [`ConnectionRouter::shutdown`]. Behind a `Mutex<Option>`
     /// so `shutdown(&self)` can take ownership of the handle to join it.
     join: Mutex<Option<JoinHandle<()>>>,
+    /// Set when a `SpawnCg` send finds the control channel closed — i.e. the
+    /// executor thread died. A dead executor hosts 0 groups, so without this
+    /// flag `place_cg` would rank it least-loaded FOREVER and every new client
+    /// group process-wide would fail placement and rehome — a half-dead state
+    /// invisible to the load balancer. Dead executors are excluded from
+    /// placement; existing groups on other executors are unaffected.
+    dead: AtomicBool,
 }
 
 /// Default executor count: one per available core, matching the design's
@@ -480,6 +486,7 @@ impl ConnectionRouter {
             executors.push(Executor {
                 ctrl_tx,
                 join: Mutex::new(Some(join)),
+                dead: AtomicBool::new(false),
             });
         }
 
@@ -732,8 +739,7 @@ impl ConnectionRouter {
         let connection_count = Arc::new(AtomicU64::new(1));
         let accepting = Arc::new(AtomicBool::new(true));
 
-        let shard = self.place_cg(client_group_id);
-        let spawn = ExecutorCommand::SpawnCg {
+        let mut spawn = ExecutorCommand::SpawnCg {
             cg_id: client_group_id.to_string(),
             rx,
             self_tx: tx.clone(),
@@ -741,11 +747,31 @@ impl ConnectionRouter {
             accepting: accepting.clone(),
             last_notification: lock_unpoisoned(&self.last_notification).clone(),
         };
-        if self.executors[shard].ctrl_tx.send(spawn).is_err() {
-            return Err(format!(
-                "executor {shard} is not accepting new client groups (shutting down)"
-            ));
+        // A closed control channel means the executor THREAD died. Mark it dead
+        // (so `place_cg` stops ranking its empty slot least-loaded) and retry on
+        // the remaining executors instead of failing every new group forever.
+        let mut placed: Option<usize> = None;
+        for _ in 0..self.executors.len() {
+            let shard = self.place_cg(client_group_id);
+            match self.executors[shard].ctrl_tx.send(spawn) {
+                Ok(()) => {
+                    placed = Some(shard);
+                    break;
+                }
+                Err(mpsc::error::SendError(returned)) => {
+                    if !self.executors[shard].dead.swap(true, Ordering::SeqCst) {
+                        tracing::error!(
+                            "executor {shard} is dead (control channel closed); \
+                             excluding it from client-group placement"
+                        );
+                    }
+                    spawn = returned;
+                }
+            }
         }
+        let Some(shard) = placed else {
+            return Err("no executor is accepting new client groups".to_string());
+        };
 
         self.cg_handles.insert(
             client_group_id.to_string(),
@@ -798,11 +824,23 @@ impl ConnectionRouter {
                 *slot += 1;
             }
         }
-        let min = load.iter().copied().min().unwrap_or(0);
+        // Only live executors are candidates — a dead one hosts 0 groups and
+        // would otherwise be ranked least-loaded forever (see `Executor::dead`).
+        // If EVERY executor is marked dead, fall back to all of them; the
+        // subsequent send fails and the caller surfaces the error.
+        let live: Vec<usize> = (0..k)
+            .filter(|&i| !self.executors[i].dead.load(Ordering::SeqCst))
+            .collect();
+        let pool = if live.is_empty() {
+            (0..k).collect::<Vec<usize>>()
+        } else {
+            live
+        };
+        let min = pool.iter().map(|&i| load[i]).min().unwrap_or(0);
         // Deterministically break ties AMONG the least-loaded executors by hashing
         // the cg_id, so a cold/uniform system still spreads groups (rather than
         // always piling the first ones onto executor 0).
-        let candidates: Vec<usize> = (0..k).filter(|&i| load[i] == min).collect();
+        let candidates: Vec<usize> = pool.into_iter().filter(|&i| load[i] == min).collect();
         candidates[shard_for(cg_id, candidates.len())]
     }
 
@@ -1437,7 +1475,17 @@ impl CgState {
                 self.mark_version_served(&cvr.version);
                 self.cvr = Some(cvr);
             }
-            Err(e) => tracing::warn!("CG {}: remove_expired_queries failed: {e}", self.cg_id),
+            Err(e) => {
+                // A failed expiry pass is NOT recoverable by continuing: the
+                // engine has already torn down the expired queries' pipelines
+                // (remove_query runs before the flush), so warning-and-carrying-
+                // on leaves the engine and the (reloaded-from-PG) CVR disagreeing
+                // about which queries run — rows for those queries silently stop
+                // syncing. Treat it like every other sync path: fail the group;
+                // clients rehome and the next owner reloads a consistent pair.
+                tracing::error!("CG {}: remove_expired_queries failed: {e}", self.cg_id);
+                self.fail_group("TTL expiry sync failed");
+            }
         }
     }
 
@@ -1611,7 +1659,22 @@ impl CgState {
         self.registered_ws.insert(client_id.clone(), ws_id.clone());
         self.client_base_versions.insert(
             client_id.clone(),
-            params.base_cookie.as_deref().map(version_from_string),
+            // base_cookie is client-supplied: a malformed one must not panic the
+            // CG task (which hosts EVERY client of the group). Treat it as no
+            // base version — the SAME fallback `ClientHandler::new` applies, so
+            // the version this map validates matches the version the poker uses.
+            params.base_cookie.as_deref().and_then(|c| {
+                match rust_cvr::version::try_version_from_string(c) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::warn!(
+                            "CG {}: ignoring malformed base cookie {c:?}: {e}",
+                            self.cg_id
+                        );
+                        None
+                    }
+                }
+            }),
         );
         self.client_raw_auth.remove(&client_id);
         self.client_query_ctx.remove(&client_id);
@@ -2004,12 +2067,20 @@ impl CgState {
                 "hydrate-start",
                 &format!("cg={} client={client_id}", self.cg_id),
             );
+            // Poke EVERY registered connection, not just the requester — TS
+            // `#syncQueryPipelineSet` pokes `#getClients()` unfiltered. Scoping
+            // to `&[ws_id]` left the group's other tabs on the old cookie, and
+            // `advance_poke_targets` (which only pokes at-version clients) then
+            // excluded them from every future advance: a live-but-frozen
+            // connection. The per-client base filters inside the pokers deliver
+            // each connection exactly what it hasn't seen.
+            let all_ws_ids: Vec<String> = self.registered_ws.values().cloned().collect();
             match self
                 .sync_engine
                 .config_and_hydrate_with_profile(
                     cvr,
                     client_id,
-                    &[ws_id],
+                    &all_ws_ids,
                     &self.shard,
                     puts,
                     dels,
@@ -2670,7 +2741,12 @@ impl CgState {
             .collect();
         let now = now_ms();
         let mut cvr = cvr;
-        for (client_id, ws_id) in clients {
+        // Poke every registered connection on each pass (TS `#getClients()`).
+        // The first client's pass re-hydrates the full query set and pokes
+        // everyone to the new version; later passes then find their queries
+        // running and their catch-up interval empty (cheap no-ops).
+        let all_ws_ids: Vec<String> = self.registered_ws.values().cloned().collect();
+        for (client_id, _ws_id) in clients {
             let state_version = self
                 .sync_engine
                 .pipelines()
@@ -2690,7 +2766,7 @@ impl CgState {
                 .config_and_hydrate_with_profile(
                     cvr.clone(),
                     &client_id,
-                    &[ws_id],
+                    &all_ws_ids,
                     &self.shard,
                     Vec::new(),
                     Vec::new(),
@@ -3153,6 +3229,7 @@ mod tests {
     };
     use crate::protocol::PROTOCOL_VERSION;
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
+    use rust_cvr::version::version_from_string;
 
     /// Coalescing parity with TS notifier.ts: the newer notification's fields
     /// win, but the merged upstream commit time keeps the OLDEST value (it

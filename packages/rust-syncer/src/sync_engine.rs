@@ -31,7 +31,7 @@ use rust_cvr::types::{
 };
 use rust_cvr::updater::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, RowRecordMap};
 use rust_cvr::version::{
-    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_from_string,
+    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, try_version_from_string,
     version_string,
 };
 
@@ -772,7 +772,7 @@ impl SyncEngine {
             Ok(cfg_cvr)
         } else {
             let excluded: Vec<String> = add_queries.iter().map(|(id, _)| id.clone()).collect();
-            let result = self
+            let (result, pokers) = self
                 .hydrate_and_sync(
                     cfg_cvr,
                     state_version,
@@ -789,14 +789,22 @@ impl SyncEngine {
                     ttl_clock,
                 )
                 .await?;
-            self.catchup_clients(
-                &result.cvr,
-                &result.cvr.version,
-                &excluded,
-                poke_ws_ids,
-                &original_client_versions,
-            )
-            .await?;
+            // Catch-up rides the SAME poke as the hydrate (TS shape: catchup
+            // before pokeEnd). Each poker's live per-client base filter delivers
+            // exactly the patches that client hasn't seen; ending the hydrate
+            // poke first (the previous shape) advanced every base to the new
+            // version and made a separate catch-up poke inert — a reconnecting
+            // client silently lost the whole `(oldCookie, current]` interval.
+            let clients = self.clients_for(poke_ws_ids);
+            let catchup_from =
+                Self::catchup_floor(&result.cvr.version, &clients, &original_client_versions);
+            let patches = self
+                .gather_catchup_patches(&result.cvr, &result.cvr.version, &excluded, catchup_from)
+                .await?;
+            for p in &patches {
+                pokers.add_patch(p);
+            }
+            pokers.end(result.cvr.version.clone());
             // TS `#viewSyncerHydration.recordMs(performance.now() - start)` —
             // recorded once per sync that hydrated ≥1 query, after pokeEnd +
             // catchup.
@@ -898,10 +906,6 @@ impl SyncEngine {
         // against the un-advanced cookies — this snapshot reproduces that.
         original_versions: &std::collections::HashMap<String, NullableCVRVersion>,
     ) -> Result<(), String> {
-        let (Some(store_arc), Some(cache)) = (self.store.clone(), self.row_cache.as_ref()) else {
-            return Ok(()); // no store → nothing persisted to catch up from
-        };
-
         let clients = self.clients_for(poke_ws_ids);
         if clients.is_empty() {
             return Ok(());
@@ -912,6 +916,37 @@ impl SyncEngine {
         // — but against the cycle-start snapshot, since each client's live
         // `version()` has already been advanced by the config/hydrate pokes.
         let catchup_from = Self::catchup_floor(&cvr.version, &clients, original_versions);
+        let patches = self
+            .gather_catchup_patches(cvr, current, exclude_query_hashes, catchup_from)
+            .await?;
+        if patches.is_empty() {
+            return Ok(());
+        }
+
+        let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
+        let pokers = MultiPoker::new(&client_refs, cvr.version.clone());
+        for p in &patches {
+            pokers.add_patch(p);
+        }
+        pokers.end(cvr.version.clone());
+        Ok(())
+    }
+
+    /// Build the catch-up patch set (row patches first, then config patches —
+    /// matching TS ordering) WITHOUT poking. The hydrate path appends these to
+    /// its still-open poke; the standalone [`catchup_clients`] wraps them in
+    /// their own poke. Returns an empty Vec when there is no store (nothing
+    /// persisted to catch up from).
+    async fn gather_catchup_patches(
+        &mut self,
+        cvr: &CVR,
+        current: &CVRVersion,
+        exclude_query_hashes: &[String],
+        catchup_from: NullableCVRVersion,
+    ) -> Result<Vec<PatchToVersion>, String> {
+        let (Some(store_arc), Some(cache)) = (self.store.clone(), self.row_cache.as_ref()) else {
+            return Ok(Vec::new()); // no store → nothing persisted to catch up from
+        };
 
         // Gather the row pages + config patches from PG (async), then release
         // the cache/store borrows before touching the engine (`getRow`).
@@ -945,15 +980,7 @@ impl SyncEngine {
             Ok::<_, String>((rows, cfg))
         }?;
 
-        if raw_rows.is_empty() && cfg_patches.is_empty() {
-            return Ok(());
-        }
-
-        let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
-        let pokers = MultiPoker::new(&client_refs, cvr.version.clone());
-
-        // Row patches first (so the AsyncGenerator-equivalent has fully drained),
-        // then config patches — matching TS ordering.
+        let mut patches: Vec<PatchToVersion> = Vec::with_capacity(raw_rows.len() + cfg_patches.len());
         for row in raw_rows {
             let row_key = match row.row_key {
                 serde_json::Value::Object(m) => m,
@@ -964,7 +991,8 @@ impl SyncEngine {
                 table: row.table.clone(),
                 row_key: row_key.clone(),
             };
-            let to_version = version_from_string(&row.patch_version);
+            let to_version = try_version_from_string(&row.patch_version)
+                .map_err(|e| format!("catchup: invalid patchVersion in rows table: {e}"))?;
             let patch = if row.ref_counts.is_none() {
                 // Null refCounts = tombstone → the client should delete the row.
                 Patch::Row(RowPatch::Del { id })
@@ -987,13 +1015,10 @@ impl SyncEngine {
                 };
                 Patch::Row(RowPatch::Put { id, contents })
             };
-            pokers.add_patch(&PatchToVersion { patch, to_version });
+            patches.push(PatchToVersion { patch, to_version });
         }
-        for p in &cfg_patches {
-            pokers.add_patch(p);
-        }
-        pokers.end(cvr.version.clone());
-        Ok(())
+        patches.extend(cfg_patches);
+        Ok(patches)
     }
 
     /// Build a row-set-signature provider for a `CVRQueryDrivenUpdater` plus the
@@ -1039,6 +1064,14 @@ impl SyncEngine {
     /// (source-drift assert) propagates out for teardown, after the engine rolls
     /// back its partial source connections.
     #[allow(clippy::too_many_arguments)]
+    /// Hydrate queries and poke their rows. Returns the still-OPEN `MultiPoker`
+    /// alongside the result: the caller MUST call `pokers.end(result.cvr.version)`
+    /// after adding any remaining patches (catch-up rides the same poke). This is
+    /// the TS `#syncQueryPipelineSet` shape — one `pokeStart(baseCookie=old)` →
+    /// hydrate parts + catchup parts → one `pokeEnd(new)`. Ending the poke here
+    /// (as this function previously did) advanced every client's `base_version`
+    /// to the new CVR version, which made the subsequent catch-up poke a NOOP —
+    /// silently dropping every patch a reconnecting client missed while away.
     pub async fn hydrate_and_sync(
         &mut self,
         cvr: CVR,
@@ -1052,7 +1085,7 @@ impl SyncEngine {
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
-    ) -> Result<SyncResult, String> {
+    ) -> Result<(SyncResult, MultiPoker), String> {
         let (sigs, provider) = Self::signature_provider();
         let mut updater =
             CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, Some(provider));
@@ -1119,17 +1152,20 @@ impl SyncEngine {
         } else {
             updater.base.orig.clone()
         };
-        pokers.end(flushed_cvr.version.clone());
-
+        // NOTE: the poke is NOT ended here — the caller ends it after appending
+        // catch-up patches (or immediately, when no catch-up applies).
         let version = version_string(&flushed_cvr.version);
-        Ok(SyncResult {
-            cvr: flushed_cvr,
-            version,
-            query_patches,
-            num_changes,
-            reset_reason: None,
-            reset_msg: None,
-        })
+        Ok((
+            SyncResult {
+                cvr: flushed_cvr,
+                version,
+                query_patches,
+                num_changes,
+                reset_reason: None,
+                reset_msg: None,
+            },
+            pokers,
+        ))
     }
 
     /// Advance the replica to head AND apply to CVR + push pokes to clients.
@@ -1294,7 +1330,7 @@ impl SyncEngine {
         // got-query `del` patches + bumps the config version, remove_query
         // tears each pipeline down, and `finish` → delete_unreferenced_rows
         // pokes the now-orphaned rows away.
-        let result = self
+        let (result, pokers) = self
             .hydrate_and_sync(
                 cvr,
                 state_version,
@@ -1309,6 +1345,9 @@ impl SyncEngine {
                 ttl_clock,
             )
             .await?;
+        // Expiry removals need no catch-up (connected clients are current, and
+        // nothing was hydrated) — end the poke directly.
+        pokers.end(result.cvr.version.clone());
         Ok((result.cvr, expired.len()))
     }
 
@@ -1351,7 +1390,13 @@ impl SyncEngine {
         let existing_rows = self.existing_rows().await;
         let clients = self.clients_for(poke_ws_ids);
         {
-            let refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
+            // Like the config poke (`config_poke_targets`): only clients AT the
+            // pre-delete CVR version get this delta poke. A lagging reconnect
+            // must keep its old cookie for `catchup_clients` — ending a poke at
+            // the new version here would jump it over its catch-up interval.
+            let poke_clients =
+                Self::config_poke_targets(clients.clone(), &expected_current_version);
+            let refs: Vec<&ClientHandler> = poke_clients.iter().map(|c| c.as_ref()).collect();
             let pokers = MultiPoker::new(&refs, cfg_cvr.version.clone());
             for p in &patches {
                 pokers.add_patch(p);
@@ -1581,7 +1626,7 @@ mod tests {
     use crate::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::types::{BaseQueryRecord, CVR, ClientQueryRecord, QueryRecord, ShardID};
-    use rust_cvr::version::CVRVersion;
+    use rust_cvr::version::{CVRVersion, version_from_string};
     use std::collections::BTreeMap;
 
     /// A censused type must return its live-object counter to baseline once it
@@ -1737,7 +1782,7 @@ mod tests {
         );
 
         let existing_rows: RowRecordMap = HashMap::new();
-        let result = engine
+        let (result, pokers) = engine
             .hydrate_and_sync(
                 make_cvr(),
                 "00".to_string(),
@@ -1761,6 +1806,25 @@ mod tests {
             "expected a got-query patch"
         );
 
+        // Reconnect-catch-up regression: the poke must still be OPEN after
+        // `hydrate_and_sync` returns, so catch-up patches appended here ride the
+        // SAME poke and are delivered. (Previously `end()` ran inside, advancing
+        // every client's base to the new version — a separate catch-up poke then
+        // NOOP-dropped every patch a reconnecting client missed while away.)
+        let mut del_key = serde_json::Map::new();
+        del_key.insert("id".to_string(), serde_json::json!("stale-row"));
+        pokers.add_patch(&PatchToVersion {
+            patch: Patch::Row(RowPatch::Del {
+                id: RowID {
+                    schema: String::new(),
+                    table: "users".to_string(),
+                    row_key: del_key,
+                },
+            }),
+            to_version: result.cvr.version.clone(),
+        });
+        pokers.end(result.cvr.version.clone());
+
         let mut frames = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             if let WsCommand::Send(v) = cmd {
@@ -1774,6 +1838,16 @@ mod tests {
         );
         assert_eq!(frames.first().unwrap()[0], "pokeStart");
         assert_eq!(frames.last().unwrap()[0], "pokeEnd");
+        // Exactly ONE poke (no nested pokeStart), and the late catch-up del is in it.
+        let starts = frames.iter().filter(|f| f[0] == "pokeStart").count();
+        assert_eq!(starts, 1, "hydrate + catch-up must share one poke");
+        let has_del = frames.iter().any(|f| {
+            f[0] == "pokePart"
+                && f[1]["rowsPatch"]
+                    .as_array()
+                    .is_some_and(|ps| ps.iter().any(|p| p["op"] == "del"))
+        });
+        assert!(has_del, "late catch-up patch must be delivered in the poke");
     }
 
     /// Regression for the advance-path panic: `advance_and_sync` must construct

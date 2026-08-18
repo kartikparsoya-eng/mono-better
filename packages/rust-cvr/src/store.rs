@@ -489,18 +489,27 @@ impl CVRStoreHandle {
         let flush_started = std::time::Instant::now();
         self.put_instance(cvr);
 
+        // Take the buffered writes out of `self` so they are consumed by this
+        // flush attempt WHETHER OR NOT it succeeds. An errored flush (ownership
+        // lost, concurrent modification, PG failure) rolls the tx back — but the
+        // ops must not linger to be replayed by a LATER flush against a reloaded
+        // CVR: they're tagged with the old version, and replaying them is exactly
+        // the cross-owner corruption the version guard exists to prevent. TS gets
+        // this for free by discarding the whole CVRStore with the failed service.
+        let pending = std::mem::take(&mut self.pending);
+
         if crate::trace::enabled() {
             crate::trace::note(
                 "CVRStore",
                 &format!(
                     "flush start cvr_id={} rows={} clients={} queries={} desires={}",
                     self.cvr_id,
-                    self.pending.pending_row_record_updates.len(),
-                    self.pending.pending_clients_insert.len()
-                        + self.pending.pending_clients_delete.len(),
-                    self.pending.pending_query_updates.len()
-                        + self.pending.pending_query_partial_updates.len(),
-                    self.pending.pending_desire_updates.len(),
+                    pending.pending_row_record_updates.len(),
+                    pending.pending_clients_insert.len()
+                        + pending.pending_clients_delete.len(),
+                    pending.pending_query_updates.len()
+                        + pending.pending_query_partial_updates.len(),
+                    pending.pending_desire_updates.len(),
                 ),
             );
         }
@@ -556,7 +565,7 @@ impl CVRStoreHandle {
         }
 
         // 1. Instance upsert with ownership check
-        if let Some(instance) = &self.pending.pending_instance_write {
+        if let Some(instance) = &pending.pending_instance_write {
             let sql = format!(
                 // owner + grantedAt re-assert this task's ownership at its connect
                 // time (NOT `NOW()`), matching TS `putInstance` which writes
@@ -596,8 +605,8 @@ impl CVRStoreHandle {
         }
 
         // 2. Clients inserts
-        if !self.pending.pending_clients_insert.is_empty() {
-            for client in &self.pending.pending_clients_insert {
+        if !pending.pending_clients_insert.is_empty() {
+            for client in &pending.pending_clients_insert {
                 let sql = format!(
                     r#"INSERT INTO "{}".clients ("clientGroupID", "clientID")
                        VALUES ($1, $2)
@@ -610,11 +619,11 @@ impl CVRStoreHandle {
                     .execute(&mut *tx)
                     .await?;
             }
-            stats.clients = self.pending.pending_clients_insert.len();
+            stats.clients = pending.pending_clients_insert.len();
         }
 
         // 3. Clients deletes
-        for client_id in &self.pending.pending_clients_delete {
+        for client_id in &pending.pending_clients_delete {
             let sql = format!(
                 r#"DELETE FROM "{}".clients WHERE "clientGroupID" = $1 AND "clientID" = $2"#,
                 self.schema
@@ -627,7 +636,7 @@ impl CVRStoreHandle {
         }
 
         // 4. Query upserts (full)
-        for row in self.pending.pending_query_updates.values() {
+        for row in pending.pending_query_updates.values() {
             let sql = format!(
                 r#"INSERT INTO "{}".queries
                    ("clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs",
@@ -664,7 +673,7 @@ impl CVRStoreHandle {
         }
 
         // 5. Query partial updates
-        for (hash, partial) in &self.pending.pending_query_partial_updates {
+        for (hash, partial) in &pending.pending_query_partial_updates {
             let mut sets = Vec::new();
             let mut bind_idx = 2u32;
             if partial.patch_version.is_some() {
@@ -718,7 +727,7 @@ impl CVRStoreHandle {
         }
 
         // 6. Desire upserts
-        for row in self.pending.pending_desire_updates.values() {
+        for row in pending.pending_desire_updates.values() {
             let sql = format!(
                 r#"INSERT INTO "{}".desires
                    ("clientGroupID", "clientID", "queryHash", "patchVersion",
@@ -768,7 +777,7 @@ impl CVRStoreHandle {
                 .execute(&mut *tx)
                 .await?;
         }
-        for (row_id, record) in self.pending.pending_row_record_updates.values() {
+        for (row_id, record) in pending.pending_row_record_updates.values() {
             // A row leaves the CVR either as an explicit del (`None`) or as a put
             // with `refCounts = null` (the tombstone form used when a row is no
             // longer referenced by any query). BOTH must DELETE the row from the
@@ -833,9 +842,7 @@ impl CVRStoreHandle {
 
         tx.commit().await?;
 
-        // Clear pending
-        self.pending = PendingWrites::default();
-
+        // (`self.pending` was consumed by the mem::take above — nothing to clear.)
         stats.statements =
             stats.instances + stats.clients + stats.queries + stats.desires + stats.rows;
 

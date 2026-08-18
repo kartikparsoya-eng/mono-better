@@ -134,6 +134,33 @@ describe('rustSyncerEnv', () => {
     expect(env.AUTH_SECRET).toBeUndefined();
   });
 
+  test('forwards issuer / audience pinning and the revalidation interval', () => {
+    const env = rustSyncerEnv(
+      {
+        ...base,
+        auth: {
+          secret: 's3cret',
+          issuer: 'https://issuer.example',
+          audience: 'my-app',
+          revalidateIntervalSeconds: 120,
+        },
+      },
+      'serving',
+      3100,
+      3200,
+      15,
+    );
+    expect(env.AUTH_ISSUER).toBe('https://issuer.example');
+    expect(env.AUTH_AUDIENCE).toBe('my-app');
+    expect(env.AUTH_REVALIDATE_INTERVAL_SECONDS).toBe('120');
+  });
+
+  test('omits issuer / audience when unset (validation stays sub+sig only)', () => {
+    const env = rustSyncerEnv(base, 'serving', 3100, 3200, 15);
+    expect(env.AUTH_ISSUER).toBeUndefined();
+    expect(env.AUTH_AUDIENCE).toBeUndefined();
+  });
+
   test('uses the legacy getQueries config when query has no URL', () => {
     const env = rustSyncerEnv(
       {
