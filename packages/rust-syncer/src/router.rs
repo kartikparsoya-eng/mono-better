@@ -211,6 +211,9 @@ enum ExecutorCommand {
         self_tx: mpsc::UnboundedSender<CGMessage>,
         connection_count: Arc<AtomicU64>,
         accepting: Arc<AtomicBool>,
+        /// The newest broadcast notification at creation time, used to arm the
+        /// group's serving-lag tracker (TS notifier latest-state replay).
+        last_notification: Option<serde_json::Value>,
     },
     /// Stop accepting new groups and drain the ones already hosted, then exit.
     Shutdown,
@@ -395,6 +398,12 @@ pub struct ConnectionRouter {
     connections: Arc<Mutex<HashMap<String, ConnectionInfo>>>,
     /// Group auth states: client_group_id → GroupAuthState.
     group_auth_states: Arc<Mutex<HashMap<String, GroupAuthState>>>,
+    /// The most recent broadcast notification. A client group created AFTER the
+    /// last commit would otherwise never learn that commit's watermark/commit
+    /// time until the NEXT commit — TS's in-process notifier replays the latest
+    /// `ReplicaState` to every new subscriber (notifier.ts). Handed to each
+    /// newly spawned CG to arm its serving-lag tracker.
+    last_notification: Arc<Mutex<Option<serde_json::Value>>>,
     /// Whether the router is shutting down.
     shutting_down: Arc<AtomicBool>,
 }
@@ -481,6 +490,7 @@ impl ConnectionRouter {
             metrics,
             connections,
             group_auth_states: Arc::new(Mutex::new(HashMap::new())),
+            last_notification: Arc::new(Mutex::new(None)),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -730,6 +740,7 @@ impl ConnectionRouter {
             self_tx: tx.clone(),
             connection_count: connection_count.clone(),
             accepting: accepting.clone(),
+            last_notification: lock_unpoisoned(&self.last_notification).clone(),
         };
         if self.executors[shard].ctrl_tx.send(spawn).is_err() {
             return Err(format!(
@@ -853,6 +864,9 @@ impl ConnectionRouter {
     /// `version-ready` from the replicator's `Subscription<ReplicaState>` drives
     /// every pipeline. Returns the number of CG threads notified.
     pub fn broadcast_notification(&self, notification: serde_json::Value) -> usize {
+        // Remember the newest state so a CG created between commits can arm its
+        // serving-lag tracker at spawn (TS notifier latest-state replay).
+        *lock_unpoisoned(&self.last_notification) = Some(notification.clone());
         let mut sent = 0;
         for entry in self.cg_handles.iter() {
             if entry
@@ -1408,6 +1422,9 @@ impl CgState {
                     tracing::debug!("CG {}: expired {n} queries", self.cg_id);
                     crate::metrics::Metrics::add(&self.metrics.expired_queries, n as u64);
                 }
+                // Expiry runs through the same query-sync path TS marks served
+                // at the end of (`#syncQueryPipelineSet`).
+                self.mark_version_served(&cvr.version);
                 self.cvr = Some(cvr);
             }
             Err(e) => tracing::warn!("CG {}: remove_expired_queries failed: {e}", self.cg_id),
@@ -1970,6 +1987,13 @@ impl CgState {
                 .await
             {
                 Ok(cvr) => {
+                    // TS marks the version served at the end of
+                    // `#syncQueryPipelineSet` (initConnection /
+                    // changeDesiredQueries / catchup), not only after advances:
+                    // a hydrate that serves the pending watermark must clear the
+                    // serving-lag pending, or the next advance records a lag
+                    // inflated by the whole idle gap.
+                    self.mark_version_served(&cvr.version);
                     self.cvr = Some(cvr);
                     config_accepted = true;
                     let elapsed_ms = hydrate_started.elapsed().as_secs_f64() * 1000.0;
@@ -2433,17 +2457,34 @@ impl CgState {
         }
     }
 
-    async fn on_notification(&mut self, notification: serde_json::Value) {
-        // Record the upstream commit behind this `version-ready` so the served
-        // version can be paired with it for the end-to-end serving-lag histogram.
-        // Coalesced notifications keep the oldest commit time / newest watermark.
-        // Port of TS `#e2eServingLagTracker.onVersionReady(replicaState)`.
+    /// Record the upstream commit behind a `version-ready` so the served
+    /// version can be paired with it for the end-to-end serving-lag histogram.
+    /// Port of TS `#e2eServingLagTracker.onVersionReady(replicaState)`.
+    ///
+    /// Replay guard: the bridge's `/notify` POST is retried, so an
+    /// already-processed notification can be redelivered (the in-process TS
+    /// notifier cannot replay). A watermark at or behind the CVR's current
+    /// state version is already served — re-arming the tracker with it would
+    /// record a spurious, retry-latency-inflated lag observation on the next
+    /// serve. Skip arming for those; the advance itself stays harmless
+    /// (idempotent, and a zero-change advance now no-op-flushes to orig).
+    fn arm_serving_lag(&mut self, notification: &serde_json::Value) {
+        let watermark = notification.get("watermark").and_then(|v| v.as_str());
+        if let (Some(w), Some(cvr)) = (watermark, self.cvr.as_ref())
+            && w <= cvr.version.state_version.as_str()
+        {
+            return;
+        }
         self.e2e_serving_lag.on_version_ready(
-            notification.get("watermark").and_then(|v| v.as_str()),
+            watermark,
             notification
                 .get("upstreamCommitTimeMs")
                 .and_then(|v| v.as_f64()),
         );
+    }
+
+    async fn on_notification(&mut self, notification: serde_json::Value) {
+        self.arm_serving_lag(&notification);
 
         // A notification can only advance an existing CVR (no create): without a
         // loaded CVR there is nothing to advance.
@@ -2743,6 +2784,7 @@ async fn executor_loop(
                 self_tx,
                 connection_count,
                 accepting,
+                last_notification,
             }) => {
                 let ctx = CgTaskContext {
                     services_factory: services_factory.clone(),
@@ -2763,7 +2805,15 @@ async fn executor_loop(
                 };
                 let task = tokio::task::spawn_local(async move {
                     let _cleanup = cleanup;
-                    cg_event_loop(&cg_id, rx, connection_count, accepting, ctx).await;
+                    cg_event_loop(
+                        &cg_id,
+                        rx,
+                        connection_count,
+                        accepting,
+                        ctx,
+                        last_notification,
+                    )
+                    .await;
                 });
                 tasks.push(task);
             }
@@ -2818,6 +2868,7 @@ async fn cg_event_loop(
     connection_count: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     ctx: CgTaskContext,
+    last_notification: Option<serde_json::Value>,
 ) {
     let mut state = CgState::new_with_accepting(
         cg_id,
@@ -2828,6 +2879,12 @@ async fn cg_event_loop(
         accepting,
         ctx.cvr_pool,
     );
+    // Arm the serving-lag tracker with the newest pre-spawn commit (TS notifier
+    // latest-state replay): the group's FIRST serve then records an observation
+    // instead of silently swallowing everything before the next commit.
+    if let Some(n) = &last_notification {
+        state.arm_serving_lag(n);
+    }
     if state.terminal {
         // Surface initialization failure to the accepted socket instead of
         // dropping the queued connection silently.
@@ -2856,7 +2913,25 @@ async fn cg_event_loop(
     // `#scheduleAuthMaintenance` / `#runAuthMaintenance`). We wake at the
     // earliest of the deadlines and run whichever ones are actually due. With
     // nothing pending we await the channel indefinitely.
+    //
+    // `stashed` holds a non-notification message popped while coalescing a run
+    // of queued notifications (see the Notification arm); it is handled before
+    // the channel is polled again, preserving message order.
+    let mut stashed: std::collections::VecDeque<CGMessage> = std::collections::VecDeque::new();
     loop {
+        if let Some(msg) = stashed.pop_front() {
+            if !dispatch_cg_message(&mut state, &mut rx, &mut stashed, msg).await {
+                tracing::info!("CG thread {cg_id}: shutting down");
+                break;
+            }
+            if state.terminal {
+                tracing::error!(
+                    "CG thread {cg_id}: terminating after fatal synchronization error"
+                );
+                break;
+            }
+            continue;
+        }
         let next_delay = [
             state.next_expiry_delay(),
             state.next_auth_maintenance_delay(),
@@ -2903,33 +2978,97 @@ async fn cg_event_loop(
                 None => break,
             },
         };
-        match msg {
-            CGMessage::NewConnection { params, sink } => {
-                state.on_new_connection(*params, sink).await
-            }
-            CGMessage::Inbound {
-                client_id,
-                ws_id,
-                text,
-            } => state.on_inbound(client_id, ws_id, text).await,
-            CGMessage::ConnectionClosed { client_id, ws_id } => {
-                state.on_connection_closed(client_id, ws_id)
-            }
-            CGMessage::CloseConnection { client_id, ws_id } => {
-                state.close_connection(client_id, ws_id)
-            }
-            CGMessage::Notification(n) => state.on_notification(n).await,
-            CGMessage::Shutdown => {
-                tracing::info!("CG thread {cg_id}: shutting down");
-                state.shutdown();
-                break;
-            }
+        if !dispatch_cg_message(&mut state, &mut rx, &mut stashed, msg).await {
+            tracing::info!("CG thread {cg_id}: shutting down");
+            break;
         }
         if state.terminal {
             tracing::error!("CG thread {cg_id}: terminating after fatal synchronization error");
             break;
         }
     }
+}
+
+/// Handle one CG message. Returns `false` when the event loop must stop
+/// (`Shutdown`).
+///
+/// The `Notification` arm coalesces any immediately-queued run of further
+/// notifications into ONE advance, mirroring the TS notifier subscription's
+/// coalesce-while-busy contract (notifier.ts: newest state wins, oldest
+/// upstream commit time is kept). Without this, a slow CG behind a commit
+/// burst runs one full `advance_and_sync` per queued notification — N advances
+/// (and N small serving-lag observations) where TS does one — and its
+/// unbounded queue grows with the backlog. A non-notification message popped
+/// while draining is pushed to `stashed` for in-order handling by the caller.
+async fn dispatch_cg_message(
+    state: &mut CgState,
+    rx: &mut mpsc::UnboundedReceiver<CGMessage>,
+    stashed: &mut std::collections::VecDeque<CGMessage>,
+    msg: CGMessage,
+) -> bool {
+    match msg {
+        CGMessage::NewConnection { params, sink } => state.on_new_connection(*params, sink).await,
+        CGMessage::Inbound {
+            client_id,
+            ws_id,
+            text,
+        } => state.on_inbound(client_id, ws_id, text).await,
+        CGMessage::ConnectionClosed { client_id, ws_id } => {
+            state.on_connection_closed(client_id, ws_id)
+        }
+        CGMessage::CloseConnection { client_id, ws_id } => state.close_connection(client_id, ws_id),
+        CGMessage::Notification(n) => {
+            let mut merged = n;
+            loop {
+                match rx.try_recv() {
+                    Ok(CGMessage::Notification(next)) => {
+                        merged = merge_notifications(merged, next);
+                    }
+                    Ok(other) => {
+                        stashed.push_back(other);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            state.on_notification(merged).await
+        }
+        CGMessage::Shutdown => {
+            state.shutdown();
+            return false;
+        }
+    }
+    true
+}
+
+/// Merge two coalesced notifications: the newer notification's fields win
+/// (`{...prev, ...curr}` in TS notifier.ts), except `upstreamCommitTimeMs`
+/// keeps the OLDEST value — it bounds the lag of every commit the merged
+/// notification subsumes.
+fn merge_notifications(prev: serde_json::Value, next: serde_json::Value) -> serde_json::Value {
+    let min_commit = match (
+        prev.get("upstreamCommitTimeMs").and_then(|v| v.as_f64()),
+        next.get("upstreamCommitTimeMs").and_then(|v| v.as_f64()),
+    ) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let mut merged = match (prev, next) {
+        (serde_json::Value::Object(mut p), serde_json::Value::Object(n)) => {
+            for (k, v) in n {
+                p.insert(k, v);
+            }
+            serde_json::Value::Object(p)
+        }
+        (_, n) => n,
+    };
+    if let (Some(obj), Some(t)) = (merged.as_object_mut(), min_commit) {
+        obj.insert(
+            "upstreamCommitTimeMs".to_string(),
+            serde_json::Value::from(t),
+        );
+    }
+    merged
 }
 
 #[cfg(test)]
@@ -2940,6 +3079,35 @@ mod tests {
     };
     use crate::protocol::PROTOCOL_VERSION;
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
+
+    /// Coalescing parity with TS notifier.ts: the newer notification's fields
+    /// win, but the merged upstream commit time keeps the OLDEST value (it
+    /// bounds the lag of everything the merge subsumed).
+    #[test]
+    fn merge_notifications_keeps_newest_fields_and_oldest_commit_time() {
+        let m = merge_notifications(
+            serde_json::json!({"state":"version-ready","watermark":"05","upstreamCommitTimeMs":100.0}),
+            serde_json::json!({"state":"version-ready","watermark":"09","upstreamCommitTimeMs":80.0}),
+        );
+        assert_eq!(m.get("watermark").unwrap(), "09");
+        assert_eq!(m.get("upstreamCommitTimeMs").unwrap().as_f64(), Some(80.0));
+
+        // A notification missing the commit time inherits the older one's.
+        let m = merge_notifications(
+            serde_json::json!({"watermark":"05","upstreamCommitTimeMs":50.0}),
+            serde_json::json!({"watermark":"09"}),
+        );
+        assert_eq!(m.get("watermark").unwrap(), "09");
+        assert_eq!(m.get("upstreamCommitTimeMs").unwrap().as_f64(), Some(50.0));
+
+        // Fields present only on the older notification survive the merge.
+        let m = merge_notifications(
+            serde_json::json!({"state":"version-ready","watermark":"05"}),
+            serde_json::json!({"watermark":"09"}),
+        );
+        assert_eq!(m.get("state").unwrap(), "version-ready");
+        assert_eq!(m.get("watermark").unwrap(), "09");
+    }
 
     #[test]
     fn non_empty_client_cookie_against_empty_cvr_is_client_not_found() {

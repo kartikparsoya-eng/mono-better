@@ -94,7 +94,15 @@ describe('rustSyncerEnv', () => {
       QUERY_ALLOWED_CLIENT_HEADERS_JSON: '["x-request-id"]',
       QUERY_ALLOWED_REQUEST_HEADERS_JSON: '["x-forwarded-for"]',
       QUERY_FORWARD_COOKIES: 'true',
+      NOTIFY_AUTH_TOKEN: expect.any(String),
     });
+  });
+
+  test('every spawned syncer shares one notify auth token', () => {
+    const a = rustSyncerEnv(base, 'serving', 3100, 3200, 15);
+    const b = rustSyncerEnv(base, 'serving', 3101, 3201, 15);
+    expect(a.NOTIFY_AUTH_TOKEN).toBeTruthy();
+    expect(a.NOTIFY_AUTH_TOKEN).toBe(b.NOTIFY_AUTH_TOKEN);
   });
 
   test('applies the serving-copy suffix to the replica file', () => {

@@ -39,6 +39,44 @@ pub struct HttpServerState {
     pub router: Arc<ConnectionRouter>,
     pub stats: Arc<Mutex<ServerStats>>,
     pub start_time: std::time::Instant,
+    /// Shared secret for the `/notify` endpoints (`NOTIFY_AUTH_TOKEN`). The
+    /// HTTP port is bound on all interfaces (metrics are scraped externally),
+    /// which leaves `/notify` reachable by any peer: one unauthenticated POST
+    /// triggers a full advance cycle on every hosted CG, and a forged
+    /// watermark/commit-time poisons the serving-lag histogram. The dispatcher
+    /// generates a per-process token and passes it via env; when set, both
+    /// notify routes require it in the `x-notify-auth` header. Unset (manual /
+    /// standalone runs) preserves the open behavior.
+    pub notify_auth_token: Option<String>,
+}
+
+/// Notify-route guard: shared-secret check (when configured) + `state` check.
+/// Returns an error response, or `None` when the request may proceed.
+fn check_notify_request(
+    state: &HttpServerState,
+    headers: &axum::http::HeaderMap,
+    notification: &Value,
+) -> Option<(StatusCode, Json<Value>)> {
+    if let Some(expected) = &state.notify_auth_token {
+        let presented = headers.get("x-notify-auth").and_then(|v| v.to_str().ok());
+        if presented != Some(expected.as_str()) {
+            return Some((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "missing or invalid x-notify-auth"})),
+            ));
+        }
+    }
+    // The bridge always sends `state: "version-ready"`. Reject any OTHER state
+    // outright; a missing state (legacy/manual poke) is still accepted.
+    if let Some(s) = notification.get("state").and_then(Value::as_str)
+        && s != "version-ready"
+    {
+        return Some((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("unsupported notification state: {s}")})),
+        ));
+    }
+    None
 }
 
 /// Bind the HTTP TCP listener without serving, so the caller can confirm the
@@ -54,6 +92,9 @@ pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<Connectio
         router,
         stats: Arc::new(Mutex::new(ServerStats::default())),
         start_time: std::time::Instant::now(),
+        notify_auth_token: std::env::var("NOTIFY_AUTH_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty()),
     });
 
     let app = Router::new()
@@ -131,6 +172,7 @@ async fn heapz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode
 /// hosted CG thread advances to the new replica head and pokes its clients.
 async fn notify_broadcast_handler(
     State(state): State<Arc<HttpServerState>>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> (StatusCode, Json<Value>) {
     // The body is optional; default to an empty object when absent/blank. When
@@ -148,6 +190,9 @@ async fn notify_broadcast_handler(
             }
         }
     };
+    if let Some(rejection) = check_notify_request(&state, &headers, &notification) {
+        return rejection;
+    }
     let notified = state.router.broadcast_notification(notification);
     tracing::debug!("broadcast notification to {notified} CG thread(s)");
     (
@@ -164,6 +209,7 @@ async fn notify_broadcast_handler(
 async fn notify_handler(
     State(state): State<Arc<HttpServerState>>,
     Path(cg_id): Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> (StatusCode, Json<Value>) {
     tracing::debug!("received notification for CG {}", cg_id);
@@ -188,6 +234,10 @@ async fn notify_handler(
             );
         }
     };
+
+    if let Some(rejection) = check_notify_request(&state, &headers, &notification) {
+        return rejection;
+    }
 
     // Forward to the CG thread
     if state.router.send_notification(&cg_id, notification) {

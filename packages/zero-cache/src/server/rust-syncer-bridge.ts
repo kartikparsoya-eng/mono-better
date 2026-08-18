@@ -1,3 +1,4 @@
+import {randomUUID} from 'node:crypto';
 import net, {type Socket} from 'node:net';
 import type {LogContext} from '@rocicorp/logger';
 import {must} from '../../../shared/src/must.ts';
@@ -112,6 +113,8 @@ export function rustSyncerEnv(
   if (config.enableQueryCovering === false) {
     out.ENABLE_QUERY_COVERING = 'false';
   }
+  // Shared secret gating the rust /notify endpoints (see notifyAuthToken).
+  out.NOTIFY_AUTH_TOKEN = notifyAuthToken;
   return out;
 }
 
@@ -200,13 +203,31 @@ export function proxyUpgradeToRust(
  * rust HTTP server briefly unavailable across a restart / GC pause, a dropped
  * connection) would silently drop the notification, leaving the syncer stale
  * until the *next* commit happens to fire another POST. Retrying restores the
- * "eventually delivered" guarantee. Retries are safe because `/notify` is
- * idempotent (rust advances its CGs to replica head regardless of how many
- * times it is told) and the payload is constant, so a slightly stale retry
- * simply re-triggers advance-to-head. Exponential backoff: 50, 100, 200, 400ms.
+ * "eventually delivered" guarantee. Retries are delivery-safe: rust advances
+ * to replica head idempotently, coalesces queued notifications per client
+ * group, and drops a redelivered watermark it has already served (its
+ * serving-lag replay guard). Exponential backoff: 50, 100, 200, 400ms.
+ *
+ * Each attempt carries a hard timeout: without one, a rust process that
+ * accepts the TCP connection but never responds (wedged executor, full accept
+ * queue) blocks this promise forever — and since `notifyRustSyncers` awaits
+ * all ports before the subscription loop pulls the next state, one wedged
+ * syncer would permanently stall version-ready fan-out to EVERY syncer.
  */
 const NOTIFY_MAX_ATTEMPTS = 5;
 const NOTIFY_RETRY_BASE_MS = 50;
+const NOTIFY_ATTEMPT_TIMEOUT_MS = 5_000;
+
+/**
+ * Per-dispatcher shared secret for `/notify`. The rust HTTP port is bound on
+ * all interfaces (its metrics endpoint is scraped externally), which would
+ * otherwise leave `/notify` open to any reachable peer — one POST triggers a
+ * full advance cycle on every hosted client group, and a forged
+ * watermark/commit-time poisons the serving-lag histogram. The token is
+ * generated once per dispatcher process, handed to each spawned rust-syncer
+ * via `NOTIFY_AUTH_TOKEN`, and attached to every notify request.
+ */
+const notifyAuthToken = randomUUID();
 
 async function notifyOne(
   lc: LogContext,
@@ -217,8 +238,12 @@ async function notifyOne(
     try {
       const resp = await fetch(`http://127.0.0.1:${port}/notify`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: {
+          'content-type': 'application/json',
+          'x-notify-auth': notifyAuthToken,
+        },
         body,
+        signal: AbortSignal.timeout(NOTIFY_ATTEMPT_TIMEOUT_MS),
       });
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
