@@ -131,11 +131,7 @@ impl SyncerConfig {
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|n| *n > 0)
-                .unwrap_or_else(|| {
-                    std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(4)
-                }),
+                .unwrap_or_else(effective_parallelism),
             // TS default: 300s. `0` (or a negative) disables it.
             revalidate_interval_ms: {
                 let secs = env::var("AUTH_REVALIDATE_INTERVAL_SECONDS")
@@ -153,6 +149,52 @@ impl SyncerConfig {
                 .unwrap_or(false),
         }
     }
+}
+
+/// Executor-shard default: the container's EFFECTIVE cpu budget, not the host
+/// core count. `available_parallelism` is cgroup-quota-blind, so a 4-cpu-capped
+/// container on a 14-core host used to get 14 executor threads — 3.5x scheduler
+/// oversubscription that collapsed the measured capacity cliff from ~112 to 25
+/// connections (ART G22) and starved individual hydrations past the 60s
+/// liveness ceiling (G28). Reads cgroup v2 `cpu.max`, then v1 cfs quota, then
+/// falls back to `available_parallelism`.
+fn effective_parallelism() -> usize {
+    let host = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let quota_cores = std::fs::read_to_string("/sys/fs/cgroup/cpu.max")
+        .ok()
+        .and_then(|s| parse_cpu_max(&s))
+        .or_else(|| {
+            let quota = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+                .ok()?
+                .trim()
+                .parse::<f64>()
+                .ok()?;
+            let period = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+                .ok()?
+                .trim()
+                .parse::<f64>()
+                .ok()?;
+            (quota > 0.0 && period > 0.0).then(|| (quota / period).ceil() as usize)
+        });
+    match quota_cores {
+        Some(cores) if cores >= 1 => cores.min(host),
+        _ => host,
+    }
+}
+
+/// Parse cgroup v2 `cpu.max` ("<quota> <period>" or "max <period>") into a
+/// whole-core count. Returns None for unlimited ("max") or malformed content.
+fn parse_cpu_max(s: &str) -> Option<usize> {
+    let mut it = s.split_whitespace();
+    let quota = it.next()?;
+    let period = it.next()?;
+    if quota == "max" {
+        return None;
+    }
+    let (q, p) = (quota.parse::<f64>().ok()?, period.parse::<f64>().ok()?);
+    (q > 0.0 && p > 0.0).then(|| (q / p).ceil() as usize)
 }
 
 fn parse_query_config() -> Option<rust_syncer::FetchConfig> {
@@ -271,7 +313,11 @@ fn main() {
     // handle is injected into each CG's SyncEngine so CVR I/O is offloaded onto
     // this runtime (`SyncEngine::offload`; the CG executors are current_thread
     // runtimes that must not poll another reactor's connections — doc 91 §5.1).
+    // Size the reactor by the container's cpu QUOTA, not the host core count —
+    // tokio's default (available_parallelism) is as quota-blind as the shard
+    // default was, and the two pools stack on the same capped cpus.
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(effective_parallelism())
         .enable_all()
         .build()
         .unwrap();
@@ -635,5 +681,22 @@ impl rust_syncer::ConnContextManagerDispatch for PlaceholderConnContextManager {
         _body: &serde_json::Value,
     ) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod cpu_quota_tests {
+    use super::parse_cpu_max;
+
+    /// cgroup v2 cpu.max parsing: quota/period rounds UP to whole cores,
+    /// "max" (unlimited) and malformed content defer to available_parallelism.
+    #[test]
+    fn parse_cpu_max_quota_shapes() {
+        assert_eq!(parse_cpu_max("400000 100000\n"), Some(4));
+        assert_eq!(parse_cpu_max("150000 100000"), Some(2)); // 1.5 cpus -> 2
+        assert_eq!(parse_cpu_max("50000 100000"), Some(1)); // 0.5 cpus -> 1
+        assert_eq!(parse_cpu_max("max 100000"), None);
+        assert_eq!(parse_cpu_max(""), None);
+        assert_eq!(parse_cpu_max("garbage here"), None);
     }
 }
