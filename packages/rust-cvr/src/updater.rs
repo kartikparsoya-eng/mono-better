@@ -23,7 +23,7 @@ use crate::cvr::{
 use crate::row_key::RowID;
 use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl, compare_ttl};
 use crate::types::*;
-use crate::version::{CVRVersion, cmp_versions, max_version, one_after};
+use crate::version::{CVRVersion, cmp_cvr, cmp_versions, max_version, one_after};
 
 /// Row records keyed by rowIDString for O(1) lookup.
 pub type RowRecordMap = HashMap<String, RowRecord>;
@@ -53,7 +53,7 @@ impl CVRUpdater {
 
     pub fn set_version(&mut self, version: CVRVersion) -> CVRVersion {
         assert!(
-            cmp_versions(&Some(self.cvr.version.clone()), &Some(version.clone())) == Ordering::Less,
+            cmp_cvr(&self.cvr.version, &version) == Ordering::Less,
             "Expected new version to be greater than current version"
         );
         self.cvr.version = version.clone();
@@ -758,9 +758,15 @@ impl CVRQueryDrivenUpdater {
 
             self.received_rows.insert(id_str.clone(), merged.clone());
 
+            // TS (cvr.ts:865): `newRowVersion = merged === null ? undefined : version`,
+            // then `existing && existing.rowVersion === newRowVersion`. `new_row_version`
+            // is None exactly when `merged` is None (or `version` is None), so compare the
+            // Options directly — `Some(rv) == None` is false, matching TS's
+            // `rowVersion === undefined`. (The old `.unwrap_or("")` sentinel would have
+            // spuriously kept the existing patch_version if a row_version were ever "".)
             let new_row_version: Option<String> = merged.as_ref().and_then(|_| version.clone());
             let patch_version = match existing {
-                Some(e) if e.row_version == new_row_version.as_deref().unwrap_or("") => {
+                Some(e) if new_row_version.as_deref() == Some(e.row_version.as_str()) => {
                     e.patch_version.clone()
                 }
                 _ => self.assert_new_version(),
@@ -852,7 +858,10 @@ impl CVRQueryDrivenUpdater {
 
     /// Delete rows that are no longer referenced by any query.
     /// `existing_rows` is the set of rows associated with executed/removed queries.
-    pub fn delete_unreferenced_rows(&mut self, existing_rows: &[RowRecord]) -> Vec<PatchToVersion> {
+    pub fn delete_unreferenced_rows<'a>(
+        &mut self,
+        existing_rows: impl IntoIterator<Item = &'a RowRecord>,
+    ) -> Vec<PatchToVersion> {
         let mut patches: Vec<PatchToVersion> = Vec::new();
 
         if self.removed_or_executed_query_ids.is_empty() {
@@ -1470,6 +1479,63 @@ mod tests {
             Patch::Row(RowPatch::Del { id: _ }) => {}
             _ => panic!("expected RowPatch::Del"),
         }
+    }
+
+    /// Regression for the `patchVersion` parity fix: when a row's refCounts
+    /// collapse to null (`merged == None`), TS's `existing.rowVersion ===
+    /// newRowVersion` compares against `undefined` and so ALWAYS bumps
+    /// (`#assertNewVersion`). The old Rust used `new_row_version.unwrap_or("")`,
+    /// which — for an existing row whose `row_version` is the empty string —
+    /// wrongly matched and KEPT the stale `patch_version` (a client-visible
+    /// stale cookie on the Del). This asserts the Del's `to_version` is the
+    /// updater's bumped version, not the existing row's old one.
+    #[test]
+    fn test_unref_empty_row_version_bumps_patch_version() {
+        let cvr = make_test_cvr(); // stateVersion "v1"
+        let mut updater = make_query_driven_updater(cvr, "v2");
+        updater.track_queries(&[], &[]);
+
+        let id = RowID {
+            schema: "s".to_string(),
+            table: "t".to_string(),
+            row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
+        };
+        let id_str = crate::row_key::row_id_string(&id);
+
+        let mut existing = HashMap::new();
+        existing.insert(
+            id_str.clone(),
+            RowRecord {
+                id: id.clone(),
+                row_version: String::new(), // the latent-bug trigger
+                patch_version: CVRVersion {
+                    state_version: "v1".to_string(),
+                    config_version: Some(1),
+                },
+                ref_counts: Some([("hash1".to_string(), 1)].into_iter().collect()),
+            },
+        );
+
+        // Retract the only ref → merged collapses to None.
+        let update = RowUpdate {
+            version: None,
+            contents: None,
+            ref_counts: [("hash1".to_string(), -1)].into_iter().collect(),
+        };
+        let mut rows = HashMap::new();
+        rows.insert(id_str, (id, update));
+
+        let patches = updater.received(&rows, &existing);
+        assert_eq!(patches.len(), 1);
+        match &patches[0].patch {
+            Patch::Row(RowPatch::Del { .. }) => {}
+            _ => panic!("expected RowPatch::Del"),
+        }
+        // Must be the BUMPED version ("v2"), not the stale existing patch_version ("v1").
+        assert_eq!(
+            patches[0].to_version.state_version, "v2",
+            "Del must carry a bumped to_version, not the stale existing patch_version"
+        );
     }
 
     #[test]

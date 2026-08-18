@@ -56,15 +56,29 @@ impl CVRVersion {
 pub type NullableCVRVersion = Option<CVRVersion>;
 
 /// Mirrors TS `cmpVersions(a, b)`.
+/// Order two concrete versions. Absent `configVersion` counts as 0 (TS `?? 0`).
+/// Borrowing sibling of [`cmp_versions`]: compare owned `CVRVersion`s directly
+/// instead of wrapping-and-cloning each into `Some(_)`.
+///
+/// NB: this deliberately differs from the derived `PartialEq` on `CVRVersion`,
+/// which treats `configVersion: None` and `Some(0)` as unequal. Ordering follows
+/// TS's `?? 0` (so `None` and `Some(0)` are Equal here), which is why `CVRVersion`
+/// does NOT implement `Ord` — an `Ord` consistent with this would violate the
+/// `Ord`/`Eq` contract against the derived `Eq`.
+pub fn cmp_cvr(a: &CVRVersion, b: &CVRVersion) -> Ordering {
+    a.state_version.cmp(&b.state_version).then_with(|| {
+        a.config_version
+            .unwrap_or(0)
+            .cmp(&b.config_version.unwrap_or(0))
+    })
+}
+
 pub fn cmp_versions(a: &NullableCVRVersion, b: &NullableCVRVersion) -> Ordering {
     match (a, b) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Less,
         (Some(_), None) => Ordering::Greater,
-        (Some(a), Some(b)) => a
-            .state_version
-            .cmp(&b.state_version)
-            .then_with(|| (a.config_version.unwrap_or(0)).cmp(&b.config_version.unwrap_or(0))),
+        (Some(a), Some(b)) => cmp_cvr(a, b),
     }
 }
 
@@ -73,7 +87,7 @@ pub fn max_version(a: CVRVersion, b: Option<CVRVersion>) -> CVRVersion {
     match b {
         None => a,
         Some(b) => {
-            if cmp_versions(&Some(b.clone()), &Some(a.clone())) == Ordering::Greater {
+            if cmp_cvr(&b, &a) == Ordering::Greater {
                 b
             } else {
                 a

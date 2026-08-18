@@ -130,8 +130,13 @@ impl<'a> ChangeProcessor<'a> {
                 *rc -= 1;
             }
             _ => {
-                // CHILD or unknown — skip (TS uses unreachable())
-                eprintln!("Unknown change type: {}", change_type);
+                // CHILD or unknown — skip (TS uses unreachable()). Route through
+                // the crate's env-gated trace instead of an uncontrolled
+                // library `eprintln!`; behavior (skip) is unchanged.
+                crate::trace::note(
+                    "ChangeProcessor",
+                    &format!("skipping unknown change type {change_type}"),
+                );
             }
         }
 
@@ -162,10 +167,12 @@ impl<'a> ChangeProcessor<'a> {
     pub fn finish(&mut self, existing_rows: &RowRecordMap) {
         self.finish_received(existing_rows);
 
-        // delete_unreferenced_rows
-        let existing_rows_vec: Vec<crate::types::RowRecord> =
-            existing_rows.values().cloned().collect();
-        let patches = self.updater.delete_unreferenced_rows(&existing_rows_vec);
+        // delete_unreferenced_rows — borrow the cache's records directly rather
+        // than deep-cloning the whole row-record map (which, for a large client
+        // group, copied every RowRecord in the CVR on every advance).
+        let patches = self
+            .updater
+            .delete_unreferenced_rows(existing_rows.values());
         for patch in &patches {
             self.pokers.add_patch(patch);
         }

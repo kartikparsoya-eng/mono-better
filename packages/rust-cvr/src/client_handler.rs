@@ -22,7 +22,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 use crate::types::*;
-use crate::version::{CVRVersion, NullableCVRVersion, cmp_versions, version_string};
+use crate::version::{CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, version_string};
 use std::cmp::Ordering;
 
 const PART_COUNT_FLUSH_THRESHOLD: usize = 100;
@@ -165,7 +165,13 @@ impl PokeHandler {
         let to_version = &patch_to_version.to_version;
         let base = self.base_version.lock().unwrap();
 
-        if cmp_versions(&Some(to_version.clone()), &base) != Ordering::Greater {
+        // Skip when to_version is not strictly greater than base (a None base
+        // means "no floor", so nothing is skipped) — matches the old
+        // `cmp_versions(&Some(to_version), &base) != Greater`, without cloning.
+        if base
+            .as_ref()
+            .is_some_and(|b| cmp_cvr(to_version, b) != Ordering::Greater)
+        {
             return Ok(());
         }
         drop(base);

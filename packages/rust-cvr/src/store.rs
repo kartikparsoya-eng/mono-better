@@ -14,7 +14,7 @@ use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
 use crate::types::StoreOp;
 use crate::types::*;
 use crate::version::{
-    CVRVersion, NullableCVRVersion, cmp_versions, version_from_string, version_string,
+    CVRVersion, NullableCVRVersion, cmp_cvr, version_from_string, version_string,
 };
 use std::cmp::Ordering;
 
@@ -1186,7 +1186,7 @@ impl CVRStoreHandle {
 
         if let Some((cv,)) = &current_version {
             let cv = version_from_string(cv);
-            if cmp_versions(&Some(cv.clone()), &Some(up_to_version.clone())) != Ordering::Equal {
+            if cmp_cvr(&cv, up_to_version) != Ordering::Equal {
                 return Err(CVRStoreError::ConcurrentModification {
                     expected: version_string(up_to_version),
                     actual: version_string(&cv),
