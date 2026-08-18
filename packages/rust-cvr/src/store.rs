@@ -777,49 +777,72 @@ impl CVRStoreHandle {
                 .execute(&mut *tx)
                 .await?;
         }
+        // Row updates, mirroring TS `RowRecordCache.executeRowUpdates`:
+        // - a literal `None` record is a hard DELETE;
+        // - EVERYTHING else — including refCounts-NULL tombstones — is upserted.
+        //   A tombstone stays in the `rows` table carrying the deletion's
+        //   patchVersion, which is precisely what catch-up reads to emit row
+        //   DELs to reconnecting clients. (Hard-deleting tombstones — the
+        //   previous behavior — starved catch-up of DELs: a reconnecting client
+        //   could never learn a row was removed while it was away.) Tombstones
+        //   never reach the row-record cache, whose load filters
+        //   `refCounts IS NOT NULL`.
+        // Upserts are batched into ONE `json_to_recordset` statement (TS shape):
+        // a large hydration previously paid one PG round trip per row while
+        // holding a shared pool connection — the flush-convoy driver behind the
+        // capacity cliff.
+        let mut upserts: Vec<&RowRecord> = Vec::new();
         for (row_id, record) in pending.pending_row_record_updates.values() {
-            // A row leaves the CVR either as an explicit del (`None`) or as a put
-            // with `refCounts = null` (the tombstone form used when a row is no
-            // longer referenced by any query). BOTH must DELETE the row from the
-            // `rows` table, matching TS `executeRowUpdates`, which routes `null`
-            // and `refCounts == null` records into `deletes`. The old code skipped
-            // `None` entirely and wrote tombstones as `refCounts = NULL` upserts —
-            // leaking dead rows and silently dropping real deletions.
-            let is_delete = match record {
-                None => true,
-                Some(row) => row.ref_counts.is_none(),
-            };
-            if is_delete {
-                let row_key_json: Value =
-                    serde_json::to_value(&row_id.row_key).unwrap_or(Value::Null);
-                let sql = format!(
-                    r#"DELETE FROM "{}".rows
-                       WHERE "clientGroupID" = $1 AND "schema" = $2
-                         AND "table" = $3 AND "rowKey" = $4"#,
-                    self.schema
-                );
-                sqlx::query(&sql)
-                    .bind(&self.cvr_id)
-                    .bind(&row_id.schema)
-                    .bind(&row_id.table)
-                    .bind(&row_key_json)
-                    .execute(&mut *tx)
-                    .await?;
-                stats.rows += 1;
-                continue;
+            match record {
+                None => {
+                    let row_key_json: Value =
+                        serde_json::to_value(&row_id.row_key).unwrap_or(Value::Null);
+                    let sql = format!(
+                        r#"DELETE FROM "{}".rows
+                           WHERE "clientGroupID" = $1 AND "schema" = $2
+                             AND "table" = $3 AND "rowKey" = $4"#,
+                        self.schema
+                    );
+                    sqlx::query(&sql)
+                        .bind(&self.cvr_id)
+                        .bind(&row_id.schema)
+                        .bind(&row_id.table)
+                        .bind(&row_key_json)
+                        .execute(&mut *tx)
+                        .await?;
+                    stats.rows += 1;
+                }
+                Some(row) => upserts.push(row),
             }
-
-            let row = record.as_ref().expect("non-delete row has a record");
-            let row_key_json: Value = serde_json::to_value(&row.id.row_key).unwrap_or(Value::Null);
-            let ref_counts_json: Option<Value> = row
-                .ref_counts
-                .as_ref()
-                .map(|rc| serde_json::to_value(rc).unwrap_or(Value::Null));
+        }
+        if !upserts.is_empty() {
+            let rows_json = Value::Array(
+                upserts
+                    .iter()
+                    .map(|r| {
+                        serde_json::to_value(crate::row_record_cache::row_record_to_rows_row(
+                            &self.cvr_id,
+                            r,
+                        ))
+                        .unwrap_or(Value::Null)
+                    })
+                    .collect(),
+            );
             let sql = format!(
                 r#"INSERT INTO "{}".rows
                    ("clientGroupID", "schema", "table", "rowKey",
                     "rowVersion", "patchVersion", "refCounts")
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                   SELECT "clientGroupID", "schema", "table", "rowKey",
+                          "rowVersion", "patchVersion", "refCounts"
+                   FROM json_to_recordset($1::json) AS x(
+                     "clientGroupID" TEXT,
+                     "schema" TEXT,
+                     "table" TEXT,
+                     "rowKey" JSONB,
+                     "rowVersion" TEXT,
+                     "patchVersion" TEXT,
+                     "refCounts" JSONB
+                   )
                    ON CONFLICT ("clientGroupID", "schema", "table", "rowKey")
                    DO UPDATE SET
                     "rowVersion" = excluded."rowVersion",
@@ -828,16 +851,10 @@ impl CVRStoreHandle {
                 self.schema
             );
             sqlx::query(&sql)
-                .bind(&self.cvr_id)
-                .bind(&row.id.schema)
-                .bind(&row.id.table)
-                .bind(&row_key_json)
-                .bind(&row.row_version)
-                .bind(version_string(&row.patch_version))
-                .bind(&ref_counts_json)
+                .bind(&rows_json)
                 .execute(&mut *tx)
                 .await?;
-            stats.rows += 1;
+            stats.rows += upserts.len();
         }
 
         tx.commit().await?;

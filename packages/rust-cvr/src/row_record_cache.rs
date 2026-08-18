@@ -205,8 +205,9 @@ pub enum ExecuteResult {
 
 /// Internal cache state, protected by a tokio mutex (flush task needs async access).
 struct CacheState {
-    /// Loaded once, then kept in sync. Keyed by `rowIDString(id)`.
-    cache: Option<HashMap<String, RowRecord>>,
+    /// Loaded once, then kept in sync. Keyed by `rowIDString(id)`. Behind an
+    /// `Arc` so `get_row_records` snapshots are O(1) (writers `Arc::make_mut`).
+    cache: Option<Arc<HashMap<String, RowRecord>>>,
     /// Pending deferred writes. Keyed by `rowIDString(id)`. Value is (RowID, Option<RowRecord>)
     /// where the RowID is needed for tombstone DELETEs.
     pending: HashMap<String, (RowID, Option<RowRecord>)>,
@@ -360,18 +361,22 @@ impl RowRecordCache {
         }
 
         let count = cache.len();
-        state.cache = Some(cache);
+        state.cache = Some(Arc::new(cache));
         Ok(count)
     }
 
-    /// Mirrors TS `getRowRecords()`. Returns a snapshot of the cache as a
-    /// `HashMap<String, RowRecord>` keyed by `rowIDString`.
+    /// Mirrors TS `getRowRecords()`. Returns an `Arc` snapshot of the cache
+    /// keyed by `rowIDString` — an O(1) refcount bump, NOT a deep copy. This is
+    /// called once per advance/config/TTL pass per client group; deep-cloning
+    /// the full CVR row set here (the previous behavior) was the dominant
+    /// allocator load at high client counts. Writers use `Arc::make_mut`, so a
+    /// snapshot held across a concurrent write-back sees a stable view.
     /// Must be called after `load()`.
-    pub async fn get_row_records(&self) -> HashMap<String, RowRecord> {
+    pub async fn get_row_records(&self) -> Arc<HashMap<String, RowRecord>> {
         let state = self.state.lock().await;
         match &state.cache {
-            Some(c) => c.clone(),
-            None => HashMap::new(),
+            Some(c) => Arc::clone(c),
+            None => Arc::new(HashMap::new()),
         }
     }
 
@@ -390,9 +395,12 @@ impl RowRecordCache {
             return Err("cache not loaded".to_string());
         }
 
-        // Update cache first (separate borrow scope).
+        // Update cache first (separate borrow scope). `make_mut` mutates in
+        // place when no snapshot is outstanding (refcount 1); with a live
+        // `get_row_records` snapshot it copies-on-write once — paid only on
+        // row-writing flushes, instead of the old deep clone on every read.
         {
-            let cache = state.cache.as_mut().unwrap();
+            let cache = Arc::make_mut(state.cache.as_mut().unwrap());
             for (id, row) in &row_records {
                 let id_str = row_id_string(id);
                 match row {
@@ -1168,7 +1176,7 @@ mod tests {
             Arc::new(|_| {}),
             None,
         );
-        cache.state.try_lock().unwrap().cache = Some(HashMap::new());
+        cache.state.try_lock().unwrap().cache = Some(Arc::new(HashMap::new()));
         cache
     }
 

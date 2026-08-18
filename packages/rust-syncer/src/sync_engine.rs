@@ -112,9 +112,13 @@ impl SyncEngine {
     /// The cache is loaded once (lazily) and kept warm; the write-back path
     /// (`flush_ops_to_store`) applies each flushed row delta to it, so this never
     /// re-reads Postgres. Empty when there is no store/cache.
-    pub async fn existing_rows(&self) -> RowRecordMap {
+    ///
+    /// Returns an `Arc` snapshot (O(1)) — NOT a deep copy. This runs once per
+    /// advance/config/TTL pass per client group; the previous full-map clone was
+    /// the dominant per-advance allocation at high client counts.
+    pub async fn existing_rows(&self) -> Arc<RowRecordMap> {
         let Some(cache) = &self.row_cache else {
-            return HashMap::new();
+            return Arc::new(HashMap::new());
         };
         // Offload the (idempotent) cache load + read onto the shared-pool
         // runtime. `load()` populates the cache on first call and returns early
@@ -124,7 +128,7 @@ impl SyncEngine {
         self.offload(async move {
             if let Err(e) = cache.load().await {
                 tracing::warn!("row cache load failed: {e}");
-                return HashMap::new();
+                return Arc::new(HashMap::new());
             }
             // The cache and updater share one `RowRecord` type, so this is
             // `RowRecordMap` directly — no per-row conversion.

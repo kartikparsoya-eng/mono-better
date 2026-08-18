@@ -251,11 +251,14 @@ fn pg_cvr_store_flush_and_reload_roundtrip() {
     });
 }
 
-/// A row leaves the CVR either as an explicit del OR as a put with
-/// `refCounts = null` (the tombstone form). BOTH must DELETE the row from the
-/// `rows` table. The old store skipped `None` deletes entirely and wrote
-/// tombstones as `refCounts = NULL` upserts, leaking dead rows and dropping
-/// real deletions. Mirrors TS `executeRowUpdates`.
+/// Row-flush semantics, mirroring TS `executeRowUpdates`:
+/// - an explicit del (`None`) hard-DELETEs the row from the `rows` table;
+/// - a tombstone (put with `refCounts = null`) is UPSERTED and KEPT — it
+///   carries the deletion's patchVersion, which is what catch-up reads to emit
+///   row DELs to reconnecting clients. (Hard-deleting tombstones starved
+///   catch-up of DELs: a reconnecting client never learned a row was removed
+///   while it was away.) Tombstones stay invisible to the row-record cache,
+///   whose load filters `refCounts IS NOT NULL`.
 #[test]
 fn pg_cvr_store_deletes_rows() {
     use rust_cvr::row_key::RowID;
@@ -342,8 +345,9 @@ fn pg_cvr_store_deletes_rows() {
             .expect("flush puts");
         assert_eq!(row_count(pool.clone()).await, 2, "both rows persisted");
 
-        // Delete A via a tombstone (put refCounts = None); delete B via an
-        // explicit del. Both must remove the row from the `rows` table.
+        // Tombstone A (put refCounts = None); explicitly del B. B's row must be
+        // gone; A's row must REMAIN as a refCounts-NULL tombstone (the catch-up
+        // DEL source), invisible to the cache's refCounts-IS-NOT-NULL load.
         store.apply_store_ops(vec![
             StoreOp::PutRowRecord(mk_row("A", None)),
             StoreOp::DelRowRecord(mk_row("B", None).id),
@@ -354,9 +358,17 @@ fn pg_cvr_store_deletes_rows() {
             .expect("flush deletes");
         assert_eq!(
             row_count(pool.clone()).await,
-            0,
-            "both the tombstone and the explicit del removed their rows"
+            1,
+            "explicit del removed B; A remains as a tombstone"
         );
+        let tombstones: (i64,) = sqlx::query_as(&format!(
+            r#"SELECT count(*) FROM "{schema}".rows
+               WHERE "clientGroupID" = 'cg1' AND "refCounts" IS NULL"#
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tombstones.0, 1, "A's tombstone carries refCounts = NULL");
 
         sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
             .execute(&pool)
