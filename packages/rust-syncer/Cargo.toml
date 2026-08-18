@@ -8,6 +8,14 @@ edition = "2024"
 # defaults and require the WAL2 replica format exactly like the TS snapshotter.
 default = ["non-wal2-test-support"]
 non-wal2-test-support = ["rust-ivm/non-wal2-test-support"]
+# dhat-heap: build with `--features dhat-heap` to install dhat's heap-profiling
+# global allocator and dump `dhat-heap.json` on graceful shutdown. Off by default
+# (dhat intercepts every allocation, so it carries real overhead) — it exists to
+# attribute a process-level RSS leak (e.g. the G6 climb) that the rust-ivm engine
+# harness — which is heap-flat — cannot see. NOTE: dhat only tracks RUST
+# allocations; SQLite's page cache / mmap / C-side allocations are invisible to
+# it, so a retained snapshot connection leaks RSS while dhat stays flat.
+dhat-heap = ["dep:dhat"]
 
 [[bin]]
 name = "rust-syncer"
@@ -16,6 +24,8 @@ path = "src/main.rs"
 [dependencies]
 rust-cvr = { path = "../rust-cvr" }
 rust-ivm = { path = "../rust-ivm", default-features = false }
+# Optional heap profiler; enabled only by the `dhat-heap` feature.
+dhat = { version = "0.3", optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }

@@ -114,12 +114,20 @@ COPY packages/rust-cvr/ ./rust-cvr/
 COPY packages/rust-ivm/ ./rust-ivm/
 COPY packages/rust-syncer/ ./rust-syncer/
 
+# Optional extra cargo features for the syncer build (empty by default → the
+# normal production binary). Set `--build-arg RUST_SYNCER_FEATURES=dhat-heap` to
+# produce a heap-profiling binary that dumps a dhat profile on graceful shutdown
+# (leak hunts only; dhat intercepts every allocation, so never ship it).
+ARG RUST_SYNCER_FEATURES=""
+
 # `--no-default-features` disables the plain-WAL test escape hatch. The binary's
 # build.rs statically links the WAL2 amalgamation, so it reads the exact replica
 # format produced by zero-cache without depending on the runtime system SQLite.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/rust-syncer/target \
-    cargo build --release --no-default-features --manifest-path rust-syncer/Cargo.toml \
+    cargo build --release --no-default-features \
+      ${RUST_SYNCER_FEATURES:+--features "$RUST_SYNCER_FEATURES"} \
+      --manifest-path rust-syncer/Cargo.toml \
     && cp rust-syncer/target/release/rust-syncer /usr/local/bin/rust-syncer
 
 # ---------------------------------------------------------------------------

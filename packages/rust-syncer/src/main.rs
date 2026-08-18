@@ -199,7 +199,51 @@ async fn shutdown_signal() {
     }
 }
 
+/// dhat's heap-profiling allocator, installed only under `--features dhat-heap`.
+/// It intercepts every Rust allocation so `dhat::Profiler` can attribute retained
+/// blocks. Left uninstalled by default so production runs use the system allocator.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 fn main() {
+    // Start the heap profiler first so it observes allocations for the whole
+    // process lifetime. The guard lives until `main` returns; on graceful
+    // shutdown (ctrl_c / SIGTERM handled below) it drops and writes the profile
+    // (view at https://nnethercote.github.io/dh_view/dh_view.html). A SIGKILL
+    // skips the dump — drain the syncer gracefully (and allow a generous
+    // stop-grace period, the dump can take several seconds) to get a profile.
+    // Output path is `ZERO_DHAT_OUT` (default `dhat-heap.json` in CWD); point it
+    // at a mounted volume so it survives container teardown.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat_profiler = {
+        // Output path precedence: ZERO_DHAT_OUT, else next to the replica file
+        // (that dir is the mounted /var/zero volume in the container, so the
+        // dump survives teardown and is trivially extractable), else dhat's
+        // default (dhat-heap.json in CWD).
+        let out = env::var("ZERO_DHAT_OUT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                env::var("REPLICA_FILE")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|rf| {
+                        std::path::Path::new(&rf)
+                            .parent()
+                            .map(|d| d.join("dhat-heap.json"))
+                            .unwrap_or_else(|| std::path::PathBuf::from("dhat-heap.json"))
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+            });
+        let mut builder = dhat::Profiler::builder();
+        if let Some(path) = out {
+            builder = builder.file_name(path);
+        }
+        builder.build()
+    };
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -207,6 +251,9 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    #[cfg(feature = "dhat-heap")]
+    tracing::warn!("dhat-heap profiling active: dhat-heap.json written on graceful shutdown");
 
     let config = Arc::new(SyncerConfig::from_env());
 
