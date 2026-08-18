@@ -1602,3 +1602,139 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             .unwrap();
     });
 }
+
+/// Quiet-commit store contract (1.9 review Fix 1). An advance that produced
+/// zero IVM output for a CG (the commit only touched other groups' rows, or a
+/// duplicate `/notify` re-advanced at the same version) drains ZERO store ops,
+/// so `store.flush` must (a) return `None` and write nothing, and (b) the next
+/// material flush must succeed with the ORIGINAL version as
+/// `expectedCurrentVersion`. Before the sync_engine fallback fix, the caller
+/// adopted the bumped in-memory CVR after the no-op, so the next material
+/// flush passed the bumped (never-persisted) version and died on
+/// `ConcurrentModification` — tearing down the whole client group. The
+/// counter-factual assertion at the end pins that failure shape.
+#[test]
+fn pg_quiet_commit_noop_flush_contract() {
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_quiet_commit_noop_flush_contract: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_quiet_commit";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .expect("ddl");
+
+        // Establish v1 in the store: a material config flush (client1).
+        let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
+        cfg.ensure_client("client1");
+        let (cvr_v1, _stats) = cfg.flush(0, 0, 0);
+        let ops = cfg.base.drain_store_ops();
+        let mut store = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        );
+        store.apply_store_ops(ops);
+        store
+            .flush(&EMPTY_CVR_VERSION, &cvr_v1, 0.0)
+            .await
+            .expect("initial material flush")
+            .expect("initial flush is material");
+
+        // Quiet advance: bump the state version with ZERO tracked changes. The
+        // updater drains no ops, and the store flush is a no-op that must not
+        // advance the on-disk version.
+        let mut quiet = rust_cvr::updater::CVRQueryDrivenUpdater::new(
+            cvr_v1.clone(),
+            "01".to_string(),
+            "01".to_string(),
+            None,
+        );
+        let (quiet_cvr, _stats) = quiet.flush(0, 0, 0);
+        let quiet_ops = quiet.base.drain_store_ops();
+        assert!(
+            quiet_ops.is_empty(),
+            "a zero-change advance must drain no store ops, got {quiet_ops:?}"
+        );
+        let flushed = store
+            .flush(&cvr_v1.version, &quiet_cvr, 0.0)
+            .await
+            .expect("quiet flush must not error");
+        assert!(
+            flushed.is_none(),
+            "a zero-op flush must be a no-op (return None)"
+        );
+        let db_version: (String,) = sqlx::query_as(&format!(
+            r#"SELECT "version" FROM "{schema}".instances WHERE "clientGroupID" = 'cg1'"#
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            db_version.0,
+            rust_cvr::version::version_string(&cvr_v1.version),
+            "no-op flush must not advance the stored version"
+        );
+
+        // FIXED caller behavior: after the no-op it stays on cvr_v1 (orig), so
+        // the next material advance passes cvr_v1.version as expected — and
+        // succeeds.
+        let mut material = rust_cvr::updater::CVRQueryDrivenUpdater::new(
+            cvr_v1.clone(),
+            "02".to_string(),
+            "01".to_string(),
+            None,
+        );
+        let (material_cvr, _stats) = material.flush(0, 0, 0);
+        let mut ops = material.base.drain_store_ops();
+        ops.push(insert_client_op("client2"));
+        store.apply_store_ops(ops);
+        store
+            .flush(&cvr_v1.version, &material_cvr, 0.0)
+            .await
+            .expect("material flush after quiet no-op must succeed")
+            .expect("material flush is material");
+
+        // COUNTER-FACTUAL (the pre-fix bug): a caller that adopted the bumped
+        // quiet CVR would pass the never-persisted version as expected and die
+        // on the version guard.
+        let mut store2 = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        );
+        store2.apply_store_ops(vec![insert_client_op("client3")]);
+        let err = store2
+            .flush(&quiet_cvr.version, &material_cvr, 0.0)
+            .await
+            .expect_err("stale expected version must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("concurrent"),
+            "expected ConcurrentModification, got: {msg}"
+        );
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}

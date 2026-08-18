@@ -255,13 +255,20 @@ impl SyncEngine {
     /// Flush the updater's buffered store ops + CVR to Postgres (no-op when no
     /// store is set). Requires a current tokio runtime handle when a store is
     /// present, mirroring the napi path.
+    ///
+    /// Returns whether the store MATERIALLY flushed (see `flush_ops_to_store`).
+    /// On `false` the caller must fall back to the updater's ORIGINAL CVR —
+    /// TS `CVRUpdater.flush`'s `if (!flushed) return {cvr: this._orig}`
+    /// (cvr.ts) — because nothing was persisted: adopting the bumped working
+    /// CVR would poke clients to a version the store never wrote and make the
+    /// next material flush fail its version guard (`ConcurrentModification`).
     async fn flush_to_store(
         &self,
         updater: &mut CVRQueryDrivenUpdater,
         flushed_cvr: Arc<CVR>,
         last_connect_time: i64,
         existing_rows: &RowRecordMap,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let expected_current_version = updater.base.orig.version.clone();
         self.flush_ops_to_store(
             updater.base.drain_store_ops(),
@@ -278,6 +285,12 @@ impl SyncEngine {
     /// the flush, the same row deltas are written back into the row-record cache
     /// (`RowRecordCache::apply` with `flushed=true`) so `existing_rows()` stays
     /// current without re-reading Postgres.
+    /// Returns `Ok(true)` when the store materially flushed (or when no store
+    /// is configured — the in-memory path has no version guard to desync, so
+    /// callers keep the working CVR as before). Returns `Ok(false)` when the
+    /// store found nothing material to write and skipped the flush entirely:
+    /// the on-disk CVR version did NOT advance, so the caller must stay on the
+    /// updater's original CVR (TS `flush` → `{cvr: this._orig, flushed: false}`).
     async fn flush_ops_to_store(
         &self,
         ops: Vec<StoreOp>,
@@ -285,9 +298,9 @@ impl SyncEngine {
         flushed_cvr: Arc<CVR>,
         last_connect_time: i64,
         existing_rows: &RowRecordMap,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let Some(store_arc) = self.store.clone() else {
-            return Ok(());
+            return Ok(true);
         };
 
         // Row-write dedup (port of TS `#flush`'s pending-row dedup): drop row ops
@@ -332,13 +345,14 @@ impl SyncEngine {
             if !ops.is_empty() {
                 store_arc.lock().await.apply_store_ops(ops);
             }
-            {
+            let store_flushed = {
                 let mut store = store_arc.lock().await;
                 store
                     .flush(&expected, &flushed, last_connect_time as f64)
                     .await
-                    .map_err(|e| format!("store flush: {e}"))?;
-            }
+                    .map_err(|e| format!("store flush: {e}"))?
+                    .is_some()
+            };
 
             // Write-back: the store just persisted these rows to PG, so update
             // the in-memory cache with the same deltas (`flushed=true` →
@@ -355,7 +369,7 @@ impl SyncEngine {
                     tracing::warn!("row cache write-back failed: {e}");
                 }
             }
-            Ok(())
+            Ok(store_flushed)
         })
         .await
     }
@@ -500,15 +514,24 @@ impl SyncEngine {
                 pokers.add_patch(p);
             }
             let cfg_arc = Arc::new(cfg_cvr);
-            self.flush_ops_to_store(
-                cfg_ops,
-                &expected_current_version,
-                cfg_arc.clone(),
-                last_connect_time,
-                existing_rows,
-            )
-            .await?;
-            cfg_cvr = Arc::try_unwrap(cfg_arc).unwrap_or_else(|a| (*a).clone());
+            let store_flushed = self
+                .flush_ops_to_store(
+                    cfg_ops,
+                    &expected_current_version,
+                    cfg_arc.clone(),
+                    last_connect_time,
+                    existing_rows,
+                )
+                .await?;
+            // No-op store flush → stay on the ORIGINAL CVR (TS `flush` returns
+            // `this._orig`): nothing was persisted, so adopting the bumped
+            // working copy would advance client cookies past the stored version
+            // and fail the next material flush's version guard.
+            cfg_cvr = if store_flushed {
+                Arc::try_unwrap(cfg_arc).unwrap_or_else(|a| (*a).clone())
+            } else {
+                cfg.base.orig.clone()
+            };
             pokers.end(cfg_cvr.version.clone());
         }
 
@@ -1071,14 +1094,20 @@ impl SyncEngine {
         // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
         // deep copy); reclaim it after the awaited flush drops its clone.
         let flushed_arc = Arc::new(flushed_cvr);
-        self.flush_to_store(
-            &mut updater,
-            flushed_arc.clone(),
-            last_connect_time,
-            existing_rows,
-        )
-        .await?;
-        let flushed_cvr = Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone());
+        let store_flushed = self
+            .flush_to_store(
+                &mut updater,
+                flushed_arc.clone(),
+                last_connect_time,
+                existing_rows,
+            )
+            .await?;
+        // No-op store flush → revert to the ORIGINAL CVR (see `flush_to_store`).
+        let flushed_cvr = if store_flushed {
+            Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone())
+        } else {
+            updater.base.orig.clone()
+        };
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -1190,14 +1219,25 @@ impl SyncEngine {
         // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
         // deep copy); reclaim it after the awaited flush drops its clone.
         let flushed_arc = Arc::new(flushed_cvr);
-        self.flush_to_store(
-            &mut updater,
-            flushed_arc.clone(),
-            last_connect_time,
-            existing_rows,
-        )
-        .await?;
-        let flushed_cvr = Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone());
+        let store_flushed = self
+            .flush_to_store(
+                &mut updater,
+                flushed_arc.clone(),
+                last_connect_time,
+                existing_rows,
+            )
+            .await?;
+        // Quiet commit (zero IVM output for this CG, e.g. the batch only touched
+        // other groups' rows): the store flush is a no-op, so revert to the
+        // ORIGINAL CVR (TS `flush` → `this._orig`). `pokers.end(orig)` then
+        // no-ops for caught-up clients instead of advancing their cookies to a
+        // version that was never persisted, and the next material flush's
+        // `expected_current_version` still matches the on-disk version.
+        let flushed_cvr = if store_flushed {
+            Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone())
+        } else {
+            updater.base.orig.clone()
+        };
         pokers.end(flushed_cvr.version.clone());
 
         let version = version_string(&flushed_cvr.version);
@@ -1306,15 +1346,22 @@ impl SyncEngine {
                 pokers.add_patch(p);
             }
             let cfg_arc = Arc::new(cfg_cvr);
-            self.flush_ops_to_store(
-                ops,
-                &expected_current_version,
-                cfg_arc.clone(),
-                last_connect_time,
-                &existing_rows,
-            )
-            .await?;
-            cfg_cvr = Arc::try_unwrap(cfg_arc).unwrap_or_else(|a| (*a).clone());
+            let store_flushed = self
+                .flush_ops_to_store(
+                    ops,
+                    &expected_current_version,
+                    cfg_arc.clone(),
+                    last_connect_time,
+                    &existing_rows,
+                )
+                .await?;
+            // No-op flush (e.g. every requested client was foreign to this
+            // group) → stay on the original CVR (see `flush_to_store`).
+            cfg_cvr = if store_flushed {
+                Arc::try_unwrap(cfg_arc).unwrap_or_else(|a| (*a).clone())
+            } else {
+                cfg.base.orig.clone()
+            };
             pokers.end(cfg_cvr.version.clone());
         }
 

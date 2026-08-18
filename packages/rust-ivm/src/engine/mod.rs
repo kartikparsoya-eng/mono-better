@@ -905,29 +905,12 @@ impl Engine {
                 // three-arm decision; both this per-change site and the per-fetch
                 // `should_stop_fetch` evaluate the same formula.
                 if let Some(reset) = advance_gate.advance_reset() {
-                    let elapsed_ms = advance_gate.elapsed_ms();
-                    let budget = total_hydration_time_ms;
-                    let msg = match reset {
-                        crate::advance_gate::AdvanceReset::SlowCurrentChange {
-                            current_change_ms,
-                        } => format!(
-                            "Advancement aborted: current change took {:.0}ms (> hydration budget {:.0}ms) at {}/{}",
-                            current_change_ms, budget, pos, num_changes
-                        ),
-                        crate::advance_gate::AdvanceReset::Projected { projected_ms } => format!(
-                            "Advancement aborted: projected {:.0}ms exceeds hydration budget {:.0}ms at {}/{} ({:.0}ms elapsed)",
-                            projected_ms, budget, pos, num_changes, elapsed_ms
-                        ),
-                        crate::advance_gate::AdvanceReset::Timeout => format!(
-                            "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
-                            elapsed_ms, budget, pos, num_changes
-                        ),
-                    };
-                    return Err(crate::snapshotter::DiffError::Reset(
-                        crate::snapshotter::ResetPipelinesSignal {
-                            reason: "advancement-timeout",
-                            msg,
-                        },
+                    return Err(advance_reset_error(
+                        reset,
+                        advance_gate.elapsed_ms(),
+                        total_hydration_time_ms,
+                        pos,
+                        num_changes,
                     ));
                 }
                 pos += 1;
@@ -1048,6 +1031,28 @@ impl Engine {
                             },
                         ));
                     }
+                }
+
+                // Post-push gate check, WHILE the current-change window is still
+                // set (TS pipeline-driver.ts: `#shouldAdvanceYieldMaybeAbortAdvance`
+                // runs inside the `currentChangeStartMs` scope, after the inner
+                // `pos++` finally). This is the primary firing site of the
+                // slow-current-change arm: a change whose cost lands in operator
+                // compute (not in sampled row fetches) is only observable here,
+                // and once the advance is >=80% complete the late-finish
+                // exception suppresses the other arms — without this check a
+                // single pathological late change escapes reset entirely.
+                // `set_pos(pos)` first: `pos` was already incremented for this
+                // change, matching TS's post-increment value at this check.
+                advance_gate.set_pos(pos);
+                if let Some(reset) = advance_gate.advance_reset() {
+                    return Err(advance_reset_error(
+                        reset,
+                        advance_gate.elapsed_ms(),
+                        total_hydration_time_ms,
+                        pos,
+                        num_changes,
+                    ));
                 }
 
                 // Change boundary: the slow-current-change arm no longer applies
@@ -1477,6 +1482,36 @@ fn push_source_change(
         }
     }
     None
+}
+
+/// Format a tripped [`crate::advance_gate::AdvanceReset`] arm into the
+/// advancement-timeout reset error. Shared by the top-of-change and the
+/// post-push (change-boundary) gate sites so both attribute the arm that fired.
+fn advance_reset_error(
+    reset: crate::advance_gate::AdvanceReset,
+    elapsed_ms: f64,
+    budget: f64,
+    pos: usize,
+    num_changes: usize,
+) -> crate::snapshotter::DiffError {
+    let msg = match reset {
+        crate::advance_gate::AdvanceReset::SlowCurrentChange { current_change_ms } => format!(
+            "Advancement aborted: current change took {:.0}ms (> hydration budget {:.0}ms) at {}/{}",
+            current_change_ms, budget, pos, num_changes
+        ),
+        crate::advance_gate::AdvanceReset::Projected { projected_ms } => format!(
+            "Advancement aborted: projected {:.0}ms exceeds hydration budget {:.0}ms at {}/{} ({:.0}ms elapsed)",
+            projected_ms, budget, pos, num_changes, elapsed_ms
+        ),
+        crate::advance_gate::AdvanceReset::Timeout => format!(
+            "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
+            elapsed_ms, budget, pos, num_changes
+        ),
+    };
+    crate::snapshotter::DiffError::Reset(crate::snapshotter::ResetPipelinesSignal {
+        reason: "advancement-timeout",
+        msg,
+    })
 }
 
 fn take_scalar_reset(pipelines: &[PipelineEntry]) -> Option<ScalarResetError> {
