@@ -1356,6 +1356,28 @@ impl Engine {
     }
 }
 
+/// Break the operator graph's `Rc` cycles on teardown.
+///
+/// IVM operators form strong `Rc` cycles: each operator holds its `input`
+/// (down-edge) and, via `set_output`, the upstream input holds a strong `output`
+/// back-edge to the downstream operator. Only `destroy()` breaks these. When a
+/// client group is torn down (e.g. the last client disconnects), the owning
+/// `SyncEngine`/`CgState` simply *drops* the engine — nothing calls `destroy()`
+/// explicitly — so without this impl the whole operator subtree (Join / Exists /
+/// TableSourceInput / TableConnection, plus the SQLite connection each
+/// TableConnection pins) leaks on every CG churn. That is the G6 RSS climb: the
+/// `TableSource` root drops (it is not in the cycle) but its registered
+/// inputs/connections and the operators above them are retained forever.
+///
+/// `destroy()` is idempotent — the explicit calls in `init`/reset drain the
+/// pipelines, so a later drop-time call is a no-op — so this composes safely
+/// with the existing teardown paths.
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BuilderDelegate — complete implementation matching TS.
 // ---------------------------------------------------------------------------
