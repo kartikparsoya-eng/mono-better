@@ -563,16 +563,14 @@ fn canonical_key_row(record: &Constraint, keys: &[String]) -> String {
 
 fn canonical_key(record: &Row, keys: &[String]) -> String {
     if keys.len() == 1 {
-        canonical_value(&record.get(&keys[0]).cloned().unwrap_or(Value::Null))
+        canonical_value(record.get(&keys[0]).unwrap_or(&Value::Null))
     } else {
         let mut s = String::new();
         for (i, key) in keys.iter().enumerate() {
             if i > 0 {
                 s.push('\0');
             }
-            s.push_str(&canonical_value(
-                &record.get(key).cloned().unwrap_or(Value::Null),
-            ));
+            s.push_str(&canonical_value(record.get(key).unwrap_or(&Value::Null)));
         }
         s
     }

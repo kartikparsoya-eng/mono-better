@@ -135,16 +135,16 @@ impl Cap {
             (Some(pk), Some(row), _) => {
                 let mut parts = Vec::new();
                 for col in pk {
-                    let v = row.get(col).cloned().unwrap_or(Value::Null);
-                    parts.push(value_to_string(&v));
+                    let v = row.get(col).unwrap_or(&Value::Null);
+                    parts.push(value_to_string(v));
                 }
                 format!("[\"cap\",{}]", parts.join(","))
             }
             (Some(pk), _, Some(c)) => {
                 let mut parts = Vec::new();
                 for col in pk {
-                    let v = c.get(col).cloned().unwrap_or(Value::Null);
-                    parts.push(value_to_string(&v));
+                    let v = c.get(col).unwrap_or(&Value::Null);
+                    parts.push(value_to_string(v));
                 }
                 format!("[\"cap\",{}]", parts.join(","))
             }
@@ -156,7 +156,7 @@ impl Cap {
         let parts: Vec<String> = self
             .primary_key
             .iter()
-            .map(|k| value_to_string(&row.get(k).cloned().unwrap_or(Value::Null)))
+            .map(|k| value_to_string(row.get(k).unwrap_or(&Value::Null)))
             .collect();
         format!("[{}]", parts.join(","))
     }
@@ -231,7 +231,7 @@ impl Cap {
                         .iter()
                         .map(|k| {
                             crate::ivm::cap::value_to_string(
-                                &node.row.get(k).cloned().unwrap_or(Value::Null),
+                                node.row.get(k).unwrap_or(&Value::Null),
                             )
                         })
                         .collect();

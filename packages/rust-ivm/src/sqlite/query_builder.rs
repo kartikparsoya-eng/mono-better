@@ -239,7 +239,7 @@ fn gather_start_constraints(
 
         for j in 0..=i {
             if j == i {
-                let val = from.get(i_field).cloned().unwrap_or(Value::Null);
+                let val = from.get(i_field).unwrap_or(&Value::Null);
                 let operator = if i_dir == "asc" {
                     if reverse { "<" } else { ">" }
                 } else if reverse {
@@ -250,7 +250,7 @@ fn gather_start_constraints(
                 let optional = column_is_optional(column_types, i_field);
                 group.push(nullable_aware_range_comparison(
                     i_field,
-                    &val,
+                    val,
                     column_types.get(i_field),
                     operator,
                     optional,
@@ -258,11 +258,11 @@ fn gather_start_constraints(
                 ));
             } else {
                 let (j_field, _) = &order[j];
-                let val = from.get(j_field).cloned().unwrap_or(Value::Null);
+                let val = from.get(j_field).unwrap_or(&Value::Null);
                 let optional = column_is_optional(column_types, j_field);
                 group.push(nullable_aware_equality(
                     j_field,
-                    &val,
+                    val,
                     column_types.get(j_field),
                     optional,
                     &mut params,
@@ -276,11 +276,11 @@ fn gather_start_constraints(
     if start.basis == Basis::At {
         let mut group: Vec<String> = Vec::new();
         for (field, _) in order {
-            let val = from.get(field).cloned().unwrap_or(Value::Null);
+            let val = from.get(field).unwrap_or(&Value::Null);
             let optional = column_is_optional(column_types, field);
             group.push(nullable_aware_equality(
                 field,
-                &val,
+                val,
                 column_types.get(field),
                 optional,
                 &mut params,

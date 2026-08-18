@@ -239,9 +239,9 @@ impl MemorySource {
         // source stays consistent when tests mutate rows between hydrates.
         if let Some(idx) = data.iter().position(|existing| {
             pk.iter().all(|k| {
-                let a = existing.get(k).cloned().unwrap_or(Value::Null);
-                let b = r.get(k).cloned().unwrap_or(Value::Null);
-                values_equal(&a, &b)
+                let a = existing.get(k).unwrap_or(&Value::Null);
+                let b = r.get(k).unwrap_or(&Value::Null);
+                values_equal(a, b)
             })
         }) {
             data[idx] = r;
@@ -255,9 +255,9 @@ impl MemorySource {
         let data = self.data.borrow();
         data.iter().any(|existing| {
             self.primary_key.iter().all(|pk| {
-                let a = existing.get(pk).cloned().unwrap_or(Value::Null);
-                let b = row.get(pk).cloned().unwrap_or(Value::Null);
-                values_equal(&a, &b)
+                let a = existing.get(pk).unwrap_or(&Value::Null);
+                let b = row.get(pk).unwrap_or(&Value::Null);
+                values_equal(a, b)
             })
         })
     }
@@ -269,8 +269,8 @@ impl MemorySource {
         data.iter()
             .find(|existing| {
                 pk.iter().all(|(col, val)| {
-                    let a = existing.get(col).cloned().unwrap_or(Value::Null);
-                    values_equal(&a, val)
+                    let a = existing.get(col).unwrap_or(&Value::Null);
+                    values_equal(a, val)
                 })
             })
             .cloned()
@@ -368,8 +368,8 @@ impl MemorySource {
                 let conn = c.borrow();
                 if let Some(ref keys) = conn.split_edit_keys {
                     keys.iter().any(|k| {
-                        let old_val = old_row.get(k).cloned().unwrap_or(Value::Null);
-                        let new_val = row.get(k).cloned().unwrap_or(Value::Null);
+                        let old_val = old_row.get(k).unwrap_or(&Value::Null);
+                        let new_val = row.get(k).unwrap_or(&Value::Null);
                         old_val != new_val
                     })
                 } else {
@@ -487,9 +487,9 @@ impl MemorySource {
             SourceChange::Remove { row } => {
                 if let Some(pos) = data.iter().position(|existing| {
                     pk.iter().all(|pk| {
-                        let a = existing.get(pk).cloned().unwrap_or(Value::Null);
-                        let b = row.get(pk).cloned().unwrap_or(Value::Null);
-                        values_equal(&a, &b)
+                        let a = existing.get(pk).unwrap_or(&Value::Null);
+                        let b = row.get(pk).unwrap_or(&Value::Null);
+                        values_equal(a, b)
                     })
                 }) {
                     data.remove(pos);
@@ -502,9 +502,9 @@ impl MemorySource {
             SourceChange::Edit { row, old_row } => {
                 if let Some(pos) = data.iter().position(|existing| {
                     pk.iter().all(|pk| {
-                        let a = existing.get(pk).cloned().unwrap_or(Value::Null);
-                        let b = old_row.get(pk).cloned().unwrap_or(Value::Null);
-                        values_equal(&a, &b)
+                        let a = existing.get(pk).unwrap_or(&Value::Null);
+                        let b = old_row.get(pk).unwrap_or(&Value::Null);
+                        values_equal(a, b)
                     })
                 }) {
                     data.remove(pos);

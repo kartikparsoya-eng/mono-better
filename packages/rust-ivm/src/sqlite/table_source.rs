@@ -580,8 +580,7 @@ impl TableSource {
                 let conn = c.borrow();
                 conn.split_edit_keys.as_ref().is_some_and(|keys| {
                     keys.iter().any(|k| {
-                        old_row.get(k).cloned().unwrap_or(Value::Null)
-                            != row.get(k).cloned().unwrap_or(Value::Null)
+                        old_row.get(k).unwrap_or(&Value::Null) != row.get(k).unwrap_or(&Value::Null)
                     })
                 })
             });
@@ -696,7 +695,7 @@ impl TableSource {
         let params: Vec<SqlParam> = self
             .primary_key
             .iter()
-            .map(|k| SqlParam::from(&row.get(k).cloned().unwrap_or(Value::Null)))
+            .map(|k| SqlParam::from(row.get(k).unwrap_or(&Value::Null)))
             .collect();
 
         // Propagate, never swallow. A prepare/execution failure must NOT be
@@ -751,7 +750,7 @@ impl TableSource {
                 let params: Vec<SqlParam> = self
                     .column_names
                     .iter()
-                    .map(|c| SqlParam::from(&row.get(c).cloned().unwrap_or(Value::Null)))
+                    .map(|c| SqlParam::from(row.get(c).unwrap_or(&Value::Null)))
                     .collect();
                 tx.execute(
                     &sql,
@@ -772,7 +771,7 @@ impl TableSource {
                 let params: Vec<SqlParam> = self
                     .primary_key
                     .iter()
-                    .map(|k| SqlParam::from(&row.get(k).cloned().unwrap_or(Value::Null)))
+                    .map(|k| SqlParam::from(row.get(k).unwrap_or(&Value::Null)))
                     .collect();
                 tx.execute(
                     &sql,
@@ -783,8 +782,8 @@ impl TableSource {
                 // If PK is the same, use UPDATE; else DELETE + INSERT
                 let pk_same = self.primary_key.iter().all(|k| {
                     values_equal(
-                        &row.get(k).cloned().unwrap_or(Value::Null),
-                        &old_row.get(k).cloned().unwrap_or(Value::Null),
+                        row.get(k).unwrap_or(&Value::Null),
+                        old_row.get(k).unwrap_or(&Value::Null),
                     )
                 });
 
@@ -810,12 +809,12 @@ impl TableSource {
                     );
                     let mut params: Vec<SqlParam> = non_pk
                         .iter()
-                        .map(|c| SqlParam::from(&row.get(c).cloned().unwrap_or(Value::Null)))
+                        .map(|c| SqlParam::from(row.get(c).unwrap_or(&Value::Null)))
                         .collect();
                     params.extend(
                         self.primary_key
                             .iter()
-                            .map(|k| SqlParam::from(&row.get(k).cloned().unwrap_or(Value::Null))),
+                            .map(|k| SqlParam::from(row.get(k).unwrap_or(&Value::Null))),
                     );
                     tx.execute(
                         &sql,
@@ -836,7 +835,7 @@ impl TableSource {
                     let del_params: Vec<SqlParam> = self
                         .primary_key
                         .iter()
-                        .map(|k| SqlParam::from(&old_row.get(k).cloned().unwrap_or(Value::Null)))
+                        .map(|k| SqlParam::from(old_row.get(k).unwrap_or(&Value::Null)))
                         .collect();
                     tx.execute(
                         &del_sql,
@@ -859,7 +858,7 @@ impl TableSource {
                     let ins_params: Vec<SqlParam> = self
                         .column_names
                         .iter()
-                        .map(|c| SqlParam::from(&row.get(c).cloned().unwrap_or(Value::Null)))
+                        .map(|c| SqlParam::from(row.get(c).unwrap_or(&Value::Null)))
                         .collect();
                     tx.execute(
                         &ins_sql,
@@ -1108,8 +1107,8 @@ fn sql_start_matches(
         )
     };
     let range_matches = |field: &str, direction: &str| {
-        let row_value = row.get(field).cloned().unwrap_or(Value::Null);
-        let start_value = start.row.get(field).cloned().unwrap_or(Value::Null);
+        let row_value = row.get(field).unwrap_or(&Value::Null);
+        let start_value = start.row.get(field).unwrap_or(&Value::Null);
         let greater = if direction == "asc" {
             !reverse
         } else {
@@ -1134,7 +1133,7 @@ fn sql_start_matches(
         if row_value.is_null() || start_value.is_null() {
             return false;
         }
-        let ordering = compare_values(&row_value, &start_value);
+        let ordering = compare_values(row_value, start_value);
         if greater {
             ordering == CmpOrdering::Greater
         } else {
@@ -1142,15 +1141,15 @@ fn sql_start_matches(
         }
     };
     let equality_matches = |field: &str| {
-        let row_value = row.get(field).cloned().unwrap_or(Value::Null);
-        let start_value = start.row.get(field).cloned().unwrap_or(Value::Null);
+        let row_value = row.get(field).unwrap_or(&Value::Null);
+        let start_value = start.row.get(field).unwrap_or(&Value::Null);
         if row_value.is_null() || start_value.is_null() {
             // VALUE-aware IS semantics (see query_builder): a NULL start value
             // now always generates `col IS ?`, which matches exactly the
             // NULL rows — declared optionality no longer changes the outcome.
             return row_value.is_null() && start_value.is_null();
         }
-        compare_values(&row_value, &start_value) == CmpOrdering::Equal
+        compare_values(row_value, start_value) == CmpOrdering::Equal
     };
 
     for (index, (field, direction)) in order.iter().enumerate() {

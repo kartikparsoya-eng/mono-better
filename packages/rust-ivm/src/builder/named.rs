@@ -61,8 +61,8 @@ impl SyncedQuery {
         let fn_clone = fn_owned.clone();
         let wrapped: Box<dyn Fn(Option<&Value>, &[Value]) -> crate::builder::query::Query> =
             Box::new(move |ctx, args| {
-                let ctx_val = ctx.cloned().unwrap_or(Value::Null);
-                fn_clone(&ctx_val, args)
+                let ctx_val = ctx.unwrap_or(&Value::Null);
+                fn_clone(ctx_val, args)
             });
         SyncedQuery {
             query_name: name.to_string(),

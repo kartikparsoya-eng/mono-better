@@ -227,7 +227,7 @@ impl Take {
         };
         let mut key = String::new();
         for col in partition_key {
-            let value = row.get(col).cloned().unwrap_or(Value::Null);
+            let value = row.get(col).unwrap_or(&Value::Null);
             key.push_str(&format!("{}={:?};", col, value));
         }
         key
@@ -239,7 +239,7 @@ impl Take {
         };
         let mut key = String::new();
         for col in partition_key {
-            let value = constraint.get(col).cloned().unwrap_or(Value::Null);
+            let value = constraint.get(col).unwrap_or(&Value::Null);
             key.push_str(&format!("{}={:?};", col, value));
         }
         key
@@ -980,7 +980,7 @@ impl Input for Take {
                         }
                         let mut key = String::new();
                         for col in &partition_key {
-                            let value = node.row.get(col).cloned().unwrap_or(Value::Null);
+                            let value = node.row.get(col).unwrap_or(&Value::Null);
                             key.push_str(&format!("{}={:?};", col, value));
                         }
                         let bound = storage
@@ -1034,9 +1034,9 @@ fn make_partition_key_comparator(partition_key: &PartitionKey) -> Comparator {
     let pk = partition_key.clone();
     Rc::new(move |a: &Row, b: &Row| {
         for col in &pk {
-            let av = a.get(col).cloned().unwrap_or(Value::Null);
-            let bv = b.get(col).cloned().unwrap_or(Value::Null);
-            let cmp = compare_values(&av, &bv);
+            let av = a.get(col).unwrap_or(&Value::Null);
+            let bv = b.get(col).unwrap_or(&Value::Null);
+            let cmp = compare_values(av, bv);
             if cmp != CmpOrdering::Equal {
                 return cmp;
             }

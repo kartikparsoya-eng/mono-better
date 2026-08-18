@@ -245,9 +245,9 @@ pub fn make_comparator(order: SortOrder, reverse: bool) -> Comparator {
     Rc::new(move |a: &Row, b: &Row| {
         for ord in order.iter() {
             let field = &ord[0];
-            let a_val = a.get(field).cloned().unwrap_or(Value::Null);
-            let b_val = b.get(field).cloned().unwrap_or(Value::Null);
-            let cmp = compare_values(&a_val, &b_val);
+            let a_val = a.get(field).unwrap_or(&Value::Null);
+            let b_val = b.get(field).unwrap_or(&Value::Null);
+            let cmp = compare_values(a_val, b_val);
             if cmp != CmpOrdering::Equal {
                 let result = if ord[1] == "asc" { cmp } else { cmp.reverse() };
                 return if reverse { result.reverse() } else { result };
@@ -266,9 +266,9 @@ pub fn make_partial_bound_comparator(order: SortOrder, reverse: bool) -> Compara
             if !b.contains_key(field) {
                 return CmpOrdering::Equal;
             }
-            let a_val = a.get(field).cloned().unwrap_or(Value::Null);
-            let b_val = b.get(field).cloned().unwrap_or(Value::Null);
-            let cmp = compare_values(&a_val, &b_val);
+            let a_val = a.get(field).unwrap_or(&Value::Null);
+            let b_val = b.get(field).unwrap_or(&Value::Null);
+            let cmp = compare_values(a_val, b_val);
             if cmp != CmpOrdering::Equal {
                 let result = if ord[1] == "asc" { cmp } else { cmp.reverse() };
                 return if reverse { result.reverse() } else { result };

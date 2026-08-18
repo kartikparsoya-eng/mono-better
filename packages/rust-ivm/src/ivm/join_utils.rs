@@ -23,9 +23,9 @@ use crate::ivm::stream::{NodeStream, RelStream, skip_yields};
 /// Port of TS `rowEqualsForCompoundKey` (join-utils.ts:232).
 pub fn row_equals_for_compound_key(a: &Row, b: &Row, key: &[String]) -> bool {
     for k in key {
-        let av = a.get(k).cloned().unwrap_or(Value::Null);
-        let bv = b.get(k).cloned().unwrap_or(Value::Null);
-        if compare_values(&av, &bv) != CmpOrdering::Equal {
+        let av = a.get(k).unwrap_or(&Value::Null);
+        let bv = b.get(k).unwrap_or(&Value::Null);
+        if compare_values(av, bv) != CmpOrdering::Equal {
             return false;
         }
     }
@@ -41,9 +41,9 @@ pub fn is_join_match(
     child_key: &[String],
 ) -> bool {
     for (pk, ck) in parent_key.iter().zip(child_key.iter()) {
-        let pv = parent.get(pk).cloned().unwrap_or(Value::Null);
-        let cv = child.get(ck).cloned().unwrap_or(Value::Null);
-        if !values_equal(&pv, &cv) {
+        let pv = parent.get(pk).unwrap_or(&Value::Null);
+        let cv = child.get(ck).unwrap_or(&Value::Null);
+        if !values_equal(pv, cv) {
             return false;
         }
     }

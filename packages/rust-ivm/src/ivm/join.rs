@@ -470,9 +470,9 @@ pub fn is_join_match(
     child_key: &CompoundKey,
 ) -> bool {
     for (pk, ck) in parent_key.iter().zip(child_key.iter()) {
-        let pv = parent_row.get(pk).cloned().unwrap_or(Value::Null);
-        let cv = child_row.get(ck).cloned().unwrap_or(Value::Null);
-        if !values_equal(&pv, &cv) {
+        let pv = parent_row.get(pk).unwrap_or(&Value::Null);
+        let cv = child_row.get(ck).unwrap_or(&Value::Null);
+        if !values_equal(pv, cv) {
             return false;
         }
     }
@@ -481,11 +481,11 @@ pub fn is_join_match(
 
 pub fn row_equals_for_compound_key(a: &Row, b: &Row, key: &CompoundKey) -> bool {
     for k in key {
-        let av = a.get(k).cloned().unwrap_or(Value::Null);
-        let bv = b.get(k).cloned().unwrap_or(Value::Null);
+        let av = a.get(k).unwrap_or(&Value::Null);
+        let bv = b.get(k).unwrap_or(&Value::Null);
         // TS uses compareValues (null === null → 0, i.e. equal).
         // NOT valuesEqual (which treats null as never equal — that's for joins).
-        if compare_values(&av, &bv) != CmpOrdering::Equal {
+        if compare_values(av, bv) != CmpOrdering::Equal {
             return false;
         }
     }

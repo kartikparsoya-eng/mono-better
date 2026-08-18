@@ -14,8 +14,8 @@ pub type MultiConstraint = Vec<crate::ivm::constraint::Constraint>;
 /// Check if a constraint matches a row — port of TS `constraintMatchesRow`.
 pub fn constraint_matches_row(constraint: &Constraint, row: &crate::ivm::data::Row) -> bool {
     for (key, value) in constraint {
-        let row_val = row.get(key).cloned().unwrap_or(Value::Null);
-        if !values_equal(&row_val, value) {
+        let row_val = row.get(key).unwrap_or(&Value::Null);
+        if !values_equal(row_val, value) {
             return false;
         }
     }

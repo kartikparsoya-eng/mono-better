@@ -48,8 +48,8 @@ pub fn create_simple_predicate(simple: &SimpleCondition) -> Predicate {
             if op == "IS" || op == "IS NOT" {
                 let is_not = op == "IS NOT";
                 return Arc::new(move |row| {
-                    let lhs = row.get(&col_name).cloned().unwrap_or(Value::Null);
-                    let result = lhs == rhs;
+                    let lhs = row.get(&col_name).unwrap_or(&Value::Null);
+                    let result = *lhs == rhs;
                     if is_not { !result } else { result }
                 });
             }
@@ -61,11 +61,11 @@ pub fn create_simple_predicate(simple: &SimpleCondition) -> Predicate {
 
             let pred = create_predicate_impl(&rhs, &op);
             Arc::new(move |row| {
-                let lhs = row.get(&col_name).cloned().unwrap_or(Value::Null);
+                let lhs = row.get(&col_name).unwrap_or(&Value::Null);
                 if lhs.is_null() {
                     return false;
                 }
-                pred(&lhs)
+                pred(lhs)
             })
         }
         (

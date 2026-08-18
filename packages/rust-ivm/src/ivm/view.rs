@@ -831,13 +831,13 @@ fn make_new_meta_entry(row: &Row, schema: &SourceSchema, with_ids: bool, rc: usi
 fn make_id(row: &FxHashMap<String, Value>, schema: &SourceSchema) -> Option<String> {
     if schema.primary_key.len() == 1 {
         let pk = &schema.primary_key[0];
-        let val = row.get(pk).cloned().unwrap_or(Value::Null);
-        Some(value_to_json_string(&val))
+        let val = row.get(pk).unwrap_or(&Value::Null);
+        Some(value_to_json_string(val))
     } else {
         let parts: Vec<String> = schema
             .primary_key
             .iter()
-            .map(|k| value_to_json_string(&row.get(k).cloned().unwrap_or(Value::Null)))
+            .map(|k| value_to_json_string(row.get(k).unwrap_or(&Value::Null)))
             .collect();
         Some(format!("[{}]", parts.join(",")))
     }
