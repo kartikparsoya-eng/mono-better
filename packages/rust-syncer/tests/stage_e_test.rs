@@ -403,13 +403,11 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
     let url = "http://127.0.0.1:1/custom-hydrate-test";
     let ctx = CustomQueryContext {
         url: url.to_string(),
-        headers: vec![],
-        auth: None,
+        allowed_urls: vec![url.to_string()],
+        ..CustomQueryContext::default()
     };
     rust_syncer::custom_query::seed_transform_cache_for_test(
-        url,
-        None,
-        &[],
+        &ctx,
         "custom_q",
         &TransformedQuery {
             id: "custom_q".to_string(),
@@ -533,8 +531,8 @@ fn partial_success_transform_hydrates_healthy_query() {
 
     let ctx = rust_syncer::custom_query::CustomQueryContext {
         url: format!("http://{addr}/transform"),
-        headers: vec![],
-        auth: None,
+        allowed_urls: vec![format!("http://{addr}/transform")],
+        ..rust_syncer::custom_query::CustomQueryContext::default()
     };
 
     // Two custom queries — both uncached, so they batch into the one mock request.
@@ -666,8 +664,8 @@ fn transform_failure_fails_only_the_offending_connection() {
 
     let ctx = rust_syncer::custom_query::CustomQueryContext {
         url: format!("http://{addr}/transform"),
-        headers: vec![],
-        auth: None,
+        allowed_urls: vec![format!("http://{addr}/transform")],
+        ..rust_syncer::custom_query::CustomQueryContext::default()
     };
     // Only client A's config pass runs (poke_ws_ids = [wsA]); its transform fails.
     let cvr = empty_cvr("cg1", "01");

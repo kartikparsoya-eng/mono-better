@@ -134,28 +134,60 @@ pub async fn accept_connection_with_limit(
         .get("sec-websocket-protocol")
         .and_then(|v| v.to_str().ok());
 
-    // Extract cookie and origin headers.
-    let cookie = headers.get("cookie").and_then(|v| v.to_str().ok());
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
 
-    // Normalize ALL incoming request headers (lowercased names, multi-values
-    // joined with ", ") so allowlisted ones can be forwarded to the query API.
-    // Port of connect-params.ts `normalizeHeaders` (zero/v1.9.0 #6144).
+    // Normalize ALL incoming request headers (lowercased names) so allowlisted
+    // ones can be forwarded to the query API. Port of connect-params.ts
+    // `normalizeHeaders` (#6144), whose input is Node's parsed header map — so
+    // duplicate handling must match Node http: `cookie` duplicates join with
+    // "; ", Node's discard-duplicates singleton headers keep the FIRST value,
+    // everything else joins with ", ".
     let request_headers: std::collections::HashMap<String, String> = {
+        // Node _addHeaderLine's non-array headers (first value wins).
+        const NODE_SINGLETON_HEADERS: [&str; 15] = [
+            "age",
+            "authorization",
+            "content-length",
+            "content-type",
+            "etag",
+            "expires",
+            "from",
+            "host",
+            "if-modified-since",
+            "if-unmodified-since",
+            "last-modified",
+            "location",
+            "max-forwards",
+            "referer",
+            "user-agent",
+        ];
         let mut normalized = std::collections::HashMap::new();
         for (name, value) in headers.iter() {
             if let Ok(v) = value.to_str() {
+                let name = name.as_str().to_string();
                 normalized
-                    .entry(name.as_str().to_string())
+                    .entry(name.clone())
                     .and_modify(|existing: &mut String| {
-                        existing.push_str(", ");
-                        existing.push_str(v);
+                        if NODE_SINGLETON_HEADERS.contains(&name.as_str()) {
+                            // keep first
+                        } else if name == "cookie" {
+                            existing.push_str("; ");
+                            existing.push_str(v);
+                        } else {
+                            existing.push_str(", ");
+                            existing.push_str(v);
+                        }
                     })
                     .or_insert_with(|| v.to_string());
             }
         }
         normalized
     };
+
+    // The forwarded cookie comes from the normalized map so duplicate Cookie
+    // headers reach the API "; "-joined (Node `headers.cookie` semantics),
+    // not first-only.
+    let cookie = request_headers.get("cookie").map(|c| c.to_string());
 
     // Build the full URL for parsing (path + query).
     let full_url = format!("http://localhost{}", path);
@@ -165,7 +197,7 @@ pub async fn accept_connection_with_limit(
         protocol_version,
         &full_url,
         sec_protocol,
-        cookie,
+        cookie.as_deref(),
         origin,
         request_headers,
     ) {

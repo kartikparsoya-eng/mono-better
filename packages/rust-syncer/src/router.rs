@@ -1008,46 +1008,42 @@ fn default_query_context(
     params: &ConnectParams,
 ) -> Option<CustomQueryContext> {
     let config = config?;
-    let url = config.url.as_ref()?.first()?.clone();
-    let mut headers = Vec::new();
-    if let Some(api_key) = config.api_key.as_ref().filter(|value| !value.is_empty()) {
-        headers.push(("X-Api-Key".to_string(), api_key.clone()));
-    }
-    if config.forward_cookies
-        && let Some(cookie) = params.http_cookie.as_ref()
-    {
-        headers.push(("Cookie".to_string(), cookie.clone()));
-    }
-    if let Some(origin) = params.origin.as_ref() {
-        headers.push(("Origin".to_string(), origin.clone()));
-    }
+    let allowed_urls = config.url.clone()?;
+    let url = allowed_urls.first()?.clone();
     // Forward allowlisted incoming request headers (e.g. `x-forwarded-for`) to
     // the query API. Port of #6144 (`filterHeaders` by the
     // `query-allowed-request-headers` allowlist, case-insensitive). Sorted so the
     // forwarded set is deterministic regardless of the header map's iteration
     // order.
-    if let Some(allowed) = config.allowed_request_headers.as_ref() {
-        let allowed: HashSet<String> = allowed.iter().map(|h| h.to_ascii_lowercase()).collect();
-        let mut forwarded: Vec<(String, String)> = params
-            .request_headers
-            .iter()
-            .filter(|(name, _)| allowed.contains(&name.to_ascii_lowercase()))
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect();
-        forwarded.sort();
-        headers.extend(forwarded);
-    }
+    let request_headers = config
+        .allowed_request_headers
+        .as_ref()
+        .map(|allowed| {
+            let allowed: HashSet<String> = allowed.iter().map(|h| h.to_ascii_lowercase()).collect();
+            let mut forwarded: Vec<(String, String)> = params
+                .request_headers
+                .iter()
+                .filter(|(name, _)| allowed.contains(&name.to_ascii_lowercase()))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            forwarded.sort();
+            forwarded
+        })
+        .unwrap_or_default();
     Some(CustomQueryContext {
         url,
-        headers,
+        allowed_urls,
+        api_key: config.api_key.clone().filter(|value| !value.is_empty()),
+        client_headers: Vec::new(),
+        request_headers,
+        cookie: config
+            .forward_cookies
+            .then(|| params.http_cookie.clone())
+            .flatten(),
+        origin: params.origin.clone(),
         auth: params.auth.clone().filter(|value| !value.is_empty()),
+        user_id: params.user_id.clone().filter(|value| !value.is_empty()),
     })
-}
-
-fn query_url_is_allowed(config: Option<&FetchConfig>, url: &str) -> bool {
-    config
-        .and_then(|config| config.url.as_ref())
-        .is_some_and(|urls| urls.iter().any(|allowed| allowed == url))
 }
 
 fn filtered_query_headers(
@@ -1828,35 +1824,33 @@ impl CgState {
         if let Some(url) = body.get("userQueryURL").and_then(|v| v.as_str())
             && !url.is_empty()
         {
-            if !query_url_is_allowed(self.query_config.as_ref(), url) {
-                let message =
-                    format!("URL \"{url}\" is not allowed by the ZERO_QUERY_URL configuration");
-                if let Some(conn) = self.connections.get(client_id) {
-                    conn.close_with_error(crate::protocol::ErrorBody::TransformFailedZeroCache(
-                        crate::protocol::TransformFailedZeroCacheBody {
-                            kind: crate::protocol::ErrorKind::TransformFailed,
-                            details: None,
-                            query_ids: Vec::new(),
-                            message,
-                            origin: crate::protocol::ErrorOrigin::ZeroCache,
-                            reason: crate::protocol::ErrorReason::Internal,
-                        },
-                    ));
-                }
-                return;
-            }
+            // The override is NOT validated here: TS records it at registration
+            // and `fetchFromAPIServer` runs the `urlMatch` allow-check at
+            // request time, surfacing a per-request TransformFailed while the
+            // connection survives. Closing the connection here (the old
+            // behavior) also rejected wildcard-allowlisted URLs, since the old
+            // check was exact string equality.
             let custom_headers = filtered_query_headers(self.query_config.as_ref(), body);
             let auth = self.client_raw_auth.get(client_id).cloned();
+            let allowed_urls = self
+                .query_config
+                .as_ref()
+                .and_then(|c| c.url.clone())
+                .unwrap_or_default();
             let context = self
                 .client_query_ctx
                 .entry(client_id.to_string())
                 .or_insert_with(|| CustomQueryContext {
                     url: url.to_string(),
-                    headers: Vec::new(),
                     auth,
+                    ..CustomQueryContext::default()
                 });
             context.url = url.to_string();
-            context.headers.extend(custom_headers);
+            context.allowed_urls = allowed_urls;
+            // REPLACE the client headers (TS re-registers `customHeaders`
+            // wholesale on each initConnection); extending accumulated stale
+            // entries across repeated initConnections on one socket.
+            context.client_headers = custom_headers;
         }
         // Client-deletion inputs the body may also carry (TS `#handleConfigUpdate`
         // applies query patches AND client deletions in one pass).
@@ -2925,9 +2919,7 @@ async fn cg_event_loop(
                 break;
             }
             if state.terminal {
-                tracing::error!(
-                    "CG thread {cg_id}: terminating after fatal synchronization error"
-                );
+                tracing::error!("CG thread {cg_id}: terminating after fatal synchronization error");
                 break;
             }
             continue;
@@ -3438,21 +3430,15 @@ mod tests {
         let context = default_query_context(Some(&config), &params).unwrap();
         assert_eq!(context.url, "https://api.example/query");
         assert_eq!(context.auth.as_deref(), Some("jwt"));
-        assert!(
-            context
-                .headers
-                .contains(&("X-Api-Key".to_string(), "secret".to_string()))
-        );
-        assert!(
-            context
-                .headers
-                .contains(&("Cookie".to_string(), "session=1".to_string()))
-        );
-        assert!(
-            context
-                .headers
-                .contains(&("Origin".to_string(), "https://app.example".to_string()))
-        );
+        assert_eq!(context.api_key.as_deref(), Some("secret"));
+        assert_eq!(context.cookie.as_deref(), Some("session=1"));
+        assert_eq!(context.origin.as_deref(), Some("https://app.example"));
+        assert_eq!(context.allowed_urls, vec!["https://api.example/query"]);
+        // The composed outgoing set carries them all (TS fetchFromAPIServer).
+        let composed = context.composed_headers();
+        assert!(composed.contains(&("X-Api-Key".to_string(), "secret".to_string())));
+        assert!(composed.contains(&("Cookie".to_string(), "session=1".to_string())));
+        assert!(composed.contains(&("Origin".to_string(), "https://app.example".to_string())));
 
         let body = serde_json::json!({
             "userQueryHeaders": {
@@ -3464,14 +3450,6 @@ mod tests {
             filtered_query_headers(Some(&config), &body),
             vec![("x-request-id".to_string(), "allowed".to_string())]
         );
-        assert!(query_url_is_allowed(
-            Some(&config),
-            "https://api.example/query"
-        ));
-        assert!(!query_url_is_allowed(
-            Some(&config),
-            "https://evil.example/query"
-        ));
     }
 
     #[test]
@@ -3499,17 +3477,17 @@ mod tests {
         // Allowlisted (case-insensitive) headers forwarded; others dropped.
         assert!(
             context
-                .headers
+                .request_headers
                 .contains(&("x-forwarded-for".to_string(), "203.0.113.7".to_string()))
         );
         assert!(
             context
-                .headers
+                .request_headers
                 .contains(&("x-tenant".to_string(), "acme".to_string()))
         );
         assert!(
             !context
-                .headers
+                .request_headers
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
         );
