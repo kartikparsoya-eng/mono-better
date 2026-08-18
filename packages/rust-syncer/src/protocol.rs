@@ -668,6 +668,13 @@ pub enum Upstream {
 /// Parse an upstream message from a JSON array `["type", body]`.
 pub fn parse_upstream(text: &str) -> Result<Upstream, serde_json::Error> {
     let arr: Vec<Value> = serde_json::from_str(text)?;
+    parse_upstream_array(&arr)
+}
+
+/// Validate + dispatch an already-parsed `["type", body]` array. Split out of
+/// [`parse_upstream`] so a caller that also needs the raw array (e.g. the
+/// router's inbound dispatch) can parse the frame's JSON exactly once.
+pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error> {
     if arr.len() < 2 {
         return Err(serde::de::Error::custom(
             "message must be a tuple [type, body]",

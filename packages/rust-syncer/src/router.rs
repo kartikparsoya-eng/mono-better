@@ -140,15 +140,17 @@ pub enum CGMessage {
         sink: DirectWebSocketSink,
     },
     /// An inbound WS text frame for a connection (forwarded from the WS reader).
+    /// `client_id`/`ws_id` are `Arc<str>` so the per-frame forward is a refcount
+    /// bump, not a fresh `String` allocation on the busiest path.
     Inbound {
-        client_id: String,
-        ws_id: String,
+        client_id: Arc<str>,
+        ws_id: Arc<str>,
         text: String,
     },
     /// A connection's WS closed (its upstream channel ended).
-    ConnectionClosed { client_id: String, ws_id: String },
+    ConnectionClosed { client_id: Arc<str>, ws_id: Arc<str> },
     /// Explicitly close a superseded socket before installing its replacement.
-    CloseConnection { client_id: String, ws_id: String },
+    CloseConnection { client_id: Arc<str>, ws_id: Arc<str> },
     /// Change-streamer notification — new data is available; advance + poke.
     Notification(serde_json::Value),
     /// The CG should shut down (no more connections).
@@ -628,8 +630,8 @@ impl ConnectionRouter {
             && let Some(handle) = self.cg_handles.get(&existing.client_group_id)
         {
             let _ = handle.send(CGMessage::CloseConnection {
-                client_id: client_id.clone(),
-                ws_id: existing.ws_id,
+                client_id: Arc::from(client_id.as_str()),
+                ws_id: Arc::from(existing.ws_id.as_str()),
             });
         }
 
@@ -649,8 +651,8 @@ impl ConnectionRouter {
                 tokio::spawn(forward_inbound(
                     upstream_rx,
                     cg_handle.tx.clone(),
-                    client_id,
-                    ws_id,
+                    Arc::from(client_id.as_str()),
+                    Arc::from(ws_id.as_str()),
                 ));
             }
             Err(err) => {
@@ -665,10 +667,7 @@ impl ConnectionRouter {
                 }
                 drop(conns);
                 if !self.cg_handles.contains_key(&client_group_id) {
-                    self.group_auth_states
-                        .lock()
-                        .unwrap()
-                        .remove(&client_group_id);
+                    lock_unpoisoned(&self.group_auth_states).remove(&client_group_id);
                 }
                 if let CGMessage::NewConnection { sink, .. } = err.0 {
                     sink.fail(crate::protocol::ErrorBody::rehome(
@@ -888,8 +887,8 @@ impl ConnectionRouter {
 async fn forward_inbound(
     mut upstream_rx: mpsc::Receiver<String>,
     cg_tx: mpsc::UnboundedSender<CGMessage>,
-    client_id: String,
-    ws_id: String,
+    client_id: Arc<str>,
+    ws_id: Arc<str>,
 ) {
     while let Some(text) = upstream_rx.recv().await {
         if cg_tx
@@ -938,7 +937,7 @@ fn decrement_nonzero(count: &AtomicU64) {
 /// Router maps remain usable after an unrelated connection task panics. These
 /// mutexes protect containers, not multi-step transactional invariants, so
 /// cascading `PoisonError` panics only turn one socket failure into an outage.
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1533,7 +1532,7 @@ impl CgState {
                         conn.close_with_error(error_body);
                     }
                     if let Some(ws_id) = self.registered_ws.get(&client_id).cloned() {
-                        self.on_connection_closed(client_id, ws_id);
+                        self.on_connection_closed(&client_id, &ws_id);
                     }
                 }
                 Ok(()) => survivors.push(client_id),
@@ -1740,35 +1739,40 @@ impl CgState {
         }
     }
 
-    async fn on_inbound(&mut self, client_id: String, ws_id: String, text: String) {
+    async fn on_inbound(&mut self, client_id: Arc<str>, ws_id: Arc<str>, text: String) {
         // A superseded socket can have frames already queued when its replacement
         // is installed. Never route those frames through the new connection.
-        if self.registered_ws.get(&client_id) != Some(&ws_id) {
+        if self.registered_ws.get(&*client_id).map(String::as_str) != Some(&*ws_id) {
             tracing::debug!(
                 "CG {}: ignoring stale inbound frame for {client_id}/{ws_id}",
                 self.cg_id
             );
             return;
         }
+        // Parse the frame's JSON exactly once; validation and the tag dispatch
+        // below share the parsed array.
+        let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&text);
         // Do not let the direct-engine intercept bypass protocol validation.
         // Malformed messages must take the normal Connection fatal-error path,
         // rather than being partially parsed and silently dropped below.
-        if crate::protocol::parse_upstream(&text).is_err() {
-            let closed = match self.connections.get(&client_id) {
+        let valid = parsed
+            .as_deref()
+            .is_ok_and(|arr| crate::protocol::parse_upstream_array(arr).is_ok());
+        if !valid {
+            let closed = match self.connections.get(&*client_id) {
                 Some(conn) => !conn.handle_inbound(&text),
                 None => return,
             };
             if closed {
-                self.on_connection_closed(client_id, ws_id);
+                self.on_connection_closed(&client_id, &ws_id);
             }
             return;
         }
         // Intercept desired-query messages and route them to the CG-owned
         // SyncEngine — the placeholder `ViewSyncerDispatch` can't reach the
         // `!Send` engine. Everything else (ping, etc.) goes through Connection.
-        if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(&text)
-            && let Some(tag) = arr.first().and_then(|v| v.as_str())
-        {
+        let arr = parsed.expect("checked valid above");
+        if let Some(tag) = arr.first().and_then(|v| v.as_str()) {
             if tag == "initConnection" || tag == "changeDesiredQueries" {
                 if let Some(body) = arr.get(1) {
                     self.handle_desired_queries(&client_id, body, tag == "initConnection")
@@ -1810,12 +1814,12 @@ impl CgState {
                 return;
             }
         }
-        let closed = match self.connections.get(&client_id) {
+        let closed = match self.connections.get(&*client_id) {
             Some(conn) => !conn.handle_inbound(&text),
             None => return,
         };
         if closed {
-            self.on_connection_closed(client_id, ws_id);
+            self.on_connection_closed(&client_id, &ws_id);
         }
     }
 
@@ -1854,7 +1858,7 @@ impl CgState {
                     message,
                 ));
             }
-            self.on_connection_closed(client_id.to_string(), ws_id);
+            self.on_connection_closed(client_id, &ws_id);
             return;
         }
         // Capture the custom-query API context from an `initConnection` that
@@ -1938,7 +1942,7 @@ impl CgState {
                 if let Some(conn) = self.connections.get(client_id) {
                     conn.close_with_error(crate::protocol::ErrorBody::client_not_found(message));
                 }
-                self.on_connection_closed(client_id.to_string(), ws_id);
+                self.on_connection_closed(client_id, &ws_id);
                 return;
             }
             Err(error) => {
@@ -1959,7 +1963,7 @@ impl CgState {
             if let Some(conn) = self.connections.get(client_id) {
                 conn.close_with_error(*error);
             }
-            self.on_connection_closed(client_id.to_string(), ws_id);
+            self.on_connection_closed(client_id, &ws_id);
             return;
         }
         if is_init && cvr.client_schema.is_none() && client_schema.is_none() {
@@ -1970,7 +1974,7 @@ impl CgState {
                         .to_string(),
                 ));
             }
-            self.on_connection_closed(client_id.to_string(), ws_id);
+            self.on_connection_closed(client_id, &ws_id);
             return;
         }
 
@@ -2124,7 +2128,7 @@ impl CgState {
                 ));
             }
             if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
-                self.on_connection_closed(client_id.to_string(), ws_id);
+                self.on_connection_closed(client_id, &ws_id);
             }
             return;
         }
@@ -2147,7 +2151,7 @@ impl CgState {
                 conn.close_with_error(error_body);
             }
             if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
-                self.on_connection_closed(client_id.to_string(), ws_id);
+                self.on_connection_closed(client_id, &ws_id);
             }
             return;
         }
@@ -2379,37 +2383,37 @@ impl CgState {
         // the TS mutation path, not in the Rust syncer.
     }
 
-    fn on_connection_closed(&mut self, client_id: String, ws_id: String) {
+    fn on_connection_closed(&mut self, client_id: &str, ws_id: &str) {
         crate::trace::note(
             "conn-close",
             &format!("cg={} client={client_id} ws={ws_id}", self.cg_id),
         );
         // Every accepted socket increments the CG handle count, including a
         // socket later superseded by another wsID.
-        if self.open_ws_ids.remove(&ws_id) {
+        if self.open_ws_ids.remove(ws_id) {
             decrement_nonzero(&self.connection_count);
         }
 
         // A delayed close from the superseded socket must not remove the current
         // connection that happens to share its clientID.
-        if self.registered_ws.get(&client_id) != Some(&ws_id) {
+        if self.registered_ws.get(client_id).map(String::as_str) != Some(ws_id) {
             return;
         }
-        self.connections.remove(&client_id);
-        self.registered_ws.remove(&client_id);
-        self.client_base_versions.remove(&client_id);
-        self.sync_engine.unregister_client(&ws_id);
-        self.decrement_active_client(&ws_id);
-        self.client_auth.remove(&client_id);
-        self.client_raw_auth.remove(&client_id);
-        self.client_query_ctx.remove(&client_id);
-        self.client_profile_ids.remove(&client_id);
+        self.connections.remove(client_id);
+        self.registered_ws.remove(client_id);
+        self.client_base_versions.remove(client_id);
+        self.sync_engine.unregister_client(ws_id);
+        self.decrement_active_client(ws_id);
+        self.client_auth.remove(client_id);
+        self.client_raw_auth.remove(client_id);
+        self.client_query_ctx.remove(client_id);
+        self.client_profile_ids.remove(client_id);
         let mut global = lock_unpoisoned(&self.global_connections);
         if global
-            .get(&client_id)
-            .is_some_and(|info| info.ws_id == ws_id)
+            .get(client_id)
+            .is_some_and(|info| info.ws_id.as_str() == ws_id)
         {
-            global.remove(&client_id);
+            global.remove(client_id);
         }
     }
 
@@ -2432,11 +2436,11 @@ impl CgState {
             && now_ms() >= self.keepalive_until
     }
 
-    fn close_connection(&mut self, client_id: String, ws_id: String) {
-        if self.registered_ws.get(&client_id) != Some(&ws_id) {
+    fn close_connection(&mut self, client_id: &str, ws_id: &str) {
+        if self.registered_ws.get(client_id).map(String::as_str) != Some(ws_id) {
             return;
         }
-        if let Some(conn) = self.connections.get(&client_id) {
+        if let Some(conn) = self.connections.get(client_id) {
             conn.close_with_error(crate::protocol::ErrorBody::rehome(
                 "Connection superseded by a newer connection",
             ));
@@ -3082,9 +3086,11 @@ async fn dispatch_cg_message(
             text,
         } => state.on_inbound(client_id, ws_id, text).await,
         CGMessage::ConnectionClosed { client_id, ws_id } => {
-            state.on_connection_closed(client_id, ws_id)
+            state.on_connection_closed(&client_id, &ws_id)
         }
-        CGMessage::CloseConnection { client_id, ws_id } => state.close_connection(client_id, ws_id),
+        CGMessage::CloseConnection { client_id, ws_id } => {
+            state.close_connection(&client_id, &ws_id)
+        }
         CGMessage::Notification(n) => {
             let mut merged = n;
             loop {
@@ -3784,8 +3790,8 @@ mod tests {
 
         // deleteClients targeting "foo" arrives on the STALE ws1 → must be dropped.
         rt.block_on(state.on_inbound(
-            "foo".to_string(),
-            "ws1".to_string(),
+            "foo".into(),
+            "ws1".into(),
             r#"["deleteClients",{"clientIDs":["foo"]}]"#.to_string(),
         ));
 
@@ -4091,7 +4097,7 @@ mod tests {
         rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
 
         // Disconnect unregisters the client.
-        state.on_connection_closed("c1".to_string(), "ws1".to_string());
+        state.on_connection_closed("c1", "ws1");
         assert_eq!(state.registered_ws.len(), 0);
         assert_eq!(state.connections.len(), 0);
     }
@@ -4208,7 +4214,7 @@ mod tests {
         assert_eq!(state.registered_ws.len(), 1);
 
         // The delayed close event from ws1 must not tear down ws2.
-        state.on_connection_closed("c1".to_string(), "ws1".to_string());
+        state.on_connection_closed("c1", "ws1");
         assert_eq!(
             state.registered_ws.get("c1").map(String::as_str),
             Some("ws2")
@@ -4664,8 +4670,8 @@ mod tests {
 
         // 1) `version` before authenticating → challenge (authenticated:false).
         rt.block_on(state.on_inbound(
-            "c1".to_string(),
-            "ws1".to_string(),
+            "c1".into(),
+            "ws1".into(),
             r#"["inspect",{"op":"version","id":"1"}]"#.to_string(),
         ));
         let frames = drain(&mut drx);
@@ -4676,8 +4682,8 @@ mod tests {
 
         // 2) authenticate with the wrong password → false.
         rt.block_on(state.on_inbound(
-            "c1".to_string(),
-            "ws1".to_string(),
+            "c1".into(),
+            "ws1".into(),
             r#"["inspect",{"op":"authenticate","id":"2","value":"nope"}]"#.to_string(),
         ));
         assert_eq!(drain(&mut drx).last().unwrap()[1]["value"], false);
@@ -4685,8 +4691,8 @@ mod tests {
 
         // 3) authenticate with the right password → true.
         rt.block_on(state.on_inbound(
-            "c1".to_string(),
-            "ws1".to_string(),
+            "c1".into(),
+            "ws1".into(),
             r#"["inspect",{"op":"authenticate","id":"3","value":"s3cret"}]"#.to_string(),
         ));
         assert_eq!(drain(&mut drx).last().unwrap()[1]["value"], true);
@@ -4694,8 +4700,8 @@ mod tests {
 
         // 4) `version` now returns the configured server version.
         rt.block_on(state.on_inbound(
-            "c1".to_string(),
-            "ws1".to_string(),
+            "c1".into(),
+            "ws1".into(),
             r#"["inspect",{"op":"version","id":"4"}]"#.to_string(),
         ));
         let last = drain(&mut drx).into_iter().next_back().unwrap();

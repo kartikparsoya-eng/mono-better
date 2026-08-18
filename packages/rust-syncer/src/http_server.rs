@@ -112,7 +112,11 @@ pub async fn serve_http(listener: tokio::net::TcpListener, router: Arc<Connectio
         .route("/notify/:cg_id", post(notify_handler))
         .with_state(state);
 
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(listener, app).await {
+        // This server hosts /notify (the change-stream fanout ingress); a serve
+        // error must be logged, not panic the task silently.
+        tracing::error!(error = %e, "http server terminated");
+    }
 }
 
 /// Run the HTTP server on the given address (bind + serve).
@@ -123,7 +127,7 @@ pub async fn run_http_server(addr: SocketAddr, router: Arc<ConnectionRouter>) {
 
 /// GET /statz — return server statistics.
 async fn statz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json<Value>) {
-    let stats = state.stats.lock().unwrap();
+    let stats = crate::router::lock_unpoisoned(&state.stats);
     let uptime_ms = state.start_time.elapsed().as_millis() as u64;
     let active_cgs = state.router.cg_count();
 
@@ -174,7 +178,7 @@ async fn census_handler() -> impl IntoResponse {
 /// GET /heapz — heap snapshot placeholder.
 /// Returns a minimal V8-style heap snapshot for compatibility.
 async fn heapz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json<Value>) {
-    let stats = state.stats.lock().unwrap();
+    let stats = crate::router::lock_unpoisoned(&state.stats);
     let response = json!({
         "type": "heap_snapshot",
         "timestamp": std::time::SystemTime::now()

@@ -723,9 +723,12 @@ pub(crate) fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value 
         serde_json::Value::Bool(b) => rust_ivm::ivm::data::Value::Bool(b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&i) {
-                    panic!("integer {i} is outside of supported bounds");
-                }
+                // IVM values are JS numbers (f64), matching TS. An integer beyond
+                // the ±2^53 safe range loses precision here exactly as it would in
+                // TS (`i as f64` is the same IEEE-754 round-to-nearest as JS's
+                // `Number(bigint)`). Do NOT panic: this runs on client-supplied
+                // query literals and int8 column values, so a large value must
+                // not be able to take down the whole client-group task.
                 rust_ivm::ivm::data::Value::F64(i as f64)
             } else if let Some(f) = n.as_f64() {
                 rust_ivm::ivm::data::Value::F64(f)
@@ -746,6 +749,24 @@ pub(crate) fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_to_value_out_of_safe_range_int_coerces_not_panics() {
+        use rust_ivm::ivm::data::Value;
+        // 2^53 + 1 and its negative — beyond the JS safe-integer range. Must
+        // coerce to f64 (matching TS/JS), never panic.
+        for i in [9_007_199_254_740_993_i64, -9_007_199_254_740_993_i64] {
+            match json_to_value(serde_json::json!(i)) {
+                Value::F64(f) => assert_eq!(f, i as f64),
+                _ => panic!("expected F64 for {i}"),
+            }
+        }
+        // In-range integers still round-trip through f64 as before.
+        assert!(matches!(
+            json_to_value(serde_json::json!(42)),
+            Value::F64(f) if f == 42.0
+        ));
+    }
 
     fn users_spec() -> IvmTableSpec {
         IvmTableSpec {

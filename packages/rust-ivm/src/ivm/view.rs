@@ -408,7 +408,7 @@ fn apply_add_singular(
             // `old_entry.row` is an owned `FxHashMap`, `node.row()` derefs through
             // its `Arc` — instead of cloning into throwaway `Arc<FxHashMap>`s.
             assert_eq!(
-                (schema.compare_rows)(&old_entry.row, &**node.row()),
+                (schema.compare_rows)(&old_entry.row, node.row()),
                 CmpOrdering::Equal,
                 "Singular relationship should not have multiple rows"
             );

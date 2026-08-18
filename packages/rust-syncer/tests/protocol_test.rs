@@ -589,3 +589,37 @@ fn test_connect_params_with_optional_fields() {
 // - view-syncer.pg.test.ts / syncer.test.ts: large integration tests needing a
 //   live Postgres + replica (the planned PG harness); e.g. connection hijacking
 //   prevention + ref counting are integration-level.
+
+// ─── parse_upstream / parse_upstream_array equivalence ─────────────────────
+//
+// The router parses each inbound frame's JSON once and validates the parsed
+// array via `parse_upstream_array`; `parse_upstream` is the text-level wrapper.
+// The two must accept/reject identically.
+
+#[test]
+fn test_parse_upstream_array_matches_parse_upstream() {
+    let frames = [
+        r#"["ping",{}]"#,
+        r#"["initConnection",{"desiredQueriesPatch":[]}]"#,
+        r#"["deleteClients",{"clientIDs":["a"]}]"#,
+        r#"["changeDesiredQueries",{"desiredQueriesPatch":[]}]"#,
+        r#"["updateAuth",{"auth":"tok"}]"#,
+        r#"["closeConnection",{}]"#,
+        r#"["inspect",{"op":"version","id":"1"}]"#,
+        // invalid: unknown tag, too-short tuple, non-string tag
+        r#"["nonsense",{}]"#,
+        r#"["ping"]"#,
+        r#"[42,{}]"#,
+    ];
+    for text in frames {
+        let via_text = parse_upstream(text).is_ok();
+        let via_array = serde_json::from_str::<Vec<serde_json::Value>>(text)
+            .map_err(|_| ())
+            .and_then(|arr| parse_upstream_array(&arr).map_err(|_| ()))
+            .is_ok();
+        assert_eq!(via_text, via_array, "accept/reject mismatch for {text}");
+    }
+    // A non-array frame must fail at the parse step (the router then routes it
+    // down the Connection fatal path, same as before the single-parse refactor).
+    assert!(parse_upstream(r#"{"not":"an array"}"#).is_err());
+}
