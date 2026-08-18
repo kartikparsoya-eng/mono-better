@@ -144,10 +144,20 @@ pub struct PokeHandler {
     /// performance.now()` in `startPoke`. Read once in `end()` for
     /// `zero.sync.poke.time`.
     start: std::time::Instant,
+    /// True for the handler returned when the client is already at/ahead of the
+    /// tentative version: a genuinely inert NOOP whose `add_patch`/`end`/
+    /// `cancel` do nothing, matching TS's do-nothing-methods NOOP object
+    /// (client-handler.ts). Without this, an `end(final != base)` on the
+    /// "Greater" case emitted a fabricated `pokeStart {baseCookie: null}` +
+    /// `pokeEnd` that REGRESSED the client's cookie.
+    noop: bool,
 }
 
 impl PokeHandler {
     pub fn add_patch(&self, patch_to_version: &PatchToVersion) -> Result<(), String> {
+        if self.noop {
+            return Ok(());
+        }
         let to_version = &patch_to_version.to_version;
         let base = self.base_version.lock().unwrap();
 
@@ -249,6 +259,9 @@ impl PokeHandler {
     }
 
     pub fn cancel(&self) -> Result<(), String> {
+        if self.noop {
+            return Ok(());
+        }
         let mut state = self.state.lock().unwrap();
         let result = if state.started {
             self.downstream.push(serde_json::json!([
@@ -265,6 +278,11 @@ impl PokeHandler {
     }
 
     pub fn end(&self, final_version: CVRVersion) -> Result<(), String> {
+        // The NOOP handler sends nothing and must not touch `ever_poked` or
+        // `base_version` — TS's NOOP `end` is an empty function.
+        if self.noop {
+            return Ok(());
+        }
         let mut state = self.state.lock().unwrap();
         let cookie = version_string(&final_version);
 
@@ -610,8 +628,10 @@ impl ClientHandler {
         let force_initial_poke = !self.ever_poked.load(AtomicOrdering::SeqCst);
         let cmp = cmp_versions(&base_val, &Some(tentative_version.clone()));
         if cmp == Ordering::Greater || (cmp == Ordering::Equal && !force_initial_poke) {
-            // NOOP handler — add_patch will skip everything because
-            // to_version <= base_version.
+            // Genuinely inert NOOP handler (TS returns an object whose
+            // addPatch/end/cancel are empty functions): every method
+            // early-returns on `noop`, so a later `end(final != base)` cannot
+            // emit a fabricated baseCookie-null poke or regress the cookie.
             return PokeHandler {
                 state: Arc::new(StdMutex::new(PokeState::new(poke_id, None))),
                 downstream: self.downstream.clone(),
@@ -623,6 +643,7 @@ impl ClientHandler {
                 zero_mutations_table: self.zero_mutations_table.clone(),
                 client_group_id: self.client_group_id.clone(),
                 start: std::time::Instant::now(),
+                noop: true,
             };
         }
 
@@ -639,6 +660,7 @@ impl ClientHandler {
             zero_mutations_table: self.zero_mutations_table.clone(),
             client_group_id: self.client_group_id.clone(),
             start: std::time::Instant::now(),
+            noop: false,
         }
     }
 
@@ -897,6 +919,47 @@ mod tests {
         let poke = handler.start_poke(v2.clone());
         poke.end(v2).unwrap();
         assert!(messages.lock().unwrap().is_empty());
+    }
+
+    /// The client is AHEAD of the tentative version (Greater case): the
+    /// returned handler must be a true NOOP even when `end` is called with a
+    /// final version different from the client's base. Before the fix it was a
+    /// live handler with `baseCookie: None` — the mismatched `end` emitted a
+    /// fabricated from-scratch `pokeStart {baseCookie: null}` + `pokeEnd` and
+    /// REGRESSED the client's cookie. TS returns an object whose
+    /// addPatch/end/cancel are empty functions (client-handler.ts).
+    #[test]
+    fn test_noop_poke_inert_on_mismatched_end() {
+        let (handler, messages) = make_handler();
+        let v2 = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        };
+        let v3 = CVRVersion {
+            state_version: "v3".to_string(),
+            config_version: None,
+        };
+        *handler.base_version.lock().unwrap() = Some(v3.clone());
+
+        let poke = handler.start_poke(v2.clone());
+        poke.end(v2).unwrap();
+        assert!(
+            messages.lock().unwrap().is_empty(),
+            "NOOP handler must send nothing on a mismatched end"
+        );
+        assert_eq!(
+            *handler.base_version.lock().unwrap(),
+            Some(v3.clone()),
+            "NOOP end must not regress the client's base version"
+        );
+
+        // The NOOP end must not have consumed `ever_poked`: the first REAL
+        // caught-up poke is still forced.
+        handler.start_poke(v3.clone()).end(v3).unwrap();
+        let msgs = messages.lock().unwrap();
+        assert_eq!(msgs.len(), 2, "forced initial poke still fires");
+        assert_eq!(msgs[0][0], "pokeStart");
+        assert_eq!(msgs[1][0], "pokeEnd");
     }
 
     #[test]
