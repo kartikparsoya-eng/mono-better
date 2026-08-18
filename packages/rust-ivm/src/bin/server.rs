@@ -678,9 +678,40 @@ fn handle_advance_stream(
     let sink = rust_ivm::streamer::CollectSink::new();
     let mut chunker = rust_ivm::streamer::Chunker::new(sink, 64);
 
-    state.engine.advance_streaming(&rust_changes, |rc| {
+    let completed = state.engine.advance_streaming(&rust_changes, |rc| {
         chunker.push_row_change(&rc.query_id, rc.clone());
     });
+    if !completed {
+        // The batch was truncated by the legacy economic budget: the graph
+        // reflects only a prefix, so a normal response would be a silently
+        // corrupt parity sample. Surface an explicit error frame instead.
+        chunker
+            .error("advancement aborted: economic budget exceeded (truncated batch)".to_string());
+        let sink = chunker.into_sink();
+        let mut ndjson = String::new();
+        for frame in &sink.frames {
+            if let rust_ivm::streamer::StreamFrame::Error {
+                chunk_index,
+                message,
+            } = frame
+            {
+                ndjson.push_str(
+                    &serde_json::json!({
+                        "type": "error",
+                        "chunkIndex": chunk_index,
+                        "message": message,
+                    })
+                    .to_string(),
+                );
+                ndjson.push('\n');
+            }
+        }
+        let mut response = Response::from_string(ndjson).with_status_code(500);
+        if let Ok(header) = Header::from_bytes(b"Content-Type", b"application/x-ndjson") {
+            response = response.with_header(header);
+        }
+        return response;
+    }
     chunker.done();
 
     let sink = chunker.into_sink();

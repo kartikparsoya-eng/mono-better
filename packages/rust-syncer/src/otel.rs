@@ -81,9 +81,40 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
         ))
         .build();
 
+    // TS exports its "native" latency histograms as base2 EXPONENTIAL
+    // histograms (observability/metrics.ts NATIVE_HISTOGRAM_INSTRUMENT_NAMES →
+    // an exponential-histogram View in otel-start.ts). Match that here — with
+    // fixed explicit boundaries capped at 30s, everything above 30s landed in
+    // +Inf (truncating exactly the stuck-then-recovered tail the serving-lag
+    // metric exists to expose) and the two implementations exported different
+    // OTLP data types, so dashboards could not aggregate them together.
+    // max_size 160 matches the JS SDK's exponential-histogram default.
+    const NATIVE_HISTOGRAM_INSTRUMENTS: [&str; 2] = [
+        "zero.sync.e2e_serving_lag",
+        "zero.sync.view_syncer_hydration",
+    ];
+    let native_histogram_view =
+        |instrument: &opentelemetry_sdk::metrics::Instrument|
+         -> Option<opentelemetry_sdk::metrics::Stream> {
+            if !NATIVE_HISTOGRAM_INSTRUMENTS.contains(&instrument.name()) {
+                return None;
+            }
+            opentelemetry_sdk::metrics::Stream::builder()
+                .with_aggregation(
+                    opentelemetry_sdk::metrics::Aggregation::Base2ExponentialHistogram {
+                        max_size: 160,
+                        max_scale: 20,
+                        record_min_max: true,
+                    },
+                )
+                .build()
+                .ok()
+        };
+
     let provider = SdkMeterProvider::builder()
         .with_reader(reader)
         .with_resource(resource)
+        .with_view(native_histogram_view)
         .build();
 
     global::set_meter_provider(provider.clone());

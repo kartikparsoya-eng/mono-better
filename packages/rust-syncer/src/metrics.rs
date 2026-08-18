@@ -172,7 +172,9 @@ fn serving_lag_otel() -> &'static ServingLagOtel {
                      pipeline: the upstream transaction commit, replication to the replica, IVM \
                      advancement, CVR flush, and pokeEnd. Recorded once per served version.",
                 )
-                .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
+                // No explicit boundaries: the SDK view in otel.rs exports this
+                // instrument as a base2 exponential histogram (TS native-
+                // histogram parity; fixed 30s-capped buckets truncated the tail).
                 .build(),
             e2e_serving_lag_clamps: m
                 .u64_counter("zero.sync.e2e_serving_lag_clamps")
@@ -228,7 +230,7 @@ fn view_syncer_hydration_otel() -> &'static OtelHistogram<f64> {
                  group. Includes query transformation, query materialization, CVR flush, \
                  catchup, and pokeEnd.",
             )
-            .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
+            // Exponential-histogram view in otel.rs (TS native-histogram parity).
             .build()
     })
 }

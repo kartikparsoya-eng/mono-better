@@ -33,6 +33,17 @@ use std::time::{Duration, Instant};
 /// independent `const`s).
 pub const MIN_ADVANCEMENT_TIME_LIMIT_MS: f64 = 50.0;
 
+/// Absolute wall-clock ceiling for one advance, measured WITHOUT the
+/// delivery-time exclusion. The economic clock pauses while rows are being
+/// delivered downstream (`exclude`), which TS does not do — its budget keeps
+/// ticking through consumer/flush work. Under a slow consumer the Rust advance
+/// could therefore hold the previous WAL snapshot open indefinitely, the very
+/// resource the advancement-timeout reset exists to bound. This ceiling
+/// restores an absolute bound regardless of exclusions; it ignores the
+/// late-finish exception for the same reason. 60s matches the query liveness
+/// ceiling.
+pub const ADVANCE_WALL_CLOCK_CEILING_MS: f64 = 60_000.0;
+
 // Smarter load-shedding tunables — byte-identical to TS pipeline-driver.ts
 // (#6206). We project the total cost of pushing the change backlog and bail if
 // it materially exceeds a fresh hydrate, catch a single pathological change, and
@@ -56,6 +67,9 @@ pub enum AdvanceReset {
     Projected { projected_ms: f64 },
     /// The original economic time-limit arm.
     Timeout,
+    /// The absolute wall-clock bound (including excluded delivery time) was
+    /// exceeded — the advance has held the previous WAL snapshot too long.
+    WallClockCeiling { wall_ms: f64 },
 }
 
 /// Project total advancement time from the elapsed cost of the processed prefix.
@@ -138,6 +152,13 @@ pub struct AdvanceGate {
     num_changes: usize,
     pos: AtomicUsize,
     tripped: AtomicBool,
+    /// Which arm latched `tripped` (0 = none, 1 = slow-current-change,
+    /// 2 = projected, 3 = timeout, 4 = wall-clock ceiling) and the triggering
+    /// measurement (ms, f64 bits) — so the mid-fetch reset message can
+    /// attribute the arm instead of collapsing all three into a generic
+    /// "timed out mid-fetch".
+    tripped_arm: AtomicUsize,
+    tripped_value_bits: AtomicU64,
     excluded_nanos: AtomicU64,
     /// Elapsed-ms at which the current change's push began; `active` gates it
     /// (a change boundary clears it so the slow-current-change arm only applies
@@ -156,6 +177,8 @@ impl AdvanceGate {
             num_changes,
             pos: AtomicUsize::new(0),
             tripped: AtomicBool::new(false),
+            tripped_arm: AtomicUsize::new(0),
+            tripped_value_bits: AtomicU64::new(0),
             excluded_nanos: AtomicU64::new(0),
             current_change_start_bits: AtomicU64::new(0),
             current_change_active: AtomicBool::new(false),
@@ -166,19 +189,27 @@ impl AdvanceGate {
     /// slow-current-change arm can measure it. TS sets `currentChangeStartMs` at
     /// the top of each change's processing.
     pub fn set_current_change_start(&self, elapsed_ms: f64) {
+        // Publish the bits BEFORE the flag (Release) and read the flag with
+        // Acquire below: a cross-thread reader that observes `active == true`
+        // is then guaranteed to see THIS change's start, never a previous
+        // change's smaller value (which would inflate the measured duration
+        // and fire a spurious slow-current-change reset). Today every accessor
+        // runs on the single actor thread, but the struct is Arc-shared and
+        // atomic-typed — pay the (free on x86/aarch64 loads) barrier rather
+        // than advertise a thread-safety the code doesn't have.
         self.current_change_start_bits
             .store(elapsed_ms.to_bits(), Ordering::Relaxed);
-        self.current_change_active.store(true, Ordering::Relaxed);
+        self.current_change_active.store(true, Ordering::Release);
     }
 
     /// Clear the current-change marker at a change boundary (TS resets
     /// `currentChangeStartMs = undefined` after each change).
     pub fn clear_current_change(&self) {
-        self.current_change_active.store(false, Ordering::Relaxed);
+        self.current_change_active.store(false, Ordering::Release);
     }
 
     fn current_change_start_ms(&self) -> Option<f64> {
-        if self.current_change_active.load(Ordering::Relaxed) {
+        if self.current_change_active.load(Ordering::Acquire) {
             Some(f64::from_bits(
                 self.current_change_start_bits.load(Ordering::Relaxed),
             ))
@@ -222,6 +253,13 @@ impl AdvanceGate {
         let num = self.num_changes;
         let budget = self.budget_ms;
 
+        // Arm 0: absolute wall-clock bound, exclusion-free — no late-finish
+        // exception (see ADVANCE_WALL_CLOCK_CEILING_MS).
+        let wall_ms = self.raw_elapsed_ms();
+        if wall_ms > ADVANCE_WALL_CLOCK_CEILING_MS {
+            return Some(AdvanceReset::WallClockCeiling { wall_ms });
+        }
+
         // Arm 1: the current change alone blew the budget. No late-finish
         // exception — a single pathological push always resets.
         if let Some(cc_start) = self.current_change_start_ms() {
@@ -263,15 +301,48 @@ impl AdvanceGate {
         if self.tripped.load(Ordering::Relaxed) {
             return true;
         }
-        if self.advance_reset().is_some() {
-            self.tripped.store(true, Ordering::Relaxed);
+        if let Some(reset) = self.advance_reset() {
+            let (arm, value) = match reset {
+                AdvanceReset::SlowCurrentChange { current_change_ms } => (1, current_change_ms),
+                AdvanceReset::Projected { projected_ms } => (2, projected_ms),
+                AdvanceReset::Timeout => (3, self.elapsed_ms()),
+                AdvanceReset::WallClockCeiling { wall_ms } => (4, wall_ms),
+            };
+            self.tripped_arm.store(arm, Ordering::Relaxed);
+            self.tripped_value_bits
+                .store(value.to_bits(), Ordering::Relaxed);
+            self.tripped.store(true, Ordering::Release);
             return true;
         }
         false
     }
 
+    /// The arm that latched `tripped` mid-fetch, reconstructed for the reset
+    /// message. `None` when nothing tripped.
+    pub fn tripped_reset(&self) -> Option<AdvanceReset> {
+        if !self.tripped.load(Ordering::Acquire) {
+            return None;
+        }
+        let value = f64::from_bits(self.tripped_value_bits.load(Ordering::Relaxed));
+        Some(match self.tripped_arm.load(Ordering::Relaxed) {
+            1 => AdvanceReset::SlowCurrentChange {
+                current_change_ms: value,
+            },
+            2 => AdvanceReset::Projected {
+                projected_ms: value,
+            },
+            4 => AdvanceReset::WallClockCeiling { wall_ms: value },
+            _ => AdvanceReset::Timeout,
+        })
+    }
+
     pub fn elapsed_ms(&self) -> f64 {
         self.elapsed().as_secs_f64() * 1000.0
+    }
+
+    /// Wall-clock elapsed WITHOUT the delivery-time exclusion (arm 0).
+    pub fn raw_elapsed_ms(&self) -> f64 {
+        self.start.elapsed().as_secs_f64() * 1000.0
     }
 
     pub fn budget_ms(&self) -> f64 {

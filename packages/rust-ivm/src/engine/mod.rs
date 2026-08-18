@@ -681,11 +681,18 @@ impl Engine {
     }
 
     /// Advance with streaming — calls `on_row_change` for each RowChange as produced.
+    /// Returns `true` when every change was pushed; `false` when the
+    /// economic budget (the pre-#6206 model retained on this legacy path) or a
+    /// cancellation aborted the batch early. A `false` batch is TRUNCATED —
+    /// the graph reflects only the pushed prefix, so the caller must treat the
+    /// output as invalid and rehydrate (TS's old model threw
+    /// ResetPipelinesSignal here; a silent partial-success previously let the
+    /// parity harness serialize a truncated batch as a normal response).
     pub fn advance_streaming<F: FnMut(&RowChange)>(
         &mut self,
         changes: &[(String, SourceChange)],
         mut on_row_change: F,
-    ) {
+    ) -> bool {
         // Reset cancellation at the start of each advance.
         self.cancellation_token.reset();
 
@@ -708,8 +715,10 @@ impl Engine {
             num_changes: changes.len(),
             pos: 0,
         };
+        let mut completed = true;
         for (table, change) in changes {
             if advance_ctx.should_abort() || self.cancellation_token.is_cancelled() {
+                completed = false;
                 break;
             }
 
@@ -755,6 +764,7 @@ impl Engine {
                 }
             }
         }
+        completed
     }
 
     /// Build pipelines and hydrate them.
@@ -878,11 +888,8 @@ impl Engine {
             .map(|(t, s)| (t.clone(), s.borrow().column_types()))
             .collect();
         let cancellation_token = self.cancellation_token.clone();
-        let mut result = crate::snapshotter::diff::iterate_diff(
-            &diff,
-            &prev_conn,
-            &curr_conn,
-            |sc| {
+        let mut result =
+            crate::snapshotter::diff::iterate_diff(&diff, &prev_conn, &curr_conn, |sc| {
                 // A watchdog/consumer cancel is not a successful short stream. In
                 // particular, the boundary callback can cancel after failing to
                 // acquire credit; continuing would mutate the graph to head while
@@ -1064,18 +1071,16 @@ impl Engine {
                 // and ended its stream early (truncated — discarded on rehydrate).
                 // Surface it as the same advancement-timeout reset the per-change
                 // arm produces, so we rehydrate at head rather than emit a partial.
-                if advance_gate.tripped() {
-                    return Err(crate::snapshotter::DiffError::Reset(
-                        crate::snapshotter::ResetPipelinesSignal {
-                            reason: "advancement-timeout",
-                            msg: format!(
-                                "Advancement timed out mid-fetch ({:.0}ms, budget: {:.0}ms, pos: {}/{})",
-                                advance_gate.elapsed_ms(),
-                                advance_gate.budget_ms(),
-                                pos,
-                                num_changes
-                            ),
-                        },
+                if let Some(latched) = advance_gate.tripped_reset() {
+                    // Attribute the arm that latched mid-fetch instead of a
+                    // generic "timed out mid-fetch" (TS throws arm-specific
+                    // messages immediately).
+                    return Err(advance_reset_error(
+                        latched,
+                        advance_gate.elapsed_ms(),
+                        advance_gate.budget_ms(),
+                        pos,
+                        num_changes,
                     ));
                 }
 
@@ -1092,8 +1097,7 @@ impl Engine {
                     change_timer.elapsed().as_secs_f64() * 1000.0,
                 );
                 Ok(())
-            },
-        );
+            });
 
         // Restore every TableSource to the CURR (head) snapshot for subsequent
         // reads (incremental fetches + next hydration), on every path — matches
@@ -1149,7 +1153,7 @@ impl Engine {
     /// Delegates to advance_streaming — single code path.
     pub fn advance(&mut self, changes: &[(String, SourceChange)]) -> Vec<RowChange> {
         let mut all_row_changes = Vec::new();
-        self.advance_streaming(changes, |rc| {
+        let _completed = self.advance_streaming(changes, |rc| {
             all_row_changes.push(rc.clone());
         });
         all_row_changes
@@ -1506,6 +1510,14 @@ fn advance_reset_error(
         crate::advance_gate::AdvanceReset::Timeout => format!(
             "Advancement timed out after {:.0}ms (budget: {:.0}ms, pos: {}/{})",
             elapsed_ms, budget, pos, num_changes
+        ),
+        crate::advance_gate::AdvanceReset::WallClockCeiling { wall_ms } => format!(
+            "Advancement exceeded the wall-clock ceiling: {:.0}ms including delivery time \
+             (ceiling: {:.0}ms, pos: {}/{})",
+            wall_ms,
+            crate::advance_gate::ADVANCE_WALL_CLOCK_CEILING_MS,
+            pos,
+            num_changes
         ),
     };
     crate::snapshotter::DiffError::Reset(crate::snapshotter::ResetPipelinesSignal {
