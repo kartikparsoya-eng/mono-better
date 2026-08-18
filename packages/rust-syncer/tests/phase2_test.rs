@@ -131,6 +131,8 @@ impl PusherDispatch for MockPusher {
         &self,
         selector: &ConnectionSelector,
         body: &serde_json::Value,
+        _headers: &rust_syncer::PushRelayHeaders,
+        _client_group_id: &str,
     ) -> rust_syncer::connection::HandlerResult {
         self.enqueue_push_calls
             .lock()
@@ -177,6 +179,7 @@ fn create_handler(
         "test-client-group".to_string(),
         "test-client".to_string(),
         "test-ws".to_string(),
+        rust_syncer::PushRelayHeaders::default(),
     )
 }
 

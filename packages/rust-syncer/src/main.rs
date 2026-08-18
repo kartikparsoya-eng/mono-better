@@ -48,6 +48,9 @@ pub struct SyncerConfig {
     pub auth_audience: Option<String>,
     pub mutagen_url: Option<String>,
     pub pusher_url: Option<String>,
+    /// Shared secret gating the TS push endpoint (`PUSHER_AUTH_TOKEN`), attached
+    /// as `x-relay-auth` on every relayed push.
+    pub pusher_auth_token: Option<String>,
     /// Normalized custom-query fetch configuration supplied by the TS
     /// dispatcher. This is the server-side default used when the client does
     /// not send a `userQueryURL` override.
@@ -98,7 +101,8 @@ impl SyncerConfig {
             auth_issuer: env::var("AUTH_ISSUER").ok(),
             auth_audience: env::var("AUTH_AUDIENCE").ok(),
             mutagen_url: env::var("MUTAGEN_URL").ok(),
-            pusher_url: env::var("PUSHER_URL").ok(),
+            pusher_url: env::var("PUSHER_URL").ok().filter(|s| !s.is_empty()),
+            pusher_auth_token: env::var("PUSHER_AUTH_TOKEN").ok().filter(|s| !s.is_empty()),
             query_config: parse_query_config(),
             // Memory backstop, NOT a normal-operation limit. TS has no
             // per-worker client-group reject cap (its only bound is the
@@ -380,22 +384,28 @@ impl CGServicesFactory for RealServicesFactory {
         Arc::new(PlaceholderConnContextManager)
     }
 
-    // Mutations are HANDLED OUT-OF-BAND, not by the Rust syncer. Clients push
-    // mutations over HTTP directly to the TS mutation endpoint (mutagen → PG for
-    // CRUD; pusher → userPushURL for custom). Their results flow back to clients
-    // through the CVR's internal `lmids` (→ `lastMutationIDChanges`) and
-    // `mutationResults` (→ `mutationsPatch`) queries, which the SyncEngine
-    // already hydrates and pokes. The Rust syncer therefore never processes a WS
-    // `push`: with no mutagen/pusher wired, `SyncerWsMessageHandler` rejects a
-    // stray WS push with the TS-faithful "must set ZERO_MUTATE_URL" / "legacy
-    // CRUD disabled" error. Returning `None` here is the intended production
-    // configuration, not an unfinished stub.
+    // The Rust syncer runs ZERO mutation logic. CRUD mutations (mutagen → PG)
+    // genuinely require mutation processing and stay unsupported here (no app
+    // uses them on this path); a CRUD push still hits the "legacy CRUD disabled"
+    // rejection.
     fn create_mutagen(&self, _cg_id: &str) -> Option<Arc<dyn rust_syncer::MutagenDispatch>> {
         None
     }
 
+    // Custom mutations are RELAYED, not processed. When `PUSHER_URL` is set, a
+    // custom WS push is forwarded (with this connection's auth/header material)
+    // to the TS push endpoint, which runs the real pusher → `userPushURL`. The
+    // result flows back through the CVR's `lmids`/`mutationResults` queries this
+    // syncer already hydrates and pokes — so the relay is one-directional and
+    // adds no mutation logic here. With `PUSHER_URL` unset, a custom push hits
+    // the read-only rejection (the prior behavior).
     fn create_pusher(&self, _cg_id: &str) -> Option<Arc<dyn rust_syncer::PusherDispatch>> {
-        None
+        let url = self.config.pusher_url.clone()?;
+        Some(Arc::new(rust_syncer::HttpRelayPusher::new(
+            url,
+            self.config.pusher_auth_token.clone(),
+            self.tokio_handle.clone(),
+        )))
     }
 
     fn create_sync_engine_config(&self, cg_id: &str) -> rust_syncer::SyncEngineConfig {

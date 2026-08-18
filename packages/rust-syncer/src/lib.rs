@@ -18,6 +18,7 @@ pub mod otel;
 pub mod permissions;
 pub mod pipeline_driver;
 pub mod protocol;
+pub mod push_relay;
 pub mod query_covering;
 pub mod replica_schema;
 pub mod router;
@@ -46,7 +47,7 @@ pub use http_server::{
 };
 pub use message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
-    PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
+    PushRelayHeaders, PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
 pub use permissions::{
     LoadedPermissions, PermissionsReload, deny_all_permissions, hash_of_ast, load_permissions,
@@ -56,6 +57,7 @@ pub use pipeline_driver::{
     AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,
 };
 pub use protocol::*;
+pub use push_relay::HttpRelayPusher;
 pub use replica_schema::{
     ReplicaVersions, compute_table_specs, compute_table_specs_from_path, read_replica_versions,
     read_replica_versions_from_path, validate_client_schema,

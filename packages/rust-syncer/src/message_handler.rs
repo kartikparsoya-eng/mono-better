@@ -82,6 +82,21 @@ pub trait MutagenDispatch: Send + Sync {
     ) -> Option<(ErrorKind, String)>;
 }
 
+/// Per-connection header/auth material forwarded with a relayed push, so the TS
+/// relay endpoint can rebuild the `userPushURL` request (Bearer auth, Cookie,
+/// Origin, forwarded request headers) the same way `fetchFromAPIServer` does for
+/// the query path. These are the RAW values captured at `initConnection`; the TS
+/// side applies its own push-config allowlist/composition. The Rust syncer runs
+/// zero mutation logic — it only relays these bytes.
+#[derive(Clone, Default)]
+pub struct PushRelayHeaders {
+    pub auth: Option<String>,
+    pub cookie: Option<String>,
+    pub origin: Option<String>,
+    pub request_headers: Vec<(String, String)>,
+    pub user_id: Option<String>,
+}
+
 /// Trait for the Pusher interface (custom mutation forwarding).
 pub trait PusherDispatch: Send + Sync {
     /// Enqueue a push message. Returns a HandlerResult.
@@ -89,6 +104,8 @@ pub trait PusherDispatch: Send + Sync {
         &self,
         selector: &ConnectionSelector,
         body: &serde_json::Value,
+        headers: &PushRelayHeaders,
+        client_group_id: &str,
     ) -> HandlerResult;
 
     /// Initialize connection for pusher.
@@ -113,9 +130,13 @@ pub struct SyncerWsMessageHandler {
     mutation_lock: Mutex<()>,
     client_group_id: String,
     connection_selector: ConnectionSelector,
+    /// Raw auth/header material for this connection, forwarded on a relayed
+    /// push so the TS endpoint can rebuild the `userPushURL` request.
+    push_relay_headers: PushRelayHeaders,
 }
 
 impl SyncerWsMessageHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view_syncer: Arc<dyn ViewSyncerDispatch>,
         conn_context_manager: Arc<dyn ConnContextManagerDispatch>,
@@ -124,6 +145,7 @@ impl SyncerWsMessageHandler {
         client_group_id: String,
         client_id: String,
         ws_id: String,
+        push_relay_headers: PushRelayHeaders,
     ) -> Self {
         Self {
             view_syncer,
@@ -133,6 +155,7 @@ impl SyncerWsMessageHandler {
             mutation_lock: Mutex::new(()),
             client_group_id,
             connection_selector: ConnectionSelector { client_id, ws_id },
+            push_relay_headers,
         }
     }
 }
@@ -284,24 +307,33 @@ impl SyncerWsMessageHandler {
             let is_custom = first_mutation.get("type").and_then(|v| v.as_str()) == Some("custom");
 
             if is_custom {
-                // Custom mutation → forward to pusher.
+                // Custom mutation → relay to the TS push endpoint (which runs
+                // the real pusher → `userPushURL`). The Rust syncer runs zero
+                // mutation logic: it only forwards the push body plus this
+                // connection's auth/header material. The mutation RESULT flows
+                // back to the client through the CVR's `lmids`/`mutationResults`
+                // queries this syncer already hydrates and pokes — no WS
+                // response needed here.
                 if let Some(pusher) = &self.pusher {
                     let body_value: serde_json::Value = serde_json::from_str(raw_msg)
                         .ok()
                         .and_then(|arr: Vec<serde_json::Value>| arr.into_iter().nth(1))
                         .unwrap_or(serde_json::Value::Null);
-                    return pusher.enqueue_push(selector, &body_value);
+                    return pusher.enqueue_push(
+                        selector,
+                        &body_value,
+                        &self.push_relay_headers,
+                        &self.client_group_id,
+                    );
                 }
-                // This server keeps the sync connection read-only and does not
-                // relay mutations. The client should push mutations directly to
-                // the app's mutate endpoint (`mutateDirectly: true` + a
-                // `mutateURL`). Surface a clear error but keep the (read)
+                // No relay endpoint configured → the sync connection stays
+                // read-only. Surface a clear error but keep the (read)
                 // connection open rather than tearing it down.
                 return HandlerResult::Transient {
                     errors: vec![ErrorBody::invalid_push(
                         "This server does not process mutations over the sync connection. \
-                         Enable direct mutations on the client (set `mutateDirectly: true` \
-                         with a `mutateURL`) so mutations POST to your API server directly.",
+                         Configure the push relay (PUSHER_URL) or enable direct mutations \
+                         on the client so mutations POST to your API server.",
                     )],
                 };
             }

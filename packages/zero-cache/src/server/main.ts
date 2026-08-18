@@ -1,5 +1,7 @@
 import {spawn, type ChildProcess, type SendHandle} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
+import type {Server} from 'node:http';
 import {Socket} from 'node:net';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -38,6 +40,7 @@ import {
 } from '../workers/replicator.ts';
 import {createLogContext} from './logging.ts';
 import {startOtelAuto} from './otel-start.ts';
+import {startRustPushRelay} from './rust-push-relay.ts';
 import {
   notifyRustSyncers,
   proxyUpgradeToRust,
@@ -147,6 +150,14 @@ export default async function runWorker(
   // used by the notification fan-out below.
   const rustSyncerHttpPorts: number[] = [];
 
+  // Custom-mutation push relay: the rust-syncer runs zero mutation logic and
+  // POSTs custom pushes to this loopback endpoint, which forwards them to
+  // `userPushURL` via the in-process pusher path (write path stays in TS). URL +
+  // token are handed to each rust-syncer via `PUSHER_URL`/`PUSHER_AUTH_TOKEN`.
+  // Populated before the syncers spawn (below); read in `loadRustSyncer`.
+  const rustPushRelayToken = randomUUID();
+  let rustPushRelayURL: string | undefined;
+
   // Per-worker CVR connection budget, matching the `--cvr-max-conns-per-worker`
   // flag handed to TS syncers (whole config divided across the syncers).
   const cvrMaxConnsPerWorker =
@@ -182,6 +193,14 @@ export default async function runWorker(
           httpPort,
           cvrMaxConnsPerWorker,
         ),
+        // Push relay endpoint (custom mutations forward here). Absent when no
+        // push/mutate URL is configured, in which case rust rejects WS pushes.
+        ...(rustPushRelayURL
+          ? {
+              PUSHER_URL: rustPushRelayURL,
+              PUSHER_AUTH_TOKEN: rustPushRelayToken,
+            }
+          : {}),
       },
       stdio: ['inherit', 'pipe', 'inherit'],
     }) as ChildProcess;
@@ -321,6 +340,8 @@ export default async function runWorker(
   // The replica-notification subscription that drives the rust-syncer HTTP
   // notify fan-out; cancelled on dispatcher shutdown.
   let rustNotifySubscription: Subscription<ReplicaState> | undefined;
+  // The custom-push relay HTTP server; closed on dispatcher shutdown.
+  let rustPushRelayServer: Server | undefined;
   if (numSyncers) {
     const mode: ReplicaFileMode =
       runChangeStreamer && litestream.backupURL ? 'serving-copy' : 'serving';
@@ -340,6 +361,16 @@ export default async function runWorker(
     // Readiness of each spawned rust-syncer's HTTP `/notify` port. rust emits
     // `["ready", …]` only AFTER binding both its WS and HTTP listeners
     // (rust-syncer main.rs), so awaiting it guarantees the port is accepting.
+    // Start the push relay BEFORE spawning the rust-syncers so its URL is in
+    // their env. Loopback + token-gated; skipped when no push/mutate URL.
+    if (useRustSyncer) {
+      const relay = await startRustPushRelay(lc, config, rustPushRelayToken);
+      if (relay) {
+        rustPushRelayURL = relay.url;
+        rustPushRelayServer = relay.server;
+      }
+    }
+
     const rustSyncersReady: Promise<void>[] = [];
     for (let i = 0; i < numSyncers; i++) {
       if (useRustSyncer) {
@@ -414,6 +445,8 @@ export default async function runWorker(
   } finally {
     // Stop the rust-syncer notify fan-out so its subscription doesn't linger.
     rustNotifySubscription?.cancel();
+    // Close the push relay endpoint.
+    rustPushRelayServer?.close();
   }
 
   await processes.done();

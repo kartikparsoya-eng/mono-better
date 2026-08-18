@@ -1643,6 +1643,23 @@ impl CgState {
         // Port of `validateConnection` setting `revalidateAt = now + interval`.
         self.arm_auth_maintenance();
 
+        // Raw auth/header material captured at connect, forwarded on a relayed
+        // custom push so the TS endpoint can rebuild the userPushURL request.
+        // The TS side applies its own push-config allowlist, so send raw here.
+        let mut relay_request_headers: Vec<(String, String)> = params
+            .request_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        relay_request_headers.sort();
+        let push_relay_headers = crate::message_handler::PushRelayHeaders {
+            auth: params.auth.clone().filter(|v| !v.is_empty()),
+            cookie: params.http_cookie.clone(),
+            origin: params.origin.clone(),
+            request_headers: relay_request_headers,
+            user_id: params.user_id.clone().filter(|v| !v.is_empty()),
+        };
+
         let handler = Box::new(SyncerWsMessageHandler::new(
             self.view_syncer.clone(),
             self.conn_context_manager.clone(),
@@ -1651,6 +1668,7 @@ impl CgState {
             client_group_id.clone(),
             client_id.clone(),
             ws_id.clone(),
+            push_relay_headers,
         ));
 
         let cid = client_id.clone();
