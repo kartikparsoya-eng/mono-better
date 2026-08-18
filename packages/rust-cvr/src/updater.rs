@@ -291,16 +291,10 @@ impl CVRConfigDrivenUpdater {
 
         let new_version = self.base.ensure_new_version();
 
-        // Update desiredQueryIDs: sorted union of current and needed.
-        let mut combined: Vec<String> = current.iter().cloned().collect();
-        for n in &needed {
-            if !combined.contains(n) {
-                combined.push(n.clone());
-            }
-        }
+        // Update desiredQueryIDs: sorted union of current and needed. Both are
+        // HashSets, so the union is already duplicate-free — just sort it.
+        let mut combined: Vec<String> = current.union(&needed).cloned().collect();
         combined.sort();
-        // Remove duplicates (already done by HashSet, but be safe).
-        combined.dedup();
         self.base
             .cvr
             .clients

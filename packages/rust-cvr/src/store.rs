@@ -14,7 +14,7 @@ use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
 use crate::types::StoreOp;
 use crate::types::*;
 use crate::version::{
-    CVRVersion, NullableCVRVersion, cmp_cvr, version_from_string, version_string,
+    CVRVersion, NullableCVRVersion, VersionError, cmp_cvr, try_version_from_string, version_string,
 };
 use std::cmp::Ordering;
 
@@ -49,6 +49,8 @@ pub enum CVRStoreError {
     },
     #[error("Invalid client schema: {0}")]
     InvalidClientSchema(String),
+    #[error("Invalid version string in CVR data: {0}")]
+    VersionParse(#[from] crate::version::VersionError),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 }
@@ -995,7 +997,7 @@ impl CVRStoreHandle {
                 if version != expected_rows {
                     rows_behind = Some((version.clone(), rows_version));
                 }
-                let cvr_version = version_from_string(&version);
+                let cvr_version = try_version_from_string(&version)?;
                 CVR {
                     id: self.cvr_id.clone(),
                     version: cvr_version,
@@ -1073,7 +1075,7 @@ impl CVRStoreHandle {
                 deleted: row.8,
                 row_set_signature: row.9,
             };
-            let query = as_query(&qrow);
+            let query = as_query(&qrow)?;
             cvr.queries.insert(qrow.query_hash, query);
         }
 
@@ -1109,7 +1111,7 @@ impl CVRStoreHandle {
                         ttl: clamp_ttl(TTL::Ms(
                             (*ttl_ms).map(|ms| ms as i64).unwrap_or(DEFAULT_TTL_MS),
                         )),
-                        version: version_from_string(patch_version),
+                        version: try_version_from_string(patch_version)?,
                     },
                 );
             }
@@ -1185,7 +1187,7 @@ impl CVRStoreHandle {
             .await?;
 
         if let Some((cv,)) = &current_version {
-            let cv = version_from_string(cv);
+            let cv = try_version_from_string(cv)?;
             if cmp_cvr(&cv, up_to_version) != Ordering::Equal {
                 return Err(CVRStoreError::ConcurrentModification {
                     expected: version_string(up_to_version),
@@ -1237,7 +1239,7 @@ impl CVRStoreHandle {
             let Some(pv) = patch_version else {
                 continue; // patchVersion must be set for a query patch
             };
-            let to_version = version_from_string(&pv);
+            let to_version = try_version_from_string(&pv)?;
             let patch = if deleted.unwrap_or(false) {
                 Patch::Query(QueryPatch::Del {
                     id: query_hash,
@@ -1252,7 +1254,7 @@ impl CVRStoreHandle {
             patches.push(PatchToVersion { patch, to_version });
         }
         for (client_id, query_hash, patch_version, deleted, _, _) in desires {
-            let to_version = version_from_string(&patch_version);
+            let to_version = try_version_from_string(&patch_version)?;
             let patch = if deleted {
                 Patch::Query(QueryPatch::Del {
                     id: query_hash,
@@ -1275,27 +1277,30 @@ impl CVRStoreHandle {
 
 /// Convert a QueriesRow (DB row) to a QueryRecord (in-memory).
 /// Mirrors TS `asQuery()` from cvr-store.ts.
-pub fn as_query(row: &QueriesRow) -> QueryRecord {
+pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
+    // Version strings here come from the DB; a corrupt value is a recoverable
+    // load error (TS `versionFromString` throws → caught), not a thread abort.
     let base = BaseQueryRecord {
         id: row.query_hash.clone(),
         transformation_hash: row.transformation_hash.clone(),
         transformation_version: row
             .transformation_version
             .as_deref()
-            .map(version_from_string),
+            .map(try_version_from_string)
+            .transpose()?,
         row_set_signature: row.row_set_signature.clone(),
     };
 
     if row.internal == Some(true) {
-        return QueryRecord::Internal(InternalQueryRecord {
+        return Ok(QueryRecord::Internal(InternalQueryRecord {
             base,
             ast: row.client_ast.clone().unwrap_or(Value::Null),
-        });
+        }));
     }
 
     // External query — check if client or custom
     if let Some(name) = &row.query_name {
-        return QueryRecord::Custom(CustomQueryRecord {
+        return Ok(QueryRecord::Custom(CustomQueryRecord {
             base,
             name: name.clone(),
             args: row
@@ -1305,16 +1310,24 @@ pub fn as_query(row: &QueriesRow) -> QueryRecord {
                 .map(|a| a.to_vec())
                 .unwrap_or_default(),
             client_state: BTreeMap::new(),
-            patch_version: row.patch_version.as_deref().map(version_from_string),
-        });
+            patch_version: row
+                .patch_version
+                .as_deref()
+                .map(try_version_from_string)
+                .transpose()?,
+        }));
     }
 
-    QueryRecord::Client(ClientQueryRecord {
+    Ok(QueryRecord::Client(ClientQueryRecord {
         base,
         ast: row.client_ast.clone().unwrap_or(Value::Null),
         client_state: BTreeMap::new(),
-        patch_version: row.patch_version.as_deref().map(version_from_string),
-    })
+        patch_version: row
+            .patch_version
+            .as_deref()
+            .map(try_version_from_string)
+            .transpose()?,
+    }))
 }
 
 /// Convert a QueryRecord to a QueriesRow for storage.
@@ -1609,7 +1622,7 @@ mod tests {
             deleted: Some(false),
             row_set_signature: None,
         };
-        let q = as_query(&row);
+        let q = as_query(&row).unwrap();
         assert!(matches!(q, QueryRecord::Internal(_)));
     }
 
@@ -1628,7 +1641,7 @@ mod tests {
             deleted: Some(false),
             row_set_signature: None,
         };
-        let q = as_query(&row);
+        let q = as_query(&row).unwrap();
         assert!(matches!(q, QueryRecord::Client(_)));
     }
 
@@ -1647,7 +1660,7 @@ mod tests {
             deleted: Some(false),
             row_set_signature: None,
         };
-        let q = as_query(&row);
+        let q = as_query(&row).unwrap();
         match q {
             QueryRecord::Custom(r) => {
                 assert_eq!(r.name, "myQuery");

@@ -122,29 +122,54 @@ pub fn version_string(v: &CVRVersion) -> String {
     }
 }
 
-/// Mirrors TS `versionFromString(s)`.
-pub fn version_from_string(s: &str) -> CVRVersion {
+/// Error from parsing a version string. Mirrors the cases where TS
+/// `versionFromString` throws.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VersionError {
+    #[error("invalid version string {0:?}: more than one ':' separator")]
+    TooManyParts(String),
+    #[error("invalid lexi configVersion {lexi:?}: {reason}")]
+    BadLexi { lexi: String, reason: &'static str },
+    #[error("configVersion {0:?} exceeds max safe integer")]
+    ConfigTooLarge(String),
+}
+
+/// Fallible sibling of [`version_from_string`]: returns a [`VersionError`]
+/// instead of panicking. Use this for untrusted / DB-sourced / client-cookie
+/// strings, so a corrupt value surfaces as a recoverable error (mirroring TS
+/// `versionFromString` throwing, which the caller catches) rather than aborting
+/// the thread.
+pub fn try_version_from_string(s: &str) -> Result<CVRVersion, VersionError> {
     let parts: Vec<&str> = s.split(':').collect();
     match parts.len() {
-        1 => CVRVersion {
+        1 => Ok(CVRVersion {
             state_version: parts[0].to_string(),
             config_version: None,
-        },
+        }),
         2 => {
-            let config_version = version_from_lexi(parts[1])
-                .unwrap_or_else(|e| panic!("invalid lexi version {}: {}", parts[1], e));
-            assert!(
-                config_version <= u64::from(u32::MAX) as u128,
-                "_configVersion {} exceeds max safe integer_",
-                parts[1]
-            );
-            CVRVersion {
+            let config_version =
+                version_from_lexi(parts[1]).map_err(|reason| VersionError::BadLexi {
+                    lexi: parts[1].to_string(),
+                    reason,
+                })?;
+            if config_version > u64::from(u32::MAX) as u128 {
+                return Err(VersionError::ConfigTooLarge(parts[1].to_string()));
+            }
+            Ok(CVRVersion {
                 state_version: parts[0].to_string(),
                 config_version: Some(config_version as u64),
-            }
+            })
         }
-        _ => panic!("Invalid version string {}", s),
+        _ => Err(VersionError::TooManyParts(s.to_string())),
     }
+}
+
+/// Mirrors TS `versionFromString(s)`. Panics on malformed input — retained for
+/// internally-produced strings (round-tripped through [`version_string`], hence
+/// provably well-formed) and tests. For untrusted input use
+/// [`try_version_from_string`].
+pub fn version_from_string(s: &str) -> CVRVersion {
+    try_version_from_string(s).unwrap_or_else(|e| panic!("{e}"))
 }
 
 // ---- LexiVersion utilities ----
@@ -284,6 +309,28 @@ mod tests {
                 state_version: "01".to_string(),
                 config_version: Some(2)
             }
+        );
+    }
+
+    #[test]
+    fn test_try_version_from_string_errors() {
+        // >2 colon parts → TooManyParts (TS throws)
+        assert_eq!(
+            try_version_from_string("a:b:c"),
+            Err(VersionError::TooManyParts("a:b:c".to_string()))
+        );
+        // Malformed lexi config → BadLexi
+        assert!(matches!(
+            try_version_from_string("01:x"),
+            Err(VersionError::BadLexi { .. })
+        ));
+        // Well-formed still parses
+        assert_eq!(
+            try_version_from_string("01:01"),
+            Ok(CVRVersion {
+                state_version: "01".to_string(),
+                config_version: Some(1)
+            })
         );
     }
 

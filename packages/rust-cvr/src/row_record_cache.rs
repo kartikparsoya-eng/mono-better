@@ -19,7 +19,7 @@
 //! - Catchup tx: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` + same SET LOCALs.
 
 use crate::row_key::{RowID, row_id_string};
-use crate::version::{CVRVersion, NullableCVRVersion, version_from_string, version_string};
+use crate::version::{CVRVersion, NullableCVRVersion, try_version_from_string, version_string};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,19 +27,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as TokioMutex, mpsc, watch};
 
-/// Mirrors TS `RowRecord` from `schema/types.ts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RowRecord {
-    pub id: RowID,
-    #[serde(rename = "rowVersion")]
-    pub row_version: String,
-    /// CVRVersion — serialized as an object, not a string.
-    #[serde(rename = "patchVersion")]
-    pub patch_version: CVRVersion,
-    /// `{queryHash: refCount}` or `None` for tombstone.
-    #[serde(rename = "refCounts")]
-    pub ref_counts: Option<HashMap<String, i64>>,
-}
+/// The cache and the CVR updater share one `RowRecord` type (`crate::types`),
+/// so no per-row conversion is needed when the cache's records cross into the
+/// updater's `RowRecordMap` (and back on flush). `ref_counts` is a `BTreeMap`
+/// (`RefCounts`), giving deterministic key order for the DB `refCounts` jsonb.
+pub use crate::types::RowRecord;
 
 /// Mirrors TS `RowsRow` from `schema/cvr.ts` — the DB row form.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,34 +81,54 @@ impl From<RowsRowDb> for RowsRow {
     }
 }
 
+/// Error from decoding a DB `RowsRow` into a `RowRecord`. All variants indicate
+/// malformed data in the `rows` table; mapped to `sqlx::Error::Decode` at the
+/// call site so a corrupt row fails the load recoverably instead of aborting the
+/// task (matching TS, which throws on malformed shapes).
+#[derive(Debug, thiserror::Error)]
+pub enum RowRecordError {
+    #[error("rowKey is not an object: {0:?}")]
+    RowKeyNotObject(serde_json::Value),
+    #[error("refCounts is not an object: {0:?}")]
+    RefCountsNotObject(serde_json::Value),
+    #[error("refCount value is not an integer: {0:?}")]
+    RefCountNotInteger(serde_json::Value),
+    #[error("invalid patchVersion: {0}")]
+    Version(#[from] crate::version::VersionError),
+}
+
 /// Converts a `RowsRow` (DB form) to a `RowRecord` (cache form).
 /// Mirrors TS `rowsRowToRowRecord` from `schema/cvr.ts`.
-pub fn rows_row_to_row_record(row: &RowsRow) -> RowRecord {
+pub fn rows_row_to_row_record(row: &RowsRow) -> Result<RowRecord, RowRecordError> {
     let row_key_map = match &row.row_key {
         serde_json::Value::Object(m) => m.clone(),
-        _ => panic!("rowKey is not an object: {:?}", row.row_key),
+        other => return Err(RowRecordError::RowKeyNotObject(other.clone())),
     };
-    RowRecord {
+    let ref_counts = row
+        .ref_counts
+        .as_ref()
+        .map(|v| match v {
+            serde_json::Value::Object(m) => m
+                .iter()
+                .map(|(k, v)| {
+                    v.as_i64()
+                        .map(|n| (k.clone(), n))
+                        .ok_or_else(|| RowRecordError::RefCountNotInteger(v.clone()))
+                })
+                .collect::<Result<_, _>>(),
+            other => Err(RowRecordError::RefCountsNotObject(other.clone())),
+        })
+        .transpose()?;
+    Ok(RowRecord {
         id: RowID {
             schema: row.schema.clone(),
             table: row.table.clone(),
             row_key: row_key_map,
         },
         row_version: row.row_version.clone(),
-        patch_version: version_from_string(&row.patch_version),
-        ref_counts: row.ref_counts.as_ref().map(|v| match v {
-            serde_json::Value::Object(m) => m
-                .iter()
-                .map(|(k, v)| {
-                    let n = v
-                        .as_i64()
-                        .unwrap_or_else(|| panic!("refCount value is not an integer: {:?}", v));
-                    (k.clone(), n)
-                })
-                .collect(),
-            _ => panic!("refCounts is not an object: {:?}", v),
-        }),
-    }
+        patch_version: try_version_from_string(&row.patch_version)?,
+        ref_counts,
+    })
 }
 
 /// Converts a `RowRecord` (cache form) to a `RowsRow` (DB form).
@@ -341,7 +353,8 @@ impl RowRecordCache {
         while let Some(row_result) = stream.next().await {
             let db_row = row_result?;
             let rows_row: RowsRow = db_row.into();
-            let record = rows_row_to_row_record(&rows_row);
+            let record = rows_row_to_row_record(&rows_row)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
             let key = row_id_string(&record.id);
             cache.insert(key, record);
         }
@@ -1022,7 +1035,7 @@ mod tests {
                 state_version: "01".to_string(),
                 config_version: None,
             },
-            ref_counts: Some(HashMap::from([("q1".to_string(), 1)])),
+            ref_counts: Some(std::collections::BTreeMap::from([("q1".to_string(), 1)])),
         }
     }
 
@@ -1037,14 +1050,14 @@ mod tests {
             patch_version: "01".to_string(),
             ref_counts: Some(serde_json::json!({"q1": 1})),
         };
-        let record = rows_row_to_row_record(&rows_row);
+        let record = rows_row_to_row_record(&rows_row).unwrap();
         assert_eq!(record.id.schema, "public");
         assert_eq!(record.id.table, "users");
         assert_eq!(record.row_version, "v1");
         assert_eq!(record.patch_version.state_version, "01");
         assert_eq!(
             record.ref_counts,
-            Some(HashMap::from([("q1".to_string(), 1)]))
+            Some(std::collections::BTreeMap::from([("q1".to_string(), 1)]))
         );
     }
 
@@ -1071,8 +1084,49 @@ mod tests {
             patch_version: "01".to_string(),
             ref_counts: None,
         };
-        let record = rows_row_to_row_record(&rows_row);
+        let record = rows_row_to_row_record(&rows_row).unwrap();
         assert_eq!(record.ref_counts, None);
+    }
+
+    #[test]
+    fn test_rows_row_to_record_malformed_is_err_not_panic() {
+        let base = || RowsRow {
+            client_group_id: "cg1".to_string(),
+            schema: "public".to_string(),
+            table: "users".to_string(),
+            row_key: serde_json::json!({"id": 42}),
+            row_version: "v1".to_string(),
+            patch_version: "01".to_string(),
+            ref_counts: None,
+        };
+        // rowKey not an object
+        let mut r = base();
+        r.row_key = serde_json::json!("not-an-object");
+        assert!(matches!(
+            rows_row_to_row_record(&r),
+            Err(RowRecordError::RowKeyNotObject(_))
+        ));
+        // refCounts not an object
+        let mut r = base();
+        r.ref_counts = Some(serde_json::json!(5));
+        assert!(matches!(
+            rows_row_to_row_record(&r),
+            Err(RowRecordError::RefCountsNotObject(_))
+        ));
+        // refCount value not an integer
+        let mut r = base();
+        r.ref_counts = Some(serde_json::json!({"q1": "x"}));
+        assert!(matches!(
+            rows_row_to_row_record(&r),
+            Err(RowRecordError::RefCountNotInteger(_))
+        ));
+        // malformed patchVersion (>2 colon parts)
+        let mut r = base();
+        r.patch_version = "a:b:c".to_string();
+        assert!(matches!(
+            rows_row_to_row_record(&r),
+            Err(RowRecordError::Version(_))
+        ));
     }
 
     #[test]

@@ -35,7 +35,7 @@ pub use crate::row_key::RowID;
 pub type RefCounts = BTreeMap<String, i64>;
 
 /// RowRecord — a row's CVR metadata.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowRecord {
     pub id: RowID,
     pub row_version: String,

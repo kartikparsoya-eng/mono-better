@@ -612,9 +612,22 @@ impl ClientHandler {
             zero_clients_table: format!("{}.clients", us),
             zero_mutations_table: format!("{}.mutations", us),
             downstream,
-            base_version: Arc::new(StdMutex::new(
-                base_cookie.map(crate::version::version_from_string),
-            )),
+            base_version: Arc::new(StdMutex::new(base_cookie.and_then(|c| {
+                // base_cookie is client-supplied. A malformed one must not panic
+                // connection setup; treat it as no base version (client re-syncs
+                // from scratch) and record it via the env-gated trace. Well-behaved
+                // clients only ever send cookies we produced.
+                match crate::version::try_version_from_string(c) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        crate::trace::note(
+                            "ClientHandler",
+                            &format!("ignoring malformed base cookie {c:?}: {e}"),
+                        );
+                        None
+                    }
+                }
+            }))),
             poke_chain: Arc::new(AtomicBool::new(false)),
             ever_poked: Arc::new(AtomicBool::new(false)),
             _census: crate::live_count::Guard::new(&crate::live_count::CLIENT_HANDLER),

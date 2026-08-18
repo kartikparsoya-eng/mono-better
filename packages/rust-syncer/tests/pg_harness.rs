@@ -868,7 +868,6 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
 fn pg_repro_catchup_from_cg_thread() {
     use rust_cvr::row_key::RowID;
     use rust_cvr::row_record_cache::{RowRecord, RowRecordCache};
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     let Some(uri) = pg_uri() else {
@@ -948,7 +947,7 @@ fn pg_repro_catchup_from_cg_thread() {
                 },
                 row_version: "r1".to_string(),
                 patch_version: v1.clone(),
-                ref_counts: Some(HashMap::from([("q1".to_string(), 1)])),
+                ref_counts: Some(std::collections::BTreeMap::from([("q1".to_string(), 1)])),
             };
             let id = rec.id.clone();
             // flushed=false → spawns the background flush task.
@@ -1007,7 +1006,6 @@ fn pg_repro_catchup_from_cg_thread() {
 fn pg_repro_failed_flush_does_not_hang() {
     use rust_cvr::row_key::RowID;
     use rust_cvr::row_record_cache::{RowRecord, RowRecordCache};
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     let Some(uri) = pg_uri() else {
@@ -1079,7 +1077,7 @@ fn pg_repro_failed_flush_does_not_hang() {
                 },
                 row_version: "r1".to_string(),
                 patch_version: v1.clone(),
-                ref_counts: Some(HashMap::from([("q1".to_string(), 1)])),
+                ref_counts: Some(std::collections::BTreeMap::from([("q1".to_string(), 1)])),
             };
             let id = rec.id.clone();
             cache2

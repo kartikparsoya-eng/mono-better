@@ -20,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use rust_cvr::change_processor::ChangeProcessor;
+use rust_cvr::change_processor::{ChangeProcessor, RowChangeType};
 use rust_cvr::client_handler::{ClientHandler, MultiPoker, WebSocketSink};
 use rust_cvr::row_key::row_id_string;
 use rust_cvr::row_record_cache::RowRecordCache;
@@ -126,12 +126,9 @@ impl SyncEngine {
                 tracing::warn!("row cache load failed: {e}");
                 return HashMap::new();
             }
-            cache
-                .get_row_records()
-                .await
-                .into_iter()
-                .map(|(k, v)| (k, cache_record_to_types(v)))
-                .collect()
+            // The cache and updater share one `RowRecord` type, so this is
+            // `RowRecordMap` directly — no per-row conversion.
+            cache.get_row_records().await
         })
         .await
     }
@@ -325,12 +322,10 @@ impl SyncEngine {
         // Extract the row deltas (from the DEDUPED ops) before they are moved into
         // the store, so we can mirror the same writes into the read cache after
         // the PG write succeeds.
-        let row_deltas: Vec<(RowID, Option<rust_cvr::row_record_cache::RowRecord>)> = ops
+        let row_deltas: Vec<(RowID, Option<RowRecord>)> = ops
             .iter()
             .filter_map(|op| match op {
-                StoreOp::PutRowRecord(r) => {
-                    Some((r.id.clone(), Some(types_record_to_cache(r.clone()))))
-                }
+                StoreOp::PutRowRecord(r) => Some((r.id.clone(), Some(r.clone()))),
                 StoreOp::DelRowRecord(id) => Some((id.clone(), None)),
                 _ => None,
             })
@@ -1088,8 +1083,9 @@ impl SyncEngine {
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
         self.pipelines.hydrate(queries, |rc| {
             accumulate_signature(&mut sig_acc, rc);
-            let (ct, qid, table, rk, row) = row_change_to_maps(rc);
-            processor.on_row_change(ct, &qid, &table, &rk, row.as_ref(), existing_rows);
+            if let Some((ct, qid, table, rk, row)) = row_change_to_maps(rc) {
+                processor.on_row_change(ct, &qid, &table, &rk, row.as_ref(), existing_rows);
+            }
         })?;
         // Record the transformation hash each query was hydrated with, so a later
         // config pass can detect a changed hash (drift / auth re-transform) and
@@ -1170,7 +1166,7 @@ impl SyncEngine {
         // last version — TS likewise returns `changes` as an array), so buffering
         // it is cheap, unlike a full hydrate.
         type CollectedChange = (
-            u8,
+            RowChangeType,
             String,
             String,
             serde_json::Map<String, serde_json::Value>,
@@ -1186,7 +1182,7 @@ impl SyncEngine {
             },
             |rc| {
                 accumulate_signature(&mut sig_acc, rc);
-                collected.push(row_change_to_maps(rc));
+                collected.extend(row_change_to_maps(rc));
             },
         )?;
 
@@ -1401,7 +1397,7 @@ impl SyncEngine {
 /// row_key, row)` shape `ChangeProcessor::on_row_change` expects. Port of napi
 /// `row_change_to_maps`.
 type RowChangeMaps = (
-    u8,
+    RowChangeType,
     String,
     String,
     serde_json::Map<String, serde_json::Value>,
@@ -1418,7 +1414,17 @@ fn query_name_of(cvr: &CVR, qid: &str) -> Option<String> {
     }
 }
 
-fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> RowChangeMaps {
+/// Maps `ivm::ChangeType` → the CVR `RowChangeType`. Returns `None` for `Child`,
+/// which the streamer never emits at the row level (see `streamer::stream_nodes`,
+/// which only streams Add/Remove/Edit) — skipping it preserves the prior
+/// `on_row_change` behavior of ignoring non-row changes, without a panic.
+fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> Option<RowChangeMaps> {
+    let change_type = match rc.change_type {
+        rust_ivm::ivm::change::ChangeType::Add => RowChangeType::Add,
+        rust_ivm::ivm::change::ChangeType::Remove => RowChangeType::Remove,
+        rust_ivm::ivm::change::ChangeType::Edit => RowChangeType::Edit,
+        rust_ivm::ivm::change::ChangeType::Child => return None,
+    };
     let row_key = {
         let mut m = serde_json::Map::with_capacity(rc.row_key.len());
         for (k, v) in rc.row_key.iter() {
@@ -1433,13 +1439,13 @@ fn row_change_to_maps(rc: &rust_ivm::streamer::RowChange) -> RowChangeMaps {
         }
         m
     });
-    (
-        rc.change_type as u8,
+    Some((
+        change_type,
         rc.query_id.clone(),
         rc.table.clone(),
         row_key,
         row,
-    )
+    ))
 }
 
 /// XOR-fold a streamed `RowChange` into a per-query row-set-signature
@@ -1531,27 +1537,6 @@ fn row_op_is_noop(op: &StoreOp, existing: &RowRecordMap) -> bool {
             existing.get(&key).is_none()
         }
         _ => false,
-    }
-}
-
-fn cache_record_to_types(r: rust_cvr::row_record_cache::RowRecord) -> RowRecord {
-    RowRecord {
-        id: r.id,
-        row_version: r.row_version,
-        patch_version: r.patch_version,
-        ref_counts: r.ref_counts.map(|m| m.into_iter().collect()),
-    }
-}
-
-/// Inverse of [`cache_record_to_types`] — convert a `types::RowRecord` (from a
-/// flushed `StoreOp::PutRowRecord`) into the row-record-cache's `RowRecord`, for
-/// the write-back path that keeps the cache in lockstep with PG.
-fn types_record_to_cache(r: RowRecord) -> rust_cvr::row_record_cache::RowRecord {
-    rust_cvr::row_record_cache::RowRecord {
-        id: r.id,
-        row_version: r.row_version,
-        patch_version: r.patch_version,
-        ref_counts: r.ref_counts.map(|m| m.into_iter().collect()),
     }
 }
 
@@ -2047,31 +2032,6 @@ mod tests {
             !cvr.queries.contains_key("q1"),
             "expired query removed from CVR"
         );
-    }
-
-    #[test]
-    fn row_record_cache_type_conversion_roundtrips() {
-        // The write-back path converts types::RowRecord → cache RowRecord; the
-        // read path converts back. The two must roundtrip losslessly.
-        let mut row_key = serde_json::Map::new();
-        row_key.insert("id".to_string(), serde_json::json!("i1"));
-        let mut ref_counts = std::collections::BTreeMap::new();
-        ref_counts.insert("q1".to_string(), 2i64);
-        let original = RowRecord {
-            id: rust_cvr::row_key::RowID {
-                schema: "public".to_string(),
-                table: "issue".to_string(),
-                row_key,
-            },
-            row_version: "01".to_string(),
-            patch_version: CVRVersion {
-                state_version: "01".to_string(),
-                config_version: None,
-            },
-            ref_counts: Some(ref_counts),
-        };
-        let back = super::cache_record_to_types(super::types_record_to_cache(original.clone()));
-        assert_eq!(back, original);
     }
 
     #[tokio::test]

@@ -22,6 +22,20 @@ const ZERO_VERSION_COLUMN_NAME: &str = "_0_version";
 // chunk boundary aligns with the CVR flush boundary.
 const DEFAULT_CURSOR_PAGE_SIZE: usize = 10000;
 
+/// The row-level change kinds `ChangeProcessor` acts on — the subset of the IVM
+/// `ChangeType` that reaches the CVR row path (the streamer only ever emits
+/// Add/Remove/Edit at the row level; structural `Child` changes never arrive
+/// here). Kept as a local enum so `rust-cvr` needs no dependency on `rust-ivm`;
+/// the syncer maps `ivm::ChangeType` → this at the boundary. Using an enum (vs a
+/// raw `u8`) makes the `on_row_change` match exhaustive — a new variant is a
+/// compile error rather than a silently-dropped row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowChangeType {
+    Add,
+    Remove,
+    Edit,
+}
+
 /// The in-Rust equivalent of TS `#processChanges`.
 ///
 /// Called from the engine's `on_row_change` callback — same thread, zero crossing.
@@ -63,7 +77,7 @@ impl<'a> ChangeProcessor<'a> {
     /// - `row`: the full row (None for REMOVE)
     pub fn on_row_change(
         &mut self,
-        change_type: u8,
+        change_type: RowChangeType,
         query_id: &str,
         table: &str,
         row_key: &Map<String, Value>,
@@ -120,36 +134,24 @@ impl<'a> ChangeProcessor<'a> {
         };
 
         match change_type {
-            0 => {
-                // ADD
+            RowChangeType::Add => {
                 if let Some(row) = row {
                     update_version(entry, row);
                 }
                 // Ensure refCounts[queryID] exists (TS: `parsedRow.refCounts[queryID] ??= 0`)
                 *entry.1.ref_counts.entry(query_id.to_string()).or_insert(0) += 1;
             }
-            2 => {
-                // EDIT
+            RowChangeType::Edit => {
                 if let Some(row) = row {
                     update_version(entry, row);
                 }
                 // Ensure the key exists (TS: `parsedRow.refCounts[queryID] ??= 0`)
                 entry.1.ref_counts.entry(query_id.to_string()).or_insert(0);
             }
-            1 => {
-                // REMOVE
+            RowChangeType::Remove => {
                 // Ensure the key exists before decrementing (TS: `parsedRow.refCounts[queryID] ??= 0`)
                 let rc = entry.1.ref_counts.entry(query_id.to_string()).or_insert(0);
                 *rc -= 1;
-            }
-            _ => {
-                // CHILD or unknown — skip (TS uses unreachable()). Route through
-                // the crate's env-gated trace instead of an uncontrolled
-                // library `eprintln!`; behavior (skip) is unchanged.
-                crate::trace::note(
-                    "ChangeProcessor",
-                    &format!("skipping unknown change type {change_type}"),
-                );
             }
         }
 
@@ -321,7 +323,7 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -363,8 +365,8 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then REMOVE → refCount goes to 0
-        processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
-        processor.on_row_change(1, "q1", "users", &row_key, None, &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Remove, "q1", "users", &row_key, None, &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -402,8 +404,8 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD from query1 + ADD from query2 → refCounts = {q1: 1, q2: 1}
-        processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
-        processor.on_row_change(0, "q2", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q2", "users", &row_key, Some(&row), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -462,7 +464,7 @@ mod tests {
             let mut row_key = Map::new();
             row_key.insert("id".to_string(), Value::String(format!("row{}", i)));
 
-            processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
+            processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
         }
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
@@ -502,7 +504,7 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -546,7 +548,7 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then EDIT → refCount stays at 1
-        processor.on_row_change(0, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
 
         // EDIT with updated version
         let mut row2 = Map::new();
@@ -554,7 +556,7 @@ mod tests {
         row2.insert("name".to_string(), Value::String("Bob".to_string()));
         row2.insert("_0_version".to_string(), Value::String("v2".to_string()));
 
-        processor.on_row_change(2, "q1", "users", &row_key, Some(&row2), &existing_rows);
+        processor.on_row_change(RowChangeType::Edit, "q1", "users", &row_key, Some(&row2), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
