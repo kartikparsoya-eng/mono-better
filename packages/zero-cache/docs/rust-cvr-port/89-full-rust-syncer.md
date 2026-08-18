@@ -1148,17 +1148,17 @@ It sends `['ready', {ready: true}]` to parent when initialized.
 
 ## Gap Closure Summary
 
-| Gap                                            | How closed                                                     |
-| ---------------------------------------------- | -------------------------------------------------------------- |
-| 1. Two Rust stores                             | One `CVRStoreHandle` per CG, on the CG thread                  |
-| 2. TS CVRStore used                            | `CVRStoreHandle` is the only store; TS `CVRStore` is dead code |
-| 3. Config-driven not on actor thread           | `handle_config_update()` on CG thread, same store + clients    |
-| 4. Signature provider not wired                | `engine.row_set_signature()` passed as provider                |
-| 5. `#hydrateUnchangedQueries` not ported       | `hydrate_unchanged()` on CG thread                             |
-| 6. Catchup not ported                          | `catchup_clients()` on CG thread, `engine.get_row()` direct    |
-| 7. PokeHandler Drop missing                    | Add `impl Drop for PokeHandler`                                |
-| 8. `send_query_transform_failed_error` missing | Add method to `ClientHandler`                                  |
-| 9. TS tests not ported                         | Port as Rust integration tests                                 |
+| Gap                                            | How closed                                                                                               |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| 1. Two Rust stores                             | One `CVRStoreHandle` per CG, on the CG thread                                                            |
+| 2. TS CVRStore used                            | `CVRStoreHandle` is the only store; TS `CVRStore` is dead code                                           |
+| 3. Config-driven not on actor thread           | `handle_config_update()` on CG thread, same store + clients                                              |
+| 4. Signature provider not wired                | `engine.row_set_signature()` passed as provider                                                          |
+| 5. `#hydrateUnchangedQueries` not ported       | `hydrate_unchanged()` on CG thread                                                                       |
+| 6. Catchup not ported                          | `catchup_clients()` on CG thread, `engine.get_row()` direct                                              |
+| 7. PokeHandler Drop missing                    | Add `impl Drop for PokeHandler`                                                                          |
+| 8. `send_query_transform_failed_error` missing | Add method to `ClientHandler`                                                                            |
+| 9. TS tests not ported                         | Port as Rust integration tests                                                                           |
 | 10. `rust-cvr/napi/` not cleaned up            | ✅ DONE (a5e502ad9): `rust-cvr/napi` + `rust-ivm/napi` deleted; TS hybrid wiring reverted to zero/v1.7.0 |
 
 ---

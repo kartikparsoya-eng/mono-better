@@ -77,3 +77,16 @@ bundle-sizes.json
 packages/rust-ivm/*.node
 packages/rust-ivm/agentic/logs/
 packages/rust-ivm/.shared-target-w*/
+
+# Image diet (ART G23 size gate): docs/perf/test-only packages and the apps are
+# not in the zero-cache runtime closure. Keep each workspace member's
+# package.json so `pnpm install --frozen-lockfile` still sees every importer;
+# drop the content (replicache-doc alone is ~159MB of image weight).
+packages/replicache-doc/**
+!packages/replicache-doc/package.json
+packages/replicache-perf/**
+!packages/replicache-perf/package.json
+packages/zql-integration-tests/**
+!packages/zql-integration-tests/package.json
+apps/**
+!apps/*/package.json

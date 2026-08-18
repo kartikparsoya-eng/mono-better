@@ -363,9 +363,18 @@ fn main() {
     let http_router = router.clone();
     let http_addr: SocketAddr = format!("0.0.0.0:{}", config.http_port).parse().unwrap();
     let ws_router = router.clone();
+    // TS parity: `--websocket-max-payload-bytes` defaults to 10MB
+    // (zero-config.ts websocketMaxPayloadBytes); oversized messages must be
+    // rejected identically on both syncers. The env override is the same one
+    // the TS config layer reads, so one knob configures both.
+    let max_payload_bytes = std::env::var("ZERO_WEBSOCKET_MAX_PAYLOAD_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(10 * 1024 * 1024);
     let ws_config = WsServerConfig {
         port: config.ws_port,
-        max_payload_bytes: 1024 * 1024 * 16, // 16MB
+        max_payload_bytes,
         compression: false,
     };
 
@@ -383,8 +392,34 @@ fn main() {
     let readyz_pool = cvr_pool.clone();
     let readyz_replica = Some(config.replica_file.clone());
     runtime.spawn(async move {
-        serve_http(http_listener, http_router, Some(readyz_pool), readyz_replica).await;
+        serve_http(
+            http_listener,
+            http_router,
+            Some(readyz_pool),
+            readyz_replica,
+        )
+        .await;
     });
+
+    // Periodic glibc malloc_trim: pipeline/row memory freed on query-TTL
+    // expiry and CG teardown stays in malloc's arenas (RSS never falls), which
+    // the ART leak gate (G6) — and any operator watching the pod — reads as an
+    // unbounded leak. Return free arena memory to the OS on a slow cadence;
+    // trim walks the arenas so keep it well off the hot path. glibc-only.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    std::thread::Builder::new()
+        .name("malloc-trim".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                // SAFETY: malloc_trim is async-signal-unsafe but thread-safe;
+                // calling it from a dedicated thread is the documented use.
+                unsafe {
+                    libc::malloc_trim(0);
+                }
+            }
+        })
+        .expect("spawn malloc-trim thread");
 
     // Both ports are bound → announce readiness to the parent ProcessManager.
     // Format matches TS: JSON array ["ready", {"ready": true}]. Flush stdout

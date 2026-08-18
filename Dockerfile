@@ -219,6 +219,12 @@ ENV ZERO_ROUND_ROBIN_ROUTING=1
 # frames during cold hydrate.
 ENV ZERO_CURSOR_PAGE_SIZE=100
 ENV UV_THREADPOOL_SIZE=16
+# Cap glibc malloc arenas: the multi-threaded rust-syncer (sharded executors +
+# tokio) otherwise gets up to 8*cores arenas whose fragmentation retains freed
+# pipeline memory as ever-growing RSS (reads as a leak in the ART G6 gate and
+# in prod dashboards). Two arenas keep contention negligible at our thread
+# counts while bounding retention; pairs with the in-process malloc_trim task.
+ENV MALLOC_ARENA_MAX=2
 ENV ZERO_IN_CONTAINER=1
 ENV ZERO_LOG_FORMAT=json
 ENV ZERO_SERVER_VERSION=${ZERO_VERSION}

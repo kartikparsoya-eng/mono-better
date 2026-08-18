@@ -1000,7 +1000,8 @@ impl SyncEngine {
             Ok::<_, String>((rows, cfg))
         }?;
 
-        let mut patches: Vec<PatchToVersion> = Vec::with_capacity(raw_rows.len() + cfg_patches.len());
+        let mut patches: Vec<PatchToVersion> =
+            Vec::with_capacity(raw_rows.len() + cfg_patches.len());
         for row in raw_rows {
             let row_key = match row.row_key {
                 serde_json::Value::Object(m) => m,

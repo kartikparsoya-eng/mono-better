@@ -193,15 +193,23 @@ mod tests {
 
         for i in 0..3 {
             assert!(
-                sink.send_command(WsCommand::Send(serde_json::json!([i]))).is_ok(),
+                sink.send_command(WsCommand::Send(serde_json::json!([i])))
+                    .is_ok(),
                 "frame {i} under the HWM must be accepted"
             );
         }
         assert!(!*kill_rx.borrow(), "kill must not fire under the HWM");
         // 4th frame crosses hwm=3 → rejected + kill fired.
-        assert!(sink.send_command(WsCommand::Send(serde_json::json!([3]))).is_err());
+        assert!(
+            sink.send_command(WsCommand::Send(serde_json::json!([3])))
+                .is_err()
+        );
         assert!(*kill_rx.borrow(), "kill fires on overflow");
-        assert_eq!(limits.depth.load(Ordering::SeqCst), 3, "rejected frame not counted");
+        assert_eq!(
+            limits.depth.load(Ordering::SeqCst),
+            3,
+            "rejected frame not counted"
+        );
         // The queued (accepted) frames are still there, in order.
         for i in 0..3 {
             match rx.recv().await {

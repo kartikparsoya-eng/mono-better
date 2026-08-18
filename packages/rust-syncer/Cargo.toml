@@ -46,6 +46,9 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 rusqlite = { version = "0.32" }
 jsonwebtoken = "9"
+# glibc malloc_trim for the periodic RSS-return task (linux-gnu only): freed
+# pipeline/row memory otherwise stays in malloc arenas and reads as a leak.
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",

@@ -53,6 +53,58 @@ pub struct HttpServerState {
     pub cvr_pool: Option<sqlx::PgPool>,
     /// For `/readyz`: the replica file path (existence probe). `None` skips.
     pub replica_file: Option<String>,
+    /// `ZERO_ADMIN_PASSWORD` — gates `/statz` and `/heapz` behind HTTP Basic
+    /// auth, matching TS `handleStatzRequest`/`handleHeapzRequest`
+    /// (`isAdminPasswordValid`): dev mode with no password configured allows,
+    /// production with no password configured denies.
+    pub admin_password: Option<String>,
+}
+
+/// Port of TS `isAdminPasswordValid` + the 401 response shape of
+/// `handleStatzRequest`. Returns `None` when the request may proceed.
+fn check_admin_auth(
+    admin_password: Option<&str>,
+    headers: &axum::http::HeaderMap,
+) -> Option<axum::response::Response> {
+    use base64::Engine as _;
+    // Basic-auth password (user part is ignored, same as TS `auth(req).pass`).
+    let presented: Option<String> = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Basic "))
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .and_then(|cred| cred.split_once(':').map(|(_, p)| p.to_string()));
+
+    let dev_mode = std::env::var("NODE_ENV").as_deref() == Ok("development");
+    let ok = match (&admin_password, &presented) {
+        (None, None) if dev_mode => true,
+        (None, _) => false, // no password configured: deny in production
+        (Some(expected), presented) => {
+            // Constant-time comparison (parity with TS timingSafeEqual).
+            let given = presented.as_deref().unwrap_or("");
+            let (a, b) = (expected.as_bytes(), given.as_bytes());
+            if a.len() != b.len() {
+                false
+            } else {
+                a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+            }
+        }
+    };
+    if ok {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::UNAUTHORIZED,
+            [(
+                axum::http::header::WWW_AUTHENTICATE,
+                "Basic realm=\"Statz Protected Area\"",
+            )],
+            "Unauthorized",
+        )
+            .into_response(),
+    )
 }
 
 /// Notify-route guard: shared-secret check (when configured) + `state` check.
@@ -108,6 +160,9 @@ pub async fn serve_http(
             .filter(|t| !t.is_empty()),
         cvr_pool,
         replica_file,
+        admin_password: std::env::var("ZERO_ADMIN_PASSWORD")
+            .ok()
+            .filter(|t| !t.is_empty()),
     });
 
     let app = Router::new()
@@ -169,8 +224,15 @@ async fn readyz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCod
     }
 }
 
-/// GET /statz — return server statistics.
-async fn statz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json<Value>) {
+/// GET /statz — return server statistics. Admin-gated like TS
+/// `handleStatzRequest` (Basic auth vs `ZERO_ADMIN_PASSWORD`).
+async fn statz_handler(
+    State(state): State<Arc<HttpServerState>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Some(denied) = check_admin_auth(state.admin_password.as_deref(), &headers) {
+        return denied;
+    }
     let stats = crate::router::lock_unpoisoned(&state.stats);
     let uptime_ms = state.start_time.elapsed().as_millis() as u64;
     let active_cgs = state.router.cg_count();
@@ -184,7 +246,7 @@ async fn statz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode
         "metrics": state.router.metrics_snapshot(),
     });
 
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// GET /metrics — Prometheus text-format metrics. Scraped by the ART G17
@@ -220,8 +282,15 @@ async fn census_handler() -> impl IntoResponse {
 }
 
 /// GET /heapz — heap snapshot placeholder.
-/// Returns a minimal V8-style heap snapshot for compatibility.
-async fn heapz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode, Json<Value>) {
+/// Returns a minimal V8-style heap snapshot for compatibility. Admin-gated
+/// like TS `handleHeapzRequest`.
+async fn heapz_handler(
+    State(state): State<Arc<HttpServerState>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Some(denied) = check_admin_auth(state.admin_password.as_deref(), &headers) {
+        return denied;
+    }
     let stats = crate::router::lock_unpoisoned(&state.stats);
     let response = json!({
         "type": "heap_snapshot",
@@ -235,7 +304,7 @@ async fn heapz_handler(State(state): State<Arc<HttpServerState>>) -> (StatusCode
         },
     });
 
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// POST /notify — global commit notification from the replicator.
@@ -328,6 +397,34 @@ async fn notify_handler(
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+
+    fn basic(pass: &str) -> axum::http::HeaderMap {
+        use base64::Engine as _;
+        let mut h = axum::http::HeaderMap::new();
+        let cred = base64::engine::general_purpose::STANDARD.encode(format!("admin:{pass}"));
+        h.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Basic {cred}").parse().unwrap(),
+        );
+        h
+    }
+
+    /// TS `isAdminPasswordValid` parity: configured password gates by
+    /// constant-time equality; wrong/absent creds → 401 with WWW-Authenticate.
+    #[test]
+    fn admin_auth_gates_when_password_configured() {
+        assert!(check_admin_auth(Some("s3cret"), &basic("s3cret")).is_none());
+        let denied = check_admin_auth(Some("s3cret"), &basic("wrong")).unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            denied
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .is_some()
+        );
+        // No credentials at all is also denied when a password is configured.
+        assert!(check_admin_auth(Some("s3cret"), &axum::http::HeaderMap::new()).is_some());
+    }
 
     /// The `/census` handler returns a 200 text/plain body with one line per
     /// Rust crate (syncer/cvr/ivm), each rendering that crate's live-object

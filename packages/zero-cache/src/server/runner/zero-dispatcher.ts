@@ -29,6 +29,18 @@ export class ZeroDispatcher extends HttpService {
       fastify.get('/heapz', (req, res) =>
         handleHeapzRequest(lc, config, req, res),
       );
+      // Orchestrator probe contract. The dispatcher only begins listening
+      // after `allWorkersReady()`, so a 200 from /healthz implies the process
+      // is up; /readyz additionally awaits a live sync worker (which also
+      // boots the cache under --lazy-startup), so it flips 200 only when a
+      // connection could actually be served.
+      fastify.get('/healthz', (_req, res) => res.send('OK'));
+      fastify.get('/readyz', (_req, res) =>
+        getWorker().then(
+          () => res.send('OK'),
+          err => res.code(503).send(String(err)),
+        ),
+      );
       installWebSocketHandoff(lc, this.#handoff, fastify.server);
     });
     this.#getWorker = getWorker;

@@ -32,6 +32,11 @@ use crate::message_handler::{ConnectionSelector, PushRelayHeaders, PusherDispatc
 /// How long a single relay POST may take before it is abandoned.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Internal mutation name `zero-server` handles directly (no user dispatch) by
+/// deleting stored mutation results. Mirror of
+/// `zero-protocol/src/mutation.ts CLEANUP_RESULTS_MUTATION_NAME`.
+const CLEANUP_RESULTS_MUTATION_NAME: &str = "_zero_cleanupResults";
+
 /// Max queued pushes before new ones are dropped (client re-pushes by design —
 /// its lmid doesn't advance until the mutation lands). Bounds relay memory
 /// during a TS-loopback outage: the drainer POSTs one-at-a-time with a 10s
@@ -122,6 +127,52 @@ impl HttpRelayPusher {
             "userID": headers.user_id,
         })
     }
+
+    /// Cap-checked enqueue shared by real pushes and synthetic cleanup pushes.
+    /// Returns false when the payload was dropped (queue full / channel closed).
+    fn enqueue_payload(&self, payload: serde_json::Value, what: &str) -> bool {
+        if self.depth.load(Ordering::SeqCst) >= self.cap {
+            tracing::warn!(cap = self.cap, "push relay queue full; dropping {what}");
+            return false;
+        }
+        self.depth.fetch_add(1, Ordering::SeqCst);
+        if let Err(e) = self.tx.send(payload) {
+            self.depth.fetch_sub(1, Ordering::SeqCst);
+            tracing::warn!(error = %e, "push relay channel closed; {what} dropped");
+            return false;
+        }
+        true
+    }
+
+    /// Build the synthetic `_zero_cleanupResults` push body the TS
+    /// `PusherService` sends for mutation-result cleanup. `args` is the single
+    /// element of the mutation's `args` array (`{type:"single"|"bulk", …}`).
+    fn cleanup_push_body(
+        client_group_id: &str,
+        sender_client_id: &str,
+        request_id: String,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        serde_json::json!({
+            "clientGroupID": client_group_id,
+            "mutations": [{
+                "type": "custom",
+                // Not tracked — fire-and-forget, same as TS (`id: 0`).
+                "id": 0,
+                "clientID": sender_client_id,
+                "name": CLEANUP_RESULTS_MUTATION_NAME,
+                "args": [args],
+                "timestamp": now_ms,
+            }],
+            "pushVersion": 1,
+            "timestamp": now_ms,
+            "requestID": request_id,
+        })
+    }
 }
 
 impl PusherDispatch for HttpRelayPusher {
@@ -136,27 +187,113 @@ impl PusherDispatch for HttpRelayPusher {
         // item); dropping the NEWEST push keeps the queue an in-order prefix and
         // bounds memory. The client's lmid never advances for a dropped push, so
         // it re-pushes — the same recovery as a failed POST.
-        if self.depth.load(Ordering::SeqCst) >= self.cap {
-            tracing::warn!(
-                cap = self.cap,
-                "push relay queue full; dropping push (client will re-push)"
-            );
-            return HandlerResult::Ok;
-        }
         let payload = Self::relay_body(selector, body, headers, client_group_id);
         // Enqueue only — never blocks, so this is safe on the async CG-executor
         // threads. The drainer POSTs sequentially (see `new`).
-        self.depth.fetch_add(1, Ordering::SeqCst);
-        if let Err(e) = self.tx.send(payload) {
-            self.depth.fetch_sub(1, Ordering::SeqCst);
-            tracing::warn!(error = %e, "push relay channel closed; mutation dropped");
-        }
+        self.enqueue_payload(payload, "push (client will re-push)");
         HandlerResult::Ok
     }
 
     fn init_connection(&self, _selector: &ConnectionSelector) {}
 
-    fn ack_mutation_responses(&self, _selector: &ConnectionSelector, _body: &serde_json::Value) {}
+    fn ack_mutation_responses(
+        &self,
+        selector: &ConnectionSelector,
+        body: &serde_json::Value,
+        headers: &PushRelayHeaders,
+        client_group_id: &str,
+    ) {
+        // Port of `PusherService.ackMutationResponses`: relay a synthetic
+        // `_zero_cleanupResults` push so the API server deletes stored mutation
+        // results up to the acked ID. Fire-and-forget (a drop only delays
+        // cleanup until the next ack).
+        let (client_id, up_to_id) = match (
+            body.get("clientID").and_then(|v| v.as_str()),
+            body.get("id").and_then(|v| v.as_i64()),
+        ) {
+            (Some(c), Some(i)) => (c.to_string(), i),
+            _ => {
+                tracing::warn!("ackMutationResponses body missing clientID/id; skipped");
+                return;
+            }
+        };
+        let push = Self::cleanup_push_body(
+            client_group_id,
+            &client_id,
+            format!("cleanup-{client_group_id}-{client_id}-{up_to_id}"),
+            serde_json::json!({
+                "type": "single",
+                "clientGroupID": client_group_id,
+                "clientID": client_id,
+                "upToMutationID": up_to_id,
+            }),
+        );
+        let payload = Self::relay_body(selector, &push, headers, client_group_id);
+        self.enqueue_payload(payload, "mutation-results cleanup (single)");
+    }
 
-    fn delete_client_mutations(&self, _selector: &ConnectionSelector, _client_ids: &[String]) {}
+    fn delete_client_mutations(
+        &self,
+        selector: &ConnectionSelector,
+        client_ids: &[String],
+        headers: &PushRelayHeaders,
+        client_group_id: &str,
+    ) {
+        // Port of `PusherService.deleteClientMutations`: bulk-clean the stored
+        // mutation results of explicitly deleted clients.
+        if client_ids.is_empty() {
+            return;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let push = Self::cleanup_push_body(
+            client_group_id,
+            // TS uses the first deleted client as the nominal sender.
+            &client_ids[0],
+            format!("cleanup-bulk-{client_group_id}-{now_ms}"),
+            serde_json::json!({
+                "type": "bulk",
+                "clientGroupID": client_group_id,
+                "clientIDs": client_ids,
+            }),
+        );
+        let payload = Self::relay_body(selector, &push, headers, client_group_id);
+        self.enqueue_payload(payload, "mutation-results cleanup (bulk)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The synthetic cleanup push must match the TS `PusherService` shape
+    /// exactly — zero-server dispatches on `type: "custom"` +
+    /// `name: "_zero_cleanupResults"` and validates `cleanupResultsArgSchema`.
+    #[test]
+    fn cleanup_push_body_matches_ts_shape() {
+        let body = HttpRelayPusher::cleanup_push_body(
+            "cg1",
+            "cA",
+            "cleanup-cg1-cA-7".to_string(),
+            serde_json::json!({
+                "type": "single",
+                "clientGroupID": "cg1",
+                "clientID": "cA",
+                "upToMutationID": 7,
+            }),
+        );
+        assert_eq!(body["clientGroupID"], "cg1");
+        assert_eq!(body["pushVersion"], 1);
+        assert_eq!(body["requestID"], "cleanup-cg1-cA-7");
+        let m = &body["mutations"][0];
+        assert_eq!(m["type"], "custom");
+        assert_eq!(m["id"], 0);
+        assert_eq!(m["clientID"], "cA");
+        assert_eq!(m["name"], CLEANUP_RESULTS_MUTATION_NAME);
+        assert_eq!(m["args"][0]["type"], "single");
+        assert_eq!(m["args"][0]["upToMutationID"], 7);
+        assert!(body["timestamp"].as_i64().unwrap() > 0);
+    }
 }

@@ -1827,6 +1827,7 @@ dependencies = [
  "dhat",
  "futures-util",
  "jsonwebtoken",
+ "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

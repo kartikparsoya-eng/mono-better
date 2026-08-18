@@ -148,14 +148,26 @@ impl PusherDispatch for MockPusher {
             .push(selector.clone());
     }
 
-    fn ack_mutation_responses(&self, selector: &ConnectionSelector, body: &serde_json::Value) {
+    fn ack_mutation_responses(
+        &self,
+        selector: &ConnectionSelector,
+        body: &serde_json::Value,
+        _headers: &rust_syncer::PushRelayHeaders,
+        _client_group_id: &str,
+    ) {
         self.ack_calls
             .lock()
             .unwrap()
             .push((selector.clone(), body.clone()));
     }
 
-    fn delete_client_mutations(&self, selector: &ConnectionSelector, client_ids: &[String]) {
+    fn delete_client_mutations(
+        &self,
+        selector: &ConnectionSelector,
+        client_ids: &[String],
+        _headers: &rust_syncer::PushRelayHeaders,
+        _client_group_id: &str,
+    ) {
         self.delete_client_calls
             .lock()
             .unwrap()

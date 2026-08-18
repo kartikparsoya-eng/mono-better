@@ -27,7 +27,9 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 const DOWNSTREAM_MSG_INTERVAL_MS: u64 = 6000;
 /// Keepalive pong check interval: half of DOWNSTREAM_MSG_INTERVAL_MS.
 const KEEPALIVE_CHECK_INTERVAL_MS: u64 = 3000;
-const DEFAULT_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+/// TS parity: zero-config `websocketMaxPayloadBytes` defaults to 10MB and
+/// rejects larger messages before parsing.
+const DEFAULT_MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 /// Slow-client shed: max queued downstream commands before the connection is
 /// force-closed (the client reconnects + rehydrates). Each `Send` command is

@@ -111,11 +111,27 @@ pub trait PusherDispatch: Send + Sync {
     /// Initialize connection for pusher.
     fn init_connection(&self, selector: &ConnectionSelector);
 
-    /// Ack mutation responses.
-    fn ack_mutation_responses(&self, selector: &ConnectionSelector, body: &serde_json::Value);
+    /// Ack mutation responses: relay a `_zero_cleanupResults` push (type
+    /// `single`) so the API server prunes stored mutation results up to the
+    /// acked mutation ID. Port of `PusherService.ackMutationResponses`.
+    fn ack_mutation_responses(
+        &self,
+        selector: &ConnectionSelector,
+        body: &serde_json::Value,
+        headers: &PushRelayHeaders,
+        client_group_id: &str,
+    );
 
-    /// Delete client mutations.
-    fn delete_client_mutations(&self, selector: &ConnectionSelector, client_ids: &[String]);
+    /// Delete client mutations: relay a `_zero_cleanupResults` push (type
+    /// `bulk`) for explicitly deleted clients. Port of
+    /// `PusherService.deleteClientMutations`.
+    fn delete_client_mutations(
+        &self,
+        selector: &ConnectionSelector,
+        client_ids: &[String],
+        headers: &PushRelayHeaders,
+        client_group_id: &str,
+    );
 }
 
 /// The message handler — port of `SyncerWsMessageHandler`.
@@ -219,7 +235,12 @@ impl MessageHandler for SyncerWsMessageHandler {
                 if let Some(pusher) = &self.pusher
                     && !deleted_client_ids.is_empty()
                 {
-                    pusher.delete_client_mutations(selector, &deleted_client_ids);
+                    pusher.delete_client_mutations(
+                        selector,
+                        &deleted_client_ids,
+                        &self.push_relay_headers,
+                        &self.client_group_id,
+                    );
                 }
                 vec![HandlerResult::Ok]
             }
@@ -271,7 +292,12 @@ impl MessageHandler for SyncerWsMessageHandler {
             Upstream::AckMutationResponses(body) => {
                 if let Some(pusher) = &self.pusher {
                     let body_value = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
-                    pusher.ack_mutation_responses(selector, &body_value);
+                    pusher.ack_mutation_responses(
+                        selector,
+                        &body_value,
+                        &self.push_relay_headers,
+                        &self.client_group_id,
+                    );
                 }
                 vec![HandlerResult::Ok]
             }

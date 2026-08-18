@@ -417,12 +417,10 @@ pub fn record_ws_queued_delta(delta: i64) {
 /// Called once from main after the pool is built; the instruments live in a
 /// static so their observe callbacks stay registered.
 pub fn register_cvr_pool_gauges(pool: sqlx::PgPool) {
-    static G: OnceLock<
-        (
-            opentelemetry::metrics::ObservableGauge<u64>,
-            opentelemetry::metrics::ObservableGauge<u64>,
-        ),
-    > = OnceLock::new();
+    static G: OnceLock<(
+        opentelemetry::metrics::ObservableGauge<u64>,
+        opentelemetry::metrics::ObservableGauge<u64>,
+    )> = OnceLock::new();
     G.get_or_init(|| {
         let m = global::meter("zero");
         let p1 = pool.clone();

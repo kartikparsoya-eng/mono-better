@@ -148,9 +148,15 @@ pub enum CGMessage {
         text: String,
     },
     /// A connection's WS closed (its upstream channel ended).
-    ConnectionClosed { client_id: Arc<str>, ws_id: Arc<str> },
+    ConnectionClosed {
+        client_id: Arc<str>,
+        ws_id: Arc<str>,
+    },
     /// Explicitly close a superseded socket before installing its replacement.
-    CloseConnection { client_id: Arc<str>, ws_id: Arc<str> },
+    CloseConnection {
+        client_id: Arc<str>,
+        ws_id: Arc<str>,
+    },
     /// Change-streamer notification — new data is available; advance + poke.
     Notification(serde_json::Value),
     /// The CG should shut down (no more connections).
@@ -1189,6 +1195,10 @@ struct CgState {
     /// client_id → raw JWT (for the `Authorization: Bearer` header on
     /// custom-query transform requests).
     client_raw_auth: HashMap<String, String>,
+    /// client_id → raw auth/header material captured at connect, needed to
+    /// relay a `_zero_cleanupResults` push when this client explicitly deletes
+    /// other clients (`deleteClients` → `pusher.delete_client_mutations`).
+    client_push_headers: HashMap<String, crate::message_handler::PushRelayHeaders>,
     /// client_id → the custom-query API context (`userQueryURL` + headers +
     /// auth), captured from the client's `initConnection`. Present only for
     /// clients that use named/custom queries.
@@ -1355,6 +1365,7 @@ impl CgState {
             active_client_pv: HashMap::new(),
             client_auth: HashMap::new(),
             client_raw_auth: HashMap::new(),
+            client_push_headers: HashMap::new(),
             client_query_ctx: HashMap::new(),
             client_profile_ids: HashMap::new(),
             admin_password,
@@ -1676,6 +1687,7 @@ impl CgState {
             }),
         );
         self.client_raw_auth.remove(&client_id);
+        self.client_push_headers.remove(&client_id);
         self.client_query_ctx.remove(&client_id);
         self.client_profile_ids.remove(&client_id);
         // Until profileID is required in the URL, default it to `cg{clientGroupID}`
@@ -1742,6 +1754,10 @@ impl CgState {
             request_headers: relay_request_headers,
             user_id: params.user_id.clone().filter(|v| !v.is_empty()),
         };
+        // Retained per client for the router-side `deleteClients` cleanup relay
+        // (the message-handler path keeps its own copy).
+        self.client_push_headers
+            .insert(client_id.clone(), push_relay_headers.clone());
 
         let handler = Box::new(SyncerWsMessageHandler::new(
             self.view_syncer.clone(),
@@ -1850,6 +1866,35 @@ impl CgState {
                     let group_ids = str_array(body.get("clientGroupIDs"));
                     self.apply_client_deletions(&client_id, None, &del_ids, &group_ids)
                         .await;
+                    // TS parity (`syncer-ws-message-handler.ts` 'deleteClients'):
+                    // an explicit deletion also prunes the deleted clients'
+                    // stored mutation results via a `_zero_cleanupResults`
+                    // relay push. Only the explicit path does this — the
+                    // initConnection activeClients GC does not, same as TS.
+                    let cleanup_ids: Vec<String> = del_ids
+                        .iter()
+                        .filter(|c| c.as_str() != &*client_id)
+                        .cloned()
+                        .collect();
+                    if !cleanup_ids.is_empty()
+                        && let Some(pusher) = &self.pusher
+                        && let Some(headers) = self.client_push_headers.get(&*client_id)
+                    {
+                        let selector = crate::message_handler::ConnectionSelector {
+                            client_id: client_id.to_string(),
+                            ws_id: self
+                                .registered_ws
+                                .get(&*client_id)
+                                .cloned()
+                                .unwrap_or_default(),
+                        };
+                        pusher.delete_client_mutations(
+                            &selector,
+                            &cleanup_ids,
+                            headers,
+                            &self.cg_id,
+                        );
+                    }
                 }
                 return;
             }
@@ -2448,9 +2493,10 @@ impl CgState {
                 self.fail_group("Client view synchronization failed");
             }
         }
-        // NOTE: mutations are HTTP-direct (task 8), so there is no pusher here
-        // to run `pusher.delete_client_mutations` — mutation cleanup happens on
-        // the TS mutation path, not in the Rust syncer.
+        // Mutation-result cleanup for EXPLICIT deleteClients messages is
+        // relayed by the caller (see the `deleteClients` arm in
+        // `handle_message`) — the implicit activeClients GC path deliberately
+        // does not clean up, matching TS.
     }
 
     fn on_connection_closed(&mut self, client_id: &str, ws_id: &str) {
@@ -2476,6 +2522,7 @@ impl CgState {
         self.decrement_active_client(ws_id);
         self.client_auth.remove(client_id);
         self.client_raw_auth.remove(client_id);
+        self.client_push_headers.remove(client_id);
         self.client_query_ctx.remove(client_id);
         self.client_profile_ids.remove(client_id);
         let mut global = lock_unpoisoned(&self.global_connections);
@@ -4753,12 +4800,12 @@ mod tests {
 
         let drain =
             |drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| -> Vec<serde_json::Value> {
-            let mut v = Vec::new();
-            while let Ok(WsCommand::Send(m)) = drx.try_recv() {
-                v.push(m);
-            }
-            v
-        };
+                let mut v = Vec::new();
+                while let Ok(WsCommand::Send(m)) = drx.try_recv() {
+                    v.push(m);
+                }
+                v
+            };
         let _ = drain(&mut drx); // discard the `connected` frame
 
         // 1) `version` before authenticating → challenge (authenticated:false).
