@@ -141,6 +141,10 @@ impl SyncerConfig {
             // 4 shards → 41+ of 51 queries breach 2x-of-TS parity (p95 to
             // multi-second); 14 shards (2 CGs/shard on ~11 shards) → 10-17
             // violations, p95 to 1.6s; 28 shards (1 CG/shard) → 0 violations.
+            // 56 shards regressed slightly (4 violations + a slow-client-shed
+            // rehome): more shards also means more CONCURRENT large pokes per
+            // client socket, so 2x host is the measured sweet spot — enough
+            // for CG isolation at gate concurrency without burstier egress.
             //
             // NOTE `std::thread::available_parallelism` is cgroup-quota-AWARE
             // on Linux (it returns 4 in a `--cpus 4` container regardless of
@@ -155,7 +159,7 @@ impl SyncerConfig {
                 .filter(|n| *n > 0)
                 .unwrap_or_else(|| {
                     warn_if_quota_capped();
-                    (host_parallelism() * 4).clamp(16, 64)
+                    (host_parallelism() * 2).clamp(16, 64)
                 }),
             // TS default: 300s. `0` (or a negative) disables it.
             revalidate_interval_ms: {
