@@ -129,13 +129,18 @@ impl SyncerConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
-            // Host core count ON PURPOSE, not the cgroup cpu quota: shards are
-            // `current_thread` executors that SERIALIZE whole client groups, so
-            // fewer shards means coarser head-of-line blocking, and that costs
-            // far more than scheduler contention saves. Measured A/B on a
-            // 4-cpu-capped container (ART G25, 2026-08-19): 4 quota-derived
-            // shards → 51/56 queries breach 2x-of-TS parity with p95 up to
-            // 58s; 14 host-derived shards → 0 violations on the same drive.
+            // Shards bound TAIL FAIRNESS, not throughput: each is a
+            // `current_thread` executor that SERIALIZES its client groups, so
+            // any CG sharing a shard eats the full latency of its neighbor's
+            // hydrations (a single 12k-row hydrate + poke serialization holds
+            // the thread for ~200ms). Threads beyond the CPU count are cheap —
+            // idle shards are parked; busy ones get OS time-slices — so the
+            // default is sized for CG-per-shard isolation at realistic
+            // concurrency, NOT for the core count. Measured A/B on a
+            // 4-cpu-capped container (ART G25 25-conn drive, 2026-08-19):
+            // 4 shards → 41+ of 51 queries breach 2x-of-TS parity (p95 to
+            // multi-second); 14 shards (2 CGs/shard on ~11 shards) → 10-17
+            // violations, p95 to 1.6s; 28 shards (1 CG/shard) → 0 violations.
             //
             // NOTE `std::thread::available_parallelism` is cgroup-quota-AWARE
             // on Linux (it returns 4 in a `--cpus 4` container regardless of
@@ -150,7 +155,7 @@ impl SyncerConfig {
                 .filter(|n| *n > 0)
                 .unwrap_or_else(|| {
                     warn_if_quota_capped();
-                    host_parallelism()
+                    (host_parallelism() * 4).clamp(16, 64)
                 }),
             // TS default: 300s. `0` (or a negative) disables it.
             revalidate_interval_ms: {
