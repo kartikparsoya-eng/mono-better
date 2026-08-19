@@ -775,37 +775,63 @@ impl ClientHandler {
 /// Unlike TS's `Promise.allSettled`, on the actor thread each poke is
 /// sequential. A failed client's error is logged but does not stop
 /// the remaining clients — matching TS's allSettled semantics.
+///
+/// The first failure for a client marks its poker **dead** (`dead[i]`) for the
+/// remainder of this poke. `PokeHandler::add_patch` already fails the client's
+/// downstream terminally on error (`downstream.fail`), mirroring TS where a
+/// caught `addPatch` throw calls `#downstream.fail()` and puts the subscription
+/// in a terminal state so every subsequent `#push` is silently absorbed. Once
+/// dead, we stop re-invoking the poker: this avoids both the wasted `send` into
+/// a closed sink AND the per-patch log flood (a big hydration poke is thousands
+/// of patches; without this, one disconnected client logs once per patch).
+/// Net result: one log line per dead client per poke, matching TS.
 pub struct MultiPoker {
     pokers: Vec<PokeHandler>,
+    dead: Vec<AtomicBool>,
 }
 
 impl MultiPoker {
     pub fn new(clients: &[&ClientHandler], tentative_version: CVRVersion) -> Self {
-        let pokers = clients
+        let pokers: Vec<PokeHandler> = clients
             .iter()
             .map(|c| c.start_poke(tentative_version.clone()))
             .collect();
-        Self { pokers }
+        let dead = pokers.iter().map(|_| AtomicBool::new(false)).collect();
+        Self { pokers, dead }
     }
 
     pub fn add_patch(&self, patch: &PatchToVersion) {
-        for poker in &self.pokers {
+        for (poker, dead) in self.pokers.iter().zip(&self.dead) {
+            if dead.load(AtomicOrdering::Relaxed) {
+                continue;
+            }
             if let Err(e) = poker.add_patch(patch) {
-                eprintln!("Poke add_patch failed for client: {}", e);
+                // First failure: PokeHandler has already failed the downstream
+                // terminally. Mark dead so the remaining patches skip this
+                // poker (no re-push, no re-log) — TS-faithful terminal state.
+                dead.store(true, AtomicOrdering::Relaxed);
+                eprintln!("Poke add_patch failed for client, dropping from poke: {}", e);
             }
         }
     }
 
     pub fn cancel(&self) {
-        for poker in &self.pokers {
+        for (poker, dead) in self.pokers.iter().zip(&self.dead) {
+            if dead.load(AtomicOrdering::Relaxed) {
+                continue;
+            }
             if let Err(e) = poker.cancel() {
+                dead.store(true, AtomicOrdering::Relaxed);
                 eprintln!("Poke cancel failed: {}", e);
             }
         }
     }
 
     pub fn end(&self, final_version: CVRVersion) {
-        for poker in &self.pokers {
+        for (poker, dead) in self.pokers.iter().zip(&self.dead) {
+            if dead.load(AtomicOrdering::Relaxed) {
+                continue;
+            }
             if let Err(e) = poker.end(final_version.clone()) {
                 // A client whose poke cannot complete (delivery failure, or the
                 // "finalVersion not greater" invariant) is mid-poke with no
@@ -814,6 +840,7 @@ impl MultiPoker {
                 // reconnects and rehydrates — matching the per-client failure
                 // handling in `add_patch` (TS Promise.allSettled semantics: the
                 // other clients' pokes proceed).
+                dead.store(true, AtomicOrdering::Relaxed);
                 eprintln!("Poke end failed: {}", e);
                 poker.downstream.fail(e);
             }
@@ -896,6 +923,21 @@ mod tests {
             None,
             Arc::new(FailingSink { fail_tag }),
         )
+    }
+
+    /// Sink that always errors on `push` and counts how many times it was
+    /// invoked, so a test can assert a dead poker is not re-pushed per patch.
+    struct CountingFailSink {
+        pushes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl WebSocketSink for CountingFailSink {
+        fn push(&self, _msg: Value) -> Result<(), String> {
+            self.pushes.fetch_add(1, AtomicOrdering::SeqCst);
+            Err("sink closed".to_string())
+        }
+        fn fail(&self, _e: String) {}
+        fn cancel(&self) {}
     }
 
     fn assert_chain_released(handler: &ClientHandler) {
@@ -1242,6 +1284,52 @@ mod tests {
             .unwrap();
         assert!(poke.cancel().is_err());
         assert_chain_released(&handler);
+    }
+
+    #[test]
+    fn multipoker_drops_dead_client_after_first_failure() {
+        // One client whose sink always errors, alongside a healthy client. The
+        // failing sink must be pushed to at most ONCE across the whole poke (it
+        // dies on the first patch's pokeStart), not once per patch — proving the
+        // per-poker `dead` short-circuit that mirrors TS's terminal downstream
+        // fail. Without it, N patches would produce N pushes + N log lines.
+        let pushes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failing = ClientHandler::new(
+            "cg1",
+            "bad",
+            "ws-bad",
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
+            None,
+            Arc::new(CountingFailSink {
+                pushes: pushes.clone(),
+            }),
+        );
+        let (healthy, healthy_msgs) = make_handler();
+
+        let tentative = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: Some(1),
+        };
+        let poker = MultiPoker::new(&[&failing, &healthy], tentative.clone());
+
+        // Fan out several patches; the failing client dies on the first.
+        for i in 0..5 {
+            poker.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": i})));
+        }
+        poker.end(tentative);
+
+        assert_eq!(
+            pushes.load(AtomicOrdering::SeqCst),
+            1,
+            "dead client must be pushed exactly once, not per patch"
+        );
+        assert!(
+            !healthy_msgs.lock().unwrap().is_empty(),
+            "healthy client keeps receiving patches after the other dies"
+        );
     }
 
     #[test]
