@@ -1899,7 +1899,7 @@ mod tests {
 
         let mut frames = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
-            if let WsCommand::Send(v) = cmd {
+            if let WsCommand::Send { msg: v, .. } = cmd {
                 frames.push(v);
             }
         }
@@ -2072,7 +2072,7 @@ mod tests {
 
         let mut starts = 0;
         let mut ends = 0;
-        while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+        while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
             match v[0].as_str() {
                 Some("pokeStart") => starts += 1,
                 Some("pokeEnd") => ends += 1,
@@ -2692,7 +2692,7 @@ mod tests {
 
         // client1 received a deleteClients ack naming client2.
         let mut saw_ack = false;
-        while let Ok(WsCommand::Send(v)) = rx1.try_recv() {
+        while let Ok(WsCommand::Send { msg: v, .. }) = rx1.try_recv() {
             if v[0] == "deleteClients"
                 && let Some(ids) = v[1]["clientIDs"].as_array()
                 && ids.iter().any(|x| x == "client2")

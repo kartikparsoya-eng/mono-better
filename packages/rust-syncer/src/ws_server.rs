@@ -39,6 +39,15 @@ const DEFAULT_MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
 /// without bound. Env override: `ZERO_WS_DOWNSTREAM_HWM`.
 const DEFAULT_DOWNSTREAM_QUEUE_HWM: i64 = 4096;
 
+/// Primary memory bound: estimated serialized bytes queued downstream for one
+/// connection before it is shed. A single command can be a multi-MB tree, so the
+/// frame-count HWM alone can't bound memory. 256MB estimated-serialized ≈ up to
+/// ~0.75GB in-memory worst case per pinned connection (a `Value` tree is 2–4× its
+/// serialized size). Generous by design — the HWM is a safety valve against a
+/// *stalled* client, not a slow one on a big hydrate. Env override:
+/// `ZERO_WS_DOWNSTREAM_BYTE_HWM` (0 disables byte shedding — rollout escape hatch).
+const DEFAULT_DOWNSTREAM_BYTE_HWM: i64 = 256 * 1024 * 1024;
+
 /// Server-side liveness: close a connection that has sent NOTHING for this
 /// long. zero-client pings every ~5s, so 60s = 12 missed pings; a half-open
 /// socket (pulled cable, sleeping laptop) otherwise queues pokes until the OS
@@ -52,6 +61,16 @@ fn downstream_queue_hwm() -> i64 {
         .and_then(|v| v.parse().ok())
         .filter(|v: &i64| *v > 0)
         .unwrap_or(DEFAULT_DOWNSTREAM_QUEUE_HWM)
+}
+
+/// Byte HWM for the downstream queue. Unlike the frame HWM, `0` is a legal value
+/// here (disables byte shedding), so a parsed `0` is honored rather than filtered.
+fn downstream_byte_hwm() -> i64 {
+    std::env::var("ZERO_WS_DOWNSTREAM_BYTE_HWM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v: &i64| *v >= 0)
+        .unwrap_or(DEFAULT_DOWNSTREAM_BYTE_HWM)
 }
 
 fn liveness_timeout_ms() -> u64 {
@@ -271,6 +290,8 @@ pub async fn accept_connection_with_limit(
     let limits = Arc::new(SinkLimits {
         depth: Arc::new(AtomicI64::new(0)),
         hwm: downstream_queue_hwm(),
+        bytes: Arc::new(AtomicI64::new(0)),
+        byte_hwm: downstream_byte_hwm(),
         kill: kill_tx,
     });
     let sink = DirectWebSocketSink::with_limits(downstream_tx, limits.clone());
@@ -349,13 +370,19 @@ async fn run_ws_writer(
                 break;
             }
             cmd = rx.recv() => {
-                if cmd.is_some() {
+                if let Some(ref c) = cmd {
                     limits.depth.fetch_sub(1, Ordering::SeqCst);
                     crate::metrics::record_ws_queued_delta(-1);
+                    // Symmetric byte accounting: subtract EXACTLY what the sink
+                    // added for this command (only `Send` carries bytes).
+                    if let WsCommand::Send { est_bytes, .. } = c {
+                        limits.bytes.fetch_sub(*est_bytes as i64, Ordering::SeqCst);
+                        crate::metrics::record_ws_queued_bytes_delta(-(*est_bytes as i64));
+                    }
                 }
                 match cmd {
-                    Some(WsCommand::Send(value)) => {
-                        let text = serde_json::to_string(&value).unwrap_or_else(|e| {
+                    Some(WsCommand::Send { msg, .. }) => {
+                        let text = serde_json::to_string(&msg).unwrap_or_else(|e| {
                             tracing::error!("serialization error: {e}");
                             r#"["error",{"kind":"Internal","message":"serialization failed"}]"#.to_string()
                         });

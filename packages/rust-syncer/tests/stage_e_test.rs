@@ -115,7 +115,7 @@ fn hydrate_real_rows_produces_row_pokes() {
     let mut saw_i2 = false;
     let mut saw_poke_part = false;
     let mut frames = 0;
-    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+    while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
         frames += 1;
         if v[0] == "pokePart" {
             saw_poke_part = true;
@@ -221,7 +221,7 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
 
     // The client received a poke carrying lastMutationIDChanges.client1 == 5.
     let mut saw_lmid = false;
-    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+    while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
         if v[0] == "pokePart" {
             let changes = &v[1]["lastMutationIDChanges"];
             if changes.get("client1").and_then(|n| n.as_i64()) == Some(5) {
@@ -341,7 +341,7 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
 
     // Rows from BOTH queries reached the client as poke row patches.
     let (mut saw_i1, mut saw_i2, mut saw_l1) = (false, false, false);
-    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+    while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
         if v[0] == "pokePart" {
             let s = serde_json::to_string(&v).unwrap();
             if s.contains("first issue") {
@@ -460,7 +460,7 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
     );
 
     let mut saw_row = false;
-    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+    while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
         if v[0] == "pokePart" {
             let s = serde_json::to_string(&v).unwrap();
             if s.contains("\"i1\"") && s.contains("custom-hydrated issue") {
@@ -581,7 +581,7 @@ fn partial_success_transform_hydrates_healthy_query() {
     );
 
     let mut saw_healthy_row = false;
-    while let Ok(WsCommand::Send(v)) = rx.try_recv() {
+    while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
         if v[0] == "pokePart" {
             let s = serde_json::to_string(&v).unwrap();
             if s.contains("\"i1\"") && s.contains("healthy issue") {
@@ -704,7 +704,7 @@ fn transform_failure_fails_only_the_offending_connection() {
 
     // Client A received an error frame (its connection was failed).
     let mut a_got_error = false;
-    while let Ok(WsCommand::Send(v)) = rx_a.try_recv() {
+    while let Ok(WsCommand::Send { msg: v, .. }) = rx_a.try_recv() {
         if v[0] == "error" {
             a_got_error = true;
         }

@@ -4400,7 +4400,7 @@ mod tests {
         // `connected` was pushed to the sink and the client is registered.
         let mut connected = false;
         while let Ok(cmd) = drx.try_recv() {
-            if let WsCommand::Send(v) = cmd
+            if let WsCommand::Send { msg: v, .. } = cmd
                 && v[0] == "connected"
             {
                 connected = true;
@@ -4570,7 +4570,7 @@ mod tests {
         state.shutdown();
 
         let mut saw_rehome = false;
-        while let Ok(WsCommand::Send(v)) = drx.try_recv() {
+        while let Ok(WsCommand::Send { msg: v, .. }) = drx.try_recv() {
             if v[0] == "error" {
                 let s = serde_json::to_string(&v).unwrap();
                 if s.contains("Rehome") {
@@ -4927,7 +4927,7 @@ mod tests {
         ));
 
         let error = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command {
-            WsCommand::Send(value)
+            WsCommand::Send { msg: value, .. }
                 if value.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
             {
                 value.get(1).cloned()
@@ -4978,7 +4978,7 @@ mod tests {
         let drain =
             |drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| -> Vec<serde_json::Value> {
                 let mut v = Vec::new();
-                while let Ok(WsCommand::Send(m)) = drx.try_recv() {
+                while let Ok(WsCommand::Send { msg: m, .. }) = drx.try_recv() {
                     v.push(m);
                 }
                 v
@@ -5062,7 +5062,7 @@ mod tests {
         drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
     ) -> serde_json::Value {
         let mut last = serde_json::Value::Null;
-        while let Ok(WsCommand::Send(m)) = drx.try_recv() {
+        while let Ok(WsCommand::Send { msg: m, .. }) = drx.try_recv() {
             last = m;
         }
         last

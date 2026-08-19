@@ -27,12 +27,84 @@ use std::cmp::Ordering;
 
 const PART_COUNT_FLUSH_THRESHOLD: usize = 100;
 
+/// Default per-`pokePart` byte cap (estimated serialized bytes). A part flushes
+/// early once its accumulated estimate crosses this, in addition to the 100-row
+/// count — bounding single-frame size so a burst of large rows can't build a
+/// multi-MB frame (which would also strain proxies and the client's inbound
+/// payload cap). Env override: `ZERO_POKE_PART_MAX_BYTES` (0 disables the byte
+/// cap, leaving only the count threshold).
+const DEFAULT_POKE_PART_MAX_BYTES: usize = 256 * 1024;
+
+/// Envelope overhead added to a flushed part's estimate: `["pokePart",{...}]`
+/// framing plus the poke-id string. A constant is enough for accounting.
+const POKE_PART_ENVELOPE_EST: usize = 48;
+
+/// Cached `ZERO_POKE_PART_MAX_BYTES`. Read once — this is on the per-row hot
+/// path, so never re-parse the env per call.
+fn poke_part_max_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("ZERO_POKE_PART_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_POKE_PART_MAX_BYTES)
+    })
+}
+
 /// Abstract WebSocket sink. The napi implementation proxies to TS's WS via
 /// a ThreadsafeFunction with `Blocking` call mode.
 pub trait WebSocketSink: Send + Sync {
     fn push(&self, msg: Value) -> Result<(), String>;
+    /// Push a frame whose approximate serialized byte size is already known
+    /// (poke parts, where the assembler accumulated the estimate for free).
+    /// Default forwards to `push`; the production sink overrides it to feed the
+    /// byte-aware slow-client shed without re-walking the tree. Test mocks keep
+    /// the default and are unaffected.
+    fn push_sized(&self, msg: Value, _est_bytes: usize) -> Result<(), String> {
+        self.push(msg)
+    }
     fn fail(&self, e: String);
     fn cancel(&self);
+}
+
+/// Approximate serialized JSON size of `v` in bytes. Deliberately cheap and
+/// deterministic — pointer-chasing with no allocation, strictly dominated by
+/// the per-client `to_value` deep conversion `flush_body` already performs on
+/// the same data. Used only for queue accounting, never for protocol
+/// decisions, so exact escaping/number widths don't matter.
+pub fn estimate_json_bytes(v: &Value) -> usize {
+    match v {
+        Value::Null => 4,
+        Value::Bool(_) => 5,
+        Value::Number(_) => 12,
+        Value::String(s) => s.len() + 2, // no escape accounting — fine for an estimate
+        Value::Array(a) => 2 + a.len() + a.iter().map(estimate_json_bytes).sum::<usize>(),
+        Value::Object(m) => {
+            2 + m
+                .iter()
+                .map(|(k, v)| k.len() + 4 + estimate_json_bytes(v))
+                .sum::<usize>()
+        }
+    }
+}
+
+/// Estimated serialized size of one row patch, envelope included. Del patches
+/// carry only the row key; Put patches the full contents.
+fn estimate_row_patch_bytes(rp: &RowPatch) -> usize {
+    const ROW_PATCH_ENVELOPE_EST: usize = 32; // {"op":"put","tableName":"...","id":{}}
+    match rp {
+        RowPatch::Put { id, contents } => {
+            id.table.len() + estimate_json_bytes(contents) + ROW_PATCH_ENVELOPE_EST
+        }
+        RowPatch::Del { id } => {
+            let key_bytes: usize = id
+                .row_key
+                .iter()
+                .map(|(k, v)| k.len() + 4 + estimate_json_bytes(v))
+                .sum();
+            id.table.len() + key_bytes + ROW_PATCH_ENVELOPE_EST
+        }
+    }
 }
 
 // ─── Poke body types ───────────────────────────────────────────────────────
@@ -108,6 +180,9 @@ struct PokeState {
     started: bool,
     body: Option<PokePartBody>,
     part_count: usize,
+    /// Accumulated estimated serialized bytes of the current (unflushed) body.
+    /// Reset to 0 whenever the body is flushed (taken).
+    body_est_bytes: usize,
     poke_in_progress: bool,
 }
 
@@ -119,6 +194,7 @@ impl PokeState {
             started: false,
             body: None,
             part_count: 0,
+            body_est_bytes: 0,
             poke_in_progress: false,
         }
     }
@@ -230,6 +306,11 @@ impl PokeHandler {
                     // TS `#pokedRows.add(1)` fires for every `type === 'row'`
                     // patch delivered to the poker (client-handler.ts:297).
                     crate::otel_metrics::record_poked_row();
+                    // Byte accounting for the slow-client shed + part cap. Add
+                    // the row's estimate regardless of which sub-table it routes
+                    // to — lmid/mutation rows are tiny, regular rows are the ones
+                    // that can build a large frame.
+                    state.body_est_bytes += estimate_row_patch_bytes(rp);
                     let table = match rp {
                         RowPatch::Put { id, .. } => &id.table,
                         RowPatch::Del { id } => &id.table,
@@ -249,7 +330,10 @@ impl PokeHandler {
             }
 
             state.part_count += 1;
-            if state.part_count >= PART_COUNT_FLUSH_THRESHOLD {
+            let byte_cap = poke_part_max_bytes();
+            if state.part_count >= PART_COUNT_FLUSH_THRESHOLD
+                || (byte_cap > 0 && state.body_est_bytes >= byte_cap)
+            {
                 self.flush_body(&mut state)?;
             }
             Ok(())
@@ -395,11 +479,16 @@ impl PokeHandler {
 
     fn flush_body(&self, state: &mut PokeState) -> Result<(), String> {
         if let Some(body) = state.body.take() {
-            if let Err(error) = self.downstream.push(serde_json::json!(["pokePart", body])) {
+            let est = state.body_est_bytes + POKE_PART_ENVELOPE_EST;
+            if let Err(error) =
+                self.downstream
+                    .push_sized(serde_json::json!(["pokePart", body]), est)
+            {
                 self.release_chain(state);
                 return Err(error);
             }
             state.part_count = 0;
+            state.body_est_bytes = 0;
         }
         Ok(())
     }
@@ -1130,6 +1219,81 @@ mod tests {
         assert_eq!(msgs[1][0], "pokePart");
         assert_eq!(msgs[2][0], "pokePart");
         assert_eq!(msgs[3][0], "pokeEnd");
+    }
+
+    #[test]
+    fn estimate_json_bytes_tracks_serialized_size() {
+        // The estimate must stay within a small factor of the real serialized
+        // length across scalars, unicode, and nested JSON — it's an accounting
+        // approximation, not exact, but must never wildly under/over-count.
+        let samples = [
+            serde_json::json!({"id": "1", "n": 42, "b": true, "z": null}),
+            serde_json::json!({"name": "héllo wörld", "tags": ["a", "b", "c"]}),
+            serde_json::json!({"nested": {"deep": {"arr": [1, 2, 3, {"k": "v"}]}}}),
+        ];
+        for s in samples {
+            let actual = serde_json::to_string(&s).unwrap().len();
+            let est = estimate_json_bytes(&s);
+            assert!(
+                est as f64 >= actual as f64 * 0.5 && est as f64 <= actual as f64 * 2.0,
+                "estimate {est} not within 0.5x–2x of actual {actual} for {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn poke_flushes_early_on_byte_cap() {
+        // Large rows must flush into several parts BEFORE the 100-count
+        // threshold — bounding single-frame size. Deterministic against the
+        // shipped 256KB default cap (no env/OnceLock dependency): 8 rows of
+        // ~50KB ≈ 400KB, well over the cap but only 8 rows (≪ 100).
+        let (handler, messages) = make_handler();
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        let big = "x".repeat(50 * 1024);
+        for _ in 0..8 {
+            poke.add_patch(&make_row_patch_put("t1", serde_json::json!({"blob": big})))
+                .unwrap();
+        }
+        poke.end(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: Some(1),
+        })
+        .unwrap();
+        let msgs = messages.lock().unwrap();
+        let parts = msgs.iter().filter(|m| m[0] == "pokePart").count();
+        // 8 rows never reach the 100-count path, so ≥2 parts proves the byte
+        // cap flushed mid-stream. (256KB / ~50KB ⇒ a flush around row 5.)
+        assert!(
+            parts >= 2,
+            "byte cap must split ~400KB into multiple parts, got {parts}"
+        );
+    }
+
+    #[test]
+    fn single_oversized_row_still_ships() {
+        // A single row larger than the cap is never split or dropped — it ships
+        // as one oversized part.
+        let (handler, messages) = make_handler();
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        let huge = "y".repeat(300 * 1024); // > 256KB default cap
+        poke.add_patch(&make_row_patch_put("t1", serde_json::json!({"blob": huge})))
+            .unwrap();
+        poke.end(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: Some(1),
+        })
+        .unwrap();
+        let msgs = messages.lock().unwrap();
+        assert!(
+            msgs.iter().any(|m| m[0] == "pokePart"),
+            "oversized single row must still be delivered as a pokePart"
+        );
     }
 
     #[test]

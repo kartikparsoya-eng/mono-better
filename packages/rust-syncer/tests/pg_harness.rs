@@ -1277,7 +1277,7 @@ fn pg_advance_lmid_change_with_no_queries() {
         .expect("initial hydrate");
 
     let mut hydrate_wire = String::new();
-    while let Ok(WsCommand::Send(frame)) = rx1.try_recv() {
+    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
         hydrate_wire.push_str(&frame.to_string());
     }
     assert!(
@@ -1321,7 +1321,7 @@ fn pg_advance_lmid_change_with_no_queries() {
     assert!(advanced.reset_reason.is_none(), "advance must not reset");
 
     let mut advance_wire = String::new();
-    while let Ok(WsCommand::Send(frame)) = rx1.try_recv() {
+    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
         advance_wire.push_str(&frame.to_string());
     }
     assert!(
@@ -1493,7 +1493,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
     let hydrate_cookie = version_string(&hydrated.version);
 
     let mut hydrate_wire = String::new();
-    while let Ok(WsCommand::Send(frame)) = rx1.try_recv() {
+    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
         hydrate_wire.push_str(&frame.to_string());
     }
     assert!(
@@ -1578,7 +1578,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         .expect("reconnect catchup");
 
     let mut catchup_wire = String::new();
-    while let Ok(WsCommand::Send(frame)) = rx2.try_recv() {
+    while let Ok(WsCommand::Send { msg: frame, .. }) = rx2.try_recv() {
         catchup_wire.push_str(&frame.to_string());
     }
     assert!(

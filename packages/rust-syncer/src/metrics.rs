@@ -558,6 +558,27 @@ pub fn record_ws_queued_delta(delta: i64) {
     WS_QUEUED_FRAMES.fetch_add(delta, Ordering::Relaxed);
 }
 
+/// Estimated serialized bytes queued downstream across all connections. The
+/// byte-aware slow-client shed bounds each connection; this makes the aggregate
+/// pressure visible (and, paired with queued-frames, the mean frame size).
+static WS_QUEUED_BYTES: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn ws_queued_bytes_gauge() -> &'static opentelemetry::metrics::ObservableGauge<i64> {
+    static G: OnceLock<opentelemetry::metrics::ObservableGauge<i64>> = OnceLock::new();
+    G.get_or_init(|| {
+        global::meter("zero")
+            .i64_observable_gauge("zero.sync.websocket.queued-bytes")
+            .with_description("Estimated downstream WS bytes queued across all connections")
+            .with_callback(|o| o.observe(WS_QUEUED_BYTES.load(Ordering::Relaxed), &[]))
+            .build()
+    })
+}
+
+pub fn record_ws_queued_bytes_delta(delta: i64) {
+    let _ = ws_queued_bytes_gauge();
+    WS_QUEUED_BYTES.fetch_add(delta, Ordering::Relaxed);
+}
+
 /// CVR PgPool gauges (size + idle). The pool is the prime capacity-cliff
 /// suspect (per-flush contention against `CVR_MAX_CONNS`); without these an
 /// acquire convoy is invisible until it becomes 10s-timeout fail_groups.
