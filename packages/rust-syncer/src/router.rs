@@ -902,6 +902,73 @@ impl ConnectionRouter {
         .await;
     }
 
+    /// Staggered graceful drain on SIGTERM — port of TS `Syncer.drain()`
+    /// (workers/syncer.ts:732) paced by the `DrainCoordinator`. Rehomes ONE
+    /// client group per drain interval instead of failing every socket at once
+    /// (`shutdown`), so a deploy does not stampede the receiving servers with
+    /// simultaneous reconnect+rehydrate storms.
+    ///
+    /// Pacing: TS re-arms each interval with the drained view-syncer's
+    /// hydration time; the router does not track per-CG hydration time, so the
+    /// drain budget is spread evenly across the live groups instead. The whole
+    /// drain is bounded by `MAX_DRAIN_MS`: the parent ProcessManager
+    /// (life-cycle.ts) waits indefinitely for the child after SIGTERM, but
+    /// orchestrators SIGKILL after their stop-grace period (commonly 30s), so
+    /// staying inside it keeps the final `shutdown()` sweep + executor join
+    /// (and e.g. a dhat profile dump) graceful.
+    pub async fn drain(&self) {
+        /// Upper bound on the elective/staggered phase; the final sweep runs after.
+        const MAX_DRAIN_MS: u64 = 25_000;
+
+        // Refuse new connections for the whole drain, not just the final
+        // sweep — a socket accepted mid-drain would only be rehomed moments
+        // later anyway.
+        self.shutting_down.store(true, Ordering::SeqCst);
+
+        let start = std::time::Instant::now();
+        let deadline = start + std::time::Duration::from_millis(MAX_DRAIN_MS);
+        let total = self.cg_handles.len() as u64;
+        tracing::info!("draining {total} client groups");
+
+        if total > 0 {
+            let coordinator = crate::drain::DrainCoordinator::new();
+            // Kick off with `drainNextIn(0)` (TS Syncer.drain): the first
+            // force-drain timeout fires ~immediately, then each drained CG
+            // re-arms it for the next interval.
+            coordinator.drain_next_in(0);
+            // Spacing such that the full sweep fits inside the budget.
+            // `drain_next_in` divides by TARGET_UTILIZATION (0.6) internally,
+            // so pre-scale to make the EFFECTIVE spacing budget/total.
+            let interval_ms = MAX_DRAIN_MS.saturating_mul(6) / 10 / total.max(1);
+            while !self.cg_handles.is_empty() {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    tracing::warn!("drain budget exhausted; rehoming remaining groups at once");
+                    break;
+                }
+                tokio::select! {
+                    () = coordinator.force_drain_timeout() => {}
+                    () = tokio::time::sleep(remaining) => break,
+                }
+                // Pick an arbitrary live CG and rehome it (TS picks the first
+                // view-syncer in its service map).
+                let Some(id) = self.cg_handles.iter().next().map(|e| e.key().clone()) else {
+                    break;
+                };
+                if let Some((_, mut handle)) = self.cg_handles.remove(&id) {
+                    tracing::debug!("draining client group {id}");
+                    handle.shutdown();
+                    lock_unpoisoned(&self.group_auth_states).remove(&id);
+                }
+                coordinator.drain_next_in(interval_ms);
+            }
+        }
+
+        // Final sweep: rehome anything left and join the executor threads.
+        self.shutdown().await;
+        tracing::info!("finished draining ({} ms)", start.elapsed().as_millis());
+    }
+
     /// Number of active CG threads.
     pub fn cg_count(&self) -> usize {
         self.cg_handles.len()
@@ -1936,7 +2003,7 @@ impl CgState {
                 // the CG engine (the placeholder ViewSyncer can't), which
                 // gates on the admin password and answers per op.
                 if let Some(body) = arr.get(1) {
-                    self.handle_inspect(&client_id, body);
+                    self.handle_inspect(&client_id, body).await;
                 }
                 return;
             }
@@ -2358,26 +2425,30 @@ impl CgState {
     /// `handleInspect` (`inspect-handler.ts`): every op except `authenticate`
     /// requires the client group to have authenticated first; unauthenticated
     /// requests get an `authenticated:false` challenge instead of a result.
-    fn handle_inspect(&mut self, client_id: &str, body: &serde_json::Value) {
+    /// Any op failure — including an unknown op, where TS throws via
+    /// `unreachable(body)` — answers with the `{op:"error", id, value:<string>}`
+    /// shape of inspect-handler.ts's catch block (:171-178): a silent drop
+    /// would hang the client's inspector RPC forever.
+    async fn handle_inspect(&mut self, client_id: &str, body: &serde_json::Value) {
         let Some(ws_id) = self.registered_ws.get(client_id).cloned() else {
             return;
         };
         let op = body.get("op").and_then(|v| v.as_str()).unwrap_or("");
         let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
-        let respond = |engine: &SyncEngine, resp: serde_json::Value| {
-            engine.send_inspect_response(&ws_id, resp);
-        };
 
         // Auth gate — only `authenticate` is allowed before authenticating.
         if op != "authenticate" && !self.inspector_authenticated {
-            respond(
-                &self.sync_engine,
+            self.sync_engine.send_inspect_response(
+                &ws_id,
                 serde_json::json!({"op": "authenticated", "id": id, "value": false}),
             );
             return;
         }
 
-        match op {
+        // Each arm yields `Ok((responseOp, value))` or `Err(message)`; the
+        // response frame (success vs `op:"error"`) is assembled once below so
+        // every path — present and future — flows through the error shape.
+        let result: Result<(&str, serde_json::Value), String> = match op {
             "authenticate" => {
                 let password = body.get("value").and_then(|v| v.as_str()).unwrap_or("");
                 // Valid only if an admin password is configured AND matches.
@@ -2386,89 +2457,151 @@ impl CgState {
                     .as_deref()
                     .is_some_and(|p| !p.is_empty() && p == password);
                 self.inspector_authenticated = ok;
-                respond(
-                    &self.sync_engine,
-                    serde_json::json!({"op": "authenticated", "id": id, "value": ok}),
-                );
+                Ok(("authenticated", serde_json::json!(ok)))
             }
-            "version" => {
-                respond(
-                    &self.sync_engine,
-                    serde_json::json!({"op": "version", "id": id, "value": self.server_version}),
-                );
-            }
+            "version" => Ok(("version", serde_json::json!(self.server_version))),
             "queries" => {
-                // Best-effort from the in-memory CVR: id, ast, ttl, and the
-                // clients that desire each query. (TS also folds server-side
-                // materialization metrics from the InspectorDelegate, which is
-                // not ported — the `metrics` field is left null.)
-                let filter_client = body.get("clientID").and_then(|v| v.as_str());
-                let value = self.inspect_queries_value(filter_client);
-                respond(
-                    &self.sync_engine,
-                    serde_json::json!({"op": "queries", "id": id, "value": value}),
-                );
+                let filter_client = body
+                    .get("clientID")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let now = now_ms();
+                let ttl_clock = self.get_ttl_clock(now);
+                let value = self
+                    .inspect_queries_value(filter_client.as_deref(), ttl_clock)
+                    .await;
+                Ok(("queries", value))
             }
             "metrics" => {
-                // Server metrics come from the OTel/InspectorDelegate layer,
-                // which is not yet ported (task 14) — report empty.
-                respond(
-                    &self.sync_engine,
-                    serde_json::json!({"op": "metrics", "id": id, "value": []}),
-                );
-            }
-            "analyze-query" => {
-                // `analyzeQuery` (query plan / vended-rows analysis) is not
-                // ported; answer with a clear, non-hanging error value.
-                respond(
-                    &self.sync_engine,
+                // The wire value is a RECORD with two REQUIRED TDigest fields
+                // (`serverMetricsSchema`, inspect-down.ts:7-10) — an array or
+                // `{}` fails the client's valita parse and rejects the RPC.
+                // Rust tracks no server TDigests yet, so send empty digests:
+                // `[1000]` is `new TDigest().toJSON()` (default compression,
+                // no centroids), which zero-client parses as a valid digest.
+                Ok((
+                    "metrics",
                     serde_json::json!({
-                        "op": "analyze-query",
-                        "id": id,
-                        "value": {"error": "analyze-query is not supported by rust-syncer"}
+                        "query-materialization-server": [1000],
+                        "query-update-server": [1000],
                     }),
-                );
+                ))
+            }
+            // `analyzeQuery` (query plan / vended-rows analysis) is not ported.
+            // Route through the error op: an `analyze-query` success frame with
+            // an `{error}` payload would fail `analyzeQueryResultSchema` on the
+            // client and hang the RPC.
+            "analyze-query" => {
+                Err("analyze-query is not supported by the rust syncer yet".to_string())
             }
             other => {
                 tracing::warn!("CG {}: unknown inspect op {other:?}", self.cg_id);
+                Err(format!("unknown inspect op: {other}"))
             }
-        }
+        };
+        let frame = match result {
+            Ok((resp_op, value)) => {
+                serde_json::json!({"op": resp_op, "id": id, "value": value})
+            }
+            Err(message) => serde_json::json!({"op": "error", "id": id, "value": message}),
+        };
+        self.sync_engine.send_inspect_response(&ws_id, frame);
     }
 
-    /// Build the `queries` inspector value from the in-memory CVR.
-    fn inspect_queries_value(&self, filter_client: Option<&str>) -> serde_json::Value {
+    /// Build the `queries` inspector rows from the in-memory CVR + the engine's
+    /// row-record cache. Port of `CVRStore.inspectQueries` (cvr-store.ts:1288):
+    /// one row per (clientID, queryHash) desire with TTL-expired desires
+    /// filtered out. Internal queries (lmids/mutationResults) are excluded —
+    /// the TS SQL only reads the `desires` table, which never carries internal
+    /// queries; here that maps to records without `client_state`.
+    async fn inspect_queries_value(
+        &self,
+        filter_client: Option<&str>,
+        ttl_clock: TTLClock,
+    ) -> serde_json::Value {
         let Some(cvr) = &self.cvr else {
             return serde_json::json!([]);
         };
-        let mut out = Vec::new();
+        // Per-query row counts, aggregated once from the row-record cache: the
+        // number of view rows whose refCounts reference the query — the same
+        // count as the TS SQL's `r."refCounts" ? d."queryHash"` subquery.
+        // Empty (rowCount 0) when no CVR store is attached.
+        let rows = self.sync_engine.existing_rows().await;
+        let mut row_counts: HashMap<&str, i64> = HashMap::new();
+        for record in rows.values() {
+            if let Some(ref_counts) = &record.ref_counts {
+                for qid in ref_counts.keys() {
+                    *row_counts.entry(qid.as_str()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut out: Vec<serde_json::Value> = Vec::new();
         for (qid, record) in &cvr.queries {
-            // Which clients desire this query (and optionally filter to one).
-            let mut client_ids: Vec<&String> = cvr
-                .clients
-                .iter()
-                .filter(|(_, c)| c.desired_query_ids.iter().any(|q| q == qid))
-                .map(|(id, _)| id)
-                .collect();
-            if let Some(fc) = filter_client {
-                if !client_ids.iter().any(|c| c.as_str() == fc) {
+            let Some(client_state) = record.client_state() else {
+                continue; // internal query — not client-visible
+            };
+            // `ast` is the client AST, null for custom queries (the TS
+            // delegate's transformed-AST fallback is not ported); `name`/`args`
+            // are non-null only for custom queries — mirroring the columns
+            // selected by the TS SQL.
+            let (ast, name, args) = match record {
+                rust_cvr::types::QueryRecord::Internal(_) => unreachable!(),
+                rust_cvr::types::QueryRecord::Client(r) => (
+                    r.ast.clone(),
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                ),
+                rust_cvr::types::QueryRecord::Custom(r) => (
+                    serde_json::Value::Null,
+                    serde_json::json!(r.name),
+                    serde_json::json!(r.args),
+                ),
+            };
+            for (cid, state) in client_state {
+                if filter_client.is_some_and(|fc| fc != cid) {
                     continue;
                 }
-                client_ids.retain(|c| c.as_str() == fc);
+                // TTL-expiry filter — port of the SQL's
+                // `NOT (inactivatedAtMs + ttlMs <= ttlClock)`. Rust's `ttl` is
+                // never null (clamped at load, TS `COALESCE(ttlMs, DEFAULT)`),
+                // so only `inactivated_at` gates the check.
+                if let Some(inactivated_at) = state.inactivated_at
+                    && inactivated_at + state.ttl <= ttl_clock
+                {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "clientID": cid,
+                    "queryID": qid,
+                    "ast": ast,
+                    "name": name,
+                    "args": args,
+                    "got": record.patch_version().is_some(),
+                    // The in-memory CVR drops a deleted desire's client_state
+                    // entirely (updater delete path), so any desire visible
+                    // here is not deleted — TS `COALESCE(d."deleted", FALSE)`.
+                    "deleted": false,
+                    "ttl": state.ttl,
+                    "inactivatedAt": state.inactivated_at,
+                    "rowCount": row_counts.get(qid.as_str()).copied().unwrap_or(0),
+                    // Server-side materialization metrics live in the TS
+                    // InspectorDelegate, which is not ported; the schema allows
+                    // `metrics: null`.
+                    "metrics": serde_json::Value::Null,
+                }));
             }
-            let (ast, name) = match record {
-                rust_cvr::types::QueryRecord::Client(r) => (Some(r.ast.clone()), None),
-                rust_cvr::types::QueryRecord::Internal(r) => (Some(r.ast.clone()), None),
-                rust_cvr::types::QueryRecord::Custom(r) => (None, Some(r.name.clone())),
-            };
-            out.push(serde_json::json!({
-                "queryID": qid,
-                "ast": ast,
-                "name": name,
-                "got": record.base().transformation_hash.is_some(),
-                "clientIDs": client_ids,
-                "metrics": serde_json::Value::Null,
-            }));
         }
+        // TS orders by (clientID, queryHash); the loop above is queryHash-major.
+        out.sort_by(|a, b| {
+            let key = |v: &serde_json::Value| {
+                (
+                    v["clientID"].as_str().unwrap_or("").to_string(),
+                    v["queryID"].as_str().unwrap_or("").to_string(),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
         serde_json::Value::Array(out)
     }
 
@@ -4891,5 +5024,222 @@ mod tests {
         let last = drain(&mut drx).into_iter().next_back().unwrap();
         assert_eq!(last[1]["op"], "version");
         assert_eq!(last[1]["value"], "9.9.9");
+    }
+
+    /// A CgState pre-authenticated to the inspector, with a live connection.
+    /// Returns the state, runtime, and the sink's receive channel.
+    fn inspect_test_state() -> (
+        CgState,
+        tokio::runtime::Runtime,
+        tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let mut state = CgState::new(
+            "cg1",
+            &factory,
+            Arc::new(crate::auth::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+        );
+        state.admin_password = Some("s3cret".to_string());
+        state.inspector_authenticated = true;
+        let (tx, drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink = DirectWebSocketSink::new(tx);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
+        (state, rt, drx)
+    }
+
+    fn last_inspect_frame(
+        drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
+    ) -> serde_json::Value {
+        let mut last = serde_json::Value::Null;
+        while let Ok(WsCommand::Send(m)) = drx.try_recv() {
+            last = m;
+        }
+        last
+    }
+
+    #[test]
+    fn inspect_queries_rows_match_protocol_shape() {
+        use rust_cvr::types::{
+            BaseQueryRecord, ClientQueryRecord, ClientState, CustomQueryRecord,
+            InternalQueryRecord, QueryRecord,
+        };
+        let (mut state, rt, _drx) = inspect_test_state();
+
+        // `got` is driven by patch_version on the variant, not the base record.
+        let base = |id: &str| BaseQueryRecord {
+            id: id.to_string(),
+            transformation_hash: None,
+            transformation_version: None,
+            row_set_signature: None,
+        };
+        let version = CVRVersion {
+            state_version: "01".to_string(),
+            config_version: None,
+        };
+        let active_state = ClientState {
+            inactivated_at: None,
+            ttl: 300_000,
+            version: version.clone(),
+        };
+        let mut cvr = empty_cvr("cg1", "01");
+        // q1: client query, actively desired by c1 with a TTL → one row.
+        cvr.queries.insert(
+            "q1".to_string(),
+            QueryRecord::Client(ClientQueryRecord {
+                base: base("q1"),
+                ast: serde_json::json!({"table": "issues"}),
+                client_state: std::collections::BTreeMap::from([(
+                    "c1".to_string(),
+                    active_state.clone(),
+                )]),
+                patch_version: Some(version.clone()),
+            }),
+        );
+        // q2: custom query, inactivated but NOT yet TTL-expired → one row.
+        cvr.queries.insert(
+            "q2".to_string(),
+            QueryRecord::Custom(CustomQueryRecord {
+                base: base("q2"),
+                name: "myQuery".to_string(),
+                args: vec![serde_json::json!(42)],
+                client_state: std::collections::BTreeMap::from([(
+                    "c1".to_string(),
+                    ClientState {
+                        inactivated_at: Some(4_000),
+                        ttl: 2_000,
+                        version: version.clone(),
+                    },
+                )]),
+                patch_version: None,
+            }),
+        );
+        // q3: TTL-expired desire (1000 + 1000 <= ttl_clock 5000) → filtered out.
+        cvr.queries.insert(
+            "q3".to_string(),
+            QueryRecord::Client(ClientQueryRecord {
+                base: base("q3"),
+                ast: serde_json::json!({"table": "labels"}),
+                client_state: std::collections::BTreeMap::from([(
+                    "c1".to_string(),
+                    ClientState {
+                        inactivated_at: Some(1_000),
+                        ttl: 1_000,
+                        version: version.clone(),
+                    },
+                )]),
+                patch_version: None,
+            }),
+        );
+        // internal (lmids) query — excluded, like the TS desires-only SQL.
+        cvr.queries.insert(
+            "lmids".to_string(),
+            QueryRecord::Internal(InternalQueryRecord {
+                base: base("lmids"),
+                ast: serde_json::json!({"table": "clients"}),
+            }),
+        );
+        state.cvr = Some(cvr);
+
+        let value = rt.block_on(state.inspect_queries_value(None, 5_000));
+        let rows = value.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "expired + internal queries are excluded");
+
+        // Ordered by (clientID, queryID) → q1 then q2.
+        let q1 = &rows[0];
+        assert_eq!(q1["clientID"], "c1");
+        assert_eq!(q1["queryID"], "q1");
+        assert_eq!(q1["ast"]["table"], "issues");
+        assert_eq!(q1["name"], serde_json::Value::Null);
+        assert_eq!(q1["args"], serde_json::Value::Null);
+        assert_eq!(q1["got"], true);
+        assert_eq!(q1["deleted"], false);
+        assert_eq!(q1["ttl"], 300_000);
+        assert_eq!(q1["inactivatedAt"], serde_json::Value::Null);
+        // No CVR store attached in tests → the row-record cache is empty.
+        assert_eq!(q1["rowCount"], 0);
+        assert_eq!(q1["metrics"], serde_json::Value::Null);
+
+        let q2 = &rows[1];
+        assert_eq!(q2["queryID"], "q2");
+        assert_eq!(q2["ast"], serde_json::Value::Null);
+        assert_eq!(q2["name"], "myQuery");
+        assert_eq!(q2["args"][0], 42);
+        assert_eq!(q2["got"], false);
+        assert_eq!(q2["ttl"], 2_000);
+        assert_eq!(q2["inactivatedAt"], 4_000);
+
+        // clientID filter: no rows for a client with no desires.
+        let filtered = rt.block_on(state.inspect_queries_value(Some("c2"), 5_000));
+        assert_eq!(filtered.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn inspect_metrics_is_a_record_of_tdigests() {
+        let (mut state, rt, mut drx) = inspect_test_state();
+        rt.block_on(state.on_inbound(
+            "c1".into(),
+            "ws1".into(),
+            r#"["inspect",{"op":"metrics","id":"m1"}]"#.to_string(),
+        ));
+        let frame = last_inspect_frame(&mut drx);
+        assert_eq!(frame[0], "inspect");
+        assert_eq!(frame[1]["op"], "metrics");
+        assert_eq!(frame[1]["id"], "m1");
+        let value = &frame[1]["value"];
+        assert!(
+            value.is_object(),
+            "metrics value must be a record, not an array"
+        );
+        // Both fields REQUIRED by serverMetricsSchema, each a TDigest JSON
+        // (non-empty number array; [compression] for an empty digest).
+        for key in ["query-materialization-server", "query-update-server"] {
+            let digest = value[key].as_array().unwrap();
+            assert!(!digest.is_empty());
+            assert!(digest[0].is_number());
+        }
+    }
+
+    #[test]
+    fn inspect_unsupported_and_unknown_ops_answer_with_error_op() {
+        let (mut state, rt, mut drx) = inspect_test_state();
+
+        // analyze-query is not ported → `{op:"error"}`, not a success frame
+        // carrying an `{error}` payload.
+        rt.block_on(state.on_inbound(
+            "c1".into(),
+            "ws1".into(),
+            r#"["inspect",{"op":"analyze-query","id":"a1"}]"#.to_string(),
+        ));
+        let frame = last_inspect_frame(&mut drx);
+        assert_eq!(frame[1]["op"], "error");
+        assert_eq!(frame[1]["id"], "a1");
+        assert!(
+            frame[1]["value"]
+                .as_str()
+                .unwrap()
+                .contains("not supported"),
+            "error value must be a string message"
+        );
+
+        // Unknown op (TS `unreachable` throw → catch) → error op, not silence.
+        // Driven through handle_inspect directly: protocol validation upstream
+        // (parse_upstream_array, mirroring the TS valita layer) rejects unknown
+        // ops before dispatch, so this covers the defensive arm.
+        rt.block_on(state.handle_inspect("c1", &serde_json::json!({"op": "bogus", "id": "b1"})));
+        let frame = last_inspect_frame(&mut drx);
+        assert_eq!(frame[1]["op"], "error");
+        assert_eq!(frame[1]["id"], "b1");
+        assert!(frame[1]["value"].is_string());
     }
 }

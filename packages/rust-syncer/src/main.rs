@@ -279,9 +279,17 @@ fn parse_query_config() -> Option<rust_syncer::FetchConfig> {
     })
 }
 
+/// Which shutdown signal arrived — they drain differently: SIGTERM (deploys,
+/// sent by the zero-cache ProcessManager) gets the staggered rehome; SIGINT
+/// (dev ctrl-C) stays an immediate shutdown.
+enum ShutdownSignal {
+    Interrupt,
+    Terminate,
+}
+
 /// Resolve when the process receives a shutdown signal (Ctrl-C / SIGINT, or
 /// SIGTERM from the ProcessManager). Used to trigger a graceful drain.
-async fn shutdown_signal() {
+async fn shutdown_signal() -> ShutdownSignal {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -298,8 +306,8 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let term = std::future::pending::<()>();
     tokio::select! {
-        () = ctrl_c => {},
-        () = term => {},
+        () = ctrl_c => ShutdownSignal::Interrupt,
+        () = term => ShutdownSignal::Terminate,
     }
 }
 
@@ -559,15 +567,26 @@ fn main() {
             });
         });
         tokio::pin!(server);
-        // Serve until the accept loop ends OR a shutdown signal arrives, then
-        // drain: `router.shutdown()` fails every connection with a Rehome error
-        // so clients reconnect elsewhere (TS `Syncer.drain` / view-syncer
-        // `#cleanup`), and joins the CG threads.
+        // Serve until the accept loop ends OR a shutdown signal arrives.
+        // SIGTERM (a deploy: the ProcessManager signals and waits for exit)
+        // takes the staggered drain — one client group Rehomed per drain
+        // interval (TS `Syncer.drain`) — so the receiving servers absorb the
+        // reconnects gradually. SIGINT keeps dev ctrl-C fast: an immediate
+        // `router.shutdown()` fails every connection with a Rehome error and
+        // joins the CG threads.
         let result = tokio::select! {
             res = &mut server => res,
-            () = shutdown_signal() => {
-                tracing::info!("shutdown signal received; draining connections");
-                ws_router.shutdown().await;
+            sig = shutdown_signal() => {
+                match sig {
+                    ShutdownSignal::Terminate => {
+                        tracing::info!("SIGTERM received; starting staggered drain");
+                        ws_router.drain().await;
+                    }
+                    ShutdownSignal::Interrupt => {
+                        tracing::info!("SIGINT received; shutting down immediately");
+                        ws_router.shutdown().await;
+                    }
+                }
                 Ok(())
             }
         };
