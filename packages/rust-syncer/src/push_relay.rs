@@ -28,6 +28,62 @@ use tokio::sync::mpsc;
 
 use crate::connection::HandlerResult;
 use crate::message_handler::{ConnectionSelector, PushRelayHeaders, PusherDispatch};
+use crate::protocol::{
+    ErrorKind, ErrorOrigin, ErrorReason, MutationID, PushFailedHttpBody, PushFailedZeroCacheBody,
+};
+use crate::router::ConnectionSinks;
+
+/// Max bytes of a failing relay response body echoed back in a `PushFailed`
+/// frame (TS `bodyPreview` parity — never buffer an unbounded error body).
+const BODY_PREVIEW_CAP: usize = 1024;
+
+/// A queued relay POST plus the metadata needed to surface a failure. Real
+/// client pushes carry a `target`; synthetic cleanup pushes are fire-and-forget
+/// (`None`) — TS emits no `PushFailed` for those either.
+struct QueuedPush {
+    payload: serde_json::Value,
+    target: Option<PushTarget>,
+}
+
+/// Who to notify (and about which mutations) when a real push's POST fails.
+struct PushTarget {
+    client_id: String,
+    /// The socket that sent the push. A failure is delivered only if this is
+    /// still the client's current socket (see `send_error_if_current`).
+    ws_id: String,
+    mutation_ids: Vec<MutationID>,
+}
+
+/// Extract `{id, clientID}` pairs from a push body's `mutations` array. Shared
+/// by the enqueue-drop path and the drainer-failure path so both report the
+/// same ids. Reads the *push body* (what lands under `payload["push"]`).
+fn mutation_ids_of(push_body: &serde_json::Value) -> Vec<MutationID> {
+    push_body
+        .get("mutations")
+        .and_then(|m| m.as_array())
+        .map(|muts| {
+            muts.iter()
+                .filter_map(|m| {
+                    Some(MutationID {
+                        id: m.get("id")?.as_i64()?,
+                        client_id: m.get("clientID")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Read up to `cap` bytes of a response body as a lossy UTF-8 preview. Bounded
+/// so a huge error page can't be buffered into the `PushFailed` frame.
+async fn read_body_preview(resp: reqwest::Response, cap: usize) -> Option<String> {
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let end = bytes.len().min(cap);
+    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
 
 /// How long a single relay POST may take before it is abandoned.
 const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -55,7 +111,7 @@ fn queue_cap() -> i64 {
 
 /// Relays custom pushes to the TS push endpoint over HTTP, in order.
 pub struct HttpRelayPusher {
-    tx: mpsc::UnboundedSender<serde_json::Value>,
+    tx: mpsc::UnboundedSender<QueuedPush>,
     /// Queued-but-not-yet-POSTed pushes (enqueue increments, drainer decrements).
     depth: Arc<AtomicI64>,
     cap: i64,
@@ -65,13 +121,16 @@ pub struct HttpRelayPusher {
 
 impl HttpRelayPusher {
     /// `relay_url` is the TS dispatcher's push endpoint (`PUSHER_URL`);
-    /// `relay_token` is the shared secret gating it (`PUSHER_AUTH_TOKEN`).
+    /// `relay_token` is the shared secret gating it (`PUSHER_AUTH_TOKEN`);
+    /// `sinks` lets a failed POST surface a `PushFailed` frame back to the
+    /// originating client's socket.
     pub fn new(
         relay_url: String,
         relay_token: Option<String>,
         tokio_handle: tokio::runtime::Handle,
+        sinks: ConnectionSinks,
     ) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<serde_json::Value>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<QueuedPush>();
         let depth = Arc::new(AtomicI64::new(0));
         let drainer_depth = depth.clone();
         // Single sequential drainer: builds the reqwest client inside the
@@ -79,7 +138,7 @@ impl HttpRelayPusher {
         // push one at a time, preserving per-connection mutation order.
         tokio_handle.spawn(async move {
             let client = reqwest::Client::new();
-            while let Some(payload) = rx.recv().await {
+            while let Some(QueuedPush { payload, target }) = rx.recv().await {
                 drainer_depth.fetch_sub(1, Ordering::SeqCst);
                 let mut req = client
                     .post(&relay_url)
@@ -93,11 +152,45 @@ impl HttpRelayPusher {
                     Ok(resp) => {
                         // Non-2xx: the app/endpoint rejected or errored. The
                         // client's lmid won't advance, so it re-pushes the
-                        // pending mutation on its next attempt/reconnect.
-                        tracing::warn!(status = %resp.status(), "push relay returned non-2xx");
+                        // pending mutation on its next attempt/reconnect — but
+                        // surface a PushFailed now so it doesn't hang (TS parity:
+                        // pusher.ts fails the downstream on a non-OK response).
+                        let status = resp.status().as_u16() as i64;
+                        let preview = read_body_preview(resp, BODY_PREVIEW_CAP).await;
+                        tracing::warn!(status, "push relay returned non-2xx");
+                        if let Some(t) = target {
+                            let err =
+                                crate::protocol::ErrorBody::PushFailedHttp(PushFailedHttpBody {
+                                    kind: ErrorKind::PushFailed,
+                                    details: None,
+                                    mutation_ids: t.mutation_ids,
+                                    message: format!(
+                                        "Fetch from API server returned non-OK status {status}"
+                                    ),
+                                    origin: ErrorOrigin::ZeroCache,
+                                    reason: ErrorReason::Http,
+                                    status,
+                                    body_preview: preview,
+                                });
+                            sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "push relay request failed");
+                        if let Some(t) = target {
+                            let err = crate::protocol::ErrorBody::PushFailedZeroCache(
+                                PushFailedZeroCacheBody {
+                                    kind: ErrorKind::PushFailed,
+                                    details: None,
+                                    mutation_ids: t.mutation_ids,
+                                    // TS parity: pusher.ts catch → "Failed to push: …".
+                                    message: format!("Failed to push: {e}"),
+                                    origin: ErrorOrigin::ZeroCache,
+                                    reason: ErrorReason::Internal,
+                                },
+                            );
+                            sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                        }
                     }
                 }
             }
@@ -150,13 +243,13 @@ impl HttpRelayPusher {
 
     /// Cap-checked enqueue shared by real pushes and synthetic cleanup pushes.
     /// Returns false when the payload was dropped (queue full / channel closed).
-    fn enqueue_payload(&self, payload: serde_json::Value, what: &str) -> bool {
+    fn enqueue_payload(&self, push: QueuedPush, what: &str) -> bool {
         if self.depth.load(Ordering::SeqCst) >= self.cap {
             tracing::warn!(cap = self.cap, "push relay queue full; dropping {what}");
             return false;
         }
         self.depth.fetch_add(1, Ordering::SeqCst);
-        if let Err(e) = self.tx.send(payload) {
+        if let Err(e) = self.tx.send(push) {
             self.depth.fetch_sub(1, Ordering::SeqCst);
             tracing::warn!(error = %e, "push relay channel closed; {what} dropped");
             return false;
@@ -207,39 +300,40 @@ impl PusherDispatch for HttpRelayPusher {
         // item); dropping the NEWEST push keeps the queue an in-order prefix and
         // bounds memory. The client's lmid never advances for a dropped push, so
         // it re-pushes — the same recovery as a failed POST.
+        // Capture the failure target BEFORE moving the payload into the queue:
+        // a drainer-side POST failure (non-2xx / network) surfaces a PushFailed
+        // frame to this exact socket via `send_error_if_current`.
+        let mutation_ids = mutation_ids_of(body);
         let payload = Self::relay_body(selector, body, headers, client_group_id);
+        let target = PushTarget {
+            client_id: selector.client_id.clone(),
+            ws_id: selector.ws_id.clone(),
+            mutation_ids: mutation_ids.clone(),
+        };
         // Enqueue only — never blocks, so this is safe on the async CG-executor
         // threads. The drainer POSTs sequentially (see `new`).
-        if self.enqueue_payload(payload, "push (client will re-push)") {
+        if self.enqueue_payload(
+            QueuedPush {
+                payload,
+                target: Some(target),
+            },
+            "push (client will re-push)",
+        ) {
             return HandlerResult::Ok;
         }
         // The push was DROPPED (queue cap / relay shut down). TS surfaces a
         // failed push as a PushFailed error frame; a silent drop here left the
         // client believing the mutation was in flight until its lmid stalled.
         // Transient: the connection stays open and the client re-pushes.
-        let mutation_ids: Vec<crate::protocol::MutationID> = body
-            .get("mutations")
-            .and_then(|m| m.as_array())
-            .map(|muts| {
-                muts.iter()
-                    .filter_map(|m| {
-                        Some(crate::protocol::MutationID {
-                            id: m.get("id")?.as_i64()?,
-                            client_id: m.get("clientID")?.as_str()?.to_string(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         HandlerResult::Transient {
             errors: vec![crate::protocol::ErrorBody::PushFailedZeroCache(
-                crate::protocol::PushFailedZeroCacheBody {
-                    kind: crate::protocol::ErrorKind::PushFailed,
+                PushFailedZeroCacheBody {
+                    kind: ErrorKind::PushFailed,
                     details: None,
                     mutation_ids,
                     message: "push relay queue is full; retry".to_string(),
-                    origin: crate::protocol::ErrorOrigin::ZeroCache,
-                    reason: crate::protocol::ErrorReason::Internal,
+                    origin: ErrorOrigin::ZeroCache,
+                    reason: ErrorReason::Internal,
                 },
             )],
         }
@@ -280,7 +374,13 @@ impl PusherDispatch for HttpRelayPusher {
             }),
         );
         let payload = Self::relay_body(selector, &push, headers, client_group_id);
-        self.enqueue_payload(payload, "mutation-results cleanup (single)");
+        self.enqueue_payload(
+            QueuedPush {
+                payload,
+                target: None,
+            },
+            "mutation-results cleanup (single)",
+        );
     }
 
     fn delete_client_mutations(
@@ -311,13 +411,185 @@ impl PusherDispatch for HttpRelayPusher {
             }),
         );
         let payload = Self::relay_body(selector, &push, headers, client_group_id);
-        self.enqueue_payload(payload, "mutation-results cleanup (bulk)");
+        self.enqueue_payload(
+            QueuedPush {
+                payload,
+                target: None,
+            },
+            "mutation-results cleanup (bulk)",
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ws_sink::{DirectWebSocketSink, WsCommand};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// `mutation_ids_of` extracts `{id, clientID}` from a push body's
+    /// `mutations` array (shared by the drop path and the drainer-failure path).
+    #[test]
+    fn mutation_ids_of_extracts_pairs() {
+        let body = serde_json::json!({"mutations": [
+            {"id": 7, "clientID": "cA"},
+            {"id": 8, "clientID": "cB"},
+            {"id": 9},                    // missing clientID → skipped
+        ]});
+        let ids = mutation_ids_of(&body);
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].id, 7);
+        assert_eq!(ids[0].client_id, "cA");
+        assert_eq!(ids[1].id, 8);
+        // No mutations key → empty, not a panic.
+        assert!(mutation_ids_of(&serde_json::json!({})).is_empty());
+    }
+
+    /// A one-shot TCP server that returns `status` with `body` then closes.
+    /// Returns the bound address to point the relay at.
+    async fn oneshot_http(status: u16, body: &'static str) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        addr
+    }
+
+    fn selector(client_id: &str, ws_id: &str) -> ConnectionSelector {
+        ConnectionSelector {
+            client_id: client_id.to_string(),
+            ws_id: ws_id.to_string(),
+        }
+    }
+
+    /// A non-2xx relay response surfaces a `PushFailedHttp` frame to the
+    /// originating socket, carrying the status, mutation ids, and a body preview
+    /// — without closing the connection.
+    #[tokio::test]
+    async fn drainer_surfaces_push_failed_http_on_non_2xx() {
+        let addr = oneshot_http(500, "nope").await;
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+
+        let pusher = HttpRelayPusher::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let body = serde_json::json!({"mutations": [{"id": 7, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("push failure frame not delivered in time")
+            .expect("channel closed");
+        match frame {
+            WsCommand::Send { msg, .. } => {
+                assert_eq!(msg[0], "error");
+                assert_eq!(msg[1]["kind"], "PushFailed");
+                assert_eq!(msg[1]["status"], 500);
+                assert_eq!(msg[1]["mutationIDs"][0]["id"], 7);
+                assert_eq!(msg[1]["body_preview"], "nope");
+            }
+            _ => panic!("expected a non-closing error Send frame"),
+        }
+    }
+
+    /// A network-level failure (nothing listening) surfaces a
+    /// `PushFailedZeroCache` frame with a "Failed to push:" message.
+    #[tokio::test]
+    async fn drainer_surfaces_push_failed_zerocache_on_network_error() {
+        // Bind then drop to get an almost-certainly-closed port.
+        let dead = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap()
+        };
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+
+        let pusher = HttpRelayPusher::new(
+            format!("http://{dead}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let body = serde_json::json!({"mutations": [{"id": 3, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+
+        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("push failure frame not delivered in time")
+            .expect("channel closed");
+        match frame {
+            WsCommand::Send { msg, .. } => {
+                assert_eq!(msg[1]["kind"], "PushFailed");
+                assert!(
+                    msg[1]["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Failed to push:"),
+                    "got: {}",
+                    msg[1]["message"]
+                );
+            }
+            _ => panic!("expected an error Send frame"),
+        }
+    }
+
+    /// A push whose target socket has been superseded (client reconnected under
+    /// a new ws_id) delivers NOTHING — the replacement re-pushes on its own.
+    #[tokio::test]
+    async fn drainer_drops_frame_for_superseded_socket() {
+        let addr = oneshot_http(500, "x").await;
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Registered under ws2, but the push targets ws1 (the old socket).
+        sinks.insert_for_test("cA", "ws2", DirectWebSocketSink::new(tx));
+
+        let pusher = HttpRelayPusher::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let body = serde_json::json!({"mutations": [{"id": 1, "clientID": "cA"}]});
+        let _ = pusher.enqueue_push(
+            &selector("cA", "ws1"),
+            &body,
+            &PushRelayHeaders::default(),
+            "cg1",
+        );
+
+        // Give the drainer time to POST + fail; ws2 must receive nothing.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "superseded socket must not be notified"
+        );
+    }
 
     /// Client push overrides captured at initConnection must reach the relay
     /// payload (the TS endpoint applies the allowlist/filters); without an

@@ -426,6 +426,85 @@ pub struct ConnectionRouter {
 struct ConnectionInfo {
     client_group_id: String,
     ws_id: String,
+    /// The connection's downstream sink. Cloneable + `Send + Sync` (an
+    /// `UnboundedSender` + `Arc<SinkLimits>`), so services running on the tokio
+    /// runtime — e.g. the push relay drainer — can deliver a frame to this
+    /// client's socket without reaching into the CG executor threads.
+    sink: DirectWebSocketSink,
+}
+
+/// Sink registry handed to services that must deliver frames to a specific
+/// client's socket from the tokio runtime (the push-relay drainer, which learns
+/// of a POST failure long after the message-handling path has returned). Wraps
+/// the router's live connection map, so delivery follows the exact
+/// insert/remove lifecycle already maintained for `ConnectionInfo` — no second
+/// structure to leak. Delivery is `ws_id`-guarded (see `send_error_if_current`).
+#[derive(Clone)]
+pub struct ConnectionSinks(Arc<Mutex<HashMap<String, ConnectionInfo>>>);
+
+impl ConnectionSinks {
+    /// A fresh, empty registry. Prod shares one instance between the router
+    /// (which populates it) and the services factory (which hands it to the
+    /// pusher); tests/other constructors get their own.
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    /// Send a non-fatal error frame to `client_id`'s CURRENT socket iff it is
+    /// still `ws_id`. Never closes the connection. Returns whether delivered.
+    ///
+    /// The `ws_id` guard matters: by the time a relay POST fails the client may
+    /// have reconnected (new socket, same `client_id`). The replacement
+    /// connection re-pushes anything above the server lmid on reconnect, so
+    /// failing the *new* socket for the *old* socket's push would be a spurious
+    /// disconnect. Rust is deliberately stricter here than TS (which routes by
+    /// `clientID` only) — a documented, strictly-safer divergence.
+    pub fn send_error_if_current(
+        &self,
+        client_id: &str,
+        ws_id: &str,
+        error: &crate::protocol::ErrorBody,
+    ) -> bool {
+        let sink = {
+            let conns = lock_unpoisoned(&self.0);
+            match conns.get(client_id) {
+                Some(info) if info.ws_id == ws_id => info.sink.clone(),
+                _ => {
+                    tracing::debug!(
+                        client_id,
+                        ws_id,
+                        "push-failure target is no longer the current socket; dropping frame"
+                    );
+                    return false;
+                }
+            }
+            // guard dropped here — never hold the lock across the push
+        };
+        sink.push(crate::protocol::error_message(error));
+        true
+    }
+}
+
+impl Default for ConnectionSinks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl ConnectionSinks {
+    /// Register a sink under `client_id`/`ws_id` for tests that exercise
+    /// delivery without going through the full connection-admission path.
+    pub(crate) fn insert_for_test(&self, client_id: &str, ws_id: &str, sink: DirectWebSocketSink) {
+        lock_unpoisoned(&self.0).insert(
+            client_id.to_string(),
+            ConnectionInfo {
+                client_group_id: "cg-test".to_string(),
+                ws_id: ws_id.to_string(),
+                sink,
+            },
+        );
+    }
 }
 
 impl ConnectionRouter {
@@ -452,6 +531,7 @@ impl ConnectionRouter {
             max_client_groups,
             default_num_shards(),
             None,
+            ConnectionSinks::new(),
         )
     }
 
@@ -469,10 +549,13 @@ impl ConnectionRouter {
         max_client_groups: usize,
         num_shards: usize,
         cvr_pool: Option<sqlx::PgPool>,
+        connection_sinks: ConnectionSinks,
     ) -> Self {
         let num_shards = num_shards.max(1);
         let cg_handles: Arc<DashMap<String, CGHandle>> = Arc::new(DashMap::new());
-        let connections = Arc::new(Mutex::new(HashMap::new()));
+        // Share the registry's map so the pusher (given a clone of the same
+        // `ConnectionSinks`) sees the connections this router admits.
+        let connections = connection_sinks.0.clone();
 
         let shutting_down = Arc::new(AtomicBool::new(false));
         let mut executors = Vec::with_capacity(num_shards);
@@ -651,6 +734,7 @@ impl ConnectionRouter {
                 ConnectionInfo {
                     client_group_id: client_group_id.clone(),
                     ws_id: ws_id.clone(),
+                    sink: ctx.sink.clone(),
                 },
             );
             existing
@@ -2049,13 +2133,14 @@ impl CgState {
                     .get("userPushURL")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
-                headers: body.get("userPushHeaders").and_then(|v| v.as_object()).map(
-                    |m| {
+                headers: body
+                    .get("userPushHeaders")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
                         m.iter()
                             .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                             .collect()
-                    },
-                ),
+                    }),
             });
         }
         let client_schema = body
@@ -3471,6 +3556,31 @@ mod tests {
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::version::version_from_string;
 
+    /// `send_error_if_current` delivers only to the client's CURRENT socket:
+    /// a matching ws_id gets the error frame; a stale ws_id or unknown client
+    /// is dropped (the reconnected socket re-pushes on its own).
+    #[test]
+    fn connection_sinks_deliver_only_to_current_socket() {
+        use crate::protocol::{ErrorBody, ErrorKind};
+        let sinks = ConnectionSinks::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
+        let err = ErrorBody::basic(ErrorKind::PushFailed, "boom".to_string());
+
+        // Stale ws_id → dropped, nothing delivered.
+        assert!(!sinks.send_error_if_current("cA", "ws0", &err));
+        // Unknown client → dropped.
+        assert!(!sinks.send_error_if_current("cZ", "ws1", &err));
+        assert!(rx.try_recv().is_err(), "no frame for stale/unknown targets");
+
+        // Current ws_id → delivered as an ["error", …] frame (not a close).
+        assert!(sinks.send_error_if_current("cA", "ws1", &err));
+        match rx.try_recv() {
+            Ok(WsCommand::Send { msg, .. }) => assert_eq!(msg[0], "error"),
+            _ => panic!("expected an error Send frame on the current socket"),
+        }
+    }
+
     /// Coalescing parity with TS notifier.ts: the newer notification's fields
     /// win, but the merged upstream commit time keeps the OLDEST value (it
     /// bounds the lag of everything the merge subsumed).
@@ -4761,6 +4871,7 @@ mod tests {
             100,
             3,
             None,
+            ConnectionSinks::new(),
         );
 
         // Fake handles (no real CG task) let us load specific executors without
@@ -4825,6 +4936,7 @@ mod tests {
             200,
             k,
             None,
+            ConnectionSinks::new(),
         );
 
         for i in 0..n {

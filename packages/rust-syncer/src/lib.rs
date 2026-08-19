@@ -65,8 +65,8 @@ pub use replica_schema::{
     read_replica_versions_from_path, validate_client_schema,
 };
 pub use router::{
-    AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter, CvrPgConfig,
-    GroupAuthState, SyncEngineConfig,
+    AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter, ConnectionSinks,
+    CvrPgConfig, GroupAuthState, SyncEngineConfig,
 };
 pub use sync_engine::{SyncEngine, SyncResult, parse_existing_rows};
 pub use ws_server::{

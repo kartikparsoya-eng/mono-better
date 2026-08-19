@@ -369,7 +369,8 @@ fn main() {
             env::var("ZERO_LOG_LEVEL").map(|l| tracing_subscriber::EnvFilter::new(l.trim()))
         })
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let json_logs = env::var("ZERO_LOG_FORMAT").is_ok_and(|f| f.trim().eq_ignore_ascii_case("json"));
+    let json_logs =
+        env::var("ZERO_LOG_FORMAT").is_ok_and(|f| f.trim().eq_ignore_ascii_case("json"));
     if json_logs {
         tracing_subscriber::fmt()
             .json()
@@ -464,11 +465,16 @@ fn main() {
     // Create the connection router with the real per-CG services factory and a
     // real JWT auth validator (secret/jwk/jwksUrl from config). Spawns the
     // `num_shards` executor threads; each receives a clone of the shared pool.
+    // One registry shared between the router (populates it as connections are
+    // admitted) and the services factory (hands it to each CG's push relay so a
+    // drainer POST failure can be surfaced to the originating socket).
+    let connection_sinks = rust_syncer::ConnectionSinks::new();
     let router = Arc::new(ConnectionRouter::new_sharded(
         Arc::new(RealServicesFactory {
             config: config.clone(),
             tokio_handle: runtime.handle().clone(),
             metrics: metrics.clone(),
+            connection_sinks: connection_sinks.clone(),
         }),
         Arc::new(rust_syncer::JwtAuthValidator {
             jwk: config.auth_jwk.clone(),
@@ -481,6 +487,7 @@ fn main() {
         config.max_client_groups,
         num_shards,
         Some(cvr_pool.clone()),
+        connection_sinks,
     ));
 
     // Bind BOTH listeners eagerly so the process is genuinely accepting on its
@@ -648,6 +655,9 @@ struct RealServicesFactory {
     config: Arc<SyncerConfig>,
     tokio_handle: tokio::runtime::Handle,
     metrics: Arc<rust_syncer::metrics::Metrics>,
+    /// Shared with the router: lets the per-CG push relay deliver a PushFailed
+    /// frame back to a client's socket when a relay POST fails on the drainer.
+    connection_sinks: rust_syncer::ConnectionSinks,
 }
 
 impl CGServicesFactory for RealServicesFactory {
@@ -683,6 +693,7 @@ impl CGServicesFactory for RealServicesFactory {
             url,
             self.config.pusher_auth_token.clone(),
             self.tokio_handle.clone(),
+            self.connection_sinks.clone(),
         )))
     }
 
