@@ -1658,16 +1658,27 @@ mod tests {
     fn sync_engine_census_returns_to_baseline_after_drop() {
         use crate::live_count::SYNC_ENGINE;
         use std::sync::atomic::Ordering;
-        let base = SYNC_ENGINE.load(Ordering::Relaxed);
-        {
-            let _engine = SyncEngine::new(IvmPipelines::new());
-            assert_eq!(SYNC_ENGINE.load(Ordering::Relaxed), base + 1);
+        // The census counter is process-global and the harness runs tests on
+        // parallel threads, so a sibling test constructing/dropping its own
+        // SyncEngine mid-assertion makes an exact-count check flaky (it aborted
+        // a release run). Retry a few times; a real Guard leak fails EVERY
+        // attempt (the counter never returns to its snapshot), while transient
+        // cross-test interference passes on a quiet retry.
+        let mut last: Option<(i64, i64, i64)> = None;
+        for _ in 0..8 {
+            let base = SYNC_ENGINE.load(Ordering::Relaxed);
+            let held = {
+                let _engine = SyncEngine::new(IvmPipelines::new());
+                SYNC_ENGINE.load(Ordering::Relaxed)
+            };
+            let after = SYNC_ENGINE.load(Ordering::Relaxed);
+            if held == base + 1 && after == base {
+                return;
+            }
+            last = Some((base, held, after));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert_eq!(
-            SYNC_ENGINE.load(Ordering::Relaxed),
-            base,
-            "SyncEngine census leaked on drop"
-        );
+        panic!("SyncEngine census never returned to baseline: {last:?}");
     }
 
     fn row_id(id: &str) -> RowID {
