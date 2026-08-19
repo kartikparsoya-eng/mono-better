@@ -328,7 +328,10 @@ pub fn record_api_attempt(
         opentelemetry::KeyValue::new("attempt", attempt as i64),
     ];
     if let Some(code) = http_status {
-        attrs.push(opentelemetry::KeyValue::new("http_status_code", code as i64));
+        attrs.push(opentelemetry::KeyValue::new(
+            "http_status_code",
+            code as i64,
+        ));
         attrs.push(opentelemetry::KeyValue::new(
             "http_status_class",
             format!("{}xx", code / 100),

@@ -97,7 +97,9 @@ fn run(iters: usize) {
         let id_str = row_id_string(&id);
         let update = RowUpdate {
             version: Some("rv".to_string()),
-            contents: Some(std::sync::Arc::new(serde_json::json!({ "id": n_new, "name": "x" }))),
+            contents: Some(std::sync::Arc::new(
+                serde_json::json!({ "id": n_new, "name": "x" }),
+            )),
             ref_counts: ref_counts("q", 1),
         };
         let mut rows: HashMap<String, (RowID, RowUpdate)> = HashMap::new();

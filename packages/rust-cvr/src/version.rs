@@ -105,9 +105,11 @@ pub fn version_to_nullable_cookie(v: &NullableCVRVersion) -> Option<String> {
     v.as_ref().map(version_to_cookie)
 }
 
-pub fn cookie_to_version(cookie: Option<&str>) -> NullableCVRVersion {
-    cookie.map(version_from_string)
-}
+// NOTE: there is deliberately no `cookie_to_version` here. It used to wrap the
+// PANICKING `version_from_string`, which is a foot-gun on any client-supplied
+// cookie path. All cookie parsing must go through the fallible
+// `try_version_from_string` (used by every real caller). Do not re-add an
+// infallible cookie→version helper.
 
 /// Mirrors TS `versionString(v)`.
 pub fn version_string(v: &CVRVersion) -> String {

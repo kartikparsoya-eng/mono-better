@@ -447,6 +447,17 @@ fn main() {
         match opts().connect(&config.cvr_pg_uri).await {
             Ok(pool) => pool,
             Err(e) => {
+                // Best-effort eager connect, then fall back to a lazy pool and
+                // report ready anyway — DELIBERATE TS parity, do NOT "harden"
+                // this into a hard readiness gate. TS's sync worker fires
+                // `['ready',{ready:true}]` after a best-effort `warmupConnections`
+                // wrapped in `Promise.allSettled` (syncer.ts), which TOLERATES a
+                // CVR-down warmup failure — so TS also comes up ready with the CVR
+                // Postgres unreachable and connects lazily on first client.
+                // Gating our stdout ready signal on a CVR `SELECT 1` would make
+                // this syncer stricter than TS (the orchestrator would restart-
+                // loop where TS would serve /readyz=503 until PG returns). `/readyz`
+                // still reports the true CVR+replica health for the LB to consult.
                 tracing::error!("CVR pool eager connect failed ({e}); using lazy pool");
                 opts()
                     .connect_lazy(&config.cvr_pg_uri)

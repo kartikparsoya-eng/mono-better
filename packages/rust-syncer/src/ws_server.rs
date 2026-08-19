@@ -448,6 +448,20 @@ async fn run_ws_writer(
             }
         }
     }
+
+    // The writer is exiting (shed/Fail/Close/socket error/liveness). Commands
+    // still queued were counted into the process-global queued-frames/bytes
+    // gauges at enqueue but will never be dequeued here — drain them for metrics
+    // accounting so the gauges don't monotonically inflate under connection
+    // churn (worst on the slow-client kill path, where the backlog is largest).
+    // The per-connection `limits` counters need no fixup: the whole
+    // `SinkLimits` Arc drops with this task.
+    while let Ok(cmd) = rx.try_recv() {
+        crate::metrics::record_ws_queued_delta(-1);
+        if let WsCommand::Send { est_bytes, .. } = cmd {
+            crate::metrics::record_ws_queued_bytes_delta(-(est_bytes as i64));
+        }
+    }
 }
 
 /// Wall-clock millis (liveness bookkeeping shared between reader and writer).

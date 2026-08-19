@@ -376,7 +376,13 @@ async fn post_transform_attempts(
             Err(e) => {
                 // Network errors can be transient (TS retries `fetch failed`).
                 let will_retry = attempt < FETCH_MAX_ATTEMPTS;
-                crate::metrics::record_api_attempt("fetch_error", will_retry, attempt_ms, attempt, None);
+                crate::metrics::record_api_attempt(
+                    "fetch_error",
+                    will_retry,
+                    attempt_ms,
+                    attempt,
+                    None,
+                );
                 if will_retry {
                     tokio::time::sleep(Duration::from_millis(backoff_delay_ms(attempt))).await;
                     attempt += 1;
@@ -392,7 +398,13 @@ async fn post_transform_attempts(
                 if !status.is_success() {
                     // 5xx can be transient (TS retries them); 4xx fails now.
                     let will_retry = status.is_server_error() && attempt < FETCH_MAX_ATTEMPTS;
-                    crate::metrics::record_api_attempt("http_error", will_retry, attempt_ms, attempt, Some(status.as_u16()));
+                    crate::metrics::record_api_attempt(
+                        "http_error",
+                        will_retry,
+                        attempt_ms,
+                        attempt,
+                        Some(status.as_u16()),
+                    );
                     if will_retry {
                         tokio::time::sleep(Duration::from_millis(backoff_delay_ms(attempt))).await;
                         attempt += 1;
@@ -409,11 +421,23 @@ async fn post_transform_attempts(
                 }
                 match resp.json::<Value>().await {
                     Ok(v) => {
-                        crate::metrics::record_api_attempt("success", false, attempt_ms, attempt, Some(status.as_u16()));
+                        crate::metrics::record_api_attempt(
+                            "success",
+                            false,
+                            attempt_ms,
+                            attempt,
+                            Some(status.as_u16()),
+                        );
                         break Ok(v);
                     }
                     Err(e) => {
-                        crate::metrics::record_api_attempt("parse_error", false, attempt_ms, attempt, Some(status.as_u16()));
+                        crate::metrics::record_api_attempt(
+                            "parse_error",
+                            false,
+                            attempt_ms,
+                            attempt,
+                            Some(status.as_u16()),
+                        );
                         break Err((
                             "parse_error",
                             transform_failed(

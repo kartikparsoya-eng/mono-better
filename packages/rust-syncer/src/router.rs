@@ -2840,7 +2840,12 @@ impl CgState {
         let Some(path) = self.replica_path.as_deref() else {
             return false;
         };
-        let conn = match rusqlite::Connection::open(path) {
+        // READ_ONLY like every other replica reader: the default
+        // `Connection::open` is READ_WRITE|CREATE, which would silently create
+        // an empty db if the replica is missing/swapped at this instant — then
+        // find no permissions and keep serving stale rules instead of surfacing
+        // the problem. Fail cleanly into the warn+return-false path instead.
+        let conn = match crate::replica_schema::open_replica_read_only(path) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(

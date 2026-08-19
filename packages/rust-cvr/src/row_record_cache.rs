@@ -354,8 +354,8 @@ impl RowRecordCache {
         while let Some(row_result) = stream.next().await {
             let db_row = row_result?;
             let rows_row: RowsRow = db_row.into();
-            let record = rows_row_to_row_record(&rows_row)
-                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+            let record =
+                rows_row_to_row_record(&rows_row).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
             let key = row_id_string(&record.id);
             cache.insert(key, record);
         }

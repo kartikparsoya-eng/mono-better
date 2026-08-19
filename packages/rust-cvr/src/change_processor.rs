@@ -324,7 +324,14 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
+        processor.on_row_change(
+            RowChangeType::Add,
+            "q1",
+            "users",
+            row_key.clone(),
+            Some(row.clone()),
+            &existing_rows,
+        );
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -366,8 +373,22 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then REMOVE → refCount goes to 0
-        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
-        processor.on_row_change(RowChangeType::Remove, "q1", "users", row_key.clone(), None, &existing_rows);
+        processor.on_row_change(
+            RowChangeType::Add,
+            "q1",
+            "users",
+            row_key.clone(),
+            Some(row.clone()),
+            &existing_rows,
+        );
+        processor.on_row_change(
+            RowChangeType::Remove,
+            "q1",
+            "users",
+            row_key.clone(),
+            None,
+            &existing_rows,
+        );
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -405,8 +426,22 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD from query1 + ADD from query2 → refCounts = {q1: 1, q2: 1}
-        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
-        processor.on_row_change(RowChangeType::Add, "q2", "users", row_key.clone(), Some(row.clone()), &existing_rows);
+        processor.on_row_change(
+            RowChangeType::Add,
+            "q1",
+            "users",
+            row_key.clone(),
+            Some(row.clone()),
+            &existing_rows,
+        );
+        processor.on_row_change(
+            RowChangeType::Add,
+            "q2",
+            "users",
+            row_key.clone(),
+            Some(row.clone()),
+            &existing_rows,
+        );
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -465,7 +500,14 @@ mod tests {
             let mut row_key = Map::new();
             row_key.insert("id".to_string(), Value::String(format!("row{}", i)));
 
-            processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
+            processor.on_row_change(
+                RowChangeType::Add,
+                "q1",
+                "users",
+                row_key.clone(),
+                Some(row.clone()),
+                &existing_rows,
+            );
         }
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
@@ -505,7 +547,14 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
+        processor.on_row_change(
+            RowChangeType::Add,
+            "q1",
+            "users",
+            row_key.clone(),
+            Some(row.clone()),
+            &existing_rows,
+        );
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -549,7 +598,14 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then EDIT → refCount stays at 1
-        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
+        processor.on_row_change(
+            RowChangeType::Add,
+            "q1",
+            "users",
+            row_key.clone(),
+            Some(row.clone()),
+            &existing_rows,
+        );
 
         // EDIT with updated version
         let mut row2 = Map::new();
@@ -557,7 +613,14 @@ mod tests {
         row2.insert("name".to_string(), Value::String("Bob".to_string()));
         row2.insert("_0_version".to_string(), Value::String("v2".to_string()));
 
-        processor.on_row_change(RowChangeType::Edit, "q1", "users", row_key.clone(), Some(row2.clone()), &existing_rows);
+        processor.on_row_change(
+            RowChangeType::Edit,
+            "q1",
+            "users",
+            row_key.clone(),
+            Some(row2.clone()),
+            &existing_rows,
+        );
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),

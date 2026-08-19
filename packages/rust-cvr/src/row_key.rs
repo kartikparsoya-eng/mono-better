@@ -162,7 +162,8 @@ static ROW_ID_STRING_CACHE: OnceLock<parking_lot::Mutex<RowIdStringCache>> = Onc
 
 /// Mirrors TS's memoized `rowIDString` using a thread-safe bounded cache.
 pub fn row_id_string_cached(id: &RowID) -> String {
-    let cache = ROW_ID_STRING_CACHE.get_or_init(|| parking_lot::Mutex::new(RowIdStringCache::new()));
+    let cache =
+        ROW_ID_STRING_CACHE.get_or_init(|| parking_lot::Mutex::new(RowIdStringCache::new()));
     let mut guard = cache.lock();
     if let Some(s) = guard.get(id) {
         return s;

@@ -314,8 +314,16 @@ mod tests {
             .is_err()
         );
         assert!(*kill_rx.borrow(), "kill fires on byte overflow");
-        assert_eq!(limits.bytes.load(Ordering::SeqCst), 800, "rejected bytes rolled back");
-        assert_eq!(limits.depth.load(Ordering::SeqCst), 2, "rejected frame rolled back");
+        assert_eq!(
+            limits.bytes.load(Ordering::SeqCst),
+            800,
+            "rejected bytes rolled back"
+        );
+        assert_eq!(
+            limits.depth.load(Ordering::SeqCst),
+            2,
+            "rejected frame rolled back"
+        );
     }
 
     /// Push N sized frames then drain them all → both counters return to zero
@@ -341,8 +349,16 @@ mod tests {
                 limits.depth.fetch_sub(1, Ordering::SeqCst);
             }
         }
-        assert_eq!(limits.bytes.load(Ordering::SeqCst), 0, "no byte drift after full drain");
-        assert_eq!(limits.depth.load(Ordering::SeqCst), 0, "no frame drift after full drain");
+        assert_eq!(
+            limits.bytes.load(Ordering::SeqCst),
+            0,
+            "no byte drift after full drain"
+        );
+        assert_eq!(
+            limits.depth.load(Ordering::SeqCst),
+            0,
+            "no frame drift after full drain"
+        );
     }
 
     /// `byte_hwm == 0` disables byte shedding entirely; a huge frame is accepted.
@@ -359,7 +375,11 @@ mod tests {
             .is_ok()
         );
         assert!(!*kill_rx.borrow(), "byte_hwm=0 must never shed on bytes");
-        assert_eq!(limits.bytes.load(Ordering::SeqCst), 0, "disabled: bytes not accounted");
+        assert_eq!(
+            limits.bytes.load(Ordering::SeqCst),
+            0,
+            "disabled: bytes not accounted"
+        );
     }
 
     /// `Fail`/`Close` commands terminate the stream and must not perturb the
@@ -374,8 +394,13 @@ mod tests {
             "x".to_string(),
         )))
         .unwrap();
-        sink.send_command(WsCommand::Close("bye".to_string())).unwrap();
-        assert_eq!(limits.bytes.load(Ordering::SeqCst), 0, "Fail/Close carry no bytes");
+        sink.send_command(WsCommand::Close("bye".to_string()))
+            .unwrap();
+        assert_eq!(
+            limits.bytes.load(Ordering::SeqCst),
+            0,
+            "Fail/Close carry no bytes"
+        );
     }
 
     /// A burst larger than any previous bounded capacity must arrive in exact

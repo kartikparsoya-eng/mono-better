@@ -1035,17 +1035,19 @@ impl Output for TakeOutput {
 /// Make a partition key comparator.
 fn make_partition_key_comparator(partition_key: &PartitionKey) -> Comparator {
     let pk = partition_key.clone();
-    Rc::new(move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
-        for col in &pk {
-            let av = a.get(col).unwrap_or(&Value::Null);
-            let bv = b.get(col).unwrap_or(&Value::Null);
-            let cmp = compare_values(av, bv);
-            if cmp != CmpOrdering::Equal {
-                return cmp;
+    Rc::new(
+        move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
+            for col in &pk {
+                let av = a.get(col).unwrap_or(&Value::Null);
+                let bv = b.get(col).unwrap_or(&Value::Null);
+                let cmp = compare_values(av, bv);
+                if cmp != CmpOrdering::Equal {
+                    return cmp;
+                }
             }
-        }
-        CmpOrdering::Equal
-    })
+            CmpOrdering::Equal
+        },
+    )
 }
 
 /// Check if a constraint matches a partition key.

@@ -367,40 +367,45 @@ impl SyncEngine {
                 store_arc.lock().await.apply_store_ops(ops);
             }
             let store_flushed = {
-                let first = {
-                    let mut store = store_arc.lock().await;
-                    store
-                        .flush(&expected, &flushed, last_connect_time as f64)
-                        .await
-                };
-                let result = match first {
-                    Ok(r) => Ok(r),
-                    Err(e) => {
-                        // Retry ONCE with jitter before declaring the group
-                        // dead. A failed flush is terminal (fail_group →
-                        // every client rehomes and REHYDRATES), so under a
-                        // pool-acquire convoy the old fail-fast behavior was
-                        // self-amplifying: timeouts killed groups, rehydrates
-                        // deepened the convoy. The flush runs in one PG
-                        // transaction, so a failed attempt left nothing
-                        // behind and the retry is safe; deterministic errors
-                        // (ownership handoff) simply fail again — those are
-                        // cheap (checked at transaction start). The jitter
-                        // de-synchronizes the convoy.
-                        let jitter_ms = 100
-                            + (std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.subsec_nanos())
-                                .unwrap_or(0)
-                                % 200) as u64;
-                        tracing::warn!(
-                            "CVR flush failed ({e}); retrying once in {jitter_ms}ms"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
+                // Bounded retry-with-backoff before declaring the group dead. A
+                // failed flush is terminal (fail_group → every client rehomes and
+                // REHYDRATES), so under a pool-acquire convoy fail-fast is
+                // self-amplifying: timeouts kill groups, rehydrates deepen the
+                // convoy. TS has NO acquire timeout and NO shedding — postgres.js
+                // simply QUEUES, so transient CVR saturation degrades to latency,
+                // not a storm. We approximate that: retry a few times with growing
+                // jittered backoff so a saturation spike is ridden out as latency.
+                // The flush is one PG transaction (a failed attempt leaves nothing
+                // behind, so retries are safe) and deterministic errors (ownership
+                // handoff) just re-fail cheaply. Unlike TS's unbounded queue this
+                // is BOUNDED, so a genuinely-dead CVR still fails the group
+                // promptly rather than wedging. Jitter de-synchronizes the convoy.
+                const MAX_FLUSH_ATTEMPTS: u32 = 3;
+                let mut attempt = 1u32;
+                let result = loop {
+                    let outcome = {
                         let mut store = store_arc.lock().await;
                         store
                             .flush(&expected, &flushed, last_connect_time as f64)
                             .await
+                    };
+                    match outcome {
+                        Ok(r) => break Ok(r),
+                        Err(e) if attempt >= MAX_FLUSH_ATTEMPTS => break Err(e),
+                        Err(e) => {
+                            let jitter = (std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.subsec_nanos())
+                                .unwrap_or(0)
+                                % 200) as u64;
+                            // Growing backoff: ~100ms, ~200ms, … per attempt.
+                            let backoff_ms = 100 * attempt as u64 + jitter;
+                            tracing::warn!(
+                                "CVR flush failed ({e}); retry {attempt}/{MAX_FLUSH_ATTEMPTS} in {backoff_ms}ms"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                            attempt += 1;
+                        }
                     }
                 };
                 crate::metrics::record_cvr_flush_attempt(result.is_ok());

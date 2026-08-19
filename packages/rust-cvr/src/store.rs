@@ -505,8 +505,7 @@ impl CVRStoreHandle {
                     "flush start cvr_id={} rows={} clients={} queries={} desires={}",
                     self.cvr_id,
                     pending.pending_row_record_updates.len(),
-                    pending.pending_clients_insert.len()
-                        + pending.pending_clients_delete.len(),
+                    pending.pending_clients_insert.len() + pending.pending_clients_delete.len(),
                     pending.pending_query_updates.len()
                         + pending.pending_query_partial_updates.len(),
                     pending.pending_desire_updates.len(),
@@ -850,10 +849,7 @@ impl CVRStoreHandle {
                     "refCounts" = excluded."refCounts""#,
                 self.schema
             );
-            sqlx::query(&sql)
-                .bind(&rows_json)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
             stats.rows += upserts.len();
         }
 

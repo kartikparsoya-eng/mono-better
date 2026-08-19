@@ -243,47 +243,58 @@ pub type SortOrder = Arc<Vec<[String; 2]>>;
 /// comparator only reads columns, so borrowing the map directly lets hot callers
 /// like `binary_search` pass `&entry.row` with no `Arc::new(row.clone())` per
 /// probe. `Row` derefs to `FxHashMap`, so owned/`Arc` rows coerce at call sites.
-pub type Comparator = Rc<dyn Fn(&FxHashMap<String, Value>, &FxHashMap<String, Value>) -> CmpOrdering + 'static>;
+pub type Comparator =
+    Rc<dyn Fn(&FxHashMap<String, Value>, &FxHashMap<String, Value>) -> CmpOrdering + 'static>;
 
 /// Make a comparator from a sort order — port of TS `makeComparator`.
 pub fn make_comparator(order: SortOrder, reverse: bool) -> Comparator {
     // Resolve (column, ascending?) once at build time rather than re-parsing the
     // `"asc"`/`"desc"` string on every comparison — this closure is the innermost
     // primitive of every binary_search / partition_point on the sorted view.
-    let cols: Vec<(String, bool)> = order.iter().map(|o| (o[0].clone(), o[1] == "asc")).collect();
-    Rc::new(move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
-        for (field, ascending) in &cols {
-            let a_val = a.get(field).unwrap_or(&Value::Null);
-            let b_val = b.get(field).unwrap_or(&Value::Null);
-            let cmp = compare_values(a_val, b_val);
-            if cmp != CmpOrdering::Equal {
-                let result = if *ascending { cmp } else { cmp.reverse() };
-                return if reverse { result.reverse() } else { result };
+    let cols: Vec<(String, bool)> = order
+        .iter()
+        .map(|o| (o[0].clone(), o[1] == "asc"))
+        .collect();
+    Rc::new(
+        move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
+            for (field, ascending) in &cols {
+                let a_val = a.get(field).unwrap_or(&Value::Null);
+                let b_val = b.get(field).unwrap_or(&Value::Null);
+                let cmp = compare_values(a_val, b_val);
+                if cmp != CmpOrdering::Equal {
+                    let result = if *ascending { cmp } else { cmp.reverse() };
+                    return if reverse { result.reverse() } else { result };
+                }
             }
-        }
-        CmpOrdering::Equal
-    })
+            CmpOrdering::Equal
+        },
+    )
 }
 
 /// Make a partial-bound comparator — comparison stops at the first
 /// sort column ABSENT from `b`.
 pub fn make_partial_bound_comparator(order: SortOrder, reverse: bool) -> Comparator {
-    let cols: Vec<(String, bool)> = order.iter().map(|o| (o[0].clone(), o[1] == "asc")).collect();
-    Rc::new(move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
-        for (field, ascending) in &cols {
-            if !b.contains_key(field) {
-                return CmpOrdering::Equal;
+    let cols: Vec<(String, bool)> = order
+        .iter()
+        .map(|o| (o[0].clone(), o[1] == "asc"))
+        .collect();
+    Rc::new(
+        move |a: &FxHashMap<String, Value>, b: &FxHashMap<String, Value>| {
+            for (field, ascending) in &cols {
+                if !b.contains_key(field) {
+                    return CmpOrdering::Equal;
+                }
+                let a_val = a.get(field).unwrap_or(&Value::Null);
+                let b_val = b.get(field).unwrap_or(&Value::Null);
+                let cmp = compare_values(a_val, b_val);
+                if cmp != CmpOrdering::Equal {
+                    let result = if *ascending { cmp } else { cmp.reverse() };
+                    return if reverse { result.reverse() } else { result };
+                }
             }
-            let a_val = a.get(field).unwrap_or(&Value::Null);
-            let b_val = b.get(field).unwrap_or(&Value::Null);
-            let cmp = compare_values(a_val, b_val);
-            if cmp != CmpOrdering::Equal {
-                let result = if *ascending { cmp } else { cmp.reverse() };
-                return if reverse { result.reverse() } else { result };
-            }
-        }
-        CmpOrdering::Equal
-    })
+            CmpOrdering::Equal
+        },
+    )
 }
 
 /// A node flowing through the pipeline — port of TS `Node`.

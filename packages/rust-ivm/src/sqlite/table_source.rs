@@ -317,8 +317,11 @@ pub(crate) fn sqlite_value_to_ivm(
         Ok(Sv::Integer(n)) => {
             // Reject integers outside ±(2^53-1) rather than silently losing
             // precision — TS `fromSQLiteType` throws UnsupportedValueError here
-            // (same message); our panic is caught by the napi boundary and
-            // rethrown to JS, so the failure surfaces identically.
+            // (same message). In the full-Rust syncer this panic is the
+            // throw-equivalent: it is caught by the per-CG `catch_unwind` in
+            // pipeline_driver (hydrate/advance), so a bad stored value fails
+            // that client group's operation and rehydrates rather than crashing
+            // the process — the same "fail the op" outcome as the TS throw.
             if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&n) {
                 panic!("value {n} (in {table}.{col}) is outside of supported bounds");
             }
@@ -336,6 +339,13 @@ pub(crate) fn sqlite_value_to_ivm(
 /// `fromSQLiteType('json', value)` is `JSON.parse(value)` in TS. JSON.parse
 /// first stringifies non-string SQLite scalars, then returns the corresponding
 /// JS scalar; only arrays and objects remain JSON containers.
+///
+/// A malformed JSON column value throws `UnsupportedValueError` in TS
+/// (zqlite/table-source.ts); here the equivalent panic is caught by the per-CG
+/// `catch_unwind` in pipeline_driver, so the client group's op fails and
+/// rehydrates — the same "fail the op" outcome as the TS throw, not a crash.
+/// serde_json's default 128-level recursion limit also bounds parse depth, so a
+/// deeply-nested column can't stack-overflow the walk below.
 fn json_sqlite_text_to_ivm(text: &str, table: &str, col: &str) -> Value {
     let parsed = serde_json::from_str::<serde_json::Value>(text)
         .unwrap_or_else(|error| panic!("Failed to parse JSON for {table}.{col}: {error}"));

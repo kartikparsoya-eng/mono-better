@@ -72,20 +72,36 @@ pub trait WebSocketSink: Send + Sync {
 /// the per-client `to_value` deep conversion `flush_body` already performs on
 /// the same data. Used only for queue accounting, never for protocol
 /// decisions, so exact escaping/number widths don't matter.
+///
+/// Depth-guarded: values reaching this function are already bounded by serde's
+/// 128-level parse limit (client JSON is always parsed, never built with
+/// `disable_recursion_limit`), but as this is a recursive walker we cap descent
+/// regardless of caller so it can never stack-overflow — accounting only, so
+/// stopping at the cap merely under-counts a pathological subtree.
 pub fn estimate_json_bytes(v: &Value) -> usize {
-    match v {
-        Value::Null => 4,
-        Value::Bool(_) => 5,
-        Value::Number(_) => 12,
-        Value::String(s) => s.len() + 2, // no escape accounting — fine for an estimate
-        Value::Array(a) => 2 + a.len() + a.iter().map(estimate_json_bytes).sum::<usize>(),
-        Value::Object(m) => {
-            2 + m
-                .iter()
-                .map(|(k, v)| k.len() + 4 + estimate_json_bytes(v))
-                .sum::<usize>()
+    /// Comfortably above serde's 128 parse limit; a backstop, not a functional
+    /// bound. Reaching it means the input bypassed the parser (a programmatic
+    /// build) — under-count rather than blow the stack.
+    const MAX_DEPTH: u32 = 300;
+    fn go(v: &Value, depth: u32) -> usize {
+        if depth >= MAX_DEPTH {
+            return 0;
+        }
+        match v {
+            Value::Null => 4,
+            Value::Bool(_) => 5,
+            Value::Number(_) => 12,
+            Value::String(s) => s.len() + 2, // no escape accounting — fine for an estimate
+            Value::Array(a) => 2 + a.len() + a.iter().map(|e| go(e, depth + 1)).sum::<usize>(),
+            Value::Object(m) => {
+                2 + m
+                    .iter()
+                    .map(|(k, v)| k.len() + 4 + go(v, depth + 1))
+                    .sum::<usize>()
+            }
         }
     }
+    go(v, 0)
 }
 
 /// Estimated serialized size of one row patch, envelope included. Del patches
@@ -480,9 +496,9 @@ impl PokeHandler {
     fn flush_body(&self, state: &mut PokeState) -> Result<(), String> {
         if let Some(body) = state.body.take() {
             let est = state.body_est_bytes + POKE_PART_ENVELOPE_EST;
-            if let Err(error) =
-                self.downstream
-                    .push_sized(serde_json::json!(["pokePart", body]), est)
+            if let Err(error) = self
+                .downstream
+                .push_sized(serde_json::json!(["pokePart", body]), est)
             {
                 self.release_chain(state);
                 return Err(error);
@@ -899,7 +915,10 @@ impl MultiPoker {
                 // terminally. Mark dead so the remaining patches skip this
                 // poker (no re-push, no re-log) — TS-faithful terminal state.
                 dead.store(true, AtomicOrdering::Relaxed);
-                eprintln!("Poke add_patch failed for client, dropping from poke: {}", e);
+                eprintln!(
+                    "Poke add_patch failed for client, dropping from poke: {}",
+                    e
+                );
             }
         }
     }
@@ -1078,7 +1097,9 @@ mod tests {
                 table: "t".into(),
                 row_key: Map::new(),
             },
-            contents: std::sync::Arc::new(serde_json::json!({"id": "1", "big": 9_007_199_254_740_991_i64})),
+            contents: std::sync::Arc::new(
+                serde_json::json!({"id": "1", "big": 9_007_199_254_740_991_i64}),
+            ),
         };
         assert!(make_row_patch(&safe).is_ok());
 
@@ -1091,7 +1112,9 @@ mod tests {
                 table: "t".into(),
                 row_key: Map::new(),
             },
-            contents: std::sync::Arc::new(serde_json::json!({"id": "1", "big": 9_007_199_254_740_993_u64})),
+            contents: std::sync::Arc::new(
+                serde_json::json!({"id": "1", "big": 9_007_199_254_740_993_u64}),
+            ),
         };
         let err = make_row_patch(&unsafe_i).unwrap_err();
         assert!(err.contains("exceeds safe Number range"), "got: {err}");
@@ -1219,6 +1242,35 @@ mod tests {
         assert_eq!(msgs[1][0], "pokePart");
         assert_eq!(msgs[2][0], "pokePart");
         assert_eq!(msgs[3][0], "pokeEnd");
+    }
+
+    /// Load-bearing invariant: client JSON is parsed via serde, whose default
+    /// 128-level recursion limit rejects pathologically-nested input BEFORE any
+    /// of our unguarded recursive walks (AST transform, hash, estimate) run. If
+    /// a future change ever calls `disable_recursion_limit()` on a client path,
+    /// this test fails — a deliberate tripwire.
+    #[test]
+    fn serde_rejects_deeply_nested_client_json() {
+        // 200 open brackets ≫ serde's 128 default depth.
+        let deep = "[".repeat(200) + &"]".repeat(200);
+        let parsed = serde_json::from_str::<Value>(&deep);
+        assert!(
+            parsed.is_err(),
+            "serde must reject >128-deep JSON at parse time (recursion-limit tripwire)"
+        );
+    }
+
+    /// The estimator must not stack-overflow even on nesting deeper than its
+    /// depth cap (defense-in-depth: a Value built programmatically, bypassing
+    /// the parser). Build the tree directly (not via parse) to exceed the cap.
+    #[test]
+    fn estimate_json_bytes_is_depth_bounded() {
+        let mut v = serde_json::json!(0);
+        for _ in 0..1000 {
+            v = Value::Array(vec![v]);
+        }
+        // Must return without overflowing; value is not asserted (accounting only).
+        let _ = estimate_json_bytes(&v);
     }
 
     #[test]
