@@ -127,11 +127,25 @@ impl SyncerConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(30),
+            // Host core count ON PURPOSE, not the cgroup cpu quota: shards are
+            // `current_thread` executors that SERIALIZE whole client groups, so
+            // fewer shards means coarser head-of-line blocking, and that costs
+            // far more than scheduler contention saves. Measured A/B on a
+            // 4-cpu-capped container (ART G25, 2026-08-19): 4 quota-derived
+            // shards → 51/56 queries breach 2x-of-TS parity with p95 up to
+            // 58s; 14 host-derived shards → 0 violations on the same drive.
+            // `effective_parallelism` still warns about the quota mismatch so
+            // operators can tune ZERO_SYNCER_SHARDS deliberately.
             num_shards: env::var("ZERO_SYNCER_SHARDS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|n| *n > 0)
-                .unwrap_or_else(effective_parallelism),
+                .unwrap_or_else(|| {
+                    warn_if_quota_capped();
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(4)
+                }),
             // TS default: 300s. `0` (or a negative) disables it.
             revalidate_interval_ms: {
                 let secs = env::var("AUTH_REVALIDATE_INTERVAL_SECONDS")
@@ -151,18 +165,31 @@ impl SyncerConfig {
     }
 }
 
-/// Executor-shard default: the container's EFFECTIVE cpu budget, not the host
-/// core count. `available_parallelism` is cgroup-quota-blind, so a 4-cpu-capped
-/// container on a 14-core host used to get 14 executor threads — 3.5x scheduler
-/// oversubscription that collapsed the measured capacity cliff from ~112 to 25
-/// connections (ART G22) and starved individual hydrations past the 60s
-/// liveness ceiling (G28). Reads cgroup v2 `cpu.max`, then v1 cfs quota, then
-/// falls back to `available_parallelism`.
-fn effective_parallelism() -> usize {
+/// Log when the cgroup cpu quota is far below the host core count the shard
+/// default is derived from. We deliberately do NOT auto-shrink the shard pool
+/// to the quota — an A/B (ART G25) showed quota-sized `current_thread` shards
+/// serialize whole client groups behind each other and destroy tail latency —
+/// but a 3x+ mismatch is worth an operator's attention (ZERO_SYNCER_SHARDS).
+fn warn_if_quota_capped() {
     let host = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let quota_cores = std::fs::read_to_string("/sys/fs/cgroup/cpu.max")
+    if let Some(cores) = cgroup_cpu_quota_cores()
+        && cores.saturating_mul(3) <= host
+    {
+        tracing::warn!(
+            quota_cores = cores,
+            host_cores = host,
+            "cgroup cpu quota is far below the host core count; the {host}-shard \
+             default may oversubscribe — consider tuning ZERO_SYNCER_SHARDS"
+        );
+    }
+}
+
+/// The container's cpu quota in whole cores (cgroup v2 `cpu.max`, then v1 cfs
+/// quota); `None` when unlimited or undetectable.
+fn cgroup_cpu_quota_cores() -> Option<usize> {
+    std::fs::read_to_string("/sys/fs/cgroup/cpu.max")
         .ok()
         .and_then(|s| parse_cpu_max(&s))
         .or_else(|| {
@@ -177,11 +204,8 @@ fn effective_parallelism() -> usize {
                 .parse::<f64>()
                 .ok()?;
             (quota > 0.0 && period > 0.0).then(|| (quota / period).ceil() as usize)
-        });
-    match quota_cores {
-        Some(cores) if cores >= 1 => cores.min(host),
-        _ => host,
-    }
+        })
+        .filter(|c| *c >= 1)
 }
 
 /// Parse cgroup v2 `cpu.max` ("<quota> <period>" or "max <period>") into a
@@ -313,11 +337,7 @@ fn main() {
     // handle is injected into each CG's SyncEngine so CVR I/O is offloaded onto
     // this runtime (`SyncEngine::offload`; the CG executors are current_thread
     // runtimes that must not poll another reactor's connections — doc 91 §5.1).
-    // Size the reactor by the container's cpu QUOTA, not the host core count —
-    // tokio's default (available_parallelism) is as quota-blind as the shard
-    // default was, and the two pools stack on the same capped cpus.
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(effective_parallelism())
         .enable_all()
         .build()
         .unwrap();
