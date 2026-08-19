@@ -311,13 +311,29 @@ pub fn record_api_request_duration(elapsed_ms: f64) {
     );
 }
 
-/// One HTTP fetch attempt — TS `recordApiAttempt`.
-pub fn record_api_attempt(result: &'static str, will_retry: bool, elapsed_ms: f64) {
-    let attrs = [
+/// One HTTP fetch attempt — TS `recordApiAttempt`, with the same attempt
+/// number + HTTP status attributes TS records (custom/metrics.ts:40-48), so a
+/// dashboard can split retries-by-attempt and errors-by-status.
+pub fn record_api_attempt(
+    result: &'static str,
+    will_retry: bool,
+    elapsed_ms: f64,
+    attempt: u32,
+    http_status: Option<u16>,
+) {
+    let mut attrs = vec![
         opentelemetry::KeyValue::new("operation", "query"),
         opentelemetry::KeyValue::new("result", result),
         opentelemetry::KeyValue::new("will_retry", will_retry),
+        opentelemetry::KeyValue::new("attempt", attempt as i64),
     ];
+    if let Some(code) = http_status {
+        attrs.push(opentelemetry::KeyValue::new("http_status_code", code as i64));
+        attrs.push(opentelemetry::KeyValue::new(
+            "http_status_class",
+            format!("{}xx", code / 100),
+        ));
+    }
     api_otel().attempts.add(1, &attrs);
     api_otel().attempt_duration.record(
         elapsed_ms / 1000.0,
@@ -325,9 +341,12 @@ pub fn record_api_attempt(result: &'static str, will_retry: bool, elapsed_ms: f6
     );
 }
 
-/// In-flight request delta (+1 on start, -1 on completion).
+/// In-flight request delta (+1 on start, -1 on completion) — TS labels this by
+/// operation (custom/fetch.ts:116).
 pub fn record_api_in_flight(delta: i64) {
-    api_otel().in_flight.add(delta, &[]);
+    api_otel()
+        .in_flight
+        .add(delta, &[opentelemetry::KeyValue::new("operation", "query")]);
 }
 
 /// Active sync clients — TS view-syncer's `#activeClients` UpDownCounter
@@ -445,6 +464,60 @@ fn cvr_flush_failures() -> &'static Counter<u64> {
 
 pub fn record_cvr_flush_failure() {
     cvr_flush_failures().add(1, &[]);
+}
+
+/// CVR load/flush attempt instruments — TS `zero.sync.cvr.load_attempts` /
+/// `load_duration` / `flush_attempts` (cvr-store.ts:207-217). Alert rules on
+/// `flush_attempts{result="error"}` / load-latency dashboards written for the
+/// TS syncer keep working under rust.
+struct CvrAttemptOtel {
+    load_attempts: Counter<u64>,
+    load_duration: OtelHistogram<f64>,
+    flush_attempts: Counter<u64>,
+}
+
+fn cvr_attempt_otel() -> &'static CvrAttemptOtel {
+    static I: OnceLock<CvrAttemptOtel> = OnceLock::new();
+    I.get_or_init(|| {
+        let m = global::meter("zero");
+        CvrAttemptOtel {
+            load_attempts: m
+                .u64_counter("zero.sync.cvr.load_attempts")
+                .with_description("CVR load attempts, labeled by result.")
+                .build(),
+            load_duration: m
+                .f64_histogram("zero.sync.cvr.load_duration")
+                .with_unit("s")
+                .with_description("CVR load duration.")
+                .with_boundaries(OTEL_LATENCY_BOUNDARIES_S.to_vec())
+                .build(),
+            flush_attempts: m
+                .u64_counter("zero.sync.cvr.flush_attempts")
+                .with_description("CVR flush attempts, labeled by result and flush.type.")
+                .build(),
+        }
+    })
+}
+
+pub fn record_cvr_load_attempt(success: bool, elapsed_ms: f64) {
+    let result = if success { "success" } else { "error" };
+    let attrs = [KeyValue::new("result", result)];
+    cvr_attempt_otel().load_attempts.add(1, &attrs);
+    cvr_attempt_otel()
+        .load_duration
+        .record(elapsed_ms / 1000.0, &attrs);
+}
+
+/// `flush.type` is always `sync` in rust — there is no deferred-flush path.
+pub fn record_cvr_flush_attempt(success: bool) {
+    let result = if success { "success" } else { "error" };
+    cvr_attempt_otel().flush_attempts.add(
+        1,
+        &[
+            KeyValue::new("result", result),
+            KeyValue::new("flush.type", "sync"),
+        ],
+    );
 }
 
 /// Client groups torn down via `fail_group` (all their clients rehomed).
@@ -633,9 +706,14 @@ impl Metrics {
     }
 
     /// Record a pipeline reset — TS `zero.sync.pipeline-resets`.
-    pub fn record_reset(&self) {
+    /// `reason` labels the OTLP series like TS `#pipelineResets.add(1,
+    /// {reason})` — an operator distinguishing schema-change resets from
+    /// snapshot-drift resets needs the attribute, not just the total.
+    pub fn record_reset(&self, reason: &str) {
         self.resets.fetch_add(1, Ordering::Relaxed);
-        self.otel.pipeline_resets.add(1, &[]);
+        self.otel
+            .pipeline_resets
+            .add(1, &[KeyValue::new("reason", reason.to_string())]);
     }
 
     /// A JSON snapshot for the `/statz` endpoint.
@@ -800,7 +878,7 @@ mod tests {
         m.record_hydration(12.0);
         m.record_hydration(8.0);
         m.record_advance(3.0);
-        m.record_reset();
+        m.record_reset("test");
 
         let s = m.snapshot();
         assert_eq!(s["hydrations"], 2);

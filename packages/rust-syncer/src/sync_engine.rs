@@ -177,12 +177,18 @@ impl SyncEngine {
             return Ok(None);
         };
         // Offload the load onto the shared-pool runtime (doc 91 §5.1).
+        let load_started = std::time::Instant::now();
         let result = self
             .offload(async move {
                 let mut store = store_arc.lock().await;
                 store.load(last_connect_time).await
             })
-            .await?;
+            .await;
+        crate::metrics::record_cvr_load_attempt(
+            result.is_ok(),
+            load_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        let result = result?;
         Ok(Some(result.cvr))
     }
 
@@ -361,10 +367,44 @@ impl SyncEngine {
                 store_arc.lock().await.apply_store_ops(ops);
             }
             let store_flushed = {
-                let mut store = store_arc.lock().await;
-                store
-                    .flush(&expected, &flushed, last_connect_time as f64)
-                    .await
+                let first = {
+                    let mut store = store_arc.lock().await;
+                    store
+                        .flush(&expected, &flushed, last_connect_time as f64)
+                        .await
+                };
+                let result = match first {
+                    Ok(r) => Ok(r),
+                    Err(e) => {
+                        // Retry ONCE with jitter before declaring the group
+                        // dead. A failed flush is terminal (fail_group →
+                        // every client rehomes and REHYDRATES), so under a
+                        // pool-acquire convoy the old fail-fast behavior was
+                        // self-amplifying: timeouts killed groups, rehydrates
+                        // deepened the convoy. The flush runs in one PG
+                        // transaction, so a failed attempt left nothing
+                        // behind and the retry is safe; deterministic errors
+                        // (ownership handoff) simply fail again — those are
+                        // cheap (checked at transaction start). The jitter
+                        // de-synchronizes the convoy.
+                        let jitter_ms = 100
+                            + (std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.subsec_nanos())
+                                .unwrap_or(0)
+                                % 200) as u64;
+                        tracing::warn!(
+                            "CVR flush failed ({e}); retrying once in {jitter_ms}ms"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
+                        let mut store = store_arc.lock().await;
+                        store
+                            .flush(&expected, &flushed, last_connect_time as f64)
+                            .await
+                    }
+                };
+                crate::metrics::record_cvr_flush_attempt(result.is_ok());
+                result
                     .map_err(|e| {
                         // Counted, not just logged: a rising flush-failure rate
                         // (pool exhaustion, ownership churn) is the leading

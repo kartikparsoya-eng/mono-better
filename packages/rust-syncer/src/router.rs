@@ -2768,7 +2768,7 @@ impl CgState {
                     // drift). Port of TS `ResetPipelinesSignal` handling: the
                     // in-flight poke was already cancelled; re-init the pipeline
                     // and re-hydrate every query from scratch.
-                    self.metrics.record_reset();
+                    self.metrics.record_reset(&reason);
                     self.reset_pipelines_and_rehydrate(result.cvr, &reason)
                         .await;
                 } else {
