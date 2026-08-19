@@ -573,21 +573,66 @@ fn main() {
         // interval (TS `Syncer.drain`) — so the receiving servers absorb the
         // reconnects gradually. SIGINT keeps dev ctrl-C fast: an immediate
         // `router.shutdown()` fails every connection with a Rehome error and
-        // joins the CG threads.
+        // joins the CG threads. A second signal (either kind) DURING the
+        // SIGTERM drain expedites to an immediate shutdown.
         let result = tokio::select! {
             res = &mut server => res,
             sig = shutdown_signal() => {
                 match sig {
                     ShutdownSignal::Terminate => {
                         tracing::info!("SIGTERM received; starting staggered drain");
-                        ws_router.drain().await;
+                        // Run the drain as a task instead of awaiting it in
+                        // this select! arm: awaiting here would stop polling
+                        // `&mut server` for the whole drain (up to ~25s +
+                        // final sweep), so in-flight WS handshakes would hang
+                        // in the accept queue instead of promptly receiving
+                        // the router's shutting-down rejection. Keep the
+                        // accept loop polled while the drain runs.
+                        let drain_router = ws_router.clone();
+                        let mut drain = tokio::spawn(async move {
+                            drain_router.drain().await;
+                        });
+                        tokio::select! {
+                            // Drain finished (it ends with a full
+                            // `shutdown()` sweep + executor join) — the
+                            // normal SIGTERM exit.
+                            _ = &mut drain => {}
+                            // The accept loop ended on its own mid-drain
+                            // (listener error): nothing left to accept, but
+                            // let the drain finish so CG teardown + CVR pool
+                            // close stay graceful.
+                            _ = &mut server => {
+                                let _ = drain.await;
+                            }
+                            // A second signal (SIGINT or SIGTERM) during the
+                            // drain expedites shutdown: stop the staggered
+                            // pacing and Rehome everything at once. The abort
+                            // is awaited (reaped) BEFORE calling shutdown(),
+                            // so drain/shutdown never truly run concurrently;
+                            // a cancelled drain leaves only idempotent state
+                            // behind (CG handles are removed atomically from
+                            // the DashMap, executor Shutdown sends are
+                            // ignorable re-sends, join handles are take()n at
+                            // most once). See patch README for the one
+                            // residual hazard (abort landing inside drain's
+                            // own final shutdown() sweep).
+                            _ = shutdown_signal() => {
+                                tracing::info!(
+                                    "second signal during drain; shutting down immediately"
+                                );
+                                drain.abort();
+                                let _ = drain.await;
+                                ws_router.shutdown().await;
+                            }
+                        }
+                        Ok(())
                     }
                     ShutdownSignal::Interrupt => {
                         tracing::info!("SIGINT received; shutting down immediately");
                         ws_router.shutdown().await;
+                        Ok(())
                     }
                 }
-                Ok(())
             }
         };
         result
