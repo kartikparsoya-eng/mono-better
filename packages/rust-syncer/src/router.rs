@@ -1772,6 +1772,7 @@ impl CgState {
             origin: params.origin.clone(),
             request_headers: relay_request_headers,
             user_id: params.user_id.clone().filter(|v| !v.is_empty()),
+            push_override: Default::default(),
         };
         // Retained per client for the router-side `deleteClients` cleanup relay
         // (the message-handler path keeps its own copy).
@@ -1966,6 +1967,30 @@ impl CgState {
             return;
         };
         let (puts, dels, clear) = parse_desired_queries_patch(body);
+        // Client push overrides (TS ConnectionContextManager handleInitConnection:
+        // `userPushURL` replaces the push target; `userPushHeaders` become
+        // customHeaders after the TS-side `allowedClientHeaders` filter).
+        // Stored through the shared `push_override` cell so the message
+        // handler's clone of `PushRelayHeaders` sees them too.
+        if is_init
+            && (body.get("userPushURL").is_some() || body.get("userPushHeaders").is_some())
+            && let Some(headers) = self.client_push_headers.get(client_id)
+            && let Ok(mut ov) = headers.push_override.lock()
+        {
+            *ov = Some(crate::message_handler::PushOverride {
+                url: body
+                    .get("userPushURL")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                headers: body.get("userPushHeaders").and_then(|v| v.as_object()).map(
+                    |m| {
+                        m.iter()
+                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                            .collect()
+                    },
+                ),
+            });
+        }
         let client_schema = body
             .get("clientSchema")
             .filter(|value| !value.is_null())

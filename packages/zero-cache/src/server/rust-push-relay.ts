@@ -29,6 +29,15 @@ type RelayedPush = {
   /** `[[name, value], …]` — raw incoming request headers (unfiltered). */
   requestHeaders?: [string, string][] | null;
   userID?: string | null;
+  /**
+   * Client-supplied push overrides from `initConnection` (the in-process
+   * pusher honors these per connection via ConnectionContextManager). The
+   * URL must still match the configured push-URL allowlist —
+   * `fetchFromAPIServer` enforces that — and the headers pass through the
+   * `allowedClientHeaders` filter below.
+   */
+  userPushURL?: string | null;
+  userPushHeaders?: Record<string, string> | null;
 };
 
 /** Port of the private `filterHeaders` in connection-context-manager.ts. */
@@ -110,11 +119,18 @@ export function startRustPushRelay(
         }
 
         const mutateContext: ConnectionFetchContext = {
-          url: pushURL,
+          // The client's userPushURL override wins, exactly like the
+          // in-process pusher (connection-context-manager.ts). An override
+          // outside the allowlist fails THIS push inside fetchFromAPIServer,
+          // not the connection.
+          url: relayed.userPushURL ?? pushURL,
           allowedUrlPatterns,
           headerOptions: {
             apiKey: pushConfig.apiKey,
-            customHeaders: undefined,
+            customHeaders: filterHeaders(
+              relayed.userPushHeaders ?? undefined,
+              pushConfig.allowedClientHeaders,
+            ),
             requestHeaders: filterHeaders(
               requestHeaders,
               pushConfig.allowedRequestHeaders,
@@ -153,7 +169,7 @@ export function startRustPushRelay(
           // advance, so it re-pushes on its next attempt. Surface as 502 so the
           // Rust syncer logs it.
           lc.warn?.(
-            `push relay to ${pushURL} failed for client ${relayed.clientID}: ${String(e)}`,
+            `push relay to ${relayed.userPushURL ?? pushURL} failed for client ${relayed.clientID}: ${String(e)}`,
           );
           return fail(502, `push forward failed: ${String(e)}`);
         }

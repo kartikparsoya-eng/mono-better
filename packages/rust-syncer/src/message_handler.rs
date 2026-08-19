@@ -95,6 +95,21 @@ pub struct PushRelayHeaders {
     pub origin: Option<String>,
     pub request_headers: Vec<(String, String)>,
     pub user_id: Option<String>,
+    /// Client-supplied `userPushURL`/`userPushHeaders` from `initConnection`
+    /// (TS `ConnectionContextManager` applies these per connection). Shared
+    /// via `Arc` because the router and the message handler each hold a clone
+    /// of this struct, and the override arrives AFTER both were constructed
+    /// (the initConnection body is the first post-handshake message). The TS
+    /// relay endpoint enforces the push-URL allowlist and the
+    /// `allowedClientHeaders` filter — the rust side only relays the bytes.
+    pub push_override: std::sync::Arc<std::sync::Mutex<Option<PushOverride>>>,
+}
+
+/// The client's per-connection push overrides (see `PushRelayHeaders`).
+#[derive(Clone, Default)]
+pub struct PushOverride {
+    pub url: Option<String>,
+    pub headers: Option<Vec<(String, String)>>,
 }
 
 /// Trait for the Pusher interface (custom mutation forwarding).

@@ -116,7 +116,7 @@ impl HttpRelayPusher {
         headers: &PushRelayHeaders,
         client_group_id: &str,
     ) -> serde_json::Value {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "clientGroupID": client_group_id,
             "clientID": selector.client_id,
             "push": body,
@@ -125,7 +125,27 @@ impl HttpRelayPusher {
             "origin": headers.origin,
             "requestHeaders": headers.request_headers,
             "userID": headers.user_id,
-        })
+        });
+        // Client push overrides (initConnection userPushURL/userPushHeaders).
+        // The TS relay validates the URL against the configured allowlist and
+        // filters the headers through `allowedClientHeaders` — exactly what the
+        // in-process TS pusher does per connection.
+        if let Ok(guard) = headers.push_override.lock()
+            && let Some(ov) = guard.as_ref()
+        {
+            let obj = payload.as_object_mut().expect("relay body is an object");
+            if let Some(url) = &ov.url {
+                obj.insert("userPushURL".into(), serde_json::json!(url));
+            }
+            if let Some(hdrs) = &ov.headers {
+                let map: serde_json::Map<String, serde_json::Value> = hdrs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                    .collect();
+                obj.insert("userPushHeaders".into(), serde_json::Value::Object(map));
+            }
+        }
+        payload
     }
 
     /// Cap-checked enqueue shared by real pushes and synthetic cleanup pushes.
@@ -190,8 +210,39 @@ impl PusherDispatch for HttpRelayPusher {
         let payload = Self::relay_body(selector, body, headers, client_group_id);
         // Enqueue only — never blocks, so this is safe on the async CG-executor
         // threads. The drainer POSTs sequentially (see `new`).
-        self.enqueue_payload(payload, "push (client will re-push)");
-        HandlerResult::Ok
+        if self.enqueue_payload(payload, "push (client will re-push)") {
+            return HandlerResult::Ok;
+        }
+        // The push was DROPPED (queue cap / relay shut down). TS surfaces a
+        // failed push as a PushFailed error frame; a silent drop here left the
+        // client believing the mutation was in flight until its lmid stalled.
+        // Transient: the connection stays open and the client re-pushes.
+        let mutation_ids: Vec<crate::protocol::MutationID> = body
+            .get("mutations")
+            .and_then(|m| m.as_array())
+            .map(|muts| {
+                muts.iter()
+                    .filter_map(|m| {
+                        Some(crate::protocol::MutationID {
+                            id: m.get("id")?.as_i64()?,
+                            client_id: m.get("clientID")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        HandlerResult::Transient {
+            errors: vec![crate::protocol::ErrorBody::PushFailedZeroCache(
+                crate::protocol::PushFailedZeroCacheBody {
+                    kind: crate::protocol::ErrorKind::PushFailed,
+                    details: None,
+                    mutation_ids,
+                    message: "push relay queue is full; retry".to_string(),
+                    origin: crate::protocol::ErrorOrigin::ZeroCache,
+                    reason: crate::protocol::ErrorReason::Internal,
+                },
+            )],
+        }
     }
 
     fn init_connection(&self, _selector: &ConnectionSelector) {}
@@ -267,6 +318,31 @@ impl PusherDispatch for HttpRelayPusher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Client push overrides captured at initConnection must reach the relay
+    /// payload (the TS endpoint applies the allowlist/filters); without an
+    /// override the fields are absent entirely (not null).
+    #[test]
+    fn relay_body_carries_user_push_overrides() {
+        let selector = ConnectionSelector {
+            client_id: "cA".to_string(),
+            ws_id: "ws1".to_string(),
+        };
+        let push = serde_json::json!({"mutations": []});
+        let headers = PushRelayHeaders::default();
+
+        let body = HttpRelayPusher::relay_body(&selector, &push, &headers, "cg1");
+        assert!(body.get("userPushURL").is_none());
+        assert!(body.get("userPushHeaders").is_none());
+
+        *headers.push_override.lock().unwrap() = Some(crate::message_handler::PushOverride {
+            url: Some("https://api.example.com/push".to_string()),
+            headers: Some(vec![("x-tenant".to_string(), "acme".to_string())]),
+        });
+        let body = HttpRelayPusher::relay_body(&selector, &push, &headers, "cg1");
+        assert_eq!(body["userPushURL"], "https://api.example.com/push");
+        assert_eq!(body["userPushHeaders"]["x-tenant"], "acme");
+    }
 
     /// The synthetic cleanup push must match the TS `PusherService` shape
     /// exactly — zero-server dispatches on `type: "custom"` +
