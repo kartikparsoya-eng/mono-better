@@ -48,8 +48,10 @@ pub struct RowPatchOp {
     pub op: String,
     #[serde(rename = "tableName")]
     pub table_name: String,
+    // Arc-shared with the originating `RowPatch::Put` (serde's `rc` feature
+    // serializes through the Arc transparently) — no per-client deep clone.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<Value>,
+    pub value: Option<std::sync::Arc<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
 }
@@ -927,7 +929,7 @@ mod tests {
                     table: table.to_string(),
                     row_key: Map::new(),
                 },
-                contents,
+                contents: std::sync::Arc::new(contents),
             }),
             to_version: CVRVersion {
                 state_version: "v2".to_string(),
@@ -945,7 +947,7 @@ mod tests {
                 table: "t".into(),
                 row_key: Map::new(),
             },
-            contents: serde_json::json!({"id": "1", "big": 9_007_199_254_740_991_i64}),
+            contents: std::sync::Arc::new(serde_json::json!({"id": "1", "big": 9_007_199_254_740_991_i64})),
         };
         assert!(make_row_patch(&safe).is_ok());
 
@@ -958,7 +960,7 @@ mod tests {
                 table: "t".into(),
                 row_key: Map::new(),
             },
-            contents: serde_json::json!({"id": "1", "big": 9_007_199_254_740_993_u64}),
+            contents: std::sync::Arc::new(serde_json::json!({"id": "1", "big": 9_007_199_254_740_993_u64})),
         };
         let err = make_row_patch(&unsafe_i).unwrap_err();
         assert!(err.contains("exceeds safe Number range"), "got: {err}");
@@ -1322,7 +1324,7 @@ mod tests {
                     table: "t".to_string(),
                     row_key: Map::new(),
                 },
-                contents: serde_json::json!({"id": 1}),
+                contents: std::sync::Arc::new(serde_json::json!({"id": 1})),
             }),
             to_version: CVRVersion {
                 state_version: "v2".to_string(),

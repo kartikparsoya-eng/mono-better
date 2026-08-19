@@ -80,14 +80,14 @@ impl<'a> ChangeProcessor<'a> {
         change_type: RowChangeType,
         query_id: &str,
         table: &str,
-        row_key: &Map<String, Value>,
-        row: Option<&Map<String, Value>>,
+        row_key: Map<String, Value>,
+        row: Option<Map<String, Value>>,
         existing_rows: &RowRecordMap,
     ) {
         let row_id = RowID {
             schema: String::new(),
             table: table.to_string(),
-            row_key: row_key.clone(),
+            row_key,
         };
         let id_str = row_id_string(&row_id);
 
@@ -107,7 +107,7 @@ impl<'a> ChangeProcessor<'a> {
         // IVM can output multiple versions of a row as it goes through its
         // intermediate stages. Always update the version and contents;
         // the last version will reflect the final state.
-        let update_version = |entry: &mut (RowID, RowUpdate), row: &Map<String, Value>| {
+        let update_version = |entry: &mut (RowID, RowUpdate), row: Map<String, Value>| {
             // Strip _0_version (TS contentsAndVersion)
             let version = row
                 .get(ZERO_VERSION_COLUMN_NAME)
@@ -116,18 +116,19 @@ impl<'a> ChangeProcessor<'a> {
             // Build contents without `_0_version` (TS `contentsAndVersion`).
             // Filtering into a fresh map is byte-identical to `row.clone()` +
             // `remove(_0_version)` — same remaining keys, same insertion order —
-            // but skips cloning the stripped value and avoids the O(n) shift a
-            // `remove` triggers on the insertion-ordered (preserve_order) map.
-            // The engine hands us the row as a shared borrow (`Arc<...>`
-            // upstream), so `contents` must be an owned copy regardless.
+            // but the map is OWNED here, so the surviving values are MOVED, not
+            // cloned (`remove` on the insertion-ordered map would also O(n)
+            // shift). Wrapped in `Arc` so the downstream `RowPatch::Put` /
+            // poke-body stages share this one allocation.
             let contents = {
-                let mut c = Map::with_capacity(row.len().saturating_sub(1));
+                let len = row.len().saturating_sub(1);
+                let mut c = Map::with_capacity(len);
                 for (k, v) in row {
                     if k != ZERO_VERSION_COLUMN_NAME {
-                        c.insert(k.clone(), v.clone());
+                        c.insert(k, v);
                     }
                 }
-                Value::Object(c)
+                std::sync::Arc::new(Value::Object(c))
             };
             entry.1.version = version;
             entry.1.contents = Some(contents);
@@ -323,7 +324,7 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -365,8 +366,8 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then REMOVE → refCount goes to 0
-        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
-        processor.on_row_change(RowChangeType::Remove, "q1", "users", &row_key, None, &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
+        processor.on_row_change(RowChangeType::Remove, "q1", "users", row_key.clone(), None, &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -404,8 +405,8 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD from query1 + ADD from query2 → refCounts = {q1: 1, q2: 1}
-        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
-        processor.on_row_change(RowChangeType::Add, "q2", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q2", "users", row_key.clone(), Some(row.clone()), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -464,7 +465,7 @@ mod tests {
             let mut row_key = Map::new();
             row_key.insert("id".to_string(), Value::String(format!("row{}", i)));
 
-            processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
+            processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
         }
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
@@ -504,7 +505,7 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
@@ -548,7 +549,7 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then EDIT → refCount stays at 1
-        processor.on_row_change(RowChangeType::Add, "q1", "users", &row_key, Some(&row), &existing_rows);
+        processor.on_row_change(RowChangeType::Add, "q1", "users", row_key.clone(), Some(row.clone()), &existing_rows);
 
         // EDIT with updated version
         let mut row2 = Map::new();
@@ -556,7 +557,7 @@ mod tests {
         row2.insert("name".to_string(), Value::String("Bob".to_string()));
         row2.insert("_0_version".to_string(), Value::String("v2".to_string()));
 
-        processor.on_row_change(RowChangeType::Edit, "q1", "users", &row_key, Some(&row2), &existing_rows);
+        processor.on_row_change(RowChangeType::Edit, "q1", "users", row_key.clone(), Some(row2.clone()), &existing_rows);
         processor.finish(&existing_rows);
         pokers.end(CVRVersion {
             state_version: "00".to_string(),

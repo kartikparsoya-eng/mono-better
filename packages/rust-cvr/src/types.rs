@@ -45,12 +45,17 @@ pub struct RowRecord {
 }
 
 /// RowUpdate — what the replicator sends for a row.
+///
+/// `contents` is `Arc`-shared: a hydrated row's contents flow unchanged from
+/// the engine callback through `RowPatch::Put` into each client's poke body,
+/// so sharing one allocation avoids a deep `Value` clone per stage (the
+/// per-row deliver path was the dominant hydration cost for large queries).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RowUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contents: Option<Value>,
+    pub contents: Option<std::sync::Arc<Value>>,
     pub ref_counts: RefCounts,
 }
 
@@ -219,7 +224,10 @@ pub enum Patch {
 #[serde(tag = "op")]
 pub enum RowPatch {
     #[serde(rename = "put")]
-    Put { id: RowID, contents: Value },
+    Put {
+        id: RowID,
+        contents: std::sync::Arc<Value>,
+    },
     #[serde(rename = "del")]
     Del { id: RowID },
 }

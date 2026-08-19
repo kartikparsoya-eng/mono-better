@@ -1407,7 +1407,7 @@ mod tests {
         let id_str = crate::row_key::row_id_string(&id);
         let update = RowUpdate {
             version: Some("rv1".to_string()),
-            contents: Some(serde_json::json!({"id": 1, "name": "foo"})),
+            contents: Some(std::sync::Arc::new(serde_json::json!({"id": 1, "name": "foo"}))),
             ref_counts: [("hash1".to_string(), 1)].into_iter().collect(),
         };
 

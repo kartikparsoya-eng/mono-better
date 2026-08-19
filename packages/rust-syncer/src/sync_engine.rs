@@ -1025,7 +1025,7 @@ impl SyncEngine {
                     .map(|(k, v)| (k.clone(), json_to_value(v.clone())))
                     .collect();
                 let contents = match self.pipelines.get_row(&row.table, &pk) {
-                    Some(r) => row_to_contents(&r),
+                    Some(r) => Arc::new(row_to_contents(&r)),
                     None => {
                         return Err(format!(
                             "catchup: missing row {}:{}",
@@ -1138,7 +1138,7 @@ impl SyncEngine {
         self.pipelines.hydrate(queries, |rc| {
             accumulate_signature(&mut sig_acc, rc);
             if let Some((ct, qid, table, rk, row)) = row_change_to_maps(rc) {
-                processor.on_row_change(ct, &qid, &table, &rk, row.as_ref(), existing_rows);
+                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows);
             }
         })?;
         // Record the transformation hash each query was hydrated with, so a later
@@ -1271,8 +1271,8 @@ impl SyncEngine {
 
         {
             let mut processor = ChangeProcessor::new(&mut updater, &pokers);
-            for (ct, qid, table, rk, row) in &collected {
-                processor.on_row_change(*ct, qid, table, rk, row.as_ref(), existing_rows);
+            for (ct, qid, table, rk, row) in collected {
+                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows);
             }
             // TS `#advancePipelines` only processes received row changes. It
             // does not reconcile unreferenced rows because no queries are being

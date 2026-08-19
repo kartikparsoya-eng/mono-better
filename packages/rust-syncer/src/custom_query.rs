@@ -326,7 +326,12 @@ async fn post_transform(
         .append_pair("appID", &shard.app_id);
 
     let headers = ctx.composed_headers();
-    let client = reqwest::Client::new();
+    // One process-wide client: reqwest pools + keep-alives connections per
+    // host, so repeated transforms reuse the TCP connection to the API server
+    // instead of paying DNS + connect + slow-start on every request (TS's
+    // `fetch` shares Node's global agent the same way).
+    static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+    let client = &*HTTP_CLIENT;
     crate::metrics::record_api_in_flight(1);
     let result = post_transform_attempts(&client, url, &headers, body, &transform_failed).await;
     crate::metrics::record_api_in_flight(-1);

@@ -216,7 +216,7 @@ fn build_row_patch_from_spec(spec: &Value) -> RowPatch {
     match spec.get("op").and_then(Value::as_str).expect("op") {
         "put" => RowPatch::Put {
             id: row_id,
-            contents: spec.get("contents").cloned().unwrap_or(Value::Null),
+            contents: std::sync::Arc::new(spec.get("contents").cloned().unwrap_or(Value::Null)),
         },
         _ => RowPatch::Del { id: row_id },
     }
