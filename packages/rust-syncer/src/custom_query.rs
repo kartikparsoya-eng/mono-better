@@ -333,7 +333,7 @@ async fn post_transform(
     static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
     let client = &*HTTP_CLIENT;
     crate::metrics::record_api_in_flight(1);
-    let result = post_transform_attempts(&client, url, &headers, body, &transform_failed).await;
+    let result = post_transform_attempts(client, url, &headers, body, &transform_failed).await;
     crate::metrics::record_api_in_flight(-1);
     result
 }

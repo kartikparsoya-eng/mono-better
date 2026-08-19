@@ -65,9 +65,11 @@ pub struct SyncerConfig {
     pub cvr_max_conns: u32,
     /// Number of executor threads (doc 91). Client groups are least-loaded
     /// placed across them; each runs a `current_thread` runtime + `LocalSet`
-    /// and draws CVR I/O from the shared pool. Defaults to the core count
-    /// (`ZERO_SYNCER_SHARDS` to override — set it explicitly in containers
-    /// with a CPU quota, since `available_parallelism` is quota-blind).
+    /// and draws CVR I/O from the shared pool. Defaults to the HOST core
+    /// count via the affinity mask (`host_parallelism`), deliberately
+    /// ignoring any cgroup cpu quota — quota-sized shard pools serialize
+    /// whole client groups (see `num_shards` default). `ZERO_SYNCER_SHARDS`
+    /// overrides.
     pub num_shards: usize,
     /// Interval (ms) between periodic JWT re-validation + query re-transform for
     /// live connections (TS `--auth-revalidate-interval-seconds`, default 300s).
@@ -134,17 +136,21 @@ impl SyncerConfig {
             // 4-cpu-capped container (ART G25, 2026-08-19): 4 quota-derived
             // shards → 51/56 queries breach 2x-of-TS parity with p95 up to
             // 58s; 14 host-derived shards → 0 violations on the same drive.
-            // `effective_parallelism` still warns about the quota mismatch so
-            // operators can tune ZERO_SYNCER_SHARDS deliberately.
+            //
+            // NOTE `std::thread::available_parallelism` is cgroup-quota-AWARE
+            // on Linux (it returns 4 in a `--cpus 4` container regardless of
+            // host cores), which silently re-created the quota-sized pool this
+            // default was meant to avoid. `host_parallelism()` reads the CPU
+            // affinity mask instead (quota-independent — `nproc` semantics).
+            // `warn_if_quota_capped` still flags the mismatch so operators can
+            // tune ZERO_SYNCER_SHARDS deliberately.
             num_shards: env::var("ZERO_SYNCER_SHARDS")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|n| *n > 0)
                 .unwrap_or_else(|| {
                     warn_if_quota_capped();
-                    std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(4)
+                    host_parallelism()
                 }),
             // TS default: 300s. `0` (or a negative) disables it.
             revalidate_interval_ms: {
@@ -165,15 +171,36 @@ impl SyncerConfig {
     }
 }
 
+/// The HOST-side logical CPU count, independent of any cgroup cpu quota.
+///
+/// `std::thread::available_parallelism` is quota-aware on Linux, so in a
+/// `--cpus N` container it returns N — exactly the quota-shrunk number the
+/// shard pool must NOT use (see `num_shards`). The sched affinity mask is
+/// quota-independent (`nproc` reports it), so count that instead; fall back
+/// to `available_parallelism` off-Linux or if the syscall fails.
+fn host_parallelism() -> usize {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) == 0 {
+            let n = libc::CPU_COUNT(&set);
+            if n > 0 {
+                return n as usize;
+            }
+        }
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 /// Log when the cgroup cpu quota is far below the host core count the shard
 /// default is derived from. We deliberately do NOT auto-shrink the shard pool
 /// to the quota — an A/B (ART G25) showed quota-sized `current_thread` shards
 /// serialize whole client groups behind each other and destroy tail latency —
 /// but a 3x+ mismatch is worth an operator's attention (ZERO_SYNCER_SHARDS).
 fn warn_if_quota_capped() {
-    let host = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let host = host_parallelism();
     if let Some(cores) = cgroup_cpu_quota_cores()
         && cores.saturating_mul(3) <= host
     {
