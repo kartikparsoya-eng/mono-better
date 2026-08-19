@@ -976,6 +976,15 @@ impl CVRQueryDrivenUpdater {
                     continue;
                 }
 
+                // A stored signature that CHANGED (vs first-time None) is a real
+                // drift: the same transformation hash produced a different row
+                // set → non-deterministic execution. Count it (TS
+                // query.row-set-signature-drifts canary); a first-time signature
+                // is not a drift.
+                if stored.is_some() {
+                    crate::otel_metrics::record_row_set_signature_drift();
+                }
+
                 let hex = crate::row_set_signature::format_signature(sig);
                 if let Some(query) = self.base.cvr.queries.get_mut(&query_id) {
                     query.base_mut().row_set_signature = Some(hex.clone());

@@ -553,8 +553,12 @@ fn failed_client_groups() -> &'static Counter<u64> {
     })
 }
 
-pub fn record_fail_group() {
-    failed_client_groups().add(1, &[]);
+/// `reason` is a CLOSED vocabulary so a 2am responder can tell a panic
+/// (`panic` — code bug) from a normal sync teardown (`sync` — usually CVR/PG
+/// flap) from an executor thread dying (`executor_exit`). Never pass a dynamic
+/// string.
+pub fn record_fail_group(reason: &'static str) {
+    failed_client_groups().add(1, &[KeyValue::new("reason", reason)]);
 }
 
 /// Total WS downstream frames queued (all connections) — the unbounded

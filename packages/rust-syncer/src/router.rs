@@ -580,7 +580,7 @@ impl ConnectionRouter {
                         tracing::error!(
                             "CG executor {idx} exited outside shutdown — its client groups are                              orphaned until their clients reconnect and re-place"
                         );
-                        crate::metrics::record_fail_group();
+                        crate::metrics::record_fail_group("executor_exit");
                     }
                 })
                 .expect("failed to spawn CG executor thread");
@@ -3162,7 +3162,7 @@ impl CgState {
             return;
         }
         self.terminal = true;
-        crate::metrics::record_fail_group();
+        crate::metrics::record_fail_group("sync");
         self.accepting.store(false, Ordering::SeqCst);
         for (_, conn) in self.connections.drain() {
             conn.close_with_error(error.clone());
@@ -3292,7 +3292,7 @@ async fn executor_loop(
                         tracing::error!("CG {cg_id} task panicked: {msg}");
                         // A panic bypasses fail_group (which counts terminal
                         // teardowns), so count the group death here.
-                        crate::metrics::record_fail_group();
+                        crate::metrics::record_fail_group("panic");
                     }
                 });
                 tasks.push(task);

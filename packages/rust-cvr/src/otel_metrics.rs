@@ -35,6 +35,7 @@ struct Instruments {
     poke_time: Histogram<f64>,
     poke_transactions: Counter<u64>,
     poke_rows: Counter<u64>,
+    row_set_signature_drifts: Counter<u64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -70,8 +71,23 @@ fn instruments() -> &'static Instruments {
                 .u64_counter("zero.sync.poke.rows")
                 .with_description("Count of poked rows.")
                 .build(),
+            row_set_signature_drifts: m
+                .u64_counter("zero.sync.query.row-set-signature-drifts")
+                .with_description(
+                    "Queries whose row-set signature changed for the SAME transformation \
+                     hash — expected near-zero; non-zero indicates non-deterministic query \
+                     execution (a silent-correctness canary).",
+                )
+                .build(),
         }
     })
+}
+
+/// Record a row-set-signature drift — TS view-syncer `query.row-set-signature-drifts`.
+/// Fired when a query's persisted signature CHANGES (same hash, different row
+/// set), never on first computation.
+pub fn record_row_set_signature_drift() {
+    instruments().row_set_signature_drifts.add(1, &[]);
 }
 
 /// Record a CVR flush — TS `recordSyncFlushStats` / `#recordAsyncFlushStats`
