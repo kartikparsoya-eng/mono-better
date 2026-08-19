@@ -94,7 +94,32 @@ impl SyncerConfig {
             replica_file: env::var("REPLICA_FILE").unwrap_or_else(|_| "replica.db".to_string()),
             cvr_pg_uri: env::var("CVR_PG_URI")
                 .unwrap_or_else(|_| "postgres://localhost/zero".to_string()),
-            task_id: env::var("TASK_ID").unwrap_or_else(|_| "task-0".to_string()),
+            task_id: env::var("TASK_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    // TS asserts TASK_ID is present (the dispatcher always passes
+                    // a unique ECS-ARN / nanoid). A SHARED constant like "task-0"
+                    // would collapse the CVR ownership lease: two standalone
+                    // instances would each satisfy `owner == task_id` and never
+                    // see the other as a competing owner, permitting interleaved
+                    // lost updates. Fall back to a per-process-UNIQUE id instead
+                    // (in a real deployment the env is always set, so this only
+                    // guards misconfigured/standalone launches).
+                    let auto = format!(
+                        "task-auto-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    );
+                    eprintln!(
+                        "WARNING: TASK_ID unset; using unique fallback owner id \
+                         '{auto}'. Set TASK_ID in production."
+                    );
+                    auto
+                }),
             shard: env::var("SHARD").unwrap_or_else(|_| "0".to_string()),
             app_id: env::var("ZERO_APP_ID")
                 .or_else(|_| env::var("APP_ID"))

@@ -446,6 +446,25 @@ pub fn record_ws_connection_failure(protocol_version: u32, reason: &str) {
     );
 }
 
+/// Slow-client sheds — a client DISCONNECTED because it couldn't keep up
+/// (downstream queue crossed a HWM) or went unresponsive (liveness). This is the
+/// terminal event of the slow-client incident; without a counter it was
+/// `warn!`-log-only and un-alertable. `reason` is a CLOSED vocabulary
+/// (`frame_hwm` / `byte_hwm` / `liveness`) — never pass a dynamic string.
+fn ws_sheds() -> &'static Counter<u64> {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.websocket.sheds")
+            .with_description("Clients disconnected by the slow-client shed (by reason).")
+            .build()
+    })
+}
+
+pub fn record_ws_shed(reason: &'static str) {
+    ws_sheds().add(1, &[KeyValue::new("reason", reason)]);
+}
+
 pub fn record_ws_open_delta(delta: i64, protocol_version: u32) {
     ws_open_connections().add(delta, &[proto_attr(protocol_version)]);
 }

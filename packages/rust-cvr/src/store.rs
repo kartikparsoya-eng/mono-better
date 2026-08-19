@@ -725,17 +725,35 @@ impl CVRStoreHandle {
             stats.queries += 1;
         }
 
-        // 6. Desire upserts
+        // 6. Desire upserts.
+        //
+        // Dual-write the DEPRECATED "ttl" (INTERVAL) / "inactivatedAt"
+        // (TIMESTAMPTZ) columns alongside the current *Ms columns — TS
+        // `#flushDesires` does the same (cvr-store.ts convertTTLValues). Without
+        // it, during a rolling upgrade an OLD-image reader that still reads the
+        // deprecated columns sees NULL and mis-clamps TTL / re-activates an
+        // inactivated query. Derived arithmetically from the bound ms params
+        // (safer/more precise than TS's json-number→INTERVAL cast): ttl seconds
+        // = ttlMs/1000, timestamp = to_timestamp(inactivatedAtMs/1000). A NULL
+        // or negative ttlMs → NULL interval (TS `ttl < 0 ? null`).
         for row in pending.pending_desire_updates.values() {
             let sql = format!(
                 r#"INSERT INTO "{}".desires
                    ("clientGroupID", "clientID", "queryHash", "patchVersion",
-                    "deleted", "ttlMs", "inactivatedAtMs")
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    "deleted", "ttl", "ttlMs", "inactivatedAt", "inactivatedAtMs")
+                   VALUES ($1, $2, $3, $4, $5,
+                    CASE WHEN $6 IS NULL OR $6 < 0 THEN NULL
+                         ELSE ($6 / 1000.0) * INTERVAL '1 second' END,
+                    $6,
+                    CASE WHEN $7 IS NULL THEN NULL
+                         ELSE to_timestamp($7 / 1000.0) END,
+                    $7)
                    ON CONFLICT ("clientGroupID", "clientID", "queryHash") DO UPDATE SET
                     "patchVersion" = excluded."patchVersion",
                     "deleted" = excluded."deleted",
+                    "ttl" = excluded."ttl",
                     "ttlMs" = excluded."ttlMs",
+                    "inactivatedAt" = excluded."inactivatedAt",
                     "inactivatedAtMs" = excluded."inactivatedAtMs""#,
                 self.schema
             );

@@ -293,6 +293,7 @@ pub async fn accept_connection_with_limit(
         bytes: Arc::new(AtomicI64::new(0)),
         byte_hwm: downstream_byte_hwm(),
         kill: kill_tx,
+        shed_counted: std::sync::atomic::AtomicBool::new(false),
     });
     let sink = DirectWebSocketSink::with_limits(downstream_tx, limits.clone());
     // Wall-clock of the last frame received FROM the client (liveness).
@@ -427,6 +428,7 @@ async fn run_ws_writer(
                         tracing::info!(
                             "closing unresponsive client (no inbound frame for {idle_ms}ms)"
                         );
+                        crate::metrics::record_ws_shed("liveness");
                         let _ = ws_writer.send(Message::Close(Some(
                             tokio_tungstenite::tungstenite::protocol::CloseFrame {
                                 code: CloseCode::from(1001u16),

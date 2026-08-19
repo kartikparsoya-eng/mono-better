@@ -23,7 +23,7 @@ use crate::protocol::{BasicErrorBody, ErrorBody, ErrorKind};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::{mpsc, watch};
 
 /// Messages sent from the CG thread to the WS writer task.
@@ -61,6 +61,11 @@ pub struct SinkLimits {
     /// closes the socket immediately — sending a `Fail` through the queue would
     /// deliver it only after the very backlog that tripped the limit.
     pub kill: watch::Sender<bool>,
+    /// Guards the shed METRIC so it counts exactly once per connection: after
+    /// the HWM trips, the CG keeps calling `send_command` (re-crossing the mark)
+    /// until the writer drains/closes, so without this the shed counter would
+    /// over-count. Set on the first crossing via compare_exchange.
+    pub shed_counted: AtomicBool,
 }
 
 /// The sink that the CG thread uses to push downstream messages.
@@ -122,6 +127,18 @@ impl DirectWebSocketSink {
         let _ = self.send_command(WsCommand::Close(reason));
     }
 
+    /// Record a slow-client shed exactly once per connection (the CG re-crosses
+    /// the HWM on every subsequent push until the writer closes).
+    fn count_shed_once(limits: &SinkLimits, reason: &'static str) {
+        if limits
+            .shed_counted
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            crate::metrics::record_ws_shed(reason);
+        }
+    }
+
     /// Enqueue a command onto the unbounded, order-preserving channel. Never
     /// blocks and never panics; failures are a dropped receiver (the WS writer
     /// task has exited) or a tripped slow-client high-water mark.
@@ -139,6 +156,7 @@ impl DirectWebSocketSink {
                 // reject the command — the queue is already `hwm` deep.
                 limits.depth.fetch_sub(1, Ordering::SeqCst);
                 let _ = limits.kill.send(true);
+                Self::count_shed_once(limits, "frame_hwm");
                 return Err(format!(
                     "ws downstream queue overflow (depth > {}): slow client shed",
                     limits.hwm
@@ -152,6 +170,7 @@ impl DirectWebSocketSink {
                     limits.bytes.fetch_sub(est, Ordering::SeqCst);
                     limits.depth.fetch_sub(1, Ordering::SeqCst);
                     let _ = limits.kill.send(true);
+                    Self::count_shed_once(limits, "byte_hwm");
                     return Err(format!(
                         "ws downstream queue overflow (bytes > {}): slow client shed",
                         limits.byte_hwm
@@ -238,6 +257,7 @@ mod tests {
             bytes: Arc::new(AtomicI64::new(0)),
             byte_hwm: 0, // frame-HWM test: byte shedding disabled
             kill: kill_tx,
+            shed_counted: AtomicBool::new(false),
         });
         let sink = DirectWebSocketSink::with_limits(tx, limits.clone());
 
@@ -283,6 +303,7 @@ mod tests {
             bytes: Arc::new(AtomicI64::new(0)),
             byte_hwm,
             kill: kill_tx,
+            shed_counted: AtomicBool::new(false),
         });
         (limits, kill_rx)
     }
