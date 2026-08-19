@@ -71,9 +71,31 @@ pub enum AdvanceOutcome {
 
 /// The engine + snapshotter + sources for a single client group, mirroring the
 /// napi `EngineState`.
+///
+/// ── FIELD ORDER IS LOAD-BEARING — DO NOT REORDER ─────────────────────────
+/// Rust drops struct fields in declaration order, and every CG teardown in
+/// rust-syncer is a plain struct drop (no teardown path calls `destroy()`).
+/// The connection-holding fields MUST drop as:
+///
+///   1. `engine`  — its `Drop` runs `Engine::destroy()`, breaking the
+///      operator-graph Rc cycles and releasing the engine-held source/conn
+///      clones;
+///   2. `sources` — drops the per-table `TableSource` cells, releasing their
+///      inner snapshot-conn `Rc` clones;
+///   3. `snapshotter` LAST — its `Snapshot::drop` is then the SOLE owner of
+///      the snapshot's SQLite connection and takes the explicit, checked,
+///      LOUD close (snapshotter.rs). If anything still holds a conn clone at
+///      that point, `Snapshot::drop` early-returns and the eventual close is
+///      rusqlite's implicit `Drop`, which calls `sqlite3_close` and SWALLOWS
+///      the error — a `SQLITE_BUSY` close then silently leaks the whole
+///      handle (~11.5MB page cache + fds per CG churn; ART G6).
+///
+/// This ordering IS the fix for that silent sqlite-close leak: with
+/// `snapshotter` declared after `sources`, the census warning in
+/// `Snapshot::drop` fires only on true bypasses instead of on 100% of
+/// teardowns. `destroy()` and `init_from_connection` mirror this order.
 pub struct IvmPipelines {
     engine: Option<Engine>,
-    snapshotter: Option<Snapshotter>,
     syncable_tables: HashMap<String, LiteAndZqlSpec>,
     all_table_names: HashSet<String>,
     sources: HashMap<String, Rc<RefCell<dyn Source>>>,
@@ -103,6 +125,10 @@ pub struct IvmPipelines {
     /// Set when a non-scalar panic was caught mid-advance; forces the next
     /// advance to emit a reset instead of running on a half-mutated graph.
     poisoned: bool,
+    /// MUST stay the LAST field — dropped after `engine` and `sources` so the
+    /// pinned snapshot's `Snapshot::drop` sole-owner loud close runs (see the
+    /// struct-level "FIELD ORDER IS LOAD-BEARING" comment).
+    snapshotter: Option<Snapshotter>,
 }
 
 impl Default for IvmPipelines {
@@ -115,7 +141,6 @@ impl IvmPipelines {
     pub fn new() -> Self {
         IvmPipelines {
             engine: None,
-            snapshotter: None,
             syncable_tables: HashMap::new(),
             all_table_names: HashSet::new(),
             sources: HashMap::new(),
@@ -124,6 +149,7 @@ impl IvmPipelines {
             query_asts: HashMap::new(),
             query_order: Vec::new(),
             poisoned: false,
+            snapshotter: None,
         }
     }
 
@@ -248,13 +274,18 @@ impl IvmPipelines {
             eng.destroy();
         }
         self.engine = None;
-        self.snapshotter = None;
+        // Ordered teardown (see the struct-level "FIELD ORDER IS LOAD-BEARING"
+        // comment): clear `sources` BEFORE dropping the snapshotter, so the
+        // snapshotter's `Snapshot::drop` is the sole conn owner and takes the
+        // explicit loud close instead of leaving the last conn clone to
+        // rusqlite's silent implicit close.
         self.syncable_tables.clear();
         self.all_table_names.clear();
         self.sources.clear();
         self.primary_keys.clear();
         self.active_queries.clear();
         self.poisoned = false;
+        self.snapshotter = None;
         self.build_engine(&tables, Some(conn));
         Ok(())
     }
@@ -493,13 +524,20 @@ impl IvmPipelines {
     }
 
     /// Tear down pipelines and drop the engine + snapshotter.
+    ///
+    /// Teardown ORDER is load-bearing (see the struct-level "FIELD ORDER IS
+    /// LOAD-BEARING" comment): engine first (breaks operator-graph cycles,
+    /// releases engine-held conn clones), then `sources` (releases the
+    /// per-table conn clones), then the snapshotter LAST — so its
+    /// `Snapshot::drop` is the sole conn owner and runs the explicit,
+    /// checked, LOUD sqlite close instead of rusqlite's silent implicit one.
     pub fn destroy(&mut self) {
         if let Some(eng) = self.engine.as_mut() {
             eng.destroy();
         }
         self.engine = None;
-        self.snapshotter = None;
         self.sources.clear();
+        self.snapshotter = None;
         self.syncable_tables.clear();
         self.all_table_names.clear();
         self.primary_keys.clear();
