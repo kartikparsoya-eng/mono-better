@@ -354,6 +354,80 @@ pub fn record_active_client_delta(delta: i64, protocol_version: u32) {
     );
 }
 
+// ─── WebSocket front-door instruments (TS workers/syncer.ts:303-322 +
+// connection.ts:87). These are the connect-SLO metrics: a connect storm or an
+// auth-failure spike must be visible on OTLP dashboards, not just in logs. ───
+
+fn ws_open_connections() -> &'static UpDownCounter<i64> {
+    static C: OnceLock<UpDownCounter<i64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .i64_up_down_counter("zero.sync.websocket.open_connections")
+            .with_description("Open client WebSocket connections.")
+            .build()
+    })
+}
+
+fn ws_connection_attempts() -> &'static Counter<u64> {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.websocket.connection_attempts")
+            .with_description("Client WebSocket connection attempts.")
+            .build()
+    })
+}
+
+fn ws_connection_successes() -> &'static Counter<u64> {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.websocket.connection_successes")
+            .with_description("Client WebSocket connections successfully initialized.")
+            .build()
+    })
+}
+
+fn ws_connection_failures() -> &'static Counter<u64> {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.websocket.connection_failures")
+            .with_description(
+                "Client WebSocket connection attempts that failed before initialization.",
+            )
+            .build()
+    })
+}
+
+fn proto_attr(protocol_version: u32) -> KeyValue {
+    KeyValue::new("protocol.version", protocol_version as i64)
+}
+
+pub fn record_ws_connection_attempt(protocol_version: u32) {
+    ws_connection_attempts().add(1, &[proto_attr(protocol_version)]);
+}
+
+pub fn record_ws_connection_success(protocol_version: u32) {
+    ws_connection_successes().add(1, &[proto_attr(protocol_version)]);
+}
+
+/// `reason` follows the TS reason vocabulary (`auth`, `protocol_version`,
+/// `configuration`, `internal`, ...) plus rust-specific handshake stages.
+pub fn record_ws_connection_failure(protocol_version: u32, reason: &str) {
+    ws_connection_failures().add(
+        1,
+        &[
+            proto_attr(protocol_version),
+            KeyValue::new("reason", reason.to_string()),
+        ],
+    );
+}
+
+pub fn record_ws_open_delta(delta: i64, protocol_version: u32) {
+    ws_open_connections().add(delta, &[proto_attr(protocol_version)]);
+}
+
 // ─── Failure/pressure telemetry (the signals that precede a capacity incident;
 // previously error-log-only, i.e. invisible to dashboards/alerts) ────────────
 

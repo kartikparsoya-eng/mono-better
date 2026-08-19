@@ -474,6 +474,7 @@ impl ConnectionRouter {
         let cg_handles: Arc<DashMap<String, CGHandle>> = Arc::new(DashMap::new());
         let connections = Arc::new(Mutex::new(HashMap::new()));
 
+        let shutting_down = Arc::new(AtomicBool::new(false));
         let mut executors = Vec::with_capacity(num_shards);
         for idx in 0..num_shards {
             let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<ExecutorCommand>();
@@ -482,10 +483,22 @@ impl ConnectionRouter {
             let conns = connections.clone();
             let handles = cg_handles.clone();
             let pool = cvr_pool.clone();
+            let shutdown_flag = shutting_down.clone();
             let join = std::thread::Builder::new()
                 .name(format!("cg-exec-{idx}"))
                 .spawn(move || {
                     run_executor(idx, ctrl_rx, factory, validator, conns, handles, pool);
+                    // An executor thread must outlive the process outside of
+                    // shutdown. Before this line, a dead shard was discovered
+                    // only when a later CG *placement* happened to target it —
+                    // operators learned about it from tail latency. Make the
+                    // death loud and countable the moment it happens.
+                    if !shutdown_flag.load(Ordering::SeqCst) {
+                        tracing::error!(
+                            "CG executor {idx} exited outside shutdown — its client groups are                              orphaned until their clients reconnect and re-place"
+                        );
+                        crate::metrics::record_fail_group();
+                    }
                 })
                 .expect("failed to spawn CG executor thread");
             executors.push(Executor {
@@ -505,7 +518,7 @@ impl ConnectionRouter {
             connections,
             group_auth_states: Arc::new(Mutex::new(HashMap::new())),
             last_notification: Arc::new(Mutex::new(None)),
-            shutting_down: Arc::new(AtomicBool::new(false)),
+            shutting_down,
         }
     }
 
@@ -536,6 +549,7 @@ impl ConnectionRouter {
         let ws_id = ctx.params.ws_id.clone();
         let user_id = ctx.params.user_id.clone();
         let auth = ctx.params.auth.clone();
+        let pv = ctx.params.protocol_version;
 
         tracing::debug!(
             "creating connection: cg={client_group_id}, client={client_id}, ws={ws_id}"
@@ -563,6 +577,7 @@ impl ConnectionRouter {
                         "Rejecting sync connection during initial auth resolution: \
                              cg={client_group_id}, client={client_id}, user={user_id:?}"
                     );
+                    crate::metrics::record_ws_connection_failure(pv, "auth");
                     // Send error and close.
                     ctx.sink.fail(error_body);
                     return;
@@ -585,6 +600,7 @@ impl ConnectionRouter {
                 // spread-the-load signal. Covers both cap-overflow and
                 // executor-shutdown Errs from get_or_create_cg.
                 tracing::warn!("rehoming connection for {client_group_id}: {message}");
+                crate::metrics::record_ws_connection_failure(pv, "rehome");
                 ctx.sink.fail(crate::protocol::ErrorBody::rehome(message));
                 return;
             }
@@ -614,6 +630,7 @@ impl ConnectionRouter {
                     group.pinned_user_id
                 );
                 decrement_nonzero(&cg_handle.connection_count);
+                crate::metrics::record_ws_connection_failure(pv, "user_mismatch");
                 ctx.sink.fail(error);
                 return;
             }
@@ -1666,6 +1683,8 @@ impl CgState {
         self.active_client_pv
             .insert(ws_id.clone(), params.protocol_version);
         crate::metrics::record_active_client_delta(1, params.protocol_version);
+        // Connection fully initialized (TS `recordConnectionSuccessMetric`).
+        crate::metrics::record_ws_connection_success(params.protocol_version);
         self.registered_ws.insert(client_id.clone(), ws_id.clone());
         self.client_base_versions.insert(
             client_id.clone(),

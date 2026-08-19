@@ -348,13 +348,32 @@ fn main() {
         builder.build()
     };
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize tracing. Filter precedence: RUST_LOG (rust-native, full
+    // targeting syntax) else ZERO_LOG_LEVEL (the zero-cache config's level,
+    // forwarded by rust-syncer-bridge) else info. ZERO_LOG_FORMAT=json emits
+    // one JSON object per line — REQUIRED in deployments whose log pipeline
+    // parses the container stream as JSON (the parent zero-cache forwards
+    // this binary's stdout verbatim; a plaintext tracing line there is
+    // unparseable and drops the very error lines operators alert on). ANSI
+    // is always off: stdout is a pipe to the parent, never a tty.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .or_else(|_| {
+            env::var("ZERO_LOG_LEVEL").map(|l| tracing_subscriber::EnvFilter::new(l.trim()))
+        })
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let json_logs = env::var("ZERO_LOG_FORMAT").is_ok_and(|f| f.trim().eq_ignore_ascii_case("json"));
+    if json_logs {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .init();
+    }
 
     #[cfg(feature = "dhat-heap")]
     tracing::warn!("dhat-heap profiling active: dhat-heap.json written on graceful shutdown");
@@ -633,8 +652,7 @@ impl CGServicesFactory for RealServicesFactory {
             tables.len()
         );
         let load_result: Result<Option<serde_json::Value>, String> =
-            rusqlite::Connection::open(&self.config.replica_file)
-                .map_err(|e| e.to_string())
+            rust_syncer::replica_schema::open_replica_read_only(&self.config.replica_file)
                 .and_then(|conn| rust_syncer::load_permissions(&conn, &self.config.app_id))
                 .map(|loaded| loaded.permissions);
         match &load_result {

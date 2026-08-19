@@ -330,7 +330,22 @@ async fn post_transform(
     // host, so repeated transforms reuse the TCP connection to the API server
     // instead of paying DNS + connect + slow-start on every request (TS's
     // `fetch` shares Node's global agent the same way).
-    static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+    //
+    // The timeout is NOT optional: `transform_custom_queries` is awaited
+    // inline on the CG event loop, so a query-API server that accepts the
+    // connection and never responds would otherwise freeze that client group
+    // FOREVER (its message channel just queues; reconnecting clients land on
+    // the same stuck CG). reqwest has no default timeout. A timeout maps to
+    // the existing `fetch_error` retry branch. Node's undici enforces a 300s
+    // headers timeout on the TS side; 30s is tighter because the caller
+    // retries and a healthy transform is ~15ms.
+    static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("reqwest client build cannot fail with static config")
+    });
     let client = &*HTTP_CLIENT;
     crate::metrics::record_api_in_flight(1);
     let result = post_transform_attempts(client, url, &headers, body, &transform_failed).await;

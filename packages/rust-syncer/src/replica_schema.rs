@@ -48,9 +48,21 @@ pub fn read_replica_versions(conn: &Connection) -> Result<ReplicaVersions, Strin
 }
 
 pub fn read_replica_versions_from_path(replica_path: &str) -> Result<ReplicaVersions, String> {
-    let conn =
-        Connection::open(replica_path).map_err(|e| format!("open replica {replica_path}: {e}"))?;
+    let conn = open_replica_read_only(replica_path)?;
     read_replica_versions(&conn)
+}
+
+/// Open the replica strictly READ_ONLY. The default `Connection::open` is
+/// READ_WRITE|CREATE, which silently creates an empty SQLite file on a
+/// mistyped `REPLICA_FILE` — masking the misconfiguration behind later
+/// "no such table" errors while leaving a stray db file behind. These readers
+/// never write, so a missing file must fail fast here.
+pub fn open_replica_read_only(replica_path: &str) -> Result<Connection, String> {
+    Connection::open_with_flags(
+        replica_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open replica {replica_path}: {e}"))
 }
 
 const NOT_NULL_ATTRIBUTE: &str = "|NOT_NULL";
@@ -59,8 +71,7 @@ const TEXT_ARRAY_ATTRIBUTE: &str = "|TEXT_ARRAY";
 
 /// Open the replica and compute its table specs.
 pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableSpec>, String> {
-    let conn =
-        Connection::open(replica_path).map_err(|e| format!("open replica {replica_path}: {e}"))?;
+    let conn = open_replica_read_only(replica_path)?;
     compute_table_specs(&conn)
 }
 

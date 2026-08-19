@@ -161,6 +161,27 @@ describe('rustSyncerEnv', () => {
     expect(env.AUTH_AUDIENCE).toBeUndefined();
   });
 
+  test('forwards log format/level/slow-hydrate threshold to the rust env', () => {
+    const env = rustSyncerEnv(
+      {
+        ...base,
+        log: {level: 'debug', format: 'json', slowHydrateThreshold: 100},
+      },
+      'serving',
+      3100,
+      3200,
+      15,
+    );
+    expect(env.ZERO_LOG_FORMAT).toBe('json');
+    expect(env.ZERO_LOG_LEVEL).toBe('debug');
+    expect(env.ZERO_SLOW_HYDRATE_THRESHOLD_MS).toBe('100');
+    // Unset log config forwards nothing (rust falls back to its defaults).
+    const bare = rustSyncerEnv(base, 'serving', 3100, 3200, 15);
+    expect(bare.ZERO_LOG_FORMAT).toBeUndefined();
+    expect(bare.ZERO_LOG_LEVEL).toBeUndefined();
+    expect(bare.ZERO_SLOW_HYDRATE_THRESHOLD_MS).toBeUndefined();
+  });
+
   test('uses the legacy getQueries config when query has no URL', () => {
     const env = rustSyncerEnv(
       {

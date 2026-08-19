@@ -40,6 +40,20 @@ export type RustSyncerConfig = {
    * syncer's coverage logging matches the TS syncer's.
    */
   enableQueryCovering?: boolean | undefined;
+  /**
+   * Normalized log options. `format`/`level` must reach rust so its tracing
+   * output matches the deployment's log pipeline (a plaintext rust line in a
+   * `json`-format stream is unparseable); `slowHydrateThreshold` so the
+   * operator's configured threshold governs rust's slow-materialization warn
+   * (rust's own default is 1000ms vs the TS default 100ms).
+   */
+  log?:
+    | {
+        level?: string | undefined;
+        format?: string | undefined;
+        slowHydrateThreshold?: number | undefined;
+      }
+    | undefined;
 };
 
 type RustSyncerFetchConfig = {
@@ -128,6 +142,18 @@ export function rustSyncerEnv(
   // the zero-config default.
   if (config.enableQueryCovering === false) {
     out.ENABLE_QUERY_COVERING = 'false';
+  }
+  // Log-pipeline parity: the rust binary's stdout is forwarded verbatim into
+  // this process's stream, so its format/level must follow the normalized
+  // config, not a rust-only env.
+  if (config.log?.format) {
+    out.ZERO_LOG_FORMAT = config.log.format;
+  }
+  if (config.log?.level) {
+    out.ZERO_LOG_LEVEL = config.log.level;
+  }
+  if (config.log?.slowHydrateThreshold !== undefined) {
+    out.ZERO_SLOW_HYDRATE_THRESHOLD_MS = String(config.log.slowHydrateThreshold);
   }
   // Shared secret gating the rust /notify endpoints (see notifyAuthToken).
   out.NOTIFY_AUTH_TOKEN = notifyAuthToken;

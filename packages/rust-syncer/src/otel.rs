@@ -68,10 +68,17 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
         }
     };
 
-    // Export every 10s (a manual PeriodicReader ignores OTEL_METRIC_EXPORT_INTERVAL;
-    // the default is 60s). 10s gives timely delivery without excessive traffic.
+    // Honor OTEL_METRIC_EXPORT_INTERVAL (standard OTel env, milliseconds —
+    // the TS NodeSDK reader reads it too); a manual PeriodicReader would
+    // otherwise silently ignore it. Default 10s: timely delivery without
+    // excessive traffic (the OTel spec default is 60s).
+    let interval_ms = std::env::var("OTEL_METRIC_EXPORT_INTERVAL")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(10_000);
     let reader = PeriodicReader::builder(exporter)
-        .with_interval(std::time::Duration::from_secs(10))
+        .with_interval(std::time::Duration::from_millis(interval_ms))
         .build();
     let resource = Resource::builder()
         .with_service_name("zero-cache")

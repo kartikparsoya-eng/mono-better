@@ -195,12 +195,53 @@ impl JwtAuthValidator {
         // Fetch and cache the set BEFORE selecting the key, so `fetched_at` is
         // recorded even when the fetched set does not contain the requested
         // `kid` — otherwise repeated unknown-`kid` requests would each refetch.
-        let set: JwkSet = reqwest::get(jwks_url)
-            .await
-            .map_err(|e| format!("JWKS fetch failed: {e}"))?
-            .json()
-            .await
-            .map_err(|e| format!("JWKS parse failed: {e}"))?;
+        //
+        // Timeout is required: this await sits on connect/revalidation paths,
+        // so a hung IdP would otherwise hang them (reqwest has no default
+        // timeout).
+        static JWKS_HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client build cannot fail with static config")
+        });
+        let fetched: Result<JwkSet, String> = async {
+            JWKS_HTTP
+                .get(jwks_url)
+                .send()
+                .await
+                .map_err(|e| format!("JWKS fetch failed: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("JWKS parse failed: {e}"))
+        }
+        .await;
+        let set: JwkSet = match fetched {
+            Ok(set) => set,
+            Err(fetch_err) => {
+                // Stale-grace: an IdP outage must not disconnect-storm the
+                // whole tokened population at the next revalidation tick.
+                // When the refetch fails, serve the LAST-KNOWN keyset even
+                // past its TTL — key rotation retires old keys over hours,
+                // so a stale set is overwhelmingly still valid, while
+                // failing closed here turns an IdP blip into a total
+                // outage. A token signed by a genuinely revoked key still
+                // fails signature verification below.
+                if let Some(jwk) = lookup_stale_cached_jwk(jwks_url, header.kid.as_deref()) {
+                    tracing::warn!(
+                        "JWKS refetch failed ({fetch_err}); verifying against the stale cached keyset"
+                    );
+                    return verify_with_jwk(
+                        token,
+                        &jwk,
+                        user_id,
+                        self.issuer.as_deref(),
+                        self.audience.as_deref(),
+                    );
+                }
+                return Err(fetch_err);
+            }
+        };
         if let Ok(mut cache) = JWKS_CACHE.lock() {
             cache.insert(
                 jwks_url.to_string(),
@@ -268,6 +309,15 @@ fn lookup_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
     if entry.fetched_at.elapsed() >= JWKS_TTL {
         return None;
     }
+    select_jwk(&entry.set, kid).cloned()
+}
+
+/// Like `lookup_cached_jwk` but IGNORES the TTL — used only on the
+/// refetch-failure stale-grace path, where any cached key beats failing
+/// closed during an IdP outage.
+fn lookup_stale_cached_jwk(url: &str, kid: Option<&str>) -> Option<Jwk> {
+    let cache = JWKS_CACHE.lock().ok()?;
+    let entry = cache.get(url)?;
     select_jwk(&entry.set, kid).cloned()
 }
 

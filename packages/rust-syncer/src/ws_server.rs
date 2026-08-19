@@ -151,6 +151,7 @@ pub async fn accept_connection_with_limit(
         Ok(ws) => ws,
         Err(e) => {
             tracing::warn!("WebSocket handshake failed: {e}");
+            crate::metrics::record_ws_connection_failure(0, "handshake");
             return None;
         }
     };
@@ -161,6 +162,7 @@ pub async fn accept_connection_with_limit(
 
     // Extract protocol version from the URL path.
     let protocol_version = extract_protocol_version(&path).unwrap_or(0);
+    crate::metrics::record_ws_connection_attempt(protocol_version);
 
     // Extract sec-websocket-protocol header.
     let sec_protocol = headers
@@ -237,6 +239,7 @@ pub async fn accept_connection_with_limit(
         Ok(params) => params,
         Err(e) => {
             tracing::warn!("connect params error: {e}");
+            crate::metrics::record_ws_connection_failure(protocol_version, "configuration");
             let error = ErrorBody::invalid_message(e.to_string());
             send_error_and_close(ws_stream, error).await;
             return None;
@@ -245,6 +248,7 @@ pub async fn accept_connection_with_limit(
 
     // Validate protocol version.
     if !(MIN_SERVER_SUPPORTED_SYNC_PROTOCOL..=PROTOCOL_VERSION).contains(&protocol_version) {
+        crate::metrics::record_ws_connection_failure(protocol_version, "protocol_version");
         let error = ErrorBody::version_not_supported(format!(
             "Server supports protocol versions {MIN_SERVER_SUPPORTED_SYNC_PROTOCOL} to {PROTOCOL_VERSION}, but client requested {protocol_version}"
         ));
@@ -287,12 +291,18 @@ pub async fn accept_connection_with_limit(
         last_inbound.clone(),
     ));
 
+    // Open-connections gauge: +1 here, -1 when the reader task exits (the
+    // reader always terminates on close/error, so the decrement fires exactly
+    // once per accepted connection — TS pairs the same way via `ws.once('close')`).
+    crate::metrics::record_ws_open_delta(1, protocol_version);
+
     // Spawn the WS reader task.
     tokio::spawn(run_ws_reader(
         ws_reader,
         upstream_tx,
         params.ws_id.clone(),
         last_inbound,
+        protocol_version,
     ));
 
     Some(ConnectionContext {
@@ -429,6 +439,7 @@ async fn run_ws_reader(
     upstream_tx: mpsc::Sender<String>,
     ws_id: String,
     last_inbound: Arc<AtomicI64>,
+    protocol_version: u32,
 ) {
     while let Some(msg_result) = ws_reader.next().await {
         // Any frame from the client — including protocol-level ping/pong —
@@ -469,6 +480,7 @@ async fn run_ws_reader(
             }
         }
     }
+    crate::metrics::record_ws_open_delta(-1, protocol_version);
 }
 
 fn is_expected_disconnect(error: &WebSocketError) -> bool {
