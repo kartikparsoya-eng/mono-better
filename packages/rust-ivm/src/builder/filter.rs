@@ -234,8 +234,17 @@ pub fn transform_filters(filters: Option<&Condition>) -> TransformedFilters {
                 }
             }
             TransformedFilters {
+                // SECURITY: an empty OR is the deny-all `FALSE` sentinel (the
+                // read-authorizer's deny-by-default, and any rule that simplifies
+                // to FALSE). It MUST be preserved as `Some(Or([]))` — which the
+                // source enforces as `WHERE FALSE` / an all-false predicate (0
+                // rows) — NOT collapsed to `None` (no filter → EVERY row served,
+                // a data leak). This mirrors TS `transformFilters`, which returns
+                // `simplifyCondition({or, []})` = FALSE, not undefined. This arm's
+                // empty case is reachable ONLY for an empty *input* OR: any OR
+                // with branches either pushes a branch or early-returns above.
                 filters: if transformed.is_empty() {
-                    None
+                    Some(Condition::Or(Vec::new()))
                 } else if transformed.len() == 1 {
                     Some(transformed.into_iter().next().unwrap())
                 } else {
@@ -244,5 +253,67 @@ pub fn transform_filters(filters: Option<&Condition>) -> TransformedFilters {
                 conditions_removed: removed,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sqlite::query_builder::condition_to_sql;
+
+    fn simple_eq() -> Condition {
+        Condition::Simple(SimpleCondition {
+            op: "=".to_string(),
+            left: ValuePosition::Column {
+                name: "id".to_string(),
+            },
+            right: ValuePosition::Literal {
+                value: Value::F64(1.0),
+            },
+        })
+    }
+
+    /// SECURITY REGRESSION (data-leak): the deny-all empty-OR (`FALSE` sentinel —
+    /// the read-authorizer's deny-by-default and any rule simplifying to FALSE)
+    /// must be PRESERVED as `Some(Or([]))`, never collapsed to `None`. `None`
+    /// means "no source filter" → every row served. This test pins that the
+    /// sentinel survives the transform AND that the source enforces it as a
+    /// zero-row filter (SQL `FALSE`, all-false in-memory predicate).
+    #[test]
+    fn empty_or_preserved_as_deny_all_false() {
+        let empty_or = Condition::Or(Vec::new());
+        let t = transform_filters(Some(&empty_or));
+        match &t.filters {
+            Some(Condition::Or(v)) => assert!(v.is_empty(), "must stay an empty OR (FALSE)"),
+            other => panic!("empty OR must be preserved as Some(Or([])), got {other:?}"),
+        }
+        // SQL path: WHERE FALSE → 0 rows.
+        let (sql, params) = condition_to_sql(t.filters.as_ref().unwrap());
+        assert_eq!(sql, "FALSE");
+        assert!(params.is_empty());
+    }
+
+    /// Guard against over-triggering: a real OR with a branch must NOT become
+    /// FALSE — a single-branch OR collapses to that branch, unchanged.
+    #[test]
+    fn non_empty_or_not_turned_into_false() {
+        let or = Condition::Or(vec![simple_eq()]);
+        let t = transform_filters(Some(&or));
+        assert!(
+            matches!(t.filters, Some(Condition::Simple(_))),
+            "a single-branch OR must collapse to the branch, not FALSE"
+        );
+    }
+
+    /// Empty AND is TRUE (match-all); `None` is the behaviorally-equivalent
+    /// "no filter", so leaving it None is correct (allow-all, not a leak).
+    #[test]
+    fn empty_and_allows_all() {
+        let empty_and = Condition::And(Vec::new());
+        let t = transform_filters(Some(&empty_and));
+        assert!(
+            t.filters.is_none(),
+            "empty AND == TRUE == no filter (match-all); staying None is correct"
+        );
     }
 }
