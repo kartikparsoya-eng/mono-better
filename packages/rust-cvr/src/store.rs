@@ -1224,14 +1224,20 @@ impl CVRStoreHandle {
             .fetch_optional(&mut *tx)
             .await?;
 
-        if let Some((cv,)) = &current_version {
-            let cv = try_version_from_string(cv)?;
-            if cmp_cvr(&cv, up_to_version) != Ordering::Equal {
-                return Err(CVRStoreError::ConcurrentModification {
-                    expected: version_string(up_to_version),
-                    actual: version_string(&cv),
-                });
-            }
+        // TS `checkVersion` defaults a MISSING instance row to EMPTY_CVR_VERSION
+        // and still compares (cvr-store.ts:1348). A client group that vanished
+        // mid-catchup (GC/purge racing a reconnect) must therefore fail with
+        // ConcurrentModification so the client cleanly rehomes — not silently
+        // proceed and return stale/empty patches under a now-absent CVR.
+        let cv = match &current_version {
+            Some((cv,)) => try_version_from_string(cv)?,
+            None => crate::version::EMPTY_CVR_VERSION.clone(),
+        };
+        if cmp_cvr(&cv, up_to_version) != Ordering::Equal {
+            return Err(CVRStoreError::ConcurrentModification {
+                expected: version_string(up_to_version),
+                actual: version_string(&cv),
+            });
         }
 
         // Read GOT-query patches (query-state, no clientID) — the queries the

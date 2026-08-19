@@ -99,3 +99,46 @@ across 9 AST shapes at multiple scales. Escape hatch: the legacy filter-blind
 COUNT(*) model remains behind `RUST_IVM_PLANNER_COST_MODEL=count`.
 
 Required follow-up: none.
+
+## R?: LIKE/ILIKE type-mismatch handling (from six-front review, 2026-08-19)
+
+Status: Intentional Rust divergence (benign; reachable only via a mistyped query).
+
+TS `getLikePredicate` (`zql/src/builder/like.ts`) calls `assertString(lhs)`,
+which THROWS if the filtered column value isn't a string, and coerces a
+non-string pattern via `String(pattern)`. Rust (`builder/like.rs`):
+
+1. A non-string **lhs** value returns `false` (row excluded) rather than
+   throwing. This is only reachable when a `LIKE`/`ILIKE` predicate is applied
+   to a non-text column value — a mistyped query. `return false` is strictly
+   safer than TS's throw (which would fail the whole query on one bad row), and
+   on a well-typed schema (LIKE only on TEXT columns) neither path fires. We
+   deliberately keep the safer behavior rather than introduce a per-row throw.
+2. A non-string **pattern** panics ("LIKE pattern must be a string"). Patterns
+   are string literals in every real query; a non-string pattern is a malformed
+   AST. The panic is caught by the per-CG `catch_unwind` (fail-op), consistent
+   with the other malformed-input panics in the conversion layer.
+
+Also: wildcard ILIKE case-folds via `to_lowercase()` + `regex_lite` rather than
+a native Unicode `i`-flag RegExp. Agrees with TS/SQLite for ASCII and common
+Unicode; a handful of code points (final sigma ς/σ, Kelvin K U+212A, Turkish
+İ/ı) can fold differently ONLY when combined with wildcards. No known real-world
+schema depends on this; revisit with a Unicode-folding regex if a mismatch is
+ever observed.
+
+Required follow-up: none (behavior is safe and only affects malformed queries).
+
+## R?: `as_query` trait-object cast (from six-front review, 2026-08-19)
+
+Status: Documented safety invariant (sound today).
+
+`builder/query_internals.rs::as_query` casts `&dyn QueryInternals` to `&Query`
+via a raw pointer. This is sound because **`Query` is the SOLE implementor of
+`QueryInternals`** (it's `Query`'s own internals trait, mirroring TS `asQuery`).
+The invariant to preserve: never implement `QueryInternals` for any other type.
+If a second implementor is ever needed, replace the cast with an `Any`-downcast
+or fold the trait into an enum before doing so. Not converted now because the
+trait has multiple methods and the cast is a hot-path no-op; the invariant is
+narrow and easy to hold.
+
+Required follow-up: none while `Query` is the only `QueryInternals` impl.

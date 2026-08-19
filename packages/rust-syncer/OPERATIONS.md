@@ -148,7 +148,7 @@ Consequences for the collector/backend:
 | `GET :HTTP_PORT/metrics` | Prometheus text: `zero_sync_active_client_groups`, `zero_sync_{hydrations,advances,pipeline_resets,expired_queries,auth_changes,client_deletions,permission_reloads,auth_revalidations,auth_revalidation_failures}_total`, `zero_sync_{hydration,advance}_time_seconds` histograms. Unauthenticated. |
 | `GET :HTTP_PORT/census` | Plaintext live-object census across the 3 rust crates (leak hunting: watch `cg=` after disconnects). |
 | `GET :HTTP_PORT/readyz` | 200/503; probes CVR PG (`SELECT 1`, 2 s timeout) + replica-file existence. Use as the k8s readiness probe — the stdout ready handshake can lie about PG. |
-| `GET :HTTP_PORT/statz` | **Flat JSON, NOT the TS statz schema**: `{activeClientGroups, activeConnections, totalMessagesReceived, totalMessagesSent, uptimeMs, metrics{...}}`. Admin-gated (Basic auth vs `ZERO_ADMIN_PASSWORD`). The TS `/statz` on the main port still exists and is unchanged. |
+| `GET :HTTP_PORT/statz` | **Flat JSON, NOT the TS statz schema**: `{activeClientGroups, activeConnections, totalMessagesReceived, totalMessagesSent, uptimeMs, metrics{...}}`. Admin-gated (Basic auth vs `ZERO_ADMIN_PASSWORD`). ⚠️ `activeConnections`/`totalMessagesReceived`/`totalMessagesSent` are currently NOT wired (always `0`) — use the OTLP `websocket.open_connections` gauge for live connection count, not `/statz`. The TS `/statz` on the main port still exists and is unchanged. |
 | `GET :HTTP_PORT/heapz` | **Stub** — returns a minimal JSON placeholder, not a V8 heap snapshot. Use `/census` (and the `dhat-heap` build feature) for memory work. |
 
 ### Metric parity table (OTLP, meter `zero`)
@@ -176,7 +176,9 @@ Consequences for the collector/backend:
 | `zero.sync.websocket.{open_connections,connection_attempts,connection_successes,connection_failures{reason}}` | front-door connect SLO (`reason`: `auth`, `protocol_version`, `configuration`, `internal`, `handshake`, `rehome`, …) |
 | `zero.sync.cvr.flush-failures` | leading indicator of fail_group storms |
 | `zero.sync.failed-client-groups` | CGs torn down by `fail_group` (all clients rehomed) |
-| `zero.sync.websocket.queued-frames` | aggregate downstream WS backlog (gauge) |
+| `zero.sync.websocket.queued-frames` | aggregate downstream WS backlog, frames (gauge) |
+| `zero.sync.websocket.queued-bytes` | aggregate downstream WS backlog, estimated bytes (gauge) |
+| `zero.sync.websocket.sheds{reason}` | slow-client disconnects by reason (`byte_hwm`/`frame_hwm`/`liveness`) — alert on this rate |
 | `zero.sync.cvr.pool-connections` / `pool-idle-connections` | shared CVR PgPool gauges — the prime capacity-cliff suspect |
 
 **MISSING vs TS (dashboard migration required):**
@@ -231,7 +233,7 @@ Consequences for the collector/backend:
 | **Query-API (custom query transform) hang/outage** <!-- custom_query.rs:256-400 --> | Per-attempt 30 s timeout (10 s connect), up to 4 attempts; 5xx/network errors retry with jittered backoff. A query that still fails is surfaced to that client as a `transformError` **without** dropping its healthy queries. `zero.server.api.*` instruments record every attempt with status. | Watch `api.requests{result!="success"}` and `api.in_flight`. Fix the API server; clients self-heal on next transform. |
 | **Push relay outage** <!-- push_relay.rs --> | Single sequential drainer, 10 s per POST. Queue cap 1024 (`PUSHER_QUEUE_CAP`); past it, the NEWEST push is dropped and the client receives a `PushFailed` error frame — the connection stays open and the client **re-pushes** (its lmid never advanced). Non-2xx/timeout POSTs are logged; same re-push recovery. | Restore the TS side / `userPushURL`. No rust restart needed; mutations are never silently lost, only delayed. |
 | **CVR pool saturation** <!-- sync_engine.rs:370-410, metrics.rs pool gauges --> | Pool acquire timeout is 10 s. A failed flush is retried **once** with 100–300 ms jitter (flush is one PG transaction — retry is safe); a second failure → `fail_group` → all the group's clients get `Rehome`. | Alert on idle==0 + flush errors (see §4). Increase `cvr.maxConns` (TS flag; becomes `CVR_MAX_CONNS`) or scale out syncers. |
-| **Slow clients** <!-- ws_sink.rs:44-140, ws_server.rs:34-62 --> | Per-connection downstream queue HWM (4096 frames): crossing it trips `kill` — the connection is shed with `Rehome`, bounding process memory. Separately, a connection silent for 60 s (liveness) is closed. | Aggregate visibility via `websocket.queued-frames`. Tune `ZERO_WS_DOWNSTREAM_HWM` only with a memory budget in hand — it is frames, not bytes (§7). |
+| **Slow clients** <!-- ws_sink.rs, ws_server.rs --> | Per-connection downstream queue crossing the BYTE HWM (256 MiB, primary) or FRAME HWM (4096, secondary) trips `kill` — the connection is shed with `Rehome`, bounding process memory. Separately, a connection silent for 60 s (liveness) is closed. | Alert on `websocket.sheds{reason}` rate (the actual drops, by cause); watch `websocket.queued-bytes`/`queued-frames` gauges as leading indicators. Tune `ZERO_WS_DOWNSTREAM_BYTE_HWM`/`ZERO_WS_DOWNSTREAM_HWM` with a memory budget in hand (§7). |
 | **Replica swap / older replica** <!-- router.rs:78-92, 1507-1520 --> | If a CVR's state version is **newer** than the serving replica (replica rolled back / restored from an older backup), the group is failed with **`ClientNotFound`** ("Cannot sync from older replica: CVR=…, DB=…") — the client **wipes local state and re-syncs fresh**. This is expected, one-time behavior after a replica restore, not a bug. | Expect a re-sync burst after restoring an older replica. No action unless it repeats without a restore. |
 | **CG task panic** <!-- router.rs:3195-3210 --> | Counted in `failed-client-groups`; clients rehome. | Investigate the panic log line; file a bug. |
 
@@ -243,7 +245,7 @@ Consequences for the collector/backend:
 
 | Gap | Detail |
 |---|---|
-| **Byte-based shed** | Slow-client shed is frame-count only (`ZERO_WS_DOWNSTREAM_HWM=4096` frames); a frame can batch up to ~100 patches, so worst-case per-connection memory is data-dependent. No byte-budget knob yet. <!-- ws_server.rs:34-40, ws_sink.rs --> |
+| **Byte-based shed** | Slow-client shed is now BYTE-aware (primary) plus frame-count (secondary). `ZERO_WS_DOWNSTREAM_BYTE_HWM` (default 256 MiB estimated-serialized, `0` disables) bounds per-connection queued bytes; `ZERO_WS_DOWNSTREAM_HWM=4096` frames is the secondary bound; `ZERO_POKE_PART_MAX_BYTES` (default 256 KiB) caps single-frame size. Live gauge `websocket.queued-bytes`; shed counter `websocket.sheds{reason}`. <!-- ws_server.rs, ws_sink.rs --> |
 | **Inspector `metrics` op is a placeholder** | Returns empty TDigests (`[1000]`) for `query-materialization-server` / `query-update-server` so the client's schema parse succeeds; no real server digests are tracked. <!-- router.rs:2475-2489 --> |
 | **`analyze-query` unsupported** | Inspector op returns an explicit error frame ("not supported by the rust syncer yet"). <!-- router.rs:2490-2496 --> |
 | **No OTel traces** | Metrics-only OTLP. `SYNCER_TRACE=1` is a stderr debug harness, not a tracing exporter. <!-- otel.rs, trace.rs --> |

@@ -137,7 +137,14 @@ impl HttpRelayPusher {
         // runtime (so its pool/timers bind to the reactor) and POSTs each queued
         // push one at a time, preserving per-connection mutation order.
         tokio_handle.spawn(async move {
-            let client = reqwest::Client::new();
+            // Explicit connect timeout so a half-open TS-loopback socket can't
+            // wedge the drainer (parity with the JWKS/transform clients, which
+            // set one). The per-request .timeout(RELAY_TIMEOUT) bounds the whole
+            // POST; this bounds just the TCP/TLS connect.
+            let client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
             while let Some(QueuedPush { payload, target }) = rx.recv().await {
                 drainer_depth.fetch_sub(1, Ordering::SeqCst);
                 let mut req = client
