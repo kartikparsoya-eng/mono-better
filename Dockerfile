@@ -206,41 +206,65 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
        packages/rust-ivm/agentic packages/rust-ivm/wal2-sqlite \
        packages/rust-ivm/src packages/rust-ivm/tests
 
-# Required/sane defaults — DO NOT ask Shivral to remember these.
-# This is the dedicated full-Rust candidate image. Selecting this image is the
-# rollout opt-in; the independently deployed TS control uses the upstream image.
+# =============================================================================
+# Baked env — IMAGE-INTERNAL ONLY.
+#
+# This is the dedicated full-Rust candidate image; selecting it is the rollout
+# opt-in (the TS control uses the upstream image). We bake ONLY what the image
+# itself knows or provides: engine selection, in-image binary/config paths, and
+# runtime plumbing. All OPERATIONAL config — DB/auth secrets, URLs, ports,
+# routing, worker/shard counts, CVR conns, OTEL endpoint — is supplied by the
+# DEPLOYMENT (k8s manifest + secrets), exactly like the TS control image. What
+# used to be baked and moved out is listed at the bottom.
+# =============================================================================
+
+# --- Engine selection + in-image paths (only the image can know these) -------
 ENV ZERO_SYNCER=rust
 ENV ZERO_RUST_SYNCER_PATH=/usr/local/bin/rust-syncer
-# Distribute client groups across sync workers by count (round-robin) instead
-# of by CG-id hash. Sticky per CG within a process lifetime; evens out load
-# when hash bucketing leaves workers lopsided.
-ENV ZERO_ROUND_ROBIN_ROUTING=1
-# Hydration cursor page size (default 10000). Smaller pages = more, lighter
-# frames during cold hydrate.
-ENV ZERO_CURSOR_PAGE_SIZE=100
-ENV UV_THREADPOOL_SIZE=16
-# Cap glibc malloc arenas: the multi-threaded rust-syncer (sharded executors +
-# tokio) otherwise gets up to 8*cores arenas whose fragmentation retains freed
-# pipeline memory as ever-growing RSS (reads as a leak in the ART G6 gate and
-# in prod dashboards). Two arenas keep contention negligible at our thread
-# counts while bounding retention; pairs with the in-process malloc_trim task.
-ENV MALLOC_ARENA_MAX=2
-ENV ZERO_IN_CONTAINER=1
-ENV ZERO_LOG_FORMAT=json
-ENV ZERO_SERVER_VERSION=${ZERO_VERSION}
 ENV ZERO_LITESTREAM_EXECUTABLE=/usr/local/bin/litestream
 ENV ZERO_LITESTREAM_EXECUTABLE_V5=/usr/local/bin/litestream-v5
 ENV ZERO_LITESTREAM_CONFIG_PATH=/etc/litestream.yml
-# OTel needs a user; otherwise user.current() throws in containers.
+ENV ZERO_SERVER_VERSION=${ZERO_VERSION}
+
+# --- Runtime plumbing the image must provide ---------------------------------
+# OTel needs a resolvable user; user.current() throws in containers otherwise.
 ENV USER=zero-cache
-# OTel: omit endpoint in sandbox (no collector). Set per-env if a collector
-# exists. Leaving unset avoids ECONNREFUSED on 127.0.0.1:4318.
-ENV OTEL_EXPORTER_OTLP_ENDPOINT=
-# Set a safe cap on sync workers. Override per env if cores differ.
-ENV ZERO_NUM_SYNC_WORKERS=4
 # Bound JS heap to avoid OOM death spirals on unbounded hydration paths.
 ENV NODE_OPTIONS="--import tsx --no-warnings --max-old-space-size=4096"
 ENV PATH="/app/mono/node_modules/.bin:${PATH}"
+
+# --- Safe, non-conflicting image defaults (a deployment may still override) ---
+# Cap glibc malloc arenas: the multi-threaded rust-syncer (sharded executors +
+# tokio) otherwise gets up to 8*cores arenas whose fragmentation retains freed
+# pipeline memory as ever-growing RSS (reads as a leak in the ART G6 gate and in
+# prod dashboards). Two arenas keep contention negligible at our thread counts
+# while bounding retention; pairs with the in-process malloc_trim task.
+ENV MALLOC_ARENA_MAX=2
+# node libuv threadpool — sized for litestream spawns + fs work, not node's 4.
+ENV UV_THREADPOOL_SIZE=16
+ENV ZERO_IN_CONTAINER=1
+ENV ZERO_LOG_FORMAT=json
+# OTel endpoint intentionally empty; the deployment sets it when a collector
+# exists (leaving unset avoids ECONNREFUSED on 127.0.0.1:4318).
+ENV OTEL_EXPORTER_OTLP_ENDPOINT=
+
+# --- Dispatcher/runtime tuning defaults (a deployment may override) ----------
+# CG→worker routing at the TS DISPATCHER (worker-dispatcher.ts): round-robin,
+# distributed evenly by count and sticky per CG within a process lifetime,
+# instead of the default CG-id hash. This is a SEPARATE layer from the
+# rust-syncer's own CG→shard placement, which is ALWAYS least-loaded
+# (router.rs `place_cg`, no flag). `ZERO_LEAST_LOADED_ROUTING` is not implemented
+# on this line, so this does not conflict with it.
+ENV ZERO_ROUND_ROBIN_ROUTING=1
+# Hydration cursor page size (code default 10000): smaller = more, lighter
+# frames during cold hydrate.
+ENV ZERO_CURSOR_PAGE_SIZE=100
+# Sync-worker (process) count. Override per env if cores differ.
+ENV ZERO_NUM_SYNC_WORKERS=4
+
+# --- Left to the DEPLOYMENT (not baked) --------------------------------------
+#   ZERO_SYNCER_SHARDS — rust executor shards PER worker; unset ⇒ host*2 clamped
+#   16..64 (host-adaptive). Pin in the manifest to match CGs-per-instance.
 
 EXPOSE 4848 4849
 

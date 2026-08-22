@@ -1,0 +1,183 @@
+name: Rust Syncer
+
+# CI for the Rust-based zero image on the rust-cvr-v1.0.0 line.
+#
+# Unlike rust-ivm.yml (which builds the NAPI-addon-in-node image), this branch
+# ships zero-cache running the STANDALONE rust-syncer binary (ZERO_SYNCER=rust,
+# ZERO_RUST_SYNCER_PATH=/usr/local/bin/rust-syncer). So this workflow:
+#   1. checks all three Rust crates (rust-ivm, rust-cvr, rust-syncer), and
+#   2. builds/pushes + verifies + scans the rust-syncer zero image.
+# Modeled on rust-ivm.yml (pinned action SHAs, persist-credentials: false).
+
+on:
+  push:
+    branches: [rust-cvr-v1.0.0]
+  pull_request:
+    branches: [rust-cvr-v1.0.0]
+  workflow_dispatch:
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}'
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust-checks:
+    name: Rust fmt/clippy/test (ivm, cvr, syncer)
+    runs-on: ubuntu-latest
+    # rust-cvr / rust-syncer PG integration tests are gated on TEST_CVR_PG_URI;
+    # a Postgres service makes them actually run (they skip + pass when unset).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rust_syncer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_CVR_PG_URI: postgres://postgres:postgres@localhost:5432/rust_syncer_test
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # rust-ivm links a WAL2 SQLite; rust-syncer depends on rust-ivm, so build
+      # the static lib once and export its location for every cargo invocation.
+      - name: Build static WAL2 SQLite for tests
+        working-directory: packages/rust-ivm
+        run: |
+          BUILD=$(scripts/build-wal2-static-lib.sh)
+          echo "SQLITE3_LIB_DIR=$BUILD" >> "$GITHUB_ENV"
+          echo "SQLITE3_INCLUDE_DIR=$BUILD" >> "$GITHUB_ENV"
+          echo "SQLITE3_STATIC=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_LIBDIR=$(mktemp -d)" >> "$GITHUB_ENV"
+
+      - name: rust-ivm — fmt, clippy, test
+        working-directory: packages/rust-ivm
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all-targets -- --test-threads=1
+
+      - name: rust-cvr — fmt, clippy, test
+        working-directory: packages/rust-cvr
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked -- --test-threads=1
+
+      - name: rust-syncer — fmt, clippy, test
+        working-directory: packages/rust-syncer
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked -- --test-threads=1
+
+      - name: Repeated teardown integrity soak (rust-ivm)
+        working-directory: packages/rust-ivm
+        env:
+          RUST_IVM_SOAK_CYCLES: 500
+        run: cargo test --locked --test teardown_gate_test -- --test-threads=1
+
+  docker-build:
+    name: Build and push rust-syncer zero image
+    runs-on: ubuntu-latest
+    needs: [rust-checks]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/rust-cvr-v1.0.0')
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository }}/zero-cache-rust-syncer
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=raw,value={{branch}}-latest
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify published runtime image
+        env:
+          IMAGE_REF: ghcr.io/${{ github.repository }}/zero-cache-rust-syncer@${{ steps.build.outputs.digest }}
+        run: |
+          docker pull "$IMAGE_REF"
+          size=$(docker image inspect "$IMAGE_REF" --format '{{.Size}}')
+          echo "image size: $((size / 1024 / 1024)) MiB"
+          # Soft budget — flip to `test "$size" -le ...` to hard-enforce once the
+          # steady-state size is known.
+          if [ "$size" -gt $((900 * 1024 * 1024)) ]; then
+            echo "::warning::rust-syncer image exceeds 900 MiB ($((size / 1024 / 1024)) MiB)"
+          fi
+          docker run --rm --entrypoint sh "$IMAGE_REF" -lc '
+            # Engine selection — this image runs the STANDALONE Rust syncer.
+            test "$ZERO_SYNCER" = rust
+            test "$ZERO_RUST_SYNCER_PATH" = /usr/local/bin/rust-syncer
+            test -x /usr/local/bin/rust-syncer
+            # In-image binary/config paths (required image-internal env).
+            test "$ZERO_LITESTREAM_EXECUTABLE" = /usr/local/bin/litestream
+            test "$ZERO_LITESTREAM_EXECUTABLE_V5" = /usr/local/bin/litestream-v5
+            test "$ZERO_LITESTREAM_CONFIG_PATH" = /etc/litestream.yml
+            test -f /etc/litestream.yml
+            # Baked image defaults.
+            test "$MALLOC_ARENA_MAX" = 2
+            test "$UV_THREADPOOL_SIZE" = 16
+            test "$ZERO_LOG_FORMAT" = json
+            # Dispatcher/runtime tuning baked into the image.
+            test "$ZERO_ROUND_ROBIN_ROUTING" = 1
+            test "$ZERO_CURSOR_PAGE_SIZE" = 100
+            test "$ZERO_NUM_SYNC_WORKERS" = 4
+            # Backup replicators must be present and the expected versions.
+            litestream version | grep -Fx "0.3.13+z0.0.9"
+            litestream-v5 version | grep -Fx "0.5.11"
+            # The node dispatcher (entrypoint) must be runnable.
+            command -v node >/dev/null
+          '
+
+      - name: Scan published image for critical vulnerabilities
+        env:
+          IMAGE_REF: ghcr.io/${{ github.repository }}/zero-cache-rust-syncer@${{ steps.build.outputs.digest }}
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy:0.66.0@sha256:086971aaf400beebd94e8300fd8ea623774419597169156cec56eec5b00dfb1e
+          image --quiet --exit-code 1 --scanners vuln --severity CRITICAL
+          --ignore-unfixed "$IMAGE_REF"
