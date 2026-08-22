@@ -334,8 +334,8 @@ impl RowRecordCache {
     /// Returns the number of rows loaded.
     pub async fn load(&self) -> Result<usize, sqlx::Error> {
         let mut state = self.state.lock().await;
-        if state.cache.is_some() {
-            return Ok(state.cache.as_ref().unwrap().len());
+        if let Some(cache) = &state.cache {
+            return Ok(cache.len());
         }
 
         let sql = format!(
