@@ -258,3 +258,38 @@ Consequences for the collector/backend:
 (main.rs), `rustSyncerEnv` (rust-syncer-bridge.ts), and the metric definitions
 in metrics.rs/otel.rs — those are the sources of truth this runbook was
 verified against.*
+
+## Row-key invariant & ART gates (client-PK poison class)
+
+**Invariant:** the client-facing CVR rowKey for a table MUST be keyed by that
+table's **client-declared primary key** — NOT the IVM `keyCmp[0]` (the shortest
+replicated unique key). When they differ (e.g. a junction table with a compound
+client PK plus a shorter surrogate unique index), keying by `keyCmp[0]` stores a
+rowKey missing a client-PK column, and the client crash-loops every poke with
+`toPrimaryKeyString: Expected string, number or boolean. Got undefined`. The
+poisoned rows persist in the shared CVR (Postgres) and survive an image revert.
+See the fix in `engine::apply_client_primary_keys` (one logical key map =
+`keyCmp[0]` overlaid with the client PK, threaded through source identity,
+ordering, advance edit-classification, and emission — TS `#primaryKeys` parity).
+
+**In-CI gates (this repo, always run):**
+- `tests/rowkey_invariant_test.rs` — self-contained; asserts emission == client PK
+  across several `client PK != keyCmp[0]` schema SHAPES. No replica/PG needed.
+- `tests/rowkey_repro.rs` — hydrate-path regression.
+- `tests/pg_harness.rs::pg_advance_client_pk_col_update_emits_remove_add` —
+  advance-path (PG-gated): a client-PK-column update must emit REMOVE+ADD, not a
+  single EDIT.
+
+**ART gates to wire sandbox-side (the corpus that missed this used only
+`id`-keyed tables where client PK == keyCmp[0]):**
+1. Feed the REAL app schema into the differential oracle (golden fixtures from TS
+   on the actual xyne schema, esp. compound-PK + surrogate-unique-index tables) —
+   not just the reference schema.
+2. Run `tests/rowkey_oracle.rs` against the live replica + client schema:
+   `TEST_REPLICA_DB=... TEST_CLIENT_SCHEMA=... cargo test --no-default-features
+   --test rowkey_oracle` — per-table assert emitted rowKey cols == client PK.
+3. Post-run CVR poison probe: `scripts/cvr_rowkey_probe.sql` against the CVR
+   Postgres; fail the run if any table shows a rowKey column-set that omits a
+   client-PK column (or >1 set).
+4. Make the diff-oracle compare RAW stored rowKey bytes, not just logical row
+   identity (which normalizes a key-shape divergence away).
