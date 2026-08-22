@@ -1748,3 +1748,262 @@ fn pg_quiet_commit_noop_flush_contract() {
             .unwrap();
     });
 }
+
+/// Advance-path regression guard for the client-PK row-key convergence
+/// (commits d6c1dd80b + 2a75395f9). On a table whose client PK differs from the
+/// IVM `keyCmp[0]` (compound client PK [channelId,userId] + a shorter surrogate
+/// unique index on `id`), an upstream UPDATE that changes a CLIENT-PK column but
+/// NOT the surrogate must produce REMOVE(old rowKey) + ADD(new rowKey) — NOT a
+/// single EDIT. Before the fix the advance `same_pk` check used `keyCmp[0]`
+/// (=`id`, unchanged) → single EDIT → the old CVR row `{channelId,userId=old}`
+/// is orphaned and the client phantom-edits a rowKey it never received. After
+/// the fix `same_pk` uses the client PK → `userId` changed → REMOVE + ADD.
+#[test]
+fn pg_advance_client_pk_col_update_emits_remove_add() {
+    use std::sync::Arc;
+
+    use rusqlite::Connection;
+    use rust_cvr::client_handler::WebSocketSink;
+    use rust_cvr::updater::RowRecordMap;
+    use rust_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_advance_client_pk_col_update_emits_remove_add: TEST_CVR_PG_URI not set");
+        return;
+    };
+
+    let schema = "cvr_advance_clientpk";
+    let db_path = format!(
+        "/tmp/rust-syncer-pg-advance-clientpk-{}.db",
+        std::process::id()
+    );
+    let cleanup_sqlite = || {
+        for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    };
+    cleanup_sqlite();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+
+    // Replica with a junction table: NO SQL PRIMARY KEY, a compound unique index
+    // (the app's client PK) AND a shorter surrogate unique index on `id`.
+    // compute_table_specs' keyCmp[0] therefore picks ["id"] (fewest columns).
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        let _ = conn.pragma_update(None, "journal_mode", "wal2");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                replicaVersion TEXT NOT NULL,
+                publications TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.replicationState" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                stateVersion TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.changeLog2" (
+                "stateVersion" TEXT NOT NULL,
+                "table"        TEXT NOT NULL,
+                "rowKey"       TEXT NOT NULL,
+                "op"           TEXT NOT NULL,
+                "pos"          INTEGER NOT NULL,
+                PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE "channel_user_status" (
+                "channelId"  "text|NOT_NULL",
+                "userId"     "text|NOT_NULL",
+                "id"         "text|NOT_NULL",
+                "_0_version" "text|NOT_NULL"
+            );
+            CREATE UNIQUE INDEX "cus_client_pk" ON "channel_user_status" ("channelId", "userId");
+            CREATE UNIQUE INDEX "cus_surrogate" ON "channel_user_status" ("id");
+            INSERT INTO "_zero.replicationConfig" (lock, replicaVersion, publications)
+                VALUES ('singleton', 'replica-1', '[]');
+            INSERT INTO "_zero.replicationState" (lock, stateVersion)
+                VALUES ('singleton', '01');
+            INSERT INTO "channel_user_status" ("channelId", "userId", "id", "_0_version")
+                VALUES ('c1', 'u1', 'cus1', '01');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let specs = rust_syncer::compute_table_specs_from_path(&db_path).unwrap();
+    // Precondition: the IVM keyCmp[0] is the surrogate ["id"], diverging from the
+    // client's declared PK [channelId, userId].
+    let cus = specs
+        .iter()
+        .find(|s| s.table == "channel_user_status")
+        .expect("channel_user_status must be syncable");
+    assert_eq!(
+        cus.primary_key,
+        vec!["id".to_string()],
+        "precondition: keyCmp[0] must be the shortest unique key (surrogate id)"
+    );
+
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init(specs, Some(&db_path), "app").unwrap();
+    let mut engine = SyncEngine::new(pipelines);
+    let pool = {
+        let _g = handle.enter();
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy(&uri)
+            .unwrap()
+    };
+    engine.set_tokio_handle(handle);
+    engine
+        .set_cvr_store(
+            pool,
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        )
+        .unwrap();
+
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+    let sink1: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx1));
+    engine.register_client("client1", "ws1", "cg1", &shard, None, sink1);
+
+    // Client schema declares the compound PK [channelId, userId] — this is what
+    // config_and_hydrate installs on the pipelines for rowKey emission + identity.
+    let client_schema = serde_json::json!({
+        "tables": {
+            "channel_user_status": {
+                "columns": {
+                    "channelId": {"type": "string"},
+                    "userId": {"type": "string"},
+                    "id": {"type": "string"}
+                },
+                "primaryKey": ["channelId", "userId"]
+            }
+        }
+    });
+    let puts = vec![DesiredQuerySpec {
+        hash: "q_cus".to_string(),
+        ast: Some(serde_json::json!({"table": "channel_user_status"})),
+        name: None,
+        args: None,
+        ttl: None,
+    }];
+    let hydrated = rt
+        .block_on(engine.config_and_hydrate(
+            empty_engine_cvr("cg1", "replica-1"),
+            "client1",
+            &["ws1".to_string()],
+            &shard,
+            puts,
+            Vec::new(),
+            false,
+            Some(client_schema),
+            None,
+            &serde_json::json!({}),
+            None,
+            "01".to_string(),
+            "replica-1".to_string(),
+            &RowRecordMap::new(),
+            0,
+            0,
+            0,
+        ))
+        .expect("initial hydrate");
+
+    let mut hydrate_wire = String::new();
+    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+        hydrate_wire.push_str(&frame.to_string());
+    }
+    // Emission must be keyed by the client PK: the hydrated row carries both
+    // client-PK columns (channelId + userId=u1).
+    assert!(
+        hydrate_wire.contains("channelId") && hydrate_wire.contains("u1"),
+        "hydrate must emit the row keyed by the client PK; wire={hydrate_wire}"
+    );
+
+    // Upstream UPDATE: change a CLIENT-PK column (userId u1 -> u2) while the
+    // surrogate `id` stays 'cus1'. The changelog rowKey is the replicator key
+    // (keyCmp[0] = id), exactly as replication writes it.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            BEGIN;
+            UPDATE "channel_user_status"
+               SET "userId" = 'u2', "_0_version" = '02'
+             WHERE "id" = 'cus1';
+            INSERT INTO "_zero.changeLog2" ("stateVersion", "table", "rowKey", "op", "pos")
+                VALUES ('02', 'channel_user_status', '{"id":"cus1"}', 's', 0);
+            UPDATE "_zero.replicationState" SET stateVersion = '02';
+            COMMIT;
+            "#,
+        )
+        .unwrap();
+    }
+
+    let existing = rt.block_on(engine.existing_rows());
+    let _advanced = rt
+        .block_on(engine.advance_and_sync(
+            hydrated,
+            "replica-1".to_string(),
+            // Poke the still-connected client (at the pre-advance version) so we
+            // can observe the delta the advance produces.
+            &["ws1".to_string()],
+            &existing,
+            0,
+            0,
+            0,
+        ))
+        .expect("advance");
+
+    let mut adv_wire = String::new();
+    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+        adv_wire.push_str(&frame.to_string());
+    }
+
+    // THE REGRESSION ASSERTION: a client-PK-column change must produce a REMOVE
+    // (del) of the old rowKey plus an ADD (put) of the new — NOT a single EDIT.
+    // Pre-fix (same_pk on keyCmp[0]=id, unchanged) there is NO `del`; the old
+    // row {channelId:c1,userId:u1} is orphaned.
+    assert!(
+        adv_wire.contains(r#""op":"del""#),
+        "advance must REMOVE the old client-PK rowKey (not a single EDIT); wire={adv_wire}"
+    );
+    assert!(
+        adv_wire.contains("u2"),
+        "advance must ADD the row under the new client PK (userId=u2); wire={adv_wire}"
+    );
+
+    rt.block_on(async {
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(
+                &sqlx::postgres::PgPoolOptions::new()
+                    .connect(&uri)
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+    cleanup_sqlite();
+}
