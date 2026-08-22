@@ -603,45 +603,99 @@ impl CVRStoreHandle {
             stats.instances = 1;
         }
 
-        // 2. Clients inserts
+        // 2. Clients inserts — batched into ONE `json_to_recordset` statement (was
+        // one awaited INSERT per client). Identical semantics: insert each
+        // (clientGroupID, clientID), ON CONFLICT DO NOTHING. Rust-equivalent of
+        // TS's pipelined per-client inserts (same rows, one round-trip).
         if !pending.pending_clients_insert.is_empty() {
-            for client in &pending.pending_clients_insert {
-                let sql = format!(
-                    r#"INSERT INTO "{}".clients ("clientGroupID", "clientID")
-                       VALUES ($1, $2)
-                       ON CONFLICT ("clientGroupID", "clientID") DO NOTHING"#,
-                    self.schema
-                );
-                sqlx::query(&sql)
-                    .bind(&client.client_group_id)
-                    .bind(&client.client_id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+            let rows_json = Value::Array(
+                pending
+                    .pending_clients_insert
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "clientGroupID": c.client_group_id,
+                            "clientID": c.client_id,
+                        })
+                    })
+                    .collect(),
+            );
+            let sql = format!(
+                r#"INSERT INTO "{}".clients ("clientGroupID", "clientID")
+                   SELECT "clientGroupID", "clientID"
+                   FROM json_to_recordset($1::json) AS x(
+                     "clientGroupID" TEXT,
+                     "clientID" TEXT
+                   )
+                   ON CONFLICT ("clientGroupID", "clientID") DO NOTHING"#,
+                self.schema
+            );
+            sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
             stats.clients = pending.pending_clients_insert.len();
         }
 
-        // 3. Clients deletes
-        for client_id in &pending.pending_clients_delete {
+        // 3. Clients deletes — batched into ONE statement via `= ANY`.
+        if !pending.pending_clients_delete.is_empty() {
             let sql = format!(
-                r#"DELETE FROM "{}".clients WHERE "clientGroupID" = $1 AND "clientID" = $2"#,
+                r#"DELETE FROM "{}".clients
+                   WHERE "clientGroupID" = $1 AND "clientID" = ANY($2)"#,
                 self.schema
             );
             sqlx::query(&sql)
                 .bind(&self.cvr_id)
-                .bind(client_id)
+                .bind(&pending.pending_clients_delete)
                 .execute(&mut *tx)
                 .await?;
         }
 
-        // 4. Query upserts (full)
-        for row in pending.pending_query_updates.values() {
+        // 4. Query upserts (full) — batched into ONE `json_to_recordset` statement
+        // (was one awaited upsert per query). Mirrors TS `#flushQueries` full batch.
+        // `clientAST` (JSONB) and `queryArgs` (JSON) are read directly as their JSON
+        // types because rust stores them as parsed `Value`s — unlike TS's
+        // pre-stringified `TEXT::json` — for the identical end state.
+        if !pending.pending_query_updates.is_empty() {
+            let rows_json = Value::Array(
+                pending
+                    .pending_query_updates
+                    .values()
+                    .map(|row| {
+                        serde_json::json!({
+                            "clientGroupID": row.client_group_id,
+                            "queryHash": row.query_hash,
+                            "clientAST": row.client_ast,
+                            "queryName": row.query_name,
+                            "queryArgs": row.query_args,
+                            "patchVersion": row.patch_version,
+                            "transformationHash": row.transformation_hash,
+                            "transformationVersion": row.transformation_version,
+                            "internal": row.internal,
+                            "deleted": row.deleted,
+                            "rowSetSignature": row.row_set_signature,
+                        })
+                    })
+                    .collect(),
+            );
             let sql = format!(
                 r#"INSERT INTO "{}".queries
                    ("clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs",
                     "patchVersion", "transformationHash", "transformationVersion",
                     "internal", "deleted", "rowSetSignature")
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                   SELECT "clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs",
+                          "patchVersion", "transformationHash", "transformationVersion",
+                          "internal", "deleted", "rowSetSignature"
+                   FROM json_to_recordset($1::json) AS x(
+                     "clientGroupID" TEXT,
+                     "queryHash" TEXT,
+                     "clientAST" JSONB,
+                     "queryName" TEXT,
+                     "queryArgs" JSON,
+                     "patchVersion" TEXT,
+                     "transformationHash" TEXT,
+                     "transformationVersion" TEXT,
+                     "internal" BOOLEAN,
+                     "deleted" BOOLEAN,
+                     "rowSetSignature" TEXT
+                   )
                    ON CONFLICT ("clientGroupID", "queryHash") DO UPDATE SET
                     "clientAST" = excluded."clientAST",
                     "queryName" = excluded."queryName",
@@ -654,75 +708,65 @@ impl CVRStoreHandle {
                     "rowSetSignature" = excluded."rowSetSignature""#,
                 self.schema
             );
-            sqlx::query(&sql)
-                .bind(&row.client_group_id)
-                .bind(&row.query_hash)
-                .bind(&row.client_ast)
-                .bind(&row.query_name)
-                .bind(&row.query_args)
-                .bind(&row.patch_version)
-                .bind(&row.transformation_hash)
-                .bind(&row.transformation_version)
-                .bind(row.internal)
-                .bind(row.deleted)
-                .bind(&row.row_set_signature)
-                .execute(&mut *tx)
-                .await?;
-            stats.queries += 1;
+            sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
+            stats.queries += pending.pending_query_updates.len();
         }
 
-        // 5. Query partial updates
-        for (hash, partial) in &pending.pending_query_partial_updates {
-            let mut sets = Vec::new();
-            let mut bind_idx = 2u32;
-            if partial.patch_version.is_some() {
-                sets.push(format!(r#""patchVersion" = ${}"#, bind_idx));
-                bind_idx += 1;
-            }
-            if partial.deleted.is_some() {
-                sets.push(format!(r#""deleted" = ${}"#, bind_idx));
-                bind_idx += 1;
-            }
-            if partial.transformation_hash.is_some() {
-                sets.push(format!(r#""transformationHash" = ${}"#, bind_idx));
-                bind_idx += 1;
-            }
-            if partial.transformation_version.is_some() {
-                sets.push(format!(r#""transformationVersion" = ${}"#, bind_idx));
-                bind_idx += 1;
-            }
-            if partial.row_set_signature.is_some() {
-                sets.push(format!(r#""rowSetSignature" = ${}"#, bind_idx));
-                bind_idx += 1;
-            }
-            if sets.is_empty() {
-                continue;
-            }
-            let sql = format!(
-                r#"UPDATE "{}".queries SET {} WHERE "clientGroupID" = $1 AND "queryHash" = ${}"#,
-                self.schema,
-                sets.join(", "),
-                bind_idx
+        // 5. Query partial updates — batched into ONE `UPDATE ... FROM
+        // json_to_recordset` with per-column `WHEN "<col>Set"` CASE guards (mirrors
+        // TS `#flushQueries` partial batch). Preserves the outer/inner `Option`
+        // semantics: a column is written iff it was set (outer `Some`); a
+        // set-to-NULL (inner `None`) is honored via the flattened value.
+        if !pending.pending_query_partial_updates.is_empty() {
+            let rows_json = Value::Array(
+                pending
+                    .pending_query_partial_updates
+                    .iter()
+                    .map(|(hash, p)| {
+                        serde_json::json!({
+                            "clientGroupID": self.cvr_id,
+                            "queryHash": hash,
+                            "patchVersionSet": p.patch_version.is_some(),
+                            "patchVersion": p.patch_version.clone().flatten(),
+                            "deletedSet": p.deleted.is_some(),
+                            "deleted": p.deleted,
+                            "transformationHashSet": p.transformation_hash.is_some(),
+                            "transformationHash": p.transformation_hash.clone().flatten(),
+                            "transformationVersionSet": p.transformation_version.is_some(),
+                            "transformationVersion": p.transformation_version.clone().flatten(),
+                            "rowSetSignatureSet": p.row_set_signature.is_some(),
+                            "rowSetSignature": p.row_set_signature,
+                        })
+                    })
+                    .collect(),
             );
-            let mut q = sqlx::query(&sql).bind(&self.cvr_id);
-            if let Some(ref pv) = partial.patch_version {
-                q = q.bind(pv);
-            }
-            if let Some(d) = partial.deleted {
-                q = q.bind(d);
-            }
-            if let Some(ref th) = partial.transformation_hash {
-                q = q.bind(th);
-            }
-            if let Some(ref tv) = partial.transformation_version {
-                q = q.bind(tv);
-            }
-            if let Some(ref rs) = partial.row_set_signature {
-                q = q.bind(rs);
-            }
-            q = q.bind(hash);
-            q.execute(&mut *tx).await?;
-            stats.queries += 1;
+            let sql = format!(
+                r#"UPDATE "{}".queries AS q SET
+                    "patchVersion" = CASE WHEN u."patchVersionSet" THEN u."patchVersion" ELSE q."patchVersion" END,
+                    "deleted" = CASE WHEN u."deletedSet" THEN u."deleted" ELSE q."deleted" END,
+                    "transformationHash" = CASE WHEN u."transformationHashSet" THEN u."transformationHash" ELSE q."transformationHash" END,
+                    "transformationVersion" = CASE WHEN u."transformationVersionSet" THEN u."transformationVersion" ELSE q."transformationVersion" END,
+                    "rowSetSignature" = CASE WHEN u."rowSetSignatureSet" THEN u."rowSetSignature" ELSE q."rowSetSignature" END
+                   FROM json_to_recordset($1::json) AS u(
+                     "clientGroupID" TEXT,
+                     "queryHash" TEXT,
+                     "patchVersionSet" BOOLEAN,
+                     "patchVersion" TEXT,
+                     "deletedSet" BOOLEAN,
+                     "deleted" BOOLEAN,
+                     "transformationHashSet" BOOLEAN,
+                     "transformationHash" TEXT,
+                     "transformationVersionSet" BOOLEAN,
+                     "transformationVersion" TEXT,
+                     "rowSetSignatureSet" BOOLEAN,
+                     "rowSetSignature" TEXT
+                   )
+                   WHERE q."clientGroupID" = u."clientGroupID"
+                     AND q."queryHash" = u."queryHash""#,
+                self.schema
+            );
+            sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
+            stats.queries += pending.pending_query_partial_updates.len();
         }
 
         // 6. Desire upserts.
@@ -736,18 +780,48 @@ impl CVRStoreHandle {
         // (safer/more precise than TS's json-number→INTERVAL cast): ttl seconds
         // = ttlMs/1000, timestamp = to_timestamp(inactivatedAtMs/1000). A NULL
         // or negative ttlMs → NULL interval (TS `ttl < 0 ? null`).
-        for row in pending.pending_desire_updates.values() {
+        // Batched into ONE `json_to_recordset` statement (was one awaited upsert per
+        // desire). The per-row CASE derivations are unchanged — rust's deliberate
+        // ms→INTERVAL / to_timestamp derivation (kept over TS's json-number cast) —
+        // now applied set-wise over the batch instead of one PG round-trip per row.
+        if !pending.pending_desire_updates.is_empty() {
+            let rows_json = Value::Array(
+                pending
+                    .pending_desire_updates
+                    .values()
+                    .map(|row| {
+                        serde_json::json!({
+                            "clientGroupID": row.client_group_id,
+                            "clientID": row.client_id,
+                            "queryHash": row.query_hash,
+                            "patchVersion": row.patch_version,
+                            "deleted": row.deleted,
+                            "ttlMs": row.ttl,
+                            "inactivatedAtMs": row.inactivated_at,
+                        })
+                    })
+                    .collect(),
+            );
             let sql = format!(
                 r#"INSERT INTO "{}".desires
                    ("clientGroupID", "clientID", "queryHash", "patchVersion",
                     "deleted", "ttl", "ttlMs", "inactivatedAt", "inactivatedAtMs")
-                   VALUES ($1, $2, $3, $4, $5,
-                    CASE WHEN $6 IS NULL OR $6 < 0 THEN NULL
-                         ELSE ($6 / 1000.0) * INTERVAL '1 second' END,
-                    $6,
-                    CASE WHEN $7 IS NULL THEN NULL
-                         ELSE to_timestamp($7 / 1000.0) END,
-                    $7)
+                   SELECT "clientGroupID", "clientID", "queryHash", "patchVersion", "deleted",
+                    CASE WHEN "ttlMs" IS NULL OR "ttlMs" < 0 THEN NULL
+                         ELSE ("ttlMs" / 1000.0) * INTERVAL '1 second' END,
+                    "ttlMs",
+                    CASE WHEN "inactivatedAtMs" IS NULL THEN NULL
+                         ELSE to_timestamp("inactivatedAtMs" / 1000.0) END,
+                    "inactivatedAtMs"
+                   FROM json_to_recordset($1::json) AS x(
+                     "clientGroupID" TEXT,
+                     "clientID" TEXT,
+                     "queryHash" TEXT,
+                     "patchVersion" TEXT,
+                     "deleted" BOOLEAN,
+                     "ttlMs" DOUBLE PRECISION,
+                     "inactivatedAtMs" DOUBLE PRECISION
+                   )
                    ON CONFLICT ("clientGroupID", "clientID", "queryHash") DO UPDATE SET
                     "patchVersion" = excluded."patchVersion",
                     "deleted" = excluded."deleted",
@@ -757,17 +831,8 @@ impl CVRStoreHandle {
                     "inactivatedAtMs" = excluded."inactivatedAtMs""#,
                 self.schema
             );
-            sqlx::query(&sql)
-                .bind(&row.client_group_id)
-                .bind(&row.client_id)
-                .bind(&row.query_hash)
-                .bind(&row.patch_version)
-                .bind(row.deleted)
-                .bind(row.ttl)
-                .bind(row.inactivated_at)
-                .execute(&mut *tx)
-                .await?;
-            stats.desires += 1;
+            sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
+            stats.desires += pending.pending_desire_updates.len();
         }
 
         // 7. Row record upserts and deletes.
@@ -809,28 +874,52 @@ impl CVRStoreHandle {
         // holding a shared pool connection — the flush-convoy driver behind the
         // capacity cliff.
         let mut upserts: Vec<&RowRecord> = Vec::new();
+        let mut deletes: Vec<Value> = Vec::new();
         for (row_id, record) in pending.pending_row_record_updates.values() {
             match record {
                 None => {
-                    let row_key_json: Value =
-                        serde_json::to_value(&row_id.row_key).unwrap_or(Value::Null);
-                    let sql = format!(
-                        r#"DELETE FROM "{}".rows
-                           WHERE "clientGroupID" = $1 AND "schema" = $2
-                             AND "table" = $3 AND "rowKey" = $4"#,
-                        self.schema
+                    // Collect the (schema, table, rowKey) identity; batched below.
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("schema".into(), Value::String(row_id.schema.clone()));
+                    obj.insert("table".into(), Value::String(row_id.table.clone()));
+                    obj.insert(
+                        "rowKey".into(),
+                        serde_json::to_value(&row_id.row_key).unwrap_or(Value::Null),
                     );
-                    sqlx::query(&sql)
-                        .bind(&self.cvr_id)
-                        .bind(&row_id.schema)
-                        .bind(&row_id.table)
-                        .bind(&row_key_json)
-                        .execute(&mut *tx)
-                        .await?;
-                    stats.rows += 1;
+                    deletes.push(Value::Object(obj));
                 }
                 Some(row) => upserts.push(row),
             }
+        }
+        // Batch hard DELETEs into ONE statement (was one awaited DELETE per row →
+        // N sequential PG round-trips, the flush-convoy driver behind the sandbox
+        // ~20s hydrate stall on a latent CVR DB). Mirrors the upsert batch below
+        // and TS's pipelined `executeRowUpdates` deletes: identical semantics —
+        // rows are matched by (clientGroupID, schema, table, rowKey) with JSONB
+        // rowKey equality, exactly as the per-row DELETE did — collapsed to one
+        // round-trip via a `json_to_recordset` join.
+        if !deletes.is_empty() {
+            let n = deletes.len();
+            let del_json = Value::Array(deletes);
+            let sql = format!(
+                r#"DELETE FROM "{}".rows AS r
+                   USING json_to_recordset($1::json) AS d(
+                     "schema" TEXT,
+                     "table" TEXT,
+                     "rowKey" JSONB
+                   )
+                   WHERE r."clientGroupID" = $2
+                     AND r."schema" = d."schema"
+                     AND r."table" = d."table"
+                     AND r."rowKey" = d."rowKey""#,
+                self.schema
+            );
+            sqlx::query(&sql)
+                .bind(&del_json)
+                .bind(&self.cvr_id)
+                .execute(&mut *tx)
+                .await?;
+            stats.rows += n;
         }
         if !upserts.is_empty() {
             let rows_json = Value::Array(
