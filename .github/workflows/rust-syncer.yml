@@ -100,6 +100,12 @@ jobs:
         # the test/bin link pulls a second SQLite → rust-lld "duplicate symbol:
         # sqlite3_*". (clippy alone passed because `check` does not link.)
         run: |
+          # rust-syncer's build.rs statically links the WAL2 amalgamation
+          # itself (like the Dockerfile). The SQLITE3_STATIC/SQLITE3_LIB_DIR env
+          # set for the rust-ivm/rust-cvr steps would link a SECOND SQLite here
+          # → rust-lld "duplicate symbol: sqlite3_*". Match the Dockerfile: build
+          # the syncer with build.rs-only linking (no SQLITE3_* env).
+          unset SQLITE3_STATIC SQLITE3_LIB_DIR SQLITE3_INCLUDE_DIR PKG_CONFIG_LIBDIR
           cargo fmt --check
           cargo clippy --locked --no-default-features --all-targets -- -D warnings
           cargo test --locked --no-default-features -- --test-threads=1
