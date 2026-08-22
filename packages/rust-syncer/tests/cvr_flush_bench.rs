@@ -1,16 +1,18 @@
-//! REPRO BENCH — CVR flush round-trip cost (sandbox hydrate-stall reproduction).
+//! REGRESSION GATE — CVR flush round-trip cost (sandbox hydrate-stall repro).
 //!
-//! Isolates the two write paths inside `rust_cvr` `flush_one_iteration`:
-//!   * INSERT path  — all referenced rows go into ONE `json_to_recordset` bulk
+//! Times the two `rust_cvr` `CVRStoreHandle::flush` row paths for growing N:
+//!   * INSERT path — all referenced rows go into ONE `json_to_recordset` bulk
 //!     upsert → ~constant round-trips regardless of N.
-//!   * DELETE path  — `flush_one_iteration` issues ONE awaited `DELETE` per
-//!     removed row → N SEQUENTIAL round-trips.
+//!   * DELETE path — now ALSO one batched `DELETE ... USING json_to_recordset`
+//!     statement (was one awaited `DELETE` per row = N SEQUENTIAL round-trips).
 //!
-//! On a low-latency CVR DB both look fine; on a latent CVR DB (the sandbox's
-//! `zero-playground-db-v2`) the per-row DELETE path's wall-clock scales
-//! LINEARLY with N × RTT, and because the flush is awaited inline on the
-//! single-threaded CG the socket starves → the reconnect storm. This is the
-//! mechanism behind the 20s "Loading conversations…" stall.
+//! History: the per-row DELETE loop's wall-clock scaled LINEARLY with N × RTT;
+//! on the sandbox's latent CVR DB (`zero-playground-db-v2`) a large-board hydrate
+//! churn awaited inline on the single-threaded CG starved the socket → reconnect
+//! storm → the ~20s "Loading conversations…" stall. After batching, DELETE is
+//! flat in N like INSERT (5000-del @ +3ms RTT: 22.8s → ~67ms). This test guards
+//! against a regression back to the per-row loop — run it with injected latency
+//! (toxiproxy) and DELETE-per-row should stay within a small multiple of INSERT.
 //!
 //! Gated on TEST_CVR_PG_URI. Run:
 //!   TEST_CVR_PG_URI=postgres://postgres:postgres@localhost:55432/cvr_repro \
@@ -138,7 +140,10 @@ fn cvr_flush_roundtrip_bench() {
             .connect(&uri)
             .await
             .expect("connect");
-        sqlx::raw_sql(&cvr_ddl(schema)).execute(&pool).await.unwrap();
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
 
         // Create the CVR instance so rows can be persisted (FK to rowsVersion/instance).
         let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
