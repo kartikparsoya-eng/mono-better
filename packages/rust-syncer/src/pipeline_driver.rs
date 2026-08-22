@@ -100,6 +100,11 @@ pub struct IvmPipelines {
     all_table_names: HashSet<String>,
     sources: HashMap<String, Rc<RefCell<dyn Source>>>,
     primary_keys: HashMap<String, Vec<String>>,
+    /// Client-declared primary keys per table (from the client schema). Applied
+    /// to the engine for client-facing rowKey EMISSION — TS
+    /// `buildPrimaryKeys(clientSchema)`. Stored here so it survives an engine
+    /// rebuild (`build_engine`) and is re-applied. Empty ⇒ emit `keyCmp[0]`.
+    client_primary_keys: HashMap<String, Vec<String>>,
     /// Query ids currently hydrated in the engine. Mirrors TS
     /// `pipelineDriver.queries()` — used by the ViewSyncer to add only queries
     /// missing from the pipeline (`#syncQueryPipelineSet`), rather than
@@ -145,6 +150,7 @@ impl IvmPipelines {
             all_table_names: HashSet::new(),
             sources: HashMap::new(),
             primary_keys: HashMap::new(),
+            client_primary_keys: HashMap::new(),
             active_queries: HashMap::new(),
             query_asts: HashMap::new(),
             query_order: Vec::new(),
@@ -354,8 +360,21 @@ impl IvmPipelines {
                 .unwrap_or_else(|| vec![spec.primary_key.clone()]);
             eng.set_unique_keys(&spec.table, unique_keys);
         }
+        // TS `buildPrimaryKeys(clientSchema)`: emission uses the client PKs.
+        eng.set_client_primary_keys(self.client_primary_keys.clone());
         self.engine = Some(eng);
         self.primary_keys = primary_keys;
+    }
+
+    /// Install the client-declared primary keys (from the client schema) used
+    /// for client-facing rowKey emission. Stored so a later `init`/rebuild
+    /// re-applies them, and applied immediately if the engine already exists.
+    /// Port of TS `buildPrimaryKeys(clientSchema, primaryKeys)`.
+    pub fn set_client_primary_keys(&mut self, client_primary_keys: HashMap<String, Vec<String>>) {
+        self.client_primary_keys = client_primary_keys;
+        if let Some(eng) = self.engine.as_mut() {
+            eng.set_client_primary_keys(self.client_primary_keys.clone());
+        }
     }
 
     /// Remove a query's pipeline (and its row-set signature entry).

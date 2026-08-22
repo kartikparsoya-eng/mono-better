@@ -535,6 +535,20 @@ impl SyncEngine {
             .map(|c| (c.ws_id.clone(), c.version()))
             .collect();
 
+        // Client-facing rowKey emission must be keyed by the CLIENT's declared
+        // primary key (TS `buildPrimaryKeys(clientSchema)`), not the IVM
+        // `keyCmp[0]`. Take the per-table client PKs from the incoming schema,
+        // or the one already persisted in the CVR (reconnects send no schema),
+        // and install them on the pipelines so the stored rowKey matches what
+        // the client indexes by (else `toPrimaryKeyString` throws "Got
+        // undefined"). Must run BEFORE `cvr`/`client_schema` are moved below.
+        if let Some(cs) = client_schema.as_ref().or(cvr.client_schema.as_ref()) {
+            let client_pks = client_primary_keys_from_schema(cs);
+            if !client_pks.is_empty() {
+                self.pipelines.set_client_primary_keys(client_pks);
+            }
+        }
+
         // ── Phase 1: config-driven — record client + desired queries. ──
         let mut cfg = CVRConfigDrivenUpdater::new(cvr, shard.clone());
         cfg.ensure_client(client_id);
@@ -1514,6 +1528,32 @@ type RowChangeMaps = (
     serde_json::Map<String, serde_json::Value>,
     Option<serde_json::Map<String, serde_json::Value>>,
 );
+
+/// Extract per-table client-declared primary keys from a client schema JSON
+/// (`{tables: {<name>: {primaryKey: [..]}}}`). Port of the `clientSchema.tables`
+/// half of TS `buildPrimaryKeys`. Tables with an empty/absent primary key are
+/// skipped (emission then falls back to the IVM `keyCmp[0]` for them).
+fn client_primary_keys_from_schema(
+    client_schema: &serde_json::Value,
+) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let Some(tables) = client_schema.get("tables").and_then(|v| v.as_object()) else {
+        return out;
+    };
+    for (name, table) in tables {
+        if let Some(pk) = table.get("primaryKey").and_then(|v| v.as_array()) {
+            let cols: Vec<String> = pk
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect();
+            if !cols.is_empty() {
+                out.insert(name.clone(), cols);
+            }
+        }
+    }
+    out
+}
 
 /// The custom-query name for a query id, or `None` for internal/client queries.
 /// Mirrors TS `query.type === 'custom' ? query.name : undefined`, used to label
