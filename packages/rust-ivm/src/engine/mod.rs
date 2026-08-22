@@ -343,19 +343,22 @@ impl AdvanceContext {
 
 pub struct Engine {
     sources: HashMap<String, Shared<dyn Source>>,
-    /// The IVM key per table (`keyCmp[0]`, the shortest replicated unique key).
-    /// Used for query-ordering completion, Take/limit, and source identity —
-    /// the "best key for default IVM operations". NOT for the client-facing
-    /// rowKey (see `client_primary_keys`).
+    /// The single logical primary key per table — `keyCmp[0]` (shortest
+    /// replicated unique key) OVERLAID with the client-declared PK via
+    /// `apply_client_primary_keys`. Drives EVERYTHING: source identity, query
+    /// ordering completion, Take/limit, advance edit-vs-remove classification,
+    /// and client-facing rowKey emission. This mirrors TS's single `#primaryKeys`
+    /// map (keyCmp[0] then `buildPrimaryKeys(clientSchema)`), which is threaded
+    /// everywhere incl. the `TableSource` ctor (`#getSource`). `keyCmp[0]`
+    /// survives only in the snapshotter/changelog diff spec (the replicator key,
+    /// shared with replication). Emitting `keyCmp[0]` where it differs from the
+    /// client PK would store a rowKey missing a client PK column → client
+    /// `toPrimaryKeyString` throws "Got undefined".
     primary_keys: HashMap<String, Vec<String>>,
-    /// Client-declared primary keys per table, used ONLY for the client-facing
-    /// rowKey EMISSION (`emit_primary_keys`). Mirrors TS
-    /// `buildPrimaryKeys(clientSchema)` overriding `#primaryKeys` while the IVM
-    /// key stays `tableSpec.primaryKey`. Empty ⇒ no override (emission falls
-    /// back to `primary_keys`, the pre-fix behavior). This split is why the
-    /// stored CVR rowKey matches what the client indexes by: emitting the IVM
-    /// `keyCmp[0]` when it differs from the client PK stores a rowKey missing a
-    /// client PK column → client `toPrimaryKeyString` throws "Got undefined".
+    /// The client-declared PK OVERRIDE, retained so it can be re-applied to
+    /// `primary_keys` and the sources after an engine rebuild (`build_engine`).
+    /// Empty ⇒ no override (everything uses `keyCmp[0]`). Source of truth for
+    /// `apply_client_primary_keys`; TS `clientSchema.tables[t].primaryKey`.
     client_primary_keys: HashMap<String, Vec<String>>,
     /// All unique indexes per table (PK plus any unique keys). Used by
     /// scalar-subquery resolution to decide whether a subquery is "simple"
@@ -390,30 +393,30 @@ impl Engine {
         }
     }
 
-    /// Install the client-declared primary keys used for client-facing rowKey
-    /// emission (TS `buildPrimaryKeys(clientSchema)`). Only entries for known
-    /// tables with a non-empty key take effect; everything else keeps emitting
-    /// the IVM `keyCmp[0]`.
+    /// Install the client-declared primary keys (TS `buildPrimaryKeys(clientSchema)`)
+    /// and apply them to the single logical `primary_keys` map + the sources, so
+    /// source identity, ordering, edit classification, and emission all use the
+    /// client PK. Idempotent; safe to call on every config (before hydrate).
     pub fn set_client_primary_keys(&mut self, client_primary_keys: HashMap<String, Vec<String>>) {
         self.client_primary_keys = client_primary_keys;
+        self.apply_client_primary_keys();
     }
 
-    /// The row-key EMISSION map: the IVM `primary_keys` (`keyCmp[0]`) overlaid
-    /// with any client-declared PK from `client_primary_keys`. This is what the
-    /// Streamer and companion/EXISTS row emission use so the stored rowKey is
-    /// keyed by exactly the client's declared primary key. Ordering / Take /
-    /// source identity keep using `primary_keys` directly.
-    fn emit_primary_keys(&self) -> HashMap<String, Vec<String>> {
-        if self.client_primary_keys.is_empty() {
-            return self.primary_keys.clone();
-        }
-        let mut m = self.primary_keys.clone();
+    /// Overlay `client_primary_keys` onto `primary_keys` and re-key each source
+    /// (TS threads the client-overlaid `#primaryKeys` everywhere incl. the
+    /// `TableSource` ctor). Only entries for known tables with a non-empty key
+    /// take effect; `keyCmp[0]` remains for everything else. Re-key runs before
+    /// the first fetch, so no cached row/statement state is stale.
+    fn apply_client_primary_keys(&mut self) {
         for (table, pk) in &self.client_primary_keys {
-            if !pk.is_empty() && m.contains_key(table) {
-                m.insert(table.clone(), pk.clone());
+            if pk.is_empty() || !self.primary_keys.contains_key(table) {
+                continue;
+            }
+            self.primary_keys.insert(table.clone(), pk.clone());
+            if let Some(src) = self.sources.get(table) {
+                src.borrow_mut().set_primary_key(pk.clone());
             }
         }
-        m
     }
 
     /// Set table spec info (for minRowVersion bumping in Streamer).
@@ -566,9 +569,7 @@ impl Engine {
         // calls run on this thread. After the main query rows, emit the matched
         // scalar-subquery companion rows as ADDs (TS yields them post-hydrate
         // so the client's own EXISTS rewrite has the row).
-        // Emission uses the client-PK map (keyCmp[0] overlaid with client PKs),
-        // so the stored/poked rowKey matches what the client indexes by.
-        let primary_keys = self.emit_primary_keys();
+        let primary_keys = self.primary_keys.clone();
         let table_specs = self.table_specs.clone();
 
         // Cancellation: the consumer (view-syncer) may abandon a hydrate mid-
@@ -705,8 +706,7 @@ impl Engine {
             b.collector.borrow_mut().configure_streaming(
                 b.query_id.clone(),
                 b.schema.clone(),
-                // Advance-time row emission also uses the client-PK map.
-                self.emit_primary_keys(),
+                self.primary_keys.clone(),
                 self.table_specs.clone(),
             );
             self.pipelines.push(PipelineEntry {
@@ -796,7 +796,7 @@ impl Engine {
                         let cc: Vec<Change> = std::mem::take(&mut c.output.borrow_mut().changes);
                         if !cc.is_empty() {
                             let mut streamer =
-                                Streamer::new(self.emit_primary_keys(), self.table_specs.clone());
+                                Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
                             streamer.accumulate(&entry.query_id, &c.schema, &cc);
                             for rc in streamer.stream() {
                                 let _t = crate::perf_trace::scope("deliver.row");
@@ -1068,7 +1068,7 @@ impl Engine {
                             &self.pipelines,
                             &sc.table,
                             change,
-                            &self.emit_primary_keys(),
+                            &self.primary_keys,
                             &self.table_specs,
                             &mut on_row_change,
                         )

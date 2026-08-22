@@ -1183,6 +1183,16 @@ impl Source for TableSource {
         &self.primary_key
     }
 
+    fn set_primary_key(&mut self, primary_key: Vec<String>) {
+        self.primary_index_sort = Arc::new(
+            primary_key
+                .iter()
+                .map(|k| [k.clone(), "asc".to_string()])
+                .collect(),
+        );
+        self.primary_key = primary_key;
+    }
+
     fn has_active_connections(&self) -> bool {
         self.connections
             .borrow()

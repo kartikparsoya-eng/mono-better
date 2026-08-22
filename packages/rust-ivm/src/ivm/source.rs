@@ -91,6 +91,13 @@ pub trait Source {
     fn column_types(&self) -> HashMap<String, crate::ivm::schema::ColumnType> {
         HashMap::new()
     }
+
+    /// Re-key this source to the client-declared primary key. TS builds the
+    /// `TableSource` with the client PK (`#getSource`); rust builds sources at
+    /// `init()` — before the client schema is known — so the key is installed
+    /// here once the schema arrives, always BEFORE the first fetch (and
+    /// idempotent thereafter). Recomputes any derived ordering. Default no-op.
+    fn set_primary_key(&mut self, _primary_key: Vec<String>) {}
 }
 
 /// Connection: a downstream consumer of the source.
@@ -554,6 +561,21 @@ impl Source for MemorySource {
 
     fn primary_key(&self) -> &[String] {
         &self.primary_key
+    }
+
+    fn set_primary_key(&mut self, primary_key: Vec<String>) {
+        self.primary_index_sort = Arc::new(
+            primary_key
+                .iter()
+                .map(|k| [k.clone(), "asc".to_string()])
+                .collect(),
+        );
+        self.comparator = make_comparator(self.primary_index_sort.clone(), false);
+        self.primary_key = primary_key;
+        // Keep `data` ordered under the new key (safe: called before the first
+        // fetch; a no-op re-sort if already empty/ordered).
+        let comparator = self.comparator.clone();
+        self.data.borrow_mut().sort_by(|a, b| comparator(a, b));
     }
 
     fn has_active_connections(&self) -> bool {
