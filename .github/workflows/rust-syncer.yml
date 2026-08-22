@@ -94,10 +94,15 @@ jobs:
 
       - name: rust-syncer — fmt, clippy, test
         working-directory: packages/rust-syncer
+        # `--no-default-features` matches how the binary SHIPS (Dockerfile): it
+        # drops the `non-wal2-test-support` escape hatch so the crate links ONLY
+        # the WAL2 static SQLite (from the env above). With default features on,
+        # the test/bin link pulls a second SQLite → rust-lld "duplicate symbol:
+        # sqlite3_*". (clippy alone passed because `check` does not link.)
         run: |
           cargo fmt --check
-          cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked -- --test-threads=1
+          cargo clippy --locked --no-default-features --all-targets -- -D warnings
+          cargo test --locked --no-default-features -- --test-threads=1
 
       - name: Repeated teardown integrity soak (rust-ivm)
         working-directory: packages/rust-ivm
