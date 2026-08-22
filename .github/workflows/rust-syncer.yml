@@ -55,6 +55,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # Pin the toolchain so clippy lints are REPRODUCIBLE. The runner image
+      # floats to the latest rust (e.g. 1.97), whose newer clippy lints (e.g.
+      # result_large_err) can break `-D warnings` unpredictably on an image bump
+      # and diverge from local dev. 1.90.0 is the version the crates are verified
+      # clean against; bump this deliberately (and fix any new lints) when moving.
+      - name: Pin Rust toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.90.0
+          rustc --version
+          cargo clippy --version
+
       # rust-ivm links a WAL2 SQLite; rust-syncer depends on rust-ivm, so build
       # the static lib once and export its location for every cargo invocation.
       - name: Build static WAL2 SQLite for tests
