@@ -727,8 +727,8 @@ impl CVRQueryDrivenUpdater {
         rows: &HashMap<String, (RowID, RowUpdate)>, // keyed by rowIDString
         existing_rows: &RowRecordMap,
     ) -> Vec<PatchToVersion> {
-        if crate::trace::enabled() {
-            crate::trace::recv(
+        if crate::tracer::enabled() {
+            crate::tracer::recv(
                 "QueryUpdater",
                 &format!(
                     "received batch={} existing={}",

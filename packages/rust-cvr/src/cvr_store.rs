@@ -498,8 +498,8 @@ impl CVRStoreHandle {
         // this for free by discarding the whole CVRStore with the failed service.
         let pending = std::mem::take(&mut self.pending);
 
-        if crate::trace::enabled() {
-            crate::trace::note(
+        if crate::tracer::enabled() {
+            crate::tracer::note(
                 "CVRStore",
                 &format!(
                     "flush start cvr_id={} rows={} clients={} queries={} desires={}",
@@ -977,8 +977,8 @@ impl CVRStoreHandle {
         };
         crate::otel_metrics::record_cvr_flush(elapsed_ms, rows_flushed, "sync");
 
-        if crate::trace::enabled() {
-            crate::trace::note(
+        if crate::tracer::enabled() {
+            crate::tracer::note(
                 "CVRStore",
                 &format!(
                     "flush end cvr_id={} rows={} rows_deferred={} elapsed_ms={:.2}",
@@ -998,7 +998,7 @@ impl CVRStoreHandle {
     /// wait (having signalled it via the ownership grant) and retry up to
     /// `MAX_LOAD_ATTEMPTS` before declaring the CVR invalid.
     pub async fn load(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
-        crate::trace::note("CVRStore", &format!("load cvr_id={}", self.cvr_id));
+        crate::tracer::note("CVRStore", &format!("load cvr_id={}", self.cvr_id));
         let mut last_behind: Option<CVRStoreError> = None;
         for attempt in 0..MAX_LOAD_ATTEMPTS {
             if attempt > 0 {

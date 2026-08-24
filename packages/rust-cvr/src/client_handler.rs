@@ -460,8 +460,8 @@ impl PokeHandler {
         // `#pokeTransactions.add(1)` at the end of `ClientHandler` `end()`.
         let elapsed_ms = self.start.elapsed().as_secs_f64() * 1000.0;
         crate::otel_metrics::record_poke(elapsed_ms);
-        if crate::trace::enabled() {
-            crate::trace::note(
+        if crate::tracer::enabled() {
+            crate::tracer::note(
                 "PokeHandler",
                 &format!(
                     "end poke_id={} cookie={} elapsed_ms={:.2}",
@@ -733,7 +733,7 @@ impl ClientHandler {
                 match crate::version::try_version_from_string(c) {
                     Ok(v) => Some(v),
                     Err(e) => {
-                        crate::trace::note(
+                        crate::tracer::note(
                             "ClientHandler",
                             &format!("ignoring malformed base cookie {c:?}: {e}"),
                         );
@@ -800,8 +800,8 @@ impl ClientHandler {
 
         let base_cookie = base_val.as_ref().map(version_string);
 
-        if crate::trace::enabled() {
-            crate::trace::note(
+        if crate::tracer::enabled() {
+            crate::tracer::note(
                 "PokeHandler",
                 &format!(
                     "start client_id={} poke_id={} force_initial={}",

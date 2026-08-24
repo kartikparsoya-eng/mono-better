@@ -12,7 +12,7 @@
 //! without a database. Regenerate the golden with:
 //!   TEST_CVR_PG_URI=... npx tsx packages/rust-cvr/agentic/parity/generate-flush-fixture.mjs
 
-use rust_cvr::store::CVRStoreHandle;
+use rust_cvr::cvr_store::CVRStoreHandle;
 use rust_cvr::types::{RefCounts, RowID, RowUpdate};
 use rust_cvr::updater::CVRQueryDrivenUpdater;
 use rust_cvr::version::CVRVersion;

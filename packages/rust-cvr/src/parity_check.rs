@@ -44,7 +44,7 @@ use crate::row_key::{
     RowID, RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
 };
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
-use crate::store::{QueriesRow, as_query, query_record_to_query_row};
+use crate::cvr_store::{QueriesRow, as_query, query_record_to_query_row};
 use crate::ttl::{TTL, clamp_ttl, compare_ttl, parse_ttl, parse_ttl_string};
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, DesiredQuerySpec,

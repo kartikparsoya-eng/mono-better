@@ -2,7 +2,7 @@
 //!
 //! Enable with `CVR_TRACE=1`. Zero cost when off (one cached bool check).
 //! Instrument a meaningful CVR event with:
-//!     crate::trace::note("CVRStore", "flush start rows=42");
+//!     crate::tracer::note("CVRStore", "flush start rows=42");
 //! and read the flow as a top-to-bottom log of store flushes, loads, updater
 //! batches, and poke start/end — the events that move (or fail to move) a CVR
 //! version forward.
