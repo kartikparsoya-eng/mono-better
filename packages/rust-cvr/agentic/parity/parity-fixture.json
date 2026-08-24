@@ -2003,5 +2003,122 @@
       },
       "finalVersion": "v1:01"
     }
+  ],
+  "queryScenarios": [
+    {
+      "desc": "execute query, receive 2 new rows (single + multi-col key)",
+      "stateVersion": "v2",
+      "queries": {
+        "hash1": {
+          "ast": {
+            "table": "issue"
+          }
+        }
+      },
+      "executed": [
+        {
+          "id": "hash1",
+          "transformationHash": "th1"
+        }
+      ],
+      "removed": [],
+      "existingRows": [],
+      "receivedRows": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1",
+            "title": "a"
+          },
+          "version": "rv1",
+          "refCounts": {
+            "hash1": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "label",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "2"
+            }
+          },
+          "contents": {
+            "issueID": "1",
+            "labelID": "2"
+          },
+          "version": "rv1",
+          "refCounts": {
+            "hash1": 1
+          }
+        }
+      ],
+      "trackPatches": [
+        {
+          "kind": "query",
+          "op": "put",
+          "id": "hash1",
+          "clientID": null,
+          "toVersion": "v2"
+        }
+      ],
+      "receivedPatches": [
+        {
+          "kind": "row",
+          "op": "put",
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1",
+            "title": "a"
+          },
+          "toVersion": "v2"
+        },
+        {
+          "kind": "row",
+          "op": "put",
+          "id": {
+            "schema": "public",
+            "table": "label",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "2"
+            }
+          },
+          "contents": {
+            "issueID": "1",
+            "labelID": "2"
+          },
+          "toVersion": "v2"
+        }
+      ],
+      "deletePatches": [],
+      "finalVersion": "v2"
+    },
+    {
+      "desc": "query-less config update: trackQueries([],[]) then no rows",
+      "stateVersion": "v2",
+      "queries": {},
+      "executed": [],
+      "removed": [],
+      "existingRows": [],
+      "receivedRows": [],
+      "trackPatches": [],
+      "receivedPatches": [],
+      "deletePatches": [],
+      "finalVersion": "v2"
+    }
   ]
 }

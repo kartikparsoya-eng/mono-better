@@ -31,9 +31,9 @@ use crate::ttl::{TTL, clamp_ttl, compare_ttl, parse_ttl, parse_ttl_string};
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, DesiredQuerySpec,
     InternalQueryRecord, Patch, PatchToVersion, QueryPatch, QueryRecord, RefCounts, RowPatch,
-    ShardID, StoreOp,
+    RowRecord, RowUpdate, ShardID, StoreOp,
 };
-use crate::updater::CVRConfigDrivenUpdater;
+use crate::updater::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater};
 use crate::version::{
     CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, one_after,
     try_version_from_string, version_from_lexi, version_from_string, version_string,
@@ -41,7 +41,7 @@ use crate::version::{
 };
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A fixture TTL input is either a JSON number (ms) or a string like "5m".
 fn ttl_from_json(v: &Value) -> TTL {
@@ -143,6 +143,89 @@ fn norm_put_desired_op(op: &StoreOp) -> Option<Value> {
         })),
         _ => None,
     }
+}
+
+/// Stable patch sort key matching the generator's `patchSortKey`.
+fn patch_sort_key(pv: &PatchToVersion) -> String {
+    match &pv.patch {
+        Patch::Row(rp) => {
+            let id = match rp {
+                RowPatch::Put { id, .. } => id,
+                RowPatch::Del { id } => id,
+            };
+            format!("row:{}", row_id_string(id))
+        }
+        Patch::Query(qp) => {
+            let id = match qp {
+                QueryPatch::Put { id, .. } => id,
+                QueryPatch::Del { id, .. } => id,
+            };
+            format!("query:{id}")
+        }
+    }
+}
+
+/// Sort by the stable key (row patches come out of a HashMap on the Rust side),
+/// then normalize — matching the generator, which sorts before `normPatch`.
+fn sorted_norm(mut patches: Vec<PatchToVersion>) -> Value {
+    patches.sort_by_key(patch_sort_key);
+    Value::Array(patches.iter().map(norm_patch).collect())
+}
+
+fn client_query_record(hash: &str, ast: &Value) -> QueryRecord {
+    QueryRecord::Client(ClientQueryRecord {
+        base: BaseQueryRecord {
+            id: hash.to_string(),
+            transformation_hash: None,
+            transformation_version: None,
+            row_set_signature: None,
+        },
+        ast: ast.clone(),
+        client_state: BTreeMap::new(),
+        patch_version: None,
+    })
+}
+
+/// Build the `received` rows map (keyed by rowIDString) from fixture specs.
+fn build_received_rows(specs: &[Value]) -> HashMap<String, (RowID, RowUpdate)> {
+    let mut rows = HashMap::new();
+    for r in specs {
+        let id = make_row_id_from_json(r.get("id").expect("row id"));
+        let id_str = row_id_string(&id);
+        let update = RowUpdate {
+            version: r.get("version").and_then(Value::as_str).map(str::to_string),
+            contents: r.get("contents").cloned().map(std::sync::Arc::new),
+            ref_counts: parse_refcounts(r.get("refCounts").expect("refCounts")).unwrap_or_default(),
+        };
+        rows.insert(id_str, (id, update));
+    }
+    rows
+}
+
+/// Build the existing RowRecord map (keyed by rowIDString) from fixture specs.
+fn build_existing_rows(specs: &[Value]) -> HashMap<String, RowRecord> {
+    let mut m = HashMap::new();
+    for e in specs {
+        let id = make_row_id_from_json(e.get("id").expect("existing id"));
+        let id_str = row_id_string(&id);
+        m.insert(
+            id_str,
+            RowRecord {
+                id,
+                row_version: e
+                    .get("rowVersion")
+                    .and_then(Value::as_str)
+                    .expect("rowVersion")
+                    .to_string(),
+                patch_version: serde_json::from_value(
+                    e.get("patchVersion").expect("patchVersion").clone(),
+                )
+                .expect("patchVersion"),
+                ref_counts: parse_refcounts(e.get("refCounts").expect("refCounts")),
+            },
+        );
+    }
+    m
 }
 
 /// Resulting desire state matching the generator's `normDesireState`.
@@ -981,6 +1064,111 @@ fn parity_check() {
                 .and_then(Value::as_str)
                 .expect("finalVersion"),
             "final version mismatch [{}]",
+            desc
+        );
+    }
+
+    // ---- ⑤ Tier-B: CVRQueryDrivenUpdater trackQueries -> received -> deleteUnreferencedRows ----
+    for entry in fixture
+        .get("queryScenarios")
+        .and_then(Value::as_array)
+        .expect("fixture.queryScenarios missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let state_version = entry
+            .get("stateVersion")
+            .and_then(Value::as_str)
+            .expect("stateVersion");
+
+        let mut cvr = base_cvr();
+        for (h, q) in entry
+            .get("queries")
+            .and_then(Value::as_object)
+            .expect("queries")
+        {
+            cvr.queries.insert(
+                h.clone(),
+                client_query_record(h, q.get("ast").expect("ast")),
+            );
+        }
+
+        let mut updater =
+            CVRQueryDrivenUpdater::new(cvr, state_version.to_string(), "r1".to_string(), None);
+
+        // trackQueries
+        let exec_owned: Vec<(String, String)> = entry
+            .get("executed")
+            .and_then(Value::as_array)
+            .expect("executed")
+            .iter()
+            .map(|e| {
+                (
+                    e.get("id").and_then(Value::as_str).expect("id").to_string(),
+                    e.get("transformationHash")
+                        .and_then(Value::as_str)
+                        .expect("transformationHash")
+                        .to_string(),
+                )
+            })
+            .collect();
+        let executed: Vec<(&str, &str)> = exec_owned
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let removed_owned: Vec<String> = entry
+            .get("removed")
+            .and_then(Value::as_array)
+            .expect("removed")
+            .iter()
+            .map(|r| r.get("id").and_then(Value::as_str).expect("id").to_string())
+            .collect();
+        let removed: Vec<&str> = removed_owned.iter().map(String::as_str).collect();
+
+        let (_v, track_patches) = updater.track_queries(&executed, &removed);
+        assert_eq!(
+            &sorted_norm(track_patches),
+            entry.get("trackPatches").expect("trackPatches"),
+            "trackQueries patches mismatch [{}]",
+            desc
+        );
+
+        // received
+        let existing = build_existing_rows(
+            entry
+                .get("existingRows")
+                .and_then(Value::as_array)
+                .expect("existingRows"),
+        );
+        let rows = build_received_rows(
+            entry
+                .get("receivedRows")
+                .and_then(Value::as_array)
+                .expect("receivedRows"),
+        );
+        let recv_patches = updater.received(&rows, &existing);
+        assert_eq!(
+            &sorted_norm(recv_patches),
+            entry.get("receivedPatches").expect("receivedPatches"),
+            "received patches mismatch [{}]",
+            desc
+        );
+
+        // deleteUnreferencedRows
+        let del_patches = updater.delete_unreferenced_rows(existing.values());
+        assert_eq!(
+            &sorted_norm(del_patches),
+            entry.get("deletePatches").expect("deletePatches"),
+            "deleteUnreferencedRows patches mismatch [{}]",
+            desc
+        );
+
+        assert_eq!(
+            version_string(&updater.base.cvr.version),
+            entry
+                .get("finalVersion")
+                .and_then(Value::as_str)
+                .expect("finalVersion"),
+            "query-driven final version mismatch [{}]",
             desc
         );
     }

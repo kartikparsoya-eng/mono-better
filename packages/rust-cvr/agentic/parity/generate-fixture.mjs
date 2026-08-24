@@ -39,7 +39,10 @@ import {
   mergeRefCounts,
 } from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 import {makeRowPatch} from '../../../zero-cache/src/services/view-syncer/client-handler.ts';
-import {CVRConfigDrivenUpdater} from '../../../zero-cache/src/services/view-syncer/cvr.ts';
+import {
+  CVRConfigDrivenUpdater,
+  CVRQueryDrivenUpdater,
+} from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 
 // Handpicked inputs that cover the interesting space:
 // - Empty/short strings for the hash functions
@@ -336,6 +339,10 @@ function makeStubStore(existingRows = new Map()) {
     getRowRecords: async () => existingRows,
     insertClient: client => ops.push({op: 'insertClient', id: client.id}),
     putQuery: query => ops.push({op: 'putQuery', id: query.id, kind: query.type}),
+    updateQuery: query => ops.push({op: 'updateQuery', id: query.id, kind: query.type}),
+    putRowRecord: row => ops.push({op: 'putRowRecord', id: row.id}),
+    delRowRecord: id => ops.push({op: 'delRowRecord', id}),
+    putInstance: () => ops.push({op: 'putInstance'}),
     putDesiredQuery: (v, q, c, deleted, inactivatedAt, ttl) =>
       ops.push({
         op: 'putDesiredQuery',
@@ -479,6 +486,119 @@ function runConfigScenario(sc) {
   };
 }
 
+// --- ⑤ Tier-B: CVRQueryDrivenUpdater trackQueries -> received -> deleteUnreferencedRows
+// The rowKey-construction path. received/deleteUnreferencedRows are async and
+// read existing rows from the store, so the stub returns preset rows and the
+// driver awaits. Row patches come out in HashMap order on the Rust side, so both
+// sides sort by rowIDString before comparing (row patches are key-addressed).
+
+const LC = {info: () => {}, debug: () => {}, warn: () => {}, error: () => {}};
+
+function clientQueryRecord(hash, ast) {
+  return {
+    id: hash,
+    type: 'client',
+    ast,
+    clientState: {},
+    transformationHash: undefined,
+    transformationVersion: undefined,
+    patchVersion: undefined,
+    rowSetSignature: undefined,
+  };
+}
+
+function buildExistingRows(specs) {
+  const m = new Map();
+  for (const s of specs) {
+    m.set(s.id, {
+      id: s.id,
+      rowVersion: s.rowVersion,
+      patchVersion: s.patchVersion,
+      refCounts: s.refCounts,
+    });
+  }
+  return m;
+}
+
+// Stable sort key so TS (Map insertion order) and Rust (HashMap order) agree.
+function patchSortKey(pv) {
+  const p = pv.patch;
+  return p.type === 'row' ? `row:${rowIDStringTs(p.id)}` : `query:${p.id}`;
+}
+const byKey = (a, b) => (patchSortKey(a) < patchSortKey(b) ? -1 : 1);
+
+const QUERY_SCENARIOS = [
+  {
+    desc: 'execute query, receive 2 new rows (single + multi-col key)',
+    stateVersion: 'v2',
+    queries: {hash1: {ast: {table: 'issue'}}},
+    executed: [{id: 'hash1', transformationHash: 'th1'}],
+    removed: [],
+    existingRows: [],
+    receivedRows: [
+      {
+        id: {schema: 'public', table: 'issue', rowKey: {id: '1'}},
+        contents: {id: '1', title: 'a'},
+        version: 'rv1',
+        refCounts: {hash1: 1},
+      },
+      {
+        id: {schema: 'public', table: 'label', rowKey: {issueID: '1', labelID: '2'}},
+        contents: {issueID: '1', labelID: '2'},
+        version: 'rv1',
+        refCounts: {hash1: 1},
+      },
+    ],
+  },
+  {
+    desc: 'query-less config update: trackQueries([],[]) then no rows',
+    stateVersion: 'v2',
+    queries: {},
+    executed: [],
+    removed: [],
+    existingRows: [],
+    receivedRows: [],
+  },
+];
+
+async function runQueryScenario(sc) {
+  const store = makeStubStore(buildExistingRows(sc.existingRows));
+  const queries = {};
+  for (const [h, q] of Object.entries(sc.queries)) queries[h] = clientQueryRecord(h, q.ast);
+  const updater = new CVRQueryDrivenUpdater(
+    store,
+    baseCVR({queries}),
+    sc.stateVersion,
+    'r1',
+    undefined,
+  );
+
+  const {queryPatches} = updater.trackQueries(LC, sc.executed, sc.removed);
+
+  const rowsMap = new Map();
+  for (const r of sc.receivedRows) {
+    rowsMap.set(r.id, {contents: r.contents, version: r.version, refCounts: r.refCounts});
+  }
+  const receivedPatches = await updater.received(LC, rowsMap);
+  const deletePatches = await updater.deleteUnreferencedRows(LC);
+
+  return {
+    desc: sc.desc,
+    stateVersion: sc.stateVersion,
+    queries: sc.queries,
+    executed: sc.executed,
+    removed: sc.removed,
+    existingRows: sc.existingRows,
+    receivedRows: sc.receivedRows,
+    trackPatches: queryPatches.slice().sort(byKey).map(normPatch),
+    receivedPatches: receivedPatches.slice().sort(byKey).map(normPatch),
+    deletePatches: deletePatches.slice().sort(byKey).map(normPatch),
+    finalVersion: versionString(updater._cvr.version),
+  };
+}
+
+const queryScenarioResults = await Promise.all(QUERY_SCENARIOS.map(runQueryScenario));
+
 const fixture = {
   hashes: STRINGS.map(s => ({
     input: s,
@@ -569,6 +689,7 @@ const fixture = {
   cmpCvr: CMP_CVR_PAIRS.map(([a, b]) => ({a, b, sign: sign(cmpVersions(a, b))})),
   versionParses: VERSION_PARSE_STRINGS.map(tsVersionParse),
   configScenarios: CONFIG_SCENARIOS.map(runConfigScenario),
+  queryScenarios: queryScenarioResults,
 };
 
 console.log(JSON.stringify(fixture, null, 2));
