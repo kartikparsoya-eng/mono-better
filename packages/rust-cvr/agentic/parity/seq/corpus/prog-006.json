@@ -1,0 +1,100 @@
+{
+  "seed": 6,
+  "cvrId": "cg-seq-000006",
+  "shard": {
+    "appID": "roze",
+    "shardNum": 1
+  },
+  "connectTime": 1725408000000,
+  "transactions": [
+    {
+      "lastActive": 1725411600000,
+      "ttlClock": 1725411600000,
+      "ops": [
+        {
+          "op": "deleteDesired",
+          "clientID": "c0",
+          "hashes": []
+        }
+      ]
+    },
+    {
+      "lastActive": 1725415200000,
+      "ttlClock": 1725415200000,
+      "ops": [
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c1",
+          "hashes": []
+        }
+      ]
+    },
+    {
+      "lastActive": 1725418800000,
+      "ttlClock": 1725418800000,
+      "ops": [
+        {
+          "op": "ensureClient",
+          "clientID": "c2"
+        }
+      ]
+    },
+    {
+      "lastActive": 1725422400000,
+      "ttlClock": 1725422400000,
+      "ops": [
+        {
+          "op": "deleteClient",
+          "clientID": "c2"
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c3",
+          "queries": [
+            {
+              "hash": "q0",
+              "ast": {
+                "table": "labels"
+              }
+            }
+          ]
+        },
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c4",
+          "hashes": []
+        },
+        {
+          "op": "deleteDesired",
+          "clientID": "c3",
+          "hashes": [
+            "q0"
+          ]
+        }
+      ]
+    },
+    {
+      "lastActive": 1725426000000,
+      "ttlClock": 1725426000000,
+      "ops": [
+        {
+          "op": "deleteClient",
+          "clientID": "c3"
+        },
+        {
+          "op": "clearDesired",
+          "clientID": "c5"
+        },
+        {
+          "op": "deleteClient",
+          "clientID": "c6"
+        },
+        {
+          "op": "deleteDesired",
+          "clientID": "c7",
+          "hashes": []
+        }
+      ]
+    }
+  ]
+}

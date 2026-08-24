@@ -1,0 +1,75 @@
+{
+  "seed": 12,
+  "cvrId": "cg-seq-000012",
+  "shard": {
+    "appID": "roze",
+    "shardNum": 1
+  },
+  "connectTime": 1725408000000,
+  "transactions": [
+    {
+      "lastActive": 1725411600000,
+      "ttlClock": 1725411600000,
+      "ops": [
+        {
+          "op": "deleteDesired",
+          "clientID": "c0",
+          "hashes": []
+        }
+      ]
+    },
+    {
+      "lastActive": 1725415200000,
+      "ttlClock": 1725415200000,
+      "ops": [
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q0",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 300000
+            }
+          ]
+        },
+        {
+          "op": "deleteDesired",
+          "clientID": "c1",
+          "hashes": [
+            "q0"
+          ]
+        },
+        {
+          "op": "deleteClient",
+          "clientID": "c1"
+        },
+        {
+          "op": "clearDesired",
+          "clientID": "c2"
+        }
+      ]
+    },
+    {
+      "lastActive": 1725418800000,
+      "ttlClock": 1725418800000,
+      "ops": [
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c3",
+          "hashes": []
+        },
+        {
+          "op": "clearDesired",
+          "clientID": "c4"
+        },
+        {
+          "op": "deleteClient",
+          "clientID": "c5"
+        }
+      ]
+    }
+  ]
+}

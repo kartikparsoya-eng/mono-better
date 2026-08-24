@@ -1,0 +1,229 @@
+{
+  "seed": 37,
+  "cvrId": "cg-seq-000037",
+  "shard": {
+    "appID": "roze",
+    "shardNum": 1
+  },
+  "connectTime": 1725408000000,
+  "transactions": [
+    {
+      "lastActive": 1725411600000,
+      "ttlClock": 1725411600000,
+      "ops": [
+        {
+          "op": "ensureClient",
+          "clientID": "c0"
+        },
+        {
+          "op": "clearDesired",
+          "clientID": "c0"
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q0",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 60000
+            },
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "comments"
+              },
+              "ttl": 300000
+            }
+          ]
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q2",
+              "ast": {
+                "table": "users"
+              },
+              "ttl": 1000
+            },
+            {
+              "hash": "q3",
+              "ast": {
+                "table": "issues"
+              },
+              "ttl": 300000
+            },
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "comments"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "lastActive": 1725415200000,
+      "ttlClock": 1725415200000,
+      "ops": [
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c2",
+          "queries": [
+            {
+              "hash": "q4",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 300000
+            }
+          ]
+        },
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c2",
+          "hashes": [
+            "q4"
+          ]
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c0",
+          "queries": [
+            {
+              "hash": "q5",
+              "ast": {
+                "table": "comments"
+              },
+              "ttl": -1
+            },
+            {
+              "hash": "q5",
+              "ast": {
+                "table": "comments"
+              },
+              "ttl": 60000
+            },
+            {
+              "hash": "q6",
+              "ast": {
+                "table": "users"
+              },
+              "ttl": 1000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "lastActive": 1725418800000,
+      "ttlClock": 1725418800000,
+      "ops": [
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c2",
+          "queries": [
+            {
+              "hash": "q7",
+              "ast": {
+                "table": "issues"
+              },
+              "ttl": -1
+            }
+          ]
+        },
+        {
+          "op": "deleteClient",
+          "clientID": "c0"
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c3",
+          "queries": [
+            {
+              "hash": "q8",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 60000
+            },
+            {
+              "hash": "q9",
+              "ast": {
+                "table": "comments"
+              },
+              "ttl": 300000
+            }
+          ]
+        },
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c2",
+          "hashes": []
+        }
+      ]
+    },
+    {
+      "lastActive": 1725422400000,
+      "ttlClock": 1725422400000,
+      "ops": [
+        {
+          "op": "ensureClient",
+          "clientID": "c3"
+        },
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c3",
+          "hashes": []
+        }
+      ]
+    },
+    {
+      "lastActive": 1725426000000,
+      "ttlClock": 1725426000000,
+      "ops": [
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c1",
+          "hashes": [
+            "q0",
+            "q2",
+            "q3"
+          ]
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c3",
+          "queries": [
+            {
+              "hash": "q8",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 1000
+            },
+            {
+              "hash": "q8",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 60000
+            },
+            {
+              "hash": "q8",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": -1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

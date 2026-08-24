@@ -23,6 +23,9 @@ pub mod row_key;
 pub mod row_record_cache;
 pub mod row_set_signature;
 pub mod schema;
+/// TS↔Rust *sequence* differential replay engine (parity tooling; see
+/// `agentic/parity/seq/`). Shared by the `cvr_seq_replay` bin and the CI gate.
+pub mod seq_replay;
 pub mod shards;
 pub mod tracer;
 pub mod ttl;

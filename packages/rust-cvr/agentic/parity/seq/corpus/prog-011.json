@@ -1,0 +1,126 @@
+{
+  "seed": 11,
+  "cvrId": "cg-seq-000011",
+  "shard": {
+    "appID": "roze",
+    "shardNum": 1
+  },
+  "connectTime": 1725408000000,
+  "transactions": [
+    {
+      "lastActive": 1725411600000,
+      "ttlClock": 1725411600000,
+      "ops": [
+        {
+          "op": "deleteDesired",
+          "clientID": "c0",
+          "hashes": []
+        },
+        {
+          "op": "deleteDesired",
+          "clientID": "c1",
+          "hashes": []
+        },
+        {
+          "op": "clearDesired",
+          "clientID": "c2"
+        }
+      ]
+    },
+    {
+      "lastActive": 1725415200000,
+      "ttlClock": 1725415200000,
+      "ops": [
+        {
+          "op": "ensureClient",
+          "clientID": "c3"
+        },
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c3",
+          "hashes": []
+        },
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c4",
+          "hashes": []
+        }
+      ]
+    },
+    {
+      "lastActive": 1725418800000,
+      "ttlClock": 1725418800000,
+      "ops": [
+        {
+          "op": "deleteDesired",
+          "clientID": "c3",
+          "hashes": []
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c3",
+          "queries": [
+            {
+              "hash": "q0",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 60000
+            },
+            {
+              "hash": "q0",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 60000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "lastActive": 1725422400000,
+      "ttlClock": 1725422400000,
+      "ops": [
+        {
+          "op": "clearDesired",
+          "clientID": "c5"
+        },
+        {
+          "op": "clearDesired",
+          "clientID": "c3"
+        }
+      ]
+    },
+    {
+      "lastActive": 1725426000000,
+      "ttlClock": 1725426000000,
+      "ops": [
+        {
+          "op": "ensureClient",
+          "clientID": "c3"
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c3",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "comments"
+              },
+              "ttl": 60000
+            },
+            {
+              "hash": "q2",
+              "ast": {
+                "table": "users"
+              },
+              "ttl": -1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
