@@ -18,11 +18,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {generate, generateQuery} from './gen.mjs';
+import {generate, generateQuery, generateMixed} from './gen.mjs';
 import {diffProgram, runTs} from './diff.mjs';
 
-// `--query` fuzzes the query-driven (received-rows) generator instead of config.
-const GEN = process.argv.includes('--query') ? generateQuery : generate;
+// Pick the generator: `--mixed` (full interleaved coverage), `--query`
+// (received-rows), or the default config generator.
+const GEN = process.argv.includes('--mixed')
+  ? generateMixed
+  : process.argv.includes('--query')
+    ? generateQuery
+    : generate;
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const regDir = path.join(dir, 'regressions');

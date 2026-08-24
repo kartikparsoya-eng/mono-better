@@ -251,6 +251,184 @@ export function generateQuery(seed) {
   };
 }
 
+// ── Mixed generator: full-coverage interleaving of ALL config + query ops ──
+//
+// Maintains a lifecycle model (clients, per-query desiredBy sets, gotten set) so
+// it can INTERLEAVE config and query transactions and emit VALID sequences that
+// reach the paths the two single-family generators can't: `removed` queries in
+// trackQueries (a gotten query no longer desired by any client), setClientSchema
+// / setProfileID, multi-client desires, and config↔query state interaction.
+const CLIENT_SCHEMA = {tables: {}};
+
+export function generateMixed(seed) {
+  const rnd = mulberry32(seed + 0x85ebca6b);
+  const pick = arr => arr[Math.floor(rnd() * arr.length)];
+  const chance = p => rnd() < p;
+  const connectTime = 1_725_408_000_000;
+
+  const clients = new Set(); // live clients
+  const existing = new Set(); // query hashes with a live (non-removed) record
+  const gotten = new Set(); // executed query hashes
+  const desiredBy = new Map(); // hash -> Set<client> ACTIVELY desiring (== desiredQueryIDs)
+  let hashCounter = 0;
+  let clientCounter = 0;
+  let stateCounter = 0;
+  let schemaSet = false;
+
+  const freshHash = () => `q${hashCounter++}`;
+  const freshClient = () => `c${clientCounter++}`;
+  const knownClient = () =>
+    clients.size && chance(0.75) ? pick([...clients]) : freshClient();
+  const activeDesiredOf = c => [...existing].filter(h => desiredBy.get(h)?.has(c));
+  const dropClient = c => {
+    for (const s of desiredBy.values()) s.delete(c);
+  };
+
+  const transactions = [];
+
+  // Seed: a client desiring two queries (so query txns have something to run).
+  {
+    const c = freshClient();
+    clients.add(c);
+    const qs = [freshHash(), freshHash()];
+    for (const h of qs) {
+      existing.add(h);
+      desiredBy.set(h, new Set([c]));
+    }
+    transactions.push({
+      kind: 'config',
+      lastActive: connectTime + 3600_000,
+      ttlClock: connectTime + 3600_000,
+      ops: [
+        {op: 'ensureClient', clientID: c},
+        {op: 'putDesiredQueries', clientID: c, queries: qs.map(h => ({hash: h, ast: astFor(h), ttl: 300000}))},
+      ],
+    });
+  }
+
+  const nTx = 4 + Math.floor(rnd() * 8); // 4..11 more transactions
+  for (let i = 0; i < nTx; i++) {
+    const ttlClock = connectTime + (i + 2) * 3600_000;
+
+    if (existing.size > 0 && chance(0.45)) {
+      // ── query transaction ──
+      stateCounter += 1;
+      const stateVersion = versionToLexi(stateCounter);
+      const pool = [...existing];
+      let executed = pool.filter(() => rnd() < 0.5);
+      if (executed.length === 0) executed = [pick(pool)];
+      executed.forEach(h => gotten.add(h));
+
+      // removable: gotten, NOT executed this txn, desired by nobody.
+      const removed = [...gotten].filter(
+        h => !executed.includes(h) && (desiredBy.get(h)?.size ?? 0) === 0 && rnd() < 0.6,
+      );
+      removed.forEach(h => {
+        gotten.delete(h);
+        existing.delete(h);
+        desiredBy.delete(h);
+      });
+
+      const received = [];
+      for (const row of ROW_POOL) {
+        if (!chance(0.5)) continue;
+        const refs = executed.filter(() => rnd() < 0.6);
+        if (refs.length === 0) continue;
+        const refCounts = {};
+        for (const q of refs) refCounts[q] = 1;
+        received.push({id: row, contents: {...row.rowKey, v: i}, version: stateVersion, refCounts});
+      }
+
+      transactions.push({
+        kind: 'query',
+        stateVersion,
+        replicaVersion: '01',
+        lastActive: ttlClock,
+        ttlClock,
+        track: {
+          executed: executed.map(h => [h, `${h}-t${chance(0.5) ? i : 0}`]),
+          removed,
+        },
+        received,
+        deleteUnreferenced: true,
+      });
+    } else {
+      // ── config transaction ──
+      const ops = [];
+      const nOps = 1 + Math.floor(rnd() * 3);
+      for (let j = 0; j < nOps; j++) {
+        const kind = pick([
+          'ensureClient',
+          'putDesired',
+          'putDesired',
+          'markInactive',
+          'deleteDesired',
+          'clearDesired',
+          'deleteClient',
+          'setSchema',
+          'setProfile',
+        ]);
+        if (kind === 'ensureClient') {
+          const c = knownClient();
+          clients.add(c);
+          ops.push({op: 'ensureClient', clientID: c});
+        } else if (kind === 'putDesired') {
+          const c = knownClient();
+          clients.add(c);
+          const n = 1 + Math.floor(rnd() * 3);
+          const queries = [];
+          for (let k = 0; k < n; k++) {
+            const reuse = existing.size && chance(0.5);
+            const h = reuse ? pick([...existing]) : freshHash();
+            existing.add(h);
+            if (!desiredBy.has(h)) desiredBy.set(h, new Set());
+            desiredBy.get(h).add(c);
+            queries.push({hash: h, ast: astFor(h), ttl: pick(TTLS)});
+          }
+          ops.push({op: 'putDesiredQueries', clientID: c, queries});
+        } else if (kind === 'markInactive') {
+          const c = knownClient();
+          const hashes = activeDesiredOf(c).filter(() => rnd() < 0.5);
+          hashes.forEach(h => desiredBy.get(h)?.delete(c));
+          ops.push({op: 'markDesiredInactive', clientID: c, hashes});
+        } else if (kind === 'deleteDesired') {
+          const c = knownClient();
+          const hashes = activeDesiredOf(c).filter(() => rnd() < 0.5);
+          hashes.forEach(h => desiredBy.get(h)?.delete(c));
+          ops.push({op: 'deleteDesired', clientID: c, hashes});
+        } else if (kind === 'clearDesired') {
+          const c = knownClient();
+          activeDesiredOf(c).forEach(h => desiredBy.get(h)?.delete(c));
+          ops.push({op: 'clearDesired', clientID: c});
+        } else if (kind === 'deleteClient') {
+          const c = knownClient();
+          clients.delete(c);
+          dropClient(c);
+          ops.push({op: 'deleteClient', clientID: c});
+        } else if (kind === 'setSchema') {
+          if (!schemaSet) {
+            schemaSet = true;
+            ops.push({op: 'setClientSchema', schema: CLIENT_SCHEMA});
+          }
+        } else if (kind === 'setProfile') {
+          ops.push({op: 'setProfileID', profileID: 'p-mixed'});
+        }
+      }
+      if (ops.length) {
+        transactions.push({kind: 'config', lastActive: ttlClock, ttlClock, ops});
+      }
+    }
+  }
+
+  return {
+    seed,
+    cvrId: `cg-seqm-${String(seed).padStart(6, '0')}`,
+    shard: {appID: 'roze', shardNum: 1},
+    connectTime,
+    transactions,
+  };
+}
+
 // ── CLI ──
 const args = process.argv.slice(2);
 function writeCorpus(prefix, fn, n) {
@@ -269,13 +447,17 @@ if (args[0] === '--corpus') {
   writeCorpus('prog', generate, Number(args[1] || 40));
 } else if (args[0] === '--qcorpus') {
   writeCorpus('qprog', generateQuery, Number(args[1] || 30));
+} else if (args[0] === '--mcorpus') {
+  writeCorpus('mprog', generateMixed, Number(args[1] || 30));
 } else if (args[0] === '--q' && !isNaN(Number(args[1]))) {
   process.stdout.write(JSON.stringify(generateQuery(Number(args[1])), null, 2) + '\n');
+} else if (args[0] === '--m' && !isNaN(Number(args[1]))) {
+  process.stdout.write(JSON.stringify(generateMixed(Number(args[1])), null, 2) + '\n');
 } else if (args.length && !isNaN(Number(args[0]))) {
   process.stdout.write(JSON.stringify(generate(Number(args[0])), null, 2) + '\n');
 } else if (import.meta.url === `file://${process.argv[1]}`) {
   console.error(
-    'usage: node gen.mjs <seed> | --q <seed> | --corpus <N> | --qcorpus <N>',
+    'usage: node gen.mjs <seed> | --q <seed> | --m <seed> | --corpus <N> | --qcorpus <N> | --mcorpus <N>',
   );
   process.exit(2);
 }

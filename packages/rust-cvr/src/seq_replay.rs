@@ -138,6 +138,13 @@ pub enum Op {
         #[serde(rename = "clientID")]
         client_id: String,
     },
+    #[serde(rename = "setClientSchema")]
+    SetClientSchema { schema: Value },
+    #[serde(rename = "setProfileID")]
+    SetProfileID {
+        #[serde(rename = "profileID")]
+        profile_id: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -293,6 +300,16 @@ pub async fn run(pool: &PgPool, prog: &Program) -> Value {
                     }
                     Op::DeleteClient { client_id } => {
                         push_patches(&mut patches, updater.delete_client(client_id, tx.ttl_clock))
+                    }
+                    // No patches — these queue a PutInstance (surfaces in the
+                    // instances dump's clientSchema / profileID columns).
+                    Op::SetClientSchema { schema } => {
+                        updater
+                            .set_client_schema(schema.clone())
+                            .expect("set_client_schema");
+                    }
+                    Op::SetProfileID { profile_id } => {
+                        updater.set_profile_id(profile_id);
                     }
                 }
             }

@@ -170,6 +170,12 @@ for (const tx of prog.transactions) {
         case 'deleteClient':
           patches.push(...updater.deleteClient(op.clientID, ttlClock));
           break;
+        case 'setClientSchema':
+          updater.setClientSchema(lc, op.schema);
+          break;
+        case 'setProfileID':
+          updater.setProfileID(lc, op.profileID);
+          break;
         default:
           throw new Error(`unknown op ${op.op}`);
       }

@@ -1,0 +1,435 @@
+{
+  "seed": 1,
+  "cvrId": "cg-seqm-000001",
+  "shard": {
+    "appID": "roze",
+    "shardNum": 1
+  },
+  "connectTime": 1725408000000,
+  "transactions": [
+    {
+      "kind": "config",
+      "lastActive": 1725411600000,
+      "ttlClock": 1725411600000,
+      "ops": [
+        {
+          "op": "ensureClient",
+          "clientID": "c0"
+        },
+        {
+          "op": "putDesiredQueries",
+          "clientID": "c0",
+          "queries": [
+            {
+              "hash": "q0",
+              "ast": {
+                "table": "labels"
+              },
+              "ttl": 300000
+            },
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "comments"
+              },
+              "ttl": 300000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "query",
+      "stateVersion": "01",
+      "replicaVersion": "01",
+      "lastActive": 1725415200000,
+      "ttlClock": 1725415200000,
+      "track": {
+        "executed": [
+          [
+            "q1",
+            "q1-t0"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1",
+            "v": 0
+          },
+          "version": "01",
+          "refCounts": {
+            "q1": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "1"
+            }
+          },
+          "contents": {
+            "issueID": "1",
+            "labelID": "1",
+            "v": 0
+          },
+          "version": "01",
+          "refCounts": {
+            "q1": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "query",
+      "stateVersion": "02",
+      "replicaVersion": "01",
+      "lastActive": 1725418800000,
+      "ttlClock": 1725418800000,
+      "track": {
+        "executed": [
+          [
+            "q0",
+            "q0-t1"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "1"
+            }
+          },
+          "contents": {
+            "issueID": "1",
+            "labelID": "1",
+            "v": 1
+          },
+          "version": "02",
+          "refCounts": {
+            "q0": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "config",
+      "lastActive": 1725422400000,
+      "ttlClock": 1725422400000,
+      "ops": [
+        {
+          "op": "setProfileID",
+          "profileID": "p-mixed"
+        },
+        {
+          "op": "markDesiredInactive",
+          "clientID": "c0",
+          "hashes": [
+            "q0"
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "query",
+      "stateVersion": "03",
+      "replicaVersion": "01",
+      "lastActive": 1725426000000,
+      "ttlClock": 1725426000000,
+      "track": {
+        "executed": [
+          [
+            "q0",
+            "q0-t0"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            }
+          },
+          "contents": {
+            "id": "2",
+            "v": 3
+          },
+          "version": "03",
+          "refCounts": {
+            "q0": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "0"
+            }
+          },
+          "contents": {
+            "issueID": "1",
+            "labelID": "0",
+            "v": 3
+          },
+          "version": "03",
+          "refCounts": {
+            "q0": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "query",
+      "stateVersion": "04",
+      "replicaVersion": "01",
+      "lastActive": 1725429600000,
+      "ttlClock": 1725429600000,
+      "track": {
+        "executed": [
+          [
+            "q0",
+            "q0-t4"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "0"
+            }
+          },
+          "contents": {
+            "id": "0",
+            "v": 4
+          },
+          "version": "04",
+          "refCounts": {
+            "q0": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "query",
+      "stateVersion": "05",
+      "replicaVersion": "01",
+      "lastActive": 1725433200000,
+      "ttlClock": 1725433200000,
+      "track": {
+        "executed": [
+          [
+            "q0",
+            "q0-t0"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1",
+            "v": 5
+          },
+          "version": "05",
+          "refCounts": {
+            "q0": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "query",
+      "stateVersion": "06",
+      "replicaVersion": "01",
+      "lastActive": 1725436800000,
+      "ttlClock": 1725436800000,
+      "track": {
+        "executed": [
+          [
+            "q1",
+            "q1-t0"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "1"
+            }
+          },
+          "contents": {
+            "issueID": "1",
+            "labelID": "1",
+            "v": 6
+          },
+          "version": "06",
+          "refCounts": {
+            "q1": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "query",
+      "stateVersion": "07",
+      "replicaVersion": "01",
+      "lastActive": 1725440400000,
+      "ttlClock": 1725440400000,
+      "track": {
+        "executed": [
+          [
+            "q1",
+            "q1-t0"
+          ]
+        ],
+        "removed": [
+          "q0"
+        ]
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            }
+          },
+          "contents": {
+            "id": "x",
+            "v": 7
+          },
+          "version": "07",
+          "refCounts": {
+            "q1": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "config",
+      "lastActive": 1725444000000,
+      "ttlClock": 1725444000000,
+      "ops": [
+        {
+          "op": "ensureClient",
+          "clientID": "c1"
+        },
+        {
+          "op": "setProfileID",
+          "profileID": "p-mixed"
+        }
+      ]
+    },
+    {
+      "kind": "query",
+      "stateVersion": "08",
+      "replicaVersion": "01",
+      "lastActive": 1725447600000,
+      "ttlClock": 1725447600000,
+      "track": {
+        "executed": [
+          [
+            "q1",
+            "q1-t9"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1",
+            "v": 9
+          },
+          "version": "08",
+          "refCounts": {
+            "q1": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            }
+          },
+          "contents": {
+            "id": "x",
+            "v": 9
+          },
+          "version": "08",
+          "refCounts": {
+            "q1": 1
+          }
+        }
+      ],
+      "deleteUnreferenced": true
+    },
+    {
+      "kind": "config",
+      "lastActive": 1725451200000,
+      "ttlClock": 1725451200000,
+      "ops": [
+        {
+          "op": "deleteClient",
+          "clientID": "c1"
+        }
+      ]
+    }
+  ]
+}
