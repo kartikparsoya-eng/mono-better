@@ -172,17 +172,23 @@ fn sorted_norm(mut patches: Vec<PatchToVersion>) -> Value {
     Value::Array(patches.iter().map(norm_patch).collect())
 }
 
-fn client_query_record(hash: &str, ast: &Value) -> QueryRecord {
+fn client_query_record(hash: &str, q: &Value) -> QueryRecord {
     QueryRecord::Client(ClientQueryRecord {
         base: BaseQueryRecord {
             id: hash.to_string(),
-            transformation_hash: None,
+            transformation_hash: q
+                .get("transformationHash")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             transformation_version: None,
             row_set_signature: None,
         },
-        ast: ast.clone(),
+        ast: q.get("ast").cloned().unwrap_or(Value::Null),
         client_state: BTreeMap::new(),
-        patch_version: None,
+        patch_version: q
+            .get("patchVersion")
+            .filter(|v| !v.is_null())
+            .map(|v| serde_json::from_value(v.clone()).expect("patchVersion")),
     })
 }
 
@@ -1086,10 +1092,7 @@ fn parity_check() {
             .and_then(Value::as_object)
             .expect("queries")
         {
-            cvr.queries.insert(
-                h.clone(),
-                client_query_record(h, q.get("ast").expect("ast")),
-            );
+            cvr.queries.insert(h.clone(), client_query_record(h, q));
         }
 
         let mut updater =

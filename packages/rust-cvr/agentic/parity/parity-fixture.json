@@ -2119,6 +2119,140 @@
       "receivedPatches": [],
       "deletePatches": [],
       "finalVersion": "v2"
+    },
+    {
+      "desc": "remove query -> its sole existing row is deleted",
+      "stateVersion": "v2",
+      "queries": {
+        "hash1": {
+          "ast": {
+            "table": "issue"
+          },
+          "transformationHash": "th1",
+          "patchVersion": {
+            "stateVersion": "v1"
+          }
+        }
+      },
+      "executed": [],
+      "removed": [
+        {
+          "id": "hash1"
+        }
+      ],
+      "existingRows": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "rowVersion": "rv0",
+          "patchVersion": {
+            "stateVersion": "v1"
+          },
+          "refCounts": {
+            "hash1": 1
+          }
+        }
+      ],
+      "receivedRows": [],
+      "trackPatches": [
+        {
+          "kind": "query",
+          "op": "del",
+          "id": "hash1",
+          "clientID": null,
+          "toVersion": "v2"
+        }
+      ],
+      "receivedPatches": [],
+      "deletePatches": [
+        {
+          "kind": "row",
+          "op": "del",
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "toVersion": "v2"
+        }
+      ],
+      "finalVersion": "v2"
+    },
+    {
+      "desc": "received row with a poisoned rowKey (extra non-PK column) passes through",
+      "stateVersion": "v2",
+      "queries": {
+        "hash1": {
+          "ast": {
+            "table": "issue"
+          }
+        }
+      },
+      "executed": [
+        {
+          "id": "hash1",
+          "transformationHash": "th1"
+        }
+      ],
+      "removed": [],
+      "existingRows": [],
+      "receivedRows": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "5",
+              "_leaked": "oops"
+            }
+          },
+          "contents": {
+            "id": "5",
+            "title": "x"
+          },
+          "version": "rv1",
+          "refCounts": {
+            "hash1": 1
+          }
+        }
+      ],
+      "trackPatches": [
+        {
+          "kind": "query",
+          "op": "put",
+          "id": "hash1",
+          "clientID": null,
+          "toVersion": "v2"
+        }
+      ],
+      "receivedPatches": [
+        {
+          "kind": "row",
+          "op": "put",
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "5",
+              "_leaked": "oops"
+            }
+          },
+          "contents": {
+            "id": "5",
+            "title": "x"
+          },
+          "toVersion": "v2"
+        }
+      ],
+      "deletePatches": [],
+      "finalVersion": "v2"
     }
   ]
 }

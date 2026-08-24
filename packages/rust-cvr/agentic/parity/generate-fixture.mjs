@@ -494,15 +494,15 @@ function runConfigScenario(sc) {
 
 const LC = {info: () => {}, debug: () => {}, warn: () => {}, error: () => {}};
 
-function clientQueryRecord(hash, ast) {
+function clientQueryRecord(hash, q) {
   return {
     id: hash,
     type: 'client',
-    ast,
+    ast: q.ast,
     clientState: {},
-    transformationHash: undefined,
+    transformationHash: q.transformationHash,
     transformationVersion: undefined,
-    patchVersion: undefined,
+    patchVersion: q.patchVersion,
     rowSetSignature: undefined,
   };
 }
@@ -559,12 +559,46 @@ const QUERY_SCENARIOS = [
     existingRows: [],
     receivedRows: [],
   },
+  {
+    desc: 'remove query -> its sole existing row is deleted',
+    stateVersion: 'v2',
+    queries: {
+      hash1: {ast: {table: 'issue'}, transformationHash: 'th1', patchVersion: {stateVersion: 'v1'}},
+    },
+    executed: [],
+    removed: [{id: 'hash1'}],
+    existingRows: [
+      {
+        id: {schema: 'public', table: 'issue', rowKey: {id: '1'}},
+        rowVersion: 'rv0',
+        patchVersion: {stateVersion: 'v1'},
+        refCounts: {hash1: 1},
+      },
+    ],
+    receivedRows: [],
+  },
+  {
+    desc: 'received row with a poisoned rowKey (extra non-PK column) passes through',
+    stateVersion: 'v2',
+    queries: {hash1: {ast: {table: 'issue'}}},
+    executed: [{id: 'hash1', transformationHash: 'th1'}],
+    removed: [],
+    existingRows: [],
+    receivedRows: [
+      {
+        id: {schema: 'public', table: 'issue', rowKey: {id: '5', _leaked: 'oops'}},
+        contents: {id: '5', title: 'x'},
+        version: 'rv1',
+        refCounts: {hash1: 1},
+      },
+    ],
+  },
 ];
 
 async function runQueryScenario(sc) {
   const store = makeStubStore(buildExistingRows(sc.existingRows));
   const queries = {};
-  for (const [h, q] of Object.entries(sc.queries)) queries[h] = clientQueryRecord(h, q.ast);
+  for (const [h, q] of Object.entries(sc.queries)) queries[h] = clientQueryRecord(h, q);
   const updater = new CVRQueryDrivenUpdater(
     store,
     baseCVR({queries}),
