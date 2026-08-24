@@ -69,7 +69,6 @@ CRATES = {
             "ttlclockasnumber": ("IDENTITY", "TTLClock = i64 (ttl_clock.rs); no conversion"),
             "ttlclockfromnumber": ("IDENTITY", "TTLClock = i64 (ttl_clock.rs); no conversion"),
             "cvrerrorkind": ("CVRStoreError enum (cvr_store.rs)", "fn→enum discriminant"),
-            "inspectqueries": ("send_inspect_response (client_handler.rs)", "inspector path"),
             "assert": ("assert_new_version (cvr.rs)", "rename"),
         },
     },

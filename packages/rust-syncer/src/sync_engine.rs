@@ -24,7 +24,7 @@ use rust_cvr::change_processor::{ChangeProcessor, RowChangeType};
 use rust_cvr::client_handler::{ClientHandler, MultiPoker, WebSocketSink};
 use rust_cvr::row_key::row_id_string;
 use rust_cvr::row_record_cache::RowRecordCache;
-use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle};
+use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle, InspectQueryRow};
 use rust_cvr::client_handler::{Patch, PatchToVersion, RowPatch};
 use rust_cvr::cvr::{CVR, DesiredQuerySpec, StoreOp};
 use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
@@ -133,6 +133,20 @@ impl SyncEngine {
             cache.get_row_records().await
         })
         .await
+    }
+
+    /// Inspector query view — delegates to `CVRStore::inspect_queries` (the SQL
+    /// port of TS `CVRStore.inspectQueries`). Empty when no store is attached.
+    pub async fn inspect_queries(
+        &self,
+        ttl_clock: TTLClock,
+        client_id: Option<&str>,
+    ) -> Result<Vec<InspectQueryRow>, CVRStoreError> {
+        let Some(store_arc) = self.store.clone() else {
+            return Ok(vec![]);
+        };
+        let store = store_arc.lock().await;
+        Ok(store.inspect_queries(ttl_clock, client_id).await?)
     }
 
     /// Inject the shared-pool runtime handle used to offload CVR store I/O

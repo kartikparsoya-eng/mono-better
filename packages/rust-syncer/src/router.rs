@@ -2593,100 +2593,33 @@ impl CgState {
         self.sync_engine.send_inspect_response(&ws_id, frame);
     }
 
-    /// Build the `queries` inspector rows from the in-memory CVR + the engine's
-    /// row-record cache. Port of `CVRStore.inspectQueries` (cvr-store.ts:1288):
-    /// one row per (clientID, queryHash) desire with TTL-expired desires
-    /// filtered out. Internal queries (lmids/mutationResults) are excluded —
-    /// the TS SQL only reads the `desires` table, which never carries internal
-    /// queries; here that maps to records without `client_state`.
+    /// Build the `queries` inspector value by delegating to the CVR store's
+    /// `inspect_queries` (SQL port of TS `CVRStore.inspectQueries`), then adding
+    /// `metrics: null` to each row. The InspectorDelegate materialization metrics
+    /// and the custom-query transformed-AST fallback are server-side machinery not
+    /// ported to the Rust syncer (the TS inspect-handler.ts enrichment layer).
     async fn inspect_queries_value(
         &self,
         filter_client: Option<&str>,
         ttl_clock: TTLClock,
     ) -> serde_json::Value {
-        let Some(cvr) = &self.cvr else {
-            return serde_json::json!([]);
+        let rows = match self.sync_engine.inspect_queries(ttl_clock, filter_client).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("CG {}: inspect_queries failed: {e}", self.cg_id);
+                return serde_json::json!([]);
+            }
         };
-        // Per-query row counts, aggregated once from the row-record cache: the
-        // number of view rows whose refCounts reference the query — the same
-        // count as the TS SQL's `r."refCounts" ? d."queryHash"` subquery.
-        // Empty (rowCount 0) when no CVR store is attached.
-        let rows = self.sync_engine.existing_rows().await;
-        let mut row_counts: HashMap<&str, i64> = HashMap::new();
-        for record in rows.values() {
-            if let Some(ref_counts) = &record.ref_counts {
-                for qid in ref_counts.keys() {
-                    *row_counts.entry(qid.as_str()).or_insert(0) += 1;
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let mut v = serde_json::to_value(row).unwrap_or(serde_json::Value::Null);
+                if let serde_json::Value::Object(map) = &mut v {
+                    map.insert("metrics".to_string(), serde_json::Value::Null);
                 }
-            }
-        }
-
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        for (qid, record) in &cvr.queries {
-            let Some(client_state) = record.client_state() else {
-                continue; // internal query — not client-visible
-            };
-            // `ast` is the client AST, null for custom queries (the TS
-            // delegate's transformed-AST fallback is not ported); `name`/`args`
-            // are non-null only for custom queries — mirroring the columns
-            // selected by the TS SQL.
-            let (ast, name, args) = match record {
-                rust_cvr::schema::types::QueryRecord::Internal(_) => unreachable!(),
-                rust_cvr::schema::types::QueryRecord::Client(r) => (
-                    r.ast.clone(),
-                    serde_json::Value::Null,
-                    serde_json::Value::Null,
-                ),
-                rust_cvr::schema::types::QueryRecord::Custom(r) => (
-                    serde_json::Value::Null,
-                    serde_json::json!(r.name),
-                    serde_json::json!(r.args),
-                ),
-            };
-            for (cid, state) in client_state {
-                if filter_client.is_some_and(|fc| fc != cid) {
-                    continue;
-                }
-                // TTL-expiry filter — port of the SQL's
-                // `NOT (inactivatedAtMs + ttlMs <= ttlClock)`. Rust's `ttl` is
-                // never null (clamped at load, TS `COALESCE(ttlMs, DEFAULT)`),
-                // so only `inactivated_at` gates the check.
-                if let Some(inactivated_at) = state.inactivated_at
-                    && inactivated_at + state.ttl <= ttl_clock
-                {
-                    continue;
-                }
-                out.push(serde_json::json!({
-                    "clientID": cid,
-                    "queryID": qid,
-                    "ast": ast,
-                    "name": name,
-                    "args": args,
-                    "got": record.patch_version().is_some(),
-                    // The in-memory CVR drops a deleted desire's client_state
-                    // entirely (updater delete path), so any desire visible
-                    // here is not deleted — TS `COALESCE(d."deleted", FALSE)`.
-                    "deleted": false,
-                    "ttl": state.ttl,
-                    "inactivatedAt": state.inactivated_at,
-                    "rowCount": row_counts.get(qid.as_str()).copied().unwrap_or(0),
-                    // Server-side materialization metrics live in the TS
-                    // InspectorDelegate, which is not ported; the schema allows
-                    // `metrics: null`.
-                    "metrics": serde_json::Value::Null,
-                }));
-            }
-        }
-        // TS orders by (clientID, queryHash); the loop above is queryHash-major.
-        out.sort_by(|a, b| {
-            let key = |v: &serde_json::Value| {
-                (
-                    v["clientID"].as_str().unwrap_or("").to_string(),
-                    v["queryID"].as_str().unwrap_or("").to_string(),
-                )
-            };
-            key(a).cmp(&key(b))
-        });
+                v
+            })
+            .collect();
         serde_json::Value::Array(out)
     }
 
@@ -5185,118 +5118,11 @@ mod tests {
         last
     }
 
-    #[test]
-    fn inspect_queries_rows_match_protocol_shape() {
-        use rust_cvr::schema::types::{BaseQueryRecord, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord, QueryRecord};
-        let (mut state, rt, _drx) = inspect_test_state();
-
-        // `got` is driven by patch_version on the variant, not the base record.
-        let base = |id: &str| BaseQueryRecord {
-            id: id.to_string(),
-            transformation_hash: None,
-            transformation_version: None,
-            row_set_signature: None,
-        };
-        let version = CVRVersion {
-            state_version: "01".to_string(),
-            config_version: None,
-        };
-        let active_state = ClientState {
-            inactivated_at: None,
-            ttl: 300_000,
-            version: version.clone(),
-        };
-        let mut cvr = empty_cvr("cg1", "01");
-        // q1: client query, actively desired by c1 with a TTL → one row.
-        cvr.queries.insert(
-            "q1".to_string(),
-            QueryRecord::Client(ClientQueryRecord {
-                base: base("q1"),
-                ast: serde_json::json!({"table": "issues"}),
-                client_state: std::collections::BTreeMap::from([(
-                    "c1".to_string(),
-                    active_state.clone(),
-                )]),
-                patch_version: Some(version.clone()),
-            }),
-        );
-        // q2: custom query, inactivated but NOT yet TTL-expired → one row.
-        cvr.queries.insert(
-            "q2".to_string(),
-            QueryRecord::Custom(CustomQueryRecord {
-                base: base("q2"),
-                name: "myQuery".to_string(),
-                args: vec![serde_json::json!(42)],
-                client_state: std::collections::BTreeMap::from([(
-                    "c1".to_string(),
-                    ClientState {
-                        inactivated_at: Some(4_000),
-                        ttl: 2_000,
-                        version: version.clone(),
-                    },
-                )]),
-                patch_version: None,
-            }),
-        );
-        // q3: TTL-expired desire (1000 + 1000 <= ttl_clock 5000) → filtered out.
-        cvr.queries.insert(
-            "q3".to_string(),
-            QueryRecord::Client(ClientQueryRecord {
-                base: base("q3"),
-                ast: serde_json::json!({"table": "labels"}),
-                client_state: std::collections::BTreeMap::from([(
-                    "c1".to_string(),
-                    ClientState {
-                        inactivated_at: Some(1_000),
-                        ttl: 1_000,
-                        version: version.clone(),
-                    },
-                )]),
-                patch_version: None,
-            }),
-        );
-        // internal (lmids) query — excluded, like the TS desires-only SQL.
-        cvr.queries.insert(
-            "lmids".to_string(),
-            QueryRecord::Internal(InternalQueryRecord {
-                base: base("lmids"),
-                ast: serde_json::json!({"table": "clients"}),
-            }),
-        );
-        state.cvr = Some(cvr);
-
-        let value = rt.block_on(state.inspect_queries_value(None, 5_000));
-        let rows = value.as_array().unwrap();
-        assert_eq!(rows.len(), 2, "expired + internal queries are excluded");
-
-        // Ordered by (clientID, queryID) → q1 then q2.
-        let q1 = &rows[0];
-        assert_eq!(q1["clientID"], "c1");
-        assert_eq!(q1["queryID"], "q1");
-        assert_eq!(q1["ast"]["table"], "issues");
-        assert_eq!(q1["name"], serde_json::Value::Null);
-        assert_eq!(q1["args"], serde_json::Value::Null);
-        assert_eq!(q1["got"], true);
-        assert_eq!(q1["deleted"], false);
-        assert_eq!(q1["ttl"], 300_000);
-        assert_eq!(q1["inactivatedAt"], serde_json::Value::Null);
-        // No CVR store attached in tests → the row-record cache is empty.
-        assert_eq!(q1["rowCount"], 0);
-        assert_eq!(q1["metrics"], serde_json::Value::Null);
-
-        let q2 = &rows[1];
-        assert_eq!(q2["queryID"], "q2");
-        assert_eq!(q2["ast"], serde_json::Value::Null);
-        assert_eq!(q2["name"], "myQuery");
-        assert_eq!(q2["args"][0], 42);
-        assert_eq!(q2["got"], false);
-        assert_eq!(q2["ttl"], 2_000);
-        assert_eq!(q2["inactivatedAt"], 4_000);
-
-        // clientID filter: no rows for a client with no desires.
-        let filtered = rt.block_on(state.inspect_queries_value(Some("c2"), 5_000));
-        assert_eq!(filtered.as_array().unwrap().len(), 0);
-    }
+    // NOTE: the `queries` inspector rows are now produced by the SQL port
+    // `CVRStore::inspect_queries` (rust-cvr) — router::inspect_queries_value just
+    // delegates + adds `metrics: null`. The row-shape / TTL-filter / got-flag /
+    // rowCount / client-filter coverage lives in rust-cvr tests/inspect_pg_test.rs
+    // (PG-gated), against the real desires/queries/rows tables.
 
     #[test]
     fn inspect_metrics_is_a_record_of_tdigests() {

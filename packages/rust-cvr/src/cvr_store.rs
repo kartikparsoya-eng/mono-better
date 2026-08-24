@@ -178,6 +178,64 @@ impl CVRStoreCatchupReader {
     }
 }
 
+/// One row of `CVRStore.inspectQueries` — the per-(client, query) inspector view.
+/// Mirrors TS `InspectQueryRow` (zero-protocol `inspect-down.ts`) minus `metrics`,
+/// which the inspect handler enriches from the (unported) server InspectorDelegate.
+/// Field order matches the TS protocol object for byte-identical JSON.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InspectQueryRow {
+    #[serde(rename = "clientID")]
+    pub client_id: String,
+    #[serde(rename = "queryID")]
+    pub query_id: String,
+    pub ast: Option<Value>,
+    pub name: Option<String>,
+    pub args: Option<Value>,
+    pub got: bool,
+    pub deleted: bool,
+    pub ttl: i64,
+    #[serde(rename = "inactivatedAt")]
+    pub inactivated_at: Option<i64>,
+    #[serde(rename = "rowCount")]
+    pub row_count: i64,
+}
+
+/// sqlx decode form for the `inspect_queries` SELECT (camelCase column aliases).
+#[derive(sqlx::FromRow)]
+struct InspectQueryRowDb {
+    #[sqlx(rename = "clientID")]
+    client_id: String,
+    #[sqlx(rename = "queryID")]
+    query_id: String,
+    ttl: i64,
+    #[sqlx(rename = "inactivatedAt")]
+    inactivated_at: Option<i64>,
+    #[sqlx(rename = "rowCount")]
+    row_count: i64,
+    ast: Option<Value>,
+    got: bool,
+    deleted: bool,
+    name: Option<String>,
+    args: Option<Value>,
+}
+
+impl From<InspectQueryRowDb> for InspectQueryRow {
+    fn from(d: InspectQueryRowDb) -> Self {
+        InspectQueryRow {
+            client_id: d.client_id,
+            query_id: d.query_id,
+            ast: d.ast,
+            name: d.name,
+            args: d.args,
+            got: d.got,
+            deleted: d.deleted,
+            ttl: d.ttl,
+            inactivated_at: d.inactivated_at,
+            row_count: d.row_count,
+        }
+    }
+}
+
 pub struct CVRStoreHandle {
     pool: PgPool,
     schema: String,
@@ -235,6 +293,57 @@ impl CVRStoreHandle {
 
     pub fn row_count(&self) -> usize {
         self.row_count
+    }
+
+    /// Port of TS `CVRStore.inspectQueries` (cvr-store.ts). Returns the inspector
+    /// view of every desired query for this client group (optionally filtered to
+    /// one `client_id`), read from committed Postgres state via a plain SELECT —
+    /// the same SQL as TS: `desires LEFT JOIN queries`, a per-query `rowCount`
+    /// over the `rows` table (`refCounts ? queryHash`), and a TTL-expiry filter.
+    /// `metrics` is NOT included here — the inspect handler adds it from the
+    /// server InspectorDelegate (unported), matching the TS layering.
+    pub async fn inspect_queries(
+        &self,
+        ttl_clock: TTLClock,
+        client_id: Option<&str>,
+    ) -> Result<Vec<InspectQueryRow>, sqlx::Error> {
+        let sql = format!(
+            r#"
+            SELECT DISTINCT ON (d."clientID", d."queryHash")
+                d."clientID"                                    AS "clientID",
+                d."queryHash"                                   AS "queryID",
+                (COALESCE(d."ttlMs", {default_ttl}))::bigint    AS "ttl",
+                d."inactivatedAtMs"::bigint                     AS "inactivatedAt",
+                (SELECT COUNT(*)::bigint FROM "{schema}".rows r
+                   WHERE r."clientGroupID" = d."clientGroupID"
+                     AND jsonb_exists(r."refCounts", d."queryHash")) AS "rowCount",
+                q."clientAST"                                   AS "ast",
+                (q."patchVersion" IS NOT NULL)                  AS "got",
+                COALESCE(d."deleted", FALSE)                    AS "deleted",
+                q."queryName"                                   AS "name",
+                q."queryArgs"                                   AS "args"
+            FROM "{schema}".desires d
+            LEFT JOIN "{schema}".queries q
+                ON q."clientGroupID" = d."clientGroupID"
+               AND q."queryHash" = d."queryHash"
+            WHERE d."clientGroupID" = $1
+              AND ($2::text IS NULL OR d."clientID" = $2)
+              AND NOT (
+                  d."inactivatedAtMs" IS NOT NULL
+                  AND d."ttlMs" IS NOT NULL
+                  AND (d."inactivatedAtMs" + d."ttlMs") <= $3
+              )
+            ORDER BY d."clientID", d."queryHash""#,
+            default_ttl = DEFAULT_TTL_MS,
+            schema = self.schema,
+        );
+        let rows = sqlx::query_as::<_, InspectQueryRowDb>(&sql)
+            .bind(&self.cvr_id)
+            .bind(client_id)
+            .bind(ttl_clock as f64)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(InspectQueryRow::from).collect())
     }
 
     // ─── Buffered write methods ──────────────────────────────────────
