@@ -2782,5 +2782,253 @@
       "deletePatches": [],
       "finalVersion": "v2"
     }
+  ],
+  "pokeScenarios": [
+    {
+      "desc": "empty initial poke (forceInitial): start + end only",
+      "baseCookie": null,
+      "tentative": {
+        "stateVersion": "v2"
+      },
+      "patches": [],
+      "final": {
+        "stateVersion": "v2",
+        "configVersion": 1
+      },
+      "messages": [
+        [
+          "pokeStart",
+          {
+            "pokeID": "v2",
+            "baseCookie": null
+          }
+        ],
+        [
+          "pokeEnd",
+          {
+            "pokeID": "v2",
+            "cookie": "v2:01"
+          }
+        ]
+      ]
+    },
+    {
+      "desc": "got + desired query patches",
+      "baseCookie": null,
+      "tentative": {
+        "stateVersion": "v2"
+      },
+      "patches": [
+        {
+          "patch": {
+            "type": "query",
+            "op": "put",
+            "id": "q1",
+            "clientID": "client1"
+          },
+          "toVersion": {
+            "stateVersion": "v2"
+          }
+        },
+        {
+          "patch": {
+            "type": "query",
+            "op": "put",
+            "id": "q2"
+          },
+          "toVersion": {
+            "stateVersion": "v2"
+          }
+        }
+      ],
+      "final": {
+        "stateVersion": "v2",
+        "configVersion": 1
+      },
+      "messages": [
+        [
+          "pokeStart",
+          {
+            "pokeID": "v2",
+            "baseCookie": null
+          }
+        ],
+        [
+          "pokePart",
+          {
+            "pokeID": "v2",
+            "desiredQueriesPatches": {
+              "client1": [
+                {
+                  "op": "put",
+                  "hash": "q1"
+                }
+              ]
+            },
+            "gotQueriesPatch": [
+              {
+                "op": "put",
+                "hash": "q2"
+              }
+            ]
+          }
+        ],
+        [
+          "pokeEnd",
+          {
+            "pokeID": "v2",
+            "cookie": "v2:01"
+          }
+        ]
+      ]
+    },
+    {
+      "desc": "row put + del patches (rowsPatch via makeRowPatch)",
+      "baseCookie": null,
+      "tentative": {
+        "stateVersion": "v2"
+      },
+      "patches": [
+        {
+          "patch": {
+            "type": "row",
+            "op": "put",
+            "id": {
+              "schema": "public",
+              "table": "issue",
+              "rowKey": {
+                "id": "1"
+              }
+            },
+            "contents": {
+              "id": "1",
+              "title": "a"
+            }
+          },
+          "toVersion": {
+            "stateVersion": "v2"
+          }
+        },
+        {
+          "patch": {
+            "type": "row",
+            "op": "del",
+            "id": {
+              "schema": "public",
+              "table": "issue",
+              "rowKey": {
+                "id": "2"
+              }
+            }
+          },
+          "toVersion": {
+            "stateVersion": "v2"
+          }
+        }
+      ],
+      "final": {
+        "stateVersion": "v2",
+        "configVersion": 1
+      },
+      "messages": [
+        [
+          "pokeStart",
+          {
+            "pokeID": "v2",
+            "baseCookie": null
+          }
+        ],
+        [
+          "pokePart",
+          {
+            "pokeID": "v2",
+            "rowsPatch": [
+              {
+                "op": "put",
+                "tableName": "issue",
+                "value": {
+                  "id": "1",
+                  "title": "a"
+                }
+              },
+              {
+                "op": "del",
+                "tableName": "issue",
+                "id": {
+                  "id": "2"
+                }
+              }
+            ]
+          }
+        ],
+        [
+          "pokeEnd",
+          {
+            "pokeID": "v2",
+            "cookie": "v2:01"
+          }
+        ]
+      ]
+    },
+    {
+      "desc": "patch at/below baseVersion is dropped",
+      "baseCookie": "1a9",
+      "tentative": {
+        "stateVersion": "1aa"
+      },
+      "patches": [
+        {
+          "patch": {
+            "type": "query",
+            "op": "put",
+            "id": "qOld"
+          },
+          "toVersion": {
+            "stateVersion": "1a9"
+          }
+        },
+        {
+          "patch": {
+            "type": "query",
+            "op": "put",
+            "id": "qNew"
+          },
+          "toVersion": {
+            "stateVersion": "1aa"
+          }
+        }
+      ],
+      "final": {
+        "stateVersion": "1aa"
+      },
+      "messages": [
+        [
+          "pokeStart",
+          {
+            "pokeID": "1aa",
+            "baseCookie": "1a9"
+          }
+        ],
+        [
+          "pokePart",
+          {
+            "pokeID": "1aa",
+            "gotQueriesPatch": [
+              {
+                "op": "put",
+                "hash": "qNew"
+              }
+            ]
+          }
+        ],
+        [
+          "pokeEnd",
+          {
+            "pokeID": "1aa",
+            "cookie": "1aa"
+          }
+        ]
+      ]
+    }
   ]
 }

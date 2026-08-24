@@ -19,7 +19,7 @@
 //!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
-use crate::client_handler::make_row_patch;
+use crate::client_handler::{ClientHandler, WebSocketSink, make_row_patch};
 use crate::cvr::{get_inactive_queries, merge_ref_counts};
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{
@@ -232,6 +232,55 @@ fn build_existing_rows(specs: &[Value]) -> HashMap<String, RowRecord> {
         );
     }
     m
+}
+
+/// Capturing WebSocketSink for the poke-assembly differential.
+struct CaptureSink {
+    messages: std::sync::Mutex<Vec<Value>>,
+}
+impl WebSocketSink for CaptureSink {
+    fn push(&self, msg: Value) -> Result<(), String> {
+        self.messages.lock().unwrap().push(msg);
+        Ok(())
+    }
+    fn fail(&self, _e: String) {}
+    fn cancel(&self) {}
+}
+
+/// Build a PatchToVersion from the poke-scenario fixture shape.
+fn patch_to_version_from_json(v: &Value) -> PatchToVersion {
+    let p = v.get("patch").expect("patch");
+    let to_version: CVRVersion =
+        serde_json::from_value(v.get("toVersion").expect("toVersion").clone()).expect("toVersion");
+    let op = p.get("op").and_then(Value::as_str).expect("op");
+    let patch = match p.get("type").and_then(Value::as_str).expect("type") {
+        "query" => {
+            let id = p.get("id").and_then(Value::as_str).expect("id").to_string();
+            let client_id = p
+                .get("clientID")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if op == "put" {
+                Patch::Query(QueryPatch::Put { id, client_id })
+            } else {
+                Patch::Query(QueryPatch::Del { id, client_id })
+            }
+        }
+        _ => {
+            let id = make_row_id_from_json(p.get("id").expect("id"));
+            if op == "put" {
+                Patch::Row(RowPatch::Put {
+                    id,
+                    contents: std::sync::Arc::new(
+                        p.get("contents").cloned().unwrap_or(Value::Null),
+                    ),
+                })
+            } else {
+                Patch::Row(RowPatch::Del { id })
+            }
+        }
+    };
+    PatchToVersion { patch, to_version }
 }
 
 /// Build a QueriesRow from the TS (camelCase) fixture shape.
@@ -1386,6 +1435,51 @@ fn parity_check() {
             &queries_row_to_json(&round),
             expected,
             "as_query round-trip mismatch [{}]",
+            desc
+        );
+    }
+
+    // ---- ⑨ Tier-D: ClientHandler poke assembly (patches -> wire messages) ----
+    for entry in fixture
+        .get("pokeScenarios")
+        .and_then(Value::as_array)
+        .expect("fixture.pokeScenarios missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let sink = std::sync::Arc::new(CaptureSink {
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let base_cookie = entry.get("baseCookie").and_then(Value::as_str);
+        let handler = ClientHandler::new(
+            "cg",
+            "client1",
+            "ws1",
+            &parity_shard(),
+            base_cookie,
+            sink.clone(),
+        );
+
+        let tentative: CVRVersion =
+            serde_json::from_value(entry.get("tentative").expect("tentative").clone())
+                .expect("tentative");
+        let poke = handler.start_poke(tentative);
+        for p in entry
+            .get("patches")
+            .and_then(Value::as_array)
+            .expect("patches")
+        {
+            poke.add_patch(&patch_to_version_from_json(p))
+                .expect("add_patch");
+        }
+        let final_version: CVRVersion =
+            serde_json::from_value(entry.get("final").expect("final").clone()).expect("final");
+        poke.end(final_version).expect("end");
+
+        let actual = Value::Array(sink.messages.lock().unwrap().clone());
+        assert_eq!(
+            &actual,
+            entry.get("messages").expect("messages"),
+            "poke messages mismatch [{}]",
             desc
         );
     }

@@ -44,6 +44,7 @@ import {
   CVRQueryDrivenUpdater,
 } from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 import {CustomKeyMap} from '../../../shared/src/custom-key-map.ts';
+import {ClientHandler} from '../../../zero-cache/src/services/view-syncer/client-handler.ts';
 
 // Handpicked inputs that cover the interesting space:
 // - Empty/short strings for the hash functions
@@ -618,7 +619,15 @@ function runMetadataScenario(sc) {
 // driver awaits. Row patches come out in HashMap order on the Rust side, so both
 // sides sort by rowIDString before comparing (row patches are key-addressed).
 
-const LC = {info: () => {}, debug: () => {}, warn: () => {}, error: () => {}};
+const LC = {
+  info: () => {},
+  debug: () => {},
+  warn: () => {},
+  error: () => {},
+  withContext() {
+    return LC;
+  },
+};
 
 function clientQueryRecord(hash, q) {
   return {
@@ -783,7 +792,88 @@ async function runQueryScenario(sc) {
   };
 }
 
+// --- ⑨ Tier-D: ClientHandler poke assembly (patches -> pokeStart/pokePart/pokeEnd)
+// The client wire format. Drive the real TS ClientHandler with a capturing sink
+// (Subscription stub) and compare the emitted messages to the Rust ClientHandler
+// driven with an equivalent WebSocketSink. baseCookie strings must be valid lexi
+// (the constructor parses them); tentative/final are CVRVersion objects (not parsed).
+function makeCHSink() {
+  const messages = [];
+  return {
+    messages,
+    push: msg => {
+      messages.push(msg);
+      return {result: Promise.resolve()};
+    },
+    fail: () => {},
+    cancel: () => {},
+  };
+}
+
+const POKE_SCENARIOS = [
+  {
+    desc: 'empty initial poke (forceInitial): start + end only',
+    baseCookie: null,
+    tentative: {stateVersion: 'v2'},
+    patches: [],
+    final: {stateVersion: 'v2', configVersion: 1},
+  },
+  {
+    desc: 'got + desired query patches',
+    baseCookie: null,
+    tentative: {stateVersion: 'v2'},
+    patches: [
+      {patch: {type: 'query', op: 'put', id: 'q1', clientID: 'client1'}, toVersion: {stateVersion: 'v2'}},
+      {patch: {type: 'query', op: 'put', id: 'q2'}, toVersion: {stateVersion: 'v2'}},
+    ],
+    final: {stateVersion: 'v2', configVersion: 1},
+  },
+  {
+    desc: 'row put + del patches (rowsPatch via makeRowPatch)',
+    baseCookie: null,
+    tentative: {stateVersion: 'v2'},
+    patches: [
+      {
+        patch: {type: 'row', op: 'put', id: {schema: 'public', table: 'issue', rowKey: {id: '1'}}, contents: {id: '1', title: 'a'}},
+        toVersion: {stateVersion: 'v2'},
+      },
+      {
+        patch: {type: 'row', op: 'del', id: {schema: 'public', table: 'issue', rowKey: {id: '2'}}},
+        toVersion: {stateVersion: 'v2'},
+      },
+    ],
+    final: {stateVersion: 'v2', configVersion: 1},
+  },
+  {
+    desc: 'patch at/below baseVersion is dropped',
+    baseCookie: '1a9',
+    tentative: {stateVersion: '1aa'},
+    patches: [
+      {patch: {type: 'query', op: 'put', id: 'qOld'}, toVersion: {stateVersion: '1a9'}},
+      {patch: {type: 'query', op: 'put', id: 'qNew'}, toVersion: {stateVersion: '1aa'}},
+    ],
+    final: {stateVersion: '1aa'},
+  },
+];
+
+async function runPokeScenario(sc) {
+  const sink = makeCHSink();
+  const handler = new ClientHandler(LC, 'cg', 'client1', 'ws1', SHARD, sc.baseCookie ?? null, sink);
+  const poke = handler.startPoke(sc.tentative);
+  for (const p of sc.patches) await poke.addPatch(p);
+  await poke.end(sc.final);
+  return {
+    desc: sc.desc,
+    baseCookie: sc.baseCookie ?? null,
+    tentative: sc.tentative,
+    patches: sc.patches,
+    final: sc.final,
+    messages: sink.messages,
+  };
+}
+
 const queryScenarioResults = await Promise.all(QUERY_SCENARIOS.map(runQueryScenario));
+const pokeScenarioResults = await Promise.all(POKE_SCENARIOS.map(runPokeScenario));
 
 const fixture = {
   hashes: STRINGS.map(s => ({
@@ -878,6 +968,7 @@ const fixture = {
   configOpScenarios: CONFIG_OP_SCENARIOS.map(runConfigOpScenario),
   metadataScenarios: METADATA_SCENARIOS.map(runMetadataScenario),
   queryScenarios: queryScenarioResults,
+  pokeScenarios: pokeScenarioResults,
 };
 
 console.log(JSON.stringify(fixture, null, 2));
