@@ -1258,4 +1258,77 @@ fn parity_check() {
             desc
         );
     }
+
+    // ---- ⑦ Tier-B: CVRConfigDrivenUpdater metadata setters ----
+    for entry in fixture
+        .get("metadataScenarios")
+        .and_then(Value::as_array)
+        .expect("fixture.metadataScenarios missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let mut updater = CVRConfigDrivenUpdater::new(base_cvr(), parity_shard());
+        let op_results = entry
+            .get("opResults")
+            .and_then(Value::as_array)
+            .expect("opResults");
+
+        for (i, op) in entry
+            .get("ops")
+            .and_then(Value::as_array)
+            .expect("ops")
+            .iter()
+            .enumerate()
+        {
+            let ok = match op.get("fn").and_then(Value::as_str).expect("fn") {
+                "setProfileID" => {
+                    updater.set_profile_id(
+                        op.get("profileID")
+                            .and_then(Value::as_str)
+                            .expect("profileID"),
+                    );
+                    true
+                }
+                "setClientSchema" => updater
+                    .set_client_schema(op.get("schema").expect("schema").clone())
+                    .is_ok(),
+                other => panic!("unknown metadata op {other}"),
+            };
+            assert_eq!(
+                ok,
+                op_results[i]
+                    .get("ok")
+                    .and_then(Value::as_bool)
+                    .expect("ok"),
+                "metadata op ok mismatch [{}] op {}",
+                desc,
+                i
+            );
+        }
+
+        let client_schema = updater
+            .base
+            .cvr
+            .client_schema
+            .clone()
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            &client_schema,
+            entry.get("clientSchema").expect("clientSchema"),
+            "clientSchema mismatch [{}]",
+            desc
+        );
+        let profile_id = updater
+            .base
+            .cvr
+            .profile_id
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+        assert_eq!(
+            &profile_id,
+            entry.get("profileID").expect("profileID"),
+            "profileID mismatch [{}]",
+            desc
+        );
+    }
 }

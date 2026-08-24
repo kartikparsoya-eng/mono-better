@@ -559,6 +559,59 @@ function runConfigOpScenario(sc) {
   };
 }
 
+// --- Tier-B: CVRConfigDrivenUpdater metadata setters (setProfileID/setClientSchema)
+const METADATA_SCENARIOS = [
+  {desc: 'set profileID', ops: [{fn: 'setProfileID', profileID: 'user-1'}]},
+  {
+    desc: 'set profileID twice same (idempotent)',
+    ops: [{fn: 'setProfileID', profileID: 'u'}, {fn: 'setProfileID', profileID: 'u'}],
+  },
+  {
+    desc: 'change profileID from cg-backfill',
+    ops: [{fn: 'setProfileID', profileID: 'cg-old'}, {fn: 'setProfileID', profileID: 'new'}],
+  },
+  {
+    desc: 'set clientSchema first time',
+    ops: [{fn: 'setClientSchema', schema: {tables: {issue: {columns: {id: 'string'}}}}}],
+  },
+  {
+    desc: 'set clientSchema same twice ok',
+    ops: [
+      {fn: 'setClientSchema', schema: {tables: {}}},
+      {fn: 'setClientSchema', schema: {tables: {}}},
+    ],
+  },
+  {
+    desc: 'set clientSchema mismatch errors',
+    ops: [
+      {fn: 'setClientSchema', schema: {tables: {a: 1}}},
+      {fn: 'setClientSchema', schema: {tables: {b: 2}}},
+    ],
+  },
+];
+
+function runMetadataScenario(sc) {
+  const store = makeStubStore();
+  const updater = new CVRConfigDrivenUpdater(store, baseCVR(), SHARD);
+  const opResults = sc.ops.map(op => {
+    try {
+      if (op.fn === 'setProfileID') updater.setProfileID(LC, op.profileID);
+      else if (op.fn === 'setClientSchema') updater.setClientSchema(LC, op.schema);
+      else throw new Error(`unknown ${op.fn}`);
+      return {fn: op.fn, ok: true};
+    } catch {
+      return {fn: op.fn, ok: false};
+    }
+  });
+  return {
+    desc: sc.desc,
+    ops: sc.ops,
+    opResults,
+    clientSchema: updater._cvr.clientSchema ?? null,
+    profileID: updater._cvr.profileID ?? null,
+  };
+}
+
 // --- ⑤ Tier-B: CVRQueryDrivenUpdater trackQueries -> received -> deleteUnreferencedRows
 // The rowKey-construction path. received/deleteUnreferencedRows are async and
 // read existing rows from the store, so the stub returns preset rows and the
@@ -823,6 +876,7 @@ const fixture = {
   versionParses: VERSION_PARSE_STRINGS.map(tsVersionParse),
   configScenarios: CONFIG_SCENARIOS.map(runConfigScenario),
   configOpScenarios: CONFIG_OP_SCENARIOS.map(runConfigOpScenario),
+  metadataScenarios: METADATA_SCENARIOS.map(runMetadataScenario),
   queryScenarios: queryScenarioResults,
 };
 

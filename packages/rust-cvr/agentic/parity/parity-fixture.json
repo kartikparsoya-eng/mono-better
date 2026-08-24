@@ -2282,6 +2282,176 @@
       "finalVersion": "v1:01"
     }
   ],
+  "metadataScenarios": [
+    {
+      "desc": "set profileID",
+      "ops": [
+        {
+          "fn": "setProfileID",
+          "profileID": "user-1"
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "setProfileID",
+          "ok": true
+        }
+      ],
+      "clientSchema": null,
+      "profileID": "user-1"
+    },
+    {
+      "desc": "set profileID twice same (idempotent)",
+      "ops": [
+        {
+          "fn": "setProfileID",
+          "profileID": "u"
+        },
+        {
+          "fn": "setProfileID",
+          "profileID": "u"
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "setProfileID",
+          "ok": true
+        },
+        {
+          "fn": "setProfileID",
+          "ok": true
+        }
+      ],
+      "clientSchema": null,
+      "profileID": "u"
+    },
+    {
+      "desc": "change profileID from cg-backfill",
+      "ops": [
+        {
+          "fn": "setProfileID",
+          "profileID": "cg-old"
+        },
+        {
+          "fn": "setProfileID",
+          "profileID": "new"
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "setProfileID",
+          "ok": true
+        },
+        {
+          "fn": "setProfileID",
+          "ok": true
+        }
+      ],
+      "clientSchema": null,
+      "profileID": "new"
+    },
+    {
+      "desc": "set clientSchema first time",
+      "ops": [
+        {
+          "fn": "setClientSchema",
+          "schema": {
+            "tables": {
+              "issue": {
+                "columns": {
+                  "id": "string"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "setClientSchema",
+          "ok": true
+        }
+      ],
+      "clientSchema": {
+        "tables": {
+          "issue": {
+            "columns": {
+              "id": "string"
+            }
+          }
+        }
+      },
+      "profileID": null
+    },
+    {
+      "desc": "set clientSchema same twice ok",
+      "ops": [
+        {
+          "fn": "setClientSchema",
+          "schema": {
+            "tables": {}
+          }
+        },
+        {
+          "fn": "setClientSchema",
+          "schema": {
+            "tables": {}
+          }
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "setClientSchema",
+          "ok": true
+        },
+        {
+          "fn": "setClientSchema",
+          "ok": true
+        }
+      ],
+      "clientSchema": {
+        "tables": {}
+      },
+      "profileID": null
+    },
+    {
+      "desc": "set clientSchema mismatch errors",
+      "ops": [
+        {
+          "fn": "setClientSchema",
+          "schema": {
+            "tables": {
+              "a": 1
+            }
+          }
+        },
+        {
+          "fn": "setClientSchema",
+          "schema": {
+            "tables": {
+              "b": 2
+            }
+          }
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "setClientSchema",
+          "ok": true
+        },
+        {
+          "fn": "setClientSchema",
+          "ok": false
+        }
+      ],
+      "clientSchema": {
+        "tables": {
+          "a": 1
+        }
+      },
+      "profileID": null
+    }
+  ],
   "queryScenarios": [
     {
       "desc": "execute query, receive 2 new rows (single + multi-col key)",
