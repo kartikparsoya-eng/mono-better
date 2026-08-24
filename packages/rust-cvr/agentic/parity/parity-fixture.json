@@ -1428,5 +1428,580 @@
       "str": "1a9:",
       "valid": false
     }
+  ],
+  "configScenarios": [
+    {
+      "desc": "fresh client desires one crud query",
+      "calls": [
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              }
+            }
+          ]
+        }
+      ],
+      "callResults": [
+        {
+          "clientID": "c1",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "desiredOps": [
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q1",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": [
+            "q1"
+          ]
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "client desires crud + custom query",
+      "calls": [
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              }
+            },
+            {
+              "hash": "q2",
+              "name": "myQuery",
+              "args": [
+                1,
+                "x"
+              ]
+            }
+          ]
+        }
+      ],
+      "callResults": [
+        {
+          "clientID": "c1",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            },
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q2",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "desiredOps": [
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q1",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        },
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q2",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": [
+            "q1",
+            "q2"
+          ]
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          },
+          "q2": {
+            "type": "custom",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "explicit ttl is carried into the desire",
+      "calls": [
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              },
+              "ttl": 60000
+            }
+          ]
+        }
+      ],
+      "callResults": [
+        {
+          "clientID": "c1",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "desiredOps": [
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q1",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 60000
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": [
+            "q1"
+          ]
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 60000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "re-desire same query is a no-op (no new patch)",
+      "calls": [
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              }
+            }
+          ]
+        },
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              }
+            }
+          ]
+        }
+      ],
+      "callResults": [
+        {
+          "clientID": "c1",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        },
+        {
+          "clientID": "c1",
+          "patches": []
+        }
+      ],
+      "desiredOps": [
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q1",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": [
+            "q1"
+          ]
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "two clients desire the same query",
+      "calls": [
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              }
+            }
+          ]
+        },
+        {
+          "clientID": "c2",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              }
+            }
+          ]
+        }
+      ],
+      "callResults": [
+        {
+          "clientID": "c1",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        },
+        {
+          "clientID": "c2",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c2",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "desiredOps": [
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q1",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        },
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q1",
+          "clientID": "c2",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": [
+            "q1"
+          ],
+          "c2": [
+            "q1"
+          ]
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              },
+              "c2": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "ttl over MAX is clamped to MAX (both sides)",
+      "calls": [
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "issue"
+              },
+              "ttl": 86400000
+            }
+          ]
+        }
+      ],
+      "callResults": [
+        {
+          "clientID": "c1",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "desiredOps": [
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "q1",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 600000
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": [
+            "q1"
+          ]
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 600000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "input order preserved with 3 queries (nondeterminism probe)",
+      "calls": [
+        {
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "zzz",
+              "ast": {
+                "table": "a"
+              }
+            },
+            {
+              "hash": "aaa",
+              "ast": {
+                "table": "b"
+              }
+            },
+            {
+              "hash": "mmm",
+              "name": "n",
+              "args": []
+            }
+          ]
+        }
+      ],
+      "callResults": [
+        {
+          "clientID": "c1",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "zzz",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            },
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "aaa",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            },
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "mmm",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "desiredOps": [
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "zzz",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        },
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "aaa",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        },
+        {
+          "op": "putDesiredQuery",
+          "version": "v1:01",
+          "queryID": "mmm",
+          "clientID": "c1",
+          "deleted": false,
+          "inactivatedAt": null,
+          "ttl": 300000
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": [
+            "aaa",
+            "mmm",
+            "zzz"
+          ]
+        },
+        "queries": {
+          "zzz": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          },
+          "aaa": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          },
+          "mmm": {
+            "type": "custom",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": null,
+                "ttl": 300000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    }
   ]
 }

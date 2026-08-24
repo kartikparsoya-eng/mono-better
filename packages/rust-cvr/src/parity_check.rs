@@ -29,9 +29,11 @@ use crate::row_set_signature::{format_signature, parse_signature, signature_unit
 use crate::store::query_record_to_query_row;
 use crate::ttl::{TTL, clamp_ttl, compare_ttl, parse_ttl, parse_ttl_string};
 use crate::types::{
-    BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
-    QueryRecord, RefCounts, RowPatch,
+    BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, DesiredQuerySpec,
+    InternalQueryRecord, Patch, PatchToVersion, QueryPatch, QueryRecord, RefCounts, RowPatch,
+    ShardID, StoreOp,
 };
+use crate::updater::CVRConfigDrivenUpdater;
 use crate::version::{
     CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, one_after,
     try_version_from_string, version_from_lexi, version_from_string, version_string,
@@ -50,6 +52,127 @@ fn ttl_from_json(v: &Value) -> TTL {
     } else {
         panic!("ttl input must be int or string: {:?}", v)
     }
+}
+
+// ---- Tier-B (updater state-transition) helpers ----
+
+fn base_cvr() -> CVR {
+    CVR {
+        id: "cg-parity".to_string(),
+        version: CVRVersion {
+            state_version: "v1".to_string(),
+            config_version: None,
+        },
+        last_active: 0,
+        ttl_clock: 0,
+        replica_version: Some("r1".to_string()),
+        clients: BTreeMap::new(),
+        queries: BTreeMap::new(),
+        client_schema: None,
+        profile_id: None,
+    }
+}
+
+fn parity_shard() -> ShardID {
+    ShardID {
+        app_id: "test".to_string(),
+        shard_num: 0,
+    }
+}
+
+fn spec_from_json(v: &Value) -> DesiredQuerySpec {
+    DesiredQuerySpec {
+        hash: v
+            .get("hash")
+            .and_then(Value::as_str)
+            .expect("hash")
+            .to_string(),
+        ast: v.get("ast").cloned(),
+        name: v.get("name").and_then(Value::as_str).map(str::to_string),
+        args: v.get("args").and_then(Value::as_array).cloned(),
+        ttl: v.get("ttl").and_then(Value::as_i64),
+    }
+}
+
+/// Canonical patch form matching the generator's `normPatch`.
+fn norm_patch(pv: &PatchToVersion) -> Value {
+    let to_version = version_string(&pv.to_version);
+    match &pv.patch {
+        Patch::Query(qp) => {
+            let (op, id, client_id) = match qp {
+                QueryPatch::Put { id, client_id } => ("put", id, client_id),
+                QueryPatch::Del { id, client_id } => ("del", id, client_id),
+            };
+            serde_json::json!({
+                "kind": "query", "op": op, "id": id,
+                "clientID": client_id, "toVersion": to_version,
+            })
+        }
+        Patch::Row(rp) => match rp {
+            RowPatch::Put { id, contents } => serde_json::json!({
+                "kind": "row", "op": "put",
+                "id": serde_json::to_value(id).unwrap(),
+                "contents": &**contents, "toVersion": to_version,
+            }),
+            RowPatch::Del { id } => serde_json::json!({
+                "kind": "row", "op": "del",
+                "id": serde_json::to_value(id).unwrap(), "toVersion": to_version,
+            }),
+        },
+    }
+}
+
+/// Canonical putDesiredQuery StoreOp form matching the generator's stub capture.
+fn norm_put_desired_op(op: &StoreOp) -> Option<Value> {
+    match op {
+        StoreOp::PutDesiredQuery {
+            version,
+            query_id,
+            client_id,
+            deleted,
+            inactivated_at,
+            ttl,
+        } => Some(serde_json::json!({
+            "op": "putDesiredQuery",
+            "version": version_string(version),
+            "queryID": query_id,
+            "clientID": client_id,
+            "deleted": deleted,
+            "inactivatedAt": inactivated_at,
+            "ttl": ttl,
+        })),
+        _ => None,
+    }
+}
+
+/// Resulting desire state matching the generator's `normDesireState`.
+fn norm_desire_state(cvr: &CVR) -> Value {
+    let mut clients = serde_json::Map::new();
+    for (cid, c) in &cvr.clients {
+        let mut ids = c.desired_query_ids.clone();
+        ids.sort();
+        clients.insert(cid.clone(), serde_json::to_value(ids).unwrap());
+    }
+    let mut queries = serde_json::Map::new();
+    for (qh, q) in &cvr.queries {
+        let (ty, cs) = match q {
+            QueryRecord::Internal(_) => continue,
+            QueryRecord::Client(r) => ("client", &r.client_state),
+            QueryRecord::Custom(r) => ("custom", &r.client_state),
+        };
+        let mut csm = serde_json::Map::new();
+        for (cid, s) in cs {
+            csm.insert(
+                cid.clone(),
+                serde_json::json!({"inactivatedAt": s.inactivated_at, "ttl": s.ttl}),
+            );
+        }
+        queries.insert(
+            qh.clone(),
+            serde_json::json!({"type": ty, "clientState": Value::Object(csm)}),
+        );
+    }
+    serde_json::json!({"clients": Value::Object(clients), "queries": Value::Object(queries)})
 }
 
 /// Parse a fixture RefCounts value (`{hash: count}` or `null`) into `Option`.
@@ -795,5 +918,70 @@ fn parity_check() {
                 s
             ),
         }
+    }
+
+    // ---- ④ Tier-B: CVRConfigDrivenUpdater.putDesiredQueries state transitions ----
+    // Replay each scenario through the Rust updater and assert the returned
+    // patches, the putDesiredQuery StoreOps, and the resulting desire state all
+    // match what the real TS updater produced.
+    for entry in fixture
+        .get("configScenarios")
+        .and_then(Value::as_array)
+        .expect("fixture.configScenarios missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let mut updater = CVRConfigDrivenUpdater::new(base_cvr(), parity_shard());
+
+        let calls = entry.get("calls").and_then(Value::as_array).expect("calls");
+        let call_results = entry
+            .get("callResults")
+            .and_then(Value::as_array)
+            .expect("callResults");
+        for (i, call) in calls.iter().enumerate() {
+            let client_id = call
+                .get("clientID")
+                .and_then(Value::as_str)
+                .expect("clientID");
+            let specs: Vec<DesiredQuerySpec> = call
+                .get("queries")
+                .and_then(Value::as_array)
+                .expect("queries")
+                .iter()
+                .map(spec_from_json)
+                .collect();
+            let patches = updater.put_desired_queries(client_id, &specs);
+            let actual = Value::Array(patches.iter().map(norm_patch).collect());
+            let expected = call_results[i].get("patches").expect("patches");
+            assert_eq!(
+                &actual, expected,
+                "putDesiredQueries patches mismatch [{}] call {}",
+                desc, i
+            );
+        }
+
+        let ops = updater.base.drain_store_ops();
+        let actual_ops = Value::Array(ops.iter().filter_map(norm_put_desired_op).collect());
+        assert_eq!(
+            &actual_ops,
+            entry.get("desiredOps").expect("desiredOps"),
+            "putDesiredQuery StoreOps mismatch [{}]",
+            desc
+        );
+
+        assert_eq!(
+            &norm_desire_state(&updater.base.cvr),
+            entry.get("finalState").expect("finalState"),
+            "final desire state mismatch [{}]",
+            desc
+        );
+        assert_eq!(
+            version_string(&updater.base.cvr.version),
+            entry
+                .get("finalVersion")
+                .and_then(Value::as_str)
+                .expect("finalVersion"),
+            "final version mismatch [{}]",
+            desc
+        );
     }
 }

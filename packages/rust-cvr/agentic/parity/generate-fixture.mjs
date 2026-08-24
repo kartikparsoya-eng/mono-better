@@ -39,6 +39,7 @@ import {
   mergeRefCounts,
 } from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 import {makeRowPatch} from '../../../zero-cache/src/services/view-syncer/client-handler.ts';
+import {CVRConfigDrivenUpdater} from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 
 // Handpicked inputs that cover the interesting space:
 // - Empty/short strings for the hash functions
@@ -321,6 +322,163 @@ function tsVersionParse(str) {
   }
 }
 
+// --- ④ Tier-B: CVRConfigDrivenUpdater.putDesiredQueries state-transition diff -
+// Drive the REAL TS updater with a stub CVRStore that captures the queued
+// writes, then capture {returned patches, putDesiredQuery ops, resulting desire
+// state}. The Rust test replays each scenario through put_desired_queries and
+// asserts all three match. Pins the query-desire algorithm (client tracking,
+// version bumps, ttl/inactivatedAt handling) that feeds row-key construction.
+
+function makeStubStore(existingRows = new Map()) {
+  const ops = [];
+  return {
+    ops,
+    getRowRecords: async () => existingRows,
+    insertClient: client => ops.push({op: 'insertClient', id: client.id}),
+    putQuery: query => ops.push({op: 'putQuery', id: query.id, kind: query.type}),
+    putDesiredQuery: (v, q, c, deleted, inactivatedAt, ttl) =>
+      ops.push({
+        op: 'putDesiredQuery',
+        version: versionString(v),
+        queryID: q.id,
+        clientID: c.id,
+        deleted,
+        inactivatedAt: inactivatedAt ?? null,
+        ttl,
+      }),
+    markQueryAsDeleted: (v, qp) =>
+      ops.push({op: 'markQueryAsDeleted', version: versionString(v), patch: qp}),
+    updateRowSetSignature: (qh, sig) =>
+      ops.push({op: 'updateRowSetSignature', queryHash: qh, signature: sig}),
+    deleteClient: cid => ops.push({op: 'deleteClient', clientID: cid}),
+    flush: async () => {},
+  };
+}
+
+// A minimal starting CVR (snapshot). Callers may pre-seed clients/queries.
+function baseCVR(overrides = {}) {
+  return {
+    id: 'cg-parity',
+    version: {stateVersion: 'v1'},
+    lastActive: 0,
+    ttlClock: 0,
+    replicaVersion: 'r1',
+    clients: {},
+    queries: {},
+    clientSchema: null,
+    profileID: null,
+    ...overrides,
+  };
+}
+
+const SHARD = {appID: 'test', shardNum: 0};
+
+// Canonical patch form both sides normalize to (Rust serializes to_version /
+// externally-tagged enums; TS uses toVersion / {type,op}). Keyed by kind.
+function normPatch(pv) {
+  const p = pv.patch;
+  const toVersion = versionString(pv.toVersion);
+  if (p.type === 'query') {
+    return {kind: 'query', op: p.op, id: p.id, clientID: p.clientID ?? null, toVersion};
+  }
+  return p.op === 'put'
+    ? {kind: 'row', op: 'put', id: p.id, contents: p.contents, toVersion}
+    : {kind: 'row', op: 'del', id: p.id, toVersion};
+}
+
+// Resulting desire state: per-client desiredQueryIDs + per (non-internal) query
+// clientState. Captures what the desire algorithm mutated.
+function normDesireState(cvr) {
+  const clients = {};
+  for (const [cid, c] of Object.entries(cvr.clients)) {
+    clients[cid] = [...c.desiredQueryIDs].sort();
+  }
+  const queries = {};
+  for (const [qh, q] of Object.entries(cvr.queries)) {
+    if (q.type === 'internal') continue;
+    const cs = {};
+    for (const [cid, s] of Object.entries(q.clientState ?? {})) {
+      cs[cid] = {inactivatedAt: s.inactivatedAt ?? null, ttl: s.ttl ?? null};
+    }
+    queries[qh] = {type: q.type, clientState: cs};
+  }
+  return {clients, queries};
+}
+
+// Each scenario = a sequence of putDesiredQueries calls against one updater.
+const CONFIG_SCENARIOS = [
+  {
+    desc: 'fresh client desires one crud query',
+    calls: [{clientID: 'c1', queries: [{hash: 'q1', ast: {table: 'issue'}}]}],
+  },
+  {
+    desc: 'client desires crud + custom query',
+    calls: [
+      {
+        clientID: 'c1',
+        queries: [
+          {hash: 'q1', ast: {table: 'issue'}},
+          {hash: 'q2', name: 'myQuery', args: [1, 'x']},
+        ],
+      },
+    ],
+  },
+  {
+    desc: 'explicit ttl is carried into the desire',
+    calls: [{clientID: 'c1', queries: [{hash: 'q1', ast: {table: 'issue'}, ttl: 60000}]}],
+  },
+  {
+    desc: 're-desire same query is a no-op (no new patch)',
+    calls: [
+      {clientID: 'c1', queries: [{hash: 'q1', ast: {table: 'issue'}}]},
+      {clientID: 'c1', queries: [{hash: 'q1', ast: {table: 'issue'}}]},
+    ],
+  },
+  {
+    desc: 'two clients desire the same query',
+    calls: [
+      {clientID: 'c1', queries: [{hash: 'q1', ast: {table: 'issue'}}]},
+      {clientID: 'c2', queries: [{hash: 'q1', ast: {table: 'issue'}}]},
+    ],
+  },
+  {
+    desc: 'ttl over MAX is clamped to MAX (both sides)',
+    calls: [
+      {clientID: 'c1', queries: [{hash: 'q1', ast: {table: 'issue'}, ttl: 24 * 60 * 60 * 1000}]},
+    ],
+  },
+  {
+    desc: 'input order preserved with 3 queries (nondeterminism probe)',
+    calls: [
+      {
+        clientID: 'c1',
+        queries: [
+          {hash: 'zzz', ast: {table: 'a'}},
+          {hash: 'aaa', ast: {table: 'b'}},
+          {hash: 'mmm', name: 'n', args: []},
+        ],
+      },
+    ],
+  },
+];
+
+function runConfigScenario(sc) {
+  const store = makeStubStore();
+  const updater = new CVRConfigDrivenUpdater(store, baseCVR(), SHARD);
+  const callResults = sc.calls.map(call => {
+    const patches = updater.putDesiredQueries(call.clientID, call.queries);
+    return {clientID: call.clientID, patches: patches.map(normPatch)};
+  });
+  return {
+    desc: sc.desc,
+    calls: sc.calls,
+    callResults,
+    desiredOps: store.ops.filter(o => o.op === 'putDesiredQuery'),
+    finalState: normDesireState(updater._cvr),
+    finalVersion: versionString(updater._cvr.version),
+  };
+}
+
 const fixture = {
   hashes: STRINGS.map(s => ({
     input: s,
@@ -410,6 +568,7 @@ const fixture = {
   })),
   cmpCvr: CMP_CVR_PAIRS.map(([a, b]) => ({a, b, sign: sign(cmpVersions(a, b))})),
   versionParses: VERSION_PARSE_STRINGS.map(tsVersionParse),
+  configScenarios: CONFIG_SCENARIOS.map(runConfigScenario),
 };
 
 console.log(JSON.stringify(fixture, null, 2));
