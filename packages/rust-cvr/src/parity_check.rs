@@ -42,7 +42,7 @@ use crate::cvr::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater};
 use crate::cvr::{
     get_inactive_queries, get_mutation_results_query, merge_ref_counts, next_eviction_time,
 };
-use crate::cvr_store::{as_query, query_record_to_query_row};
+use crate::cvr_store::as_query;
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{
     RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
@@ -50,6 +50,7 @@ use crate::row_key::{
 use crate::row_set_signature::{format_signature, parse_signature, row_id_signature_unit};
 use crate::schema::cvr::QueriesRow;
 use crate::schema::types::RowID;
+use crate::schema::types::query_record_to_query_row;
 use crate::schema::types::{
     BaseQueryRecord, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
     QueryPatch, QueryRecord, RowRecord,

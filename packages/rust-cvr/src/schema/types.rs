@@ -22,6 +22,7 @@ use std::sync::LazyLock;
 
 use crate::cvr::RefCounts;
 use crate::row_key::RowKey;
+use crate::schema::cvr::QueriesRow;
 use crate::ttl_clock::TTLClock;
 
 /// Mirrors TS `CVRVersion` — `{stateVersion: string, configVersion?: number}`.
@@ -443,6 +444,52 @@ pub struct RowID {
     pub table: String,
     #[serde(rename = "rowKey")]
     pub row_key: RowKey,
+}
+
+/// Convert a QueryRecord to a QueriesRow for storage.
+/// Mirrors TS `queryRecordToQueryRow` from schema/types.ts.
+pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRow {
+    match query {
+        QueryRecord::Internal(r) => QueriesRow {
+            client_group_id: cvr_id.to_string(),
+            query_hash: r.base.id.clone(),
+            client_ast: Some(r.ast.clone()),
+            query_name: None,
+            query_args: None,
+            patch_version: None,
+            transformation_hash: r.base.transformation_hash.clone(),
+            transformation_version: r.base.transformation_version.as_ref().map(version_string),
+            internal: Some(true),
+            deleted: Some(false),
+            row_set_signature: r.base.row_set_signature.clone(),
+        },
+        QueryRecord::Client(r) => QueriesRow {
+            client_group_id: cvr_id.to_string(),
+            query_hash: r.base.id.clone(),
+            client_ast: Some(r.ast.clone()),
+            query_name: None,
+            query_args: None,
+            patch_version: r.patch_version.as_ref().map(version_string),
+            transformation_hash: r.base.transformation_hash.clone(),
+            transformation_version: r.base.transformation_version.as_ref().map(version_string),
+            internal: None,
+            deleted: Some(false),
+            row_set_signature: r.base.row_set_signature.clone(),
+        },
+        QueryRecord::Custom(r) => QueriesRow {
+            client_group_id: cvr_id.to_string(),
+            query_hash: r.base.id.clone(),
+            client_ast: None,
+            query_name: Some(r.name.clone()),
+            query_args: Some(Value::Array(r.args.clone())),
+            patch_version: r.patch_version.as_ref().map(version_string),
+            transformation_hash: r.base.transformation_hash.clone(),
+            transformation_version: r.base.transformation_version.as_ref().map(version_string),
+            internal: None,
+            deleted: Some(false),
+            row_set_signature: r.base.row_set_signature.clone(),
+        },
+    }
 }
 
 #[cfg(test)]
