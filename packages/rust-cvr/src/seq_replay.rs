@@ -9,14 +9,19 @@
 //! golden. Kept in the lib so both callers share one implementation.
 
 use crate::client_handler::PatchToVersion;
-use crate::cvr::{CVRConfigDrivenUpdater, DesiredQuerySpec};
+use crate::cvr::{
+    CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, DesiredQuerySpec, RefCounts, RowRecordMap,
+    RowUpdate,
+};
 use crate::cvr_store::CVRStoreHandle;
-use crate::schema::types::{AST, version_string};
+use crate::row_key::row_id_string;
+use crate::schema::types::{AST, RowID, RowRecord, version_from_string, version_string};
 use crate::shards::ShardID;
 use crate::ttl_clock::TTLClock;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
+use std::sync::Arc;
 
 /// The schema the captured TS DDL (`flush-schema.sql`) hardcodes. Programs must
 /// use shard roze/1 to match.
@@ -42,13 +47,59 @@ pub struct Shard {
     pub shard_num: u32,
 }
 
+/// A transaction is either config-driven (default; `ops`) or query-driven
+/// (`kind: "query"`; trackQueries -> received -> deleteUnreferencedRows). The
+/// config fields default so the existing config-only corpus parses unchanged.
 #[derive(Deserialize)]
 pub struct Txn {
+    #[serde(default = "default_kind")]
+    pub kind: String,
     #[serde(rename = "lastActive")]
     pub last_active: i64,
     #[serde(rename = "ttlClock")]
     pub ttl_clock: TTLClock,
+    #[serde(default)]
     pub ops: Vec<Op>,
+    // query-driven fields
+    #[serde(default, rename = "stateVersion")]
+    pub state_version: Option<String>,
+    #[serde(default, rename = "replicaVersion")]
+    pub replica_version: Option<String>,
+    #[serde(default)]
+    pub track: Option<Track>,
+    #[serde(default)]
+    pub received: Vec<ReceivedRow>,
+    #[serde(default, rename = "deleteUnreferenced")]
+    pub delete_unreferenced: bool,
+}
+
+fn default_kind() -> String {
+    "config".to_string()
+}
+
+#[derive(Deserialize)]
+pub struct Track {
+    /// [id, transformationHash] pairs.
+    pub executed: Vec<(String, String)>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ReceivedRow {
+    pub id: RowIdJson,
+    pub contents: Value,
+    pub version: String,
+    #[serde(rename = "refCounts")]
+    pub ref_counts: Value,
+}
+
+#[derive(Deserialize)]
+pub struct RowIdJson {
+    pub schema: String,
+    pub table: String,
+    #[serde(rename = "rowKey")]
+    pub row_key: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -139,48 +190,119 @@ pub async fn run(pool: &PgPool, prog: &Program) -> Value {
         );
         let loaded = store.load(prog.connect_time).await.expect("load");
         let orig_version = loaded.cvr.version.clone();
-        let mut updater = CVRConfigDrivenUpdater::new(loaded.cvr, shard.clone());
 
-        let mut patches: Vec<String> = Vec::new();
-        for op in &tx.ops {
-            match op {
-                Op::EnsureClient { client_id } => {
-                    updater.ensure_client(client_id);
-                }
-                Op::PutDesiredQueries { client_id, queries } => {
-                    let specs: Vec<DesiredQuerySpec> = queries
-                        .iter()
-                        .map(|q| DesiredQuerySpec {
-                            hash: q.hash.clone(),
-                            ast: q.ast.clone(),
-                            name: q.name.clone(),
-                            args: q.args.clone(),
-                            ttl: q.ttl,
-                        })
-                        .collect();
-                    push_patches(&mut patches, updater.put_desired_queries(client_id, &specs));
-                }
-                Op::MarkDesiredInactive { client_id, hashes } => push_patches(
+        let (patches, cvr_final): (Vec<String>, crate::cvr::CVR) = if tx.kind == "query" {
+            // ── query-driven: trackQueries -> received -> deleteUnreferencedRows ──
+            // The existing rows are loaded from PG exactly as TS's `getRowRecords`
+            // does (non-tombstone rows for this CG); `received` merges refCounts
+            // against them and `deleteUnreferencedRows` GCs rows whose executed-
+            // query refs go to zero.
+            let state_version = tx
+                .state_version
+                .clone()
+                .expect("query txn needs stateVersion");
+            let replica_version = tx
+                .replica_version
+                .clone()
+                .unwrap_or_else(|| "01".to_string());
+            let existing = load_existing_rows(pool, &prog.cvr_id).await;
+            let mut updater =
+                CVRQueryDrivenUpdater::new(loaded.cvr, state_version, replica_version, None);
+
+            let mut patches: Vec<String> = Vec::new();
+            let track = tx.track.as_ref().expect("query txn needs track");
+            let executed: Vec<(&str, &str)> = track
+                .executed
+                .iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect();
+            let removed: Vec<&str> = track.removed.iter().map(|s| s.as_str()).collect();
+            let (_v, tq_patches) = updater.track_queries(&executed, &removed);
+            for p in tq_patches {
+                patches.push(canon_patch(&p));
+            }
+
+            let mut rows: std::collections::HashMap<String, (RowID, RowUpdate)> =
+                std::collections::HashMap::new();
+            for r in &tx.received {
+                let id = RowID {
+                    schema: r.id.schema.clone(),
+                    table: r.id.table.clone(),
+                    row_key: r.id.row_key.clone(),
+                };
+                let id_str = row_id_string(&id);
+                let ref_counts: RefCounts =
+                    serde_json::from_value(r.ref_counts.clone()).expect("refCounts");
+                rows.insert(
+                    id_str,
+                    (
+                        id,
+                        RowUpdate {
+                            version: Some(r.version.clone()),
+                            contents: Some(Arc::new(r.contents.clone())),
+                            ref_counts,
+                        },
+                    ),
+                );
+            }
+            push_patches(&mut patches, updater.received(&rows, &existing));
+            if tx.delete_unreferenced {
+                push_patches(
                     &mut patches,
-                    updater.mark_desired_queries_as_inactive(client_id, hashes, tx.ttl_clock),
-                ),
-                Op::DeleteDesired { client_id, hashes } => push_patches(
-                    &mut patches,
-                    updater.delete_desired_queries(client_id, hashes),
-                ),
-                Op::ClearDesired { client_id } => {
-                    push_patches(&mut patches, updater.clear_desired_queries(client_id))
-                }
-                Op::DeleteClient { client_id } => {
-                    push_patches(&mut patches, updater.delete_client(client_id, tx.ttl_clock))
+                    updater.delete_unreferenced_rows(existing.values()),
+                );
+            }
+
+            let (cvr_final, _stats) =
+                updater.flush(prog.connect_time as i64, tx.last_active, tx.ttl_clock);
+            let ops = updater.base.drain_store_ops();
+            store.apply_store_ops(ops);
+            (patches, cvr_final)
+        } else {
+            // ── config-driven ──
+            let mut updater = CVRConfigDrivenUpdater::new(loaded.cvr, shard.clone());
+            let mut patches: Vec<String> = Vec::new();
+            for op in &tx.ops {
+                match op {
+                    Op::EnsureClient { client_id } => {
+                        updater.ensure_client(client_id);
+                    }
+                    Op::PutDesiredQueries { client_id, queries } => {
+                        let specs: Vec<DesiredQuerySpec> = queries
+                            .iter()
+                            .map(|q| DesiredQuerySpec {
+                                hash: q.hash.clone(),
+                                ast: q.ast.clone(),
+                                name: q.name.clone(),
+                                args: q.args.clone(),
+                                ttl: q.ttl,
+                            })
+                            .collect();
+                        push_patches(&mut patches, updater.put_desired_queries(client_id, &specs));
+                    }
+                    Op::MarkDesiredInactive { client_id, hashes } => push_patches(
+                        &mut patches,
+                        updater.mark_desired_queries_as_inactive(client_id, hashes, tx.ttl_clock),
+                    ),
+                    Op::DeleteDesired { client_id, hashes } => push_patches(
+                        &mut patches,
+                        updater.delete_desired_queries(client_id, hashes),
+                    ),
+                    Op::ClearDesired { client_id } => {
+                        push_patches(&mut patches, updater.clear_desired_queries(client_id))
+                    }
+                    Op::DeleteClient { client_id } => {
+                        push_patches(&mut patches, updater.delete_client(client_id, tx.ttl_clock))
+                    }
                 }
             }
-        }
+            let (cvr_final, _stats) =
+                updater.flush(prog.connect_time as i64, tx.last_active, tx.ttl_clock);
+            let ops = updater.base.drain_store_ops();
+            store.apply_store_ops(ops);
+            (patches, cvr_final)
+        };
 
-        let (cvr_final, _stats) =
-            updater.flush(prog.connect_time as i64, tx.last_active, tx.ttl_clock);
-        let ops = updater.base.drain_store_ops();
-        store.apply_store_ops(ops);
         let flushed = store
             .flush(&orig_version, &cvr_final, prog.connect_time)
             .await
@@ -218,9 +340,54 @@ fn canon_patch(p: &PatchToVersion) -> String {
     let pv = serde_json::to_value(&p.patch).unwrap();
     let ty = pv.get("type").and_then(|x| x.as_str()).unwrap_or("?");
     let op = pv.get("op").and_then(|x| x.as_str()).unwrap_or("?");
-    let id = pv.get("id").map(|x| x.to_string()).unwrap_or_default();
+    // `id` is a string for query patches and a RowID object for row patches;
+    // canonicalize (sort keys) before stringify so object key order can't diverge.
+    let id = pv
+        .get("id")
+        .map(|x| canonicalize(x).to_string())
+        .unwrap_or_default();
     let cid = pv.get("client_id").and_then(|x| x.as_str()).unwrap_or("");
     format!("{ty}:{op}:{id}:{cid}@{v}")
+}
+
+/// Load the existing (non-tombstone) row records for this CG from PG — the same
+/// set TS's `getRowRecords` returns (row-record-cache.ts `load`:
+/// `refCounts IS NOT NULL`). The query-driven updater merges received refCounts
+/// against these and GCs unreferenced rows.
+async fn load_existing_rows(pool: &PgPool, cvr_id: &str) -> RowRecordMap {
+    let rows = sqlx::query(&format!(
+        r#"SELECT "schema","table","rowKey","rowVersion","patchVersion","refCounts"
+           FROM "{SCHEMA}".rows
+           WHERE "clientGroupID" = $1 AND "refCounts" IS NOT NULL"#
+    ))
+    .bind(cvr_id)
+    .fetch_all(pool)
+    .await
+    .expect("load existing rows");
+
+    let mut map: RowRecordMap = std::collections::HashMap::new();
+    for r in &rows {
+        let row_key = r
+            .get::<Value, _>("rowKey")
+            .as_object()
+            .expect("rowKey object")
+            .clone();
+        let id = RowID {
+            schema: r.get::<String, _>("schema"),
+            table: r.get::<String, _>("table"),
+            row_key,
+        };
+        let ref_counts: RefCounts =
+            serde_json::from_value(r.get::<Value, _>("refCounts")).expect("refCounts");
+        let record = RowRecord {
+            id: id.clone(),
+            row_version: r.get::<String, _>("rowVersion"),
+            patch_version: version_from_string(&r.get::<String, _>("patchVersion")),
+            ref_counts: Some(ref_counts),
+        };
+        map.insert(row_id_string(&id), record);
+    }
+    map
 }
 
 /// Canonical DB dump — the shared oracle. Mirrors run-ts.mjs's SELECTs.

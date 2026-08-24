@@ -145,23 +145,137 @@ function subset(set, rnd) {
   return [...set].filter(() => rnd() < 0.5);
 }
 
+// LexiVersion encoder (mirror of schema/types.rs `version_to_lexi`): base36(v)
+// prefixed with base36(len-1). For 1..35 this is '01'..'0z'. Used for the
+// query-path stateVersion / rowVersion, which must be VALID lexi (parsed on read).
+function versionToLexi(v) {
+  const b = v.toString(36);
+  return (b.length - 1).toString(36) + b;
+}
+
+// ── Query-driven (received-rows) program generator ──
+//
+// A config PRELUDE creates a client with K desired queries, then a sequence of
+// QUERY transactions execute subsets of them (trackQueries) and receive rows
+// (received) referencing the executed queries, with deleteUnreferencedRows. This
+// exercises the query-driven WRITE path across many stateVersions: desired->gotten
+// transitions, refCount merge against rows loaded from PG, row versioning, and the
+// unreferenced-row GC (a re-executed query whose row is NOT re-received is deleted).
+const ROW_POOL = [
+  {schema: 'public', table: 'issues', rowKey: {id: '0'}},
+  {schema: 'public', table: 'issues', rowKey: {id: '1'}},
+  {schema: 'public', table: 'issues', rowKey: {id: '2'}},
+  {schema: 'public', table: 'labels', rowKey: {issueID: '1', labelID: '0'}},
+  {schema: 'public', table: 'labels', rowKey: {issueID: '1', labelID: '1'}},
+  {schema: 'public', table: 'comments', rowKey: {id: 'x'}},
+];
+
+export function generateQuery(seed) {
+  // Distinct PRNG stream from the config generator so the same seed yields a
+  // different program in each corpus.
+  const rnd = mulberry32(seed + 0x9e3779b9);
+  const pick = arr => arr[Math.floor(rnd() * arr.length)];
+  const chance = p => rnd() < p;
+
+  const connectTime = 1_725_408_000_000;
+  const K = 3 + Math.floor(rnd() * 3); // 3..5 queries
+  const queries = Array.from({length: K}, (_, i) => `q${i}`);
+
+  // Prelude: one config txn that desires all K queries (so they exist to execute).
+  const transactions = [
+    {
+      kind: 'config',
+      lastActive: connectTime + 3600_000,
+      ttlClock: connectTime + 3600_000,
+      ops: [
+        {op: 'ensureClient', clientID: 'c0'},
+        {
+          op: 'putDesiredQueries',
+          clientID: 'c0',
+          queries: queries.map(h => ({hash: h, ast: astFor(h), ttl: 300000})),
+        },
+      ],
+    },
+  ];
+
+  let stateCounter = 0;
+  const nTx = 2 + Math.floor(rnd() * 5); // 2..6 query transactions
+  for (let i = 0; i < nTx; i++) {
+    stateCounter += 1;
+    const stateVersion = versionToLexi(stateCounter);
+    const ttlClock = connectTime + (i + 2) * 3600_000;
+
+    // Execute a non-empty distinct subset of the queries.
+    const executed = [...new Set(queries.filter(() => rnd() < 0.6))];
+    if (executed.length === 0) executed.push(pick(queries));
+    // transformationHash: sometimes stable (idempotent re-exec), sometimes new.
+    const track = {
+      executed: executed.map(h => [h, `${h}-t${chance(0.5) ? i : 0}`]),
+      removed: [],
+    };
+
+    // Receive a subset of rows, each referencing a non-empty subset of executed.
+    const received = [];
+    for (const row of ROW_POOL) {
+      if (!chance(0.55)) continue;
+      const refs = executed.filter(() => rnd() < 0.6);
+      if (refs.length === 0) continue;
+      const refCounts = {};
+      for (const q of refs) refCounts[q] = 1;
+      received.push({
+        id: row,
+        contents: {...row.rowKey, v: i},
+        version: stateVersion,
+        refCounts,
+      });
+    }
+
+    transactions.push({
+      kind: 'query',
+      stateVersion,
+      replicaVersion: '01',
+      lastActive: ttlClock,
+      ttlClock,
+      track,
+      received,
+      deleteUnreferenced: true,
+    });
+  }
+
+  return {
+    seed,
+    cvrId: `cg-seqq-${String(seed).padStart(6, '0')}`,
+    shard: {appID: 'roze', shardNum: 1},
+    connectTime,
+    transactions,
+  };
+}
+
 // ── CLI ──
 const args = process.argv.slice(2);
-if (args[0] === '--corpus') {
-  const n = Number(args[1] || 40);
+function writeCorpus(prefix, fn, n) {
   const outDir = path.join(dir, 'corpus');
   fs.mkdirSync(outDir, {recursive: true});
   for (let s = 0; s < n; s++) {
-    const prog = generate(s);
     fs.writeFileSync(
-      path.join(outDir, `prog-${String(s).padStart(3, '0')}.json`),
-      JSON.stringify(prog, null, 2) + '\n',
+      path.join(outDir, `${prefix}-${String(s).padStart(3, '0')}.json`),
+      JSON.stringify(fn(s), null, 2) + '\n',
     );
   }
-  console.error(`wrote ${n} programs to ${outDir}`);
+  console.error(`wrote ${n} ${prefix} programs to ${outDir}`);
+}
+
+if (args[0] === '--corpus') {
+  writeCorpus('prog', generate, Number(args[1] || 40));
+} else if (args[0] === '--qcorpus') {
+  writeCorpus('qprog', generateQuery, Number(args[1] || 30));
+} else if (args[0] === '--q' && !isNaN(Number(args[1]))) {
+  process.stdout.write(JSON.stringify(generateQuery(Number(args[1])), null, 2) + '\n');
 } else if (args.length && !isNaN(Number(args[0]))) {
   process.stdout.write(JSON.stringify(generate(Number(args[0])), null, 2) + '\n');
 } else if (import.meta.url === `file://${process.argv[1]}`) {
-  console.error('usage: node gen.mjs <seed> | node gen.mjs --corpus <N>');
+  console.error(
+    'usage: node gen.mjs <seed> | --q <seed> | --corpus <N> | --qcorpus <N>',
+  );
   process.exit(2);
 }

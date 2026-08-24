@@ -18,8 +18,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
-import {generate} from './gen.mjs';
+import {generate, generateQuery} from './gen.mjs';
 import {diffProgram, runTs} from './diff.mjs';
+
+// `--query` fuzzes the query-driven (received-rows) generator instead of config.
+const GEN = process.argv.includes('--query') ? generateQuery : generate;
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const regDir = path.join(dir, 'regressions');
@@ -99,7 +102,7 @@ if (!process.env.TEST_CVR_PG_URI) {
 
 let found = 0;
 for (let s = FROM; s < TO; s++) {
-  const prog = generate(s);
+  const prog = GEN(s);
   let res;
   try {
     res = diffProgram(tmp(prog));

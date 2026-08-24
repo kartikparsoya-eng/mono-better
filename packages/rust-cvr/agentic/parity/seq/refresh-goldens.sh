@@ -16,11 +16,10 @@ if [[ -z "${TEST_CVR_PG_URI:-}" ]]; then
 fi
 
 shopt -s nullglob
-progs=(corpus/prog-*.json)
-progs=("${progs[@]/%*.trace.json/}") # (defensive; prog-*.json never matches .trace.json)
 
 n=0
-for p in corpus/prog-*.json; do
+# Both the config corpus (prog-*) and the query/received-rows corpus (qprog-*).
+for p in corpus/prog-*.json corpus/qprog-*.json; do
   case "$p" in *.trace.json) continue;; esac
   out="${p%.json}.trace.json"
   npx tsx run-ts.mjs "$p" > "$out"

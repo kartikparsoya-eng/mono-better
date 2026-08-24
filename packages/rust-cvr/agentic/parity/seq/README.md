@@ -1,17 +1,28 @@
 # CVR sequence differential (Layer-2, stateful)
 
-A TS-vs-Rust differential that exercises the **stateful** config-driven CVR
-surface — `ensureClient` / `putDesiredQueries` / `markDesiredInactive` /
-`deleteDesired` / `clearDesired` / `deleteClient` across many interleaved
-transactions and version/configVersion transitions. Where the fixed-scenario
-fixtures pin one call each, this replays random *operation sequences* against the
-real TS and real Rust `CVRStore` + `CVRConfigDrivenUpdater` over Postgres and
+A TS-vs-Rust differential that exercises the **stateful** CVR surface across many
+interleaved transactions and version/configVersion transitions. Where the
+fixed-scenario fixtures pin one call each, this replays random *operation
+sequences* against the real TS and real Rust CVR updaters over Postgres and
 asserts the resulting CVR state (persisted DB rows) + returned patches match.
 
-On introduction it caught four real port divergences: the `lmids` internal-query
-AST `and`-wrapper (TS uses a bare `simple`), a missing first-sight instance write
-on `load`, an inactivated-desire `deleted` flag (TS writes `deleted=true`), and
-nondeterministic `HashSet` patch ordering.
+Two program families (both in `corpus/`):
+
+- **`prog-*` — config-driven** (`CVRConfigDrivenUpdater`): ensureClient /
+  putDesiredQueries / markDesiredInactive / deleteDesired / clearDesired /
+  deleteClient.
+- **`qprog-*` — query-driven / received-rows** (`CVRQueryDrivenUpdater`): a config
+  prelude desires K queries, then query transactions execute subsets
+  (trackQueries), receive rows referencing them (received, merged against rows
+  loaded from PG), and deleteUnreferencedRows — exercising desired→gotten
+  transitions, refCount merge, row versioning, and unreferenced-row GC
+  (tombstones) across many stateVersions.
+
+On introduction the config path caught four real port divergences: the `lmids`
+internal-query AST `and`-wrapper (TS uses a bare `simple`), a missing first-sight
+instance write on `load`, an inactivated-desire `deleted` flag (TS writes
+`deleted=true`), and nondeterministic `HashSet` patch ordering. The query path
+matched TS across 120 programs (no divergences).
 
 ## Pieces
 
@@ -33,11 +44,14 @@ export TEST_CVR_PG_URI=postgres://postgres:postgres@localhost:55432/postgres
 ( cd ../../.. && cargo build --no-default-features --bin cvr_seq_replay )
 export CVR_SEQ_REPLAY=$(cd ../../.. && pwd)/target/debug/cvr_seq_replay
 
-node diff.mjs 42            # diff one seed (or a program path)
-node fuzz.mjs --from 0 --to 500   # fuzz a range, shrink any divergence
+node diff.mjs 42                  # diff one config seed (or a program path)
+node gen.mjs --q 42 | node diff.mjs /dev/stdin   # diff one query seed
+node fuzz.mjs --from 0 --to 500          # fuzz the config path
+node fuzz.mjs --query --from 0 --to 500  # fuzz the query (received-rows) path
 
-# regenerate the checked-in corpus + goldens
+# regenerate the checked-in corpus + goldens (config + query)
 node gen.mjs --corpus 40
+node gen.mjs --qcorpus 30
 ./refresh-goldens.sh
 ```
 

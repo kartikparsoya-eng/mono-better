@@ -1,0 +1,1559 @@
+{
+  "cvrId": "cg-seqq-000003",
+  "transactions": [
+    {
+      "patches": [
+        "query:put:\"q0\":c0@00:01",
+        "query:put:\"q1\":c0@00:01",
+        "query:put:\"q2\":c0@00:01"
+      ],
+      "flushed": true,
+      "version": "00:01",
+      "db": {
+        "instances": [
+          {
+            "version": "00:01",
+            "replicaVersion": null,
+            "ttlClock": 1725411600000,
+            "clientSchema": null,
+            "profileID": null
+          }
+        ],
+        "clients": [
+          {
+            "clientID": "c0"
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "lmids",
+            "clientAST": {
+              "table": "roze_1.clients",
+              "where": {
+                "op": "=",
+                "left": {
+                  "name": "clientGroupID",
+                  "type": "column"
+                },
+                "type": "simple",
+                "right": {
+                  "type": "literal",
+                  "value": "cg-seqq-000003"
+                }
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "mutationResults",
+            "clientAST": {
+              "table": "roze_1.mutations",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "op": "=",
+                    "left": {
+                      "name": "clientGroupID",
+                      "type": "column"
+                    },
+                    "type": "simple",
+                    "right": {
+                      "type": "literal",
+                      "value": "cg-seqq-000003"
+                    }
+                  }
+                ]
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ],
+                [
+                  "mutationID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "q0",
+            "clientAST": {
+              "table": "labels"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q1",
+            "clientAST": {
+              "table": "comments"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q2",
+            "clientAST": {
+              "table": "users"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          }
+        ],
+        "desires": [
+          {
+            "clientID": "c0",
+            "queryHash": "q0",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q1",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q2",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          }
+        ],
+        "rows": []
+      }
+    },
+    {
+      "patches": [
+        "query:put:\"q2\":@01",
+        "row:put:{\"rowKey\":{\"id\":\"x\"},\"schema\":\"public\",\"table\":\"comments\"}:@01"
+      ],
+      "flushed": true,
+      "version": "01",
+      "db": {
+        "instances": [
+          {
+            "version": "01",
+            "replicaVersion": "01",
+            "ttlClock": 1725415200000,
+            "clientSchema": null,
+            "profileID": null
+          }
+        ],
+        "clients": [
+          {
+            "clientID": "c0"
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "lmids",
+            "clientAST": {
+              "table": "roze_1.clients",
+              "where": {
+                "op": "=",
+                "left": {
+                  "name": "clientGroupID",
+                  "type": "column"
+                },
+                "type": "simple",
+                "right": {
+                  "type": "literal",
+                  "value": "cg-seqq-000003"
+                }
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "mutationResults",
+            "clientAST": {
+              "table": "roze_1.mutations",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "op": "=",
+                    "left": {
+                      "name": "clientGroupID",
+                      "type": "column"
+                    },
+                    "type": "simple",
+                    "right": {
+                      "type": "literal",
+                      "value": "cg-seqq-000003"
+                    }
+                  }
+                ]
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ],
+                [
+                  "mutationID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "q0",
+            "clientAST": {
+              "table": "labels"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q1",
+            "clientAST": {
+              "table": "comments"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q2",
+            "clientAST": {
+              "table": "users"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "01",
+            "transformationHash": "q2-t0",
+            "transformationVersion": "01",
+            "internal": null,
+            "deleted": false
+          }
+        ],
+        "desires": [
+          {
+            "clientID": "c0",
+            "queryHash": "q0",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q1",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q2",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          }
+        ],
+        "rows": [
+          {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            },
+            "rowVersion": "01",
+            "patchVersion": "01",
+            "refCounts": {
+              "q2": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "patches": [
+        "query:put:\"q1\":@02",
+        "row:put:{\"rowKey\":{\"id\":\"1\"},\"schema\":\"public\",\"table\":\"issues\"}:@02",
+        "row:put:{\"rowKey\":{\"id\":\"2\"},\"schema\":\"public\",\"table\":\"issues\"}:@02",
+        "row:put:{\"rowKey\":{\"issueID\":\"1\",\"labelID\":\"0\"},\"schema\":\"public\",\"table\":\"labels\"}:@02",
+        "row:del:{\"rowKey\":{\"id\":\"x\"},\"schema\":\"public\",\"table\":\"comments\"}:@02"
+      ],
+      "flushed": true,
+      "version": "02",
+      "db": {
+        "instances": [
+          {
+            "version": "02",
+            "replicaVersion": "01",
+            "ttlClock": 1725418800000,
+            "clientSchema": null,
+            "profileID": null
+          }
+        ],
+        "clients": [
+          {
+            "clientID": "c0"
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "lmids",
+            "clientAST": {
+              "table": "roze_1.clients",
+              "where": {
+                "op": "=",
+                "left": {
+                  "name": "clientGroupID",
+                  "type": "column"
+                },
+                "type": "simple",
+                "right": {
+                  "type": "literal",
+                  "value": "cg-seqq-000003"
+                }
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "mutationResults",
+            "clientAST": {
+              "table": "roze_1.mutations",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "op": "=",
+                    "left": {
+                      "name": "clientGroupID",
+                      "type": "column"
+                    },
+                    "type": "simple",
+                    "right": {
+                      "type": "literal",
+                      "value": "cg-seqq-000003"
+                    }
+                  }
+                ]
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ],
+                [
+                  "mutationID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "q0",
+            "clientAST": {
+              "table": "labels"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q1",
+            "clientAST": {
+              "table": "comments"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "02",
+            "transformationHash": "q1-t1",
+            "transformationVersion": "02",
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q2",
+            "clientAST": {
+              "table": "users"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "01",
+            "transformationHash": "q2-t1",
+            "transformationVersion": "02",
+            "internal": null,
+            "deleted": false
+          }
+        ],
+        "desires": [
+          {
+            "clientID": "c0",
+            "queryHash": "q0",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q1",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q2",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          }
+        ],
+        "rows": [
+          {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            },
+            "rowVersion": "01",
+            "patchVersion": "02",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "q1": 1,
+              "q2": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "q1": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "0"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "q1": 1,
+              "q2": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "patches": [
+        "row:put:{\"rowKey\":{\"id\":\"1\"},\"schema\":\"public\",\"table\":\"issues\"}:@03",
+        "row:put:{\"rowKey\":{\"issueID\":\"1\",\"labelID\":\"1\"},\"schema\":\"public\",\"table\":\"labels\"}:@03",
+        "row:del:{\"rowKey\":{\"id\":\"2\"},\"schema\":\"public\",\"table\":\"issues\"}:@03",
+        "row:del:{\"rowKey\":{\"issueID\":\"1\",\"labelID\":\"0\"},\"schema\":\"public\",\"table\":\"labels\"}:@03"
+      ],
+      "flushed": true,
+      "version": "03",
+      "db": {
+        "instances": [
+          {
+            "version": "03",
+            "replicaVersion": "01",
+            "ttlClock": 1725422400000,
+            "clientSchema": null,
+            "profileID": null
+          }
+        ],
+        "clients": [
+          {
+            "clientID": "c0"
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "lmids",
+            "clientAST": {
+              "table": "roze_1.clients",
+              "where": {
+                "op": "=",
+                "left": {
+                  "name": "clientGroupID",
+                  "type": "column"
+                },
+                "type": "simple",
+                "right": {
+                  "type": "literal",
+                  "value": "cg-seqq-000003"
+                }
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "mutationResults",
+            "clientAST": {
+              "table": "roze_1.mutations",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "op": "=",
+                    "left": {
+                      "name": "clientGroupID",
+                      "type": "column"
+                    },
+                    "type": "simple",
+                    "right": {
+                      "type": "literal",
+                      "value": "cg-seqq-000003"
+                    }
+                  }
+                ]
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ],
+                [
+                  "mutationID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "q0",
+            "clientAST": {
+              "table": "labels"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q1",
+            "clientAST": {
+              "table": "comments"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "02",
+            "transformationHash": "q1-t2",
+            "transformationVersion": "03",
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q2",
+            "clientAST": {
+              "table": "users"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "01",
+            "transformationHash": "q2-t2",
+            "transformationVersion": "03",
+            "internal": null,
+            "deleted": false
+          }
+        ],
+        "desires": [
+          {
+            "clientID": "c0",
+            "queryHash": "q0",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q1",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q2",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          }
+        ],
+        "rows": [
+          {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            },
+            "rowVersion": "01",
+            "patchVersion": "02",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "03",
+            "refCounts": {
+              "q1": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            },
+            "rowVersion": "02",
+            "patchVersion": "03",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "0"
+            },
+            "rowVersion": "02",
+            "patchVersion": "03",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "03",
+            "refCounts": {
+              "q1": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "patches": [
+        "row:put:{\"rowKey\":{\"id\":\"0\"},\"schema\":\"public\",\"table\":\"issues\"}:@04",
+        "row:put:{\"rowKey\":{\"issueID\":\"1\",\"labelID\":\"0\"},\"schema\":\"public\",\"table\":\"labels\"}:@04",
+        "row:del:{\"rowKey\":{\"id\":\"1\"},\"schema\":\"public\",\"table\":\"issues\"}:@04",
+        "row:del:{\"rowKey\":{\"issueID\":\"1\",\"labelID\":\"1\"},\"schema\":\"public\",\"table\":\"labels\"}:@04"
+      ],
+      "flushed": true,
+      "version": "04",
+      "db": {
+        "instances": [
+          {
+            "version": "04",
+            "replicaVersion": "01",
+            "ttlClock": 1725426000000,
+            "clientSchema": null,
+            "profileID": null
+          }
+        ],
+        "clients": [
+          {
+            "clientID": "c0"
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "lmids",
+            "clientAST": {
+              "table": "roze_1.clients",
+              "where": {
+                "op": "=",
+                "left": {
+                  "name": "clientGroupID",
+                  "type": "column"
+                },
+                "type": "simple",
+                "right": {
+                  "type": "literal",
+                  "value": "cg-seqq-000003"
+                }
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "mutationResults",
+            "clientAST": {
+              "table": "roze_1.mutations",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "op": "=",
+                    "left": {
+                      "name": "clientGroupID",
+                      "type": "column"
+                    },
+                    "type": "simple",
+                    "right": {
+                      "type": "literal",
+                      "value": "cg-seqq-000003"
+                    }
+                  }
+                ]
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ],
+                [
+                  "mutationID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "q0",
+            "clientAST": {
+              "table": "labels"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q1",
+            "clientAST": {
+              "table": "comments"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "02",
+            "transformationHash": "q1-t0",
+            "transformationVersion": "04",
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q2",
+            "clientAST": {
+              "table": "users"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "01",
+            "transformationHash": "q2-t3",
+            "transformationVersion": "04",
+            "internal": null,
+            "deleted": false
+          }
+        ],
+        "desires": [
+          {
+            "clientID": "c0",
+            "queryHash": "q0",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q1",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q2",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          }
+        ],
+        "rows": [
+          {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            },
+            "rowVersion": "01",
+            "patchVersion": "02",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "0"
+            },
+            "rowVersion": "04",
+            "patchVersion": "04",
+            "refCounts": {
+              "q1": 1,
+              "q2": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "04",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            },
+            "rowVersion": "02",
+            "patchVersion": "03",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "0"
+            },
+            "rowVersion": "04",
+            "patchVersion": "04",
+            "refCounts": {
+              "q1": 1,
+              "q2": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "04",
+            "refCounts": null
+          }
+        ]
+      }
+    },
+    {
+      "patches": [
+        "row:put:{\"rowKey\":{\"id\":\"2\"},\"schema\":\"public\",\"table\":\"issues\"}:@05",
+        "row:put:{\"rowKey\":{\"id\":\"x\"},\"schema\":\"public\",\"table\":\"comments\"}:@05"
+      ],
+      "flushed": true,
+      "version": "05",
+      "db": {
+        "instances": [
+          {
+            "version": "05",
+            "replicaVersion": "01",
+            "ttlClock": 1725429600000,
+            "clientSchema": null,
+            "profileID": null
+          }
+        ],
+        "clients": [
+          {
+            "clientID": "c0"
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "lmids",
+            "clientAST": {
+              "table": "roze_1.clients",
+              "where": {
+                "op": "=",
+                "left": {
+                  "name": "clientGroupID",
+                  "type": "column"
+                },
+                "type": "simple",
+                "right": {
+                  "type": "literal",
+                  "value": "cg-seqq-000003"
+                }
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "mutationResults",
+            "clientAST": {
+              "table": "roze_1.mutations",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "op": "=",
+                    "left": {
+                      "name": "clientGroupID",
+                      "type": "column"
+                    },
+                    "type": "simple",
+                    "right": {
+                      "type": "literal",
+                      "value": "cg-seqq-000003"
+                    }
+                  }
+                ]
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ],
+                [
+                  "mutationID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "q0",
+            "clientAST": {
+              "table": "labels"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q1",
+            "clientAST": {
+              "table": "comments"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "02",
+            "transformationHash": "q1-t0",
+            "transformationVersion": "04",
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q2",
+            "clientAST": {
+              "table": "users"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "01",
+            "transformationHash": "q2-t0",
+            "transformationVersion": "05",
+            "internal": null,
+            "deleted": false
+          }
+        ],
+        "desires": [
+          {
+            "clientID": "c0",
+            "queryHash": "q0",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q1",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q2",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          }
+        ],
+        "rows": [
+          {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            },
+            "rowVersion": "05",
+            "patchVersion": "05",
+            "refCounts": {
+              "q2": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "0"
+            },
+            "rowVersion": "04",
+            "patchVersion": "04",
+            "refCounts": {
+              "q1": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "04",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            },
+            "rowVersion": "05",
+            "patchVersion": "05",
+            "refCounts": {
+              "q2": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "0"
+            },
+            "rowVersion": "04",
+            "patchVersion": "04",
+            "refCounts": {
+              "q1": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "04",
+            "refCounts": null
+          }
+        ]
+      }
+    },
+    {
+      "patches": [
+        "query:put:\"q0\":@06",
+        "row:put:{\"rowKey\":{\"id\":\"0\"},\"schema\":\"public\",\"table\":\"issues\"}:@06",
+        "row:put:{\"rowKey\":{\"id\":\"2\"},\"schema\":\"public\",\"table\":\"issues\"}:@06",
+        "row:put:{\"rowKey\":{\"issueID\":\"1\",\"labelID\":\"0\"},\"schema\":\"public\",\"table\":\"labels\"}:@06",
+        "row:del:{\"rowKey\":{\"id\":\"x\"},\"schema\":\"public\",\"table\":\"comments\"}:@06"
+      ],
+      "flushed": true,
+      "version": "06",
+      "db": {
+        "instances": [
+          {
+            "version": "06",
+            "replicaVersion": "01",
+            "ttlClock": 1725433200000,
+            "clientSchema": null,
+            "profileID": null
+          }
+        ],
+        "clients": [
+          {
+            "clientID": "c0"
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "lmids",
+            "clientAST": {
+              "table": "roze_1.clients",
+              "where": {
+                "op": "=",
+                "left": {
+                  "name": "clientGroupID",
+                  "type": "column"
+                },
+                "type": "simple",
+                "right": {
+                  "type": "literal",
+                  "value": "cg-seqq-000003"
+                }
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "mutationResults",
+            "clientAST": {
+              "table": "roze_1.mutations",
+              "where": {
+                "type": "and",
+                "conditions": [
+                  {
+                    "op": "=",
+                    "left": {
+                      "name": "clientGroupID",
+                      "type": "column"
+                    },
+                    "type": "simple",
+                    "right": {
+                      "type": "literal",
+                      "value": "cg-seqq-000003"
+                    }
+                  }
+                ]
+              },
+              "schema": "",
+              "orderBy": [
+                [
+                  "clientGroupID",
+                  "asc"
+                ],
+                [
+                  "clientID",
+                  "asc"
+                ],
+                [
+                  "mutationID",
+                  "asc"
+                ]
+              ]
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": null,
+            "transformationHash": null,
+            "transformationVersion": null,
+            "internal": true,
+            "deleted": false
+          },
+          {
+            "queryHash": "q0",
+            "clientAST": {
+              "table": "labels"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "06",
+            "transformationHash": "q0-t5",
+            "transformationVersion": "06",
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q1",
+            "clientAST": {
+              "table": "comments"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "02",
+            "transformationHash": "q1-t0",
+            "transformationVersion": "04",
+            "internal": null,
+            "deleted": false
+          },
+          {
+            "queryHash": "q2",
+            "clientAST": {
+              "table": "users"
+            },
+            "queryName": null,
+            "queryArgs": null,
+            "patchVersion": "01",
+            "transformationHash": "q2-t0",
+            "transformationVersion": "05",
+            "internal": null,
+            "deleted": false
+          }
+        ],
+        "desires": [
+          {
+            "clientID": "c0",
+            "queryHash": "q0",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q1",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          },
+          {
+            "clientID": "c0",
+            "queryHash": "q2",
+            "patchVersion": "00:01",
+            "deleted": false,
+            "ttlMs": 300000,
+            "inactivatedAtMs": null
+          }
+        ],
+        "rows": [
+          {
+            "schema": "public",
+            "table": "comments",
+            "rowKey": {
+              "id": "x"
+            },
+            "rowVersion": "05",
+            "patchVersion": "06",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "0"
+            },
+            "rowVersion": "06",
+            "patchVersion": "06",
+            "refCounts": {
+              "q0": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "04",
+            "refCounts": null
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            },
+            "rowVersion": "06",
+            "patchVersion": "06",
+            "refCounts": {
+              "q0": 1,
+              "q1": 1,
+              "q2": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "0"
+            },
+            "rowVersion": "06",
+            "patchVersion": "06",
+            "refCounts": {
+              "q1": 1,
+              "q2": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "1"
+            },
+            "rowVersion": "03",
+            "patchVersion": "04",
+            "refCounts": null
+          }
+        ]
+      }
+    }
+  ]
+}
