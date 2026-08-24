@@ -134,6 +134,30 @@ pub enum VersionError {
     BadLexi { lexi: String, reason: &'static str },
     #[error("configVersion {0:?} exceeds max safe integer")]
     ConfigTooLarge(String),
+    #[error("invalid stateVersion {ver:?}: {reason}")]
+    BadStateVersion { ver: String, reason: &'static str },
+}
+
+/// Mirror of TS `stateVersionFromString`, used purely to VALIDATE that a state
+/// version is a well-formed LexiVersion (or `major.minor` of two). TS's
+/// `versionFromString` runs this in the 1-part case, so untrusted cookies with a
+/// malformed stateVersion are rejected rather than silently accepted.
+fn validate_state_version(ver: &str) -> Result<(), VersionError> {
+    let bad = |reason| VersionError::BadStateVersion {
+        ver: ver.to_string(),
+        reason,
+    };
+    if !ver.contains('.') {
+        version_from_lexi(ver).map_err(bad)?;
+    } else {
+        let parts: Vec<&str> = ver.split('.').collect();
+        if parts.len() != 2 {
+            return Err(bad("expected major.minor"));
+        }
+        version_from_lexi(parts[0]).map_err(bad)?;
+        version_from_lexi(parts[1]).map_err(bad)?;
+    }
+    Ok(())
 }
 
 /// Fallible sibling of [`version_from_string`]: returns a [`VersionError`]
@@ -144,10 +168,14 @@ pub enum VersionError {
 pub fn try_version_from_string(s: &str) -> Result<CVRVersion, VersionError> {
     let parts: Vec<&str> = s.split(':').collect();
     match parts.len() {
-        1 => Ok(CVRVersion {
-            state_version: parts[0].to_string(),
-            config_version: None,
-        }),
+        1 => {
+            // TS validates the stateVersion in the 1-part case (case 2 does not).
+            validate_state_version(parts[0])?;
+            Ok(CVRVersion {
+                state_version: parts[0].to_string(),
+                config_version: None,
+            })
+        }
         2 => {
             let config_version =
                 version_from_lexi(parts[1]).map_err(|reason| VersionError::BadLexi {
