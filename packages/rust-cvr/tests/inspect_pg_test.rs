@@ -1,14 +1,19 @@
-//! Live-Postgres test for `CVRStore.inspect_queries` — the port of TS
-//! `CVRStore.inspectQueries` (cvr-store.ts). Seeds the desires / queries / rows
-//! tables directly, then asserts the SQL produces the exact `InspectQueryRow`
-//! set: LEFT JOIN of desires→queries, per-query `rowCount` (`refCounts ? hash`),
-//! the `got` flag, `COALESCE(ttlMs, DEFAULT)`, the TTL-expiry filter, the
-//! optional client filter, and `(clientID, queryHash)` ordering.
+//! Live-Postgres TS-vs-Rust differential for `CVRStore::inspect_queries` (port
+//! of TS `CVRStore.inspectQueries`, cvr-store.ts). Seeds desires / queries / rows
+//! byte-identically to `agentic/parity/generate-inspect-fixture.mjs` (which drives
+//! the REAL TS impl → `inspect-fixture.json`), then asserts the Rust output equals
+//! that golden — pinning the SQL semantics (LEFT JOIN desires→queries, rowCount via
+//! `refCounts ? queryHash`, got flag, COALESCE(ttlMs, DEFAULT), TTL-expiry filter,
+//! client filter, `(clientID, queryHash)` ordering) against actual TS output.
+//!
+//! Regenerate the golden with:
+//!   TEST_CVR_PG_URI=... npx tsx agentic/parity/generate-inspect-fixture.mjs
 //!
 //! Gated on `TEST_CVR_PG_URI`; skips (passes) when unset.
 
-use rust_cvr::cvr_store::CVRStoreHandle;
+use rust_cvr::cvr_store::{CVRStoreHandle, InspectQueryRow};
 use rust_cvr::ttl_clock::TTLClock;
+use serde_json::Value;
 
 const SCHEMA: &str = "roze_1/cvr";
 const CVR_ID: &str = "cg-inspect";
@@ -76,51 +81,40 @@ async fn inspect_queries_matches_ts_sql() {
         TASK_ID.to_string(),
     );
 
-    // ── all clients ──
-    let rows = store
+    // TS golden from generate-inspect-fixture.mjs (real CVRStore.inspectQueries
+    // over the byte-identical seed above).
+    let golden: Value =
+        serde_json::from_str(include_str!("../agentic/parity/inspect-fixture.json"))
+            .expect("inspect-fixture.json");
+
+    // Structural comparison (parsed Value): the TS SQL emits columns in SELECT
+    // order, the Rust struct in protocol order — object equality is order-
+    // independent, so this pins values/shape without depending on key order.
+    let to_value = |rows: Vec<InspectQueryRow>| -> Value {
+        Value::Array(
+            rows.iter()
+                .map(|r| serde_json::to_value(r).unwrap())
+                .collect(),
+        )
+    };
+
+    let all = store
         .inspect_queries(TTL_CLOCK, None)
         .await
-        .expect("inspect");
-    // Ordered by (clientID, queryHash); q3 (expired) is filtered out.
-    let ids: Vec<(&str, &str)> = rows
-        .iter()
-        .map(|r| (r.client_id.as_str(), r.query_id.as_str()))
-        .collect();
+        .expect("inspect all");
     assert_eq!(
-        ids,
-        vec![("c1", "q1"), ("c1", "q2"), ("c2", "q1")],
-        "expected c1/q1, c1/q2, c2/q1 in order (q3 TTL-expired, filtered)"
+        to_value(all),
+        golden["all"],
+        "inspect_queries(None) differs from the TS golden"
     );
 
-    // c1/q1 — client query, got, active, rowCount 2 from the two q1-referencing rows.
-    let q1 = &rows[0];
-    assert!(q1.got, "q1 has a patchVersion → got");
-    assert!(!q1.deleted);
-    assert_eq!(q1.ttl, 300000);
-    assert_eq!(q1.inactivated_at, None);
-    assert_eq!(q1.row_count, 2);
-    assert_eq!(q1.ast, Some(serde_json::json!({"table": "issues"})));
-    assert_eq!(q1.name, None);
-    assert_eq!(q1.args, None);
-
-    // c1/q2 — custom query, not got, inactivated but not yet expired, rowCount 0.
-    let q2 = &rows[1];
-    assert!(!q2.got, "q2 has no patchVersion → not got");
-    assert_eq!(q2.ttl, 2000);
-    assert_eq!(q2.inactivated_at, Some(4000));
-    assert_eq!(q2.row_count, 0);
-    assert_eq!(q2.ast, None);
-    assert_eq!(q2.name, Some("myQuery".to_string()));
-    assert_eq!(q2.args, Some(serde_json::json!([42])));
-
-    // ── client filter ──
     let filtered = store
         .inspect_queries(TTL_CLOCK, Some("c2"))
         .await
         .expect("inspect c2");
-    let fids: Vec<(&str, &str)> = filtered
-        .iter()
-        .map(|r| (r.client_id.as_str(), r.query_id.as_str()))
-        .collect();
-    assert_eq!(fids, vec![("c2", "q1")], "client filter keeps only c2");
+    assert_eq!(
+        to_value(filtered),
+        golden["filtered"],
+        "inspect_queries(\"c2\") differs from the TS golden"
+    );
 }

@@ -1,0 +1,63 @@
+{
+  "ttlClock": 5000,
+  "all": [
+    {
+      "clientID": "c1",
+      "queryID": "q1",
+      "ttl": 300000,
+      "inactivatedAt": null,
+      "rowCount": 2,
+      "ast": {
+        "table": "issues"
+      },
+      "got": true,
+      "deleted": false,
+      "name": null,
+      "args": null
+    },
+    {
+      "clientID": "c1",
+      "queryID": "q2",
+      "ttl": 2000,
+      "inactivatedAt": 4000,
+      "rowCount": 0,
+      "ast": null,
+      "got": false,
+      "deleted": false,
+      "name": "myQuery",
+      "args": [
+        42
+      ]
+    },
+    {
+      "clientID": "c2",
+      "queryID": "q1",
+      "ttl": 300000,
+      "inactivatedAt": null,
+      "rowCount": 2,
+      "ast": {
+        "table": "issues"
+      },
+      "got": true,
+      "deleted": false,
+      "name": null,
+      "args": null
+    }
+  ],
+  "filtered": [
+    {
+      "clientID": "c2",
+      "queryID": "q1",
+      "ttl": 300000,
+      "inactivatedAt": null,
+      "rowCount": 2,
+      "ast": {
+        "table": "issues"
+      },
+      "got": true,
+      "deleted": false,
+      "name": null,
+      "args": null
+    }
+  ]
+}
