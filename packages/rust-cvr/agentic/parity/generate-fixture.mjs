@@ -43,6 +43,7 @@ import {
   CVRConfigDrivenUpdater,
   CVRQueryDrivenUpdater,
 } from '../../../zero-cache/src/services/view-syncer/cvr.ts';
+import {CustomKeyMap} from '../../../shared/src/custom-key-map.ts';
 
 // Handpicked inputs that cover the interesting space:
 // - Empty/short strings for the hash functions
@@ -580,7 +581,10 @@ function clientQueryRecord(hash, q) {
 }
 
 function buildExistingRows(specs) {
-  const m = new Map();
+  // getRowRecords() returns a CustomKeyMap keyed by rowIDString — NOT a plain Map
+  // (whose object-reference keying would make received()'s `existingRows.get(id)`
+  // silently miss and spuriously treat every row as new).
+  const m = new CustomKeyMap(rowIDStringTs);
   for (const s of specs) {
     m.set(s.id, {
       id: s.id,
@@ -648,6 +652,29 @@ const QUERY_SCENARIOS = [
       },
     ],
     receivedRows: [],
+  },
+  {
+    desc: 're-execute query; unchanged existing row is re-received at same rowVersion',
+    stateVersion: 'v2',
+    queries: {hash1: {ast: {table: 'issue'}, transformationHash: 'th0', patchVersion: {stateVersion: 'v1'}}},
+    executed: [{id: 'hash1', transformationHash: 'th1'}],
+    removed: [],
+    existingRows: [
+      {
+        id: {schema: 'public', table: 'issue', rowKey: {id: '1'}},
+        rowVersion: 'rv1',
+        patchVersion: {stateVersion: 'v1'},
+        refCounts: {hash1: 1},
+      },
+    ],
+    receivedRows: [
+      {
+        id: {schema: 'public', table: 'issue', rowKey: {id: '1'}},
+        contents: {id: '1', title: 'a'},
+        version: 'rv1',
+        refCounts: {hash1: 1},
+      },
+    ],
   },
   {
     desc: 'received row with a poisoned rowKey (extra non-PK column) passes through',

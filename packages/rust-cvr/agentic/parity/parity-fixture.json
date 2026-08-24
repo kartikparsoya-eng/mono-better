@@ -2464,6 +2464,86 @@
       "finalVersion": "v2"
     },
     {
+      "desc": "re-execute query; unchanged existing row is re-received at same rowVersion",
+      "stateVersion": "v2",
+      "queries": {
+        "hash1": {
+          "ast": {
+            "table": "issue"
+          },
+          "transformationHash": "th0",
+          "patchVersion": {
+            "stateVersion": "v1"
+          }
+        }
+      },
+      "executed": [
+        {
+          "id": "hash1",
+          "transformationHash": "th1"
+        }
+      ],
+      "removed": [],
+      "existingRows": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "rowVersion": "rv1",
+          "patchVersion": {
+            "stateVersion": "v1"
+          },
+          "refCounts": {
+            "hash1": 1
+          }
+        }
+      ],
+      "receivedRows": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1",
+            "title": "a"
+          },
+          "version": "rv1",
+          "refCounts": {
+            "hash1": 1
+          }
+        }
+      ],
+      "trackPatches": [],
+      "receivedPatches": [
+        {
+          "kind": "row",
+          "op": "put",
+          "id": {
+            "schema": "public",
+            "table": "issue",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1",
+            "title": "a"
+          },
+          "toVersion": "v1"
+        }
+      ],
+      "deletePatches": [],
+      "finalVersion": "v2"
+    },
+    {
       "desc": "received row with a poisoned rowKey (extra non-PK column) passes through",
       "stateVersion": "v2",
       "queries": {
