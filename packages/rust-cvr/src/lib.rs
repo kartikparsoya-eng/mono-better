@@ -15,17 +15,16 @@
 pub mod change_processor;
 pub mod client_handler;
 pub mod cvr;
+pub mod cvr_store;
 pub mod hash;
 pub mod live_count;
 pub mod otel_metrics;
 pub mod row_key;
 pub mod row_record_cache;
 pub mod row_set_signature;
-pub mod cvr_store;
 pub mod tracer;
 pub mod ttl;
 pub mod types;
-pub mod updater;
 pub mod version;
 
 #[cfg(test)]

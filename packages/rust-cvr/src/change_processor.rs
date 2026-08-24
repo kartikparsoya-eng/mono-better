@@ -10,9 +10,9 @@
 use std::collections::HashMap;
 
 use crate::client_handler::MultiPoker;
+use crate::cvr::{CVRQueryDrivenUpdater, RowRecordMap};
 use crate::row_key::{RowID, row_id_string};
 use crate::types::{PatchToVersion, RowUpdate};
-use crate::updater::{CVRQueryDrivenUpdater, RowRecordMap};
 
 use serde_json::{Map, Value};
 
