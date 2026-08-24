@@ -14,8 +14,8 @@
 
 use rust_cvr::cvr::CVRQueryDrivenUpdater;
 use rust_cvr::cvr_store::CVRStoreHandle;
-use rust_cvr::types::{RefCounts, RowID, RowUpdate};
 use rust_cvr::schema::types::CVRVersion;
+use rust_cvr::types::{RefCounts, RowID, RowUpdate};
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::HashMap;

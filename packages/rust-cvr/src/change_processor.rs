@@ -212,8 +212,8 @@ impl<'a> ChangeProcessor<'a> {
 mod tests {
     use super::*;
     use crate::client_handler::{ClientHandler, WebSocketSink};
-    use crate::types::ShardID;
     use crate::schema::types::CVRVersion;
+    use crate::types::ShardID;
     use std::sync::{Arc, Mutex as StdMutex};
 
     struct MockSink {

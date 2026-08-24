@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
-use crate::types::StoreOp;
-use crate::types::*;
+use crate::schema::cvr::{ClientsRow, DesiresRow, InstancesRow, QueriesRow};
 use crate::schema::types::{
     CVRVersion, NullableCVRVersion, VersionError, cmp_cvr, try_version_from_string, version_string,
 };
+use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
+use crate::types::StoreOp;
+use crate::types::*;
 use std::cmp::Ordering;
 
 // The time to wait between load() attempts when the rows table is behind the
@@ -55,42 +56,6 @@ pub enum CVRStoreError {
     Sqlx(#[from] sqlx::Error),
 }
 
-// ─── Row types (mirroring PG schema) ────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstancesRow {
-    pub client_group_id: String,
-    pub version: String,
-    pub last_active: f64,
-    pub ttl_clock: f64,
-    pub replica_version: Option<String>,
-    pub owner: Option<String>,
-    pub granted_at: Option<f64>,
-    pub client_schema: Option<Value>,
-    pub profile_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientsRow {
-    pub client_group_id: String,
-    pub client_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueriesRow {
-    pub client_group_id: String,
-    pub query_hash: String,
-    pub client_ast: Option<Value>,
-    pub query_name: Option<String>,
-    pub query_args: Option<Value>,
-    pub patch_version: Option<String>,
-    pub transformation_hash: Option<String>,
-    pub transformation_version: Option<String>,
-    pub internal: Option<bool>,
-    pub deleted: Option<bool>,
-    pub row_set_signature: Option<String>,
-}
-
 type InstanceLoadRow = (
     String,
     f64,
@@ -116,28 +81,6 @@ type QueryLoadRow = (
     Option<String>,
 );
 type DesireLoadRow = (String, String, String, bool, Option<f64>, Option<f64>);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DesiresRow {
-    pub client_group_id: String,
-    pub client_id: String,
-    pub query_hash: String,
-    pub patch_version: String,
-    pub deleted: bool,
-    pub ttl: Option<f64>,
-    pub inactivated_at: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RowsRow {
-    pub client_group_id: String,
-    pub schema: String,
-    pub table: String,
-    pub row_key: Value,
-    pub row_version: String,
-    pub patch_version: String,
-    pub ref_counts: Option<Value>,
-}
 
 // ─── Flush stats ───────────────────────────────────────────────────────────
 
@@ -540,7 +483,9 @@ impl CVRStoreHandle {
                 Some((v, o, g)) => (v, o, g),
                 // No instance row yet → a brand-new CVR (empty version, no owner).
                 None => (
-                    crate::schema::types::EMPTY_CVR_VERSION.state_version.to_string(),
+                    crate::schema::types::EMPTY_CVR_VERSION
+                        .state_version
+                        .to_string(),
                     None,
                     None,
                 ),
@@ -926,7 +871,7 @@ impl CVRStoreHandle {
                 upserts
                     .iter()
                     .map(|r| {
-                        serde_json::to_value(crate::row_record_cache::row_record_to_rows_row(
+                        serde_json::to_value(crate::schema::cvr::row_record_to_rows_row(
                             &self.cvr_id,
                             r,
                         ))
@@ -1118,9 +1063,11 @@ impl CVRStoreHandle {
                 // the ownership grant fires (below) so the previous owner is
                 // signalled to flush before we retry. Port of TS `#load`'s
                 // `version !== (rowsVersion ?? EMPTY_CVR_VERSION.stateVersion)`.
-                let expected_rows = rows_version
-                    .clone()
-                    .unwrap_or_else(|| crate::schema::types::EMPTY_CVR_VERSION.state_version.to_string());
+                let expected_rows = rows_version.clone().unwrap_or_else(|| {
+                    crate::schema::types::EMPTY_CVR_VERSION
+                        .state_version
+                        .to_string()
+                });
                 if version != expected_rows {
                     rows_behind = Some((version.clone(), rows_version));
                 }

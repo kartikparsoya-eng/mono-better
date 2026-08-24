@@ -21,8 +21,8 @@ use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
 
-use crate::types::*;
 use crate::schema::types::{CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, version_string};
+use crate::types::*;
 use std::cmp::Ordering;
 
 const PART_COUNT_FLUSH_THRESHOLD: usize = 100;

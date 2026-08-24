@@ -2,4 +2,5 @@
 //! the CVR Postgres schema (`schema/cvr.ts`) and the shared CVR type/version
 //! system (`schema/types.ts`).
 
+pub mod cvr;
 pub mod types;

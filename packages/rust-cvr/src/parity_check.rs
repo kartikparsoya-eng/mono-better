@@ -40,22 +40,23 @@ use crate::cvr::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater};
 use crate::cvr::{
     get_inactive_queries, get_mutation_results_query, merge_ref_counts, next_eviction_time,
 };
-use crate::cvr_store::{QueriesRow, as_query, query_record_to_query_row};
+use crate::cvr_store::{as_query, query_record_to_query_row};
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{
     RowID, RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
 };
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
+use crate::schema::cvr::QueriesRow;
+use crate::schema::types::{
+    CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, one_after,
+    try_version_from_string, version_from_lexi, version_from_string, version_string,
+    version_to_cookie, version_to_lexi, version_to_nullable_cookie,
+};
 use crate::ttl::{TTL, clamp_ttl, compare_ttl, parse_ttl, parse_ttl_string};
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, DesiredQuerySpec,
     InternalQueryRecord, Patch, PatchToVersion, QueryPatch, QueryRecord, RefCounts, RowPatch,
     RowRecord, RowUpdate, ShardID, StoreOp,
-};
-use crate::schema::types::{
-    CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, one_after,
-    try_version_from_string, version_from_lexi, version_from_string, version_string,
-    version_to_cookie, version_to_lexi, version_to_nullable_cookie,
 };
 use serde_json::Value;
 use std::cmp::Ordering;

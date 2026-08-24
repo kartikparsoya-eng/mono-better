@@ -17,9 +17,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::Value;
 
 use crate::row_key::RowID;
+use crate::schema::types::{CVRVersion, cmp_cvr, cmp_versions, max_version, one_after};
 use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl, compare_ttl};
 use crate::types::*;
-use crate::schema::types::{CVRVersion, cmp_cvr, cmp_versions, max_version, one_after};
 
 /// Merge existing refCounts with received refCounts, optionally removing
 /// hashes in `remove_hashes` from the existing set.
