@@ -1,111 +1,264 @@
 {
-  "received": [
+  "connectTime": 1725408000000,
+  "now": 1725494400000,
+  "scenarios": [
     {
-      "id": {
-        "schema": "public",
-        "table": "issues",
-        "rowKey": {
-          "id": "1"
+      "name": "single-query-mixed-keys",
+      "baseSeedSql": "\n  INSERT INTO \"roze_1/cvr\".instances (\"clientGroupID\", version, \"lastActive\", \"ttlClock\", \"replicaVersion\")\n    VALUES ('cg-flush', '01', to_timestamp(1725408000000 / 1000.0), 1725408000000, '01');\n  INSERT INTO \"roze_1/cvr\".\"rowsVersion\" (\"clientGroupID\", version) VALUES ('cg-flush', '01');\nINSERT INTO \"roze_1/cvr\".queries (\"clientGroupID\", \"queryHash\", \"clientAST\", \"patchVersion\", \"transformationHash\", \"transformationVersion\")\n           VALUES ('cg-flush', 'foo', '{\"table\":\"issues\"}', '01', 'foo-t', '01');",
+      "tracked": {
+        "executed": [
+          [
+            "foo",
+            "foo-t"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1"
+          },
+          "refCounts": {
+            "foo": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "2"
+            }
+          },
+          "contents": {
+            "a": 1
+          },
+          "refCounts": {
+            "foo": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "3",
+              "_leaked": "oops"
+            }
+          },
+          "contents": {
+            "id": "3"
+          },
+          "refCounts": {
+            "foo": 1
+          }
         }
-      },
-      "contents": {
-        "id": "1"
-      },
-      "refCounts": {
-        "foo": 1
+      ],
+      "expected": {
+        "rows": [
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "foo": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "3",
+              "_leaked": "oops"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "foo": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "2"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "foo": 1
+            }
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "foo",
+            "patchVersion": "01",
+            "transformationHash": "foo-t",
+            "deleted": null
+          }
+        ],
+        "instances": [
+          {
+            "version": "02",
+            "replicaVersion": "01",
+            "ttlClock": 1725494400000
+          }
+        ],
+        "rowsVersion": [
+          {
+            "version": "02"
+          }
+        ]
       }
     },
     {
-      "id": {
-        "schema": "public",
-        "table": "labels",
-        "rowKey": {
-          "issueID": "1",
-          "labelID": "2"
+      "name": "multi-query-shared-refcounts",
+      "baseSeedSql": "\n  INSERT INTO \"roze_1/cvr\".instances (\"clientGroupID\", version, \"lastActive\", \"ttlClock\", \"replicaVersion\")\n    VALUES ('cg-flush', '01', to_timestamp(1725408000000 / 1000.0), 1725408000000, '01');\n  INSERT INTO \"roze_1/cvr\".\"rowsVersion\" (\"clientGroupID\", version) VALUES ('cg-flush', '01');\nINSERT INTO \"roze_1/cvr\".queries (\"clientGroupID\", \"queryHash\", \"clientAST\", \"patchVersion\", \"transformationHash\", \"transformationVersion\")\n           VALUES\n           ('cg-flush', 'foo', '{\"table\":\"issues\"}', '01', 'foo-t', '01'),\n           ('cg-flush', 'bar', '{\"table\":\"labels\"}', '01', 'bar-t', '01');",
+      "tracked": {
+        "executed": [
+          [
+            "foo",
+            "foo-t"
+          ],
+          [
+            "bar",
+            "bar-t"
+          ]
+        ],
+        "removed": []
+      },
+      "received": [
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            }
+          },
+          "contents": {
+            "id": "1"
+          },
+          "refCounts": {
+            "foo": 1,
+            "bar": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            }
+          },
+          "contents": {
+            "id": "2"
+          },
+          "refCounts": {
+            "foo": 1
+          }
+        },
+        {
+          "id": {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "2"
+            }
+          },
+          "contents": {
+            "a": 1
+          },
+          "refCounts": {
+            "bar": 1
+          }
         }
-      },
-      "contents": {
-        "a": 1
-      },
-      "refCounts": {
-        "foo": 1
+      ],
+      "expected": {
+        "rows": [
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "1"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "bar": 1,
+              "foo": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "issues",
+            "rowKey": {
+              "id": "2"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "foo": 1
+            }
+          },
+          {
+            "schema": "public",
+            "table": "labels",
+            "rowKey": {
+              "issueID": "1",
+              "labelID": "2"
+            },
+            "rowVersion": "02",
+            "patchVersion": "02",
+            "refCounts": {
+              "bar": 1
+            }
+          }
+        ],
+        "queries": [
+          {
+            "queryHash": "bar",
+            "patchVersion": "01",
+            "transformationHash": "bar-t",
+            "deleted": null
+          },
+          {
+            "queryHash": "foo",
+            "patchVersion": "01",
+            "transformationHash": "foo-t",
+            "deleted": null
+          }
+        ],
+        "instances": [
+          {
+            "version": "02",
+            "replicaVersion": "01",
+            "ttlClock": 1725494400000
+          }
+        ],
+        "rowsVersion": [
+          {
+            "version": "02"
+          }
+        ]
       }
-    },
-    {
-      "id": {
-        "schema": "public",
-        "table": "issues",
-        "rowKey": {
-          "id": "3",
-          "_leaked": "oops"
-        }
-      },
-      "contents": {
-        "id": "3"
-      },
-      "refCounts": {
-        "foo": 1
-      }
-    }
-  ],
-  "rows": [
-    {
-      "schema": "public",
-      "table": "issues",
-      "rowKey": {
-        "id": "1"
-      },
-      "rowVersion": "02",
-      "patchVersion": "02",
-      "refCounts": {
-        "foo": 1
-      }
-    },
-    {
-      "schema": "public",
-      "table": "issues",
-      "rowKey": {
-        "id": "3",
-        "_leaked": "oops"
-      },
-      "rowVersion": "02",
-      "patchVersion": "02",
-      "refCounts": {
-        "foo": 1
-      }
-    },
-    {
-      "schema": "public",
-      "table": "labels",
-      "rowKey": {
-        "issueID": "1",
-        "labelID": "2"
-      },
-      "rowVersion": "02",
-      "patchVersion": "02",
-      "refCounts": {
-        "foo": 1
-      }
-    }
-  ],
-  "queries": [
-    {
-      "queryHash": "foo",
-      "patchVersion": "01",
-      "transformationHash": "foo-t",
-      "deleted": null
-    }
-  ],
-  "instances": [
-    {
-      "version": "02",
-      "replicaVersion": "01",
-      "ttlClock": 1725494400000
-    }
-  ],
-  "rowsVersion": [
-    {
-      "version": "02"
     }
   ]
 }

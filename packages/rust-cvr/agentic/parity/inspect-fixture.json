@@ -1,63 +1,216 @@
 {
-  "ttlClock": 5000,
-  "all": [
+  "scenarios": [
     {
-      "clientID": "c1",
-      "queryID": "q1",
-      "ttl": 300000,
-      "inactivatedAt": null,
-      "rowCount": 2,
-      "ast": {
-        "table": "issues"
-      },
-      "got": true,
-      "deleted": false,
-      "name": null,
-      "args": null
+      "name": "base",
+      "ttlClock": 5000,
+      "filters": [
+        null,
+        "c2"
+      ],
+      "seedSql": "\n      INSERT INTO \"roze_1/cvr\".instances (\"clientGroupID\", version, \"lastActive\", \"ttlClock\", \"replicaVersion\")\n        VALUES ('cg-inspect', '01', to_timestamp(0), 0, '01');\n      INSERT INTO \"roze_1/cvr\".\"rowsVersion\" (\"clientGroupID\", version) VALUES ('cg-inspect', '01');\n      INSERT INTO \"roze_1/cvr\".queries (\"clientGroupID\", \"queryHash\", \"clientAST\", \"queryName\", \"queryArgs\", \"patchVersion\", internal, deleted)\n        VALUES\n        ('cg-inspect', 'q1', '{\"table\":\"issues\"}', NULL, NULL, '01', false, false),\n        ('cg-inspect', 'q2', NULL, 'myQuery', '[42]', NULL, false, false),\n        ('cg-inspect', 'q3', '{\"table\":\"labels\"}', NULL, NULL, NULL, false, false);\n      INSERT INTO \"roze_1/cvr\".desires (\"clientGroupID\", \"clientID\", \"queryHash\", \"patchVersion\", deleted, \"ttlMs\", \"inactivatedAtMs\")\n        VALUES\n        ('cg-inspect', 'c1', 'q1', '01', false, 300000, NULL),\n        ('cg-inspect', 'c1', 'q2', '01', false, 2000,   4000),\n        ('cg-inspect', 'c1', 'q3', '01', false, 1000,   1000),\n        ('cg-inspect', 'c2', 'q1', '01', false, 300000, NULL);\n      INSERT INTO \"roze_1/cvr\".rows (\"clientGroupID\", schema, \"table\", \"rowKey\", \"rowVersion\", \"patchVersion\", \"refCounts\")\n        VALUES\n        ('cg-inspect', 'public', 'issues', '{\"id\":\"1\"}', '01', '01', '{\"q1\":1}'),\n        ('cg-inspect', 'public', 'issues', '{\"id\":\"2\"}', '01', '01', '{\"q1\":1}');\n    ",
+      "results": {
+        "null": [
+          {
+            "clientID": "c1",
+            "queryID": "q1",
+            "ttl": 300000,
+            "inactivatedAt": null,
+            "rowCount": 2,
+            "ast": {
+              "table": "issues"
+            },
+            "got": true,
+            "deleted": false,
+            "name": null,
+            "args": null
+          },
+          {
+            "clientID": "c1",
+            "queryID": "q2",
+            "ttl": 2000,
+            "inactivatedAt": 4000,
+            "rowCount": 0,
+            "ast": null,
+            "got": false,
+            "deleted": false,
+            "name": "myQuery",
+            "args": [
+              42
+            ]
+          },
+          {
+            "clientID": "c2",
+            "queryID": "q1",
+            "ttl": 300000,
+            "inactivatedAt": null,
+            "rowCount": 2,
+            "ast": {
+              "table": "issues"
+            },
+            "got": true,
+            "deleted": false,
+            "name": null,
+            "args": null
+          }
+        ],
+        "c2": [
+          {
+            "clientID": "c2",
+            "queryID": "q1",
+            "ttl": 300000,
+            "inactivatedAt": null,
+            "rowCount": 2,
+            "ast": {
+              "table": "issues"
+            },
+            "got": true,
+            "deleted": false,
+            "name": null,
+            "args": null
+          }
+        ]
+      }
     },
     {
-      "clientID": "c1",
-      "queryID": "q2",
-      "ttl": 2000,
-      "inactivatedAt": 4000,
-      "rowCount": 0,
-      "ast": null,
-      "got": false,
-      "deleted": false,
-      "name": "myQuery",
-      "args": [
-        42
-      ]
+      "name": "ttl-boundary",
+      "ttlClock": 6000,
+      "filters": [
+        null
+      ],
+      "seedSql": "\n      INSERT INTO \"roze_1/cvr\".instances (\"clientGroupID\", version, \"lastActive\", \"ttlClock\", \"replicaVersion\")\n        VALUES ('cg-inspect', '01', to_timestamp(0), 0, '01');\n      INSERT INTO \"roze_1/cvr\".\"rowsVersion\" (\"clientGroupID\", version) VALUES ('cg-inspect', '01');\n      INSERT INTO \"roze_1/cvr\".queries (\"clientGroupID\", \"queryHash\", \"clientAST\", \"queryName\", \"queryArgs\", \"patchVersion\", internal, deleted)\n        VALUES\n        ('cg-inspect', 'below', '{\"table\":\"a\"}', NULL, NULL, '01', false, false),\n        ('cg-inspect', 'at',    '{\"table\":\"b\"}', NULL, NULL, '01', false, false),\n        ('cg-inspect', 'above', '{\"table\":\"c\"}', NULL, NULL, '01', false, false),\n        ('cg-inspect', 'active','{\"table\":\"d\"}', NULL, NULL, '01', false, false);\n      INSERT INTO \"roze_1/cvr\".desires (\"clientGroupID\", \"clientID\", \"queryHash\", \"patchVersion\", deleted, \"ttlMs\", \"inactivatedAtMs\")\n        VALUES\n        ('cg-inspect', 'c1', 'below',  '01', false, 1000, 4000),   -- 5000 <  6000 -> filtered\n        ('cg-inspect', 'c1', 'at',     '01', false, 1000, 5000),   -- 6000 <= 6000 -> filtered\n        ('cg-inspect', 'c1', 'above',  '01', false, 1000, 5500),   -- 6500 >  6000 -> kept\n        ('cg-inspect', 'c1', 'active', '01', false, 300000, NULL); -- never inactivated -> kept\n    ",
+      "results": {
+        "null": [
+          {
+            "clientID": "c1",
+            "queryID": "above",
+            "ttl": 1000,
+            "inactivatedAt": 5500,
+            "rowCount": 0,
+            "ast": {
+              "table": "c"
+            },
+            "got": true,
+            "deleted": false,
+            "name": null,
+            "args": null
+          },
+          {
+            "clientID": "c1",
+            "queryID": "active",
+            "ttl": 300000,
+            "inactivatedAt": null,
+            "rowCount": 0,
+            "ast": {
+              "table": "d"
+            },
+            "got": true,
+            "deleted": false,
+            "name": null,
+            "args": null
+          }
+        ]
+      }
     },
     {
-      "clientID": "c2",
-      "queryID": "q1",
-      "ttl": 300000,
-      "inactivatedAt": null,
-      "rowCount": 2,
-      "ast": {
-        "table": "issues"
-      },
-      "got": true,
-      "deleted": false,
-      "name": null,
-      "args": null
-    }
-  ],
-  "filtered": [
-    {
-      "clientID": "c2",
-      "queryID": "q1",
-      "ttl": 300000,
-      "inactivatedAt": null,
-      "rowCount": 2,
-      "ast": {
-        "table": "issues"
-      },
-      "got": true,
-      "deleted": false,
-      "name": null,
-      "args": null
+      "name": "custom-crud-multi",
+      "ttlClock": 5000,
+      "filters": [
+        null,
+        "c1",
+        "nobody"
+      ],
+      "seedSql": "\n      INSERT INTO \"roze_1/cvr\".instances (\"clientGroupID\", version, \"lastActive\", \"ttlClock\", \"replicaVersion\")\n        VALUES ('cg-inspect', '01', to_timestamp(0), 0, '01');\n      INSERT INTO \"roze_1/cvr\".\"rowsVersion\" (\"clientGroupID\", version) VALUES ('cg-inspect', '01');\n      INSERT INTO \"roze_1/cvr\".queries (\"clientGroupID\", \"queryHash\", \"clientAST\", \"queryName\", \"queryArgs\", \"patchVersion\", internal, deleted)\n        VALUES\n        ('cg-inspect', 'crudGot',   '{\"table\":\"issues\"}', NULL,       NULL,        '02', false, false),\n        ('cg-inspect', 'crudUngot', '{\"table\":\"labels\"}', NULL,       NULL,        NULL, false, false),\n        ('cg-inspect', 'customGot', NULL,                 'namedA',   '[1,\"x\"]',   '02', false, false),\n        ('cg-inspect', 'customUngot', NULL,               'namedB',   '[]',        NULL, false, false),\n        ('cg-inspect', 'internalQ', '{\"table\":\"z\"}',      NULL,       NULL,        '01', true,  false);\n      INSERT INTO \"roze_1/cvr\".desires (\"clientGroupID\", \"clientID\", \"queryHash\", \"patchVersion\", deleted, \"ttlMs\", \"inactivatedAtMs\")\n        VALUES\n        ('cg-inspect', 'c1', 'crudGot',     '02', false, NULL,   NULL),\n        ('cg-inspect', 'c1', 'customGot',   '02', false, 100000, NULL),\n        ('cg-inspect', 'c2', 'crudUngot',   '01', false, 100000, NULL),\n        ('cg-inspect', 'c2', 'customUngot', '01', false, NULL,   NULL);\n      INSERT INTO \"roze_1/cvr\".rows (\"clientGroupID\", schema, \"table\", \"rowKey\", \"rowVersion\", \"patchVersion\", \"refCounts\")\n        VALUES\n        ('cg-inspect', 'public', 'issues', '{\"id\":\"1\"}', '02', '02', '{\"crudGot\":1}'),\n        ('cg-inspect', 'public', 'mutations', '{\"id\":\"m1\"}', '02', '02', '{\"customGot\":2}');\n    ",
+      "results": {
+        "null": [
+          {
+            "clientID": "c1",
+            "queryID": "crudGot",
+            "ttl": 300000,
+            "inactivatedAt": null,
+            "rowCount": 1,
+            "ast": {
+              "table": "issues"
+            },
+            "got": true,
+            "deleted": false,
+            "name": null,
+            "args": null
+          },
+          {
+            "clientID": "c1",
+            "queryID": "customGot",
+            "ttl": 100000,
+            "inactivatedAt": null,
+            "rowCount": 1,
+            "ast": null,
+            "got": true,
+            "deleted": false,
+            "name": "namedA",
+            "args": [
+              1,
+              "x"
+            ]
+          },
+          {
+            "clientID": "c2",
+            "queryID": "crudUngot",
+            "ttl": 100000,
+            "inactivatedAt": null,
+            "rowCount": 0,
+            "ast": {
+              "table": "labels"
+            },
+            "got": false,
+            "deleted": false,
+            "name": null,
+            "args": null
+          },
+          {
+            "clientID": "c2",
+            "queryID": "customUngot",
+            "ttl": 300000,
+            "inactivatedAt": null,
+            "rowCount": 0,
+            "ast": null,
+            "got": false,
+            "deleted": false,
+            "name": "namedB",
+            "args": []
+          }
+        ],
+        "c1": [
+          {
+            "clientID": "c1",
+            "queryID": "crudGot",
+            "ttl": 300000,
+            "inactivatedAt": null,
+            "rowCount": 1,
+            "ast": {
+              "table": "issues"
+            },
+            "got": true,
+            "deleted": false,
+            "name": null,
+            "args": null
+          },
+          {
+            "clientID": "c1",
+            "queryID": "customGot",
+            "ttl": 100000,
+            "inactivatedAt": null,
+            "rowCount": 1,
+            "ast": null,
+            "got": true,
+            "deleted": false,
+            "name": "namedA",
+            "args": [
+              1,
+              "x"
+            ]
+          }
+        ],
+        "nobody": []
+      }
     }
   ]
 }

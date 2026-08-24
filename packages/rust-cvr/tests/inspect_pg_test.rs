@@ -1,10 +1,16 @@
-//! Live-Postgres TS-vs-Rust differential for `CVRStore::inspect_queries` (port
-//! of TS `CVRStore.inspectQueries`, cvr-store.ts). Seeds desires / queries / rows
-//! byte-identically to `agentic/parity/generate-inspect-fixture.mjs` (which drives
-//! the REAL TS impl → `inspect-fixture.json`), then asserts the Rust output equals
-//! that golden — pinning the SQL semantics (LEFT JOIN desires→queries, rowCount via
-//! `refCounts ? queryHash`, got flag, COALESCE(ttlMs, DEFAULT), TTL-expiry filter,
-//! client filter, `(clientID, queryHash)` ordering) against actual TS output.
+//! Live-Postgres, seed-parameterized TS-vs-Rust differential for
+//! `CVRStore::inspect_queries` (port of TS `CVRStore.inspectQueries`).
+//!
+//! The golden (`agentic/parity/generate-inspect-fixture.mjs`) defines several
+//! scenarios — got/not-got, custom vs crud, TTL-expiry boundaries (`<=`), a
+//! client with no rows, and client filters that match nothing — and drives the
+//! REAL TS impl over each. Every scenario is SELF-CONTAINED: it carries its own
+//! `seedSql` plus expected results per filter. This test replays that exact
+//! `seedSql` (so the seed data cannot drift between the two languages), runs the
+//! Rust `inspect_queries`, and asserts each filter's output equals the TS golden —
+//! pinning the SQL semantics (LEFT JOIN desires→queries, rowCount via
+//! `refCounts ? queryHash`, got flag, COALESCE(ttlMs, DEFAULT), the TTL-expiry
+//! filter, client filter, ordering).
 //!
 //! Regenerate the golden with:
 //!   TEST_CVR_PG_URI=... npx tsx agentic/parity/generate-inspect-fixture.mjs
@@ -18,7 +24,6 @@ use serde_json::Value;
 const SCHEMA: &str = "roze_1/cvr";
 const CVR_ID: &str = "cg-inspect";
 const TASK_ID: &str = "inspect-task";
-const TTL_CLOCK: TTLClock = 5_000;
 
 #[tokio::test]
 async fn inspect_queries_matches_ts_sql() {
@@ -35,57 +40,11 @@ async fn inspect_queries_matches_ts_sql() {
         .await
         .expect("connect to TEST_CVR_PG_URI");
 
-    sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE"#))
-        .execute(&pool)
-        .await
-        .expect("drop schema");
-    sqlx::raw_sql(include_str!("../agentic/parity/flush-schema.sql"))
-        .execute(&pool)
-        .await
-        .expect("create schema");
-
-    // Seed instances → queries → desires → rows (respecting FKs).
-    sqlx::raw_sql(&format!(
-        r#"
-        INSERT INTO "{SCHEMA}".instances ("clientGroupID", version, "lastActive", "ttlClock", "replicaVersion")
-          VALUES ('{CVR_ID}', '01', to_timestamp(0), 0, '01');
-        INSERT INTO "{SCHEMA}"."rowsVersion" ("clientGroupID", version) VALUES ('{CVR_ID}', '01');
-
-        INSERT INTO "{SCHEMA}".queries ("clientGroupID", "queryHash", "clientAST", "queryName", "queryArgs", "patchVersion", internal, deleted)
-          VALUES
-          ('{CVR_ID}', 'q1', '{{"table":"issues"}}', NULL, NULL, '01', false, false),   -- client query, got
-          ('{CVR_ID}', 'q2', NULL, 'myQuery', '[42]', NULL, false, false),               -- custom query, not got
-          ('{CVR_ID}', 'q3', '{{"table":"labels"}}', NULL, NULL, NULL, false, false);    -- client query, will be TTL-expired
-
-        INSERT INTO "{SCHEMA}".desires ("clientGroupID", "clientID", "queryHash", "patchVersion", deleted, "ttlMs", "inactivatedAtMs")
-          VALUES
-          ('{CVR_ID}', 'c1', 'q1', '01', false, 300000, NULL),   -- active, ttl default-ish
-          ('{CVR_ID}', 'c1', 'q2', '01', false, 2000,   4000),   -- inactivated 4000+2000=6000 > 5000 → kept
-          ('{CVR_ID}', 'c1', 'q3', '01', false, 1000,   1000),   -- inactivated 1000+1000=2000 <= 5000 → filtered
-          ('{CVR_ID}', 'c2', 'q1', '01', false, 300000, NULL);   -- second client, for the client filter
-
-        INSERT INTO "{SCHEMA}".rows ("clientGroupID", schema, "table", "rowKey", "rowVersion", "patchVersion", "refCounts")
-          VALUES
-          ('{CVR_ID}', 'public', 'issues', '{{"id":"1"}}', '01', '01', '{{"q1":1}}'),
-          ('{CVR_ID}', 'public', 'issues', '{{"id":"2"}}', '01', '01', '{{"q1":1}}');
-        "#
-    ))
-    .execute(&pool)
-    .await
-    .expect("seed");
-
-    let store = CVRStoreHandle::new(
-        pool.clone(),
-        SCHEMA.to_string(),
-        CVR_ID.to_string(),
-        TASK_ID.to_string(),
-    );
-
-    // TS golden from generate-inspect-fixture.mjs (real CVRStore.inspectQueries
-    // over the byte-identical seed above).
     let golden: Value =
         serde_json::from_str(include_str!("../agentic/parity/inspect-fixture.json"))
             .expect("inspect-fixture.json");
+    let scenarios = golden["scenarios"].as_array().expect("scenarios array");
+    assert!(!scenarios.is_empty(), "no inspect scenarios in golden");
 
     // Structural comparison (parsed Value): the TS SQL emits columns in SELECT
     // order, the Rust struct in protocol order — object equality is order-
@@ -98,23 +57,47 @@ async fn inspect_queries_matches_ts_sql() {
         )
     };
 
-    let all = store
-        .inspect_queries(TTL_CLOCK, None)
-        .await
-        .expect("inspect all");
-    assert_eq!(
-        to_value(all),
-        golden["all"],
-        "inspect_queries(None) differs from the TS golden"
-    );
+    let mut checked = 0;
+    for sc in scenarios {
+        let name = sc["name"].as_str().unwrap_or("?");
+        let seed_sql = sc["seedSql"].as_str().expect("seedSql");
+        let ttl_clock = sc["ttlClock"].as_i64().expect("ttlClock") as TTLClock;
 
-    let filtered = store
-        .inspect_queries(TTL_CLOCK, Some("c2"))
-        .await
-        .expect("inspect c2");
-    assert_eq!(
-        to_value(filtered),
-        golden["filtered"],
-        "inspect_queries(\"c2\") differs from the TS golden"
-    );
+        // Fresh schema from the exact TS DDL, then the scenario's own seed.
+        sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE"#))
+            .execute(&pool)
+            .await
+            .expect("drop schema");
+        sqlx::raw_sql(include_str!("../agentic/parity/flush-schema.sql"))
+            .execute(&pool)
+            .await
+            .expect("create schema");
+        sqlx::raw_sql(seed_sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("seed scenario {name}: {e}"));
+
+        let store = CVRStoreHandle::new(
+            pool.clone(),
+            SCHEMA.to_string(),
+            CVR_ID.to_string(),
+            TASK_ID.to_string(),
+        );
+
+        for f in sc["filters"].as_array().expect("filters") {
+            let filter: Option<&str> = f.as_str();
+            let key = filter.unwrap_or("null");
+            let actual = store
+                .inspect_queries(ttl_clock, filter)
+                .await
+                .unwrap_or_else(|e| panic!("inspect scenario {name} filter {key}: {e}"));
+            assert_eq!(
+                to_value(actual),
+                sc["results"][key],
+                "inspect scenario `{name}` filter `{key}` differs from the TS golden"
+            );
+            checked += 1;
+        }
+    }
+    eprintln!("inspect differential: {checked} scenario/filter cases matched the TS golden");
 }

@@ -670,5 +670,26 @@ mod tests {
             let b = Some(CVRVersion { state_version: version_to_lexi(sb), config_version: cb });
             prop_assert_eq!(cmp_versions(&a, &b), cmp_versions(&b, &a).reverse());
         }
+
+        // Total-order transitivity: the missing half of the order laws (with
+        // antisymmetry above). If a <= b and b <= c then a <= c — a broken
+        // configVersion tie-break or a non-lexi stateVersion compare would let
+        // versions sort inconsistently as CVR keys. Small state domain so triples
+        // actually collide on stateVersion and exercise the configVersion tie-break.
+        #[test]
+        fn prop_cmp_transitive(
+            sa in 0u64..6, ca in proptest::option::of(0u64..4),
+            sb in 0u64..6, cb in proptest::option::of(0u64..4),
+            sc in 0u64..6, cc in proptest::option::of(0u64..4),
+        ) {
+            let a = Some(CVRVersion { state_version: version_to_lexi(sa), config_version: ca });
+            let b = Some(CVRVersion { state_version: version_to_lexi(sb), config_version: cb });
+            let c = Some(CVRVersion { state_version: version_to_lexi(sc), config_version: cc });
+            if cmp_versions(&a, &b) != Ordering::Greater
+                && cmp_versions(&b, &c) != Ordering::Greater
+            {
+                prop_assert_ne!(cmp_versions(&a, &c), Ordering::Greater);
+            }
+        }
     }
 }

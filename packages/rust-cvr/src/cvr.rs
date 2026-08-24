@@ -1561,6 +1561,63 @@ mod tests {
                 prop_assert!(m.values().any(|&v| v > 0));
             }
         }
+
+        // mergeRefCounts algebra. TS (cvr.ts `mergeRefCounts`) has TWO branches
+        // with DIFFERENT semantics, so the invariants are branch-specific:
+        //
+        //  • existing = Some: per-hash integer ADDITION with the remove-filter on
+        //    the existing side only, zeros stripped from the map. So for every
+        //    hash, merged[h] (absent = 0) == filtered_existing[h] + received[h],
+        //    and every retained value is nonzero.
+        //  • existing = None: `merged = received ?? {}` — a raw copy that RETAINS
+        //    zero entries and ignores remove_hashes. So a Some result equals
+        //    `received` verbatim (this pins the documented zero-retention
+        //    asymmetry — a prior real bug dropped those zeros).
+        //
+        // Both branches share the null rule: Some iff some count is > 0.
+        #[test]
+        fn prop_merge_ref_counts_algebra(
+            ex in proptest::option::of(proptest::collection::btree_map("[a-e]", -3i64..4, 0..5)),
+            rv in proptest::option::of(proptest::collection::btree_map("[a-e]", -3i64..4, 0..5)),
+            rh in proptest::collection::hash_set("[a-e]", 0..3),
+        ) {
+            let rh = if rh.is_empty() { None } else { Some(rh) };
+            let out = merge_ref_counts(ex.as_ref(), rv.as_ref(), rh.as_ref());
+
+            match ex.as_ref() {
+                Some(_) => {
+                    if let Some(m) = out.as_ref() {
+                        // zeros are stripped in the existing=Some branch
+                        for &v in m.values() {
+                            prop_assert_ne!(v, 0);
+                        }
+                        // additive law over the union of hashes (remove-filter on existing)
+                        let mut hashes: std::collections::BTreeSet<String> = Default::default();
+                        if let Some(e) = ex.as_ref() { hashes.extend(e.keys().cloned()); }
+                        if let Some(r) = rv.as_ref() { hashes.extend(r.keys().cloned()); }
+                        for h in hashes {
+                            let removed = rh.as_ref().is_some_and(|s| s.contains(&h));
+                            let e = if removed {
+                                0
+                            } else {
+                                ex.as_ref().and_then(|m| m.get(&h)).copied().unwrap_or(0)
+                            };
+                            let r = rv.as_ref().and_then(|m| m.get(&h)).copied().unwrap_or(0);
+                            prop_assert_eq!(m.get(&h).copied().unwrap_or(0), e + r);
+                        }
+                    }
+                }
+                None => {
+                    // existing=None: Some(received-verbatim, zeros kept) iff any positive.
+                    match rv.as_ref() {
+                        Some(r) if r.values().any(|&v| v > 0) => {
+                            prop_assert_eq!(out.as_ref(), Some(r));
+                        }
+                        _ => prop_assert!(out.is_none()),
+                    }
+                }
+            }
+        }
     }
 }
 
