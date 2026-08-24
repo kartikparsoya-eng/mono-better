@@ -302,8 +302,15 @@ impl CVRConfigDrivenUpdater {
             .unwrap()
             .desired_query_ids = combined;
 
-        for id in &needed {
-            let q = queries.iter().find(|q| &q.hash == id).unwrap();
+        // Emit in input order (TS iterates an insertion-ordered Set), deduping
+        // repeated hashes. Iterating `needed` (a HashSet) directly would give
+        // nondeterministic patch/StoreOp order and diverge from TS.
+        let mut emitted: HashSet<&str> = HashSet::new();
+        for q in queries {
+            let id = &q.hash;
+            if !needed.contains(id) || !emitted.insert(id.as_str()) {
+                continue;
+            }
             let ttl = clamp_ttl(TTL::Ms(q.ttl.unwrap_or(DEFAULT_TTL_MS)));
 
             // Get or create the query record.
