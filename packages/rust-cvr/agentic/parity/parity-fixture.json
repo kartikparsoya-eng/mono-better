@@ -3252,5 +3252,76 @@
         ]
       ]
     }
+  ],
+  "deleteClientsScenarios": [
+    {
+      "desc": "both clientIDs and clientGroupIDs",
+      "clientIDs": [
+        "c1",
+        "c2"
+      ],
+      "clientGroupIDs": [
+        "cg1"
+      ],
+      "messages": [
+        [
+          "deleteClients",
+          {
+            "clientIDs": [
+              "c1",
+              "c2"
+            ],
+            "clientGroupIDs": [
+              "cg1"
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "desc": "only clientIDs",
+      "clientIDs": [
+        "c1"
+      ],
+      "clientGroupIDs": [],
+      "messages": [
+        [
+          "deleteClients",
+          {
+            "clientIDs": [
+              "c1"
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "desc": "only clientGroupIDs",
+      "clientIDs": [],
+      "clientGroupIDs": [
+        "cg1"
+      ],
+      "messages": [
+        [
+          "deleteClients",
+          {
+            "clientGroupIDs": [
+              "cg1"
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "desc": "both empty -> empty body",
+      "clientIDs": [],
+      "clientGroupIDs": [],
+      "messages": [
+        [
+          "deleteClients",
+          {}
+        ]
+      ]
+    }
   ]
 }

@@ -1526,4 +1526,37 @@ fn parity_check() {
             cg
         );
     }
+
+    // ---- ⑪ ClientHandler.sendDeleteClients wire message ----
+    for entry in fixture
+        .get("deleteClientsScenarios")
+        .and_then(Value::as_array)
+        .expect("fixture.deleteClientsScenarios missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let sink = std::sync::Arc::new(CaptureSink {
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let handler =
+            ClientHandler::new("cg", "client1", "ws1", &parity_shard(), None, sink.clone());
+        let strs = |k: &str| -> Vec<String> {
+            entry
+                .get(k)
+                .and_then(Value::as_array)
+                .expect("array")
+                .iter()
+                .map(|v| v.as_str().expect("str").to_string())
+                .collect()
+        };
+        handler
+            .send_delete_clients(strs("clientIDs"), strs("clientGroupIDs"))
+            .expect("send_delete_clients");
+        let actual = Value::Array(sink.messages.lock().unwrap().clone());
+        assert_eq!(
+            &actual,
+            entry.get("messages").expect("messages"),
+            "sendDeleteClients message mismatch [{}]",
+            desc
+        );
+    }
 }

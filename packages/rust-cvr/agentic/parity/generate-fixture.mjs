@@ -908,8 +908,30 @@ async function runPokeScenario(sc) {
   };
 }
 
+const DELETE_CLIENTS_SCENARIOS = [
+  {desc: 'both clientIDs and clientGroupIDs', clientIDs: ['c1', 'c2'], clientGroupIDs: ['cg1']},
+  {desc: 'only clientIDs', clientIDs: ['c1'], clientGroupIDs: []},
+  {desc: 'only clientGroupIDs', clientIDs: [], clientGroupIDs: ['cg1']},
+  {desc: 'both empty -> empty body', clientIDs: [], clientGroupIDs: []},
+];
+
+async function runDeleteClientsScenario(sc) {
+  const sink = makeCHSink();
+  const handler = new ClientHandler(LC, 'cg', 'client1', 'ws1', SHARD, null, sink);
+  await handler.sendDeleteClients(LC, sc.clientIDs, sc.clientGroupIDs);
+  return {
+    desc: sc.desc,
+    clientIDs: sc.clientIDs,
+    clientGroupIDs: sc.clientGroupIDs,
+    messages: sink.messages,
+  };
+}
+
 const queryScenarioResults = await Promise.all(QUERY_SCENARIOS.map(runQueryScenario));
 const pokeScenarioResults = await Promise.all(POKE_SCENARIOS.map(runPokeScenario));
+const deleteClientsResults = await Promise.all(
+  DELETE_CLIENTS_SCENARIOS.map(runDeleteClientsScenario),
+);
 
 const fixture = {
   hashes: STRINGS.map(s => ({
@@ -1013,6 +1035,7 @@ const fixture = {
   metadataScenarios: METADATA_SCENARIOS.map(runMetadataScenario),
   queryScenarios: queryScenarioResults,
   pokeScenarios: pokeScenarioResults,
+  deleteClientsScenarios: deleteClientsResults,
 };
 
 console.log(JSON.stringify(fixture, null, 2));
