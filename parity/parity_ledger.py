@@ -53,8 +53,9 @@ CRATES = {
                     "client-handler.ts", "row-set-signature.ts", "ttl-clock.ts"},
         # Rust files with no 1:1 TS origin (infra / idiom) => Rust-only here is
         # expected, not drift.
-        "infra_rust": {"hash.rs", "trace.rs", "otel_metrics.rs", "live_count.rs",
-                       "parity_check.rs", "row_key.rs", "lib.rs"},
+        "infra_rust": {"hash.rs", "tracer.rs", "otel_metrics.rs", "live_count.rs",
+                       "parity_check.rs", "row_key.rs", "lib.rs",
+                       "change_processor.rs", "ttl.rs", "shards.rs"},
         # TS files that are pure structure (DDL builders + zod codecs). Their fns
         # became inline SQL / serde derives, so they are NOT behavioral gaps.
         "structural_ts": {"schema/cvr.ts", "schema/types.ts"},
@@ -62,15 +63,14 @@ CRATES = {
         # a TS fn maps to a Rust enum, or the conversion is identity). Keys are
         # canon() of the TS name.
         "aliases": {
-            "convertttlvalues": ("INLINED", "store.rs upsert SQL: ttl/1000 + null-on-negative"),
-            "getttlclock": ("INLINED", "store.rs SELECT instances.\"ttlClock\" (load path)"),
-            "updatettlclock": ("INLINED", "store.rs:1260 UPDATE instances SET lastActive,ttlClock"),
-            "rowidsignatureunit": ("signature_unit (row_set_signature.rs:17)", "rename"),
-            "ttlclockasnumber": ("IDENTITY", "TTLClock = i64 (types.rs:14); no conversion"),
-            "ttlclockfromnumber": ("IDENTITY", "TTLClock = i64 (types.rs:14); no conversion"),
-            "cvrerrorkind": ("CVRStoreError enum (store.rs:32)", "fn→enum discriminant"),
-            "inspectqueries": ("send_inspect_response (client_handler.rs:859)", "inspector path"),
-            "assert": ("assert_new_version (updater.rs:704)", "rename"),
+            "convertttlvalues": ("INLINED", "cvr_store.rs upsert SQL: ttl/1000 + null-on-negative"),
+            "getttlclock": ("INLINED", "cvr_store.rs SELECT instances.\"ttlClock\" (load path)"),
+            "updatettlclock": ("INLINED", "cvr_store.rs UPDATE instances SET lastActive,ttlClock"),
+            "ttlclockasnumber": ("IDENTITY", "TTLClock = i64 (ttl_clock.rs); no conversion"),
+            "ttlclockfromnumber": ("IDENTITY", "TTLClock = i64 (ttl_clock.rs); no conversion"),
+            "cvrerrorkind": ("CVRStoreError enum (cvr_store.rs)", "fn→enum discriminant"),
+            "inspectqueries": ("send_inspect_response (client_handler.rs)", "inspector path"),
+            "assert": ("assert_new_version (cvr.rs)", "rename"),
         },
     },
 }
@@ -217,10 +217,15 @@ def main():
     spec = CRATES[crate]
 
     rust_syms = {}   # canon -> list of (name, kind, file, line, sig)
-    for fn in sorted(os.listdir(os.path.join(REPO, spec["rust_dir"]))):
-        if not fn.endswith(".rs"):
-            continue
-        path = os.path.join(REPO, spec["rust_dir"], fn)
+    rust_root = os.path.join(REPO, spec["rust_dir"])
+    rust_files = []
+    for dirpath, _dirs, files in os.walk(rust_root):
+        for f in files:
+            if f.endswith(".rs"):
+                # label relative to rust_dir so subdir files read as "schema/cvr.rs"
+                rust_files.append(os.path.relpath(os.path.join(dirpath, f), rust_root))
+    for fn in sorted(rust_files):
+        path = os.path.join(rust_root, fn)
         for c, name, kind, ln, sig in extract_rust(path):
             rust_syms.setdefault(c, []).append((name, kind, fn, ln, sig))
 
