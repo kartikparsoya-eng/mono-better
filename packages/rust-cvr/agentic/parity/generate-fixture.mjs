@@ -847,6 +847,40 @@ const POKE_SCENARIOS = [
     final: {stateVersion: 'v2', configVersion: 1},
   },
   {
+    desc: 'lmid update via clients-table row (lastMutationIDChanges)',
+    baseCookie: null,
+    tentative: {stateVersion: 'v2'},
+    patches: [
+      {
+        patch: {
+          type: 'row',
+          op: 'put',
+          id: {schema: '', table: 'test_0.clients', rowKey: {clientGroupID: 'cg', clientID: 'client1'}},
+          contents: {clientGroupID: 'cg', clientID: 'client1', lastMutationID: 42},
+        },
+        toVersion: {stateVersion: 'v2'},
+      },
+    ],
+    final: {stateVersion: 'v2', configVersion: 1},
+  },
+  {
+    desc: 'mutation result via mutations-table row (mutationsPatch)',
+    baseCookie: null,
+    tentative: {stateVersion: 'v2'},
+    patches: [
+      {
+        patch: {
+          type: 'row',
+          op: 'put',
+          id: {schema: '', table: 'test_0.mutations', rowKey: {clientID: 'client1', mutationID: 5}},
+          contents: {clientGroupID: 'cg', clientID: 'client1', mutationID: 5, result: {data: 1}},
+        },
+        toVersion: {stateVersion: 'v2'},
+      },
+    ],
+    final: {stateVersion: 'v2', configVersion: 1},
+  },
+  {
     desc: 'patch at/below baseVersion is dropped',
     baseCookie: '1a9',
     tentative: {stateVersion: '1aa'},
