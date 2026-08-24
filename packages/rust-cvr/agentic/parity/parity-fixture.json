@@ -396,7 +396,8 @@
           "inactivatedAt": 100,
           "ttl": 5000
         }
-      ]
+      ],
+      "nextEvictionTime": 5100
     },
     {
       "desc": "active for one client (undefined) -> excluded even if inactive for another",
@@ -415,7 +416,8 @@
           }
         }
       },
-      "expected": []
+      "expected": [],
+      "nextEvictionTime": null
     },
     {
       "desc": "multi-client inactive -> take furthest-future eviction",
@@ -440,7 +442,8 @@
           "inactivatedAt": 200,
           "ttl": 5000
         }
-      ]
+      ],
+      "nextEvictionTime": 5200
     },
     {
       "desc": "clampTTL: -1 and > MAX_TTL both clamp to MAX_TTL",
@@ -475,7 +478,8 @@
           "inactivatedAt": 0,
           "ttl": 600000
         }
-      ]
+      ],
+      "nextEvictionTime": 600000
     },
     {
       "desc": "internal query excluded",
@@ -499,7 +503,8 @@
           "inactivatedAt": 50,
           "ttl": 2000
         }
-      ]
+      ],
+      "nextEvictionTime": 2050
     },
     {
       "desc": "multi-query eviction ordering + equal-eviction tie",
@@ -562,7 +567,90 @@
           "inactivatedAt": 1000,
           "ttl": 9000
         }
-      ]
+      ],
+      "nextEvictionTime": 500
+    }
+  ],
+  "mutationResultsQueries": [
+    {
+      "upstreamSchema": "zero_0",
+      "clientGroupID": "cg-1",
+      "id": "mutationResults",
+      "ast": {
+        "schema": "",
+        "table": "zero_0.mutations",
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "clientGroupID"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "cg-1"
+              }
+            }
+          ]
+        },
+        "orderBy": [
+          [
+            "clientGroupID",
+            "asc"
+          ],
+          [
+            "clientID",
+            "asc"
+          ],
+          [
+            "mutationID",
+            "asc"
+          ]
+        ]
+      }
+    },
+    {
+      "upstreamSchema": "app_2",
+      "clientGroupID": "cg-abc",
+      "id": "mutationResults",
+      "ast": {
+        "schema": "",
+        "table": "app_2.mutations",
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "clientGroupID"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "cg-abc"
+              }
+            }
+          ]
+        },
+        "orderBy": [
+          [
+            "clientGroupID",
+            "asc"
+          ],
+          [
+            "clientID",
+            "asc"
+          ],
+          [
+            "mutationID",
+            "asc"
+          ]
+        ]
+      }
     }
   ],
   "rowPatches": [

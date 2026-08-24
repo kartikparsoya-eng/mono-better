@@ -20,7 +20,9 @@
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
 use crate::client_handler::{ClientHandler, WebSocketSink, make_row_patch};
-use crate::cvr::{get_inactive_queries, merge_ref_counts};
+use crate::cvr::{
+    get_inactive_queries, get_mutation_results_query, merge_ref_counts, next_eviction_time,
+};
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{
     RowID, RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
@@ -820,6 +822,18 @@ fn parity_check() {
             "getInactiveQueries eviction-order mismatch [{}]",
             desc
         );
+
+        // nextEvictionTime over the same CVR (min eviction across inactive queries).
+        let expected_next = match entry.get("nextEvictionTime") {
+            Some(Value::Null) | None => None,
+            Some(v) => Some(v.as_i64().expect("nextEvictionTime")),
+        };
+        assert_eq!(
+            next_eviction_time(&cvr),
+            expected_next,
+            "nextEvictionTime mismatch [{}]",
+            desc
+        );
     }
 
     // makeRowPatch parity — RowPatch -> rowsPatch wire op (the poke
@@ -1481,6 +1495,35 @@ fn parity_check() {
             entry.get("messages").expect("messages"),
             "poke messages mismatch [{}]",
             desc
+        );
+    }
+
+    // ---- ⑩ getMutationResultsQuery: the internal mutations-query AST ----
+    for entry in fixture
+        .get("mutationResultsQueries")
+        .and_then(Value::as_array)
+        .expect("fixture.mutationResultsQueries missing")
+    {
+        let schema = entry
+            .get("upstreamSchema")
+            .and_then(Value::as_str)
+            .expect("upstreamSchema");
+        let cg = entry
+            .get("clientGroupID")
+            .and_then(Value::as_str)
+            .expect("clientGroupID");
+        let r = get_mutation_results_query(schema, cg);
+        assert_eq!(
+            r.base.id,
+            entry.get("id").and_then(Value::as_str).expect("id"),
+            "getMutationResultsQuery id mismatch"
+        );
+        assert_eq!(
+            &r.ast,
+            entry.get("ast").expect("ast"),
+            "getMutationResultsQuery ast mismatch for {}/{}",
+            schema,
+            cg
         );
     }
 }

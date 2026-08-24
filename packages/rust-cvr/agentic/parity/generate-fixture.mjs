@@ -37,6 +37,8 @@ import {parseTTL, compareTTL, clampTTL} from '../../../zql/src/query/ttl.ts';
 import {
   getInactiveQueries,
   mergeRefCounts,
+  getMutationResultsQuery,
+  nextEvictionTime,
 } from '../../../zero-cache/src/services/view-syncer/cvr.ts';
 import {makeRowPatch} from '../../../zero-cache/src/services/view-syncer/client-handler.ts';
 import {
@@ -914,7 +916,15 @@ const fixture = {
     desc: c.desc,
     queries: c.queries,
     expected: getInactiveQueries(buildCVR(c.queries)),
+    nextEvictionTime: nextEvictionTime(buildCVR(c.queries)) ?? null,
   })),
+  mutationResultsQueries: [
+    {upstreamSchema: 'zero_0', clientGroupID: 'cg-1'},
+    {upstreamSchema: 'app_2', clientGroupID: 'cg-abc'},
+  ].map(i => {
+    const q = getMutationResultsQuery(i.upstreamSchema, i.clientGroupID);
+    return {...i, id: q.id, ast: q.ast};
+  }),
   rowPatches: ROW_PATCH_CASES.map(c => ({
     desc: c.desc,
     patch: c.patch,
