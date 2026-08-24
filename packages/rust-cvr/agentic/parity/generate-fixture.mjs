@@ -486,6 +486,78 @@ function runConfigScenario(sc) {
   };
 }
 
+// --- Tier-B: CVRConfigDrivenUpdater lifecycle ops (markInactive/delete/clear/deleteClient)
+// A sequence of config ops on one updater; captures per-op patches + final state.
+const CONFIG_OP_SCENARIOS = [
+  {
+    desc: 'desire then mark inactive',
+    ops: [
+      {fn: 'putDesiredQueries', clientID: 'c1', queries: [{hash: 'q1', ast: {table: 't'}}]},
+      {fn: 'markDesiredQueriesAsInactive', clientID: 'c1', queryHashes: ['q1'], ttlClock: 1000},
+    ],
+  },
+  {
+    desc: 'desire then delete desired',
+    ops: [
+      {fn: 'putDesiredQueries', clientID: 'c1', queries: [{hash: 'q1', ast: {table: 't'}}]},
+      {fn: 'deleteDesiredQueries', clientID: 'c1', queryHashes: ['q1']},
+    ],
+  },
+  {
+    desc: 'desire two then clear',
+    ops: [
+      {
+        fn: 'putDesiredQueries',
+        clientID: 'c1',
+        queries: [{hash: 'q1', ast: {table: 't'}}, {hash: 'q2', ast: {table: 'u'}}],
+      },
+      {fn: 'clearDesiredQueries', clientID: 'c1'},
+    ],
+  },
+  {
+    desc: 'desire then delete client',
+    ops: [
+      {fn: 'putDesiredQueries', clientID: 'c1', queries: [{hash: 'q1', ast: {table: 't'}}]},
+      {fn: 'deleteClient', clientID: 'c1', ttlClock: 2000},
+    ],
+  },
+];
+
+function runConfigOpScenario(sc) {
+  const store = makeStubStore();
+  const updater = new CVRConfigDrivenUpdater(store, baseCVR(), SHARD);
+  const opResults = sc.ops.map(op => {
+    let patches;
+    switch (op.fn) {
+      case 'putDesiredQueries':
+        patches = updater.putDesiredQueries(op.clientID, op.queries);
+        break;
+      case 'markDesiredQueriesAsInactive':
+        patches = updater.markDesiredQueriesAsInactive(op.clientID, op.queryHashes, op.ttlClock);
+        break;
+      case 'deleteDesiredQueries':
+        patches = updater.deleteDesiredQueries(op.clientID, op.queryHashes);
+        break;
+      case 'clearDesiredQueries':
+        patches = updater.clearDesiredQueries(op.clientID);
+        break;
+      case 'deleteClient':
+        patches = updater.deleteClient(op.clientID, op.ttlClock);
+        break;
+      default:
+        throw new Error(`unknown op ${op.fn}`);
+    }
+    return {fn: op.fn, patches: patches.slice().sort(byKey).map(normPatch)};
+  });
+  return {
+    desc: sc.desc,
+    ops: sc.ops,
+    opResults,
+    finalState: normDesireState(updater._cvr),
+    finalVersion: versionString(updater._cvr.version),
+  };
+}
+
 // --- ⑤ Tier-B: CVRQueryDrivenUpdater trackQueries -> received -> deleteUnreferencedRows
 // The rowKey-construction path. received/deleteUnreferencedRows are async and
 // read existing rows from the store, so the stub returns preset rows and the
@@ -723,6 +795,7 @@ const fixture = {
   cmpCvr: CMP_CVR_PAIRS.map(([a, b]) => ({a, b, sign: sign(cmpVersions(a, b))})),
   versionParses: VERSION_PARSE_STRINGS.map(tsVersionParse),
   configScenarios: CONFIG_SCENARIOS.map(runConfigScenario),
+  configOpScenarios: CONFIG_OP_SCENARIOS.map(runConfigOpScenario),
   queryScenarios: queryScenarioResults,
 };
 

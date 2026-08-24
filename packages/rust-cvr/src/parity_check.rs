@@ -1175,4 +1175,87 @@ fn parity_check() {
             desc
         );
     }
+
+    // ---- ⑥ Tier-B: CVRConfigDrivenUpdater lifecycle ops ----
+    for entry in fixture
+        .get("configOpScenarios")
+        .and_then(Value::as_array)
+        .expect("fixture.configOpScenarios missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let mut updater = CVRConfigDrivenUpdater::new(base_cvr(), parity_shard());
+        let op_results = entry
+            .get("opResults")
+            .and_then(Value::as_array)
+            .expect("opResults");
+
+        for (i, op) in entry
+            .get("ops")
+            .and_then(Value::as_array)
+            .expect("ops")
+            .iter()
+            .enumerate()
+        {
+            let f = op.get("fn").and_then(Value::as_str).expect("fn");
+            let client_id = op
+                .get("clientID")
+                .and_then(Value::as_str)
+                .expect("clientID");
+            let hashes = || -> Vec<String> {
+                op.get("queryHashes")
+                    .and_then(Value::as_array)
+                    .expect("queryHashes")
+                    .iter()
+                    .map(|h| h.as_str().expect("hash").to_string())
+                    .collect()
+            };
+            let ttl_clock = || {
+                op.get("ttlClock")
+                    .and_then(Value::as_i64)
+                    .expect("ttlClock")
+            };
+            let patches = match f {
+                "putDesiredQueries" => {
+                    let specs: Vec<DesiredQuerySpec> = op
+                        .get("queries")
+                        .and_then(Value::as_array)
+                        .expect("queries")
+                        .iter()
+                        .map(spec_from_json)
+                        .collect();
+                    updater.put_desired_queries(client_id, &specs)
+                }
+                "markDesiredQueriesAsInactive" => {
+                    updater.mark_desired_queries_as_inactive(client_id, &hashes(), ttl_clock())
+                }
+                "deleteDesiredQueries" => updater.delete_desired_queries(client_id, &hashes()),
+                "clearDesiredQueries" => updater.clear_desired_queries(client_id),
+                "deleteClient" => updater.delete_client(client_id, ttl_clock()),
+                other => panic!("unknown config op {other}"),
+            };
+            assert_eq!(
+                &sorted_norm(patches),
+                op_results[i].get("patches").expect("patches"),
+                "config op {} patches mismatch [{}]",
+                f,
+                desc
+            );
+        }
+
+        assert_eq!(
+            &norm_desire_state(&updater.base.cvr),
+            entry.get("finalState").expect("finalState"),
+            "config-op final state mismatch [{}]",
+            desc
+        );
+        assert_eq!(
+            version_string(&updater.base.cvr.version),
+            entry
+                .get("finalVersion")
+                .and_then(Value::as_str)
+                .expect("finalVersion"),
+            "config-op final version mismatch [{}]",
+            desc
+        );
+    }
 }

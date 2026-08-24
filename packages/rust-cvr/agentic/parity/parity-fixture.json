@@ -2004,6 +2004,284 @@
       "finalVersion": "v1:01"
     }
   ],
+  "configOpScenarios": [
+    {
+      "desc": "desire then mark inactive",
+      "ops": [
+        {
+          "fn": "putDesiredQueries",
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "t"
+              }
+            }
+          ]
+        },
+        {
+          "fn": "markDesiredQueriesAsInactive",
+          "clientID": "c1",
+          "queryHashes": [
+            "q1"
+          ],
+          "ttlClock": 1000
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "putDesiredQueries",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        },
+        {
+          "fn": "markDesiredQueriesAsInactive",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "del",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": []
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": 1000,
+                "ttl": 300000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "desire then delete desired",
+      "ops": [
+        {
+          "fn": "putDesiredQueries",
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "t"
+              }
+            }
+          ]
+        },
+        {
+          "fn": "deleteDesiredQueries",
+          "clientID": "c1",
+          "queryHashes": [
+            "q1"
+          ]
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "putDesiredQueries",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        },
+        {
+          "fn": "deleteDesiredQueries",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "del",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": []
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {}
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "desire two then clear",
+      "ops": [
+        {
+          "fn": "putDesiredQueries",
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "t"
+              }
+            },
+            {
+              "hash": "q2",
+              "ast": {
+                "table": "u"
+              }
+            }
+          ]
+        },
+        {
+          "fn": "clearDesiredQueries",
+          "clientID": "c1"
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "putDesiredQueries",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            },
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q2",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        },
+        {
+          "fn": "clearDesiredQueries",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "del",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            },
+            {
+              "kind": "query",
+              "op": "del",
+              "id": "q2",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "finalState": {
+        "clients": {
+          "c1": []
+        },
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {}
+          },
+          "q2": {
+            "type": "client",
+            "clientState": {}
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    },
+    {
+      "desc": "desire then delete client",
+      "ops": [
+        {
+          "fn": "putDesiredQueries",
+          "clientID": "c1",
+          "queries": [
+            {
+              "hash": "q1",
+              "ast": {
+                "table": "t"
+              }
+            }
+          ]
+        },
+        {
+          "fn": "deleteClient",
+          "clientID": "c1",
+          "ttlClock": 2000
+        }
+      ],
+      "opResults": [
+        {
+          "fn": "putDesiredQueries",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "put",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        },
+        {
+          "fn": "deleteClient",
+          "patches": [
+            {
+              "kind": "query",
+              "op": "del",
+              "id": "q1",
+              "clientID": "c1",
+              "toVersion": "v1:01"
+            }
+          ]
+        }
+      ],
+      "finalState": {
+        "clients": {},
+        "queries": {
+          "q1": {
+            "type": "client",
+            "clientState": {
+              "c1": {
+                "inactivatedAt": 2000,
+                "ttl": 300000
+              }
+            }
+          }
+        }
+      },
+      "finalVersion": "v1:01"
+    }
+  ],
   "queryScenarios": [
     {
       "desc": "execute query, receive 2 new rows (single + multi-col key)",
