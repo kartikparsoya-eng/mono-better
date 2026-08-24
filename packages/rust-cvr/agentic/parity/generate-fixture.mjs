@@ -16,6 +16,7 @@ import {h32, h64, h128} from '../../../shared/src/hash.ts';
 import {
   rowIDHash as rowIDHashTs,
   rowIDString as rowIDStringTs,
+  normalizedKeyOrder,
 } from '../../../zero-cache/src/types/row-key.ts';
 import {rowIDSignatureUnit} from '../../../zero-cache/src/services/view-syncer/row-set-signature.ts';
 import {
@@ -27,7 +28,12 @@ import {
   versionString,
   versionFromString,
   queryRecordToQueryRow,
+  oneAfter,
+  maxVersion,
+  versionToCookie,
+  versionToNullableCookie,
 } from '../../../zero-cache/src/services/view-syncer/schema/types.ts';
+import {parseTTL, compareTTL, clampTTL} from '../../../zql/src/query/ttl.ts';
 import {
   getInactiveQueries,
   mergeRefCounts,
@@ -257,6 +263,64 @@ function buildCVR(queries) {
   return {queries: q};
 }
 
+// --- ③ Tier-A leaf gaps: TTL semantics, key normalization, version helpers ---
+
+// TTL (zql/src/query/ttl.ts). Numbers (incl. negative = forever, > MAX) and the
+// string forms (`5m`, `1h`, `forever`, `none`). Pins parseTTL / clampTTL and the
+// forever-aware compareTTL ordering.
+const TTL_VALUES = [
+  0, 5000, 300000, 599999, 600000, 600001, 3600000, -1, -5000,
+  '30s', '5m', '10m', '1h', '2d', '1y', 'forever', 'none',
+];
+const TTL_PAIRS = [
+  [5000, 10000], [300000, '5m'], ['forever', 5000], ['none', '5m'],
+  [5000, 5000], ['1h', '60m'], [600001, '10m'], ['forever', 'forever'],
+  ['none', 'none'], [-1, 5000],
+];
+
+// normalizedKeyOrder (types/row-key.ts): single-col, already-ordered, and
+// out-of-order multi-col keys (the sort branch), plus null/mixed values.
+const NORMALIZED_KEYS = [
+  {id: 5},
+  {a: 1, b: 2},
+  {b: 1, a: 2, c: 3},
+  {z: 'x', a: null, m: true},
+  {id: 'u1', userId: 'u2'},
+];
+
+// CVRVersion / NullableCVRVersion inputs for the version helper family. Includes
+// the falsy configVersion==0 contract on every path.
+const NULLABLE_VERSIONS = [
+  null,
+  {stateVersion: '00'},
+  {stateVersion: '1a9'},
+  {stateVersion: '1a9', configVersion: 2},
+  {stateVersion: '1a9', configVersion: 0},
+];
+const NONNULL_VERSIONS = NULLABLE_VERSIONS.filter(v => v !== null);
+const MAX_PAIRS = [
+  [{stateVersion: '1a9'}, {stateVersion: '1aa'}],
+  [{stateVersion: '1aa'}, undefined],
+  [{stateVersion: '1a9', configVersion: 1}, {stateVersion: '1a9', configVersion: 3}],
+  [{stateVersion: '1a9', configVersion: 0}, {stateVersion: '1a9'}],
+];
+// cmpCvr: non-null CVRVersion pairs exercising state + config tie-break.
+const CMP_CVR_PAIRS = [
+  [{stateVersion: '1a9'}, {stateVersion: '1a9'}],
+  [{stateVersion: '1a9'}, {stateVersion: '1aa'}],
+  [{stateVersion: '1a9', configVersion: 1}, {stateVersion: '1a9', configVersion: 2}],
+  [{stateVersion: '1a9', configVersion: 0}, {stateVersion: '1a9'}],
+];
+// tryVersionFromString: valid cookies + malformed strings (TS throws => invalid).
+const VERSION_PARSE_STRINGS = ['00', '1a9', '1a9:01', '', 'zz:zz', '1a9:'];
+function tsVersionParse(str) {
+  try {
+    return {str, valid: true, versionString: versionString(versionFromString(str))};
+  } catch {
+    return {str, valid: false};
+  }
+}
+
 const fixture = {
   hashes: STRINGS.map(s => ({
     input: s,
@@ -317,6 +381,35 @@ const fixture = {
       c.removeHashes ? new Set(c.removeHashes) : undefined,
     ),
   })),
+  ttls: TTL_VALUES.map(v => ({
+    input: v,
+    parse: parseTTL(v),
+    clamp: clampTTL(v),
+  })),
+  ttlCompares: TTL_PAIRS.map(([a, b]) => ({a, b, cmp: compareTTL(a, b)})),
+  normalizedKeys: NORMALIZED_KEYS.map(k => ({
+    input: k,
+    order: Object.entries(normalizedKeyOrder(k)),
+  })),
+  oneAfter: NULLABLE_VERSIONS.map(v => ({
+    input: v,
+    versionString: versionString(oneAfter(v)),
+  })),
+  maxVersions: MAX_PAIRS.map(([a, b]) => ({
+    a,
+    b: b ?? null,
+    versionString: versionString(maxVersion(a, b)),
+  })),
+  versionCookies: NONNULL_VERSIONS.map(v => ({
+    input: v,
+    cookie: versionToCookie(v),
+  })),
+  nullableVersionCookies: NULLABLE_VERSIONS.map(v => ({
+    input: v,
+    cookie: versionToNullableCookie(v),
+  })),
+  cmpCvr: CMP_CVR_PAIRS.map(([a, b]) => ({a, b, sign: sign(cmpVersions(a, b))})),
+  versionParses: VERSION_PARSE_STRINGS.map(tsVersionParse),
 };
 
 console.log(JSON.stringify(fixture, null, 2));

@@ -1001,5 +1001,432 @@
         "a": 3
       }
     }
+  ],
+  "ttls": [
+    {
+      "input": 0,
+      "parse": 0,
+      "clamp": 0
+    },
+    {
+      "input": 5000,
+      "parse": 5000,
+      "clamp": 5000
+    },
+    {
+      "input": 300000,
+      "parse": 300000,
+      "clamp": 300000
+    },
+    {
+      "input": 599999,
+      "parse": 599999,
+      "clamp": 599999
+    },
+    {
+      "input": 600000,
+      "parse": 600000,
+      "clamp": 600000
+    },
+    {
+      "input": 600001,
+      "parse": 600001,
+      "clamp": 600000
+    },
+    {
+      "input": 3600000,
+      "parse": 3600000,
+      "clamp": 600000
+    },
+    {
+      "input": -1,
+      "parse": -1,
+      "clamp": 600000
+    },
+    {
+      "input": -5000,
+      "parse": -1,
+      "clamp": 600000
+    },
+    {
+      "input": "30s",
+      "parse": 30000,
+      "clamp": 30000
+    },
+    {
+      "input": "5m",
+      "parse": 300000,
+      "clamp": 300000
+    },
+    {
+      "input": "10m",
+      "parse": 600000,
+      "clamp": 600000
+    },
+    {
+      "input": "1h",
+      "parse": 3600000,
+      "clamp": 600000
+    },
+    {
+      "input": "2d",
+      "parse": 172800000,
+      "clamp": 600000
+    },
+    {
+      "input": "1y",
+      "parse": 31536000000,
+      "clamp": 600000
+    },
+    {
+      "input": "forever",
+      "parse": -1,
+      "clamp": 600000
+    },
+    {
+      "input": "none",
+      "parse": 0,
+      "clamp": 0
+    }
+  ],
+  "ttlCompares": [
+    {
+      "a": 5000,
+      "b": 10000,
+      "cmp": -5000
+    },
+    {
+      "a": 300000,
+      "b": "5m",
+      "cmp": 0
+    },
+    {
+      "a": "forever",
+      "b": 5000,
+      "cmp": 1
+    },
+    {
+      "a": "none",
+      "b": "5m",
+      "cmp": -300000
+    },
+    {
+      "a": 5000,
+      "b": 5000,
+      "cmp": 0
+    },
+    {
+      "a": "1h",
+      "b": "60m",
+      "cmp": 0
+    },
+    {
+      "a": 600001,
+      "b": "10m",
+      "cmp": 1
+    },
+    {
+      "a": "forever",
+      "b": "forever",
+      "cmp": 0
+    },
+    {
+      "a": "none",
+      "b": "none",
+      "cmp": 0
+    },
+    {
+      "a": -1,
+      "b": 5000,
+      "cmp": 1
+    }
+  ],
+  "normalizedKeys": [
+    {
+      "input": {
+        "id": 5
+      },
+      "order": [
+        [
+          "id",
+          5
+        ]
+      ]
+    },
+    {
+      "input": {
+        "a": 1,
+        "b": 2
+      },
+      "order": [
+        [
+          "a",
+          1
+        ],
+        [
+          "b",
+          2
+        ]
+      ]
+    },
+    {
+      "input": {
+        "b": 1,
+        "a": 2,
+        "c": 3
+      },
+      "order": [
+        [
+          "a",
+          2
+        ],
+        [
+          "b",
+          1
+        ],
+        [
+          "c",
+          3
+        ]
+      ]
+    },
+    {
+      "input": {
+        "z": "x",
+        "a": null,
+        "m": true
+      },
+      "order": [
+        [
+          "a",
+          null
+        ],
+        [
+          "m",
+          true
+        ],
+        [
+          "z",
+          "x"
+        ]
+      ]
+    },
+    {
+      "input": {
+        "id": "u1",
+        "userId": "u2"
+      },
+      "order": [
+        [
+          "id",
+          "u1"
+        ],
+        [
+          "userId",
+          "u2"
+        ]
+      ]
+    }
+  ],
+  "oneAfter": [
+    {
+      "input": null,
+      "versionString": "00"
+    },
+    {
+      "input": {
+        "stateVersion": "00"
+      },
+      "versionString": "00:01"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9"
+      },
+      "versionString": "1a9:01"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 2
+      },
+      "versionString": "1a9:03"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 0
+      },
+      "versionString": "1a9:01"
+    }
+  ],
+  "maxVersions": [
+    {
+      "a": {
+        "stateVersion": "1a9"
+      },
+      "b": {
+        "stateVersion": "1aa"
+      },
+      "versionString": "1aa"
+    },
+    {
+      "a": {
+        "stateVersion": "1aa"
+      },
+      "b": null,
+      "versionString": "1aa"
+    },
+    {
+      "a": {
+        "stateVersion": "1a9",
+        "configVersion": 1
+      },
+      "b": {
+        "stateVersion": "1a9",
+        "configVersion": 3
+      },
+      "versionString": "1a9:03"
+    },
+    {
+      "a": {
+        "stateVersion": "1a9",
+        "configVersion": 0
+      },
+      "b": {
+        "stateVersion": "1a9"
+      },
+      "versionString": "1a9"
+    }
+  ],
+  "versionCookies": [
+    {
+      "input": {
+        "stateVersion": "00"
+      },
+      "cookie": "00"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9"
+      },
+      "cookie": "1a9"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 2
+      },
+      "cookie": "1a9:02"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 0
+      },
+      "cookie": "1a9"
+    }
+  ],
+  "nullableVersionCookies": [
+    {
+      "input": null,
+      "cookie": null
+    },
+    {
+      "input": {
+        "stateVersion": "00"
+      },
+      "cookie": "00"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9"
+      },
+      "cookie": "1a9"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 2
+      },
+      "cookie": "1a9:02"
+    },
+    {
+      "input": {
+        "stateVersion": "1a9",
+        "configVersion": 0
+      },
+      "cookie": "1a9"
+    }
+  ],
+  "cmpCvr": [
+    {
+      "a": {
+        "stateVersion": "1a9"
+      },
+      "b": {
+        "stateVersion": "1a9"
+      },
+      "sign": 0
+    },
+    {
+      "a": {
+        "stateVersion": "1a9"
+      },
+      "b": {
+        "stateVersion": "1aa"
+      },
+      "sign": -1
+    },
+    {
+      "a": {
+        "stateVersion": "1a9",
+        "configVersion": 1
+      },
+      "b": {
+        "stateVersion": "1a9",
+        "configVersion": 2
+      },
+      "sign": -1
+    },
+    {
+      "a": {
+        "stateVersion": "1a9",
+        "configVersion": 0
+      },
+      "b": {
+        "stateVersion": "1a9"
+      },
+      "sign": 0
+    }
+  ],
+  "versionParses": [
+    {
+      "str": "00",
+      "valid": true,
+      "versionString": "00"
+    },
+    {
+      "str": "1a9",
+      "valid": true,
+      "versionString": "1a9"
+    },
+    {
+      "str": "1a9:01",
+      "valid": true,
+      "versionString": "1a9:01"
+    },
+    {
+      "str": "",
+      "valid": false
+    },
+    {
+      "str": "zz:zz",
+      "valid": false
+    },
+    {
+      "str": "1a9:",
+      "valid": false
+    }
   ]
 }

@@ -11,25 +11,46 @@
 //! `configVersion == 0` contract); getInactiveQueries; mergeRefCounts;
 //! queryRecordToQueryRow; and makeRowPatch (poke row serialization).
 //!
+//! Tier-A leaf gaps: TTL parse/clamp/compare (incl. forever/none); row_id_string
+//! (uncached) and normalizedKeyOrder; and the version-helper family — oneAfter,
+//! maxVersion, versionToCookie, versionToNullableCookie, cmp_cvr, and
+//! try_version_from_string (which now validates the stateVersion in the 1-part
+//! case, matching TS `versionFromString`).
+//!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
 use crate::client_handler::make_row_patch;
 use crate::cvr::{get_inactive_queries, merge_ref_counts};
 use crate::hash::{h32, h64, h128};
-use crate::row_key::{RowID, row_id_hash, row_id_string_cached};
+use crate::row_key::{
+    RowID, RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
+};
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
 use crate::store::query_record_to_query_row;
+use crate::ttl::{TTL, clamp_ttl, compare_ttl, parse_ttl, parse_ttl_string};
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
     QueryRecord, RefCounts, RowPatch,
 };
 use crate::version::{
-    CVRVersion, NullableCVRVersion, cmp_versions, version_from_lexi, version_from_string,
-    version_string, version_to_lexi,
+    CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, one_after,
+    try_version_from_string, version_from_lexi, version_from_string, version_string,
+    version_to_cookie, version_to_lexi, version_to_nullable_cookie,
 };
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
+
+/// A fixture TTL input is either a JSON number (ms) or a string like "5m".
+fn ttl_from_json(v: &Value) -> TTL {
+    if let Some(n) = v.as_i64() {
+        TTL::Ms(n)
+    } else if let Some(s) = v.as_str() {
+        parse_ttl_string(s)
+    } else {
+        panic!("ttl input must be int or string: {:?}", v)
+    }
+}
 
 /// Parse a fixture RefCounts value (`{hash: count}` or `null`) into `Option`.
 fn parse_refcounts(v: &Value) -> Option<RefCounts> {
@@ -305,6 +326,13 @@ fn parity_check() {
             "rowIDString mismatch for {:?}",
             input
         );
+        // the uncached row_id_string must agree with the cached variant / TS
+        assert_eq!(
+            row_id_string(&id),
+            expected_row_id_string,
+            "row_id_string (uncached) mismatch for {:?}",
+            input
+        );
         assert_eq!(
             actual_row_id_hash, expected_row_id_hash,
             "rowIDHash mismatch for {:?}",
@@ -573,5 +601,199 @@ fn parity_check() {
             "mergeRefCounts mismatch existing={:?} received={:?} rm={:?}",
             existing, received, remove
         );
+    }
+
+    // ---- ③ Tier-A leaf gaps ----
+
+    // TTL: parseTTL / clampTTL over numbers + string forms (incl. forever/none).
+    for entry in fixture
+        .get("ttls")
+        .and_then(Value::as_array)
+        .expect("fixture.ttls missing")
+    {
+        let input = entry.get("input").expect("ttl input");
+        let expected_parse = entry.get("parse").and_then(Value::as_i64).expect("parse");
+        let expected_clamp = entry.get("clamp").and_then(Value::as_i64).expect("clamp");
+        let ttl = ttl_from_json(input);
+        assert_eq!(
+            parse_ttl(ttl),
+            expected_parse,
+            "parseTTL mismatch for {:?}",
+            input
+        );
+        assert_eq!(
+            clamp_ttl(ttl),
+            expected_clamp,
+            "clampTTL mismatch for {:?}",
+            input
+        );
+    }
+
+    // compareTTL: forever-aware ordering (exact difference, not just sign).
+    for entry in fixture
+        .get("ttlCompares")
+        .and_then(Value::as_array)
+        .expect("fixture.ttlCompares missing")
+    {
+        let a = ttl_from_json(entry.get("a").expect("a"));
+        let b = ttl_from_json(entry.get("b").expect("b"));
+        let expected = entry.get("cmp").and_then(Value::as_i64).expect("cmp");
+        assert_eq!(
+            compare_ttl(a, b),
+            expected,
+            "compareTTL mismatch a={:?} b={:?}",
+            entry.get("a"),
+            entry.get("b")
+        );
+    }
+
+    // normalizedKeyOrder: single-col, ordered, and out-of-order (sort branch).
+    for entry in fixture
+        .get("normalizedKeys")
+        .and_then(Value::as_array)
+        .expect("fixture.normalizedKeys missing")
+    {
+        let input = entry
+            .get("input")
+            .and_then(Value::as_object)
+            .expect("input obj");
+        let expected = entry.get("order").expect("order");
+        let key: RowKey = input.clone();
+        let ordered = normalized_key_order(&key);
+        let actual = Value::Array(
+            ordered
+                .iter()
+                .map(|(k, v)| Value::Array(vec![Value::String((*k).clone()), (*v).clone()]))
+                .collect(),
+        );
+        assert_eq!(
+            &actual, expected,
+            "normalizedKeyOrder mismatch for {:?}",
+            input
+        );
+    }
+
+    // oneAfter: NullableCVRVersion -> CVRVersion (compared via versionString).
+    for entry in fixture
+        .get("oneAfter")
+        .and_then(Value::as_array)
+        .expect("fixture.oneAfter missing")
+    {
+        let nv: NullableCVRVersion =
+            serde_json::from_value(entry.get("input").expect("input").clone())
+                .expect("nullable ver");
+        let expected = entry
+            .get("versionString")
+            .and_then(Value::as_str)
+            .expect("versionString");
+        assert_eq!(
+            version_string(&one_after(&nv)),
+            expected,
+            "oneAfter mismatch for {:?}",
+            entry.get("input")
+        );
+    }
+
+    // maxVersion: (CVRVersion, Option<CVRVersion>) -> CVRVersion.
+    for entry in fixture
+        .get("maxVersions")
+        .and_then(Value::as_array)
+        .expect("fixture.maxVersions missing")
+    {
+        let a: CVRVersion = serde_json::from_value(entry.get("a").expect("a").clone()).expect("a");
+        let b_val = entry.get("b").expect("b");
+        let b: Option<CVRVersion> = if b_val.is_null() {
+            None
+        } else {
+            Some(serde_json::from_value(b_val.clone()).expect("b"))
+        };
+        let expected = entry
+            .get("versionString")
+            .and_then(Value::as_str)
+            .expect("versionString");
+        assert_eq!(
+            version_string(&max_version(a, b)),
+            expected,
+            "maxVersion mismatch"
+        );
+    }
+
+    // versionToCookie / versionToNullableCookie.
+    for entry in fixture
+        .get("versionCookies")
+        .and_then(Value::as_array)
+        .expect("fixture.versionCookies missing")
+    {
+        let v: CVRVersion =
+            serde_json::from_value(entry.get("input").expect("input").clone()).expect("cvrversion");
+        let expected = entry.get("cookie").and_then(Value::as_str).expect("cookie");
+        assert_eq!(version_to_cookie(&v), expected, "versionToCookie mismatch");
+    }
+    for entry in fixture
+        .get("nullableVersionCookies")
+        .and_then(Value::as_array)
+        .expect("fixture.nullableVersionCookies missing")
+    {
+        let nv: NullableCVRVersion =
+            serde_json::from_value(entry.get("input").expect("input").clone()).expect("nullable");
+        let cookie_val = entry.get("cookie").expect("cookie");
+        let expected: Option<String> = if cookie_val.is_null() {
+            None
+        } else {
+            Some(cookie_val.as_str().expect("cookie str").to_string())
+        };
+        assert_eq!(
+            version_to_nullable_cookie(&nv),
+            expected,
+            "versionToNullableCookie mismatch"
+        );
+    }
+
+    // cmp_cvr: non-null CVRVersion ordering (state + config tie-break).
+    for entry in fixture
+        .get("cmpCvr")
+        .and_then(Value::as_array)
+        .expect("fixture.cmpCvr missing")
+    {
+        let a: CVRVersion = serde_json::from_value(entry.get("a").expect("a").clone()).expect("a");
+        let b: CVRVersion = serde_json::from_value(entry.get("b").expect("b").clone()).expect("b");
+        let expected = entry.get("sign").and_then(Value::as_i64).expect("sign");
+        let actual = match cmp_cvr(&a, &b) {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        };
+        assert_eq!(actual, expected, "cmpCvr mismatch {:?} vs {:?}", a, b);
+    }
+
+    // try_version_from_string: valid cookies parse; malformed strings (TS throws)
+    // must return Err, not a bogus version.
+    for entry in fixture
+        .get("versionParses")
+        .and_then(Value::as_array)
+        .expect("fixture.versionParses missing")
+    {
+        let s = entry.get("str").and_then(Value::as_str).expect("str");
+        let valid = entry.get("valid").and_then(Value::as_bool).expect("valid");
+        match try_version_from_string(s) {
+            Ok(v) => {
+                assert!(valid, "try_version_from_string parsed {:?} but TS threw", s);
+                let expected = entry
+                    .get("versionString")
+                    .and_then(Value::as_str)
+                    .expect("versionString");
+                assert_eq!(
+                    version_string(&v),
+                    expected,
+                    "try_version_from_string mismatch for {:?}",
+                    s
+                );
+            }
+            Err(_) => assert!(
+                !valid,
+                "try_version_from_string errored on {:?} but TS accepted",
+                s
+            ),
+        }
     }
 }
