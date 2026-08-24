@@ -20,9 +20,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use rust_cvr::cvr::CVRQueryDrivenUpdater;
-use rust_cvr::row_key::{RowID, row_id_string};
+use rust_cvr::cvr::{CVR, RefCounts, RowUpdate};
+use rust_cvr::row_key::row_id_string;
 use rust_cvr::schema::types::CVRVersion;
-use rust_cvr::types::{CVR, RefCounts, RowRecord, RowUpdate};
+use rust_cvr::schema::types::RowID;
+use rust_cvr::schema::types::RowRecord;
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

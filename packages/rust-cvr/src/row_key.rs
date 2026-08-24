@@ -32,22 +32,13 @@
 //! so hash inputs are canonicalized upstream of any serde decision.
 
 use crate::hash::h128;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::sync::OnceLock;
 
+use crate::schema::types::RowID;
+
 pub type RowKey = Map<String, Value>;
 pub type RowKeyType = serde_json::Map<String, Value>;
-
-/// A RowID is the composite primary key used to identify a row across tables.
-/// TS: `{schema: string, table: string, rowKey: RowKey}`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct RowID {
-    pub schema: String,
-    pub table: String,
-    #[serde(rename = "rowKey")]
-    pub row_key: RowKey,
-}
 
 /// Mirrors TS `normalizedKeyOrder(rowKey)`: if keys are already lex-sorted,
 /// returns the input as-is; otherwise returns a new map with keys re-sorted.

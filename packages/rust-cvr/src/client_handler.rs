@@ -16,13 +16,50 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+// ─── wire patch types (client-handler.ts) ───
+
+/// Patches — sent to clients to update their view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Patch {
+    #[serde(rename = "row")]
+    Row(RowPatch),
+    #[serde(rename = "query")]
+    Query(QueryPatch),
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op")]
+pub enum RowPatch {
+    #[serde(rename = "put")]
+    Put {
+        id: RowID,
+        contents: std::sync::Arc<Value>,
+    },
+    #[serde(rename = "del")]
+    Del { id: RowID },
+}
+/// Patch tagged with the version it applies to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchToVersion {
+    pub patch: Patch,
+    pub to_version: CVRVersion,
+}
+/// RowPatchInfo — internal tracking for dedup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowPatchInfo {
+    /// None for a row-del
+    pub row_version: Option<String>,
+    pub to_version: CVRVersion,
+}
+
 #[cfg(test)]
 use serde_json::Map;
 use serde_json::Value;
 
+use crate::schema::types::*;
 use crate::schema::types::{CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, version_string};
-use crate::types::*;
+use crate::shards::ShardID;
 use std::cmp::Ordering;
 
 const PART_COUNT_FLUSH_THRESHOLD: usize = 100;
@@ -730,7 +767,7 @@ impl ClientHandler {
                 // connection setup; treat it as no base version (client re-syncs
                 // from scratch) and record it via the env-gated trace. Well-behaved
                 // clients only ever send cookies we produced.
-                match crate::schema::types::try_version_from_string(c) {
+                match crate::schema::types::maybe_version_string(c) {
                     Ok(v) => Some(v),
                     Err(e) => {
                         crate::tracer::note(

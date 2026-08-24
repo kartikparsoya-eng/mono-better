@@ -18,8 +18,9 @@
 //!   + `SET LOCAL idle_in_transaction_session_timeout = 60000`.
 //! - Catchup tx: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` + same SET LOCALs.
 
-use crate::row_key::{RowID, row_id_string};
+use crate::row_key::row_id_string;
 use crate::schema::cvr::{RowsRow, RowsVersionRow, row_record_to_rows_row, rows_row_to_row_record};
+use crate::schema::types::RowID;
 use crate::schema::types::{CVRVersion, NullableCVRVersion, version_string};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -28,11 +29,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as TokioMutex, mpsc, watch};
 
-/// The cache and the CVR updater share one `RowRecord` type (`crate::types`),
+/// The cache and the CVR updater share one `RowRecord` type (`crate::schema::types`),
 /// so no per-row conversion is needed when the cache's records cross into the
 /// updater's `RowRecordMap` (and back on flush). `ref_counts` is a `BTreeMap`
 /// (`RefCounts`), giving deterministic key order for the DB `refCounts` jsonb.
-pub use crate::types::RowRecord;
+pub use crate::schema::types::RowRecord;
 
 /// Database row form for sqlx `FromRow`.
 #[derive(sqlx::FromRow)]

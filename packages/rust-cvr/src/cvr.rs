@@ -14,12 +14,17 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::row_key::RowID;
-use crate::schema::types::{CVRVersion, cmp_cvr, cmp_versions, max_version, one_after};
+use crate::client_handler::{Patch, PatchToVersion, RowPatch, RowPatchInfo};
+use crate::cvr_store::CVRFlushStats;
+use crate::shards::ShardID;
+use crate::shards::upstream_schema;
+
+use crate::schema::types::*;
 use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl, compare_ttl};
-use crate::types::*;
+use crate::ttl_clock::TTLClock;
 
 /// Merge existing refCounts with received refCounts, optionally removing
 /// hashes in `remove_hashes` from the existing set.
@@ -1239,6 +1244,77 @@ impl CVRQueryDrivenUpdater {
         self.base.flush(last_connect_time, last_active, ttl_clock)
     }
 }
+
+// ─── CVR data types (cvr.ts) + StoreOp bridge ───
+
+/// RefCounts: query hash → count. Using BTreeMap for deterministic ordering.
+pub type RefCounts = BTreeMap<String, i64>;
+/// RowUpdate — what the replicator sends for a row.
+///
+/// `contents` is `Arc`-shared: a hydrated row's contents flow unchanged from
+/// the engine callback through `RowPatch::Put` into each client's poke body,
+/// so sharing one allocation avoids a deep `Value` clone per stage (the
+/// per-row deliver path was the dominant hydration cost for large queries).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RowUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contents: Option<std::sync::Arc<Value>>,
+    pub ref_counts: RefCounts,
+}
+/// The mutable CVR type (matches TS `CVR`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CVR {
+    pub id: String,
+    pub version: CVRVersion,
+    pub last_active: i64,
+    pub ttl_clock: TTLClock,
+    pub replica_version: Option<String>,
+    pub clients: BTreeMap<String, ClientRecord>,
+    pub queries: BTreeMap<String, QueryRecord>,
+    pub client_schema: Option<ClientSchema>,
+    pub profile_id: Option<String>,
+}
+/// Desired query spec — what the client wants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesiredQuerySpec {
+    pub hash: String,
+    pub ast: Option<AST>,
+    pub name: Option<String>,
+    pub args: Option<Vec<Value>>,
+    pub ttl: Option<i64>, // milliseconds; None = DEFAULT_TTL_MS
+}
+/// Store operations collected by the updater for TS to replay.
+/// Mirrors the CVRStore method calls that the TS updaters make inline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StoreOp {
+    InsertClient(ClientRecord),
+    PutQuery(QueryRecord),
+    PutDesiredQuery {
+        version: CVRVersion,
+        query_id: String,
+        client_id: String,
+        deleted: bool,
+        inactivated_at: Option<TTLClock>,
+        ttl: i64,
+    },
+    PutInstance(CVR),
+    DeleteClient(String),
+    UpdateQuery(QueryRecord),
+    MarkQueryAsDeleted {
+        version: CVRVersion,
+        patch: QueryPatch,
+    },
+    PutRowRecord(RowRecord),
+    DelRowRecord(RowID),
+    UpdateRowSetSignature {
+        query_id: String,
+        hex: String,
+    },
+}
+pub const CLIENT_LMID_QUERY_ID: &str = "lmids";
+pub const CLIENT_MUTATION_RESULTS_QUERY_ID: &str = "mutationResults";
 
 #[cfg(test)]
 mod tests {

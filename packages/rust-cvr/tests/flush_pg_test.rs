@@ -13,9 +13,10 @@
 //!   TEST_CVR_PG_URI=... npx tsx packages/rust-cvr/agentic/parity/generate-flush-fixture.mjs
 
 use rust_cvr::cvr::CVRQueryDrivenUpdater;
+use rust_cvr::cvr::{RefCounts, RowUpdate};
 use rust_cvr::cvr_store::CVRStoreHandle;
 use rust_cvr::schema::types::CVRVersion;
-use rust_cvr::types::{RefCounts, RowID, RowUpdate};
+use rust_cvr::schema::types::RowID;
 use serde_json::Value;
 use sqlx::Row;
 use std::collections::HashMap;
@@ -105,7 +106,7 @@ async fn flush_matches_ts_golden() {
             ),
         );
     }
-    let existing: HashMap<String, rust_cvr::types::RowRecord> = HashMap::new();
+    let existing: HashMap<String, rust_cvr::schema::types::RowRecord> = HashMap::new();
     updater.received(&rows, &existing);
     updater.delete_unreferenced_rows(existing.values());
 

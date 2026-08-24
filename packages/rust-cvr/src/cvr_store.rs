@@ -10,13 +10,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 
+use crate::client_handler::{Patch, PatchToVersion};
+use crate::cvr::*;
 use crate::schema::cvr::{ClientsRow, DesiresRow, InstancesRow, QueriesRow};
+use crate::schema::types::*;
 use crate::schema::types::{
-    CVRVersion, NullableCVRVersion, VersionError, cmp_cvr, try_version_from_string, version_string,
+    CVRVersion, NullableCVRVersion, VersionError, cmp_cvr, maybe_version_string, version_string,
 };
 use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
-use crate::types::StoreOp;
-use crate::types::*;
+use crate::ttl_clock::TTLClock;
 use std::cmp::Ordering;
 
 // The time to wait between load() attempts when the rows table is behind the
@@ -1071,7 +1073,7 @@ impl CVRStoreHandle {
                 if version != expected_rows {
                     rows_behind = Some((version.clone(), rows_version));
                 }
-                let cvr_version = try_version_from_string(&version)?;
+                let cvr_version = maybe_version_string(&version)?;
                 CVR {
                     id: self.cvr_id.clone(),
                     version: cvr_version,
@@ -1185,7 +1187,7 @@ impl CVRStoreHandle {
                         ttl: clamp_ttl(TTL::Ms(
                             (*ttl_ms).map(|ms| ms as i64).unwrap_or(DEFAULT_TTL_MS),
                         )),
-                        version: try_version_from_string(patch_version)?,
+                        version: maybe_version_string(patch_version)?,
                     },
                 );
             }
@@ -1266,7 +1268,7 @@ impl CVRStoreHandle {
         // ConcurrentModification so the client cleanly rehomes — not silently
         // proceed and return stale/empty patches under a now-absent CVR.
         let cv = match &current_version {
-            Some((cv,)) => try_version_from_string(cv)?,
+            Some((cv,)) => maybe_version_string(cv)?,
             None => crate::schema::types::EMPTY_CVR_VERSION.clone(),
         };
         if cmp_cvr(&cv, up_to_version) != Ordering::Equal {
@@ -1319,7 +1321,7 @@ impl CVRStoreHandle {
             let Some(pv) = patch_version else {
                 continue; // patchVersion must be set for a query patch
             };
-            let to_version = try_version_from_string(&pv)?;
+            let to_version = maybe_version_string(&pv)?;
             let patch = if deleted.unwrap_or(false) {
                 Patch::Query(QueryPatch::Del {
                     id: query_hash,
@@ -1334,7 +1336,7 @@ impl CVRStoreHandle {
             patches.push(PatchToVersion { patch, to_version });
         }
         for (client_id, query_hash, patch_version, deleted, _, _) in desires {
-            let to_version = try_version_from_string(&patch_version)?;
+            let to_version = maybe_version_string(&patch_version)?;
             let patch = if deleted {
                 Patch::Query(QueryPatch::Del {
                     id: query_hash,
@@ -1366,7 +1368,7 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
         transformation_version: row
             .transformation_version
             .as_deref()
-            .map(try_version_from_string)
+            .map(maybe_version_string)
             .transpose()?,
         row_set_signature: row.row_set_signature.clone(),
     };
@@ -1393,7 +1395,7 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
             patch_version: row
                 .patch_version
                 .as_deref()
-                .map(try_version_from_string)
+                .map(maybe_version_string)
                 .transpose()?,
         }));
     }
@@ -1405,7 +1407,7 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
         patch_version: row
             .patch_version
             .as_deref()
-            .map(try_version_from_string)
+            .map(maybe_version_string)
             .transpose()?,
     }))
 }

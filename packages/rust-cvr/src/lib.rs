@@ -23,9 +23,10 @@ pub mod row_key;
 pub mod row_record_cache;
 pub mod row_set_signature;
 pub mod schema;
+pub mod shards;
 pub mod tracer;
 pub mod ttl;
-pub mod types;
+pub mod ttl_clock;
 
 #[cfg(test)]
 mod parity_check;

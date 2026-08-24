@@ -14,7 +14,7 @@
 //! Tier-A leaf gaps: TTL parse/clamp/compare (incl. forever/none); row_id_string
 //! (uncached) and normalizedKeyOrder; and the version-helper family — oneAfter,
 //! maxVersion, versionToCookie, versionToNullableCookie, cmp_cvr, and
-//! try_version_from_string (which now validates the stateVersion in the 1-part
+//! maybe_version_string (which now validates the stateVersion in the 1-part
 //! case, matching TS `versionFromString`); nextEvictionTime; getMutationResultsQuery.
 //!
 //! Tier-B (updater state transitions): the whole CVRUpdater surface driven through
@@ -36,6 +36,8 @@
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
 use crate::client_handler::{ClientHandler, WebSocketSink, make_row_patch};
+use crate::client_handler::{Patch, PatchToVersion, RowPatch};
+use crate::cvr::{CVR, DesiredQuerySpec, RefCounts, RowUpdate, StoreOp};
 use crate::cvr::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater};
 use crate::cvr::{
     get_inactive_queries, get_mutation_results_query, merge_ref_counts, next_eviction_time,
@@ -43,21 +45,22 @@ use crate::cvr::{
 use crate::cvr_store::{as_query, query_record_to_query_row};
 use crate::hash::{h32, h64, h128};
 use crate::row_key::{
-    RowID, RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
+    RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
 };
-use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
+use crate::row_set_signature::{format_signature, parse_signature, row_id_signature_unit};
 use crate::schema::cvr::QueriesRow;
+use crate::schema::types::RowID;
 use crate::schema::types::{
-    CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, one_after,
-    try_version_from_string, version_from_lexi, version_from_string, version_string,
-    version_to_cookie, version_to_lexi, version_to_nullable_cookie,
+    BaseQueryRecord, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord,
+    QueryPatch, QueryRecord, RowRecord,
 };
+use crate::schema::types::{
+    CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, maybe_version_string,
+    one_after, version_from_lexi, version_from_string, version_string, version_to_cookie,
+    version_to_lexi, version_to_nullable_cookie,
+};
+use crate::shards::ShardID;
 use crate::ttl::{TTL, clamp_ttl, compare_ttl, parse_ttl, parse_ttl_string};
-use crate::types::{
-    BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, DesiredQuerySpec,
-    InternalQueryRecord, Patch, PatchToVersion, QueryPatch, QueryRecord, RefCounts, RowPatch,
-    RowRecord, RowUpdate, ShardID, StoreOp,
-};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -634,7 +637,7 @@ fn parity_check() {
         let id = make_row_id_from_json(input);
         let actual_row_id_string = row_id_string_cached(&id);
         let actual_row_id_hash = row_id_hash(&id);
-        let actual_signature = signature_unit(&id).to_string();
+        let actual_signature = row_id_signature_unit(&id).to_string();
 
         assert_eq!(
             actual_row_id_string, expected_row_id_string,
@@ -1093,7 +1096,7 @@ fn parity_check() {
         assert_eq!(actual, expected, "cmpCvr mismatch {:?} vs {:?}", a, b);
     }
 
-    // try_version_from_string: valid cookies parse; malformed strings (TS throws)
+    // maybe_version_string: valid cookies parse; malformed strings (TS throws)
     // must return Err, not a bogus version.
     for entry in fixture
         .get("versionParses")
@@ -1102,9 +1105,9 @@ fn parity_check() {
     {
         let s = entry.get("str").and_then(Value::as_str).expect("str");
         let valid = entry.get("valid").and_then(Value::as_bool).expect("valid");
-        match try_version_from_string(s) {
+        match maybe_version_string(s) {
             Ok(v) => {
-                assert!(valid, "try_version_from_string parsed {:?} but TS threw", s);
+                assert!(valid, "maybe_version_string parsed {:?} but TS threw", s);
                 let expected = entry
                     .get("versionString")
                     .and_then(Value::as_str)
@@ -1112,13 +1115,13 @@ fn parity_check() {
                 assert_eq!(
                     version_string(&v),
                     expected,
-                    "try_version_from_string mismatch for {:?}",
+                    "maybe_version_string mismatch for {:?}",
                     s
                 );
             }
             Err(_) => assert!(
                 !valid,
-                "try_version_from_string errored on {:?} but TS accepted",
+                "maybe_version_string errored on {:?} but TS accepted",
                 s
             ),
         }
@@ -1451,7 +1454,7 @@ fn parity_check() {
     // Anchored to the TS-verified `queryRows` fixtures: take TS's QueriesRow, run the
     // Rust load-path deserializer `as_query`, re-serialize via the (TS-matched)
     // `query_record_to_query_row`, and require identity. Pins the CVR-load decoder
-    // (internal-flag routing, custom vs client, patchVersion via try_version_from_string).
+    // (internal-flag routing, custom vs client, patchVersion via maybe_version_string).
     for entry in fixture
         .get("queryRows")
         .and_then(Value::as_array)

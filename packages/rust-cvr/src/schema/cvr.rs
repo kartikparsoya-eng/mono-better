@@ -5,9 +5,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::row_key::RowID;
-use crate::schema::types::{try_version_from_string, version_string};
-use crate::types::RowRecord;
+use crate::schema::types::RowID;
+use crate::schema::types::RowRecord;
+use crate::schema::types::{maybe_version_string, version_string};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstancesRow {
@@ -116,7 +116,7 @@ pub fn rows_row_to_row_record(row: &RowsRow) -> Result<RowRecord, RowRecordError
             row_key: row_key_map,
         },
         row_version: row.row_version.clone(),
-        patch_version: try_version_from_string(&row.patch_version)?,
+        patch_version: maybe_version_string(&row.patch_version)?,
         ref_counts,
     })
 }

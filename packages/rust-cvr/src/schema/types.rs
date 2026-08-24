@@ -15,8 +15,14 @@
 //! (i.e. up to ~1.06e+56 — effectively unlimited).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
+
+use crate::cvr::RefCounts;
+use crate::row_key::RowKey;
+use crate::ttl_clock::TTLClock;
 
 /// Mirrors TS `CVRVersion` — `{stateVersion: string, configVersion?: number}`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -108,7 +114,7 @@ pub fn version_to_nullable_cookie(v: &NullableCVRVersion) -> Option<String> {
 // NOTE: there is deliberately no `cookie_to_version` here. It used to wrap the
 // PANICKING `version_from_string`, which is a foot-gun on any client-supplied
 // cookie path. All cookie parsing must go through the fallible
-// `try_version_from_string` (used by every real caller). Do not re-add an
+// `maybe_version_string` (used by every real caller). Do not re-add an
 // infallible cookie→version helper.
 
 /// Mirrors TS `versionString(v)`.
@@ -165,7 +171,7 @@ fn validate_state_version(ver: &str) -> Result<(), VersionError> {
 /// strings, so a corrupt value surfaces as a recoverable error (mirroring TS
 /// `versionFromString` throwing, which the caller catches) rather than aborting
 /// the thread.
-pub fn try_version_from_string(s: &str) -> Result<CVRVersion, VersionError> {
+pub fn maybe_version_string(s: &str) -> Result<CVRVersion, VersionError> {
     let parts: Vec<&str> = s.split(':').collect();
     match parts.len() {
         1 => {
@@ -197,9 +203,9 @@ pub fn try_version_from_string(s: &str) -> Result<CVRVersion, VersionError> {
 /// Mirrors TS `versionFromString(s)`. Panics on malformed input — retained for
 /// internally-produced strings (round-tripped through [`version_string`], hence
 /// provably well-formed) and tests. For untrusted input use
-/// [`try_version_from_string`].
+/// [`maybe_version_string`].
 pub fn version_from_string(s: &str) -> CVRVersion {
-    try_version_from_string(s).unwrap_or_else(|e| panic!("{e}"))
+    maybe_version_string(s).unwrap_or_else(|e| panic!("{e}"))
 }
 
 // ---- LexiVersion utilities ----
@@ -264,6 +270,179 @@ fn from_base36_u64(s: &str) -> Result<u64, &'static str> {
             .ok_or("base36 value overflows u64")?;
     }
     Ok(value)
+}
+
+// ─── CVR record + query types (schema/types.ts) ───
+
+/// RowRecord — a row's CVR metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowRecord {
+    pub id: RowID,
+    pub row_version: String,
+    pub patch_version: CVRVersion,
+    /// None = tombstone (row removed from view)
+    pub ref_counts: Option<RefCounts>,
+}
+/// ClientRecord — per-client metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientRecord {
+    pub id: String,
+    pub desired_query_ids: Vec<String>,
+}
+/// ClientState — per-client, per-query state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inactivated_at: Option<TTLClock>,
+    pub ttl: i64,
+    pub version: CVRVersion,
+}
+/// AST is stored as opaque JSON.
+pub type AST = Value;
+
+/// ClientSchema is stored as opaque JSON.
+pub type ClientSchema = Value;
+/// QueryRecord — discriminated union (internal/client/custom).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum QueryRecord {
+    #[serde(rename = "internal")]
+    Internal(InternalQueryRecord),
+    #[serde(rename = "client")]
+    Client(ClientQueryRecord),
+    #[serde(rename = "custom")]
+    Custom(CustomQueryRecord),
+}
+
+/// Fields common to all query variants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BaseQueryRecord {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transformation_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transformation_version: Option<CVRVersion>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_set_signature: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InternalQueryRecord {
+    #[serde(flatten)]
+    pub base: BaseQueryRecord,
+    pub ast: AST,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientQueryRecord {
+    #[serde(flatten)]
+    pub base: BaseQueryRecord,
+    pub ast: AST,
+    pub client_state: BTreeMap<String, ClientState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_version: Option<CVRVersion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomQueryRecord {
+    #[serde(flatten)]
+    pub base: BaseQueryRecord,
+    pub name: String,
+    pub args: Vec<Value>,
+    pub client_state: BTreeMap<String, ClientState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch_version: Option<CVRVersion>,
+}
+
+// Convenience accessors on QueryRecord
+impl QueryRecord {
+    pub fn id(&self) -> &str {
+        match self {
+            QueryRecord::Internal(r) => &r.base.id,
+            QueryRecord::Client(r) => &r.base.id,
+            QueryRecord::Custom(r) => &r.base.id,
+        }
+    }
+
+    pub fn base(&self) -> &BaseQueryRecord {
+        match self {
+            QueryRecord::Internal(r) => &r.base,
+            QueryRecord::Client(r) => &r.base,
+            QueryRecord::Custom(r) => &r.base,
+        }
+    }
+
+    pub fn base_mut(&mut self) -> &mut BaseQueryRecord {
+        match self {
+            QueryRecord::Internal(r) => &mut r.base,
+            QueryRecord::Client(r) => &mut r.base,
+            QueryRecord::Custom(r) => &mut r.base,
+        }
+    }
+
+    pub fn is_internal(&self) -> bool {
+        matches!(self, QueryRecord::Internal(_))
+    }
+
+    pub fn client_state(&self) -> Option<&BTreeMap<String, ClientState>> {
+        match self {
+            QueryRecord::Internal(_) => None,
+            QueryRecord::Client(r) => Some(&r.client_state),
+            QueryRecord::Custom(r) => Some(&r.client_state),
+        }
+    }
+
+    pub fn client_state_mut(&mut self) -> Option<&mut BTreeMap<String, ClientState>> {
+        match self {
+            QueryRecord::Internal(_) => None,
+            QueryRecord::Client(r) => Some(&mut r.client_state),
+            QueryRecord::Custom(r) => Some(&mut r.client_state),
+        }
+    }
+
+    pub fn patch_version(&self) -> Option<&CVRVersion> {
+        match self {
+            QueryRecord::Internal(_) => None,
+            QueryRecord::Client(r) => r.patch_version.as_ref(),
+            QueryRecord::Custom(r) => r.patch_version.as_ref(),
+        }
+    }
+
+    pub fn patch_version_mut(&mut self) -> &mut Option<CVRVersion> {
+        match self {
+            QueryRecord::Internal(_) => panic!("internal queries have no patch_version"),
+            QueryRecord::Client(r) => &mut r.patch_version,
+            QueryRecord::Custom(r) => &mut r.patch_version,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op")]
+pub enum QueryPatch {
+    #[serde(rename = "put")]
+    Put {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+    #[serde(rename = "del")]
+    Del {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+}
+
+// ─── RowID (schema/types.ts) ───
+
+/// A RowID is the composite primary key used to identify a row across tables.
+/// TS: `{schema: string, table: string, rowKey: RowKey}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct RowID {
+    pub schema: String,
+    pub table: String,
+    #[serde(rename = "rowKey")]
+    pub row_key: RowKey,
 }
 
 #[cfg(test)]
@@ -346,17 +525,17 @@ mod tests {
     fn test_try_version_from_string_errors() {
         // >2 colon parts → TooManyParts (TS throws)
         assert_eq!(
-            try_version_from_string("a:b:c"),
+            maybe_version_string("a:b:c"),
             Err(VersionError::TooManyParts("a:b:c".to_string()))
         );
         // Malformed lexi config → BadLexi
         assert!(matches!(
-            try_version_from_string("01:x"),
+            maybe_version_string("01:x"),
             Err(VersionError::BadLexi { .. })
         ));
         // Well-formed still parses
         assert_eq!(
-            try_version_from_string("01:01"),
+            maybe_version_string("01:01"),
             Ok(CVRVersion {
                 state_version: "01".to_string(),
                 config_version: Some(1)

@@ -10,9 +10,11 @@
 use std::collections::HashMap;
 
 use crate::client_handler::MultiPoker;
+use crate::client_handler::PatchToVersion;
+use crate::cvr::RowUpdate;
 use crate::cvr::{CVRQueryDrivenUpdater, RowRecordMap};
-use crate::row_key::{RowID, row_id_string};
-use crate::types::{PatchToVersion, RowUpdate};
+use crate::row_key::row_id_string;
+use crate::schema::types::RowID;
 
 use serde_json::{Map, Value};
 
@@ -213,7 +215,7 @@ mod tests {
     use super::*;
     use crate::client_handler::{ClientHandler, WebSocketSink};
     use crate::schema::types::CVRVersion;
-    use crate::types::ShardID;
+    use crate::shards::ShardID;
     use std::sync::{Arc, Mutex as StdMutex};
 
     struct MockSink {
@@ -257,8 +259,9 @@ mod tests {
         (handler, messages)
     }
 
-    fn make_cvr() -> crate::types::CVR {
-        use crate::types::*;
+    fn make_cvr() -> crate::cvr::CVR {
+        use crate::cvr::*;
+        use crate::schema::types::*;
         let mut cvr = CVR {
             id: "cg1".to_string(),
             version: CVRVersion {
@@ -289,7 +292,7 @@ mod tests {
         cvr
     }
 
-    fn make_updater(cvr: crate::types::CVR) -> CVRQueryDrivenUpdater {
+    fn make_updater(cvr: crate::cvr::CVR) -> CVRQueryDrivenUpdater {
         let mut u = CVRQueryDrivenUpdater::new(cvr, "00".to_string(), "v1".to_string(), None);
         // track_queries must be called before received/deleteUnreferencedRows
         u.track_queries(
@@ -565,9 +568,9 @@ mod tests {
         let ops = updater.base.drain_store_ops();
         let put_op = ops
             .iter()
-            .find(|op| matches!(op, crate::types::StoreOp::PutRowRecord(_)));
+            .find(|op| matches!(op, crate::cvr::StoreOp::PutRowRecord(_)));
         assert!(put_op.is_some(), "Expected PutRowRecord in store_ops");
-        if let crate::types::StoreOp::PutRowRecord(record) = put_op.unwrap() {
+        if let crate::cvr::StoreOp::PutRowRecord(record) = put_op.unwrap() {
             assert_eq!(record.row_version, "v1");
         }
     }
