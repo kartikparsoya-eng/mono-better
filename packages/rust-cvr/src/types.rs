@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::version::CVRVersion;
+use crate::schema::types::CVRVersion;
 
 /// TTLClock is an opaque number in TS. In Rust we use i64 directly.
 pub type TTLClock = i64;

@@ -19,7 +19,7 @@
 //! - Catchup tx: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` + same SET LOCALs.
 
 use crate::row_key::{RowID, row_id_string};
-use crate::version::{CVRVersion, NullableCVRVersion, try_version_from_string, version_string};
+use crate::schema::types::{CVRVersion, NullableCVRVersion, try_version_from_string, version_string};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -94,7 +94,7 @@ pub enum RowRecordError {
     #[error("refCount value is not an integer: {0:?}")]
     RefCountNotInteger(serde_json::Value),
     #[error("invalid patchVersion: {0}")]
-    Version(#[from] crate::version::VersionError),
+    Version(#[from] crate::schema::types::VersionError),
 }
 
 /// Converts a `RowsRow` (DB form) to a `RowRecord` (cache form).
@@ -603,7 +603,7 @@ impl RowRecordCache {
         let end = version_string(up_to_version);
 
         // If after >= up_to, nothing to send.
-        if crate::version::cmp_versions(&after_version, &Some(up_to_version.clone()))
+        if crate::schema::types::cmp_versions(&after_version, &Some(up_to_version.clone()))
             != std::cmp::Ordering::Less
         {
             return Ok(CatchupCursor::empty());
@@ -956,7 +956,7 @@ async fn catchup_task_inner(context: &CatchupTaskContext) -> Result<(), String> 
 
     let actual_version = version_row
         .map(|(v,)| v)
-        .unwrap_or_else(|| crate::version::EMPTY_CVR_VERSION.state_version.clone());
+        .unwrap_or_else(|| crate::schema::types::EMPTY_CVR_VERSION.state_version.clone());
 
     if actual_version != *current_str {
         // Version mismatch — abort (matches TS checkVersion throwing CVRVersionMismatch).

@@ -13,7 +13,7 @@
 //! runs without a database.
 
 use rust_cvr::row_record_cache::RowRecordCache;
-use rust_cvr::version::{NullableCVRVersion, version_from_string};
+use rust_cvr::schema::types::{NullableCVRVersion, version_from_string};
 use serde_json::Value;
 use std::sync::Arc;
 

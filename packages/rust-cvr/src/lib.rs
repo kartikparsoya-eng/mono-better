@@ -16,6 +16,7 @@ pub mod change_processor;
 pub mod client_handler;
 pub mod cvr;
 pub mod cvr_store;
+pub mod schema;
 pub mod hash;
 pub mod live_count;
 pub mod otel_metrics;
@@ -25,7 +26,6 @@ pub mod row_set_signature;
 pub mod tracer;
 pub mod ttl;
 pub mod types;
-pub mod version;
 
 #[cfg(test)]
 mod parity_check;

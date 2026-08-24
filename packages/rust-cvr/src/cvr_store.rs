@@ -13,7 +13,7 @@ use sqlx::PgPool;
 use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl};
 use crate::types::StoreOp;
 use crate::types::*;
-use crate::version::{
+use crate::schema::types::{
     CVRVersion, NullableCVRVersion, VersionError, cmp_cvr, try_version_from_string, version_string,
 };
 use std::cmp::Ordering;
@@ -50,7 +50,7 @@ pub enum CVRStoreError {
     #[error("Invalid client schema: {0}")]
     InvalidClientSchema(String),
     #[error("Invalid version string in CVR data: {0}")]
-    VersionParse(#[from] crate::version::VersionError),
+    VersionParse(#[from] crate::schema::types::VersionError),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 }
@@ -540,7 +540,7 @@ impl CVRStoreHandle {
                 Some((v, o, g)) => (v, o, g),
                 // No instance row yet → a brand-new CVR (empty version, no owner).
                 None => (
-                    crate::version::EMPTY_CVR_VERSION.state_version.to_string(),
+                    crate::schema::types::EMPTY_CVR_VERSION.state_version.to_string(),
                     None,
                     None,
                 ),
@@ -1068,7 +1068,7 @@ impl CVRStoreHandle {
                 // New CVR
                 let cvr = CVR {
                     id: self.cvr_id.clone(),
-                    version: crate::version::EMPTY_CVR_VERSION.clone(),
+                    version: crate::schema::types::EMPTY_CVR_VERSION.clone(),
                     last_active: 0,
                     ttl_clock: 0,
                     replica_version: None,
@@ -1120,7 +1120,7 @@ impl CVRStoreHandle {
                 // `version !== (rowsVersion ?? EMPTY_CVR_VERSION.stateVersion)`.
                 let expected_rows = rows_version
                     .clone()
-                    .unwrap_or_else(|| crate::version::EMPTY_CVR_VERSION.state_version.to_string());
+                    .unwrap_or_else(|| crate::schema::types::EMPTY_CVR_VERSION.state_version.to_string());
                 if version != expected_rows {
                     rows_behind = Some((version.clone(), rows_version));
                 }
@@ -1320,7 +1320,7 @@ impl CVRStoreHandle {
         // proceed and return stale/empty patches under a now-absent CVR.
         let cv = match &current_version {
             Some((cv,)) => try_version_from_string(cv)?,
-            None => crate::version::EMPTY_CVR_VERSION.clone(),
+            None => crate::schema::types::EMPTY_CVR_VERSION.clone(),
         };
         if cmp_cvr(&cv, up_to_version) != Ordering::Equal {
             return Err(CVRStoreError::ConcurrentModification {

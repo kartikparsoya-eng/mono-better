@@ -19,7 +19,7 @@ use serde_json::Value;
 use crate::row_key::RowID;
 use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl, compare_ttl};
 use crate::types::*;
-use crate::version::{CVRVersion, cmp_cvr, cmp_versions, max_version, one_after};
+use crate::schema::types::{CVRVersion, cmp_cvr, cmp_versions, max_version, one_after};
 
 /// Merge existing refCounts with received refCounts, optionally removing
 /// hashes in `remove_hashes` from the existing set.
@@ -1470,7 +1470,7 @@ mod tests {
 #[cfg(test)]
 mod updater_tests {
     use super::*;
-    use crate::version::CVRVersion;
+    use crate::schema::types::CVRVersion;
 
     fn make_test_cvr() -> CVR {
         CVR {

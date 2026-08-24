@@ -52,7 +52,7 @@ use crate::types::{
     InternalQueryRecord, Patch, PatchToVersion, QueryPatch, QueryRecord, RefCounts, RowPatch,
     RowRecord, RowUpdate, ShardID, StoreOp,
 };
-use crate::version::{
+use crate::schema::types::{
     CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, max_version, one_after,
     try_version_from_string, version_from_lexi, version_from_string, version_string,
     version_to_cookie, version_to_lexi, version_to_nullable_cookie,

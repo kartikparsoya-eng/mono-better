@@ -213,7 +213,7 @@ mod tests {
     use super::*;
     use crate::client_handler::{ClientHandler, WebSocketSink};
     use crate::types::ShardID;
-    use crate::version::CVRVersion;
+    use crate::schema::types::CVRVersion;
     use std::sync::{Arc, Mutex as StdMutex};
 
     struct MockSink {

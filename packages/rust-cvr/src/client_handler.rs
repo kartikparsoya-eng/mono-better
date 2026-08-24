@@ -22,7 +22,7 @@ use serde_json::Map;
 use serde_json::Value;
 
 use crate::types::*;
-use crate::version::{CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, version_string};
+use crate::schema::types::{CVRVersion, NullableCVRVersion, cmp_cvr, cmp_versions, version_string};
 use std::cmp::Ordering;
 
 const PART_COUNT_FLUSH_THRESHOLD: usize = 100;
@@ -730,7 +730,7 @@ impl ClientHandler {
                 // connection setup; treat it as no base version (client re-syncs
                 // from scratch) and record it via the env-gated trace. Well-behaved
                 // clients only ever send cookies we produced.
-                match crate::version::try_version_from_string(c) {
+                match crate::schema::types::try_version_from_string(c) {
                     Ok(v) => Some(v),
                     Err(e) => {
                         crate::tracer::note(
