@@ -384,17 +384,20 @@ impl CVRConfigDrivenUpdater {
                     transformation_version: None,
                     row_set_signature: None,
                 },
+                // NB: TS builds the `lmids` query's `where` as a BARE `simple`
+                // condition (cvr.ts ensureClient), unlike `getMutationResultsQuery`
+                // which wraps its single condition in an `and`. This asymmetry is
+                // load-bearing: the AST is persisted verbatim into `queries.clientAST`,
+                // so an `and`-wrapper here writes structurally different CVR state than
+                // TS (caught by the sequence differential). Keep it bare to match.
                 ast: serde_json::json!({
                     "schema": "",
                     "table": format!("{}.clients", upstream_schema(&self.shard)),
                     "where": {
-                        "type": "and",
-                        "conditions": [{
-                            "type": "simple",
-                            "left": {"type": "column", "name": "clientGroupID"},
-                            "op": "=",
-                            "right": {"type": "literal", "value": self.base.cvr.id}
-                        }]
+                        "type": "simple",
+                        "left": {"type": "column", "name": "clientGroupID"},
+                        "op": "=",
+                        "right": {"type": "literal", "value": self.base.cvr.id}
                     },
                     "orderBy": [
                         ["clientGroupID", "asc"],
@@ -654,6 +657,16 @@ impl CVRConfigDrivenUpdater {
             .unwrap()
             .desired_query_ids = remaining;
 
+        // Iterate `remove` in a STABLE (sorted) order. TS iterates the smaller of
+        // {unwanted, current} (a size-based optimization in `intersection`), so its
+        // emitted-patch / store-op order is not a stable contract; a raw `HashSet`
+        // iteration here would additionally be nondeterministic run-to-run (unstable
+        // poke ordering). Sorting makes the Rust output deterministic. The sequence
+        // differential compares the returned patches order-independently for this
+        // reason.
+        let mut remove: Vec<String> = remove.into_iter().collect();
+        remove.sort();
+
         for id in &remove {
             let query = match self.base.cvr.queries.get(id) {
                 Some(q) => q.clone(),
@@ -700,7 +713,15 @@ impl CVRConfigDrivenUpdater {
                 version: new_version.clone(),
                 query_id: id.clone(),
                 client_id: client_id.to_string(),
-                deleted: inactivated_at.is_none(),
+                // TS `#deleteQueries` writes `putDesiredQuery(..., /*deleted=*/true, ...)`
+                // for BOTH hard-delete and inactivation — the desires `deleted`
+                // column means "no longer actively desired"; `inactivatedAtMs`
+                // (null vs set) is what distinguishes an inactive desire from a
+                // hard delete. Keying `deleted` off inactivation (the old
+                // `inactivated_at.is_none()`) wrote `deleted=false` for inactive
+                // rows, diverging from the persisted TS CVR state (caught by the
+                // sequence differential).
+                deleted: true,
                 inactivated_at,
                 ttl,
             });

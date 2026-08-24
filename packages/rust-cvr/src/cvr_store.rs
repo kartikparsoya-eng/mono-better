@@ -1134,6 +1134,19 @@ impl CVRStoreHandle {
                     profile_id: None,
                 };
                 drop(tx);
+                // First-sight initialization: TS `load` calls `putInstance(...)`
+                // when the instance row is absent ("first time we see this CVR"),
+                // queuing a pending instance write so the FIRST flush persists the
+                // instance row even when the transaction has no material content
+                // changes (e.g. a connect whose only op is a no-op). Without this,
+                // a brand-new CVR whose first flush is content-empty would never
+                // get its instance row written (the materiality guard would skip
+                // it) — a divergence the sequence differential caught. Only fires
+                // on first-sight (is_new), so it cannot resurrect the "no-op flush
+                // advances an EXISTING instance" bug, which concerns loads where
+                // the instance already exists. The flush-time `put_instance(cvr)`
+                // overwrites this single-slot write with the final version/clock.
+                self.put_instance(&cvr);
                 return Ok(LoadResult { cvr, is_new: true });
             }
             Some((
