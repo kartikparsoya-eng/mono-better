@@ -796,7 +796,7 @@ impl CGServicesFactory for RealServicesFactory {
             replica_path: Some(self.config.replica_file.clone()),
             app_id: app_id.clone(),
             replica_version,
-            shard: rust_cvr::types::ShardID {
+            shard: rust_cvr::shards::ShardID {
                 app_id: app_id.clone(),
                 shard_num,
             },

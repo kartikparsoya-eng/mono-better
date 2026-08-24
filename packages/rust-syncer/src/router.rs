@@ -27,10 +27,10 @@ use crate::sync_engine::{SyncEngine, empty_cvr};
 use crate::ws_server::ConnectionContext;
 use crate::ws_sink::DirectWebSocketSink;
 use dashmap::DashMap;
-use rust_cvr::types::{CVR, DesiredQuerySpec, ShardID, TTLClock};
-use rust_cvr::version::{
-    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_string,
-};
+use rust_cvr::cvr::{CVR, DesiredQuerySpec};
+use rust_cvr::shards::{ShardID};
+use rust_cvr::ttl_clock::{TTLClock};
+use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_string};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1844,7 +1844,7 @@ impl CgState {
             // base version — the SAME fallback `ClientHandler::new` applies, so
             // the version this map validates matches the version the poker uses.
             params.base_cookie.as_deref().and_then(|c| {
-                match rust_cvr::version::try_version_from_string(c) {
+                match rust_cvr::schema::types::maybe_version_string(c) {
                     Ok(v) => Some(v),
                     Err(e) => {
                         tracing::warn!(
@@ -2240,7 +2240,7 @@ impl CgState {
                 return;
             }
             Err(crate::sync_engine::LoadCvrError::Store(
-                rust_cvr::store::CVRStoreError::ClientNotFound(message),
+                rust_cvr::cvr_store::CVRStoreError::ClientNotFound(message),
             )) => {
                 if let Some(conn) = self.connections.get(client_id) {
                     conn.close_with_error(crate::protocol::ErrorBody::client_not_found(message));
@@ -2631,13 +2631,13 @@ impl CgState {
             // are non-null only for custom queries — mirroring the columns
             // selected by the TS SQL.
             let (ast, name, args) = match record {
-                rust_cvr::types::QueryRecord::Internal(_) => unreachable!(),
-                rust_cvr::types::QueryRecord::Client(r) => (
+                rust_cvr::schema::types::QueryRecord::Internal(_) => unreachable!(),
+                rust_cvr::schema::types::QueryRecord::Client(r) => (
                     r.ast.clone(),
                     serde_json::Value::Null,
                     serde_json::Value::Null,
                 ),
-                rust_cvr::types::QueryRecord::Custom(r) => (
+                rust_cvr::schema::types::QueryRecord::Custom(r) => (
                     serde_json::Value::Null,
                     serde_json::json!(r.name),
                     serde_json::json!(r.args),
@@ -3559,7 +3559,7 @@ mod tests {
     };
     use crate::protocol::PROTOCOL_VERSION;
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
-    use rust_cvr::version::version_from_string;
+    use rust_cvr::schema::types::version_from_string;
 
     /// `send_error_if_current` delivers only to the client's CURRENT socket:
     /// a matching ws_id gets the error frame; a stale ws_id or unknown client
@@ -5187,10 +5187,7 @@ mod tests {
 
     #[test]
     fn inspect_queries_rows_match_protocol_shape() {
-        use rust_cvr::types::{
-            BaseQueryRecord, ClientQueryRecord, ClientState, CustomQueryRecord,
-            InternalQueryRecord, QueryRecord,
-        };
+        use rust_cvr::schema::types::{BaseQueryRecord, ClientQueryRecord, ClientState, CustomQueryRecord, InternalQueryRecord, QueryRecord};
         let (mut state, rt, _drx) = inspect_test_state();
 
         // `got` is driven by patch_version on the variant, not the base record.

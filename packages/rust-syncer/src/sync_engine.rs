@@ -24,16 +24,14 @@ use rust_cvr::change_processor::{ChangeProcessor, RowChangeType};
 use rust_cvr::client_handler::{ClientHandler, MultiPoker, WebSocketSink};
 use rust_cvr::row_key::row_id_string;
 use rust_cvr::row_record_cache::RowRecordCache;
-use rust_cvr::store::{CVRStoreError, CVRStoreHandle};
-use rust_cvr::types::{
-    CVR, ClientSchema, DesiredQuerySpec, Patch, PatchToVersion, QueryRecord, RowID, RowPatch,
-    RowRecord, ShardID, StoreOp, TTLClock,
-};
-use rust_cvr::updater::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, RowRecordMap};
-use rust_cvr::version::{
-    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, try_version_from_string,
-    version_string,
-};
+use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle};
+use rust_cvr::client_handler::{Patch, PatchToVersion, RowPatch};
+use rust_cvr::cvr::{CVR, DesiredQuerySpec, StoreOp};
+use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
+use rust_cvr::shards::{ShardID};
+use rust_cvr::ttl_clock::{TTLClock};
+use rust_cvr::cvr::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, RowRecordMap};
+use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, maybe_version_string, version_string};
 
 use crate::custom_query::{
     CustomQueryContext, CustomQuerySpec, CustomTransformed, transform_custom_queries,
@@ -1031,7 +1029,7 @@ impl SyncEngine {
         // the cache/store borrows before touching the engine (`getRow`).
         let cache_ref = cache;
         let (raw_rows, cfg_patches): (
-            Vec<rust_cvr::row_record_cache::RowsRow>,
+            Vec<rust_cvr::schema::cvr::RowsRow>,
             Vec<PatchToVersion>,
         ) = {
             let mut cursor = cache_ref
@@ -1071,7 +1069,7 @@ impl SyncEngine {
                 table: row.table.clone(),
                 row_key: row_key.clone(),
             };
-            let to_version = try_version_from_string(&row.patch_version)
+            let to_version = maybe_version_string(&row.patch_version)
                 .map_err(|e| format!("catchup: invalid patchVersion in rows table: {e}"))?;
             let patch = if row.ref_counts.is_none() {
                 // Null refCounts = tombstone → the client should delete the row.
@@ -1731,8 +1729,10 @@ mod tests {
     use super::*;
     use crate::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
-    use rust_cvr::types::{BaseQueryRecord, CVR, ClientQueryRecord, QueryRecord, ShardID};
-    use rust_cvr::version::{CVRVersion, version_from_string};
+    use rust_cvr::cvr::{CVR};
+    use rust_cvr::schema::types::{BaseQueryRecord, ClientQueryRecord, QueryRecord};
+    use rust_cvr::shards::{ShardID};
+    use rust_cvr::schema::types::{CVRVersion, version_from_string};
     use std::collections::BTreeMap;
 
     /// A censused type must return its live-object counter to baseline once it
@@ -2523,7 +2523,7 @@ mod tests {
     /// `[current, current]` and a reconnecting client loses everything it missed.
     #[test]
     fn catchup_floor_uses_original_cookie_not_advanced_version() {
-        use rust_cvr::version::version_from_string;
+        use rust_cvr::schema::types::version_from_string;
 
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
@@ -2569,7 +2569,7 @@ mod tests {
     /// caught up on reconnect instead. Port of TS `#getClients(cvr.version)`.
     #[test]
     fn advance_poke_targets_excludes_lagging_clients() {
-        use rust_cvr::version::version_from_string;
+        use rust_cvr::schema::types::version_from_string;
 
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();
@@ -2598,7 +2598,7 @@ mod tests {
 
     #[test]
     fn config_poke_targets_include_new_but_exclude_lagging_clients() {
-        use rust_cvr::version::version_from_string;
+        use rust_cvr::schema::types::version_from_string;
 
         let mut pipelines = IvmPipelines::new();
         pipelines.init(vec![users_spec()], None, "zero").unwrap();

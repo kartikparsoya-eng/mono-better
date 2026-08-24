@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 use rust_cvr::client_handler::WebSocketSink;
-use rust_cvr::types::{DesiredQuerySpec, ShardID};
-use rust_cvr::updater::RowRecordMap;
+use rust_cvr::cvr::{DesiredQuerySpec};
+use rust_cvr::shards::{ShardID};
+use rust_cvr::cvr::RowRecordMap;
 use rust_syncer::pipeline_driver::IvmPipelines;
 use rust_syncer::sync_engine::{SyncEngine, empty_cvr};
 use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};

@@ -35,10 +35,11 @@
 
 use std::collections::BTreeMap;
 
-use rust_cvr::store::CVRStoreHandle;
-use rust_cvr::types::{CVR, DesiredQuerySpec, ShardID};
-use rust_cvr::updater::CVRConfigDrivenUpdater;
-use rust_cvr::version::{CVRVersion, EMPTY_CVR_VERSION};
+use rust_cvr::cvr_store::CVRStoreHandle;
+use rust_cvr::cvr::{CVR, DesiredQuerySpec};
+use rust_cvr::shards::{ShardID};
+use rust_cvr::cvr::CVRConfigDrivenUpdater;
+use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION};
 
 fn pg_uri() -> Option<String> {
     std::env::var("TEST_CVR_PG_URI")
@@ -133,8 +134,8 @@ CREATE TABLE "{schema}".rows (
 /// is a material change to write (TS `#flush` short-circuits an empty flush).
 /// Tests that exercise the guard must therefore queue a real change first, as a
 /// production flush always would.
-fn insert_client_op(id: &str) -> rust_cvr::types::StoreOp {
-    rust_cvr::types::StoreOp::InsertClient(rust_cvr::types::ClientRecord {
+fn insert_client_op(id: &str) -> rust_cvr::cvr::StoreOp {
+    rust_cvr::cvr::StoreOp::InsertClient(rust_cvr::schema::types::ClientRecord {
         id: id.to_string(),
         desired_query_ids: vec![],
     })
@@ -261,8 +262,9 @@ fn pg_cvr_store_flush_and_reload_roundtrip() {
 ///   whose load filters `refCounts IS NOT NULL`.
 #[test]
 fn pg_cvr_store_deletes_rows() {
-    use rust_cvr::row_key::RowID;
-    use rust_cvr::types::{RowRecord, StoreOp};
+    use rust_cvr::schema::types::RowID;
+    use rust_cvr::cvr::{StoreOp};
+    use rust_cvr::schema::types::{RowRecord};
 
     let Some(uri) = pg_uri() else {
         eprintln!("SKIP pg_cvr_store_deletes_rows: TEST_CVR_PG_URI not set");
@@ -383,7 +385,7 @@ fn pg_cvr_store_deletes_rows() {
 /// clobber each other's CVR.
 #[test]
 fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
-    use rust_cvr::store::CVRStoreError;
+    use rust_cvr::cvr_store::CVRStoreError;
 
     let Some(uri) = pg_uri() else {
         eprintln!("SKIP pg_cvr_store_guard: TEST_CVR_PG_URI not set");
@@ -584,7 +586,8 @@ fn pg_cvr_store_load_retries_until_rows_catch_up() {
 /// rebuild its `gotQueriesPatch`. The old code read only `desires`.
 #[test]
 fn pg_cvr_store_catchup_includes_got_query_patches() {
-    use rust_cvr::types::{Patch, QueryPatch};
+    use rust_cvr::client_handler::{Patch};
+    use rust_cvr::schema::types::{QueryPatch};
 
     let Some(uri) = pg_uri() else {
         eprintln!("SKIP pg_cvr_store_catchup_got_query: TEST_CVR_PG_URI not set");
@@ -663,7 +666,7 @@ fn pg_cvr_store_catchup_includes_got_query_patches() {
 /// `load`'s ownership grant + `#checkVersionAndOwnership`.
 #[test]
 fn pg_cvr_store_load_grants_and_transfers_ownership() {
-    use rust_cvr::store::CVRStoreError;
+    use rust_cvr::cvr_store::CVRStoreError;
 
     let Some(uri) = pg_uri() else {
         eprintln!("SKIP pg_cvr_store_load_ownership: TEST_CVR_PG_URI not set");
@@ -878,7 +881,7 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
 /// the full engine. Uses the multi-thread runtime like `main.rs`.
 #[test]
 fn pg_repro_catchup_from_cg_thread() {
-    use rust_cvr::row_key::RowID;
+    use rust_cvr::schema::types::RowID;
     use rust_cvr::row_record_cache::{RowRecord, RowRecordCache};
     use std::sync::Arc;
 
@@ -899,7 +902,7 @@ fn pg_repro_catchup_from_cg_thread() {
         state_version: "01".to_string(),
         config_version: None,
     };
-    let v1s = rust_cvr::version::version_string(&v1);
+    let v1s = rust_cvr::schema::types::version_string(&v1);
     rt.block_on(async {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect(&uri)
@@ -1016,7 +1019,7 @@ fn pg_repro_catchup_from_cg_thread() {
 /// INSERT never populates, so the flush fails while `load()` still succeeds.
 #[test]
 fn pg_repro_failed_flush_does_not_hang() {
-    use rust_cvr::row_key::RowID;
+    use rust_cvr::schema::types::RowID;
     use rust_cvr::row_record_cache::{RowRecord, RowRecordCache};
     use std::sync::Arc;
 
@@ -1144,7 +1147,7 @@ fn pg_advance_lmid_change_with_no_queries() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::updater::RowRecordMap;
+    use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
@@ -1357,8 +1360,8 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::updater::RowRecordMap;
-    use rust_cvr::version::version_string;
+    use rust_cvr::cvr::RowRecordMap;
+    use rust_cvr::schema::types::version_string;
     use rust_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
@@ -1671,7 +1674,7 @@ fn pg_quiet_commit_noop_flush_contract() {
         // Quiet advance: bump the state version with ZERO tracked changes. The
         // updater drains no ops, and the store flush is a no-op that must not
         // advance the on-disk version.
-        let mut quiet = rust_cvr::updater::CVRQueryDrivenUpdater::new(
+        let mut quiet = rust_cvr::cvr::CVRQueryDrivenUpdater::new(
             cvr_v1.clone(),
             "01".to_string(),
             "01".to_string(),
@@ -1699,14 +1702,14 @@ fn pg_quiet_commit_noop_flush_contract() {
         .unwrap();
         assert_eq!(
             db_version.0,
-            rust_cvr::version::version_string(&cvr_v1.version),
+            rust_cvr::schema::types::version_string(&cvr_v1.version),
             "no-op flush must not advance the stored version"
         );
 
         // FIXED caller behavior: after the no-op it stays on cvr_v1 (orig), so
         // the next material advance passes cvr_v1.version as expected — and
         // succeeds.
-        let mut material = rust_cvr::updater::CVRQueryDrivenUpdater::new(
+        let mut material = rust_cvr::cvr::CVRQueryDrivenUpdater::new(
             cvr_v1.clone(),
             "02".to_string(),
             "01".to_string(),
@@ -1764,7 +1767,7 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::updater::RowRecordMap;
+    use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};

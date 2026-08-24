@@ -2,7 +2,7 @@
 //! and integration tests.
 
 use rust_cvr::client_handler::{ClientHandler, WebSocketSink};
-use rust_cvr::types::ShardID;
+use rust_cvr::shards::ShardID;
 use std::sync::{Arc, Mutex};
 
 // ─── Mock WebSocketSink ────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ fn test_poke_handler_drop_releases_chain() {
     let (handler, _sink) = make_handler();
 
     // Start a poke — this acquires the poke chain
-    let poke = handler.start_poke(rust_cvr::version::CVRVersion {
+    let poke = handler.start_poke(rust_cvr::schema::types::CVRVersion {
         state_version: "1".to_string(),
         config_version: Some(1),
     });
@@ -69,7 +69,7 @@ fn test_poke_handler_drop_releases_chain() {
     drop(poke);
 
     // Starting another poke should work fine
-    let _poke2 = handler.start_poke(rust_cvr::version::CVRVersion {
+    let _poke2 = handler.start_poke(rust_cvr::schema::types::CVRVersion {
         state_version: "2".to_string(),
         config_version: Some(1),
     });
@@ -80,13 +80,13 @@ fn test_poke_handler_normal_lifecycle() {
     let (handler, sink) = make_handler();
 
     // Start a poke
-    let poke = handler.start_poke(rust_cvr::version::CVRVersion {
+    let poke = handler.start_poke(rust_cvr::schema::types::CVRVersion {
         state_version: "1".to_string(),
         config_version: Some(1),
     });
 
     // End the poke — this sends pokeStart + pokeEnd
-    poke.end(rust_cvr::version::CVRVersion {
+    poke.end(rust_cvr::schema::types::CVRVersion {
         state_version: "1".to_string(),
         config_version: Some(1),
     })
@@ -129,7 +129,7 @@ fn test_send_query_transform_failed_error() {
 fn test_client_handler_start_poke_noop_when_base_equal() {
     let (handler, sink) = make_handler();
 
-    let v = rust_cvr::version::CVRVersion {
+    let v = rust_cvr::schema::types::CVRVersion {
         state_version: "1".to_string(),
         config_version: Some(1),
     };

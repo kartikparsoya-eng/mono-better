@@ -23,11 +23,13 @@
 
 use std::collections::BTreeMap;
 
-use rust_cvr::row_key::RowID;
-use rust_cvr::store::CVRStoreHandle;
-use rust_cvr::types::{CVR, RowRecord, ShardID, StoreOp};
-use rust_cvr::updater::CVRConfigDrivenUpdater;
-use rust_cvr::version::{CVRVersion, EMPTY_CVR_VERSION};
+use rust_cvr::schema::types::RowID;
+use rust_cvr::cvr_store::CVRStoreHandle;
+use rust_cvr::cvr::{CVR, StoreOp};
+use rust_cvr::schema::types::{RowRecord};
+use rust_cvr::shards::{ShardID};
+use rust_cvr::cvr::CVRConfigDrivenUpdater;
+use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION};
 
 fn pg_uri() -> Option<String> {
     std::env::var("TEST_CVR_PG_URI")

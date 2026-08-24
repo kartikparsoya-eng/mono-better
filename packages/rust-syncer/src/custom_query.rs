@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use rust_cvr::types::ShardID;
+use rust_cvr::shards::ShardID;
 use serde_json::Value;
 
 use crate::permissions::hash_of_ast;
