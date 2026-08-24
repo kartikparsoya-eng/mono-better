@@ -31,6 +31,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # TS files are the ORIGIN; Rust files are the PORT.
 # ---------------------------------------------------------------------------
 V = "packages/zero-cache/src/services/view-syncer"
+ZC = "packages/zero-cache/src"
 CRATES = {
     "cvr": {
         "rust_dir": "packages/rust-cvr/src",
@@ -70,6 +71,218 @@ CRATES = {
             "ttlclockfromnumber": ("IDENTITY", "TTLClock = i64 (ttl_clock.rs); no conversion"),
             "cvrerrorkind": ("CVRStoreError enum (cvr_store.rs)", "fn→enum discriminant"),
             "assert": ("assert_new_version (cvr.rs)", "rename"),
+        },
+    },
+    "ivm": {
+        "rust_dir": "packages/rust-ivm/src",
+        "ts_label_prefix": "zql/src/",
+        # rust-ivm ports the ZQL IVM engine: the operators (ivm/), the query
+        # builder (builder/ + query/), and the query planner (planner/). mutate/
+        # is client-side CRUD, not ported into the engine crate.
+        "ts_files": [
+            "packages/zql/src/ivm/",
+            "packages/zql/src/builder/",
+            "packages/zql/src/planner/",
+            # query/ IS in remit — ~12 of its files are ported into builder/
+            # (query_delegate/registry/internals/expression/named/ttl/...). Only
+            # the pure client-fluent + TS type-level files have no runtime to
+            # port; excluded below so they don't read as false behavioral gaps.
+            "packages/zql/src/query/",
+        ],
+        "ts_exclude": (
+            "query/query.ts",          # TS type machinery: PullRow/QueryReturn/DeepMerge/…
+            "query/create-builder.ts", # client fluent-builder factory
+            "planner/planner-debug.ts",  # planner debug-event system — not ported
+            "builder/debug-delegate.ts", # debug/instrumentation delegate — not ported
+        ),
+        "structural_ts": set(),
+        # Triaged 2026-08-24 (3 parallel Explore agents + import-graph checks).
+        # Each entry is a behavioral TS symbol confirmed COVERED/N-A in Rust:
+        # inlined, renamed, relocated cross-crate, a JS-only idiom Rust drops, or
+        # replaced by SQLite. Zero genuine gaps found in the triaged set.
+        "aliases": {
+            # view-apply-change.ts → array_view.rs (array maintenance inlined)
+            "arraywith": ("array_view.rs new_view[pos]=…", "inlined"),
+            "insertat": ("array_view.rs Vec::insert", "inlined"),
+            "removeat": ("array_view.rs Vec::remove", "inlined"),
+            "setproperty": ("array_view.rs field assign", "inlined"),
+            "setrefcount": ("array_view.rs inc/dec_ref_count", "inlined"),
+            "assertarray": ("N/A", "TS type-guard; Rust View enum"),
+            "assertnumber": ("N/A", "TS type-guard; Rust ref_count:usize"),
+            "assertmetaentry": ("N/A", "TS type-guard; Rust Entry struct"),
+            "track": ("N/A", "JS WeakSet COW -> Rust Rc::make_mut"),
+            "owns": ("N/A", "JS WeakSet COW -> Rust Rc::make_mut"),
+            # builder.ts internals
+            "bindstaticparameters": ("rust-syncer permissions.rs", "relocated upstream (AST transform)"),
+            "resolvefield": ("rust-syncer permissions.rs resolve_field", "relocated"),
+            "isparameter": ("permissions.rs bind_value", "inlined"),
+            "groupsubqueryconditions": ("builder.rs apply_or_filter .partition", "inlined"),
+            "valueposname": ("builder.rs", "inlined"),
+            "addedge": ("N/A", "debug-instrumentation decorator; Rust wires Rc directly"),
+            "decorateinput": ("N/A", "debug-instrumentation decorator; not ported"),
+            "decoratefilterinput": ("N/A", "debug-instrumentation decorator; not ported"),
+            # planner algorithm
+            "processand": ("planner/builder.rs process_condition", "inlined"),
+            "processor": ("planner/builder.rs process_condition", "inlined"),
+            "propagateunlimitforflippedjoins": ("planner/graph.rs:298", "renamed"),
+            "flipifneeded": ("N/A", "dead code in TS; planning calls flip() directly (Rust too)"),
+            # planner-connection.ts *ForDebug + planner-join debug
+            "getconstraintsfordebug": ("N/A", "debug introspection; not ported"),
+            "getfiltersfordebug": ("N/A", "debug introspection; not ported"),
+            "getsortfordebug": ("N/A", "debug introspection; not ported"),
+            "getconstraintcostsfordebug": ("N/A", "debug introspection; not ported"),
+            "getdebuginfo": ("N/A", "debug introspection; not ported"),
+            "getnodename": ("N/A", "debug introspection; not ported"),
+            # memory-source.ts → SQLite table_source (in-memory overlay machinery replaced)
+            "computeoverlays": ("sqlite/table_source.rs", "-> SQLite (overlays via SQLite tx)"),
+            "overlaysforconstraint": ("sqlite/table_source.rs", "-> SQLite"),
+            "overlaysformulticonstraint": ("sqlite/table_source.rs", "-> SQLite"),
+            "overlaysforstartat": ("sqlite/table_source.rs", "-> SQLite"),
+            "overlaysforfilterpredicate": ("sqlite/table_source.rs", "-> SQLite"),
+            "setoverlay": ("sqlite/table_source.rs", "-> SQLite"),
+            "getindexkeys": ("sqlite/table_source.rs", "-> SQLite index"),
+            "fork": ("N/A", "TS memory-source fork; Rust source is SQLite-backed"),
+            "tableschema": ("sqlite/table_source.rs", "-> SQLite"),
+            "stringify": ("N/A", "TS memory-source key stringify; Rust uses SQLite keys"),
+            # stream.ts / misc idioms
+            "draingenerator": ("N/A", "TS generator drain -> Rust Iterator drop/for_each"),
+            "consume": ("streamer/mod.rs", "-> Rust Iterator consume"),
+            "clonedata": ("ivm/memory_storage.rs", "inlined clone"),
+            "mergeempty": ("ivm/push_accumulated logic", "inlined"),
+            "normalizeundefined": ("ivm/data.rs", "inlined (undefined->null)"),
+            "patterntoregexp": ("builder/like.rs get_like_predicate", "predicate closure, not regex"),
+            "pinned": ("planner/runtime.rs", "method"),
+            "delete": ("array_view.rs Vec::remove", "inlined"),
+            "unreachable": ("Rust unreachable!() macro", "idiom"),
+        },
+    },
+    "syncer": {
+        "rust_dir": "packages/rust-syncer/src",
+        "ts_label_prefix": "zero-cache/src/",
+        # rust-syncer replaces the entire TS syncer WORKER process: the WS
+        # connection lifecycle (workers/), the view-syncer serving loop +
+        # pipeline driver (services/view-syncer/), the read-permission + JWT auth
+        # transforms (auth/), and the custom-query relay (custom-queries/,
+        # custom/). CVR persistence lives in rust-cvr; the IVM engine in rust-ivm
+        # — so their TS origins are intentionally NOT listed here.
+        "ts_files": [
+            f"{ZC}/auth/jwt.ts",
+            f"{ZC}/auth/auth.ts",
+            f"{ZC}/auth/read-authorizer.ts",
+            f"{ZC}/workers/connect-params.ts",
+            f"{ZC}/workers/connection.ts",
+            f"{ZC}/workers/syncer.ts",
+            f"{ZC}/workers/syncer-ws-message-handler.ts",
+            f"{ZC}/services/view-syncer/connection-context-manager.ts",
+            f"{ZC}/services/view-syncer/drain-coordinator.ts",
+            f"{ZC}/services/view-syncer/e2e-serving-lag.ts",
+            f"{ZC}/services/view-syncer/pipeline-driver.ts",
+            f"{ZC}/services/view-syncer/query-covering.ts",
+            f"{ZC}/services/view-syncer/view-syncer.ts",
+            f"{ZC}/custom-queries/transform-query.ts",
+            f"{ZC}/custom/fetch.ts",
+            f"{ZC}/db/lite-tables.ts",
+        ],
+        # Serving-loop / transform algorithms — a missing behavioral symbol here
+        # is HIGH risk. Structural/DDL/type files are LOW risk (see structural_ts).
+        "core_ts": {
+            "view-syncer.ts", "pipeline-driver.ts", "connection.ts",
+            "read-authorizer.ts", "syncer-ws-message-handler.ts",
+            "connection-context-manager.ts", "jwt.ts", "transform-query.ts",
+            "query-covering.ts", "drain-coordinator.ts", "e2e-serving-lag.ts",
+        },
+        # Rust files with no 1:1 TS origin (transport / process infra / idiom) =>
+        # Rust-only here is expected, not drift.
+        "infra_rust": {
+            "http_server.rs", "lib.rs", "live_count.rs", "metrics.rs",
+            "otel.rs", "trace.rs", "ws_sink.rs", "ws_server.rs", "main.rs",
+            "protocol.rs", "replica_schema.rs",
+        },
+        # Pure structure (lite-table type maps). Their fns became serde/match
+        # tables, so they are NOT behavioral gaps.
+        "structural_ts": {"lite-tables.ts"},
+        # Confirmed resolutions the fuzzy pass can't infer. Filled in during Layer-1
+        # triage (5 parallel Explore agents, 2026-08-25). Each key is canon() of the
+        # TS name. "COVERED" targets record the CURRENT Rust home (the 1:1-fn refactor
+        # then renames the Rust symbol to snake_case(TS) where it diverges). Genuine
+        # not-yet-ported symbols are deliberately LEFT UNRESOLVED (the port worklist):
+        #   getters queryCount/rowCount, logQueryFailure, randomID, hasErrno/
+        #   hasTransientSocketCode, and the cross-CG serving-lag percentile family
+        #   (boundReplicaReadyStates/compute*ServingLag*/find/lower/upper/prune/
+        #   percentileNearestRank) — the last replaced by the completion-based
+        #   e2e-serving-lag histogram in the per-CG Rust arch.
+        "aliases": {
+            # view-syncer.ts serving loop -> router.rs / sync_engine.rs (async task)
+            "contentsandversion": ("sync_engine.rs (strip _0_version)", "inlined"),
+            "elapsedlap": ("N/A", "per-lap timing via Instant::elapsed() inline"),
+            "expired": ("router.rs remove_expired_queries", "TTL/inactivation expiry"),
+            "keepalive": ("router.rs CgState.keepalive_until", "field + next_idle_shutdown_delay"),
+            "markinitialized": ("router.rs CgState.terminal", "init-state flag; test helper dropped"),
+            "readystate": ("router.rs CgState/event loop", "init/drain state flags"),
+            "run": ("router.rs cg_event_loop", "per-CG async serving loop"),
+            "shutdownbeforeinitializationerror": ("router.rs init-fail path", "error on terminal init failure"),
+            "start": ("router.rs ensure_cvr/CgState init", "CVR load + ttl seed"),
+            "startwithoutyielding": ("N/A", "no setImmediate; sync Instant::now start"),
+            "stop": ("router.rs shutdown()", "per-CG drain + Rehome"),
+            "totalelapsed": ("N/A", "inline Instant::elapsed accumulation"),
+            "yieldprocess": ("N/A", "tokio async yield; no global-lock setImmediate"),
+            # pipeline-driver.ts -> pipeline_driver.rs + rust-ivm (advance gate, ops)
+            "addquery": ("rust-ivm engine add_queries", "streaming add (cross-crate)"),
+            "advancementresettimelimitms": ("rust-ivm advance_gate.rs", "ported"),
+            "advancewithoutdiff": ("pipeline_driver.rs advance_without_diff", "ported"),
+            "assert": ("Rust assert! macro", "idiom"),
+            "currentpermissions": ("router.rs/message_handler perms reload", "perms hot-reload at CG dispatch"),
+            "getrowkey": ("rust-ivm streamer get_row_key", "row-key extraction (cross-crate)"),
+            "getschema": ("rust-ivm operator get_schema", "trait method (cross-crate)"),
+            "minprojectedadvancementsamplechanges": ("rust-ivm advance_gate.rs", "ported"),
+            "mustgetprimarykey": ("rust-ivm engine build", "PK validated on build"),
+            "projectedadvancementtimems": ("rust-ivm advance_gate.rs", "ported"),
+            "queries": ("pipeline_driver.rs running_queries/active_query_ids", "split getters"),
+            "replicaversion": ("pipeline_driver.rs snapshotter current_version", "field/getter"),
+            "scalarvaluesequal": ("rust-ivm engine scalar_values_equal", "ported (cross-crate)"),
+            "setoutput": ("rust-ivm operator set_output", "trait method (cross-crate)"),
+            "shouldfinishlateadvancement": ("rust-ivm advance_gate.rs", "ported"),
+            "shouldresetprojectedadvancement": ("rust-ivm advance_gate.rs", "ported"),
+            "shouldresetslowcurrentchange": ("rust-ivm advance_gate.rs", "ported"),
+            "totalhydrationtimems": ("rust-ivm engine total_hydration_time_ms", "ported (cross-crate)"),
+            # workers/syncer.ts
+            "getwebsocketserveroptions": ("ws_server.rs WebSocketConfig", "compression opts"),
+            # workers/connection.ts transient-socket handling
+            "findprotocolerror": ("connection.rs classify_error_log_level", "protocol-error classify"),
+            "istransientsocketmessage": ("connection.rs (message substring)", "transient downgrade"),
+            # workers/connect-params.ts
+            "normalizeheaders": ("ws_server.rs (dup-header join)", "header normalization"),
+            # auth/jwt.ts -> auth.rs (whole file ports here; ledger 'DROPPED' is cosmetic)
+            "getremotekeyset": ("auth.rs JWKS_CACHE/lookup_cached_jwk", "cached remote JWKS"),
+            "loadjwk": ("auth.rs serde_json::from_str", "parse JWK"),
+            "loadsecret": ("auth.rs DecodingKey::from_secret", "secret key"),
+            "verifytokenimpl": ("auth.rs verify_sync/verify_with_jwk(s)", "JWT verify (split sync/async)"),
+            # auth/auth.ts
+            "isprovidedauth": ("connection_context.rs is_some_and non-empty", "inlined"),
+            # custom/fetch.ts
+            "apiattempts": ("metrics.rs record_api_attempt", "OTel counter"),
+            "apierrorfromresult": ("custom_query.rs response validation", "error extraction"),
+            "apiresponseerrormetricattrs": ("metrics.rs record_api_attempt attrs", "status attrs"),
+            "urlmatch": ("custom_query.rs url_match", "URLPattern subset (renamed 1:1)"),
+            "compileurlpattern": ("N/A", "no separate compile step; url_match matches the raw pattern inline"),
+            # workers/connection.ts — Node errno predicates with no tungstenite
+            # surface. The transient-MESSAGE path (isTransientSocketMessage) IS
+            # ported (connection.rs classify_error_log_level); the errno-CODE path
+            # has no equivalent (tungstenite/tokio errors don't carry errno).
+            "haserrno": ("N/A", "Node `'errno' in e`; Rust WS stack has no errno"),
+            "hastransientsocketcode": ("N/A", "Node EPIPE/ECONNRESET/ECANCELED; no errno in tungstenite"),
+            # pipeline-driver.ts
+            "logqueryfailure": ("inlined", "streamer error callback lives in rust-ivm; failures logged via tracing at the call sites"),
+            "randomid": ("N/A", "TS pipelineRunID debug-correlation id; not ported"),
+            # custom-queries/transform-query.ts
+            "normalizedheaders": ("custom_query.rs headers_digest", "canonical header hash"),
+            # connection-context-manager.ts
+            "filterheaders": ("router.rs filtered_query_headers", "header allowlist"),
+            "sameconnectionselector": ("connection_context.rs set_background_connection", "inlined tuple match"),
+            # query-covering.ts
+            "jsonequal": ("query_covering.rs json_value_eq", "deep eq w/ JS number semantics"),
+            # db/lite-tables.ts
+            "keycmp": ("replica_schema.rs sort_by len-then-lex", "inlined key compare"),
         },
     },
 }
@@ -211,29 +424,72 @@ def extract_ts(path):
 def rel(p):
     return os.path.relpath(p, REPO)
 
+def _is_test_ts(relpath, fname):
+    """A TS file that is test/fixture/debug scaffolding, not a parity target."""
+    if fname.endswith((".test.ts", ".d.ts", ".bench.ts")):
+        return True
+    parts = relpath.split(os.sep)
+    if "test" in parts or "tests" in parts or "__tests__" in parts:
+        return True
+    # helper/generator/debug scaffolding kept beside source (not under test/):
+    if fname.startswith("test-") or fname.endswith(("-test-util.ts", "-gen.ts")):
+        return True
+    return False
+
+def expand_ts_files(spec):
+    """Repo-relative TS origin paths. An entry ending in '/' is a directory —
+    recursively globbed for non-test .ts files (so a crate that ports a whole
+    subtree like zql/src/ivm/ needn't list every file). Test/fixture/debug
+    scaffolding is skipped, plus any path matching a spec 'ts_exclude' substring
+    (e.g. pure client-fluent / TS type-level files that have no runtime to
+    port)."""
+    excl = spec.get("ts_exclude", ())
+    out = []
+    for rp in spec["ts_files"]:
+        if rp.endswith("/"):
+            root = os.path.join(REPO, rp)
+            for dp, _d, files in os.walk(root):
+                for f in files:
+                    relp = os.path.relpath(os.path.join(dp, f), REPO)
+                    if f.endswith(".ts") and not _is_test_ts(relp, f) \
+                       and not any(x in relp for x in excl):
+                        out.append(relp)
+        else:
+            out.append(rp)
+    return sorted(set(out))
+
+def ts_label(spec, path):
+    """File label for a TS origin path — strip the crate's ts_label_prefix so
+    subdir files read as e.g. 'ivm/join.ts' / 'schema/cvr.ts'."""
+    pref = spec.get("ts_label_prefix", "view-syncer/")
+    r = rel(path)
+    return r.split(pref, 1)[-1] if pref in r else r
+
+def walk_rs(root):
+    out = []
+    for dp, _d, files in os.walk(root):
+        for f in files:
+            if f.endswith(".rs"):
+                out.append(os.path.relpath(os.path.join(dp, f), root))
+    return sorted(out)
+
 def main():
     crate = sys.argv[1] if len(sys.argv) > 1 else "cvr"
     spec = CRATES[crate]
 
     rust_syms = {}   # canon -> list of (name, kind, file, line, sig)
     rust_root = os.path.join(REPO, spec["rust_dir"])
-    rust_files = []
-    for dirpath, _dirs, files in os.walk(rust_root):
-        for f in files:
-            if f.endswith(".rs"):
-                # label relative to rust_dir so subdir files read as "schema/cvr.rs"
-                rust_files.append(os.path.relpath(os.path.join(dirpath, f), rust_root))
-    for fn in sorted(rust_files):
+    for fn in walk_rs(rust_root):   # recursive; subdir files read as "ivm/join.rs"
         path = os.path.join(rust_root, fn)
         for c, name, kind, ln, sig in extract_rust(path):
             rust_syms.setdefault(c, []).append((name, kind, fn, ln, sig))
 
     ts_syms = {}
-    for rp in spec["ts_files"]:
+    for rp in expand_ts_files(spec):
         path = os.path.join(REPO, rp)
         if not os.path.exists(path):
             continue
-        base = rel(path).split("view-syncer/")[-1]
+        base = ts_label(spec, path)
         for c, name, kind, ln, sig in extract_ts(path):
             ts_syms.setdefault(c, []).append((name, kind, base, ln, sig))
 
@@ -305,12 +561,11 @@ def main():
         except OSError:
             return 0
     ts_loc = {}
-    for rp in spec["ts_files"]:
+    for rp in expand_ts_files(spec):
         p = os.path.join(REPO, rp)
         if os.path.exists(p):
-            ts_loc[rel(p).split("view-syncer/")[-1]] = loc(p)
-    all_rust_files = sorted(fn for fn in os.listdir(os.path.join(REPO, spec["rust_dir"]))
-                            if fn.endswith(".rs"))
+            ts_loc[ts_label(spec, p)] = loc(p)
+    all_rust_files = walk_rs(os.path.join(REPO, spec["rust_dir"]))
     rust_loc = {fn: loc(os.path.join(REPO, spec["rust_dir"], fn)) for fn in all_rust_files}
 
     # classify each TS file's relationship
