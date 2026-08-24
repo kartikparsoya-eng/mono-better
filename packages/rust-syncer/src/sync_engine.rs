@@ -22,21 +22,24 @@ use std::sync::{Arc, Mutex};
 
 use rust_cvr::change_processor::{ChangeProcessor, RowChangeType};
 use rust_cvr::client_handler::{ClientHandler, MultiPoker, WebSocketSink};
-use rust_cvr::row_key::row_id_string;
-use rust_cvr::row_record_cache::RowRecordCache;
-use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle, InspectQueryRow};
 use rust_cvr::client_handler::{Patch, PatchToVersion, RowPatch};
 use rust_cvr::cvr::{CVR, DesiredQuerySpec, StoreOp};
-use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
-use rust_cvr::shards::{ShardID};
-use rust_cvr::ttl_clock::{TTLClock};
 use rust_cvr::cvr::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, RowRecordMap};
-use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, maybe_version_string, version_string};
+use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle, InspectQueryRow};
+use rust_cvr::row_key::row_id_string;
+use rust_cvr::row_record_cache::RowRecordCache;
+use rust_cvr::schema::types::{
+    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, maybe_version_string,
+    version_string,
+};
+use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
+use rust_cvr::shards::ShardID;
+use rust_cvr::ttl_clock::TTLClock;
 
 use crate::custom_query::{
     CustomQueryContext, CustomQuerySpec, CustomTransformed, transform_custom_queries,
 };
-use crate::permissions::{hash_of_ast, transform_and_hash};
+use crate::permissions::{hash_of_ast, transform_and_hash_query};
 use crate::pipeline_driver::{AdvanceOutcome, IvmPipelines, json_to_value};
 use crate::query_covering::{QueryCoverageShadowHit, QueryCoveringIndex, RunningQuery};
 
@@ -664,7 +667,7 @@ impl SyncEngine {
                 }
                 QueryRecord::Client(r) => {
                     let (ast, hash) = match permissions {
-                        Some(perms) => transform_and_hash(&r.ast, perms, auth_data, false),
+                        Some(perms) => transform_and_hash_query(&r.ast, perms, auth_data, false),
                         None => (r.ast.clone(), hash_of_ast(&r.ast)),
                     };
                     executed.push((qid.clone(), ast, hash));
@@ -1042,10 +1045,7 @@ impl SyncEngine {
         // Gather the row pages + config patches from PG (async), then release
         // the cache/store borrows before touching the engine (`getRow`).
         let cache_ref = cache;
-        let (raw_rows, cfg_patches): (
-            Vec<rust_cvr::schema::cvr::RowsRow>,
-            Vec<PatchToVersion>,
-        ) = {
+        let (raw_rows, cfg_patches): (Vec<rust_cvr::schema::cvr::RowsRow>, Vec<PatchToVersion>) = {
             let mut cursor = cache_ref
                 .catchup_row_patches(
                     catchup_from.clone(),
@@ -1743,10 +1743,10 @@ mod tests {
     use super::*;
     use crate::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
-    use rust_cvr::cvr::{CVR};
+    use rust_cvr::cvr::CVR;
     use rust_cvr::schema::types::{BaseQueryRecord, ClientQueryRecord, QueryRecord};
-    use rust_cvr::shards::{ShardID};
     use rust_cvr::schema::types::{CVRVersion, version_from_string};
+    use rust_cvr::shards::ShardID;
     use std::collections::BTreeMap;
 
     /// A censused type must return its live-object counter to baseline once it

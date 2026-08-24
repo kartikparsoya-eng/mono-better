@@ -60,7 +60,7 @@ pub fn resolve_permissions(loaded: Result<Option<Value>, String>) -> Option<Valu
 /// mutation-results / lmid internal queries) skip transformation.
 ///
 /// `auth_data` is the decoded JWT claims object (`{}` when unauthenticated).
-pub fn transform_and_hash(
+pub fn transform_and_hash_query(
     query: &Value,
     permissions: &Value,
     auth_data: &Value,

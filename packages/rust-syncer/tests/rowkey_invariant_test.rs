@@ -8,7 +8,7 @@
 //! client PK == keyCmp[0], so the divergence could never trigger). The bug
 //! class is schema-shape-triggered, so we vary the shape, not the data.
 //!
-//! Each case: build a SQLite table, run the REAL `compute_table_specs`, assert
+//! Each case: build a SQLite table, run the REAL `compute_zql_specs`, assert
 //! keyCmp[0] != client PK (so the case is actually exercising the divergence),
 //! install the client PK (as `config_and_hydrate` does from the client schema),
 //! hydrate through the real pipeline, and assert the emitted rowKey columns ==
@@ -28,7 +28,7 @@ struct Shape {
     /// Table DDL + a single INSERT of one row.
     ddl: &'static str,
     table: &'static str,
-    /// The IVM keyCmp[0] we expect `compute_table_specs` to pick (the WRONG key
+    /// The IVM keyCmp[0] we expect `compute_zql_specs` to pick (the WRONG key
     /// for client-facing emission) — asserted as a precondition so the case is
     /// meaningful.
     expect_keycmp: &'static [&'static str],
@@ -42,7 +42,7 @@ fn emitted_rowkey_cols(shape: &Shape) -> Vec<String> {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(shape.ddl).unwrap();
 
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     let spec = specs
         .iter()
         .find(|s| s.table == shape.table)

@@ -96,9 +96,10 @@ pub fn init_metrics(service_version: &str) -> Option<SdkMeterProvider> {
     // metric exists to expose) and the two implementations exported different
     // OTLP data types, so dashboards could not aggregate them together.
     // max_size 160 matches the JS SDK's exponential-histogram default.
-    const NATIVE_HISTOGRAM_INSTRUMENTS: [&str; 2] = [
+    const NATIVE_HISTOGRAM_INSTRUMENTS: [&str; 3] = [
         "zero.sync.e2e_serving_lag",
         "zero.sync.view_syncer_hydration",
+        "zero.sync.view_syncer_lag",
     ];
     let native_histogram_view =
         |instrument: &opentelemetry_sdk::metrics::Instrument|

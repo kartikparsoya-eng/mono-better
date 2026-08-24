@@ -32,7 +32,7 @@
 //! client PK equals the `keyCmp[0]` key that is actually used to emit the
 //! rowKey. A table can therefore pass validation and still poison the CVR. This
 //! oracle closes exactly that gap by running the real production
-//! `compute_table_specs` and asserting the crash predicate per table.
+//! `compute_zql_specs` and asserting the crash predicate per table.
 //!
 //! ## Running
 //!
@@ -185,7 +185,7 @@ fn rowkey_oracle_pins_diverging_table() {
         "\n\n>>> ROW-KEY POISON: {} table(s) whose stored CVR rowKey omits a client \
          primary-key column (this is the `Got undefined` crash source):\n{}\n\n\
          Fix: make rust's chosen row key for these tables match the client's declared \
-         primary key (align compute_table_specs' candidate-key enumeration / keyCmp[0] \
+         primary key (align compute_zql_specs' candidate-key enumeration / keyCmp[0] \
          with TS computeZqlSpecs), and add a write-time assertion in get_row_key that the \
          emitted rowKey contains the full client PK.\n",
         crashers.len(),

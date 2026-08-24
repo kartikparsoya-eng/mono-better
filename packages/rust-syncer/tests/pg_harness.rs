@@ -35,11 +35,11 @@
 
 use std::collections::BTreeMap;
 
-use rust_cvr::cvr_store::CVRStoreHandle;
-use rust_cvr::cvr::{CVR, DesiredQuerySpec};
-use rust_cvr::shards::{ShardID};
 use rust_cvr::cvr::CVRConfigDrivenUpdater;
+use rust_cvr::cvr::{CVR, DesiredQuerySpec};
+use rust_cvr::cvr_store::CVRStoreHandle;
 use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION};
+use rust_cvr::shards::ShardID;
 
 fn pg_uri() -> Option<String> {
     std::env::var("TEST_CVR_PG_URI")
@@ -262,9 +262,9 @@ fn pg_cvr_store_flush_and_reload_roundtrip() {
 ///   whose load filters `refCounts IS NOT NULL`.
 #[test]
 fn pg_cvr_store_deletes_rows() {
+    use rust_cvr::cvr::StoreOp;
     use rust_cvr::schema::types::RowID;
-    use rust_cvr::cvr::{StoreOp};
-    use rust_cvr::schema::types::{RowRecord};
+    use rust_cvr::schema::types::RowRecord;
 
     let Some(uri) = pg_uri() else {
         eprintln!("SKIP pg_cvr_store_deletes_rows: TEST_CVR_PG_URI not set");
@@ -586,8 +586,8 @@ fn pg_cvr_store_load_retries_until_rows_catch_up() {
 /// rebuild its `gotQueriesPatch`. The old code read only `desires`.
 #[test]
 fn pg_cvr_store_catchup_includes_got_query_patches() {
-    use rust_cvr::client_handler::{Patch};
-    use rust_cvr::schema::types::{QueryPatch};
+    use rust_cvr::client_handler::Patch;
+    use rust_cvr::schema::types::QueryPatch;
 
     let Some(uri) = pg_uri() else {
         eprintln!("SKIP pg_cvr_store_catchup_got_query: TEST_CVR_PG_URI not set");
@@ -881,8 +881,8 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
 /// the full engine. Uses the multi-thread runtime like `main.rs`.
 #[test]
 fn pg_repro_catchup_from_cg_thread() {
-    use rust_cvr::schema::types::RowID;
     use rust_cvr::row_record_cache::{RowRecord, RowRecordCache};
+    use rust_cvr::schema::types::RowID;
     use std::sync::Arc;
 
     let Some(uri) = pg_uri() else {
@@ -1019,8 +1019,8 @@ fn pg_repro_catchup_from_cg_thread() {
 /// INSERT never populates, so the flush fails while `load()` still succeeds.
 #[test]
 fn pg_repro_failed_flush_does_not_hang() {
-    use rust_cvr::schema::types::RowID;
     use rust_cvr::row_record_cache::{RowRecord, RowRecordCache};
+    use rust_cvr::schema::types::RowID;
     use std::sync::Arc;
 
     let Some(uri) = pg_uri() else {
@@ -1807,7 +1807,7 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
 
     // Replica with a junction table: NO SQL PRIMARY KEY, a compound unique index
     // (the app's client PK) AND a shorter surrogate unique index on `id`.
-    // compute_table_specs' keyCmp[0] therefore picks ["id"] (fewest columns).
+    // compute_zql_specs' keyCmp[0] therefore picks ["id"] (fewest columns).
     {
         let conn = Connection::open(&db_path).unwrap();
         let _ = conn.pragma_update(None, "journal_mode", "wal2");

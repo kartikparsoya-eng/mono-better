@@ -526,6 +526,31 @@ fn main() {
         connection_sinks,
     ));
 
+    // Cross-CG serving-lag observability (TS `Syncer` serving-lag gauges + the
+    // 60s `#viewSyncerLag` sampler). Register the observable gauges, then spawn a
+    // 60s sampler that records `view_syncer_lag` histogram observations for every
+    // eligible CG's earliest-unserved change.
+    let serving_lag_registry = router.serving_lag_registry();
+    rust_syncer::metrics::register_serving_lag_gauges(serving_lag_registry.clone());
+    runtime.spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
+            rust_syncer::serving_lag::VIEW_SYNCER_LAG_SAMPLE_INTERVAL_MS,
+        ));
+        // Skip the immediate first tick so the first sample is a real 60s later.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let dist = serving_lag_registry.compute_serving_lag_distribution(now);
+            for lag_ms in dist.lags_ms {
+                rust_syncer::metrics::record_view_syncer_lag_ms(lag_ms as f64);
+            }
+        }
+    });
+
     // Bind BOTH listeners eagerly so the process is genuinely accepting on its
     // WS + HTTP ports before we announce readiness. The TS dispatcher reverse-
     // proxies client upgrades to the WS port and POSTs commit notifications to

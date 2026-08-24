@@ -28,9 +28,11 @@ use crate::ws_server::ConnectionContext;
 use crate::ws_sink::DirectWebSocketSink;
 use dashmap::DashMap;
 use rust_cvr::cvr::{CVR, DesiredQuerySpec};
-use rust_cvr::shards::{ShardID};
-use rust_cvr::ttl_clock::{TTLClock};
-use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_string};
+use rust_cvr::schema::types::{
+    CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, version_string,
+};
+use rust_cvr::shards::ShardID;
+use rust_cvr::ttl_clock::TTLClock;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -222,6 +224,8 @@ enum ExecutorCommand {
         /// The newest broadcast notification at creation time, used to arm the
         /// group's serving-lag tracker (TS notifier latest-state replay).
         last_notification: Option<serde_json::Value>,
+        /// Process-wide serving-lag registry this CG publishes its snapshot into.
+        serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
     },
     /// Stop accepting new groups and drain the ones already hosted, then exit.
     Shutdown,
@@ -417,6 +421,10 @@ pub struct ConnectionRouter {
     /// `ReplicaState` to every new subscriber (notifier.ts). Handed to each
     /// newly spawned CG to arm its serving-lag tracker.
     last_notification: Arc<Mutex<Option<serde_json::Value>>>,
+    /// Process-wide serving-lag state (replica-ready log + per-CG snapshots),
+    /// read by the 60s sampler + the `serving_lag*`/`queries`/`rows` gauges. Port
+    /// of the `Syncer` class's `#replicaReadyStates` + view-syncer iteration.
+    serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
     /// Whether the router is shutting down.
     shutting_down: Arc<AtomicBool>,
 }
@@ -601,8 +609,15 @@ impl ConnectionRouter {
             connections,
             group_auth_states: Arc::new(Mutex::new(HashMap::new())),
             last_notification: Arc::new(Mutex::new(None)),
+            serving_lag_registry: Arc::new(crate::serving_lag::ServingLagRegistry::new()),
             shutting_down,
         }
+    }
+
+    /// The process-wide serving-lag registry (for `main` to register its gauges
+    /// + spawn the 60s sampler).
+    pub fn serving_lag_registry(&self) -> Arc<crate::serving_lag::ServingLagRegistry> {
+        self.serving_lag_registry.clone()
     }
 
     /// A JSON snapshot of the process metrics (for `/statz`).
@@ -852,6 +867,7 @@ impl ConnectionRouter {
             connection_count: connection_count.clone(),
             accepting: accepting.clone(),
             last_notification: lock_unpoisoned(&self.last_notification).clone(),
+            serving_lag_registry: self.serving_lag_registry.clone(),
         };
         // A closed control channel means the executor THREAD died. Mark it dead
         // (so `place_cg` stops ranking its empty slot least-loaded) and retry on
@@ -1077,6 +1093,18 @@ impl ConnectionRouter {
         // Remember the newest state so a CG created between commits can arm its
         // serving-lag tracker at spawn (TS notifier latest-state replay).
         *lock_unpoisoned(&self.last_notification) = Some(notification.clone());
+        // Feed the process-wide replica-ready log (TS `#recordReplicaReadyState`):
+        // once per commit, watermark + upstream commit time. This is the single
+        // process-wide replica-ready feed in the per-CG Rust arch.
+        if let Some(watermark) = notification.get("watermark").and_then(|v| v.as_str()) {
+            let ready_ms = notification
+                .get("upstreamCommitTimeMs")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as i64)
+                .unwrap_or_else(now_ms);
+            self.serving_lag_registry
+                .record_replica_ready_state(watermark, ready_ms);
+        }
         let mut sent = 0;
         for entry in self.cg_handles.iter() {
             if entry
@@ -1391,6 +1419,18 @@ struct CgState {
     /// A fatal sync/store failure makes the CG unusable: the snapshot and IVM
     /// graph may already have advanced while the CVR did not commit.
     terminal: bool,
+    /// Wall-clock (ms) at construction. Port of TS `ViewSyncerService.createdAtMs`
+    /// (a serving-lag input: replica states before this are already accounted).
+    created_at_ms: i64,
+    /// The last stateVersion poked to clients. Port of TS `#servedVersion`; feeds
+    /// `serving_lag_eligible`'s "unserved" computation via the shared registry.
+    served_version: Option<String>,
+    /// Last observed tracked-row count (published to the `rows` gauge). Refreshed
+    /// where the CG already holds the row map, so reading it costs no CVR I/O.
+    /// Port of TS `ViewSyncerService.rowCount` (there a cheap in-memory getter).
+    last_row_count: usize,
+    /// Process-wide serving-lag registry this CG publishes its snapshot into.
+    serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
     /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
     /// THE most important census — a CgState owns the `SyncEngine` (IVM graph +
     /// CVR store), so a residual count after all clients disconnect pins
@@ -1400,6 +1440,10 @@ struct CgState {
 
 impl Drop for CgState {
     fn drop(&mut self) {
+        // Drop this CG's serving-lag snapshot on every teardown path (normal
+        // return, TTL/idle shutdown, panic-unwind) — TS drops it when the
+        // view-syncer service stops.
+        self.serving_lag_registry.remove_view_syncer(&self.cg_id);
         // Attribute *who* tore down this client group when
         // `RUST_SYNCER_DROP_BACKTRACE=1`. The census counter dec's via the
         // `_census` guard's own `Drop`.
@@ -1545,8 +1589,51 @@ impl CgState {
             connection_count,
             accepting,
             terminal: initialization_failed,
+            created_at_ms: created_at,
+            served_version: None,
+            last_row_count: 0,
+            // Replaced by the process-wide registry in `cg_event_loop`; a
+            // standalone default keeps the test constructor self-contained.
+            serving_lag_registry: Arc::new(crate::serving_lag::ServingLagRegistry::new()),
             _census: crate::live_count::Guard::new(&crate::live_count::CLIENT_GROUP),
         }
+    }
+
+    /// TS `ViewSyncerService.servingLagEligible`: `#clients.size > 0 &&
+    /// getBackgroundConnectionContext() !== undefined`. Approximated here as
+    /// "has a registered client with a live connection to serve".
+    fn serving_lag_eligible(&self) -> bool {
+        !self.registered_ws.is_empty() && !self.connections.is_empty()
+    }
+
+    /// TS `ViewSyncerService.queryCount`: `#pipelines.initialized() ?
+    /// #pipelines.queries().size : 0`. The count of active (hydrated) queries.
+    fn query_count(&mut self) -> usize {
+        self.sync_engine.pipelines().active_query_ids().len()
+    }
+
+    /// TS `ViewSyncerService.rowCount`: `#cvrStore.rowCount`. The tracked-row
+    /// count as last observed while the CG held the row map (no CVR I/O here).
+    fn row_count(&self) -> usize {
+        self.last_row_count
+    }
+
+    /// Publish (or refresh) this CG's snapshot into the shared serving-lag
+    /// registry (TS's per-scrape iteration over `viewSyncers.getServices()`).
+    fn publish_serving_lag(&mut self) {
+        let num_queries = self.query_count();
+        let num_rows = self.row_count();
+        let snapshot = crate::serving_lag::CgServingSnapshot {
+            lag: crate::serving_lag::ServingLagViewSyncer {
+                created_at_ms: self.created_at_ms,
+                served_version: self.served_version.clone(),
+                serving_lag_eligible: self.serving_lag_eligible(),
+            },
+            num_queries,
+            num_rows,
+        };
+        self.serving_lag_registry
+            .upsert_view_syncer(&self.cg_id, snapshot);
     }
 
     /// Advance and return the monotonic TTL clock to wall-time `now`. Port of
@@ -1631,6 +1718,7 @@ impl CgState {
         let ttl_clock = self.get_ttl_clock(now);
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
         let existing_rows = self.sync_engine.existing_rows().await;
+        self.last_row_count = existing_rows.len();
         match self
             .sync_engine
             .remove_expired_queries(
@@ -2294,6 +2382,7 @@ impl CgState {
             let replica_version = self.replica_version.clone();
             // The rows the client already has (from the CVR row cache).
             let existing_rows = self.sync_engine.existing_rows().await;
+            self.last_row_count = existing_rows.len();
             // The client's decoded JWT claims (`authData` for permission rules).
             let auth_data = self
                 .client_auth
@@ -2603,7 +2692,11 @@ impl CgState {
         filter_client: Option<&str>,
         ttl_clock: TTLClock,
     ) -> serde_json::Value {
-        let rows = match self.sync_engine.inspect_queries(ttl_clock, filter_client).await {
+        let rows = match self
+            .sync_engine
+            .inspect_queries(ttl_clock, filter_client)
+            .await
+        {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::warn!("CG {}: inspect_queries failed: {e}", self.cg_id);
@@ -2834,6 +2927,10 @@ impl CgState {
                 crate::metrics::record_e2e_serving_lag_clamp();
             }
         }
+        // TS `#servedVersion = version.stateVersion`. Refresh the cross-CG
+        // serving-lag snapshot now that this CG has caught up to `version`.
+        self.served_version = Some(version.state_version.clone());
+        self.publish_serving_lag();
     }
 
     /// Record the upstream commit behind a `version-ready` so the served
@@ -2888,6 +2985,7 @@ impl CgState {
 
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
         let existing_rows = self.sync_engine.existing_rows().await;
+        self.last_row_count = existing_rows.len();
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
         let advance_started = std::time::Instant::now();
@@ -3000,6 +3098,7 @@ impl CgState {
                 .unwrap_or_else(|| cvr.version.state_version.clone());
             let replica_version = self.replica_version.clone();
             let existing_rows = self.sync_engine.existing_rows().await;
+            self.last_row_count = existing_rows.len();
             let auth_data = self
                 .client_auth
                 .get(&client_id)
@@ -3180,12 +3279,14 @@ async fn executor_loop(
                 connection_count,
                 accepting,
                 last_notification,
+                serving_lag_registry,
             }) => {
                 let ctx = CgTaskContext {
                     services_factory: services_factory.clone(),
                     auth_validator: auth_validator.clone(),
                     connections: connections.clone(),
                     cvr_pool: pool.clone(),
+                    serving_lag_registry,
                 };
                 // A panic in one group's engine must not poison its executor.
                 // `spawn_local` isolates the panic to this task; the drop guard
@@ -3267,6 +3368,7 @@ struct CgTaskContext {
     auth_validator: Arc<dyn AuthValidator>,
     connections: Arc<Mutex<HashMap<String, ConnectionInfo>>>,
     cvr_pool: Option<sqlx::PgPool>,
+    serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
 }
 
 /// The async body hosting one client group, run as a `spawn_local` task on its
@@ -3292,6 +3394,11 @@ async fn cg_event_loop(
         accepting,
         ctx.cvr_pool,
     );
+    // Publish into the process-wide serving-lag registry (replacing the
+    // standalone default the constructor installed) and register an initial
+    // snapshot so the sampler/gauges see this CG immediately.
+    state.serving_lag_registry = ctx.serving_lag_registry;
+    state.publish_serving_lag();
     // Arm the serving-lag tracker with the newest pre-spawn commit (TS notifier
     // latest-state replay): the group's FIRST serve then records an observation
     // instead of silently swallowing everything before the next commit.

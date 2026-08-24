@@ -118,7 +118,7 @@ impl CustomQueryContext {
 /// and fragment are ignored, matching URLPattern's implicit `search`/`hash`
 /// wildcards. Unsupported URLPattern syntax simply fails to match (the
 /// conservative direction).
-pub fn url_pattern_matches(pattern: &str, url: &str) -> bool {
+pub fn url_match(pattern: &str, url: &str) -> bool {
     let candidate = url.split(['?', '#']).next().unwrap_or(url);
     let pattern = pattern.split(['?', '#']).next().unwrap_or(pattern);
     glob_match(pattern.as_bytes(), candidate.as_bytes())
@@ -258,7 +258,7 @@ pub async fn transform_custom_queries(
 /// ms of backoff; 4xx and malformed responses fail immediately.
 const FETCH_MAX_ATTEMPTS: u32 = 4;
 
-fn backoff_delay_ms(attempt: u32) -> u64 {
+fn get_backoff_delay_ms(attempt: u32) -> u64 {
     let jitter = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
@@ -295,7 +295,7 @@ async fn post_transform(
     if !ctx
         .allowed_urls
         .iter()
-        .any(|pattern| url_pattern_matches(pattern, &ctx.url))
+        .any(|pattern| url_match(pattern, &ctx.url))
     {
         crate::metrics::record_api_request("url_not_allowed");
         return Err(transform_failed(
@@ -384,7 +384,7 @@ async fn post_transform_attempts(
                     None,
                 );
                 if will_retry {
-                    tokio::time::sleep(Duration::from_millis(backoff_delay_ms(attempt))).await;
+                    tokio::time::sleep(Duration::from_millis(get_backoff_delay_ms(attempt))).await;
                     attempt += 1;
                     continue;
                 }
@@ -406,7 +406,8 @@ async fn post_transform_attempts(
                         Some(status.as_u16()),
                     );
                     if will_retry {
-                        tokio::time::sleep(Duration::from_millis(backoff_delay_ms(attempt))).await;
+                        tokio::time::sleep(Duration::from_millis(get_backoff_delay_ms(attempt)))
+                            .await;
                         attempt += 1;
                         continue;
                     }
@@ -471,26 +472,26 @@ async fn post_transform_attempts(
 /// credentials can NOT read each other's cached (authorization-scoped)
 /// transform. Port of TS `getCacheKey`, which includes cookie, origin, userID,
 /// and customHeaders alongside url+token+id.
-fn headers_digest(headers: &[(String, String)]) -> String {
+fn normalized_headers(headers: &[(String, String)]) -> String {
     let mut pairs: Vec<&(String, String)> = headers.iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let canonical: String = pairs.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
     format!("{:016x}", rust_cvr::hash::h64(&canonical))
 }
 
-fn cache_key(ctx: &CustomQueryContext, id: &str) -> String {
+fn get_cache_key(ctx: &CustomQueryContext, id: &str) -> String {
     format!(
         "{}|{}|{}|{}|{id}",
         ctx.url,
         ctx.auth.as_deref().unwrap_or(""),
         ctx.user_id.as_deref().unwrap_or(""),
-        headers_digest(&ctx.composed_headers())
+        normalized_headers(&ctx.composed_headers())
     )
 }
 
 fn cache_get(ctx: &CustomQueryContext, id: &str) -> Option<TransformedQuery> {
     let cache = TRANSFORM_CACHE.lock().ok()?;
-    let (at, q) = cache.get(&cache_key(ctx, id))?;
+    let (at, q) = cache.get(&get_cache_key(ctx, id))?;
     if at.elapsed() >= CACHE_TTL {
         return None;
     }
@@ -499,7 +500,7 @@ fn cache_get(ctx: &CustomQueryContext, id: &str) -> Option<TransformedQuery> {
 
 fn cache_set(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery) {
     if let Ok(mut cache) = TRANSFORM_CACHE.lock() {
-        cache.insert(cache_key(ctx, id), (Instant::now(), q.clone()));
+        cache.insert(get_cache_key(ctx, id), (Instant::now(), q.clone()));
     }
 }
 
@@ -584,25 +585,25 @@ mod tests {
             c
         };
         assert_ne!(
-            cache_key(&with_auth("a"), "1"),
-            cache_key(&with_auth("b"), "1")
+            get_cache_key(&with_auth("a"), "1"),
+            get_cache_key(&with_auth("b"), "1")
         );
         assert_ne!(
-            cache_key(&with_auth("a"), "1"),
-            cache_key(&ctx_at("v"), "1")
+            get_cache_key(&with_auth("a"), "1"),
+            get_cache_key(&ctx_at("v"), "1")
         );
         assert_ne!(
-            cache_key(&with_auth("a"), "1"),
-            cache_key(&with_auth("a"), "2")
+            get_cache_key(&with_auth("a"), "1"),
+            get_cache_key(&with_auth("a"), "2")
         );
-        assert_eq!(cache_key(&base, "1"), cache_key(&base, "1"));
+        assert_eq!(get_cache_key(&base, "1"), get_cache_key(&base, "1"));
 
         // The pinned userID partitions the cache (TS getCacheKey has userID).
         let mut ua = base.clone();
         ua.user_id = Some("alice".to_string());
         let mut ub = base.clone();
         ub.user_id = Some("bob".to_string());
-        assert_ne!(cache_key(&ua, "1"), cache_key(&ub, "1"));
+        assert_ne!(get_cache_key(&ua, "1"), get_cache_key(&ub, "1"));
 
         // Forwarded credentials (cookie/origin/custom headers) must partition
         // the cache: same url+auth+id but a different cookie → different key.
@@ -610,7 +611,7 @@ mod tests {
         ca.cookie = Some("session=A".to_string());
         let mut cb = base.clone();
         cb.cookie = Some("session=B".to_string());
-        assert_ne!(cache_key(&ca, "1"), cache_key(&cb, "1"));
+        assert_ne!(get_cache_key(&ca, "1"), get_cache_key(&cb, "1"));
     }
 
     /// TS `fetchFromAPIServer` header precedence (fetch.ts): api-key → client
@@ -655,42 +656,42 @@ mod tests {
     /// params; candidate query/hash ignored.
     #[test]
     fn url_pattern_matching() {
-        assert!(url_pattern_matches(
+        assert!(url_match(
             "https://api.example.com/query",
             "https://api.example.com/query"
         ));
-        assert!(url_pattern_matches(
+        assert!(url_match(
             "https://api.example.com/query",
             "https://api.example.com/query?tenant=1"
         ));
-        assert!(url_pattern_matches(
+        assert!(url_match(
             "https://api.example.com/*",
             "https://api.example.com/v2/query"
         ));
-        assert!(url_pattern_matches(
+        assert!(url_match(
             "https://*.example.com/query",
             "https://tenant-a.example.com/query"
         ));
-        assert!(url_pattern_matches(
+        assert!(url_match(
             "https://api.example.com/:tenant/query",
             "https://api.example.com/acme/query"
         ));
         // A :param is a single path segment.
-        assert!(!url_pattern_matches(
+        assert!(!url_match(
             "https://api.example.com/:tenant/query",
             "https://api.example.com/a/b/query"
         ));
-        assert!(!url_pattern_matches(
+        assert!(!url_match(
             "https://api.example.com/query",
             "https://evil.example.com/query"
         ));
         // A port stays literal (':8080' is not a param — digits can't start a
         // param name).
-        assert!(url_pattern_matches(
+        assert!(url_match(
             "http://localhost:8080/query",
             "http://localhost:8080/query"
         ));
-        assert!(!url_pattern_matches(
+        assert!(!url_match(
             "http://localhost:8080/query",
             "http://localhost:9090/query"
         ));

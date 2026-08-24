@@ -1,0 +1,438 @@
+{
+  "cases": [
+    {
+      "desc": "empty log + no syncers",
+      "now": 1000,
+      "replicaReadyStates": [],
+      "viewSyncers": [],
+      "stats": {
+        "activeClientGroups": 0,
+        "laggingClientGroups": 0,
+        "minMs": 0,
+        "p50Ms": 0,
+        "p75Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "maxMs": 0
+    },
+    {
+      "desc": "empty log, eligible syncer -> lag 0",
+      "now": 1000,
+      "replicaReadyStates": [],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": null,
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 1,
+        "laggingClientGroups": 0,
+        "minMs": 0,
+        "p50Ms": 0,
+        "p75Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "maxMs": 0
+    },
+    {
+      "desc": "all fully served -> all lags 0",
+      "now": 1000,
+      "replicaReadyStates": [
+        {
+          "watermark": "02",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "04",
+          "replicaReadyTimeMs": 200
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": "04",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "04",
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 2,
+        "laggingClientGroups": 0,
+        "minMs": 0,
+        "p50Ms": 0,
+        "p75Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "maxMs": 0
+    },
+    {
+      "desc": "never-served, created before all -> lag from idx 0",
+      "now": 1000,
+      "replicaReadyStates": [
+        {
+          "watermark": "02",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "04",
+          "replicaReadyTimeMs": 200
+        },
+        {
+          "watermark": "06",
+          "replicaReadyTimeMs": 300
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": null,
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 1,
+        "laggingClientGroups": 1,
+        "minMs": 900,
+        "p50Ms": 900,
+        "p75Ms": 900,
+        "p99Ms": 900,
+        "maxMs": 900
+      },
+      "maxMs": 900
+    },
+    {
+      "desc": "created after everything -> fully served (lag 0)",
+      "now": 1000,
+      "replicaReadyStates": [
+        {
+          "watermark": "02",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "04",
+          "replicaReadyTimeMs": 200
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 999,
+          "servedVersion": null,
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 1,
+        "laggingClientGroups": 0,
+        "minMs": 0,
+        "p50Ms": 0,
+        "p75Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "maxMs": 0
+    },
+    {
+      "desc": "ineligible syncers are skipped entirely",
+      "now": 1000,
+      "replicaReadyStates": [
+        {
+          "watermark": "02",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "04",
+          "replicaReadyTimeMs": 200
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": null,
+          "servingLagEligible": false
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "02",
+          "servingLagEligible": false
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 0,
+        "laggingClientGroups": 0,
+        "minMs": 0,
+        "p50Ms": 0,
+        "p75Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "maxMs": 0
+    },
+    {
+      "desc": "mixed: served-at-boundary vs never-served, one ineligible",
+      "now": 1000,
+      "replicaReadyStates": [
+        {
+          "watermark": "02",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "04",
+          "replicaReadyTimeMs": 200
+        },
+        {
+          "watermark": "06",
+          "replicaReadyTimeMs": 300
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": "02",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "04",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": null,
+          "servingLagEligible": false
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 2,
+        "laggingClientGroups": 2,
+        "minMs": 700,
+        "p50Ms": 700,
+        "p75Ms": 800,
+        "p99Ms": 800,
+        "maxMs": 800
+      },
+      "maxMs": 800
+    },
+    {
+      "desc": "served exactly at last watermark -> fully served",
+      "now": 5000,
+      "replicaReadyStates": [
+        {
+          "watermark": "0a",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "0b",
+          "replicaReadyTimeMs": 250
+        },
+        {
+          "watermark": "0c",
+          "replicaReadyTimeMs": 900
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": "0c",
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 1,
+        "laggingClientGroups": 0,
+        "minMs": 0,
+        "p50Ms": 0,
+        "p75Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "maxMs": 0
+    },
+    {
+      "desc": "created between states (lowerBound picks a middle index)",
+      "now": 2000,
+      "replicaReadyStates": [
+        {
+          "watermark": "02",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "04",
+          "replicaReadyTimeMs": 200
+        },
+        {
+          "watermark": "06",
+          "replicaReadyTimeMs": 300
+        },
+        {
+          "watermark": "08",
+          "replicaReadyTimeMs": 400
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 250,
+          "servedVersion": null,
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 1,
+        "laggingClientGroups": 1,
+        "minMs": 1700,
+        "p50Ms": 1700,
+        "p75Ms": 1700,
+        "p99Ms": 1700,
+        "maxMs": 1700
+      },
+      "maxMs": 1700
+    },
+    {
+      "desc": "percentile edges: 10 states, 10 distinct lags",
+      "now": 1100,
+      "replicaReadyStates": [
+        {
+          "watermark": "10",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "11",
+          "replicaReadyTimeMs": 200
+        },
+        {
+          "watermark": "12",
+          "replicaReadyTimeMs": 300
+        },
+        {
+          "watermark": "13",
+          "replicaReadyTimeMs": 400
+        },
+        {
+          "watermark": "14",
+          "replicaReadyTimeMs": 500
+        },
+        {
+          "watermark": "15",
+          "replicaReadyTimeMs": 600
+        },
+        {
+          "watermark": "16",
+          "replicaReadyTimeMs": 700
+        },
+        {
+          "watermark": "17",
+          "replicaReadyTimeMs": 800
+        },
+        {
+          "watermark": "18",
+          "replicaReadyTimeMs": 900
+        },
+        {
+          "watermark": "19",
+          "replicaReadyTimeMs": 1000
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": null,
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "10",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "11",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "12",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "13",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "14",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "15",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "16",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "17",
+          "servingLagEligible": true
+        },
+        {
+          "createdAtMs": 0,
+          "servedVersion": "18",
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 10,
+        "laggingClientGroups": 10,
+        "minMs": 100,
+        "p50Ms": 500,
+        "p75Ms": 800,
+        "p99Ms": 1000,
+        "maxMs": 1000
+      },
+      "maxMs": 1000
+    },
+    {
+      "desc": "watermark upperBound past end -> fully served",
+      "now": 1000,
+      "replicaReadyStates": [
+        {
+          "watermark": "02",
+          "replicaReadyTimeMs": 100
+        },
+        {
+          "watermark": "04",
+          "replicaReadyTimeMs": 200
+        }
+      ],
+      "viewSyncers": [
+        {
+          "createdAtMs": 0,
+          "servedVersion": "09",
+          "servingLagEligible": true
+        }
+      ],
+      "stats": {
+        "activeClientGroups": 1,
+        "laggingClientGroups": 0,
+        "minMs": 0,
+        "p50Ms": 0,
+        "p75Ms": 0,
+        "p99Ms": 0,
+        "maxMs": 0
+      },
+      "maxMs": 0
+    }
+  ]
+}

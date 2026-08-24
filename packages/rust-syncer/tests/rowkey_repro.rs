@@ -18,14 +18,14 @@
 //! For any table whose `keyCmp[0]` (shortest / lexicographically-first
 //! replicated unique key) differs from the client's declared PK, rust stores
 //! the wrong row-key columns → the client reads `value[pkCol] === undefined` →
-//! the crash. This exercises the REAL production path (`compute_table_specs` +
+//! the crash. This exercises the REAL production path (`compute_zql_specs` +
 //! `IvmPipelines::init_from_connection` + `hydrate`) — no mocks.
 //!
 //! Regression gate (post-fix): with the client PK installed via
 //! `set_client_primary_keys` (as `config_and_hydrate` now does from the client
 //! schema), the emitted rowKey is keyed by the CLIENT PK. Without it, emission
 //! falls back to the IVM `keyCmp[0]` (unchanged prior behavior). This exercises
-//! the real path (`compute_table_specs` → `init_from_connection` → `hydrate`).
+//! the real path (`compute_zql_specs` → `init_from_connection` → `hydrate`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -56,7 +56,7 @@ fn emitted_rowkey_cols(client_pks: Option<HashMap<String, Vec<String>>>) -> Vec<
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     // Precondition: keyCmp[0] is the shortest unique key (surrogate `id`).
     let cus = specs
         .iter()

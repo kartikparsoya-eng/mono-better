@@ -267,7 +267,7 @@ fn condition_implies(covered: Option<&Value>, covering: Option<&Value>) -> bool 
     let Some(covered) = covered else {
         return false;
     };
-    if json_value_eq(covered, covering) {
+    if json_equal(covered, covering) {
         return true;
     }
 
@@ -344,7 +344,7 @@ fn simple_condition_implies(covered: &Value, covering: &Value) -> bool {
     let (covered_op, covered_value) = (covered_parts.op, covered_parts.value);
     let (covering_op, covering_value) = (covering_parts.op, covering_parts.value);
 
-    if is_equality_op(covered_op) && is_non_null_scalar_literal(covered_value) {
+    if is_equality_op(covered_op) && is_non_null_scalar_literal_value(covered_value) {
         return equality_implies(covered_value, covering_op, covering_value);
     }
 
@@ -370,8 +370,8 @@ fn simple_condition_implies(covered: &Value, covering: &Value) -> bool {
 
 fn equality_implies(value: &Value, covering_op: &str, covering_value: &Value) -> bool {
     match covering_op {
-        "=" | "IS" => json_value_eq(value, covering_value),
-        "!=" | "IS NOT" => !json_value_eq(value, covering_value),
+        "=" | "IS" => json_equal(value, covering_value),
+        "!=" | "IS NOT" => !json_equal(value, covering_value),
         "IN" => covering_value
             .as_array()
             .is_some_and(|a| literal_array_includes(a, value)),
@@ -435,12 +435,12 @@ fn is_numeric_order_op(op: &str) -> bool {
     op == "<" || op == ">" || op == "<=" || op == ">="
 }
 
-fn is_non_null_scalar_literal(value: &Value) -> bool {
+fn is_non_null_scalar_literal_value(value: &Value) -> bool {
     !value.is_null() && !value.is_array()
 }
 
 fn literal_array_includes(values: &[Value], value: &Value) -> bool {
-    values.iter().any(|v| json_value_eq(v, value))
+    values.iter().any(|v| json_equal(v, value))
 }
 
 // ─── small helpers ───────────────────────────────────────────────────────────
@@ -459,16 +459,16 @@ fn present(v: Option<&Value>) -> Option<&Value> {
 /// JS doubles — under plain `Value` equality a mixed `1`-vs-`1.0` encoding
 /// would (worse than conservatively) claim a `!=`/`IS NOT` implication that TS
 /// denies. Numbers compare via f64; everything else recurses structurally.
-fn json_value_eq(a: &Value, b: &Value) -> bool {
+fn json_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
         (Value::Array(x), Value::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| json_value_eq(a, b))
+            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| json_equal(a, b))
         }
         (Value::Object(x), Value::Object(y)) => {
             x.len() == y.len()
                 && x.iter()
-                    .all(|(k, va)| y.get(k).is_some_and(|vb| json_value_eq(va, vb)))
+                    .all(|(k, va)| y.get(k).is_some_and(|vb| json_equal(va, vb)))
         }
         _ => a == b,
     }
@@ -480,7 +480,7 @@ fn field_eq(a: &Value, b: &Value, key: &str) -> bool {
 
 fn json_eq(a: Option<&Value>, b: Option<&Value>) -> bool {
     match (present(a), present(b)) {
-        (Some(a), Some(b)) => json_value_eq(a, b),
+        (Some(a), Some(b)) => json_equal(a, b),
         (a, b) => a == b,
     }
 }

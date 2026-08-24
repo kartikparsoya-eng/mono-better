@@ -202,16 +202,120 @@ pub fn record_e2e_serving_lag_clamp() {
     serving_lag_otel().e2e_serving_lag_clamps.add(1, &[]);
 }
 
-// NOTE ON `zero.sync.view_syncer_lag` (TS `Syncer.#viewSyncerLag`, zero/v1.9.0):
-// this is the periodic *backlog* companion to `e2e_serving_lag` — a setInterval
-// in the TS Syncer worker that, every tick, samples `now - replicaReadyTime` for
-// EVERY active client group and records one observation each, so a stuck CG
-// re-reports its growing age on every tick. It is intentionally NOT ported: the
-// rust syncer runs each CG on its own single-threaded executor + LocalSet with
-// no central, timer-driven CG registry to enumerate, and the completion-based
-// `e2e_serving_lag` (ported) already captures served-version lag. Adding a
-// cross-executor lag registry sampled on a process timer would introduce shared
-// mutable state on the advance hot path for a purely-observational metric.
+/// `zero.sync.view_syncer_lag` native histogram — TS `Syncer.#viewSyncerLag`
+/// (zero/v1.9.0). The periodic *backlog* companion to `e2e_serving_lag`: the 60s
+/// sampler (`main`) records `now - replicaReadyTime` for every serving-lag-eligible
+/// CG's earliest-unserved change, so a stuck CG re-reports its growing age each
+/// tick. Fed from the cross-CG `ServingLagRegistry`.
+fn view_syncer_lag_otel() -> &'static OtelHistogram<f64> {
+    static INSTRUMENT: OnceLock<OtelHistogram<f64>> = OnceLock::new();
+    INSTRUMENT.get_or_init(|| {
+        global::meter("zero")
+            .f64_histogram("zero.sync.view_syncer_lag")
+            .with_unit("s")
+            .with_description(
+                "Lag from replica-ready change to ViewSyncer output for active client groups. A \
+                 change is output after IVM advancement, CVR flush, and pokeEnd.",
+            )
+            // Exported as a base2 exponential histogram via the otel.rs view
+            // (TS getOrCreateNativeHistogram parity).
+            .build()
+    })
+}
+
+/// Record one `view_syncer_lag` sample (ms) — TS `#viewSyncerLag.recordMs(lagMs)`.
+pub fn record_view_syncer_lag_ms(lag_ms: f64) {
+    view_syncer_lag_otel().record(lag_ms / 1000.0, &[]);
+}
+
+/// Wall-clock epoch milliseconds (for the serving-lag gauge callbacks).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Register the cross-CG serving-lag observable gauges — TS `Syncer`'s
+/// `getOrCreateGauge(...).addCallback(...)` set: `serving_lag` (max),
+/// `serving_lag_stats` (min/p50/p75/p99/max), `serving_lagging_client_groups`,
+/// `queries`, and `rows`. Kept alive in a static so the callbacks keep firing.
+pub fn register_serving_lag_gauges(
+    registry: std::sync::Arc<crate::serving_lag::ServingLagRegistry>,
+) {
+    use opentelemetry::metrics::ObservableGauge;
+    type ServingLagGauges = (
+        ObservableGauge<i64>,
+        ObservableGauge<i64>,
+        ObservableGauge<i64>,
+        ObservableGauge<u64>,
+        ObservableGauge<u64>,
+    );
+    static GAUGES: OnceLock<ServingLagGauges> = OnceLock::new();
+    GAUGES.get_or_init(|| {
+        let m = global::meter("zero");
+        let r_max = registry.clone();
+        let serving_lag = m
+            .i64_observable_gauge("zero.sync.serving_lag")
+            .with_unit("ms")
+            .with_description(
+                "Maximum time active ViewSyncer client groups have had unserved replica changes.",
+            )
+            .with_callback(move |o| {
+                o.observe(r_max.compute_serving_lag_distribution(now_ms()).max_ms, &[]);
+            })
+            .build();
+        let r_stats = registry.clone();
+        let serving_lag_stats = m
+            .i64_observable_gauge("zero.sync.serving_lag_stats")
+            .with_unit("ms")
+            .with_description(
+                "Distribution of time active ViewSyncer client groups have had unserved replica \
+                 changes.",
+            )
+            .with_callback(move |o| {
+                let d = r_stats.compute_serving_lag_distribution(now_ms());
+                o.observe(d.min_ms, &[KeyValue::new("stat", "min")]);
+                o.observe(d.p50_ms, &[KeyValue::new("stat", "p50")]);
+                o.observe(d.p75_ms, &[KeyValue::new("stat", "p75")]);
+                o.observe(d.p99_ms, &[KeyValue::new("stat", "p99")]);
+                o.observe(d.max_ms, &[KeyValue::new("stat", "max")]);
+            })
+            .build();
+        let r_lag = registry.clone();
+        let serving_lagging_client_groups = m
+            .i64_observable_gauge("zero.sync.serving_lagging_client_groups")
+            .with_description("Number of active client groups with unserved replica changes.")
+            .with_callback(move |o| {
+                o.observe(
+                    r_lag
+                        .compute_serving_lag_distribution(now_ms())
+                        .lagging_client_groups as i64,
+                    &[],
+                );
+            })
+            .build();
+        let r_q = registry.clone();
+        let queries = m
+            .u64_observable_gauge("zero.sync.queries")
+            .with_description("Active queries (pipelines) across all client groups.")
+            .with_callback(move |o| o.observe(r_q.total_queries(), &[]))
+            .build();
+        let r_rows = registry.clone();
+        let rows = m
+            .u64_observable_gauge("zero.sync.rows")
+            .with_description("Tracked rows across all client groups.")
+            .with_callback(move |o| o.observe(r_rows.total_rows(), &[]))
+            .build();
+        (
+            serving_lag,
+            serving_lag_stats,
+            serving_lagging_client_groups,
+            queries,
+            rows,
+        )
+    });
+}
 
 /// View-syncer hydration native histogram — TS view-syncer's
 /// `#viewSyncerHydration` (`zero.sync.view_syncer_hydration`, seconds, zero/v1.9.0
@@ -291,7 +395,7 @@ fn api_otel() -> &'static ApiOtel {
     })
 }
 
-fn api_attrs(result: &'static str) -> [opentelemetry::KeyValue; 2] {
+fn api_request_metric_attrs(result: &'static str) -> [opentelemetry::KeyValue; 2] {
     [
         opentelemetry::KeyValue::new("operation", "query"),
         opentelemetry::KeyValue::new("result", result),
@@ -300,7 +404,9 @@ fn api_attrs(result: &'static str) -> [opentelemetry::KeyValue; 2] {
 
 /// One completed API request (all attempts) — TS `apiRequests().add(1, attrs)`.
 pub fn record_api_request(result: &'static str) {
-    api_otel().requests.add(1, &api_attrs(result));
+    api_otel()
+        .requests
+        .add(1, &api_request_metric_attrs(result));
 }
 
 /// End-to-end request duration in ms (including retry sleeps).

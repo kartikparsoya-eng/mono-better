@@ -72,11 +72,11 @@ const TEXT_ARRAY_ATTRIBUTE: &str = "|TEXT_ARRAY";
 /// Open the replica and compute its table specs.
 pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableSpec>, String> {
     let conn = open_replica_read_only(replica_path)?;
-    compute_table_specs(&conn)
+    compute_zql_specs(&conn)
 }
 
 /// Compute table specs from an open replica connection.
-pub fn compute_table_specs(conn: &Connection) -> Result<Vec<IvmTableSpec>, String> {
+pub fn compute_zql_specs(conn: &Connection) -> Result<Vec<IvmTableSpec>, String> {
     let table_names = list_tables(conn)?;
     // Read unique indexes + minRowVersion once, then attach per table.
     let unique_indexes = list_unique_indexes(conn)?;
@@ -587,7 +587,7 @@ mod tests {
         conn.execute_batch(r#"CREATE TABLE "keyless" ("a" "text|NOT_NULL");"#)
             .unwrap();
 
-        let specs = compute_table_specs(&conn).unwrap();
+        let specs = compute_zql_specs(&conn).unwrap();
         assert_eq!(
             specs.len(),
             1,
@@ -643,7 +643,7 @@ mod tests {
         )
         .unwrap();
 
-        let specs = compute_table_specs(&conn).unwrap();
+        let specs = compute_zql_specs(&conn).unwrap();
         assert_eq!(specs.len(), 1);
         let users = &specs[0];
 

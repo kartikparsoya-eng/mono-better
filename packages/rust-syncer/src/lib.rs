@@ -23,6 +23,7 @@ pub mod push_relay;
 pub mod query_covering;
 pub mod replica_schema;
 pub mod router;
+pub mod serving_lag;
 pub mod sync_engine;
 pub mod trace;
 // NOTE: the former `view_syncer` module (the placeholder `RustViewSyncer` +
@@ -53,7 +54,7 @@ pub use message_handler::{
 };
 pub use permissions::{
     LoadedPermissions, PermissionsReload, deny_all_permissions, hash_of_ast, load_permissions,
-    reload_permissions_if_changed, resolve_permissions, transform_and_hash, transform_query,
+    reload_permissions_if_changed, resolve_permissions, transform_and_hash_query, transform_query,
 };
 pub use pipeline_driver::{
     AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,
@@ -61,7 +62,7 @@ pub use pipeline_driver::{
 pub use protocol::*;
 pub use push_relay::HttpRelayPusher;
 pub use replica_schema::{
-    ReplicaVersions, compute_table_specs, compute_table_specs_from_path, read_replica_versions,
+    ReplicaVersions, compute_table_specs_from_path, compute_zql_specs, read_replica_versions,
     read_replica_versions_from_path, validate_client_schema,
 };
 pub use router::{

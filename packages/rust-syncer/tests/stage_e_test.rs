@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 use rust_cvr::client_handler::WebSocketSink;
-use rust_cvr::cvr::{DesiredQuerySpec};
-use rust_cvr::shards::{ShardID};
+use rust_cvr::cvr::DesiredQuerySpec;
 use rust_cvr::cvr::RowRecordMap;
+use rust_cvr::shards::ShardID;
 use rust_syncer::pipeline_driver::IvmPipelines;
 use rust_syncer::sync_engine::{SyncEngine, empty_cvr};
 use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
@@ -45,7 +45,7 @@ fn hydrate_real_rows_produces_row_pokes() {
 
     // Derive the table specs from the real replica schema (Part 1). This
     // includes `_0_version`, which the ChangeProcessor reads as the row version.
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
 
     // Build the pipelines from that connection (no snapshotter needed to hydrate).
@@ -171,7 +171,7 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
 
     let mut pipelines = IvmPipelines::new();
@@ -267,7 +267,7 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
 
     let mut pipelines = IvmPipelines::new();
@@ -385,7 +385,7 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
     let mut pipelines = IvmPipelines::new();
     pipelines.init_from_connection(specs, shared_conn).unwrap();
@@ -516,7 +516,7 @@ fn partial_success_transform_hydrates_healthy_query() {
     )
     .unwrap();
 
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
     let mut pipelines = IvmPipelines::new();
     pipelines.init_from_connection(specs, shared_conn).unwrap();
@@ -633,7 +633,7 @@ fn transform_failure_fails_only_the_offending_connection() {
         "#,
     )
     .unwrap();
-    let specs = rust_syncer::compute_table_specs(&conn).unwrap();
+    let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
     let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
     let mut pipelines = IvmPipelines::new();
     pipelines.init_from_connection(specs, shared_conn).unwrap();
