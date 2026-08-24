@@ -234,8 +234,8 @@ const QR_CASES = [
   {desc: 'custom patchVersion configVersion 0 -> bare stateVersion', spec: {type: 'custom',
     id: 'q4', name: 'n', args: [], patchVersion: {stateVersion: '1b0', configVersion: 0}}},
   {desc: 'client full fields', spec: {type: 'client', id: 'q5', ast: {table: 'v'},
-    patchVersion: {stateVersion: '2z0'},
-    transformationHash: 'th5', transformationVersion: {stateVersion: '2z0', configVersion: 3},
+    patchVersion: {stateVersion: '2zzz'},
+    transformationHash: 'th5', transformationVersion: {stateVersion: '2zzz', configVersion: 3},
     rowSetSignature: 'deadbeef'}},
 ];
 function buildQR(s) {

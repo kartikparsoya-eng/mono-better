@@ -853,11 +853,11 @@
           "table": "v"
         },
         "patchVersion": {
-          "stateVersion": "2z0"
+          "stateVersion": "2zzz"
         },
         "transformationHash": "th5",
         "transformationVersion": {
-          "stateVersion": "2z0",
+          "stateVersion": "2zzz",
           "configVersion": 3
         },
         "rowSetSignature": "deadbeef"
@@ -870,9 +870,9 @@
         },
         "queryName": null,
         "queryArgs": null,
-        "patchVersion": "2z0",
+        "patchVersion": "2zzz",
         "transformationHash": "th5",
-        "transformationVersion": "2z0:03",
+        "transformationVersion": "2zzz:03",
         "internal": null,
         "deleted": false,
         "rowSetSignature": "deadbeef"

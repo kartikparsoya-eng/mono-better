@@ -26,7 +26,7 @@ use crate::row_key::{
     RowID, RowKey, normalized_key_order, row_id_hash, row_id_string, row_id_string_cached,
 };
 use crate::row_set_signature::{format_signature, parse_signature, signature_unit};
-use crate::store::query_record_to_query_row;
+use crate::store::{QueriesRow, as_query, query_record_to_query_row};
 use crate::ttl::{TTL, clamp_ttl, compare_ttl, parse_ttl, parse_ttl_string};
 use crate::types::{
     BaseQueryRecord, CVR, ClientQueryRecord, ClientState, CustomQueryRecord, DesiredQuerySpec,
@@ -232,6 +232,41 @@ fn build_existing_rows(specs: &[Value]) -> HashMap<String, RowRecord> {
         );
     }
     m
+}
+
+/// Build a QueriesRow from the TS (camelCase) fixture shape.
+fn queries_row_from_json(v: &Value) -> QueriesRow {
+    let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    QueriesRow {
+        client_group_id: s("clientGroupID").expect("clientGroupID"),
+        query_hash: s("queryHash").expect("queryHash"),
+        client_ast: v.get("clientAST").filter(|x| !x.is_null()).cloned(),
+        query_name: s("queryName"),
+        query_args: v.get("queryArgs").filter(|x| !x.is_null()).cloned(),
+        patch_version: s("patchVersion"),
+        transformation_hash: s("transformationHash"),
+        transformation_version: s("transformationVersion"),
+        internal: v.get("internal").and_then(Value::as_bool),
+        deleted: v.get("deleted").and_then(Value::as_bool),
+        row_set_signature: s("rowSetSignature"),
+    }
+}
+
+/// Serialize a QueriesRow to the TS (camelCase) fixture shape.
+fn queries_row_to_json(row: &QueriesRow) -> Value {
+    serde_json::json!({
+        "clientGroupID": row.client_group_id,
+        "queryHash": row.query_hash,
+        "clientAST": row.client_ast,
+        "queryName": row.query_name,
+        "queryArgs": row.query_args,
+        "patchVersion": row.patch_version,
+        "transformationHash": row.transformation_hash,
+        "transformationVersion": row.transformation_version,
+        "internal": row.internal,
+        "deleted": row.deleted,
+        "rowSetSignature": row.row_set_signature,
+    })
 }
 
 /// Resulting desire state matching the generator's `normDesireState`.
@@ -1328,6 +1363,29 @@ fn parity_check() {
             &profile_id,
             entry.get("profileID").expect("profileID"),
             "profileID mismatch [{}]",
+            desc
+        );
+    }
+
+    // ---- ⑧ store.rs load path: as_query is the inverse of query_record_to_query_row ----
+    // Anchored to the TS-verified `queryRows` fixtures: take TS's QueriesRow, run the
+    // Rust load-path deserializer `as_query`, re-serialize via the (TS-matched)
+    // `query_record_to_query_row`, and require identity. Pins the CVR-load decoder
+    // (internal-flag routing, custom vs client, patchVersion via try_version_from_string).
+    for entry in fixture
+        .get("queryRows")
+        .and_then(Value::as_array)
+        .expect("fixture.queryRows missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let expected = entry.get("expected").expect("expected");
+        let row = queries_row_from_json(expected);
+        let qr = as_query(&row).expect("as_query");
+        let round = query_record_to_query_row("cg-parity", &qr);
+        assert_eq!(
+            &queries_row_to_json(&round),
+            expected,
+            "as_query round-trip mismatch [{}]",
             desc
         );
     }
