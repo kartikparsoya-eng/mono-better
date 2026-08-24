@@ -15,7 +15,23 @@
 //! (uncached) and normalizedKeyOrder; and the version-helper family — oneAfter,
 //! maxVersion, versionToCookie, versionToNullableCookie, cmp_cvr, and
 //! try_version_from_string (which now validates the stateVersion in the 1-part
-//! case, matching TS `versionFromString`).
+//! case, matching TS `versionFromString`); nextEvictionTime; getMutationResultsQuery.
+//!
+//! Tier-B (updater state transitions): the whole CVRUpdater surface driven through
+//! a stub CVRStore — CVRConfigDrivenUpdater (putDesiredQueries, markDesiredQueriesAs-
+//! Inactive, deleteDesiredQueries, clearDesiredQueries, deleteClient, setProfileID,
+//! setClientSchema) and CVRQueryDrivenUpdater (trackQueries, received incl. poisoned
+//! rowKey + refcount merge, deleteUnreferencedRows). Compares returned patches,
+//! StoreOps, and resulting CVR state.
+//!
+//! store.rs: as_query (the CVR-load decoder, inverse round-trip of
+//! query_record_to_query_row). The flush-path DB-row builders are IO-tier (covered
+//! by the .pg.test.rs integration tests, not this fixture).
+//!
+//! Tier-D (client_handler wire format): ClientHandler poke assembly (pokeStart/
+//! pokePart/pokeEnd across got/desired queries, rows, lmids, mutations, and the
+//! drop-below-baseVersion rule), sendDeleteClients, sendInspectResponse, and
+//! sendQueryTransformApplicationErrors.
 //!
 //! Run via `cargo test --lib parity_check` from `packages/rust-cvr`.
 
