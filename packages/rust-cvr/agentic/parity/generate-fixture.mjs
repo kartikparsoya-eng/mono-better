@@ -927,7 +927,29 @@ async function runDeleteClientsScenario(sc) {
   };
 }
 
+// sendInspectResponse -> ['inspect', ...]; sendQueryTransformApplicationErrors ->
+// ['transformError', ...]. (sendQueryTransformFailedError uses the fail() channel,
+// not push, and Rust pushes ['error', ...] instead — a known channel difference,
+// not tested here.)
+const CLIENT_MSG_SCENARIOS = [
+  {desc: 'inspect response', fn: 'sendInspectResponse', arg: {op: 'queries', value: [1, 2]}},
+  {
+    desc: 'transform application errors',
+    fn: 'sendQueryTransformApplicationErrors',
+    arg: [{id: 'q1', error: 'boom'}],
+  },
+];
+
+async function runClientMsgScenario(sc) {
+  const sink = makeCHSink();
+  const handler = new ClientHandler(LC, 'cg', 'client1', 'ws1', SHARD, null, sink);
+  if (sc.fn === 'sendInspectResponse') handler.sendInspectResponse(LC, sc.arg);
+  else handler.sendQueryTransformApplicationErrors(sc.arg);
+  return {desc: sc.desc, fn: sc.fn, arg: sc.arg, messages: sink.messages};
+}
+
 const queryScenarioResults = await Promise.all(QUERY_SCENARIOS.map(runQueryScenario));
+const clientMsgResults = await Promise.all(CLIENT_MSG_SCENARIOS.map(runClientMsgScenario));
 const pokeScenarioResults = await Promise.all(POKE_SCENARIOS.map(runPokeScenario));
 const deleteClientsResults = await Promise.all(
   DELETE_CLIENTS_SCENARIOS.map(runDeleteClientsScenario),
@@ -1036,6 +1058,7 @@ const fixture = {
   queryScenarios: queryScenarioResults,
   pokeScenarios: pokeScenarioResults,
   deleteClientsScenarios: deleteClientsResults,
+  clientMsgScenarios: clientMsgResults,
 };
 
 console.log(JSON.stringify(fixture, null, 2));

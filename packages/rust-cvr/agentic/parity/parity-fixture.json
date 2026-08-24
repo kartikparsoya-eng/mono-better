@@ -3323,5 +3323,51 @@
         ]
       ]
     }
+  ],
+  "clientMsgScenarios": [
+    {
+      "desc": "inspect response",
+      "fn": "sendInspectResponse",
+      "arg": {
+        "op": "queries",
+        "value": [
+          1,
+          2
+        ]
+      },
+      "messages": [
+        [
+          "inspect",
+          {
+            "op": "queries",
+            "value": [
+              1,
+              2
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "desc": "transform application errors",
+      "fn": "sendQueryTransformApplicationErrors",
+      "arg": [
+        {
+          "id": "q1",
+          "error": "boom"
+        }
+      ],
+      "messages": [
+        [
+          "transformError",
+          [
+            {
+              "id": "q1",
+              "error": "boom"
+            }
+          ]
+        ]
+      ]
+    }
   ]
 }

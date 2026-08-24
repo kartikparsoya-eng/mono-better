@@ -1559,4 +1559,35 @@ fn parity_check() {
             desc
         );
     }
+
+    // ---- ⑫ ClientHandler push-based messages (inspect / transformError) ----
+    for entry in fixture
+        .get("clientMsgScenarios")
+        .and_then(Value::as_array)
+        .expect("fixture.clientMsgScenarios missing")
+    {
+        let desc = entry.get("desc").and_then(Value::as_str).unwrap_or("");
+        let sink = std::sync::Arc::new(CaptureSink {
+            messages: std::sync::Mutex::new(Vec::new()),
+        });
+        let handler =
+            ClientHandler::new("cg", "client1", "ws1", &parity_shard(), None, sink.clone());
+        let arg = entry.get("arg").expect("arg");
+        match entry.get("fn").and_then(Value::as_str).expect("fn") {
+            "sendInspectResponse" => handler.send_inspect_response(arg.clone()),
+            "sendQueryTransformApplicationErrors" => handler
+                .send_query_transform_application_errors(
+                    arg.as_array().expect("errors array").clone(),
+                )
+                .expect("send_query_transform_application_errors"),
+            other => panic!("unknown client msg fn {other}"),
+        }
+        let actual = Value::Array(sink.messages.lock().unwrap().clone());
+        assert_eq!(
+            &actual,
+            entry.get("messages").expect("messages"),
+            "client message mismatch [{}]",
+            desc
+        );
+    }
 }
