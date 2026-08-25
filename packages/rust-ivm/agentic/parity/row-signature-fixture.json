@@ -1,0 +1,72 @@
+{
+  "cases": [
+    {
+      "schema": "",
+      "table": "issue",
+      "rowKey": {
+        "id": "abc"
+      },
+      "unit": "12046094364754789189"
+    },
+    {
+      "schema": "",
+      "table": "issue",
+      "rowKey": {
+        "id": 1
+      },
+      "unit": "12940681332665336038"
+    },
+    {
+      "schema": "",
+      "table": "user",
+      "rowKey": {
+        "id": 42,
+        "org": "acme"
+      },
+      "unit": "6424638650715011393"
+    },
+    {
+      "schema": "",
+      "table": "user",
+      "rowKey": {
+        "org": "acme",
+        "id": 42
+      },
+      "unit": "6424638650715011393"
+    },
+    {
+      "schema": "",
+      "table": "t",
+      "rowKey": {
+        "b": 2,
+        "a": 1
+      },
+      "unit": "2087374012815586905"
+    },
+    {
+      "schema": "",
+      "table": "t",
+      "rowKey": {
+        "flag": true
+      },
+      "unit": "8105039086385403931"
+    },
+    {
+      "schema": "",
+      "table": "t",
+      "rowKey": {
+        "val": null
+      },
+      "unit": "12236267338854196642"
+    },
+    {
+      "schema": "",
+      "table": "issue",
+      "rowKey": {
+        "id": "abc",
+        "sub": "x"
+      },
+      "unit": "3768008104185190608"
+    }
+  ]
+}

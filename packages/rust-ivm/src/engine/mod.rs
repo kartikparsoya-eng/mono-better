@@ -81,21 +81,36 @@ struct PipelineEntry {
 // ---------------------------------------------------------------------------
 
 /// Compute the signature unit for a row key (XOR into the query's signature).
-/// Port of TS `rowIDSignatureUnit`.
-/// Compute the row-set-signature unit (a table+rowKey hash) that is XOR-folded
-/// into a query's row-set signature. Exposed so the full-Rust syncer can
-/// maintain the same signature over its streamed hydrate/advance changes (the
-/// streaming engine paths don't fold it internally). Must stay byte-identical to
-/// the fold used by `add_queries`.
+/// Port of TS `rowIDSignatureUnit` (`services/view-syncer/row-set-signature.ts`):
+/// `rowIDSignatureUnit(id) = h64(rowIDString(id))` with `id = {schema: '', table,
+/// rowKey}` (the exact shape pipeline-driver.ts:890 folds in).
+///
+/// This MUST be byte-identical to TS: the `rowSetSignature` (XOR-fold of these
+/// units) is PERSISTED to the shared CVR (`cvr.queries[queryID].rowSetSignature`)
+/// and later compared against a freshly-computed value to detect row-set drift
+/// (view-syncer.ts:1659-1669). A non-TS hash (the previous `FxHasher` over
+/// `format!("{:?}", v)`) would mismatch any signature written by a TS process →
+/// forced re-hydration of every query on a rolling / mixed / shadow deploy. So
+/// we reuse the ported xxHash-based `h64` over the ported canonical
+/// `row_id_string` — the same two functions TS composes.
 pub fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = rustc_hash::FxHasher::default();
-    table.hash(&mut hasher);
+    // Build the `RowID {schema: "", table, rowKey}` TS hashes. `row_id_string`
+    // re-sorts keys into `normalizedKeyOrder`, so the source key order is
+    // irrelevant; the ivm `Value` serializes as plain JSON (matching the wire
+    // rowKey values TS hashes).
+    let mut key_map = serde_json::Map::with_capacity(row_key.len());
     for (k, v) in row_key.iter() {
-        k.hash(&mut hasher);
-        format!("{:?}", v).hash(&mut hasher);
+        key_map.insert(
+            k.clone(),
+            serde_json::to_value(v).unwrap_or(serde_json::Value::Null),
+        );
     }
-    hasher.finish()
+    let id = rust_cvr::schema::types::RowID {
+        schema: String::new(),
+        table: table.to_string(),
+        row_key: key_map,
+    };
+    rust_cvr::hash::h64(&rust_cvr::row_key::row_id_string(&id))
 }
 
 // ---------------------------------------------------------------------------
@@ -1714,5 +1729,46 @@ mod scalar_reset_tests {
             )
             .is_none()
         );
+    }
+
+    /// Pins `row_signature_unit` to the REAL TS `rowIDSignatureUnit`
+    /// (`h64(rowIDString({schema:'', table, rowKey}))`). The unit is XOR-folded
+    /// into `rowSetSignature`, which is PERSISTED to the shared CVR and compared
+    /// across processes — so a non-TS hash forces mass re-hydration on any
+    /// rolling/mixed/shadow deploy. Goldens from
+    /// `agentic/parity/generate-row-signature-fixture.mjs` (drives real TS).
+    /// Regression guard for the former `FxHasher` divergence.
+    #[test]
+    fn row_signature_unit_matches_ts_golden() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/agentic/parity/row-signature-fixture.json"
+        );
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|e| panic!("failed to read row-signature fixture {path}: {e}"));
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("row-signature fixture is not valid JSON");
+        let cases = fixture["cases"].as_array().expect("fixture.cases missing");
+        assert!(!cases.is_empty());
+
+        for case in cases {
+            let table = case["table"].as_str().unwrap();
+            let want: u64 = case["unit"].as_str().unwrap().parse().unwrap();
+            // Build the ivm Row from the fixture rowKey (ivm Value ← plain JSON).
+            let mut map: rustc_hash::FxHashMap<String, Value> = rustc_hash::FxHashMap::default();
+            for (k, v) in case["rowKey"].as_object().unwrap() {
+                map.insert(
+                    k.clone(),
+                    serde_json::from_value::<Value>(v.clone()).unwrap(),
+                );
+            }
+            let row: Row = Arc::new(map);
+            assert_eq!(
+                row_signature_unit(table, &row),
+                want,
+                "row_signature_unit divergence for table {table:?} rowKey {:?}",
+                case["rowKey"]
+            );
+        }
     }
 }

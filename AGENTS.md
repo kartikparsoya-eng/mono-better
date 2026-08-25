@@ -37,6 +37,18 @@ rules OVERRIDE any instinct toward "cleaner" or "more idiomatic" Rust:
    `// Port of TS <symbol> (<file>:<line>)` (or `Port of <file>`) reference so the
    1:1 mapping is auditable. When you change ported code, re-read the TS first.
 
+7. **Every fix needs a NON-VACUOUS regression test — prove it fails before the fix.**
+   A test that passes BOTH before and after a fix did not validate the fix and will
+   not catch a regression (e.g. `stage_e_test` only asserted a signature *existed*,
+   so it never caught the `FxHasher`-vs-`h64` bug). When you fix a bug: add or
+   strengthen a test, then **temporarily revert the fix and confirm the test FAILS**
+   (the harness way: `cp file /tmp/bak`, apply the old code, run the test, expect
+   non-zero, restore). If an existing test passes unchanged across the fix, it is too
+   weak — tighten its assertion to pin the actual behavior that diverged (a
+   TS-golden value, an exact string, a specific branch), don't just add a new loose
+   one alongside it. Prefer a TS-golden fixture (drive the real TS impl → assert Rust
+   matches byte-for-byte) so the test pins TS parity, not merely Rust self-consistency.
+
 When porting or fixing: open the TS source, match names/paths/branches, then write
 the Rust. If you catch yourself renaming or relocating for tidiness, stop — that is
 the divergence these rules exist to prevent.
