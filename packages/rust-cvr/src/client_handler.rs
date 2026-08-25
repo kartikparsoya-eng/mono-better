@@ -566,23 +566,35 @@ impl PokeHandler {
 
     fn update_lmids(&self, state: &mut PokeState, patch: &RowPatch) -> Result<(), String> {
         if let RowPatch::Put { id: _, contents } = patch {
-            let cg = contents.get("clientGroupID").and_then(|v| v.as_str());
-            let cid = contents.get("clientID").and_then(|v| v.as_str());
-            let lmid = contents.get("lastMutationID").and_then(|v| v.as_i64());
+            // TS `#updateLMIDs` (client-handler.ts:376-390): `v.parse(row,
+            // lmidRowSchema, 'passthrough')` — clientGroupID/clientID (string)
+            // and lastMutationID (number) are REQUIRED; a malformed clients row
+            // THROWS (failing the poke downstream), it is not silently ignored
+            // (F-CH-1). Only the wrong-clientGroupID case is log-and-ignore.
+            let cg = contents
+                .get("clientGroupID")
+                .and_then(|v| v.as_str())
+                .ok_or("clients row: clientGroupID must be a string")?;
+            let cid = contents
+                .get("clientID")
+                .and_then(|v| v.as_str())
+                .ok_or("clients row: clientID must be a string")?;
+            let lmid = contents
+                .get("lastMutationID")
+                .and_then(|v| v.as_i64())
+                .ok_or("clients row: lastMutationID must be a number")?;
 
-            if let (Some(cg), Some(cid), Some(lmid)) = (cg, cid, lmid) {
-                if cg != self.client_group_id {
-                    eprintln!(
-                        "Received clients row for wrong clientGroupID. Ignoring. {}",
-                        cg
-                    );
-                } else {
-                    let body = state.body.as_mut().unwrap();
-                    let lmids = body
-                        .last_mutation_id_changes
-                        .get_or_insert_with(BTreeMap::new);
-                    lmids.insert(cid.to_string(), lmid);
-                }
+            if cg != self.client_group_id {
+                eprintln!(
+                    "Received clients row for wrong clientGroupID. Ignoring. {}",
+                    cg
+                );
+            } else {
+                let body = state.body.as_mut().unwrap();
+                let lmids = body
+                    .last_mutation_id_changes
+                    .get_or_insert_with(BTreeMap::new);
+                lmids.insert(cid.to_string(), lmid);
             }
         }
         // del/constrain ops for clients are ignored
@@ -716,12 +728,27 @@ pub(crate) fn make_row_patch(patch: &RowPatch) -> Result<RowPatchOp, String> {
                 id: None,
             })
         }
-        RowPatch::Del { id } => Ok(RowPatchOp {
-            op: "del".to_string(),
-            table_name: id.table.clone(),
-            value: None,
-            id: Some(Value::Object(id.row_key.clone())),
-        }),
+        RowPatch::Del { id } => {
+            // TS `makeRowPatch` del: `v.parse(id, primaryKeyValueRecordSchema)`
+            // (client-handler.ts:434, primary-key.ts:10-20) — every rowKey
+            // value must be string | number | boolean; anything else (null,
+            // nested object/array) THROWS rather than reaching the client
+            // (F-CH-1). The put arm's rowSchema parse is structurally
+            // guaranteed here: `contents` is already a JSON object by type.
+            for (col, val) in id.row_key.iter() {
+                if !(val.is_string() || val.is_number() || val.is_boolean()) {
+                    return Err(format!(
+                        "rowKey column {col:?} is not a primary key value (string|number|boolean)"
+                    ));
+                }
+            }
+            Ok(RowPatchOp {
+                op: "del".to_string(),
+                table_name: id.table.clone(),
+                value: None,
+                id: Some(Value::Object(id.row_key.clone())),
+            })
+        }
     }
 }
 
@@ -1157,6 +1184,40 @@ mod tests {
         assert!(err.contains("exceeds safe Number range"), "got: {err}");
     }
 
+    /// F-CH-1: TS `makeRowPatch` del runs `v.parse(id,
+    /// primaryKeyValueRecordSchema)` (client-handler.ts:434) — rowKey values
+    /// must be string|number|boolean; null/nested values THROW instead of
+    /// reaching the client. Pre-fix, Rust passed them through (proven by
+    /// temp-revert: the unwrap_err below panicked on Ok).
+    #[test]
+    fn make_row_patch_del_rejects_non_primitive_row_key() {
+        let mut row_key = Map::new();
+        row_key.insert("id".to_string(), serde_json::json!("1"));
+        row_key.insert("bad".to_string(), Value::Null);
+        let del = RowPatch::Del {
+            id: RowID {
+                schema: "s".into(),
+                table: "t".into(),
+                row_key,
+            },
+        };
+        let err = make_row_patch(&del).unwrap_err();
+        assert!(err.contains("not a primary key value"), "got: {err}");
+
+        // Primitive-only keys still pass (bool/number/string all legal).
+        let mut ok_key = Map::new();
+        ok_key.insert("id".to_string(), serde_json::json!(7));
+        ok_key.insert("flag".to_string(), serde_json::json!(true));
+        let ok = RowPatch::Del {
+            id: RowID {
+                schema: "s".into(),
+                table: "t".into(),
+                row_key: ok_key,
+            },
+        };
+        assert!(make_row_patch(&ok).is_ok());
+    }
+
     #[test]
     fn test_noop_poke_sends_nothing() {
         let (handler, messages) = make_handler();
@@ -1412,6 +1473,31 @@ mod tests {
         let part = &msgs[1][1];
         assert!(part.get("lastMutationIDChanges").is_some());
         assert_eq!(part["lastMutationIDChanges"]["clientA"], 42);
+    }
+
+    /// F-CH-1: TS `#updateLMIDs` parses the clients row against lmidRowSchema
+    /// (client-handler.ts:379-383) — a row missing `lastMutationID` (or with
+    /// wrong types) THROWS, failing the poke; it is not silently skipped.
+    /// Pre-fix, Rust's `if let (Some, Some, Some)` swallowed it (proven by
+    /// temp-revert: add_patch returned Ok).
+    #[test]
+    fn test_poke_lmids_malformed_clients_row_fails() {
+        let (handler, _messages) = make_handler();
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        let err = poke
+            .add_patch(&make_row_patch_put(
+                "app_0.clients",
+                serde_json::json!({
+                    "clientGroupID": "cg1",
+                    "clientID": "clientA",
+                    // lastMutationID missing
+                }),
+            ))
+            .unwrap_err();
+        assert!(err.contains("lastMutationID"), "got: {err}");
     }
 
     #[test]

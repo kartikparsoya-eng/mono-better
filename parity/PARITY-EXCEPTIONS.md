@@ -47,6 +47,24 @@ Anything not listed here and not STALE/WRONG must match TS.
 - **F-CCM-1 (decoded-claims boundary) is unreachable:** the consumer is the CRUD mutagen, which is disabled (`create_mutagen` → `None`) so CRUD is Fatal-rejected before auth; custom mutations go through the push relay (`userPushURL`), not a local mutagen. The `ConnContextInfo.auth: Option<String>` raw-token boundary will be widened to carry decoded claims when the mutagen is wired (Phase 4) — there is no consumer to match TS against today.
 - **Why kept:** the divergences are confined to unwired reference code; the live behavior already matches TS. The reference module is reconciled to TS on promotion, per its own header.
 
+## D-6 · Row-patch emission order: `HashMap` iteration vs TS `Map` insertion order — F-CVR-6 (caveat)
+
+- **TS** (`cvr.ts` `received()`): iterates the received-rows `Map` in insertion order, so row patches inside a poke come out in the order the pipeline produced them.
+- **Rust** (`cvr.rs` `received(&rows: &HashMap<…>)`): iterates a `HashMap`, so the row-patch order inside a poke is arbitrary (and run-to-run nondeterministic).
+- **Why kept:** row patches are key-addressed and independently versioned — no consumer is order-sensitive, and the parity harness itself institutionalizes this (generate-fixture.mjs: "Row patches come out in HashMap order on the Rust side, so both sides sort by rowIDString before comparing"). Matching TS byte-order would require threading insertion-ordered maps (`IndexMap`) through the entire engine→updater row path for zero semantic gain. Wire BYTES differ per poke; wire CONTENT is identical.
+
+## D-7 · Dead write-back/defer machinery + async-flush metrics — F-RRC-1/F-RRC-9 (caveat)
+
+- **TS** (`row-record-cache.ts`): `executeRowUpdates` supports `allow-defer` — a flush can defer row writes to a background task, with `#recordAsyncFlushStats` counting `cvr.flush_attempts{flush.type=async}`.
+- **Rust**: `execute_row_updates` and the defer latch are a faithful port but have **no production caller** — `CVRStoreHandle::flush` writes rows inline in one atomic PG transaction (single-atomic-writer design, documented at the flush row-write section), so `rows_deferred` is always 0 and no `flush.type=async` counts are ever emitted (`cvr.flush_attempts` carries sync|noop only).
+- **Why kept:** the single-writer flush is the Rust architecture's answer to the same problem (verified equivalent through the flush/seq TS-golden differentials); the deferred path would add a second writer and re-introduce the write-behind gap class of bugs. The ported-but-unwired code stays as the reference for a future write-behind actor (see SYNC-ENGINE-SCALABILITY-PROPOSAL).
+
+## Minor notes (log/observability-only, not behavior)
+
+- **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.
+- **`TTLClock` precision**: Rust `i64` ms vs TS double over a `DOUBLE PRECISION` column — sub-millisecond truncation on load (`ttl_clock as i64`). Same for the inspect query's `::bigint` casts on `ttl`/`inactivatedAt` (F-CVR-STORE-10).
+- **Anonymous-telemetry counters** (F-CVR-3): TS `recordQuery` lives on the separate opt-out anonymous-telemetry meter (`anonymous-otel-start.ts`); Rust has no anonymous-telemetry subsystem, so `zero.crud_queries_processed` / `zero.custom_queries_processed` are registered on the shared meter under the same names.
+
 ---
 
 _Add an entry here (with the TS source, the Rust divergence, and the justification)

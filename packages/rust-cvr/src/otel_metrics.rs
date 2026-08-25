@@ -36,6 +36,11 @@ struct Instruments {
     poke_transactions: Counter<u64>,
     poke_rows: Counter<u64>,
     row_set_signature_drifts: Counter<u64>,
+    cvr_load_attempts: Counter<u64>,
+    cvr_load_duration: Histogram<f64>,
+    cvr_flush_attempts: Counter<u64>,
+    crud_queries_processed: Counter<u64>,
+    custom_queries_processed: Counter<u64>,
 }
 
 fn instruments() -> &'static Instruments {
@@ -79,8 +84,75 @@ fn instruments() -> &'static Instruments {
                      execution (a silent-correctness canary).",
                 )
                 .build(),
+            // Ports of TS CVRStore's own instruments (cvr-store.ts:207-221) —
+            // F-RRC-4.
+            cvr_load_attempts: m
+                .u64_counter("zero.sync.cvr.load_attempts")
+                .with_description("CVR load attempts, labeled by result.")
+                .build(),
+            cvr_load_duration: latency("zero.sync.cvr.load_duration", "Time to load a CVR."),
+            cvr_flush_attempts: m
+                .u64_counter("zero.sync.cvr.flush_attempts")
+                .with_description("CVR flush attempts, labeled by result and flush.type.")
+                .build(),
+            // Ports of the TS anonymous-telemetry query counters
+            // (anonymous-otel-start.ts:180-187), fed by `recordQuery`. TS keeps
+            // these on a separate opt-out telemetry meter; the Rust process has
+            // no anonymous-telemetry subsystem, so they live on the shared
+            // meter under the same names.
+            crud_queries_processed: m
+                .u64_counter("zero.crud_queries_processed")
+                .with_description("Number of CRUD (ZQL) queries processed")
+                .build(),
+            custom_queries_processed: m
+                .u64_counter("zero.custom_queries_processed")
+                .with_description("Number of custom (named) queries processed")
+                .build(),
         }
     })
+}
+
+/// Port of TS `CVRStore.#recordLoad` (cvr-store.ts:308-311): one count on
+/// `cvr.load_attempts` + the elapsed time on `cvr.load_duration`, labeled by
+/// result ("success" | "error") and, on error, `error.kind`.
+pub fn record_load(elapsed_ms: f64, result: &'static str, error_kind: Option<&str>) {
+    let i = instruments();
+    let mut attrs = vec![KeyValue::new("result", result)];
+    if let Some(kind) = error_kind {
+        attrs.push(KeyValue::new("error.kind", kind.to_string()));
+    }
+    i.cvr_load_attempts.add(1, &attrs);
+    i.cvr_load_duration.record(elapsed_ms / 1000.0, &attrs);
+}
+
+/// Port of the TS `#cvrFlushes` counts (cvr-store.ts:1254-1264):
+/// `cvr.flush_attempts` labeled by result ("success" | "error") and flush.type
+/// ("sync" | "noop"), plus `error.kind` on errors.
+pub fn record_flush_attempt(
+    result: &'static str,
+    flush_type: &'static str,
+    error_kind: Option<&str>,
+) {
+    let mut attrs = vec![
+        KeyValue::new("result", result),
+        KeyValue::new("flush.type", flush_type),
+    ];
+    if let Some(kind) = error_kind {
+        attrs.push(KeyValue::new("error.kind", kind.to_string()));
+    }
+    instruments().cvr_flush_attempts.add(1, &attrs);
+}
+
+/// Port of TS `recordQuery(type: 'crud' | 'custom')`
+/// (anonymous-otel-start.ts:325-331). Fired by `putDesiredQueries` for NEW and
+/// REACTIVATED desired queries (cvr.ts:349, 361) — F-CVR-3.
+pub fn record_query(query_type: &str) {
+    let i = instruments();
+    match query_type {
+        "crud" => i.crud_queries_processed.add(1, &[]),
+        "custom" => i.custom_queries_processed.add(1, &[]),
+        _ => {}
+    }
 }
 
 /// Record a row-set-signature drift — TS view-syncer `query.row-set-signature-drifts`.

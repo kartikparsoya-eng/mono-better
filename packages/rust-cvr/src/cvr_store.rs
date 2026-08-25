@@ -575,7 +575,40 @@ impl CVRStoreHandle {
 
     // ─── Flush ───────────────────────────────────────────────────────
 
+    /// Port of the public TS `flush` wrapper (cvr-store.ts:1234-1268): run
+    /// `#flush` and count the attempt on `cvr.flush_attempts`, labeled
+    /// result=success with flush.type sync|noop, or result=error with
+    /// error.kind — F-RRC-4.
     pub async fn flush(
+        &mut self,
+        expected_current_version: &CVRVersion,
+        cvr: &CVR,
+        last_connect_time: f64,
+        existing_rows: &HashMap<String, RowRecord>,
+    ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
+        let result = self
+            .flush_internal(
+                expected_current_version,
+                cvr,
+                last_connect_time,
+                existing_rows,
+            )
+            .await;
+        match &result {
+            Ok(stats) => crate::otel_metrics::record_flush_attempt(
+                "success",
+                if stats.is_some() { "sync" } else { "noop" },
+                None,
+            ),
+            Err(e) => {
+                crate::otel_metrics::record_flush_attempt("error", "sync", Some(cvr_error_kind(e)))
+            }
+        }
+        result
+    }
+
+    /// Port of TS `#flush` (cvr-store.ts:1051-1130).
+    async fn flush_internal(
         &mut self,
         expected_current_version: &CVRVersion,
         cvr: &CVR,
@@ -1149,6 +1182,25 @@ impl CVRStoreHandle {
     /// `MAX_LOAD_ATTEMPTS` before declaring the CVR invalid.
     pub async fn load(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
         crate::tracer::note("CVRStore", &format!("load cvr_id={}", self.cvr_id));
+        // TS `load` wraps the retry loop with `#recordLoad` (cvr-store.ts:
+        // 289-303): cvr.load_attempts + cvr.load_duration, labeled
+        // success/error (+ error.kind) — F-RRC-4.
+        let start = std::time::Instant::now();
+        let result = self.load_with_retries(last_connect_time).await;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        match &result {
+            Ok(_) => crate::otel_metrics::record_load(elapsed_ms, "success", None),
+            Err(e) => {
+                crate::otel_metrics::record_load(elapsed_ms, "error", Some(cvr_error_kind(e)))
+            }
+        }
+        result
+    }
+
+    async fn load_with_retries(
+        &mut self,
+        last_connect_time: f64,
+    ) -> Result<LoadResult, CVRStoreError> {
         let mut last_behind: Option<CVRStoreError> = None;
         for attempt in 0..MAX_LOAD_ATTEMPTS {
             if attempt > 0 {
@@ -1587,6 +1639,18 @@ impl CVRStoreHandle {
 
 /// Convert a QueriesRow (DB row) to a QueryRecord (in-memory).
 /// Mirrors TS `asQuery()` from cvr-store.ts.
+/// Port of TS `cvrErrorKind` (cvr-store.ts:1421-1435): the `error.kind` label
+/// for cvr.load_attempts / cvr.flush_attempts.
+fn cvr_error_kind(e: &CVRStoreError) -> &'static str {
+    match e {
+        CVRStoreError::ClientNotFound(_) => "client_not_found",
+        CVRStoreError::ConcurrentModification { .. } => "concurrent_modification",
+        CVRStoreError::OwnershipError { .. } => "ownership",
+        CVRStoreError::InvalidClientSchema(_) => "invalid_client_schema",
+        _ => "error",
+    }
+}
+
 pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
     // Version strings here come from the DB; a corrupt value is a recoverable
     // load error (TS `versionFromString` throws → caught), not a thread abort.
@@ -1636,7 +1700,23 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
         }));
     }
 
+    // TS: `const ast = astSchema.parse(row.clientAST)` (cvr-store.ts:148) —
+    // valita validation at load, so a corrupt stored AST is a RECOVERABLE load
+    // error, not a value that silently flows into pipeline building. The full
+    // AST type lives downstream (rust-ivm), so this validates the structural
+    // envelope every astSchema AST has — a JSON object with a string `table` —
+    // and deep validation still happens when the pipeline is built
+    // (F-CVR-STORE-1).
     let ast = row.client_ast.clone().unwrap_or(Value::Null);
+    if !ast
+        .as_object()
+        .is_some_and(|o| o.get("table").is_some_and(Value::is_string))
+    {
+        return Err(VersionError::MalformedQuery {
+            query_hash: row.query_hash.clone(),
+            reason: "clientAST failed astSchema validation (not an object with a string `table`)",
+        });
+    }
     if row.internal == Some(true) {
         return Ok(QueryRecord::Internal(InternalQueryRecord { base, ast }));
     }
@@ -1997,6 +2077,45 @@ mod tests {
         };
         let q = as_query(&row).unwrap();
         assert!(matches!(q, QueryRecord::Client(_)));
+    }
+
+    /// F-CVR-STORE-1: TS `asQuery` runs `astSchema.parse(row.clientAST)`
+    /// (cvr-store.ts:148), so a corrupt stored AST is a RECOVERABLE load error.
+    /// Pre-fix, Rust passed the raw JSON through unvalidated (proven by
+    /// temp-revert: the match below failed with Ok(Client)).
+    #[test]
+    fn test_as_query_rejects_malformed_client_ast() {
+        let mut row = QueriesRow {
+            client_group_id: "cg1".to_string(),
+            query_hash: "hash1".to_string(),
+            client_ast: Some(serde_json::json!({"bogus": 1})),
+            query_name: None,
+            query_args: None,
+            patch_version: None,
+            transformation_hash: None,
+            transformation_version: None,
+            internal: None,
+            deleted: Some(false),
+            row_set_signature: None,
+        };
+        assert!(
+            matches!(as_query(&row), Err(VersionError::MalformedQuery { .. })),
+            "an AST without a string `table` must fail like TS astSchema.parse"
+        );
+        // Non-object AST (e.g. a bare string) fails too.
+        row.client_ast = Some(serde_json::json!("garbage"));
+        assert!(matches!(
+            as_query(&row),
+            Err(VersionError::MalformedQuery { .. })
+        ));
+        // Internal queries validate through the same parse (TS line 148 runs
+        // before the internal/client branch).
+        row.client_ast = Some(serde_json::json!({"table": 42}));
+        row.internal = Some(true);
+        assert!(matches!(
+            as_query(&row),
+            Err(VersionError::MalformedQuery { .. })
+        ));
     }
 
     #[test]

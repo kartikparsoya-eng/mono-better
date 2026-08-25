@@ -499,12 +499,24 @@ impl CVRConfigDrivenUpdater {
         // Find new/changed desired queries.
         let mut needed: HashSet<String> = HashSet::new();
 
+        // Port of TS `recordQueryForTelemetry` (cvr.ts:335-342): count NEW and
+        // REACTIVATED desired queries as 'crud' (has an AST) or 'custom'
+        // (name + args) — F-CVR-3.
+        let record_query_for_telemetry = |q: &DesiredQuerySpec| {
+            if q.ast.is_some() {
+                crate::otel_metrics::record_query("crud");
+            } else if q.name.is_some() && q.args.is_some() {
+                crate::otel_metrics::record_query("custom");
+            }
+        };
+
         for q in queries {
             let ttl = q.ttl.unwrap_or(DEFAULT_TTL_MS);
             let query = self.base.cvr.queries.get(&q.hash);
             match query {
                 None => {
-                    // New query
+                    // New query - record for telemetry
+                    record_query_for_telemetry(q);
                     needed.insert(q.hash.clone());
                     continue;
                 }
@@ -515,12 +527,14 @@ impl CVRConfigDrivenUpdater {
                     let old_client_state = query.client_state().and_then(|cs| cs.get(client_id));
                     match old_client_state {
                         None => {
-                            // Reactivated query
+                            // Reactivated query - record for telemetry
+                            record_query_for_telemetry(q);
                             needed.insert(q.hash.clone());
                             continue;
                         }
                         Some(state) if state.inactivated_at.is_some() => {
-                            // Reactivated query
+                            // Reactivated query - record for telemetry
+                            record_query_for_telemetry(q);
                             needed.insert(q.hash.clone());
                             continue;
                         }
