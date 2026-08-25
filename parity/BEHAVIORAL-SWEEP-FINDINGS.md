@@ -99,7 +99,29 @@ Fixes: (1) `received()` null-vs-absent, (2) `delete_queries()` fabricated client
 | `union_fan_in.rs` (`fetch`/`mergeFetches`) | ✅ | fetch = k-way merge + **dedup consecutive-equal** (union, not union-all) — matches TS `mergeFetches` (`lastNodeYielded` + `comparator===0`→skip). **Structural diff (not fixable):** TS constructor asserts branch-schema consistency incl. `compareRows === inputSchema.compareRows` (function-reference equality) which Rust's `Arc<dyn Fn>` cannot express; the builder guarantees consistency. |
 | `push_accumulated.rs` (`push_accumulated_changes`/`merge_relationships`) | ✅ | per-type collapse + per-fan-out-type resolution (Remove/Add single-type; Edit merge-or-synthesize-edit(add=new,remove=old); Child child-wins or add-xor-remove). Assert messages copied verbatim from TS. Oracle-covered. |
 
-**4 invariant asserts added** (fan_out, fan_in, cap, union_fan_out) — rust-ivm 69/69 + clippy clean. Verified two-sided: exists, take, join, filter, skip, cap, fan_out, fan_in, union_fan_out, union_fan_in, push_accumulated (11 modules — every OR/limit/filter/merge operator). Remaining: source/view (large, oracle-covered core), flipped_join, constraint, node_filter, memory_storage, catch, snitch, array_view, change/data/schema/stream, builder/*, planner/*._
+| `flipped_join.rs` (`push_child_change`) | ✅ | EXISTS-flip: per child-change fetch matching parents; `exists` seeded by Edit\|Child, set true if parent has *another* child (via CHILD-schema comparator — documented parity fix vs using the parent comparator); build child rel stream; push. Careful port, oracle-covered. |
+
+**4 invariant asserts added** (fan_out, fan_in, cap, union_fan_out) — rust-ivm 69/69 + clippy clean.
+
+### ✅ rust-ivm core dataflow: ALL 12 operators verified two-sided
+exists, take, join, **flipped_join**, filter, skip, cap, fan_out, fan_in, union_fan_out, union_fan_in, push_accumulated — every operator with divergence-prone push/fetch logic. 0 behavioral divergences (the port is faithful — matching assert messages, documented parity fixes); 4 invariant asserts added to match TS's fail-loud.
+
+| `source.rs` (`push_internal`) | ✅ | split-edit (key-changing Edit→Remove+Add, prevents Join panics), source-drift dev-assertions (Add-dup/Remove-missing/Edit-missing-old→panic = TS memory-source assertions), epoch+overlay for re-entrant fetch, per-connection push — match the reference. Oracle-covered. |
+
+### ✅ rust-ivm behavioral-divergence surface: COMPLETE
+All 12 dataflow operators + the source push path verified two-sided. **0 behavioral divergences** (faithful port — verbatim assert messages, documented parity fixes); **4 invariant asserts added** to match TS's fail-loud. Contrast with rust-cvr's 6 divergences: rust-ivm has the standing differential oracle (fuzzed real ASTs), rust-cvr had weaker fixed fixtures — the sweep confirms the oracle's strength.
+
+**Remaining rust-ivm (oracle-validated plumbing/translation, low risk):** `source.rs` fetch/overlay internals, `view.rs`, `builder/*` + `planner/*` (AST→graph), data types (`change`/`data`/`schema`/`stream`/`constraint`/`node_filter`/`memory_storage`), debug helpers (`catch`/`snitch`/`array_view`/`credit`/`advance_gate`/`join_utils`/`stopable_iterator`).
+
+## Crate: rust-syncer
+
+Much of rust-syncer is rust-specific orchestration (event loop, WS, workers, metrics) with no direct TS twin. The function-by-function comparison applies to the TS-mirrored subset: `auth/read_authorizer.rs`, `custom_queries/transform_query.rs`, `services/view_syncer/*`.
+
+| fn / file | verdict | notes |
+|---|---|---|
+| `read_authorizer.rs` (`resolve_permissions`, `transform_query_internal`, `add_rules_to_where`, `transform_condition`) | ✅ (security-verified) | Deny-by-default (no `row.select` rules → `[['allow', {or:[]}]]` always-false → 0 rows) matches TS exactly; rule application `where AND (OR allow-conds)` + recursive EXISTS/subquery transform match; `resolve_permissions` fail-CLOSED (`Err→deny_all`, safer than TS throw; `Ok(None)→pass-through` = TS intended "warn+serve"). **Resolves ART B3: "no perms → pass-through" is intended TS parity, not a bug — the gap is deployment/test-coverage only.** hash_of_ast/normalize_ast oracle-validated (result parity would break if the transform diverged). |
+
+_Remaining rust-syncer TS-twinned: `transform_query.rs` (custom-query transform), `services/view_syncer/*` (connection_context_manager, pipeline_driver, query_covering, e2e_serving_lag) — the CVR-integration flow (sync_engine hydrate_and_sync) where rust-cvr-style tri-state bugs could recur._
 
 ## Crate: rust-syncer (after rust-ivm)
 _pending_
