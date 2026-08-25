@@ -419,7 +419,7 @@ fn apply_add_singular(
             // New row: create with rc=1, initialize nested relationships
             let mut new_entry = make_new_meta_entry(node.row(), schema, with_ids, 1);
             let entry_mut = Rc::get_mut(&mut new_entry).expect("new entry has refcount 1");
-            initialize_relationships_for_new_entry(
+            initialize_relationships_for_new_entry_if_any(
                 entry_mut,
                 node,
                 schema,
@@ -447,7 +447,13 @@ fn apply_add_plural(
     if let Some((pos, new_entry)) = result.new_entry {
         let mut new_entry = new_entry;
         let entry_mut = Rc::make_mut(&mut new_entry);
-        initialize_relationships_for_new_entry(entry_mut, node, schema, child_formats, with_ids);
+        initialize_relationships_for_new_entry_if_any(
+            entry_mut,
+            node,
+            schema,
+            child_formats,
+            with_ids,
+        );
         // Replace the cloned entry with the initialized one.
         new_view[pos] = new_entry;
     }
@@ -742,7 +748,7 @@ fn apply_edit(
 // Initialize relationships for new entries
 // ---------------------------------------------------------------------------
 
-fn initialize_relationships_for_new_entry(
+fn initialize_relationships_for_new_entry_if_any(
     entry: &mut Entry,
     node: &ViewNode,
     schema: &SourceSchema,
@@ -796,7 +802,7 @@ fn initialize_relationships_for_new_entry(
                 } else {
                     let pos = (!raw_pos) as usize;
                     let mut entry_with_rels = (*new_entry).clone();
-                    initialize_relationships_for_new_entry(
+                    initialize_relationships_for_new_entry_if_any(
                         &mut entry_with_rels,
                         &child_node,
                         child_schema,

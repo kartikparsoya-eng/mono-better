@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::builder::ast::Condition;
-use crate::planner::constraint::{PlannerConstraint, merge_constraints};
-use crate::planner::node::{CostEstimate, FanoutCostModel, JoinOrConnection};
+use crate::planner::planner_constraint::{PlannerConstraint, merge_constraints};
+use crate::planner::planner_node::{CostEstimate, FanoutCostModel, JoinOrConnection};
 
 /// Cost model output for a connection.
 #[derive(Clone)]
@@ -36,7 +36,7 @@ pub struct PlannerConnection {
     pub selectivity: f64,
     /// Upward back-edge — WEAK so the graph stays acyclic (see
     /// `PlannerNodeWeak`); TS holds this strong and lets GC break the cycle.
-    output: Option<crate::planner::node::PlannerNodeWeak>,
+    output: Option<crate::planner::planner_node::PlannerNodeWeak>,
 
     // Mutable
     pub limit: Option<usize>,
@@ -85,7 +85,7 @@ impl PlannerConnection {
         }
     }
 
-    pub fn set_output(&mut self, node: crate::planner::node::PlannerNode) {
+    pub fn set_output(&mut self, node: crate::planner::planner_node::PlannerNode) {
         self.output = Some(node.downgrade());
     }
 
@@ -97,7 +97,7 @@ impl PlannerConnection {
         &mut self,
         branch_pattern: &[usize],
         c: Option<&PlannerConstraint>,
-        _from: Option<&crate::planner::node::PlannerNode>,
+        _from: Option<&crate::planner::planner_node::PlannerNode>,
     ) {
         let key = branch_pattern
             .iter()

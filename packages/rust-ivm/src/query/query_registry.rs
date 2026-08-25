@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use crate::builder::named::CustomQueryID;
-use crate::builder::query::Query;
-use crate::builder::validate_input::{InputValidationError, validate_input};
 use crate::ivm::data::Value;
+use crate::query::named::CustomQueryID;
+use crate::query::query_impl::Query;
+use crate::query::validate_input::{InputValidationError, validate_input};
 
 /// A query function: produces a Query from a validated input value.
 pub type QueryFn = Arc<dyn Fn(&Value) -> Query>;

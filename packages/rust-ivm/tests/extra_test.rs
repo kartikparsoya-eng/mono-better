@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rust_ivm::builder::error::{NotImplementedError, QueryParseError};
-use rust_ivm::builder::escape_like::escape_like;
-use rust_ivm::builder::metrics_delegate::{Metric, MetricsDelegate, NullMetricsDelegate};
-use rust_ivm::builder::named::SyncedQuery;
-use rust_ivm::builder::query::{Cardinality, RelationshipSpec};
-use rust_ivm::builder::query_registry::CustomQuery;
-use rust_ivm::builder::schema_query::{SchemaQuery, create_builder};
-use rust_ivm::builder::validate_input::validate_input;
 use rust_ivm::ivm::data::Value;
+use rust_ivm::query::error::{NotImplementedError, QueryParseError};
+use rust_ivm::query::escape_like::escape_like;
+use rust_ivm::query::metrics_delegate::{Metric, MetricsDelegate, NullMetricsDelegate};
+use rust_ivm::query::named::SyncedQuery;
+use rust_ivm::query::query_impl::{Cardinality, RelationshipSpec};
+use rust_ivm::query::query_registry::CustomQuery;
+use rust_ivm::query::schema_query::{SchemaQuery, create_builder};
+use rust_ivm::query::validate_input::validate_input;
 
 fn make_schema() -> SchemaQuery {
     let mut schema: SchemaQuery = HashMap::new();

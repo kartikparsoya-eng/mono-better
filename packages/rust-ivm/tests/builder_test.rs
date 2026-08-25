@@ -319,7 +319,7 @@ fn test_transform_filters_none() {
 
 #[test]
 fn test_complete_ordering_appends_pks() {
-    use rust_ivm::builder::complete_ordering::complete_ordering;
+    use rust_ivm::query::complete_ordering::complete_ordering;
 
     let ast = Ast {
         schema: None,
@@ -349,7 +349,7 @@ fn test_complete_ordering_appends_pks() {
 
 #[test]
 fn test_complete_ordering_no_dup_pks() {
-    use rust_ivm::builder::complete_ordering::complete_ordering;
+    use rust_ivm::query::complete_ordering::complete_ordering;
 
     let ast = Ast {
         schema: None,

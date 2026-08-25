@@ -86,11 +86,11 @@ pub enum JoinOrConnection {
 /// A tagged reference into the plan graph. Cloning is cheap (Rc bump).
 #[derive(Clone)]
 pub enum PlannerNode {
-    Connection(Rc<RefCell<crate::planner::connection::PlannerConnection>>),
-    Join(Rc<RefCell<crate::planner::join::PlannerJoin>>),
-    FanOut(Rc<RefCell<crate::planner::fan_out::PlannerFanOut>>),
-    FanIn(Rc<RefCell<crate::planner::fan_in::PlannerFanIn>>),
-    Terminus(Rc<RefCell<crate::planner::terminus::PlannerTerminus>>),
+    Connection(Rc<RefCell<crate::planner::planner_connection::PlannerConnection>>),
+    Join(Rc<RefCell<crate::planner::planner_join::PlannerJoin>>),
+    FanOut(Rc<RefCell<crate::planner::planner_fan_out::PlannerFanOut>>),
+    FanIn(Rc<RefCell<crate::planner::planner_fan_in::PlannerFanIn>>),
+    Terminus(Rc<RefCell<crate::planner::planner_terminus::PlannerTerminus>>),
 }
 
 /// Weak counterpart of [`PlannerNode`], used for every upward back-edge in the
@@ -112,11 +112,11 @@ pub enum PlannerNode {
 /// a terminus.
 #[derive(Clone)]
 pub enum PlannerNodeWeak {
-    Connection(Weak<RefCell<crate::planner::connection::PlannerConnection>>),
-    Join(Weak<RefCell<crate::planner::join::PlannerJoin>>),
-    FanOut(Weak<RefCell<crate::planner::fan_out::PlannerFanOut>>),
-    FanIn(Weak<RefCell<crate::planner::fan_in::PlannerFanIn>>),
-    Terminus(Weak<RefCell<crate::planner::terminus::PlannerTerminus>>),
+    Connection(Weak<RefCell<crate::planner::planner_connection::PlannerConnection>>),
+    Join(Weak<RefCell<crate::planner::planner_join::PlannerJoin>>),
+    FanOut(Weak<RefCell<crate::planner::planner_fan_out::PlannerFanOut>>),
+    FanIn(Weak<RefCell<crate::planner::planner_fan_in::PlannerFanIn>>),
+    Terminus(Weak<RefCell<crate::planner::planner_terminus::PlannerTerminus>>),
 }
 
 impl PlannerNodeWeak {
@@ -165,7 +165,7 @@ impl PlannerNode {
     pub fn propagate_constraints(
         &self,
         branch_pattern: &[usize],
-        constraint: Option<&crate::planner::constraint::PlannerConstraint>,
+        constraint: Option<&crate::planner::planner_constraint::PlannerConstraint>,
         from: Option<&PlannerNode>,
     ) {
         match self {

@@ -2,7 +2,7 @@
 //!
 //! Tests: parseTTL, compareTTL, normalizeTTL, clampTTL.
 
-use rust_ivm::builder::ttl::{MAX_TTL_MS, clamp_ttl, compare_ttl, parse_ttl};
+use rust_ivm::query::ttl::{MAX_TTL_MS, clamp_ttl, compare_ttl, parse_ttl};
 
 // ---------------------------------------------------------------------------
 // parseTTL

@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use crate::builder::ast::Ast;
 use crate::builder::builder::BuilderDelegate;
-use crate::builder::metrics_delegate::MetricsDelegate;
-use crate::builder::named::CustomQueryID;
-use crate::builder::query::Query;
 use crate::ivm::operator::{Shared, Storage};
 use crate::ivm::source::Source;
+use crate::query::metrics_delegate::MetricsDelegate;
+use crate::query::named::CustomQueryID;
+use crate::query::query_impl::Query;
 
 /// Commit listener callback.
 pub type CommitListener = Arc<dyn Fn()>;

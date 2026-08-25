@@ -27,7 +27,7 @@ pub struct SyncedQuery {
     pub parse: Option<ParseFn>,
     pub takes_context: bool,
     /// The function that produces a query from args.
-    pub fn_impl: Box<dyn Fn(Option<&Value>, &[Value]) -> crate::builder::query::Query>,
+    pub fn_impl: Box<dyn Fn(Option<&Value>, &[Value]) -> crate::query::query_impl::Query>,
 }
 
 impl SyncedQuery {
@@ -36,11 +36,11 @@ impl SyncedQuery {
     pub fn new(
         name: &str,
         parse: Option<ParseFn>,
-        fn_impl: Box<dyn Fn(&[Value]) -> crate::builder::query::Query>,
+        fn_impl: Box<dyn Fn(&[Value]) -> crate::query::query_impl::Query>,
     ) -> Self {
         let fn_owned = Arc::new(fn_impl);
         let fn_clone = fn_owned.clone();
-        let wrapped: Box<dyn Fn(Option<&Value>, &[Value]) -> crate::builder::query::Query> =
+        let wrapped: Box<dyn Fn(Option<&Value>, &[Value]) -> crate::query::query_impl::Query> =
             Box::new(move |_ctx, args| fn_clone(args));
         SyncedQuery {
             query_name: name.to_string(),
@@ -55,11 +55,11 @@ impl SyncedQuery {
     pub fn with_context(
         name: &str,
         parse: Option<ParseFn>,
-        fn_impl: Box<dyn Fn(&Value, &[Value]) -> crate::builder::query::Query>,
+        fn_impl: Box<dyn Fn(&Value, &[Value]) -> crate::query::query_impl::Query>,
     ) -> Self {
         let fn_owned = Arc::new(fn_impl);
         let fn_clone = fn_owned.clone();
-        let wrapped: Box<dyn Fn(Option<&Value>, &[Value]) -> crate::builder::query::Query> =
+        let wrapped: Box<dyn Fn(Option<&Value>, &[Value]) -> crate::query::query_impl::Query> =
             Box::new(move |ctx, args| {
                 let ctx_val = ctx.unwrap_or(&Value::Null);
                 fn_clone(ctx_val, args)
@@ -78,12 +78,12 @@ impl SyncedQuery {
         &self,
         context: Option<&Value>,
         args: &[Value],
-    ) -> Result<crate::builder::query::Query, crate::builder::error::QueryParseError> {
+    ) -> Result<crate::query::query_impl::Query, crate::query::error::QueryParseError> {
         let parsed_args = match &self.parse {
             Some(parse_fn) => match parse_fn(args) {
                 Ok(parsed) => parsed,
                 Err(msg) => {
-                    return Err(crate::builder::error::QueryParseError::new(Some(Box::new(
+                    return Err(crate::query::error::QueryParseError::new(Some(Box::new(
                         std::io::Error::new(std::io::ErrorKind::InvalidData, msg),
                     ))));
                 }

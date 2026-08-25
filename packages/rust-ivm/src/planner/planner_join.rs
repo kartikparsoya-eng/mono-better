@@ -1,7 +1,7 @@
 //! Planner join — port of `planner-join.ts`.
 
-use crate::planner::constraint::{PlannerConstraint, merge_constraints};
-use crate::planner::node::{
+use crate::planner::planner_constraint::{PlannerConstraint, merge_constraints};
+use crate::planner::planner_node::{
     CostEstimate, JoinOrConnection, JoinType, PlannerNode, PlannerNodeWeak,
 };
 

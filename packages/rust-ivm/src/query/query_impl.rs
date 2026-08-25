@@ -10,10 +10,10 @@ use crate::builder::ast::{
     Ast, Bound, Condition, CorrelatedSubqueryCondition, OrderPart, RelatedSubquery,
     SimpleCondition, ValuePosition,
 };
-use crate::builder::expression::{cmp_eq, simplify_condition};
 use crate::ivm::data::{Row, Value};
 use crate::ivm::schema::System;
 use crate::ivm::view::{Format, default_format};
+use crate::query::expression::{cmp_eq, simplify_condition};
 
 /// A query builder that accumulates AST state through fluent method calls.
 /// Port of TS `QueryImpl` (query-impl.ts:92).
@@ -97,7 +97,7 @@ impl Query {
     pub fn where_eq(mut self, field: &str, value: Value) -> Self {
         let cond = cmp_eq(field, value);
         let combined = match &self.ast.where_clause {
-            Some(existing) => crate::builder::expression::and(&[existing.clone(), cond]),
+            Some(existing) => crate::query::expression::and(&[existing.clone(), cond]),
             None => cond,
         };
         self.ast.where_clause = Some(simplify_condition(&combined));
@@ -114,7 +114,7 @@ impl Query {
             right: ValuePosition::Literal { value },
         });
         let combined = match &self.ast.where_clause {
-            Some(existing) => crate::builder::expression::and(&[existing.clone(), cond]),
+            Some(existing) => crate::query::expression::and(&[existing.clone(), cond]),
             None => cond,
         };
         self.ast.where_clause = Some(simplify_condition(&combined));
@@ -124,7 +124,7 @@ impl Query {
     /// Add a WHERE condition from an expression.
     pub fn where_cond(mut self, cond: Condition) -> Self {
         let combined = match &self.ast.where_clause {
-            Some(existing) => crate::builder::expression::and(&[existing.clone(), cond]),
+            Some(existing) => crate::query::expression::and(&[existing.clone(), cond]),
             None => cond,
         };
         self.ast.where_clause = Some(simplify_condition(&combined));
@@ -237,7 +237,7 @@ impl Query {
 
         let cond = Condition::CorrelatedSubquery(csq);
         let combined = match &self.ast.where_clause {
-            Some(existing) => crate::builder::expression::and(&[existing.clone(), cond]),
+            Some(existing) => crate::query::expression::and(&[existing.clone(), cond]),
             None => cond,
         };
         self.ast.where_clause = Some(simplify_condition(&combined));

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::builder::query::{Query, RelationshipSpec};
+use crate::query::query_impl::{Query, RelationshipSpec};
 
 /// A schema query: maps table names to their relationship specs.
 /// Port of TS `SchemaQuery<S>` (schema-query.ts:13).

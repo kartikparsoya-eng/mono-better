@@ -1,6 +1,6 @@
 //! Tests for escape-like.ts — port of `zql/src/query/escape-like.test.ts`.
 
-use rust_ivm::builder::escape_like::escape_like;
+use rust_ivm::query::escape_like::escape_like;
 
 #[test]
 fn test_escape_like_basics() {

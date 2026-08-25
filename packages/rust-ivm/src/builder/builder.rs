@@ -82,7 +82,7 @@ fn build_pipeline_internal(
 
     // Uniquify correlated subquery aliases: each CSQ gets alias + "_" + counter.
     // Port of TS uniquifyCorrelatedSubqueryConditionAliases (builder.ts:763).
-    let ast = uniquify_correlated_subquery_aliases(ast.clone());
+    let ast = uniquify_correlated_subquery_condition_aliases(ast.clone());
 
     // Gather correlated subquery conditions from the WHERE clause
     let csq_conditions = gather_correlated_subquery_query_conditions(ast.where_clause.as_ref());
@@ -263,7 +263,7 @@ fn apply_filter(
             }
             end
         }
-        Condition::Or(conditions) => apply_or_filter(input, conditions, delegate, name),
+        Condition::Or(conditions) => apply_or(input, conditions, delegate, name),
         Condition::CorrelatedSubquery(csq) => apply_csq_condition(input, csq),
         Condition::Simple(simple) => {
             let predicate = create_simple_predicate(simple);
@@ -274,7 +274,7 @@ fn apply_filter(
 
 /// Apply an OR condition, handling subquery conditions with NodeFilter.
 /// Port of TS `applyOr` (builder.ts:553).
-fn apply_or_filter(
+fn apply_or(
     input: Shared<dyn Input>,
     conditions: &[Condition],
     _delegate: &mut dyn BuilderDelegate,
@@ -384,7 +384,7 @@ fn apply_filter_with_flips(
             let mut branches: Vec<Shared<dyn Input>> = Vec::new();
 
             if !without_flipped.is_empty() {
-                let branch = apply_or_filter(
+                let branch = apply_or(
                     end.clone(),
                     &without_flipped.iter().cloned().cloned().collect::<Vec<_>>(),
                     delegate,
@@ -627,7 +627,7 @@ pub fn assert_no_not_exists(condition: &Condition) {
 /// Complete ordering: append PK columns to orderBy if missing.
 /// Port of TS `completeOrdering` — delegates to `complete_ordering` module.
 pub fn complete_ordering_ast(ast: &Ast, get_primary_key: &dyn Fn(&str) -> Vec<String>) -> Ast {
-    crate::builder::complete_ordering::complete_ordering(ast, get_primary_key)
+    crate::query::complete_ordering::complete_ordering(ast, get_primary_key)
 }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +647,7 @@ pub fn build_predicate(condition: &Condition) -> Arc<dyn Fn(&Row) -> bool> {
 
 /// Uniquify correlated subquery condition aliases by appending "_<counter>".
 /// Port of TS `uniquifyCorrelatedSubqueryConditionAliases` (builder.ts:763).
-fn uniquify_correlated_subquery_aliases(mut ast: Ast) -> Ast {
+fn uniquify_correlated_subquery_condition_aliases(mut ast: Ast) -> Ast {
     // Port of TS: only uniquify AND/OR conditions (not single CSQ).
     // TS: if (where.type !== 'and' && where.type !== 'or') return ast;
     let mut count = 0u32;

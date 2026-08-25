@@ -126,7 +126,7 @@ impl Cap {
         cap
     }
 
-    fn get_state_key(
+    fn get_take_state_key(
         &self,
         row_or_constraint: Option<&Row>,
         constraint: Option<&Constraint>,
@@ -179,7 +179,7 @@ impl Cap {
 
     fn initial_fetch(&self, req: &FetchRequest) -> NodeStream {
         if self.limit == 0 {
-            let state_key = self.get_state_key(None, req.constraint.as_ref());
+            let state_key = self.get_take_state_key(None, req.constraint.as_ref());
             self.storage.borrow_mut().set(
                 state_key,
                 CapState {
@@ -191,7 +191,7 @@ impl Cap {
         }
         let mut stream = self.input.borrow().fetch(req);
         let limit = self.limit;
-        let state_key = self.get_state_key(None, req.constraint.as_ref());
+        let state_key = self.get_take_state_key(None, req.constraint.as_ref());
         let primary_key = self.primary_key.clone();
         let storage = self.storage.clone();
 
@@ -299,7 +299,7 @@ impl Input for Cap {
             );
         }
 
-        let state_key = self.get_state_key(None, req.constraint.as_ref());
+        let state_key = self.get_take_state_key(None, req.constraint.as_ref());
 
         if let Some(cap_state) = self.storage.borrow().get(&state_key) {
             if cap_state.size == 0 {
@@ -354,7 +354,7 @@ impl Output for CapOutput {
                     _ => unreachable!(),
                 };
 
-                let state_key = cap.get_state_key(Some(&old_node.row), None);
+                let state_key = cap.get_take_state_key(Some(&old_node.row), None);
                 let cap_state = cap.storage.borrow().get(&state_key).cloned();
 
                 if let Some(state) = cap_state {
@@ -392,7 +392,7 @@ impl Output for CapOutput {
             }
             ChangeType::Add | ChangeType::Remove => {
                 let node = change.node().clone();
-                let state_key = cap.get_state_key(Some(&node.row), None);
+                let state_key = cap.get_take_state_key(Some(&node.row), None);
                 let cap_state = cap.storage.borrow().get(&state_key).cloned();
 
                 let cap_state = match cap_state {
@@ -507,7 +507,7 @@ impl Output for CapOutput {
             }
             ChangeType::Child => {
                 let node = change.node().clone();
-                let state_key = cap.get_state_key(Some(&node.row), None);
+                let state_key = cap.get_take_state_key(Some(&node.row), None);
                 let cap_state = cap.storage.borrow().get(&state_key).cloned();
 
                 if let Some(state) = cap_state {

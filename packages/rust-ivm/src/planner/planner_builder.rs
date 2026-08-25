@@ -5,14 +5,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition};
-use crate::planner::connection::ConnectionCostModel;
-use crate::planner::constraint::PlannerConstraint;
-use crate::planner::fan_in::PlannerFanIn;
-use crate::planner::fan_out::PlannerFanOut;
-use crate::planner::graph::PlannerGraph;
-use crate::planner::join::PlannerJoin;
-use crate::planner::node::{JoinType, PlannerNode};
-use crate::planner::terminus::PlannerTerminus;
+use crate::planner::planner_connection::ConnectionCostModel;
+use crate::planner::planner_constraint::PlannerConstraint;
+use crate::planner::planner_fan_in::PlannerFanIn;
+use crate::planner::planner_fan_out::PlannerFanOut;
+use crate::planner::planner_graph::PlannerGraph;
+use crate::planner::planner_join::PlannerJoin;
+use crate::planner::planner_node::{JoinType, PlannerNode};
+use crate::planner::planner_terminus::PlannerTerminus;
 
 pub struct Plans {
     pub plan: PlannerGraph,

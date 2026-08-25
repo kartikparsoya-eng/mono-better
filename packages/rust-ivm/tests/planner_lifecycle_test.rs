@@ -87,10 +87,10 @@ fn rich_ast_json() -> serde_json::Value {
 #[allow(clippy::type_complexity)]
 fn collect_node_weaks(
     plans: &Plans,
-    joins: &mut Vec<Weak<RefCell<rust_ivm::planner::join::PlannerJoin>>>,
-    conns: &mut Vec<Weak<RefCell<rust_ivm::planner::connection::PlannerConnection>>>,
-    fan_ins: &mut Vec<Weak<RefCell<rust_ivm::planner::fan_in::PlannerFanIn>>>,
-    fan_outs: &mut Vec<Weak<RefCell<rust_ivm::planner::fan_out::PlannerFanOut>>>,
+    joins: &mut Vec<Weak<RefCell<rust_ivm::planner::planner_join::PlannerJoin>>>,
+    conns: &mut Vec<Weak<RefCell<rust_ivm::planner::planner_connection::PlannerConnection>>>,
+    fan_ins: &mut Vec<Weak<RefCell<rust_ivm::planner::planner_fan_in::PlannerFanIn>>>,
+    fan_outs: &mut Vec<Weak<RefCell<rust_ivm::planner::planner_fan_out::PlannerFanOut>>>,
 ) {
     joins.extend(plans.plan.joins.iter().map(Rc::downgrade));
     conns.extend(plans.plan.connections.iter().map(Rc::downgrade));
@@ -163,9 +163,9 @@ fn every_planner_node_frees_when_plans_drop() {
 /// join alive, join.child keeps the connection alive → cycle).
 #[test]
 fn escaped_unregistered_nodes_cannot_form_a_cycle() {
-    use rust_ivm::planner::connection::PlannerConnection;
-    use rust_ivm::planner::join::PlannerJoin;
-    use rust_ivm::planner::node::{JoinType, PlannerNode};
+    use rust_ivm::planner::planner_connection::PlannerConnection;
+    use rust_ivm::planner::planner_join::PlannerJoin;
+    use rust_ivm::planner::planner_node::{JoinType, PlannerNode};
 
     let parent = Rc::new(RefCell::new(PlannerConnection::new(
         "parent",

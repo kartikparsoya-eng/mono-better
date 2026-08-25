@@ -139,10 +139,9 @@ fn user_all_channels_tablesource_excludes_cross_workspace_dm() {
             if rc.table == "channels"
                 && !rc.is_hidden
                 && rc.change_type == rust_ivm::ivm::change::ChangeType::Add
+                && let Some(rust_ivm::ivm::data::Value::Str(s)) = rc.row_key.get("id")
             {
-                if let Some(rust_ivm::ivm::data::Value::Str(s)) = rc.row_key.get("id") {
-                    sink.borrow_mut().push(s.to_string());
-                }
+                sink.borrow_mut().push(s.to_string());
             }
         },
     );

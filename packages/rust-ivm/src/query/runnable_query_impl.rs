@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::builder::query::{Query, RelationshipSpec};
+use crate::query::query_impl::{Query, RelationshipSpec};
 
 /// Create a new runnable query.
 /// Port of TS `newRunnableQuery` (runnable-query-impl.ts:23).

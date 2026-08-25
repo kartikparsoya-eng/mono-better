@@ -3,9 +3,9 @@
 //! Internal interface for query implementation details.
 
 use crate::builder::ast::Ast;
-use crate::builder::named::CustomQueryID;
-use crate::builder::query::Query;
 use crate::ivm::view::Format;
+use crate::query::named::CustomQueryID;
+use crate::query::query_impl::Query;
 
 /// Internal interface for query implementation details.
 /// Port of TS `QueryInternals` (query-internals.ts:16).

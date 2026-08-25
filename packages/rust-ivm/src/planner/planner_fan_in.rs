@@ -1,7 +1,7 @@
 //! Planner fan-in — port of `planner-fan-in.ts`.
 
-use crate::planner::constraint::PlannerConstraint;
-use crate::planner::node::{
+use crate::planner::planner_constraint::PlannerConstraint;
+use crate::planner::planner_node::{
     CostEstimate, FanInType, JoinOrConnection, PlannerNode, PlannerNodeWeak,
 };
 

@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 
 use rust_ivm::builder::ast::Condition;
-use rust_ivm::builder::expression::{
+use rust_ivm::ivm::data::Value;
+use rust_ivm::query::expression::{
     and, cmp_eq, false_val, negate_operator, not, or, simplify_condition, true_val,
 };
-use rust_ivm::builder::query::{Cardinality, ExistsOptions, Query, RelationshipSpec};
-use rust_ivm::builder::ttl::{DEFAULT_TTL_MS, MAX_TTL_MS, clamp_ttl, compare_ttl, parse_ttl};
-use rust_ivm::ivm::data::Value;
+use rust_ivm::query::query_impl::{Cardinality, ExistsOptions, Query, RelationshipSpec};
+use rust_ivm::query::ttl::{DEFAULT_TTL_MS, MAX_TTL_MS, clamp_ttl, compare_ttl, parse_ttl};
 
 fn make_relationships() -> HashMap<String, HashMap<String, RelationshipSpec>> {
     let mut tables: HashMap<String, HashMap<String, RelationshipSpec>> = HashMap::new();

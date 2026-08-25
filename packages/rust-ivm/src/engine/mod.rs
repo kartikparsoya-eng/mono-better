@@ -13,12 +13,12 @@ use std::time::Instant;
 
 use crate::builder::ast::Ast;
 use crate::builder::builder::{BuilderDelegate, build_pipeline};
-use crate::builder::complete_ordering::complete_ordering;
 use crate::ivm::change::{Change, SourceChange};
 use crate::ivm::data::{Row, Value};
 use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared, Storage};
 use crate::ivm::schema::SourceSchema;
 use crate::ivm::source::{CollectOutput, Source};
+use crate::query::complete_ordering::complete_ordering;
 use crate::streamer::{RowChange, Streamer, TableSpecInfo};
 
 /// Floor capacity retained by a per-push collector buffer after `clear()`.

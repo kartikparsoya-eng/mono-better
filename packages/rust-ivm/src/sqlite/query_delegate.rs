@@ -8,16 +8,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::builder::ast::Ast;
-use crate::builder::metrics_delegate::{Metric, MetricsDelegate};
-use crate::builder::named::CustomQueryID;
-use crate::builder::query::Query;
-use crate::builder::query_delegate::{
-    CommitListener, MaterializeOptions, PreloadOptions, QueryDelegate, RunOptions,
-};
 use crate::ivm::array_view::ArrayView;
 use crate::ivm::operator::{Shared, Storage};
 use crate::ivm::schema::ColumnType;
 use crate::ivm::source::Source;
+use crate::query::metrics_delegate::{Metric, MetricsDelegate};
+use crate::query::named::CustomQueryID;
+use crate::query::query_delegate_base::{
+    CommitListener, MaterializeOptions, PreloadOptions, QueryDelegate, RunOptions,
+};
+use crate::query::query_impl::Query;
 use crate::sqlite::table_source::TableSource;
 
 /// ZQLite QueryDelegate implementation.

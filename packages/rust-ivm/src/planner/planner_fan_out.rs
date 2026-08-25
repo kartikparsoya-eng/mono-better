@@ -1,7 +1,7 @@
 //! Planner fan-out — port of `planner-fan-out.ts`.
 
-use crate::planner::constraint::PlannerConstraint;
-use crate::planner::node::{
+use crate::planner::planner_constraint::PlannerConstraint;
+use crate::planner::planner_node::{
     CostEstimate, FanOutType, JoinOrConnection, PlannerNode, PlannerNodeWeak,
 };
 

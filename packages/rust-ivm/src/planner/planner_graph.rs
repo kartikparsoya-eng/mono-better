@@ -4,14 +4,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::planner::connection::{ConnectionCostModel, PlannerConnection};
-use crate::planner::constraint::PlannerConstraint;
-use crate::planner::fan_in::PlannerFanIn;
-use crate::planner::fan_out::PlannerFanOut;
-use crate::planner::join::PlannerJoin;
-use crate::planner::node::{FanInType, FanOutType, JoinType, PlannerNode};
-use crate::planner::source::PlannerSource;
-use crate::planner::terminus::PlannerTerminus;
+use crate::planner::planner_connection::{ConnectionCostModel, PlannerConnection};
+use crate::planner::planner_constraint::PlannerConstraint;
+use crate::planner::planner_fan_in::PlannerFanIn;
+use crate::planner::planner_fan_out::PlannerFanOut;
+use crate::planner::planner_join::PlannerJoin;
+use crate::planner::planner_node::{FanInType, FanOutType, JoinType, PlannerNode};
+use crate::planner::planner_source::PlannerSource;
+use crate::planner::planner_terminus::PlannerTerminus;
 
 const MAX_FLIPPABLE_JOINS: usize = 9;
 
@@ -105,7 +105,7 @@ impl PlannerGraph {
         est.cost + est.startup_cost
     }
 
-    pub fn capture_snapshot(&self) -> PlanState {
+    pub fn capture_planning_snapshot(&self) -> PlanState {
         PlanState {
             connections: self.connections.iter().map(|c| c.borrow().limit).collect(),
             joins: self.joins.iter().map(|j| j.borrow().join_type()).collect(),
@@ -127,7 +127,7 @@ impl PlannerGraph {
         }
     }
 
-    pub fn restore_snapshot(&mut self, state: &PlanState) {
+    pub fn restore_planning_snapshot(&mut self, state: &PlanState) {
         for (i, c) in self.connections.iter_mut().enumerate() {
             c.borrow_mut().limit = state.connections[i];
             c.borrow_mut()
@@ -186,12 +186,12 @@ impl PlannerGraph {
             let total_cost = self.get_total_cost();
             if total_cost < best_cost {
                 best_cost = total_cost;
-                best_plan = Some(self.capture_snapshot());
+                best_plan = Some(self.capture_planning_snapshot());
             }
         }
 
         if let Some(ref plan) = best_plan {
-            self.restore_snapshot(plan);
+            self.restore_planning_snapshot(plan);
             self.propagate_constraints();
         }
     }

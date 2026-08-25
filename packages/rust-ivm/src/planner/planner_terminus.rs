@@ -1,6 +1,6 @@
 //! Planner terminus — port of `planner-terminus.ts`.
 
-use crate::planner::node::{CostEstimate, JoinOrConnection, PlannerNode};
+use crate::planner::planner_node::{CostEstimate, JoinOrConnection, PlannerNode};
 
 pub struct PlannerTerminus {
     input: PlannerNode,
