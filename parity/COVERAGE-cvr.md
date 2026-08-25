@@ -2,12 +2,12 @@
 
 _Which Rust fns have their BODY pinned to TS output via `parity_check.rs`._
 
-- Rust fns total **176** · ✅ COVERED **81** · 🟥 GAP (pure, untested) **55** · ⚙️ IO (integration diff) **25** · ◻️ infra/metrics (n/a) **15**
-- Body-differential coverage of the **unit-testable pure surface**: **81/136 = 60%**
+- Rust fns total **186** · ✅ COVERED **81** · 🟥 GAP (pure, untested) **67** · ⚙️ IO (integration diff) **27** · ◻️ infra/metrics (n/a) **11**
+- Body-differential coverage of the **unit-testable pure surface**: **81/148 = 55%**
 
-> ⚠️ **Highest-risk uncovered (emit patches / build rowKeys / mutate CVR — the corruption class):** `add_mutation_patch` (client_handler.rs), `ensure_client` (updater.rs), `estimate_row_patch_bytes` (client_handler.rs), `new_query_record` (cvr.rs), `patch_version` (types.rs), `patch_version_mut` (types.rs), `put_desired_query` (store.rs), `track_executed` (updater.rs), `track_removed` (updater.rs), `update_row_set_signature` (store.rs)
+> ⚠️ **Highest-risk uncovered (emit patches / build rowKeys / mutate CVR — the corruption class):** `add_mutation_patch` (client_handler.rs), `canon_patch` (seq_replay.rs), `ensure_client` (cvr.rs), `estimate_row_patch_bytes` (client_handler.rs), `new_query_record` (cvr.rs), `patch_version` (schema/types.rs), `patch_version_mut` (schema/types.rs), `push_patches` (seq_replay.rs), `put_desired_query` (cvr_store.rs), `track_executed` (cvr.rs), `track_removed` (cvr.rs), `update_row_set_signature` (cvr_store.rs)
 
-## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 55
+## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 67
 
 | fn | file | signature |
 |---|---|---|
@@ -28,44 +28,56 @@ _Which Rust fns have their BODY pinned to TS output via `parity_check.rs`._
 | `update_lmids` | client_handler.rs | `fn update_lmids(&self, state: &mut PokeState, patch: &RowPatch) -> Result<(), String> {` |
 | `upstream_schema` | client_handler.rs | `fn upstream_schema(shard: &ShardID) -> String {` |
 | `version` | client_handler.rs | `pub fn version(&self) -> NullableCVRVersion {` |
+| `assert_new_version` | cvr.rs | `fn assert_new_version(&self) -> CVRVersion {` |
 | `assert_not_internal` | cvr.rs | `pub fn assert_not_internal(query: &QueryRecord) {` |
+| `delete_queries` | cvr.rs | `fn delete_queries(` |
+| `ensure_client` | cvr.rs | `pub fn ensure_client(&mut self, id: &str) -> &mut ClientRecord {` |
+| `ensure_new_version` | cvr.rs | `pub fn ensure_new_version(&mut self) -> CVRVersion {` |
+| `flush` | cvr.rs | `pub fn flush(` |
 | `new_query_record` | cvr.rs | `pub fn new_query_record(` |
+| `set_version` | cvr.rs | `pub fn set_version(&mut self, version: CVRVersion) -> CVRVersion {` |
+| `track_executed` | cvr.rs | `fn track_executed(&mut self, query_id: &str, transformation_hash: &str) -> Vec<Patch> {` |
+| `track_removed` | cvr.rs | `fn track_removed(&mut self, query_id: &str) -> Vec<Patch> {` |
+| `updated_version` | cvr.rs | `pub fn updated_version(&self) -> CVRVersion {` |
+| `apply_store_ops` | cvr_store.rs | `pub fn apply_store_ops(&mut self, ops: Vec<StoreOp>) {` |
+| `catchup_reader` | cvr_store.rs | `pub fn catchup_reader(&self) -> CVRStoreCatchupReader {` |
+| `del_row_record` | cvr_store.rs | `pub fn del_row_record(&mut self, id: &RowID) {` |
+| `force_updates` | cvr_store.rs | `pub fn force_updates(&mut self, ids: &[RowID]) {` |
+| `from` | cvr_store.rs | `fn from(d: InspectQueryRowDb) -> Self {` |
+| `has_pending_writes` | cvr_store.rs | `pub fn has_pending_writes(&self) -> bool {` |
+| `insert_client` | cvr_store.rs | `pub fn insert_client(&mut self, client: &ClientRecord) {` |
+| `is_empty` | cvr_store.rs | `fn is_empty(&self) -> bool {` |
+| `mark_query_as_deleted` | cvr_store.rs | `pub fn mark_query_as_deleted(&mut self, version: &CVRVersion, query_patch: &QueryPatch) {` |
+| `put_desired_query` | cvr_store.rs | `pub fn put_desired_query(` |
+| `put_instance` | cvr_store.rs | `pub fn put_instance(&mut self, cvr: &CVR) {` |
+| `put_query` | cvr_store.rs | `pub fn put_query(&mut self, query: &QueryRecord) {` |
+| `put_row_record` | cvr_store.rs | `pub fn put_row_record(&mut self, row: &RowRecord) {` |
+| `row_count` | cvr_store.rs | `pub fn row_count(&self) -> usize {` |
+| `update_query` | cvr_store.rs | `pub fn update_query(&mut self, query: &QueryRecord) {` |
+| `update_row_set_signature` | cvr_store.rs | `pub fn update_row_set_signature(&mut self, query_hash: &str, signature: &str) {` |
 | `xxh32_seeded` | hash.rs | `fn xxh32_seeded(data: &[u8], seed: u32) -> u32 {` |
 | `base36_encode` | row_key.rs | `fn base36_encode(mut n: u128) -> String {` |
-| `apply_store_ops` | store.rs | `pub fn apply_store_ops(&mut self, ops: Vec<StoreOp>) {` |
-| `catchup_reader` | store.rs | `pub fn catchup_reader(&self) -> CVRStoreCatchupReader {` |
-| `del_row_record` | store.rs | `pub fn del_row_record(&mut self, id: &RowID) {` |
-| `force_updates` | store.rs | `pub fn force_updates(&mut self, ids: &[RowID]) {` |
-| `has_pending_writes` | store.rs | `pub fn has_pending_writes(&self) -> bool {` |
-| `insert_client` | store.rs | `pub fn insert_client(&mut self, client: &ClientRecord) {` |
-| `is_empty` | store.rs | `fn is_empty(&self) -> bool {` |
-| `mark_query_as_deleted` | store.rs | `pub fn mark_query_as_deleted(&mut self, version: &CVRVersion, query_patch: &QueryPatch) {` |
-| `put_desired_query` | store.rs | `pub fn put_desired_query(` |
-| `put_instance` | store.rs | `pub fn put_instance(&mut self, cvr: &CVR) {` |
-| `put_query` | store.rs | `pub fn put_query(&mut self, query: &QueryRecord) {` |
-| `put_row_record` | store.rs | `pub fn put_row_record(&mut self, row: &RowRecord) {` |
-| `row_count` | store.rs | `pub fn row_count(&self) -> usize {` |
-| `update_query` | store.rs | `pub fn update_query(&mut self, query: &QueryRecord) {` |
-| `update_row_set_signature` | store.rs | `pub fn update_row_set_signature(&mut self, query_hash: &str, signature: &str) {` |
-| `base` | types.rs | `pub fn base(&self) -> &BaseQueryRecord {` |
-| `base_mut` | types.rs | `pub fn base_mut(&mut self) -> &mut BaseQueryRecord {` |
-| `client_state_mut` | types.rs | `pub fn client_state_mut(&mut self) -> Option<&mut BTreeMap<String, ClientState>> {` |
-| `cvr_schema` | types.rs | `pub fn cvr_schema(shard: &ShardID) -> String {` |
-| `id` | types.rs | `pub fn id(&self) -> &str {` |
-| `is_internal` | types.rs | `pub fn is_internal(&self) -> bool {` |
-| `patch_version` | types.rs | `pub fn patch_version(&self) -> Option<&CVRVersion> {` |
-| `patch_version_mut` | types.rs | `pub fn patch_version_mut(&mut self) -> &mut Option<CVRVersion> {` |
-| `assert_new_version` | updater.rs | `fn assert_new_version(&self) -> CVRVersion {` |
-| `delete_queries` | updater.rs | `fn delete_queries(` |
-| `ensure_client` | updater.rs | `pub fn ensure_client(&mut self, id: &str) -> &mut ClientRecord {` |
-| `ensure_new_version` | updater.rs | `pub fn ensure_new_version(&mut self) -> CVRVersion {` |
-| `set_version` | updater.rs | `pub fn set_version(&mut self, version: CVRVersion) -> CVRVersion {` |
-| `track_executed` | updater.rs | `fn track_executed(&mut self, query_id: &str, transformation_hash: &str) -> Vec<Patch> {` |
-| `track_removed` | updater.rs | `fn track_removed(&mut self, query_id: &str) -> Vec<Patch> {` |
-| `updated_version` | updater.rs | `pub fn updated_version(&self) -> CVRVersion {` |
-| `from_base36_u64` | version.rs | `fn from_base36_u64(s: &str) -> Result<u64, &'static str> {` |
-| `to_base36_u64` | version.rs | `fn to_base36_u64(mut n: u64) -> String {` |
-| `validate_state_version` | version.rs | `fn validate_state_version(ver: &str) -> Result<(), VersionError> {` |
+| `row_record_to_rows_row` | schema/cvr.rs | `pub fn row_record_to_rows_row(client_group_id: &str, record: &RowRecord) -> RowsRow {` |
+| `rows_row_to_row_record` | schema/cvr.rs | `pub fn rows_row_to_row_record(row: &RowsRow) -> Result<RowRecord, RowRecordError> {` |
+| `base` | schema/types.rs | `pub fn base(&self) -> &BaseQueryRecord {` |
+| `base_mut` | schema/types.rs | `pub fn base_mut(&mut self) -> &mut BaseQueryRecord {` |
+| `client_state_mut` | schema/types.rs | `pub fn client_state_mut(&mut self) -> Option<&mut BTreeMap<String, ClientState>> {` |
+| `from_base36_u64` | schema/types.rs | `fn from_base36_u64(s: &str) -> Result<u64, &'static str> {` |
+| `id` | schema/types.rs | `pub fn id(&self) -> &str {` |
+| `is_internal` | schema/types.rs | `pub fn is_internal(&self) -> bool {` |
+| `patch_version` | schema/types.rs | `pub fn patch_version(&self) -> Option<&CVRVersion> {` |
+| `patch_version_mut` | schema/types.rs | `pub fn patch_version_mut(&mut self) -> &mut Option<CVRVersion> {` |
+| `to_base36_u64` | schema/types.rs | `fn to_base36_u64(mut n: u64) -> String {` |
+| `validate_state_version` | schema/types.rs | `fn validate_state_version(ver: &str) -> Result<(), VersionError> {` |
+| `canon_patch` | seq_replay.rs | `fn canon_patch(p: &PatchToVersion) -> String {` |
+| `canonicalize` | seq_replay.rs | `pub fn canonicalize(v: &Value) -> Value {` |
+| `default_kind` | seq_replay.rs | `fn default_kind() -> String {` |
+| `push_patches` | seq_replay.rs | `fn push_patches(acc: &mut Vec<String>, patches: Vec<PatchToVersion>) {` |
+| `cvr_schema` | shards.rs | `pub fn cvr_schema(shard: &ShardID) -> String {` |
+| `emit` | tracer.rs | `pub fn emit(op: &str, msg: &str) {` |
+| `enabled` | tracer.rs | `pub fn enabled() -> bool {` |
+| `note` | tracer.rs | `pub fn note(op: &str, msg: &str) {` |
+| `recv` | tracer.rs | `pub fn recv(op: &str, msg: &str) {` |
 
 ## ✅ COVERED — body pinned to TS fixture — 81
 
@@ -82,10 +94,22 @@ _Which Rust fns have their BODY pinned to TS output via `parity_check.rs`._
 | `send_inspect_response` | client_handler.rs | `pub fn send_inspect_response(&self, response: Value) {` |
 | `send_query_transform_application_errors` | client_handler.rs | `pub fn send_query_transform_application_errors(` |
 | `start_poke` | client_handler.rs | `pub fn start_poke(&self, tentative_version: CVRVersion) -> PokeHandler {` |
+| `clear_desired_queries` | cvr.rs | `pub fn clear_desired_queries(&mut self, client_id: &str) -> Vec<PatchToVersion> {` |
+| `delete_client` | cvr.rs | `pub fn delete_client(&mut self, client_id: &str, ttl_clock: TTLClock) -> Vec<PatchToVer…` |
+| `delete_desired_queries` | cvr.rs | `pub fn delete_desired_queries(` |
+| `delete_unreferenced_rows` | cvr.rs | `pub fn delete_unreferenced_rows<'a>(` |
+| `drain_store_ops` | cvr.rs | `pub fn drain_store_ops(&mut self) -> Vec<StoreOp> {` |
 | `get_inactive_queries` | cvr.rs | `pub fn get_inactive_queries(cvr: &CVR) -> Vec<InactiveQuery> {` |
 | `get_mutation_results_query` | cvr.rs | `pub fn get_mutation_results_query(` |
+| `mark_desired_queries_as_inactive` | cvr.rs | `pub fn mark_desired_queries_as_inactive(` |
 | `merge_ref_counts` | cvr.rs | `pub fn merge_ref_counts(` |
 | `next_eviction_time` | cvr.rs | `pub fn next_eviction_time(cvr: &CVR) -> Option<TTLClock> {` |
+| `put_desired_queries` | cvr.rs | `pub fn put_desired_queries(` |
+| `received` | cvr.rs | `pub fn received(` |
+| `set_client_schema` | cvr.rs | `pub fn set_client_schema(&mut self, client_schema: ClientSchema) -> Result<(), String> {` |
+| `set_profile_id` | cvr.rs | `pub fn set_profile_id(&mut self, profile_id: &str) {` |
+| `track_queries` | cvr.rs | `pub fn track_queries(` |
+| `as_query` | cvr_store.rs | `pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {` |
 | `h128` | hash.rs | `pub fn h128(s: &str) -> u128 {` |
 | `h32` | hash.rs | `pub fn h32(s: &str) -> u32 {` |
 | `h64` | hash.rs | `pub fn h64(s: &str) -> u64 {` |
@@ -122,47 +146,40 @@ _Which Rust fns have their BODY pinned to TS output via `parity_check.rs`._
 | `empty` | row_record_cache.rs | `fn empty() -> Self {` |
 | `format_signature` | row_set_signature.rs | `pub fn format_signature(sig: u64) -> String {` |
 | `parse_signature` | row_set_signature.rs | `pub fn parse_signature(hex: Option<&str>) -> Result<u64, std::num::ParseIntError> {` |
-| `signature_unit` | row_set_signature.rs | `pub fn signature_unit(id: &RowID) -> u64 {` |
-| `as_query` | store.rs | `pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {` |
-| `delete_client` | store.rs | `pub fn delete_client(&mut self, client_id: &str) {` |
-| `query_record_to_query_row` | store.rs | `pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRow {` |
+| `row_id_signature_unit` | row_set_signature.rs | `pub fn row_id_signature_unit(id: &RowID) -> u64 {` |
+| `client_state` | schema/types.rs | `pub fn client_state(&self) -> Option<&BTreeMap<String, ClientState>> {` |
+| `cmp_cvr` | schema/types.rs | `pub fn cmp_cvr(a: &CVRVersion, b: &CVRVersion) -> Ordering {` |
+| `cmp_versions` | schema/types.rs | `pub fn cmp_versions(a: &NullableCVRVersion, b: &NullableCVRVersion) -> Ordering {` |
+| `max_version` | schema/types.rs | `pub fn max_version(a: CVRVersion, b: Option<CVRVersion>) -> CVRVersion {` |
+| `maybe_version_string` | schema/types.rs | `pub fn maybe_version_string(s: &str) -> Result<CVRVersion, VersionError> {` |
+| `one_after` | schema/types.rs | `pub fn one_after(v: &NullableCVRVersion) -> CVRVersion {` |
+| `query_record_to_query_row` | schema/types.rs | `pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRow {` |
+| `version_from_lexi` | schema/types.rs | `pub fn version_from_lexi(lexi_version: &str) -> Result<u128, &'static str> {` |
+| `version_from_string` | schema/types.rs | `pub fn version_from_string(s: &str) -> CVRVersion {` |
+| `version_string` | schema/types.rs | `pub fn version_string(v: &CVRVersion) -> String {` |
+| `version_to_cookie` | schema/types.rs | `pub fn version_to_cookie(v: &CVRVersion) -> String {` |
+| `version_to_lexi` | schema/types.rs | `pub fn version_to_lexi(v: u64) -> String {` |
+| `version_to_nullable_cookie` | schema/types.rs | `pub fn version_to_nullable_cookie(v: &NullableCVRVersion) -> Option<String> {` |
 | `clamp_ttl` | ttl.rs | `pub fn clamp_ttl(ttl: TTL) -> i64 {` |
 | `compare_ttl` | ttl.rs | `pub fn compare_ttl(a: TTL, b: TTL) -> i64 {` |
 | `parse_ttl` | ttl.rs | `pub fn parse_ttl(ttl: TTL) -> i64 {` |
 | `parse_ttl_string` | ttl.rs | `pub fn parse_ttl_string(s: &str) -> TTL {` |
-| `client_state` | types.rs | `pub fn client_state(&self) -> Option<&BTreeMap<String, ClientState>> {` |
-| `clear_desired_queries` | updater.rs | `pub fn clear_desired_queries(&mut self, client_id: &str) -> Vec<PatchToVersion> {` |
-| `delete_desired_queries` | updater.rs | `pub fn delete_desired_queries(` |
-| `delete_unreferenced_rows` | updater.rs | `pub fn delete_unreferenced_rows<'a>(` |
-| `drain_store_ops` | updater.rs | `pub fn drain_store_ops(&mut self) -> Vec<StoreOp> {` |
-| `mark_desired_queries_as_inactive` | updater.rs | `pub fn mark_desired_queries_as_inactive(` |
-| `put_desired_queries` | updater.rs | `pub fn put_desired_queries(` |
-| `received` | updater.rs | `pub fn received(` |
-| `set_client_schema` | updater.rs | `pub fn set_client_schema(&mut self, client_schema: ClientSchema) -> Result<(), String> {` |
-| `set_profile_id` | updater.rs | `pub fn set_profile_id(&mut self, profile_id: &str) {` |
-| `track_queries` | updater.rs | `pub fn track_queries(` |
-| `cmp_cvr` | version.rs | `pub fn cmp_cvr(a: &CVRVersion, b: &CVRVersion) -> Ordering {` |
-| `cmp_versions` | version.rs | `pub fn cmp_versions(a: &NullableCVRVersion, b: &NullableCVRVersion) -> Ordering {` |
-| `max_version` | version.rs | `pub fn max_version(a: CVRVersion, b: Option<CVRVersion>) -> CVRVersion {` |
-| `one_after` | version.rs | `pub fn one_after(v: &NullableCVRVersion) -> CVRVersion {` |
-| `try_version_from_string` | version.rs | `pub fn try_version_from_string(s: &str) -> Result<CVRVersion, VersionError> {` |
-| `version_from_lexi` | version.rs | `pub fn version_from_lexi(lexi_version: &str) -> Result<u128, &'static str> {` |
-| `version_from_string` | version.rs | `pub fn version_from_string(s: &str) -> CVRVersion {` |
-| `version_string` | version.rs | `pub fn version_string(v: &CVRVersion) -> String {` |
-| `version_to_cookie` | version.rs | `pub fn version_to_cookie(v: &CVRVersion) -> String {` |
-| `version_to_lexi` | version.rs | `pub fn version_to_lexi(v: u64) -> String {` |
-| `version_to_nullable_cookie` | version.rs | `pub fn version_to_nullable_cookie(v: &NullableCVRVersion) -> Option<String> {` |
 
-## ⚙️ IO — async/DB/actor, use the ART mirror not a unit fixture — 25
+## ⚙️ IO — async/DB/actor, use the ART mirror not a unit fixture — 27
 
 | fn | file | signature |
 |---|---|---|
+| `main` | bin/cvr_seq_replay.rs | `async fn main() {` |
 | `finish` | change_processor.rs | `pub fn finish(&mut self, existing_rows: &RowRecordMap) {` |
 | `finish_received` | change_processor.rs | `pub fn finish_received(&mut self, existing_rows: &RowRecordMap) {` |
 | `flush_batch` | change_processor.rs | `fn flush_batch(&mut self, existing_rows: &RowRecordMap) {` |
 | `on_row_change` | change_processor.rs | `pub fn on_row_change(` |
 | `total_processed` | change_processor.rs | `pub fn total_processed(&self) -> usize {` |
 | `with_page_size` | change_processor.rs | `pub fn with_page_size(` |
+| `catchup_config_patches` | cvr_store.rs | `pub async fn catchup_config_patches(` |
+| `inspect_queries` | cvr_store.rs | `pub async fn inspect_queries(` |
+| `load` | cvr_store.rs | `pub async fn load(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreErro…` |
+| `load_once` | cvr_store.rs | `async fn load_once(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreErr…` |
 | `apply` | row_record_cache.rs | `pub async fn apply(` |
 | `catchup_row_patches` | row_record_cache.rs | `pub async fn catchup_row_patches(` |
 | `catchup_task` | row_record_cache.rs | `async fn catchup_task(context: CatchupTaskContext) {` |
@@ -172,13 +189,10 @@ _Which Rust fns have their BODY pinned to TS output via `parity_check.rs`._
 | `flush_loop` | row_record_cache.rs | `async fn flush_loop(context: FlushLoopContext) {` |
 | `flush_one_iteration` | row_record_cache.rs | `async fn flush_one_iteration(` |
 | `flushed` | row_record_cache.rs | `pub async fn flushed(&self) -> Result<(), String> {` |
-| `from` | row_record_cache.rs | `fn from(db: RowsRowDb) -> Self {` |
 | `get_row_records` | row_record_cache.rs | `pub async fn get_row_records(&self) -> Arc<HashMap<String, RowRecord>> {` |
 | `has_pending_updates` | row_record_cache.rs | `pub async fn has_pending_updates(&self) -> bool {` |
-| `load` | row_record_cache.rs | `pub async fn load(&self) -> Result<usize, sqlx::Error> {` |
 | `next_page` | row_record_cache.rs | `pub async fn next_page(&mut self) -> Result<Option<Vec<RowsRow>>, String> {` |
-| `row_record_to_rows_row` | row_record_cache.rs | `pub fn row_record_to_rows_row(client_group_id: &str, record: &RowRecord) -> RowsRow {` |
-| `rows_row_to_row_record` | row_record_cache.rs | `pub fn rows_row_to_row_record(row: &RowsRow) -> Result<RowRecord, RowRecordError> {` |
-| `catchup_config_patches` | store.rs | `pub async fn catchup_config_patches(` |
-| `flush` | store.rs | `pub async fn flush(` |
-| `load_once` | store.rs | `async fn load_once(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreErr…` |
+| `dump` | seq_replay.rs | `async fn dump(pool: &PgPool) -> Value {` |
+| `load_existing_rows` | seq_replay.rs | `async fn load_existing_rows(pool: &PgPool, cvr_id: &str) -> RowRecordMap {` |
+| `reset_schema` | seq_replay.rs | `pub async fn reset_schema(pool: &PgPool) {` |
+| `run` | seq_replay.rs | `pub async fn run(pool: &PgPool, prog: &Program) -> Value {` |

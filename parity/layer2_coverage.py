@@ -24,13 +24,21 @@ spec = CRATES["cvr"]
 RUST_DIR = os.path.join(REPO, spec["rust_dir"])
 
 # --- all Rust fns in the crate (name-keyed) ---
-rust_fns = {}   # canon -> (name, file, sig)
-for fn in sorted(os.listdir(RUST_DIR)):
-    if not fn.endswith(".rs"):
-        continue
-    for c, name, kind, ln, sig in extract_rust(os.path.join(RUST_DIR, fn)):
+# Walk RECURSIVELY (os.walk, not os.listdir): the crate has subdirs (schema/,
+# bin/) after the 1:1 file refactor, and a flat listdir silently drops them —
+# under-counting the pool and colliding top-level cvr.rs with schema/cvr.rs. The
+# file label is the path RELATIVE to RUST_DIR so subdir files stay distinct.
+rust_fns = {}   # canon -> (name, rel_file, sig)
+rs_files = []
+for dirpath, _dirs, files in os.walk(RUST_DIR):
+    for f in files:
+        if f.endswith(".rs"):
+            full = os.path.join(dirpath, f)
+            rs_files.append((os.path.relpath(full, RUST_DIR), full))
+for rel, full in sorted(rs_files):
+    for c, name, kind, ln, sig in extract_rust(full):
         if kind == "fn":
-            rust_fns.setdefault(c, (name, fn, sig))
+            rust_fns.setdefault(c, (name, rel, sig))
 
 # --- which fns does the Layer-2 harness actually exercise? ---
 pc = open(os.path.join(RUST_DIR, "parity_check.rs"), encoding="utf-8").read()
