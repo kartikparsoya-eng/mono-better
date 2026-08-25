@@ -1861,11 +1861,57 @@ impl CgState {
         // Retransform each surviving connection's queries against current auth +
         // permissions (re-fetching custom queries with the current token).
         let empty_body = serde_json::json!({});
+        let shard = self.shard.clone();
         for client_id in survivors {
-            if self.registered_ws.contains_key(&client_id) {
-                self.handle_desired_queries(&client_id, &empty_body, true)
-                    .await;
+            if !self.registered_ws.contains_key(&client_id) {
+                continue;
             }
+
+            // Server-side revocation probe. Port of TS `#validateConnection` →
+            // `CustomQueryTransformer.validate`: when a custom query API is
+            // configured for this client, POST an empty transform so the API
+            // server can reject a token that is cryptographically valid but
+            // revoked/deauthorized at the app layer (local `validate_auth` above
+            // only catches expiry/signature/user-swap). No query API configured →
+            // no ctx → skip (TS client-fallback path — no probe). An AUTH error
+            // (401/403) invalidates the connection; a transient failure (API down
+            // / 5xx) is DEFERRED — keep the connection and retry on the next
+            // scheduled tick (TS `deferMaintenance('revalidate')`), never close on
+            // a blip.
+            if let Some(ctx) = self.client_query_ctx.get(&client_id).cloned() {
+                match crate::custom_queries::transform_query::validate_custom_queries(&ctx, &shard)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(body) => {
+                        if crate::custom_queries::transform_query::is_auth_error_body(&body) {
+                            tracing::warn!(
+                                "CG {}: server-side auth revocation for client {client_id}; closing",
+                                self.cg_id
+                            );
+                            crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+                            if let Some(conn) = self.connections.get(&client_id) {
+                                conn.close_with_error(crate::protocol::ErrorBody::unauthorized(
+                                    "Connection auth validation failed",
+                                ));
+                            }
+                            if let Some(ws_id) = self.registered_ws.get(&client_id).cloned() {
+                                self.on_connection_closed(&client_id, &ws_id);
+                            }
+                            continue;
+                        }
+                        tracing::warn!(
+                            "CG {}: query-transform validation failed transiently for \
+                             client {client_id}; deferring retransform",
+                            self.cg_id
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            self.handle_desired_queries(&client_id, &empty_body, true)
+                .await;
         }
 
         // Re-arm: schedule the next tick if any authed connection remains,

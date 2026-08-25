@@ -276,6 +276,47 @@ pub async fn transform_custom_queries(
     Ok(results)
 }
 
+/// Force the empty `/query` validation request used by auth maintenance. Port of
+/// TS `CustomQueryTransformer.validate` (`transform-query.ts`).
+///
+/// Kept separate from `transform_custom_queries` because that path short-circuits
+/// locally on an empty batch (`to_fetch.is_empty()`) and never hits the API
+/// server — but validation MUST make the request so a token revoked/deauthorized
+/// at the app layer (still cryptographically valid) is surfaced by the server.
+/// Success is intentionally opaque (`Ok(())`); callers only care pass/fail.
+pub async fn validate_custom_queries(
+    ctx: &CustomQueryContext,
+    shard: &ShardID,
+) -> Result<(), Value> {
+    let body = serde_json::json!(["transform", []]);
+    post_transform(ctx, shard, &body, &[]).await.map(|_| ())
+}
+
+/// Whether an error body denotes an authorization failure. Port of TS
+/// `isAuthErrorBody` (`auth/auth.ts`):
+///  - `{error: "http", status: 401|403}`
+///  - `{kind: "AuthInvalidated" | "Unauthorized"}`
+///  - `{kind: "TransformFailed" | "PushFailed", reason: "http", status: 401|403}`
+///
+/// Used by the auth-maintenance revocation probe to decide invalidate (auth
+/// error → close) vs defer (transient/API-down → keep + retry).
+pub fn is_auth_error_body(body: &Value) -> bool {
+    let is_auth_status =
+        |body: &Value| matches!(body.get("status").and_then(Value::as_u64), Some(401) | Some(403));
+
+    if body.get("error").and_then(Value::as_str) == Some("http") {
+        return is_auth_status(body);
+    }
+    match body.get("kind").and_then(Value::as_str) {
+        Some("AuthInvalidated") | Some("Unauthorized") => true,
+        Some("TransformFailed") | Some("PushFailed") => {
+            // TS `ErrorReason.HTTP` is the lowercase `"http"`.
+            body.get("reason").and_then(Value::as_str) == Some("http") && is_auth_status(body)
+        }
+        _ => false,
+    }
+}
+
 /// TS `fetchFromAPIServer` retry parameters (#6315): up to 4 attempts, 5xx and
 /// network errors retry with `min(1000, 100 * 2^(attempt-1) + jitter(0..100))`
 /// ms of backoff; 4xx and malformed responses fail immediately.
@@ -325,7 +366,7 @@ async fn post_transform(
     {
         crate::metrics::record_api_request("url_not_allowed");
         return Err(transform_failed(
-            "Internal",
+            "internal",
             format!(
                 "URL \"{}\" is not allowed by the ZERO_QUERY_URL configuration",
                 ctx.url
@@ -334,14 +375,14 @@ async fn post_transform(
     }
 
     let mut url = reqwest::Url::parse(&ctx.url)
-        .map_err(|e| transform_failed("Internal", format!("invalid userQueryURL: {e}")))?;
+        .map_err(|e| transform_failed("internal", format!("invalid userQueryURL: {e}")))?;
     // Reserved-param guard (TS `reservedParams`): the configured URL may not
     // already carry the params zero-cache appends.
     for reserved in RESERVED_PARAMS {
         if url.query_pairs().any(|(k, _)| k == reserved) {
             crate::metrics::record_api_request("config_error");
             return Err(transform_failed(
-                "Internal",
+                "internal",
                 format!("The query URL cannot contain the reserved query param \"{reserved}\""),
             ));
         }
@@ -416,7 +457,10 @@ async fn post_transform_attempts(
                 }
                 break Err((
                     "fetch_error",
-                    transform_failed("HTTP", format!("query transform request failed: {e}")),
+                    // A network failure (no HTTP response) is the ZeroCache
+                    // non-`http` variant — no `status`, so `reason: 'internal'`
+                    // per TS `transformFailedBodySchema` (not an auth failure).
+                    transform_failed("internal", format!("query transform request failed: {e}")),
                 ));
             }
             Ok(resp) => {
@@ -438,13 +482,20 @@ async fn post_transform_attempts(
                         continue;
                     }
                     let preview = resp.text().await.unwrap_or_default();
-                    break Err((
-                        "http_error",
-                        transform_failed(
-                            "HTTP",
-                            format!("query transform returned {status}: {preview}"),
-                        ),
-                    ));
+                    // Port of the ZeroCache `reason: 'http'` TransformFailed
+                    // variant (`error.ts` transformFailedBodySchema): carry the
+                    // HTTP `status` (+ `bodyPreview`) so a 401/403 is recognizable
+                    // as a server-side auth failure — see `is_auth_error_body`,
+                    // used by the auth-maintenance revocation probe.
+                    let mut failure = transform_failed(
+                        "http",
+                        format!("query transform returned {status}: {preview}"),
+                    );
+                    if let Some(obj) = failure.as_object_mut() {
+                        obj.insert("status".into(), serde_json::json!(status.as_u16()));
+                        obj.insert("bodyPreview".into(), serde_json::json!(preview));
+                    }
+                    break Err(("http_error", failure));
                 }
                 match resp.json::<Value>().await {
                     Ok(v) => {
@@ -468,7 +519,7 @@ async fn post_transform_attempts(
                         break Err((
                             "parse_error",
                             transform_failed(
-                                "Internal",
+                                "internal",
                                 format!("invalid transform response: {e}"),
                             ),
                         ));
@@ -553,6 +604,40 @@ pub fn seed_transform_cache_for_test(ctx: &CustomQueryContext, id: &str, q: &Tra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_auth_error_body_matches_ts_is_auth_error_body() {
+        // {error:"http", status:401|403} → auth
+        assert!(is_auth_error_body(
+            &serde_json::json!({"error": "http", "status": 401})
+        ));
+        assert!(is_auth_error_body(
+            &serde_json::json!({"error": "http", "status": 403})
+        ));
+        assert!(!is_auth_error_body(
+            &serde_json::json!({"error": "http", "status": 500})
+        ));
+        // {kind: AuthInvalidated|Unauthorized} → auth
+        assert!(is_auth_error_body(&serde_json::json!({"kind": "Unauthorized"})));
+        assert!(is_auth_error_body(
+            &serde_json::json!({"kind": "AuthInvalidated"})
+        ));
+        // TransformFailed is auth ONLY when reason=="http" AND status in {401,403}.
+        assert!(is_auth_error_body(&serde_json::json!({
+            "kind": "TransformFailed", "reason": "http", "status": 401
+        })));
+        assert!(!is_auth_error_body(&serde_json::json!({
+            "kind": "TransformFailed", "reason": "http", "status": 500
+        })));
+        // A transient/API-down TransformFailed must NOT count as auth (→ defer,
+        // don't close the connection).
+        assert!(!is_auth_error_body(&serde_json::json!({
+            "kind": "TransformFailed", "reason": "internal", "message": "boom"
+        })));
+        assert!(!is_auth_error_body(&serde_json::json!({
+            "kind": "TransformFailed", "reason": "http", "status": 503
+        })));
+    }
 
     /// Layer-2 body-differential: `url_match` (the custom-query URL allowlist)
     /// must return the same bool as the REAL TS `urlMatch`+`compileUrlPattern`
