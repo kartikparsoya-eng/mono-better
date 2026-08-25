@@ -757,6 +757,37 @@ const QUERY_SCENARIOS = [
       },
     ],
   },
+  {
+    // Pins F-CVR-STORE-12: the CVRQueryDrivenUpdater constructor must NOT bump
+    // the version when stateVersion == cvr.version.stateVersion (TS cvr.ts:599-601
+    // has no else branch). With no executed/removed queries and an unchanged
+    // received row (same rowVersion -> patchVersion = existing.patchVersion, no
+    // #assertNewVersion), the finalVersion must stay at the base 'v1'.
+    desc: 'same-stateVersion pass: unchanged row, no query changes -> version must NOT bump',
+    stateVersion: 'v1',
+    // Advance-style pass: TS #advancePipelines never calls deleteUnreferencedRows
+    // (it asserts "Expected no received rows for query-less update" otherwise).
+    skipDelete: true,
+    queries: {hash1: {ast: {table: 'issue'}}},
+    executed: [],
+    removed: [],
+    existingRows: [
+      {
+        id: {schema: 'public', table: 'issue', rowKey: {id: '1'}},
+        rowVersion: 'rv1',
+        patchVersion: {stateVersion: 'v1'},
+        refCounts: {hash1: 1},
+      },
+    ],
+    receivedRows: [
+      {
+        id: {schema: 'public', table: 'issue', rowKey: {id: '1'}},
+        contents: {id: '1', title: 'a'},
+        version: 'rv1',
+        refCounts: {hash1: 1},
+      },
+    ],
+  },
 ];
 
 async function runQueryScenario(sc) {
@@ -778,11 +809,12 @@ async function runQueryScenario(sc) {
     rowsMap.set(r.id, {contents: r.contents, version: r.version, refCounts: r.refCounts});
   }
   const receivedPatches = await updater.received(LC, rowsMap);
-  const deletePatches = await updater.deleteUnreferencedRows(LC);
+  const deletePatches = sc.skipDelete ? [] : await updater.deleteUnreferencedRows(LC);
 
   return {
     desc: sc.desc,
     stateVersion: sc.stateVersion,
+    skipDelete: sc.skipDelete ?? false,
     queries: sc.queries,
     executed: sc.executed,
     removed: sc.removed,

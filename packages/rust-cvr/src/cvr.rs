@@ -840,14 +840,18 @@ impl CVRQueryDrivenUpdater {
             "stateVersion must be >= cvr.version.stateVersion"
         );
 
+        // Port of TS cvr.ts:599-601: bump ONLY when stateVersion advanced. At
+        // equality the constructor must NOT bump — the version bump comes lazily
+        // from trackQueries (_ensureNewVersion) and received() hard-asserts it
+        // happened when a row actually needs a new patchVersion
+        // (#assertNewVersion). An eager bump here produced a configVersion
+        // advance + extra poke/cookie on same-stateVersion passes that TS
+        // leaves version-unchanged (F-CVR-STORE-12).
         if state_version > base.orig.version.state_version {
             base.set_version(CVRVersion {
                 state_version: state_version.clone(),
                 config_version: None,
             });
-        } else if state_version == base.orig.version.state_version {
-            // Bump config version for row changes.
-            base.ensure_new_version();
         }
 
         Self {
@@ -2017,13 +2021,32 @@ mod updater_tests {
         assert!(updater.base.cvr.version.config_version.is_none());
     }
 
+    /// F-CVR-STORE-12: at the SAME stateVersion the constructor must NOT bump
+    /// (TS cvr.ts:599-601 has no else branch) — the bump comes lazily from
+    /// `track_queries`' `ensure_new_version`, and `received()` asserts it
+    /// happened when actually needed. This test previously pinned the buggy
+    /// eager bump (`config_version == Some(1)` straight from `new`); the
+    /// TS-golden fixture scenario "same-stateVersion pass ... must NOT bump"
+    /// pins the corrected behavior end-to-end.
     #[test]
-    fn test_query_updater_bumps_config_on_same_state_version() {
+    fn test_query_updater_does_not_bump_on_same_state_version() {
         let cvr = make_test_cvr();
-        let updater = make_query_driven_updater(cvr, "v1");
-        // Same stateVersion → config version should be bumped
+        let mut updater = make_query_driven_updater(cvr, "v1");
         assert_eq!(updater.base.cvr.version.state_version, "v1");
-        assert_eq!(updater.base.cvr.version.config_version, Some(1));
+        assert_eq!(
+            updater.base.cvr.version.config_version, None,
+            "constructor must not bump at stateVersion equality (TS has no else branch)"
+        );
+        // The bump arrives lazily — track_executed/track_removed call
+        // _ensureNewVersion per query; `ensure_new_version` is TS's public
+        // alias for the same deferred bump (cvr.ts:798-800).
+        let new_version = updater.ensure_new_version();
+        assert_eq!(new_version.state_version, "v1");
+        assert_eq!(
+            new_version.config_version,
+            Some(1),
+            "ensure_new_version provides the configVersion bump TS defers to"
+        );
     }
 
     #[test]

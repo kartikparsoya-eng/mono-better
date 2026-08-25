@@ -1308,8 +1308,18 @@ fn parity_check() {
             desc
         );
 
-        // deleteUnreferencedRows
-        let del_patches = updater.delete_unreferenced_rows(existing.values());
+        // deleteUnreferencedRows — skipped for advance-style scenarios (TS
+        // #advancePipelines never reconciles unreferenced rows; calling it with
+        // received rows and no executed/removed queries asserts on both sides).
+        let skip_delete = entry
+            .get("skipDelete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let del_patches = if skip_delete {
+            Vec::new()
+        } else {
+            updater.delete_unreferenced_rows(existing.values())
+        };
         assert_eq!(
             &sorted_norm(del_patches),
             entry.get("deletePatches").expect("deletePatches"),
