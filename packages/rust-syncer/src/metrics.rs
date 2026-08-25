@@ -571,6 +571,33 @@ pub fn record_ws_shed(reason: &'static str) {
     ws_sheds().add(1, &[KeyValue::new("reason", reason)]);
 }
 
+/// Client WebSocket error events. Port of TS `Connection.#webSocketErrors`
+/// (`getOrCreateCounter('sync', 'websocket.errors', ...)`) — incremented on an
+/// unclean close (`event_type=unclean_close`) or a transport/protocol error
+/// (`event_type=error_event`), tagged by protocol version and event type.
+fn ws_errors() -> &'static Counter<u64> {
+    static C: OnceLock<Counter<u64>> = OnceLock::new();
+    C.get_or_init(|| {
+        global::meter("zero")
+            .u64_counter("zero.sync.websocket.errors")
+            .with_description("Client WebSocket error events.")
+            .build()
+    })
+}
+
+/// `event_type` is a CLOSED vocabulary matching TS: `unclean_close` (the socket
+/// ended without an RFC 6455 close handshake) or `error_event` (a real
+/// transport/protocol error). Never pass a dynamic string.
+pub fn record_websocket_error(event_type: &'static str, protocol_version: u32) {
+    ws_errors().add(
+        1,
+        &[
+            proto_attr(protocol_version),
+            KeyValue::new("event.type", event_type),
+        ],
+    );
+}
+
 pub fn record_ws_open_delta(delta: i64, protocol_version: u32) {
     ws_open_connections().add(delta, &[proto_attr(protocol_version)]);
 }

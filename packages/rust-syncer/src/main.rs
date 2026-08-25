@@ -794,7 +794,30 @@ impl CGServicesFactory for RealServicesFactory {
         match &load_result {
             Ok(Some(_)) => tracing::info!("CG {cg_id}: loaded read-permissions from replica"),
             Ok(None) => {
-                tracing::warn!("CG {cg_id}: no read-permissions deployed — queries pass through")
+                // Port of the `permissions === null` branch in TS `loadPermissions`
+                // (`auth/load-permissions.ts`): warn to run `zero-deploy-permissions`
+                // UNLESS custom endpoints are configured (`hasCustomEndpoints`) — a
+                // deployment using a custom query+mutate API legitimately runs with
+                // no deployed permissions doc, so the nudge would be noise. TS's
+                // `hasCustomEndpoints = (push||mutate url) && (query||getQueries url)`
+                // maps to `pusher_url` (write) AND `query_config` (read) here.
+                // Emitted at this single CG-load consumer (not inside
+                // `load_permissions`, which is called twice per load) to stay
+                // single-fire.
+                let has_custom_endpoints =
+                    self.config.pusher_url.is_some() && self.config.query_config.is_some();
+                if !has_custom_endpoints {
+                    let app_id_flag = if self.config.app_id == "zero" {
+                        String::new()
+                    } else {
+                        format!(" --app-id={}", self.config.app_id)
+                    };
+                    tracing::warn!(
+                        "CG {cg_id}: No upstream permissions deployed. Run \
+                         'npx zero-deploy-permissions{app_id_flag}' to enforce \
+                         permissions. Queries pass through until then."
+                    );
+                }
             }
             // Fail CLOSED: an existing-but-unloadable permissions doc must not
             // silently disable authorization. `resolve_permissions` substitutes a

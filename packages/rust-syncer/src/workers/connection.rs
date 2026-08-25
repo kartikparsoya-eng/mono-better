@@ -317,19 +317,53 @@ pub enum LogLevel {
     Error,
 }
 
+/// System error codes that indicate transient socket conditions. Port of TS
+/// `TRANSIENT_SOCKET_ERROR_CODES` (`connection.ts`); lowercased for matching.
+const TRANSIENT_SOCKET_ERROR_CODES: [&str; 3] = ["epipe", "econnreset", "ecanceled"];
+
+/// Error-message fragments that indicate transient socket conditions without a
+/// standard code. Port of TS `TRANSIENT_SOCKET_MESSAGE_PATTERNS`, plus the
+/// `std::io::ErrorKind` Display forms that are the Rust stand-in for the errno
+/// codes above (TS reads them off a thrown object; see `has_transient_socket_code`).
+const TRANSIENT_SOCKET_MESSAGE_PATTERNS: [&str; 4] = [
+    "socket was closed while data was being compressed",
+    "connection reset",   // std::io::ErrorKind::ConnectionReset Display (ECONNRESET)
+    "broken pipe",        // std::io::ErrorKind::BrokenPipe Display (EPIPE)
+    "operation canceled", // std::io Display (ECANCELED)
+];
+
+/// Port of TS `hasTransientSocketCode`. TS reads the thrown error's `.code`;
+/// Rust has no thrown object at this boundary, so we scan the (lowercased) error
+/// message for the errno spelling — the only channel available (F-CON-3).
+fn has_transient_socket_code(msg_lower: &str) -> bool {
+    TRANSIENT_SOCKET_ERROR_CODES
+        .iter()
+        .any(|c| msg_lower.contains(c))
+}
+
+/// Port of TS `isTransientSocketMessage`.
+fn is_transient_socket_message(msg_lower: &str) -> bool {
+    TRANSIENT_SOCKET_MESSAGE_PATTERNS
+        .iter()
+        .any(|p| msg_lower.contains(p))
+}
+
 /// Classify the log level for an error body.
 ///
 /// Port of the `sendError()` logic:
 /// - `ClientNotFound` → warn
 /// - `TransformFailed` → warn
-/// - Otherwise → info (for thrown errors, falls back to `getLogLevel`)
+/// - transient socket condition (EPIPE/ECONNRESET/ECANCELED, etc.) → warn
+/// - Otherwise → info (or error for `Internal`)
 pub fn classify_error_log_level(error: &ErrorBody) -> LogLevel {
     match error.kind() {
         ErrorKind::ClientNotFound | ErrorKind::TransformFailed => LogLevel::Warn,
         _ => {
-            // Check for transient socket message patterns.
-            let msg = error.message().to_lowercase();
-            if msg.contains("socket was closed while data was being compressed") {
+            // Transient I/O (peer reset / broken pipe / canceled): TS downgrades
+            // these to `warn` so a normal disconnect doesn't page an operator.
+            // Mirrors TS `hasTransientSocketCode(thrown) || isTransientSocketMessage(msg)`.
+            let msg_lower = error.message().to_lowercase();
+            if has_transient_socket_code(&msg_lower) || is_transient_socket_message(&msg_lower) {
                 return LogLevel::Warn;
             }
             // Default: info for protocol errors, error for internal errors.
@@ -425,5 +459,30 @@ mod tests {
             "The socket was closed while data was being compressed",
         );
         assert_eq!(classify_error_log_level(&err), LogLevel::Warn);
+    }
+
+    #[test]
+    fn transient_socket_errors_are_downgraded_to_warn() {
+        // TS downgrades EPIPE/ECONNRESET/ECANCELED (transient peer disconnects)
+        // to warn. Rust matches on the message (carrying the io::Error Display),
+        // for both the raw errno spelling and the ErrorKind Display form.
+        for msg in [
+            "write failed: Broken pipe (os error 32)",
+            "Connection reset by peer (os error 54)",
+            "io error: ECONNRESET",
+            "operation canceled",
+        ] {
+            let err = basic(ErrorKind::Internal, msg);
+            assert_eq!(
+                classify_error_log_level(&err),
+                LogLevel::Warn,
+                "transient socket message should warn: {msg:?}"
+            );
+        }
+        // A genuine internal error still logs at error.
+        assert_eq!(
+            classify_error_log_level(&basic(ErrorKind::Internal, "assertion failed: x == y")),
+            LogLevel::Error
+        );
     }
 }

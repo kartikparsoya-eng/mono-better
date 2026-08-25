@@ -516,8 +516,13 @@ async fn run_ws_reader(
                 // production warning/error signal during normal lifecycle churn.
                 if is_expected_disconnect(&e) {
                     tracing::debug!("WebSocket {ws_id} disconnected: {e}");
+                    // A reset/abrupt close without an RFC 6455 handshake — TS
+                    // `#handleClose` with `wasClean === false`.
+                    crate::metrics::record_websocket_error("unclean_close", protocol_version);
                 } else {
                     tracing::warn!("WebSocket {ws_id} read error: {e}");
+                    // A real transport/protocol error — TS `#handleError`.
+                    crate::metrics::record_websocket_error("error_event", protocol_version);
                 }
                 break;
             }

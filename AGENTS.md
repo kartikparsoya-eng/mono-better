@@ -1,5 +1,46 @@
 # Rocicorp Monorepo Instructions
 
+## HARD RULES — Rust ⇄ TS 1:1 Port Parity (non-negotiable)
+
+The Rust crates (`rust-cvr`, `rust-ivm`, `rust-syncer`) are a **strict 1:1 port**
+of the TypeScript Zero implementation. TypeScript is the source of truth. These
+rules OVERRIDE any instinct toward "cleaner" or "more idiomatic" Rust:
+
+1. **TS behavior is the spec.** The Rust code must reproduce the TS behavior
+   exactly — same branches, same edge cases, same tri-state (null / undefined /
+   absent) handling, same error/throw semantics. If TS does something that looks
+   wrong, port it faithfully and flag it; do NOT "fix" it in Rust. A divergence
+   is a bug even if the Rust version seems more correct.
+
+2. **1:1 function names.** Every ported function keeps the TS name, transliterated
+   to Rust casing only: `liteTableName` → `lite_table_name`, `#recordWebSocketError`
+   → `record_websocket_error`, `isTransientSocketMessage` → `is_transient_socket_message`.
+   Do NOT rename, do NOT merge two TS functions into one, do NOT split one into two.
+   If TS has `hasTransientSocketCode` AND `isTransientSocketMessage`, Rust has both.
+
+3. **1:1 file paths + names.** A ported symbol lives in the Rust file mirroring its
+   TS file: `zql/src/ivm/take.ts` → `rust-ivm/src/ivm/take.rs`. Mirror the directory
+   structure and filename. Do NOT relocate a function to a "more convenient" module.
+   (Exception, already established: where a crate has no twin for a TS `types/*`
+   utility module, fold it into its consumer — but keep the function name 1:1. Prefer
+   creating the mirrored file when the crate's structure already has that directory.)
+
+4. **1:1 constants + types.** Named constants, enums, struct field names, and their
+   value sets mirror TS (`TRANSIENT_SOCKET_ERROR_CODES`, `PROTOCOL_VERSION`, etc.).
+
+5. **Rust-only additions must be justified + labeled.** Memory management (Rc-cycle
+   breaks, RAII `Drop` for `try/finally`), `Send`-ification, and re-entrancy adapters
+   are legitimate — they have no TS twin because they solve a Rust-specific problem.
+   Comment them as such. Everything else needs a TS origin.
+
+6. **Cite the TS origin in a doc-comment.** Every ported item carries a
+   `// Port of TS <symbol> (<file>:<line>)` (or `Port of <file>`) reference so the
+   1:1 mapping is auditable. When you change ported code, re-read the TS first.
+
+When porting or fixing: open the TS source, match names/paths/branches, then write
+the Rust. If you catch yourself renaming or relocating for tidiness, stop — that is
+the divergence these rules exist to prevent.
+
 ## Architecture Overview
 
 This monorepo contains **Zero** (real-time sync platform) and **Replicache** (client-side data layer), built as complementary technologies for building reactive, sync-enabled applications.
