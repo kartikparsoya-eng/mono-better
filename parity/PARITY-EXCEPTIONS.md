@@ -66,6 +66,23 @@ Anything not listed here and not STALE/WRONG must match TS.
 - **`flipIfNeeded` absent** (F-PLANNER-9): test-only in TS (only callers are planner-join.test.ts).
 - **UnionFanIn push forwarding via all-branch match-count** instead of TS's pusher-identity skip: equivalent under the invariant that the pusher branch's post-change fetch reflects its own change (add→found, remove→absent); pinned by the union-fan-in tests + the differential oracle. Also: single-input fetch skips the merge-dedup (unobservable for sorted-unique branches).
 
+## D-9 · Malformed-baseCookie rejection TIMING (connect vs first init)
+
+- **TS**: the baseCookie from the connect URL is parsed lazily, when the
+  ClientHandler is constructed while processing the first `initConnection`
+  (client-handler.ts `cookieToVersion` → schema/types.ts `versionFromString`
+  throw → `wrapWithProtocolError` → fatal `Internal` error frame + close).
+- **Rust**: the same validation runs at connection REGISTRATION
+  (router.rs `on_new_connection`, right after `connected` is sent) — the
+  router materializes `client_base_versions` at registration, so deferring
+  the throw to init handling would let a poke race an invalid base version.
+- **Observable difference**: identical frames (`connected` → `["error",
+  {kind: Internal, message: <versionFromString error>}]` → close 1000); the
+  only divergence is that Rust emits them even if the client never sends an
+  `initConnection`, and before (rather than after) consuming one. Real zero
+  clients always send init immediately, so the orderings are indistinguishable
+  in practice; the xyne-art G36 harness tolerates both (open_side send guard).
+
 ## Minor notes (log/observability-only, not behavior)
 
 - **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.
