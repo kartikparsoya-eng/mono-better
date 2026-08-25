@@ -625,9 +625,12 @@ mod tests {
         let mut c: PlannerConstraint = Default::default();
         c.insert("id".to_string(), None);
         c.insert("flag".to_string(), None);
+        // WHERE terms follow the constraint's INSERTION order (TS iterates
+        // the Record with Object.entries) — id was inserted first. The old
+        // expectation pinned BTreeMap's alphabetical re-sort (NEW-2 artifact).
         assert_eq!(
             build_probe_sql("t", &columns, Some(&c), None, &[]),
-            r#"SELECT "flag","id","n" FROM "t" WHERE "flag" = 0 AND "id" = ?"#
+            r#"SELECT "flag","id","n" FROM "t" WHERE "id" = ? AND "flag" = 0"#
         );
 
         // Filters inlined (string escape), sort appended.

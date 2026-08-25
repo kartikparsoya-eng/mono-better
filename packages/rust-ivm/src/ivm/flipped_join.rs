@@ -252,14 +252,20 @@ impl FlippedJoin {
                             match change.change_type() {
                                 ChangeType::Remove => {
                                     if has_been_pushed {
+                                        // TS filters by REFERENCE identity
+                                        // (`n !== inprogressChildChange[NODE]`,
+                                        // flipped-join.ts:358-360): only the
+                                        // node spliced back in by fetch() is
+                                        // removed. Matching by child_key here
+                                        // wrongly dropped every SIBLING child
+                                        // sharing the join key (NEW-6), so a
+                                        // parent with another child vanished
+                                        // from mid-push fetches. The spliced
+                                        // node shares the change node's row
+                                        // `Arc`, so `Arc::ptr_eq` is the Rust
+                                        // twin of the TS `!==`.
                                         let change_row = change.node().row.clone();
-                                        overlaid.retain(|n| {
-                                            !row_equals_for_compound_key(
-                                                &n.row,
-                                                &change_row,
-                                                &child_key_for_overlay,
-                                            )
-                                        });
+                                        overlaid.retain(|n| !Arc::ptr_eq(&n.row, &change_row));
                                     }
                                 }
                                 ChangeType::Add | ChangeType::Edit | ChangeType::Child => {
@@ -521,8 +527,16 @@ impl Input for FlippedJoin {
         {
             let removed = change.node().clone();
             let compare = self.child.borrow().get_schema().compare_rows.clone();
-            let insert_pos =
-                child_nodes.partition_point(|n| compare(&removed.row, &n.row) == CmpOrdering::Less);
+            // TS binarySearch (flipped-join.ts:198-201 → shared/binary-search)
+            // returns the FIRST index with compare(removed, node) <= 0 — the
+            // leftmost sorted insertion point. `partition_point` needs the
+            // true-prefix predicate, i.e. the nodes STRICTLY BEFORE the removed
+            // row: `removed > n`. The previous `== Less` predicate was true for
+            // the SUFFIX, so mixed-position removes spliced at index 0 and the
+            // relationship-row order diverged from TS on remove-push refetches
+            // (NEW-4; same idiom as source.rs's existing-first partition_point).
+            let insert_pos = child_nodes
+                .partition_point(|n| compare(&removed.row, &n.row) == CmpOrdering::Greater);
             child_nodes.insert(insert_pos, removed);
         }
 

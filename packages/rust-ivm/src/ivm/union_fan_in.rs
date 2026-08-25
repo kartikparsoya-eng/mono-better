@@ -157,11 +157,18 @@ impl UnionFanIn {
     ///   If another branch has it, that branch will send the remove.
     fn push_internal_change(&self, change: Change, pusher: &dyn InputBase) {
         match change.change_type() {
-            ChangeType::Child | ChangeType::Edit => {
+            ChangeType::Child => {
                 let output = self.output.borrow().clone();
                 if let Some(output) = output {
                     output.borrow_mut().push(change, pusher);
                 }
+            }
+            // TS union-fan-in.ts:150-156: edits never reach here — the flip
+            // join turns them into child changes, and an edit that would
+            // change membership is split into add/remove. Forwarding one
+            // silently (the old arm) hid that invariant violation.
+            ChangeType::Edit => {
+                panic!("UnionFanIn: expected add or remove change type, got Edit");
             }
             ChangeType::Add | ChangeType::Remove => {
                 let node = change.node().clone();

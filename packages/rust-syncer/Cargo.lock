@@ -1810,6 +1810,7 @@ dependencies = [
 name = "rust-ivm"
 version = "0.1.0"
 dependencies = [
+ "indexmap",
  "opentelemetry",
  "parking_lot",
  "regex",

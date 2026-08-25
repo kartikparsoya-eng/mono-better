@@ -14,7 +14,6 @@
 use std::rc::Rc;
 
 use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
-use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::System;
 use rust_ivm::planner::{ConnectionCostModel, CostModelCost, plan_query};
 
@@ -29,7 +28,7 @@ fn mock_cost_model(table_costs: Vec<(&str, f64)>) -> ConnectionCostModel {
         move |table: &str,
               _sort: &[(String, String)],
               _filters: Option<&Condition>,
-              constraint: Option<&std::collections::BTreeMap<String, Option<Value>>>| {
+              constraint: Option<&rust_ivm::planner::planner_constraint::PlannerConstraint>| {
             let base = *costs.get(table).unwrap_or(&100.0);
             // A constrained read is an indexed key seek (~1 row), like SQLite's
             // planner reports via scanstatus — NOT a full scan. Modelling this is

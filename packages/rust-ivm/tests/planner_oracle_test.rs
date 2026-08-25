@@ -10,13 +10,12 @@
 //!   node --experimental-strip-types agentic/oracle/planner-ts-runner.mjs \
 //!     agentic/oracle/planner-corpus.json --out agentic/oracle/planner-expected.json
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use serde_json::Value as JsonValue;
 
 use rust_ivm::builder::ast::{Ast, Condition};
-use rust_ivm::ivm::data::Value;
 use rust_ivm::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, plan_query};
 use rust_ivm::replay::json_to_ast;
 
@@ -28,7 +27,7 @@ fn mock_from_costs(costs: HashMap<String, f64>) -> ConnectionCostModel {
         move |table: &str,
               _sort: &[(String, String)],
               _filters: Option<&Condition>,
-              constraint: Option<&BTreeMap<String, Option<Value>>>| {
+              constraint: Option<&rust_ivm::planner::planner_constraint::PlannerConstraint>| {
             let rows = if constraint.is_some() {
                 1.0
             } else {

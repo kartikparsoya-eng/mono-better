@@ -661,19 +661,19 @@ fn make_event_schema() -> SourceSchema {
 }
 
 fn make_event_format(singular_athletes: bool) -> Format {
+    // TS shape (view-apply-change.test.ts:86-89, 338-346): the format follows
+    // the VISIBLE tree — ONE `athletes` entry for the visible athlete level;
+    // the hidden matchup level has no format entry (the outer format passes
+    // through it unchanged, view-apply-change.ts:222-262). The previous
+    // nested-per-structural-level shape here compensated for the NEW-5 bug.
     let mut fmt = default_format();
-    let athlete_fmt = default_format();
-    let mut matchup_fmt = default_format();
-    matchup_fmt.relationships.insert(
+    fmt.relationships.insert(
         "athletes".to_string(),
         Format {
             singular: singular_athletes,
             relationships: FxHashMap::default(),
         },
     );
-    fmt.relationships
-        .insert("athletes".to_string(), matchup_fmt);
-    let _ = athlete_fmt;
     fmt
 }
 

@@ -28,9 +28,11 @@ fn translate_constraints_for_flipped_join(
     }
 }
 
-fn get_multi_constraint_chunk_size() -> usize {
-    500
-}
+// Port of TS planner-join.ts:2 — the planner imports the RUNTIME's
+// `getMultiConstraintChunkSize` from ivm/flipped-join.ts (256). A local shadow
+// here previously returned 500, underestimating flipped-join chunk startup
+// cost vs TS and skewing plan choice (NEW-1).
+use crate::ivm::flipped_join::get_multi_constraint_chunk_size;
 
 pub struct PlannerJoin {
     parent: PlannerNode,
@@ -214,5 +216,71 @@ impl PlannerJoin {
 impl Drop for PlannerJoin {
     fn drop(&mut self) {
         crate::live_count::dec(&crate::live_count::PLANNER_NODE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// NEW-1: the planner must use the RUNTIME's chunk size (TS
+    /// planner-join.ts:2 imports `getMultiConstraintChunkSize` from
+    /// ivm/flipped-join.ts, value 256). A local shadow returning 500
+    /// underestimated flipped-join chunk startup cost and skewed plan choice.
+    /// Pre-fix the first assert failed (500 != 256) — proven by temp-revert.
+    #[test]
+    fn chunk_size_is_the_runtime_value() {
+        assert_eq!(
+            get_multi_constraint_chunk_size(),
+            256,
+            "TS MULTI_CONSTRAINT_CHUNK_SIZE (flipped-join.ts:55)"
+        );
+        // The planner's symbol must BE the ivm one: the test override must be
+        // visible through it.
+        let restore = crate::ivm::flipped_join::set_multi_constraint_chunk_size_for_test(7);
+        assert_eq!(
+            get_multi_constraint_chunk_size(),
+            7,
+            "planner must read the runtime chunk size, not a local copy"
+        );
+        restore();
+    }
+
+    /// NEW-2: `translateConstraintsForFlippedJoin` pairs
+    /// `parentKeys[i] ↔ childKeys[i]` POSITIONALLY in Record insertion order
+    /// (TS planner-join.ts:34-44; the order `extractConstraint` inserted =
+    /// the correlation-array order). With a BTreeMap the keys re-sorted
+    /// alphabetically, so a multi-column correlation whose sides sort
+    /// differently paired the wrong columns: parent ['b','a'] ↔ child
+    /// ['x','y'] must map b→x, but sorted ['a','b'] mapped b→y. Proven by
+    /// temp-revert (PlannerConstraint as BTreeMap fails the b→x assert).
+    #[test]
+    fn translate_constraints_pairs_by_insertion_order() {
+        let mut parent = PlannerConstraint::new();
+        parent.insert("b".to_string(), None);
+        parent.insert("a".to_string(), None);
+        let mut child = PlannerConstraint::new();
+        child.insert("x".to_string(), None);
+        child.insert("y".to_string(), None);
+
+        let mut incoming = PlannerConstraint::new();
+        incoming.insert("b".to_string(), None);
+        let translated = translate_constraints_for_flipped_join(Some(&incoming), &parent, &child)
+            .expect("translated");
+        assert!(
+            translated.contains_key("x") && !translated.contains_key("y"),
+            "b is parentKeys[0] (insertion order) and must map to childKeys[0] = x; got {:?}",
+            translated.keys().collect::<Vec<_>>()
+        );
+
+        let mut incoming_a = PlannerConstraint::new();
+        incoming_a.insert("a".to_string(), None);
+        let translated_a =
+            translate_constraints_for_flipped_join(Some(&incoming_a), &parent, &child)
+                .expect("translated");
+        assert!(
+            translated_a.contains_key("y"),
+            "a is parentKeys[1] and must map to childKeys[1] = y"
+        );
     }
 }

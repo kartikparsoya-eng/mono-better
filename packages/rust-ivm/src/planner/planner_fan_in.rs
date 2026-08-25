@@ -74,6 +74,11 @@ impl PlannerFanIn {
                     max_startup = max_startup.max(cost.startup_cost);
                     max_scan = max_scan.max(cost.scan_est);
                     no_match_prob *= 1.0 - cost.selectivity;
+                    // TS planner-fan-in.ts:134-137.
+                    assert!(
+                        total.limit.is_none() || cost.limit == total.limit,
+                        "All FanIn inputs should have the same limit"
+                    );
                     total.limit = cost.limit;
                 }
                 total.returned_rows = max_rows;
@@ -94,6 +99,11 @@ impl PlannerFanIn {
                     total.scan_est += cost.scan_est;
                     total.startup_cost += cost.startup_cost;
                     no_match_prob *= 1.0 - cost.selectivity;
+                    // TS planner-fan-in.ts:170-173.
+                    assert!(
+                        total.limit.is_none() || cost.limit == total.limit,
+                        "All FanIn inputs should have the same limit"
+                    );
                     total.limit = cost.limit;
                 }
                 total.selectivity = 1.0 - no_match_prob;

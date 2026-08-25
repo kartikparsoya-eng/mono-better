@@ -22,6 +22,7 @@ name = "replay"
 path = "src/bin/replay.rs"
 
 [dependencies]
+indexmap = "2"
 parking_lot = "0.12"
 rustc-hash = "2"
 rusqlite = { version = "0.32" }

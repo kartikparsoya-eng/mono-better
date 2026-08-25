@@ -244,7 +244,15 @@ fn apply_change_internal(
     mutate: Mutate,
 ) -> Entry {
     if schema.is_hidden {
-        return apply_change_hidden(parent_entry, change, schema, format, with_ids, mutate);
+        return apply_change_hidden(
+            parent_entry,
+            change,
+            schema,
+            relationship,
+            format,
+            with_ids,
+            mutate,
+        );
     }
 
     let singular = format.singular;
@@ -325,21 +333,24 @@ fn apply_change_hidden(
     parent_entry: &Entry,
     change: &ViewChange,
     schema: &SourceSchema,
+    relationship: &str,
     format: &Format,
     with_ids: bool,
     mutate: Mutate,
 ) -> Entry {
+    // TS view-apply-change.ts:222-262: through a HIDDEN level the OUTER
+    // `format` (and, for the child case, the OUTER `relationship`) pass
+    // UNCHANGED — the format at a hidden level is the format of the eventual
+    // visible level. Descending into `format.relationships` here (NEW-5)
+    // defaulted a singular junction target to plural and dropped any nested
+    // relationship below it (its child-format lookup then missed at the
+    // visible level).
     match change {
         ViewChange::Add { node } | ViewChange::Remove { node } => {
             let mut current = parent_entry.clone();
             let rel_names = node.relationship_names();
             for rel_name in &rel_names {
                 if let Some(child_schema) = schema.relationships.get(rel_name) {
-                    let child_format = format
-                        .relationships
-                        .get(rel_name)
-                        .cloned()
-                        .unwrap_or_default();
                     for child_node in node.children(rel_name) {
                         let child_change = match change {
                             ViewChange::Add { .. } => ViewChange::Add { node: child_node },
@@ -351,7 +362,7 @@ fn apply_change_hidden(
                             &child_change,
                             child_schema,
                             rel_name,
-                            &child_format,
+                            format,
                             with_ids,
                             mutate,
                         );
@@ -370,17 +381,15 @@ fn apply_change_hidden(
                 .relationships
                 .get(&child.relationship_name)
                 .expect("child schema not found");
-            let child_format = format
-                .relationships
-                .get(&child.relationship_name)
-                .cloned()
-                .unwrap_or_default();
+            // TS passes the OUTER `relationship` (the name the hidden level
+            // was reached under; the loop variable only shadows it in the
+            // add/remove arm) and the OUTER `format`.
             apply_change_internal(
                 parent_entry,
                 &child.change,
                 child_schema,
-                &child.relationship_name,
-                &child_format,
+                relationship,
+                format,
                 with_ids,
                 mutate,
             )
@@ -679,7 +688,11 @@ fn apply_edit_plural(
         };
 
         // Special case: rc=1 and new pos is same as or directly after old pos
-        if old_entry.ref_count == 1 && (pos == old_pos || pos - 1 == old_pos) {
+        // TS: `pos === oldPos || pos - 1 === oldPos` — in JS `pos - 1` can be
+        // -1 (falsey compare); `pos == old_pos + 1` is the usize-safe
+        // equivalent (the old form underflowed and panicked in debug builds
+        // when pos == 0).
+        if old_entry.ref_count == 1 && (pos == old_pos || pos == old_pos + 1) {
             let new_entry = apply_edit(old_entry, node, old_node, schema, with_ids, mutate);
             let mut new_view = view.to_vec();
             new_view[old_pos] = Rc::new(new_entry);

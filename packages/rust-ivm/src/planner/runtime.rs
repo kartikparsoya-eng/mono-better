@@ -18,11 +18,10 @@
 //! still used by the mock-cost oracle tests.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::builder::ast::{Ast, Condition};
-use crate::ivm::data::Value;
 use crate::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, plan_query};
 
 /// Version-keyed row-count cache: `(snapshot_version, table -> COUNT(*))`.
@@ -68,7 +67,7 @@ fn cost_model_with_cache(
         move |table: &str,
               _sort: &[(String, String)],
               _filters: Option<&Condition>,
-              constraint: Option<&BTreeMap<String, Option<Value>>>| {
+              constraint: Option<&crate::planner::planner_constraint::PlannerConstraint>| {
             let rows = if constraint.is_some() {
                 // Indexed key seek — a handful of rows; model as ~1.
                 1.0

@@ -3,11 +3,17 @@
 //! A constraint represents a column that will be constrained at runtime
 //! (e.g., `issue.assignee_id`). We know the column name but not the value.
 
-use std::collections::BTreeMap;
-
 /// A planner constraint: column name → (value known at runtime, not now).
-/// Uses `BTreeMap` for deterministic iteration order (tests rely on it).
-pub type PlannerConstraint = BTreeMap<String, Option<crate::ivm::data::Value>>;
+///
+/// TS `PlannerConstraint` is a plain `Record`, and the planner RELIES on its
+/// insertion-order key iteration: `translateConstraintsForFlippedJoin`
+/// (planner-join.ts:34-44) pairs `parentKeys[i] ↔ childKeys[i]` positionally,
+/// where the positions are the correlation-array order `extractConstraint`
+/// inserted (planner-builder.ts:297). A `BTreeMap` here re-sorted the keys
+/// alphabetically, so multi-column correlations whose two sides sort
+/// differently paired the WRONG columns (NEW-2) — hence `IndexMap`, the
+/// insertion-ordered twin of a JS object.
+pub type PlannerConstraint = indexmap::IndexMap<String, Option<crate::ivm::data::Value>>;
 
 /// Merge two constraints (last-wins on key collision).
 pub fn merge_constraints(

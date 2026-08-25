@@ -170,6 +170,12 @@ impl PlannerGraph {
         let mut best_cost = f64::INFINITY;
         let mut best_plan: Option<PlanState> = None;
 
+        // Build the FO→FI cache ONCE before the pattern loop (TS
+        // planner-graph.ts:270 "to avoid redundant BFS traversals in each
+        // iteration"); graph topology is immutable during planning, so the
+        // cache is pattern-invariant (F-PLANNER-6).
+        let fofi_cache = build_fofi_cache(self);
+
         for pattern in 0..num_patterns {
             self.reset_planning_state();
 
@@ -179,7 +185,7 @@ impl PlannerGraph {
                 }
             }
 
-            check_and_convert_fofi(self);
+            check_and_convert_fofi(self, &fofi_cache);
             propagate_unlimit(self);
             self.propagate_constraints();
 
@@ -193,6 +199,14 @@ impl PlannerGraph {
         if let Some(ref plan) = best_plan {
             self.restore_planning_snapshot(plan);
             self.propagate_constraints();
+        } else {
+            // TS planner-graph.ts:377-380: reaching here with flippable joins
+            // means every candidate cost was NaN — fail loudly instead of
+            // silently leaving the query unplanned.
+            assert!(
+                num_patterns == 0,
+                "no plan was found but flippable joins did exist!"
+            );
         }
     }
 }
@@ -281,9 +295,8 @@ fn find_fi_and_joins(graph: &PlannerGraph, fo: &PlannerFanOut) -> FofiInfo {
     }
 }
 
-fn check_and_convert_fofi(graph: &mut PlannerGraph) {
-    let cache = build_fofi_cache(graph);
-    for (fo_idx, info) in &cache {
+fn check_and_convert_fofi(graph: &mut PlannerGraph, cache: &HashMap<usize, FofiInfo>) {
+    for (fo_idx, info) in cache {
         let has_flipped = info
             .join_indices
             .iter()

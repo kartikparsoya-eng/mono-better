@@ -59,6 +59,13 @@ Anything not listed here and not STALE/WRONG must match TS.
 - **Rust**: `execute_row_updates` and the defer latch are a faithful port but have **no production caller** — `CVRStoreHandle::flush` writes rows inline in one atomic PG transaction (single-atomic-writer design, documented at the flush row-write section), so `rows_deferred` is always 0 and no `flush.type=async` counts are ever emitted (`cvr.flush_attempts` carries sync|noop only).
 - **Why kept:** the single-writer flush is the Rust architecture's answer to the same problem (verified equivalent through the flush/seq TS-golden differentials); the deferred path would add a second writer and re-introduce the write-behind gap class of bugs. The ported-but-unwired code stays as the reference for a future write-behind actor (see SYNC-ENGINE-SCALABILITY-PROPOSAL).
 
+## D-8 · IVM planner/runtime deliberate adaptations (Pairs 36-40 verification)
+
+- **`PlanDebugger` absent** (F-PLANNER-1): TS's `PlanDebugger` (planner-debug.ts) is a pure event sink — nothing in `plan()`/`estimateCost` reads back from it, and its only production consumers are the analyze/inspector tools (a known deferred subsystem). Omission cannot change plan selection.
+- **`planner-terminus.ts` `pinned` absent** (F-PLANNER-4): dead code in TS — `get pinned() { return true }` has zero readers (the `pinned` field in `ConnectionCostsEvent` belongs to an event that is never emitted; legacy of the old greedy planner).
+- **`flipIfNeeded` absent** (F-PLANNER-9): test-only in TS (only callers are planner-join.test.ts).
+- **UnionFanIn push forwarding via all-branch match-count** instead of TS's pusher-identity skip: equivalent under the invariant that the pusher branch's post-change fetch reflects its own change (add→found, remove→absent); pinned by the union-fan-in tests + the differential oracle. Also: single-input fetch skips the merge-dedup (unobservable for sorted-unique branches).
+
 ## Minor notes (log/observability-only, not behavior)
 
 - **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.
