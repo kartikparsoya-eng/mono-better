@@ -241,12 +241,20 @@ pub fn get_inactive_queries(cvr: &CVR) -> Vec<InactiveQuery> {
         }
     }
 
-    // Sort by eviction time (inactivated_at + ttl), oldest first.
+    // Sort by eviction time (inactivated_at + ttl), oldest first. TS breaks
+    // ties by `cvr.queries` INSERTION order, but the TS CVR load issues no
+    // ORDER BY (cvr-store.ts:361 — `SELECT … FROM queries WHERE …`), so that
+    // insertion order is arbitrary PG heap order, NOT a stable contract. We
+    // therefore pick a deterministic TOTAL order — expire, then query hash —
+    // which is stable run-to-run and cannot diverge observably (both consumers,
+    // `next_eviction_time` (min) and the sync-engine expiry filter (whole-set),
+    // are order-independent). The explicit `.then_with` tie-break keeps this
+    // total even if `inactive` ever stops being a key-sorted BTreeMap.
     let mut result: Vec<InactiveQuery> = inactive.into_values().collect();
     result.sort_by(|a, b| {
         let a_expire = a.inactivated_at + a.ttl;
         let b_expire = b.inactivated_at + b.ttl;
-        a_expire.cmp(&b_expire)
+        a_expire.cmp(&b_expire).then_with(|| a.hash.cmp(&b.hash))
     });
     result
 }
@@ -685,24 +693,35 @@ impl CVRConfigDrivenUpdater {
                     }
                 }
                 Some(inactivated_at) => {
-                    // Inactivate: set inactivatedAt.
+                    // Inactivate: set inactivatedAt — but ONLY if the client
+                    // already has a clientState entry. TS (cvr.ts:463-476) guards
+                    // the whole assignment with `if (clientState !== undefined)`;
+                    // a query the client DESIRES but never transformed has no
+                    // clientState, and TS leaves it absent (the desires row is
+                    // still written below with ttl=DEFAULT). Unconditionally
+                    // inserting here fabricated an in-memory clientState entry TS
+                    // never creates, skewing an intra-pass getInactiveQueries /
+                    // nextEvictionTime read. See parity/BEHAVIORAL-SWEEP-FINDINGS.md.
                     if let Some(cs) = query.client_state_mut() {
-                        if let Some(state) = cs.get(client_id) {
+                        let existing_ttl = cs.get(client_id).map(|state| {
                             assert!(
                                 state.inactivated_at.is_none(),
                                 "Query {} is already inactivated",
                                 id
                             );
-                            ttl = clamp_ttl(TTL::Ms(state.ttl));
+                            clamp_ttl(TTL::Ms(state.ttl))
+                        });
+                        if let Some(t) = existing_ttl {
+                            ttl = t;
+                            cs.insert(
+                                client_id.to_string(),
+                                ClientState {
+                                    inactivated_at: Some(inactivated_at),
+                                    ttl,
+                                    version: new_version.clone(),
+                                },
+                            );
                         }
-                        cs.insert(
-                            client_id.to_string(),
-                            ClientState {
-                                inactivated_at: Some(inactivated_at),
-                                ttl,
-                                version: new_version.clone(),
-                            },
-                        );
                     }
                 }
             }
@@ -1007,9 +1026,17 @@ impl CVRQueryDrivenUpdater {
             let existing = existing_rows.get(id_str);
             let previously_received = self.received_rows.get(id_str).and_then(|o| o.clone());
 
-            // Merge refCounts.
-            let merged = match &previously_received {
-                Some(prev) => merge_ref_counts(Some(prev), Some(ref_counts), None),
+            // Merge refCounts. Branch on ENTRY PRESENCE, not the flattened
+            // value: TS keys on `previouslyReceived !== undefined`, so a
+            // present-but-null entry (a row merged to null in an EARLIER batch
+            // of this pass) re-merges as `mergeRefCounts(null, refCounts)` — raw
+            // received counts, with NO existing row and NO removed/executed
+            // filter. The old `match &previously_received` flattened null→None
+            // and wrongly took the existing+filter path, diverging the persisted
+            // refCounts and the client patch (put vs del) on cross-batch
+            // re-receipt of a shared row. See parity/BEHAVIORAL-SWEEP-FINDINGS.md.
+            let merged = match self.received_rows.get(id_str) {
+                Some(prev_opt) => merge_ref_counts(prev_opt.as_ref(), Some(ref_counts), None),
                 None => merge_ref_counts(
                     existing.and_then(|e| e.ref_counts.as_ref()),
                     Some(ref_counts),
@@ -1801,6 +1828,51 @@ mod updater_tests {
         assert!(!query.client_state().unwrap().contains_key("client1"));
     }
 
+    /// Parity regression (BEHAVIORAL-SWEEP-FINDINGS.md, `delete_queries`):
+    /// inactivating a query the client DESIRES but has NO clientState for (query
+    /// never transformed) must NOT fabricate a clientState entry. TS
+    /// (cvr.ts:463-476) guards the assignment with `if (clientState !== undefined)`;
+    /// the old Rust inserted unconditionally.
+    #[test]
+    fn test_inactivate_missing_client_state_does_not_fabricate_entry() {
+        let cvr = make_test_cvr();
+        let shard = make_shard();
+        let mut updater = CVRConfigDrivenUpdater::new(cvr, shard);
+
+        let queries = vec![DesiredQuerySpec {
+            hash: "hashX".to_string(),
+            ast: Some(serde_json::json!({"schema": "s", "table": "t"})),
+            name: None,
+            args: None,
+            ttl: None,
+        }];
+        updater.put_desired_queries("client1", &queries);
+
+        // Simulate "query desired but never transformed": drop the clientState
+        // entry while leaving "hashX" in the client's desiredQueryIDs.
+        updater
+            .base
+            .cvr
+            .queries
+            .get_mut("hashX")
+            .unwrap()
+            .client_state_mut()
+            .unwrap()
+            .remove("client1");
+        updater.base.drain_store_ops();
+
+        // Inactivate it.
+        let ttl_clock: TTLClock = 1000;
+        updater.mark_desired_queries_as_inactive("client1", &["hashX".to_string()], ttl_clock);
+
+        // TS leaves clientState absent; Rust must too (no fabricated entry).
+        let q = updater.base.cvr.queries.get("hashX").unwrap();
+        assert!(
+            !q.client_state().unwrap().contains_key("client1"),
+            "inactivating a query with no clientState must not fabricate a clientState entry (TS parity)"
+        );
+    }
+
     #[test]
     fn test_delete_client() {
         let cvr = make_test_cvr();
@@ -2106,6 +2178,98 @@ mod updater_tests {
             Patch::Row(RowPatch::Del { id: _ }) => {}
             _ => panic!("expected RowPatch::Del"),
         }
+    }
+
+    /// Cross-batch parity regression (BEHAVIORAL-SWEEP-FINDINGS.md, `received`):
+    /// `received_rows` accumulates across batches within one pass. TS keys the
+    /// merge on entry PRESENCE (`previouslyReceived !== undefined`), so a row that
+    /// collapsed to `null` in an earlier batch re-merges as
+    /// `mergeRefCounts(null, refCounts)` — the RAW received counts, dropping the
+    /// stale `existing` refs. The old Rust flattened present-null → None and
+    /// re-applied `existing.refCounts`, resurrecting a retracted ref (`qA`) in the
+    /// persisted row. This asserts the re-referenced row carries ONLY the freshly
+    /// received `qB`.
+    #[test]
+    fn test_received_null_then_reref_drops_stale_existing_refs() {
+        let cvr = make_test_cvr();
+        let mut updater = make_query_driven_updater(cvr, "v2");
+        updater.track_queries(&[], &[]); // empty removed/executed filter
+
+        let id = RowID {
+            schema: "s".to_string(),
+            table: "t".to_string(),
+            row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
+        };
+        let id_str = crate::row_key::row_id_string(&id);
+
+        // Existing row referenced only by qA.
+        let mut existing = HashMap::new();
+        existing.insert(
+            id_str.clone(),
+            RowRecord {
+                id: id.clone(),
+                row_version: "rv1".to_string(),
+                patch_version: CVRVersion {
+                    state_version: "v1".to_string(),
+                    config_version: Some(1),
+                },
+                ref_counts: Some([("qA".to_string(), 1)].into_iter().collect()),
+            },
+        );
+
+        // Batch 1: qA retracted → merged collapses to null → received_rows[R] = null.
+        let mut rows1 = HashMap::new();
+        rows1.insert(
+            id_str.clone(),
+            (
+                id.clone(),
+                RowUpdate {
+                    version: None,
+                    contents: None,
+                    ref_counts: [("qA".to_string(), -1)].into_iter().collect(),
+                },
+            ),
+        );
+        updater.received(&rows1, &existing);
+        assert!(
+            updater.received_rows.get(&id_str).is_some_and(|v| v.is_none()),
+            "batch 1 should leave a present-but-null received_rows entry"
+        );
+
+        // Batch 2: same row re-referenced by a DIFFERENT query qB.
+        let mut rows2 = HashMap::new();
+        rows2.insert(
+            id_str.clone(),
+            (
+                id.clone(),
+                RowUpdate {
+                    version: Some("rv2".to_string()),
+                    contents: Some(std::sync::Arc::new(serde_json::json!({"id": 1}))),
+                    ref_counts: [("qB".to_string(), 1)].into_iter().collect(),
+                },
+            ),
+        );
+        updater.received(&rows2, &existing);
+
+        // The last PutRowRecord for R must carry ONLY qB — the retracted qA must
+        // NOT be resurrected from `existing` (TS: mergeRefCounts(null, {qB:1})).
+        let last = updater
+            .base
+            .store_ops
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                StoreOp::PutRowRecord(r) if r.id == id => Some(r.clone()),
+                _ => None,
+            })
+            .expect("expected a PutRowRecord for the row");
+        let rc = last.ref_counts.expect("row should be referenced by qB");
+        let keys: std::collections::BTreeSet<&String> = rc.keys().collect();
+        assert_eq!(
+            keys,
+            [&"qB".to_string()].into_iter().collect::<std::collections::BTreeSet<_>>(),
+            "re-referenced row must carry only qB, not the retracted qA (null-vs-absent parity)"
+        );
     }
 
     /// Regression for the `patchVersion` parity fix: when a row's refCounts

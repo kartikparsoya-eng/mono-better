@@ -79,16 +79,21 @@ pub fn parse_ttl_string(s: &str) -> TTL {
             'd' => MULT_D,
             'y' => MULT_Y,
             _ => {
-                // Pure number
-                if let Ok(n) = s.parse::<i64>() {
-                    return TTL::Ms(n);
+                // Pure number (no unit suffix). TS `Number(...)` parses floats.
+                if let Ok(n) = s.parse::<f64>() {
+                    return TTL::Ms(n as i64);
                 }
                 return TTL::Ms(0);
             }
         };
+        // TS: `Number(ttl.slice(0,-1)) * multiplier[unit]` — `Number` parses
+        // FLOATS, so a fractional TTL like "1.5h" is 5_400_000ms, not 0 (an i64
+        // parse of "1.5" fails). parse_ttl_string is a parity-harness/test entry
+        // point (TTL reaches the CVR path pre-parsed as a number), but match TS's
+        // Number() semantics. See BEHAVIORAL-SWEEP-FINDINGS.md.
         let num_str = &s[..s.len() - 1];
-        if let Ok(n) = num_str.parse::<i64>() {
-            return TTL::Ms(n * multi);
+        if let Ok(n) = num_str.parse::<f64>() {
+            return TTL::Ms((n * multi as f64) as i64);
         }
     }
     TTL::Ms(0)
@@ -133,5 +138,8 @@ mod tests {
         assert_eq!(parse_ttl_string("forever"), TTL::Forever);
         assert_eq!(parse_ttl_string("none"), TTL::None);
         assert_eq!(parse_ttl_string("100"), TTL::Ms(100));
+        // Fractional TTLs parse as floats (TS `Number()` semantics), not i64→0.
+        assert_eq!(parse_ttl_string("1.5h"), TTL::Ms(5_400_000));
+        assert_eq!(parse_ttl_string("0.5s"), TTL::Ms(500));
     }
 }

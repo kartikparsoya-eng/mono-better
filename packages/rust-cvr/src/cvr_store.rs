@@ -451,7 +451,12 @@ impl CVRStoreHandle {
                 query_hash: query_id.to_string(),
                 patch_version: version_string(version),
                 deleted,
-                ttl: Some(ttl as f64),
+                // TS `convertTTLValues`: `ttlMs = ttl < 0 ? null : ttl` — a
+                // negative TTL (the "forever" sentinel) is persisted as SQL NULL,
+                // not a negative number. `clamp_ttl` maps -1 → MAX_TTL_MS so this
+                // is unreachable via the normal callers today, but match TS's
+                // function contract defensively. See BEHAVIORAL-SWEEP-FINDINGS.md.
+                ttl: if ttl < 0 { None } else { Some(ttl as f64) },
                 inactivated_at: inactivated_at.map(|t| t as f64),
             },
         );
@@ -1495,18 +1500,26 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
         row_set_signature: row.row_set_signature.clone(),
     };
 
-    if row.internal == Some(true) {
-        return Ok(QueryRecord::Internal(InternalQueryRecord {
-            base,
-            ast: row.client_ast.clone().unwrap_or(Value::Null),
-        }));
-    }
-
-    // External query — check if client or custom
-    if let Some(name) = &row.query_name {
+    // Discriminator matches TS `asQuery` (cvr-store.ts:119-168): a NULL clientAST
+    // means a CUSTOM query; otherwise the `internal` flag distinguishes internal
+    // from client. The old Rust checked `internal` first and keyed "custom" off
+    // `query_name`, which for a corrupt custom row (clientAST null, queryName
+    // null) silently built a client query with `ast = Null` instead of the
+    // recoverable load error TS raises via its `assert(queryName && queryArgs)`.
+    if row.client_ast.is_none() {
+        // Custom query. TS asserts name & args are both set.
+        let name = match &row.query_name {
+            Some(n) if row.query_args.is_some() => n.clone(),
+            _ => {
+                return Err(VersionError::MalformedQuery {
+                    query_hash: row.query_hash.clone(),
+                    reason: "queryName and queryArgs must be set for custom queries",
+                });
+            }
+        };
         return Ok(QueryRecord::Custom(CustomQueryRecord {
             base,
-            name: name.clone(),
+            name,
             args: row
                 .query_args
                 .as_ref()
@@ -1522,9 +1535,14 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
         }));
     }
 
+    let ast = row.client_ast.clone().unwrap_or(Value::Null);
+    if row.internal == Some(true) {
+        return Ok(QueryRecord::Internal(InternalQueryRecord { base, ast }));
+    }
+
     Ok(QueryRecord::Client(ClientQueryRecord {
         base,
-        ast: row.client_ast.clone().unwrap_or(Value::Null),
+        ast,
         client_state: BTreeMap::new(),
         patch_version: row
             .patch_version
@@ -1826,6 +1844,32 @@ mod tests {
             }
             _ => panic!("expected Custom query"),
         }
+    }
+
+    /// Parity (BEHAVIORAL-SWEEP-FINDINGS.md, `as_query`): a corrupt custom row
+    /// (clientAST null, no queryName) must be a recoverable load error — matching
+    /// TS's `assert(queryName && queryArgs …)` — not a silently-built null-AST
+    /// client query (the old Rust keyed "custom" off query_name and fell through
+    /// to Client here).
+    #[test]
+    fn test_as_query_null_ast_missing_name_is_error() {
+        let row = QueriesRow {
+            client_group_id: "cg1".to_string(),
+            query_hash: "hashCorrupt".to_string(),
+            client_ast: None,
+            query_name: None,
+            query_args: None,
+            patch_version: None,
+            transformation_hash: None,
+            transformation_version: None,
+            internal: None,
+            deleted: Some(false),
+            row_set_signature: None,
+        };
+        assert!(matches!(
+            as_query(&row),
+            Err(VersionError::MalformedQuery { .. })
+        ));
     }
 
     #[test]

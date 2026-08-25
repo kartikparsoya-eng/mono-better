@@ -143,6 +143,11 @@ pub enum VersionError {
     ConfigTooLarge(String),
     #[error("invalid stateVersion {ver:?}: {reason}")]
     BadStateVersion { ver: String, reason: &'static str },
+    #[error("malformed query row {query_hash:?}: {reason}")]
+    MalformedQuery {
+        query_hash: String,
+        reason: &'static str,
+    },
 }
 
 /// Mirror of TS `stateVersionFromString`, used purely to VALIDATE that a state
