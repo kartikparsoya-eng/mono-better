@@ -1,0 +1,252 @@
+{
+  "cases": [
+    {
+      "desc": "basic lag then pending consumed",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "02",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1350
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1400
+        }
+      ],
+      "observations": [
+        {
+          "lagMs": 350,
+          "clamped": false
+        },
+        null
+      ]
+    },
+    {
+      "desc": "serving a later version covers the commit",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "02",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "served",
+          "version": "05",
+          "nowMs": 1500
+        }
+      ],
+      "observations": [
+        {
+          "lagMs": 500,
+          "clamped": false
+        }
+      ]
+    },
+    {
+      "desc": "serving behind the watermark is ignored until caught up",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "05",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1500
+        },
+        {
+          "kind": "served",
+          "version": "05",
+          "nowMs": 1800
+        }
+      ],
+      "observations": [
+        null,
+        {
+          "lagMs": 800,
+          "clamped": false
+        }
+      ]
+    },
+    {
+      "desc": "coalesced notifications measure from the oldest commit",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "02",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "ready",
+          "watermark": "03",
+          "upstreamCommitTimeMs": 1100
+        },
+        {
+          "kind": "ready",
+          "watermark": "04",
+          "upstreamCommitTimeMs": 1250
+        },
+        {
+          "kind": "served",
+          "version": "04",
+          "nowMs": 2000
+        }
+      ],
+      "observations": [
+        {
+          "lagMs": 1000,
+          "clamped": false
+        }
+      ]
+    },
+    {
+      "desc": "notifications without a commit time are ignored",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "02"
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1500
+        },
+        {
+          "kind": "ready",
+          "watermark": "03",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "ready",
+          "watermark": "04"
+        },
+        {
+          "kind": "served",
+          "version": "04",
+          "nowMs": 1600
+        }
+      ],
+      "observations": [
+        null,
+        {
+          "lagMs": 600,
+          "clamped": false
+        }
+      ]
+    },
+    {
+      "desc": "clock skew: negative lag clamps to 0",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "02",
+          "upstreamCommitTimeMs": 5000
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 4000
+        }
+      ],
+      "observations": [
+        {
+          "lagMs": 0,
+          "clamped": true
+        }
+      ]
+    },
+    {
+      "desc": "legitimate zero lag is not clamped",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "02",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1000
+        }
+      ],
+      "observations": [
+        {
+          "lagMs": 0,
+          "clamped": false
+        }
+      ]
+    },
+    {
+      "desc": "serve with no pending returns null",
+      "events": [
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1000
+        }
+      ],
+      "observations": [
+        null
+      ]
+    },
+    {
+      "desc": "missing watermark is ignored",
+      "events": [
+        {
+          "kind": "ready",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1500
+        }
+      ],
+      "observations": [
+        null
+      ]
+    },
+    {
+      "desc": "re-ready after consume measures the new commit",
+      "events": [
+        {
+          "kind": "ready",
+          "watermark": "02",
+          "upstreamCommitTimeMs": 1000
+        },
+        {
+          "kind": "served",
+          "version": "02",
+          "nowMs": 1200
+        },
+        {
+          "kind": "ready",
+          "watermark": "04",
+          "upstreamCommitTimeMs": 1500
+        },
+        {
+          "kind": "served",
+          "version": "04",
+          "nowMs": 1900
+        }
+      ],
+      "observations": [
+        {
+          "lagMs": 200,
+          "clamped": false
+        },
+        {
+          "lagMs": 400,
+          "clamped": false
+        }
+      ]
+    }
+  ]
+}

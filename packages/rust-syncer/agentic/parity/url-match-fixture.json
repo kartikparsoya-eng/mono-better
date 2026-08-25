@@ -1,0 +1,89 @@
+{
+  "cases": [
+    {
+      "pattern": "https://api.example.com/query",
+      "url": "https://api.example.com/query",
+      "matched": true
+    },
+    {
+      "pattern": "https://api.example.com/query",
+      "url": "https://api.example.com/query?tenant=123",
+      "matched": true
+    },
+    {
+      "pattern": "https://api.example.com/query",
+      "url": "https://api.example.com/other",
+      "matched": false
+    },
+    {
+      "pattern": "https://api.example.com/query",
+      "url": "https://evil.example.com/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://api.example.com/*",
+      "url": "https://api.example.com/v2/nested/path",
+      "matched": true
+    },
+    {
+      "pattern": "https://api.example.com/*",
+      "url": "https://api.example.com/",
+      "matched": true
+    },
+    {
+      "pattern": "https://api.example.com/v1/*",
+      "url": "https://api.example.com/v1/query",
+      "matched": true
+    },
+    {
+      "pattern": "https://api.example.com/v1/*",
+      "url": "https://api.example.com/v2/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://*.example.com/query",
+      "url": "https://tenant-a.example.com/query",
+      "matched": true
+    },
+    {
+      "pattern": "https://*.example.com/query",
+      "url": "https://example.com/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://api.example.com/:tenant/query",
+      "url": "https://api.example.com/acme/query",
+      "matched": true
+    },
+    {
+      "pattern": "https://api.example.com/:tenant/query",
+      "url": "https://api.example.com/a/b/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://api.example.com/:tenant/query",
+      "url": "https://api.example.com//query",
+      "matched": false
+    },
+    {
+      "pattern": "http://localhost:8080/query",
+      "url": "http://localhost:8080/query",
+      "matched": true
+    },
+    {
+      "pattern": "http://localhost:8080/query",
+      "url": "http://localhost:9090/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://api.example.com/query",
+      "url": "https://api.example.com/query#frag",
+      "matched": true
+    },
+    {
+      "pattern": "https://api.example.com/*/items",
+      "url": "https://api.example.com/tenant/items",
+      "matched": true
+    }
+  ]
+}

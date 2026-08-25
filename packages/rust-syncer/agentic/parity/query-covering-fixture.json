@@ -1,0 +1,1145 @@
+{
+  "cases": [
+    {
+      "desc": "same query covers itself",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "id"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "123"
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "id"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "123"
+          }
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "unfiltered covers filtered",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "id"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "123"
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "filtered does NOT cover unfiltered",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "id"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "123"
+          }
+        }
+      },
+      "covered_by": false
+    },
+    {
+      "desc": "conjunction covered by subset",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "status"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "open"
+              }
+            },
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "owner"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "alice"
+              }
+            }
+          ]
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "subset does NOT cover conjunction",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "status"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "open"
+              }
+            },
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "owner"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "alice"
+              }
+            }
+          ]
+        }
+      },
+      "covered_by": false
+    },
+    {
+      "desc": "eq covered by IN",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "id"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "1"
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "id"
+          },
+          "op": "IN",
+          "right": {
+            "type": "literal",
+            "value": [
+              "1",
+              "2"
+            ]
+          }
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "range implication >5 covered by >3",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "priority"
+          },
+          "op": ">",
+          "right": {
+            "type": "literal",
+            "value": 5
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "priority"
+          },
+          "op": ">",
+          "right": {
+            "type": "literal",
+            "value": 3
+          }
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "range NOT covered >3 by >5",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "priority"
+          },
+          "op": ">",
+          "right": {
+            "type": "literal",
+            "value": 3
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "priority"
+          },
+          "op": ">",
+          "right": {
+            "type": "literal",
+            "value": 5
+          }
+        }
+      },
+      "covered_by": false
+    },
+    {
+      "desc": "disjunct covered by OR",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "type"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "bug"
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "or",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "type"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "bug"
+              }
+            },
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "type"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "feature"
+              }
+            }
+          ]
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "OR NOT covered by disjunct",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "or",
+          "conditions": [
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "type"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "bug"
+              }
+            },
+            {
+              "type": "simple",
+              "left": {
+                "type": "column",
+                "name": "type"
+              },
+              "op": "=",
+              "right": {
+                "type": "literal",
+                "value": "feature"
+              }
+            }
+          ]
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "type"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "bug"
+          }
+        }
+      },
+      "covered_by": false
+    },
+    {
+      "desc": "unlimited covers limited+paged",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        },
+        "limit": 10,
+        "start": {
+          "row": {
+            "id": "abc"
+          },
+          "exclusive": true
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "same input larger limit covers",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        },
+        "limit": 10
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        },
+        "limit": 20
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "broader input same limit does NOT cover",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        },
+        "limit": 10
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "limit": 10
+      },
+      "covered_by": false
+    },
+    {
+      "desc": "recursive related coverage",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        },
+        "related": [
+          {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "simple",
+                "left": {
+                  "type": "column",
+                  "name": "text"
+                },
+                "op": "=",
+                "right": {
+                  "type": "literal",
+                  "value": "hello"
+                }
+              },
+              "alias": "comments"
+            }
+          }
+        ]
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "related": [
+          {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "alias": "comments"
+            }
+          }
+        ]
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "related NOT covered without the related",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "status"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "open"
+          }
+        },
+        "related": [
+          {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "simple",
+                "left": {
+                  "type": "column",
+                  "name": "text"
+                },
+                "op": "=",
+                "right": {
+                  "type": "literal",
+                  "value": "hello"
+                }
+              },
+              "alias": "comments"
+            }
+          }
+        ]
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "covered_by": false
+    },
+    {
+      "desc": "NOT EXISTS reverses implication",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "NOT EXISTS",
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "NOT EXISTS",
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "simple",
+                "left": {
+                  "type": "column",
+                  "name": "text"
+                },
+                "op": "=",
+                "right": {
+                  "type": "literal",
+                  "value": "hello"
+                }
+              },
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "NOT EXISTS reverse (other direction) does NOT cover",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "NOT EXISTS",
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "simple",
+                "left": {
+                  "type": "column",
+                  "name": "text"
+                },
+                "op": "=",
+                "right": {
+                  "type": "literal",
+                  "value": "hello"
+                }
+              },
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "NOT EXISTS",
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covered_by": false
+    },
+    {
+      "desc": "EXISTS flip invariant (unflipped by flipped)",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "flip": true,
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "EXISTS flip invariant (flipped by unflipped)",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "flip": true,
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covering": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "system": "client",
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "alias": "comments"
+            }
+          }
+        }
+      },
+      "covered_by": true
+    },
+    {
+      "desc": "different tables do NOT cover",
+      "covered": {
+        "table": "issues",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "simple",
+          "left": {
+            "type": "column",
+            "name": "id"
+          },
+          "op": "=",
+          "right": {
+            "type": "literal",
+            "value": "1"
+          }
+        }
+      },
+      "covering": {
+        "table": "comments",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ]
+      },
+      "covered_by": false
+    }
+  ]
+}

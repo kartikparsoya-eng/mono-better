@@ -157,4 +157,64 @@ mod tests {
         let mut t = E2EServingLagTracker::new();
         assert!(t.on_version_served("0a", 100.0).is_none());
     }
+
+    /// Layer-2 body-differential: replay the event sequences captured from the
+    /// REAL TS `E2EServingLagTracker` (`e2e-serving-lag-fixture.json`, generated
+    /// by `generate-e2e-serving-lag-fixture.mjs`) and assert each served event's
+    /// observation matches — pinning coalesce-oldest, the watermark replay-guard,
+    /// and the negative-lag clamp to TS.
+    #[test]
+    fn e2e_serving_lag_parity_against_ts() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/agentic/parity/e2e-serving-lag-fixture.json"
+        );
+        let bytes = std::fs::read(path)
+            .unwrap_or_else(|e| panic!("failed to read e2e fixture {path}: {e}"));
+        let fixture: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("e2e fixture is not valid JSON");
+        let cases = fixture["cases"].as_array().expect("fixture.cases missing");
+        assert!(!cases.is_empty());
+
+        for case in cases {
+            let desc = case["desc"].as_str().unwrap_or("");
+            let mut tracker = E2EServingLagTracker::new();
+            let expected = case["observations"].as_array().unwrap();
+            let mut obs_idx = 0;
+            for ev in case["events"].as_array().unwrap() {
+                match ev["kind"].as_str().unwrap() {
+                    "ready" => tracker.on_version_ready(
+                        ev["watermark"].as_str(),
+                        ev["upstreamCommitTimeMs"].as_f64(),
+                    ),
+                    "served" => {
+                        let got = tracker.on_version_served(
+                            ev["version"].as_str().unwrap(),
+                            ev["nowMs"].as_f64().unwrap(),
+                        );
+                        let want = &expected[obs_idx];
+                        obs_idx += 1;
+                        match (got, want.is_null()) {
+                            (None, true) => {}
+                            (Some(o), false) => {
+                                assert_eq!(
+                                    o.lag_ms,
+                                    want["lagMs"].as_f64().unwrap(),
+                                    "lagMs [{desc}]"
+                                );
+                                assert_eq!(
+                                    o.clamped,
+                                    want["clamped"].as_bool().unwrap(),
+                                    "clamped [{desc}]"
+                                );
+                            }
+                            (g, _) => panic!("observation mismatch [{desc}]: rust={g:?} ts={want}"),
+                        }
+                    }
+                    k => panic!("unknown event kind {k}"),
+                }
+            }
+            assert_eq!(obs_idx, expected.len(), "observation count [{desc}]");
+        }
+    }
 }
