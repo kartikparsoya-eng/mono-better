@@ -221,6 +221,12 @@ export function proxyUpgradeToRust(
   };
 
   upstream.on('connect', () => {
+    // The `ws` server calls `socket.setNoDelay()` on every connection it
+    // owns (ws/lib/websocket.js). In rust mode neither proxied leg is owned
+    // by `ws`, so Nagle stays ON and the syncer's multi-frame poke bursts
+    // stall ~40-50ms on delayed-ACK. Match `ws` on both legs.
+    upstream.setNoDelay(true);
+    clientSocket.setNoDelay(true);
     upstream.write(rebuildUpgradeRequest(message));
     if (head && head.byteLength > 0) {
       upstream.write(Buffer.from(head));

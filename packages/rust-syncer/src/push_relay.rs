@@ -157,7 +157,12 @@ impl HttpRelayPusher {
                     req = req.header("x-relay-auth", token);
                 }
                 match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {}
+                    Ok(resp) if resp.status().is_success() => {
+                        // Drain the body: hyper only returns the connection
+                        // to reqwest's pool once the response is consumed —
+                        // otherwise every push pays a fresh loopback connect.
+                        let _ = resp.bytes().await;
+                    }
                     Ok(resp) => {
                         // Non-2xx: the app/endpoint rejected or errored. The
                         // client's lmid won't advance, so it re-pushes the

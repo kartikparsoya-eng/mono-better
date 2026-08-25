@@ -705,6 +705,13 @@ where
         match listener.accept().await {
             Ok((stream, addr)) => {
                 tracing::debug!("TCP connection from {addr}");
+                // Port of Node `ws` (websocket.js `socket.setNoDelay()`):
+                // every accepted sync socket disables Nagle. Without it the
+                // multi-frame poke burst (pokeStart → pokePart → pokeEnd as
+                // separate writes) stalls ~40-50ms on Nagle + delayed-ACK —
+                // measured live as a constant +50ms push-ack penalty
+                // (G42 push class 2.0x vs TS).
+                let _ = stream.set_nodelay(true);
                 let handler = handler.clone();
                 let max_payload_bytes = config.max_payload_bytes;
                 tokio::spawn(async move {
