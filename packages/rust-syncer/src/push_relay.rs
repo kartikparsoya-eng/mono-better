@@ -26,12 +26,14 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::connection::HandlerResult;
-use crate::message_handler::{ConnectionSelector, PushRelayHeaders, PusherDispatch};
 use crate::protocol::{
     ErrorKind, ErrorOrigin, ErrorReason, MutationID, PushFailedHttpBody, PushFailedZeroCacheBody,
 };
 use crate::router::ConnectionSinks;
+use crate::workers::connection::HandlerResult;
+use crate::workers::syncer_ws_message_handler::{
+    ConnectionSelector, PushRelayHeaders, PusherDispatch,
+};
 
 /// Max bytes of a failing relay response body echoed back in a `PushFailed`
 /// frame (TS `bodyPreview` parity — never buffer an unbounded error body).
@@ -614,10 +616,11 @@ mod tests {
         assert!(body.get("userPushURL").is_none());
         assert!(body.get("userPushHeaders").is_none());
 
-        *headers.push_override.lock().unwrap() = Some(crate::message_handler::PushOverride {
-            url: Some("https://api.example.com/push".to_string()),
-            headers: Some(vec![("x-tenant".to_string(), "acme".to_string())]),
-        });
+        *headers.push_override.lock().unwrap() =
+            Some(crate::workers::syncer_ws_message_handler::PushOverride {
+                url: Some("https://api.example.com/push".to_string()),
+                headers: Some(vec![("x-tenant".to_string(), "acme".to_string())]),
+            });
         let body = HttpRelayPusher::relay_body(&selector, &push, &headers, "cg1");
         assert_eq!(body["userPushURL"], "https://api.example.com/push");
         assert_eq!(body["userPushHeaders"]["x-tenant"], "acme");

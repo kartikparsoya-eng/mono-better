@@ -241,7 +241,7 @@ fn now_ms() -> i64 {
 /// `serving_lag_stats` (min/p50/p75/p99/max), `serving_lagging_client_groups`,
 /// `queries`, and `rows`. Kept alive in a static so the callbacks keep firing.
 pub fn register_serving_lag_gauges(
-    registry: std::sync::Arc<crate::serving_lag::ServingLagRegistry>,
+    registry: std::sync::Arc<crate::workers::syncer::ServingLagRegistry>,
 ) {
     use opentelemetry::metrics::ObservableGauge;
     type ServingLagGauges = (

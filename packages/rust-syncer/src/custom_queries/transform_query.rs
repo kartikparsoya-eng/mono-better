@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use rust_cvr::shards::ShardID;
 use serde_json::Value;
 
-use crate::permissions::hash_of_ast;
+use crate::auth::read_authorizer::hash_of_ast;
 
 /// TS `CustomQueryTransformer` cache TTL — 5s (chosen to be shorter than a
 /// typical short-lived auth token, so a re-auth re-transforms promptly).

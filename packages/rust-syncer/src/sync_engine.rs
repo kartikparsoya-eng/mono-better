@@ -36,12 +36,14 @@ use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
 use rust_cvr::shards::ShardID;
 use rust_cvr::ttl_clock::TTLClock;
 
-use crate::custom_query::{
+use crate::auth::read_authorizer::{hash_of_ast, transform_and_hash_query};
+use crate::custom_queries::transform_query::{
     CustomQueryContext, CustomQuerySpec, CustomTransformed, transform_custom_queries,
 };
-use crate::permissions::{hash_of_ast, transform_and_hash_query};
-use crate::pipeline_driver::{AdvanceOutcome, IvmPipelines, json_to_value};
-use crate::query_covering::{QueryCoverageShadowHit, QueryCoveringIndex, RunningQuery};
+use crate::services::view_syncer::pipeline_driver::{AdvanceOutcome, IvmPipelines, json_to_value};
+use crate::services::view_syncer::query_covering::{
+    QueryCoverageShadowHit, QueryCoveringIndex, RunningQuery,
+};
 
 /// Result of `hydrate_and_sync` / `advance_and_sync`.
 #[derive(Debug)]
@@ -836,7 +838,7 @@ impl SyncEngine {
                 );
             }
             // TS `#logQueryCoverageShadowSummary`, hydrationPath 'add'.
-            crate::query_covering::log_shadow_summary(
+            crate::services::view_syncer::query_covering::log_shadow_summary(
                 &shard.app_id,
                 shard.shard_num,
                 &cfg_cvr.id,
@@ -1741,7 +1743,7 @@ pub fn parse_existing_rows(json: &str) -> Result<RowRecordMap, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
+    use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::cvr::CVR;
     use rust_cvr::schema::types::{BaseQueryRecord, ClientQueryRecord, QueryRecord};

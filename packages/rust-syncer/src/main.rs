@@ -534,7 +534,7 @@ fn main() {
     rust_syncer::metrics::register_serving_lag_gauges(serving_lag_registry.clone());
     runtime.spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(
-            rust_syncer::serving_lag::VIEW_SYNCER_LAG_SAMPLE_INTERVAL_MS,
+            rust_syncer::workers::syncer::VIEW_SYNCER_LAG_SAMPLE_INTERVAL_MS,
         ));
         // Skip the immediate first tick so the first sample is a real 60s later.
         ticker.tick().await;
@@ -788,7 +788,7 @@ impl CGServicesFactory for RealServicesFactory {
             tables.len()
         );
         let load_result: Result<Option<serde_json::Value>, String> =
-            rust_syncer::replica_schema::open_replica_read_only(&self.config.replica_file)
+            rust_syncer::db::lite_tables::open_replica_read_only(&self.config.replica_file)
                 .and_then(|conn| rust_syncer::load_permissions(&conn, &self.config.app_id))
                 .map(|loaded| loaded.permissions);
         match &load_result {

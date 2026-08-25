@@ -16,7 +16,7 @@
 //! streamer's `_0_version` bumping (ports of TS `listIndexes` /
 //! `TableMetadataTracker.getMinRowVersions`).
 
-use crate::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
+use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
 use rusqlite::Connection;
 use std::collections::HashMap;
 

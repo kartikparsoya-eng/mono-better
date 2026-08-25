@@ -8,13 +8,13 @@
 //! it does not understand returns `false` rather than guessing.
 //!
 //! The TS operates on `normalizeAST(ast)` (`Required<AST>`); here we reuse
-//! [`crate::permissions::normalize_ast`], which produces the identical
+//! [`crate::auth::read_authorizer::normalize_ast`], which produces the identical
 //! canonical JSON (sorted/flattened conditions, sorted+recursively-normalized
 //! related, undefined fields omitted). All the implication logic below then
 //! runs over `serde_json::Value`, mirroring `jsonEqual` == `deepEqual` with
 //! `Value` structural equality.
 
-use crate::permissions::normalize_ast;
+use crate::auth::read_authorizer::normalize_ast;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 

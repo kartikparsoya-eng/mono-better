@@ -14,16 +14,16 @@
 //! 6. Call `connection.init()` (send `connected` message)
 //! 7. Handle piggybacked `initConnection` from sec-websocket-protocol header
 
-use crate::connect_params::ConnectParams;
-use crate::connection::Connection;
-use crate::connection_context::FetchConfig;
-use crate::custom_query::CustomQueryContext;
-use crate::message_handler::{
+use crate::custom_queries::transform_query::CustomQueryContext;
+use crate::services::view_syncer::connection_context_manager::FetchConfig;
+use crate::services::view_syncer::pipeline_driver::{IvmPipelines, IvmTableSpec};
+use crate::sync_engine::{SyncEngine, empty_cvr};
+use crate::workers::connect_params::ConnectParams;
+use crate::workers::connection::Connection;
+use crate::workers::syncer_ws_message_handler::{
     ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch, PusherDispatch,
     SyncerWsMessageHandler, ViewSyncerDispatch,
 };
-use crate::pipeline_driver::{IvmPipelines, IvmTableSpec};
-use crate::sync_engine::{SyncEngine, empty_cvr};
 use crate::ws_server::ConnectionContext;
 use crate::ws_sink::DirectWebSocketSink;
 use dashmap::DashMap;
@@ -225,7 +225,7 @@ enum ExecutorCommand {
         /// group's serving-lag tracker (TS notifier latest-state replay).
         last_notification: Option<serde_json::Value>,
         /// Process-wide serving-lag registry this CG publishes its snapshot into.
-        serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
+        serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
     },
     /// Stop accepting new groups and drain the ones already hosted, then exit.
     Shutdown,
@@ -424,7 +424,7 @@ pub struct ConnectionRouter {
     /// Process-wide serving-lag state (replica-ready log + per-CG snapshots),
     /// read by the 60s sampler + the `serving_lag*`/`queries`/`rows` gauges. Port
     /// of the `Syncer` class's `#replicaReadyStates` + view-syncer iteration.
-    serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
+    serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
     /// Whether the router is shutting down.
     shutting_down: Arc<AtomicBool>,
 }
@@ -609,14 +609,14 @@ impl ConnectionRouter {
             connections,
             group_auth_states: Arc::new(Mutex::new(HashMap::new())),
             last_notification: Arc::new(Mutex::new(None)),
-            serving_lag_registry: Arc::new(crate::serving_lag::ServingLagRegistry::new()),
+            serving_lag_registry: Arc::new(crate::workers::syncer::ServingLagRegistry::new()),
             shutting_down,
         }
     }
 
     /// The process-wide serving-lag registry (for `main` to register its gauges
     /// + spawn the 60s sampler).
-    pub fn serving_lag_registry(&self) -> Arc<crate::serving_lag::ServingLagRegistry> {
+    pub fn serving_lag_registry(&self) -> Arc<crate::workers::syncer::ServingLagRegistry> {
         self.serving_lag_registry.clone()
     }
 
@@ -1031,7 +1031,8 @@ impl ConnectionRouter {
         tracing::info!("draining {total} client groups");
 
         if total > 0 {
-            let coordinator = crate::drain::DrainCoordinator::new();
+            let coordinator =
+                crate::services::view_syncer::drain_coordinator::DrainCoordinator::new();
             // Kick off with `drainNextIn(0)` (TS Syncer.drain): the first
             // force-drain timeout fires ~immediately, then each drained CG
             // re-arms it for the next interval.
@@ -1357,7 +1358,7 @@ struct CgState {
     /// End-to-end serving-lag tracker: pairs each `version-ready`'s upstream
     /// commit time with the moment its version is served, feeding the
     /// `zero.sync.e2e_serving_lag` histogram. Port of TS `#e2eServingLagTracker`.
-    e2e_serving_lag: crate::e2e_serving_lag::E2EServingLagTracker,
+    e2e_serving_lag: crate::services::view_syncer::e2e_serving_lag::E2EServingLagTracker,
     /// Monotonic TTL clock (ms), seeded from `cvr.ttl_clock` when the CVR is
     /// loaded and advanced by wall-time delta while this CG runs — so a long
     /// downtime does not mass-expire queries. Port of TS `#ttlClock`.
@@ -1394,7 +1395,8 @@ struct CgState {
     /// client_id → raw auth/header material captured at connect, needed to
     /// relay a `_zero_cleanupResults` push when this client explicitly deletes
     /// other clients (`deleteClients` → `pusher.delete_client_mutations`).
-    client_push_headers: HashMap<String, crate::message_handler::PushRelayHeaders>,
+    client_push_headers:
+        HashMap<String, crate::workers::syncer_ws_message_handler::PushRelayHeaders>,
     /// client_id → the custom-query API context (`userQueryURL` + headers +
     /// auth), captured from the client's `initConnection`. Present only for
     /// clients that use named/custom queries.
@@ -1430,7 +1432,7 @@ struct CgState {
     /// Port of TS `ViewSyncerService.rowCount` (there a cheap in-memory getter).
     last_row_count: usize,
     /// Process-wide serving-lag registry this CG publishes its snapshot into.
-    serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
+    serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
     /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
     /// THE most important census — a CgState owns the `SyncEngine` (IVM graph +
     /// CVR store), so a residual count after all clients disconnect pins
@@ -1565,7 +1567,8 @@ impl CgState {
             next_auth_maintenance_at: None,
             pinned_user_id: None,
             cvr: None,
-            e2e_serving_lag: crate::e2e_serving_lag::E2EServingLagTracker::new(),
+            e2e_serving_lag:
+                crate::services::view_syncer::e2e_serving_lag::E2EServingLagTracker::new(),
             ttl_clock: 0,
             ttl_clock_base: created_at,
             last_connect_time: created_at,
@@ -1594,7 +1597,7 @@ impl CgState {
             last_row_count: 0,
             // Replaced by the process-wide registry in `cg_event_loop`; a
             // standalone default keeps the test constructor self-contained.
-            serving_lag_registry: Arc::new(crate::serving_lag::ServingLagRegistry::new()),
+            serving_lag_registry: Arc::new(crate::workers::syncer::ServingLagRegistry::new()),
             _census: crate::live_count::Guard::new(&crate::live_count::CLIENT_GROUP),
         }
     }
@@ -1623,8 +1626,8 @@ impl CgState {
     fn publish_serving_lag(&mut self) {
         let num_queries = self.query_count();
         let num_rows = self.row_count();
-        let snapshot = crate::serving_lag::CgServingSnapshot {
-            lag: crate::serving_lag::ServingLagViewSyncer {
+        let snapshot = crate::workers::syncer::CgServingSnapshot {
+            lag: crate::workers::syncer::ServingLagViewSyncer {
                 created_at_ms: self.created_at_ms,
                 served_version: self.served_version.clone(),
                 serving_lag_eligible: self.serving_lag_eligible(),
@@ -1821,7 +1824,7 @@ impl CgState {
             // Falls back to the token's `sub` only for an unpinned (anonymous)
             // group.
             let expected_sub = self.pinned_user_id.clone().or_else(|| {
-                crate::auth::decode_jwt_claims(&token)
+                crate::auth::jwt::decode_jwt_claims(&token)
                     .get("sub")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
@@ -1967,7 +1970,7 @@ impl CgState {
             .auth
             .as_deref()
             .filter(|t| !t.is_empty())
-            .map(crate::auth::decode_jwt_claims)
+            .map(crate::auth::jwt::decode_jwt_claims)
             .unwrap_or_else(|| serde_json::json!({}));
         self.client_auth.insert(client_id.clone(), claims);
         // Retain the raw token for the `Authorization: Bearer` header on
@@ -2005,7 +2008,7 @@ impl CgState {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         relay_request_headers.sort();
-        let push_relay_headers = crate::message_handler::PushRelayHeaders {
+        let push_relay_headers = crate::workers::syncer_ws_message_handler::PushRelayHeaders {
             auth: params.auth.clone().filter(|v| !v.is_empty()),
             cookie: params.http_cookie.clone(),
             origin: params.origin.clone(),
@@ -2139,14 +2142,15 @@ impl CgState {
                         && let Some(pusher) = &self.pusher
                         && let Some(headers) = self.client_push_headers.get(&*client_id)
                     {
-                        let selector = crate::message_handler::ConnectionSelector {
-                            client_id: client_id.to_string(),
-                            ws_id: self
-                                .registered_ws
-                                .get(&*client_id)
-                                .cloned()
-                                .unwrap_or_default(),
-                        };
+                        let selector =
+                            crate::workers::syncer_ws_message_handler::ConnectionSelector {
+                                client_id: client_id.to_string(),
+                                ws_id: self
+                                    .registered_ws
+                                    .get(&*client_id)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                            };
                         pusher.delete_client_mutations(
                             &selector,
                             &cleanup_ids,
@@ -2216,7 +2220,7 @@ impl CgState {
             && let Some(headers) = self.client_push_headers.get(client_id)
             && let Ok(mut ov) = headers.push_override.lock()
         {
-            *ov = Some(crate::message_handler::PushOverride {
+            *ov = Some(crate::workers::syncer_ws_message_handler::PushOverride {
                 url: body
                     .get("userPushURL")
                     .and_then(|v| v.as_str())
@@ -2237,7 +2241,7 @@ impl CgState {
             .cloned();
         if let Some(schema) = client_schema.as_ref()
             && let Err(message) =
-                crate::replica_schema::validate_client_schema(schema, &self.tables)
+                crate::db::lite_tables::validate_client_schema(schema, &self.tables)
         {
             tracing::info!(
                 "CG {}: rejecting incompatible client schema: {message}",
@@ -2498,7 +2502,7 @@ impl CgState {
         }
         // Decode the new claims (unverified) — used both to compare against the
         // stored auth data and to extract the `sub`.
-        let new_claims = crate::auth::decode_jwt_claims(token);
+        let new_claims = crate::auth::jwt::decode_jwt_claims(token);
         let new_sub = new_claims
             .get("sub")
             .and_then(|v| v.as_str())
@@ -2871,7 +2875,7 @@ impl CgState {
         // an empty db if the replica is missing/swapped at this instant — then
         // find no permissions and keep serving stale rules instead of surfacing
         // the problem. Fail cleanly into the warn+return-false path instead.
-        let conn = match crate::replica_schema::open_replica_read_only(path) {
+        let conn = match crate::db::lite_tables::open_replica_read_only(path) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -2881,13 +2885,13 @@ impl CgState {
                 return false;
             }
         };
-        match crate::permissions::reload_permissions_if_changed(
+        match crate::auth::read_authorizer::reload_permissions_if_changed(
             &conn,
             &self.app_id,
             self.permissions_hash.as_deref(),
         ) {
-            crate::permissions::PermissionsReload::Unchanged => false,
-            crate::permissions::PermissionsReload::Changed { permissions, hash } => {
+            crate::auth::read_authorizer::PermissionsReload::Unchanged => false,
+            crate::auth::read_authorizer::PermissionsReload::Changed { permissions, hash } => {
                 tracing::info!(
                     "CG {}: read-permissions changed (hash {:?} → {:?}); re-transforming queries",
                     self.cg_id,
@@ -3050,7 +3054,7 @@ impl CgState {
         // captured at CG creation would rebuild the engine with the same stale
         // table/column set and either reset-loop or serve an obsolete schema.
         if let Some(path) = self.replica_path.as_deref() {
-            match crate::replica_schema::compute_table_specs_from_path(path) {
+            match crate::db::lite_tables::compute_table_specs_from_path(path) {
                 Ok(tables) => self.tables = tables,
                 Err(e) => {
                     tracing::error!("CG {}: schema reload after reset failed: {e}", self.cg_id);
@@ -3368,7 +3372,7 @@ struct CgTaskContext {
     auth_validator: Arc<dyn AuthValidator>,
     connections: Arc<Mutex<HashMap<String, ConnectionInfo>>>,
     cvr_pool: Option<sqlx::PgPool>,
-    serving_lag_registry: Arc<crate::serving_lag::ServingLagRegistry>,
+    serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
 }
 
 /// The async body hosting one client group, run as a `spawn_local` task on its
@@ -3594,10 +3598,10 @@ fn merge_notifications(prev: serde_json::Value, next: serde_json::Value) -> serd
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message_handler::{
+    use crate::protocol::PROTOCOL_VERSION;
+    use crate::workers::syncer_ws_message_handler::{
         ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, ViewSyncerDispatch,
     };
-    use crate::protocol::PROTOCOL_VERSION;
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::schema::types::version_from_string;
 
@@ -3900,7 +3904,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -4537,7 +4541,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -4584,7 +4588,7 @@ mod tests {
         let mut state = CgState::new(
             "cg-idle",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -4642,7 +4646,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -4707,7 +4711,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -4753,7 +4757,7 @@ mod tests {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
         });
-        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
             jwk: None,
             secret: None,
             jwks_url: None,
@@ -4777,7 +4781,7 @@ mod tests {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
         });
-        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
             jwk: None,
             secret: None,
             jwks_url: None,
@@ -4827,7 +4831,7 @@ mod tests {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
         });
-        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
             jwk: None,
             secret: None,
             jwks_url: None,
@@ -4902,7 +4906,7 @@ mod tests {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
         });
-        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
             jwk: None,
             secret: None,
             jwks_url: None,
@@ -4965,7 +4969,7 @@ mod tests {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
         });
-        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::JwtAuthValidator {
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
             jwk: None,
             secret: None,
             jwks_url: None,
@@ -5019,7 +5023,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -5063,7 +5067,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -5114,7 +5118,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,
@@ -5197,7 +5201,7 @@ mod tests {
         let mut state = CgState::new(
             "cg1",
             &factory,
-            Arc::new(crate::auth::JwtAuthValidator {
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
                 jwk: None,
                 secret: None,
                 jwks_url: None,

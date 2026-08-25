@@ -4,10 +4,10 @@
 //! Uses `tokio-tungstenite` for the WebSocket protocol. No handoff mechanism
 //! (the server accepts directly, unlike the TS handoff model).
 
-use crate::connect_params::{ConnectParams, extract_protocol_version, get_connect_params};
 use crate::protocol::{
     ErrorBody, MIN_SERVER_SUPPORTED_SYNC_PROTOCOL, PROTOCOL_VERSION, error_message, pong_message,
 };
+use crate::workers::connect_params::{ConnectParams, extract_protocol_version, get_connect_params};
 use crate::ws_sink::{DirectWebSocketSink, SinkLimits, WsCommand};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;

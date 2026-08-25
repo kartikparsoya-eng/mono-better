@@ -7,8 +7,8 @@
 //! implementation comes in Phase 4. Mutagen/Pusher stay in TS (HTTP forwarding
 //! in the full binary).
 
-use crate::connection::{HandlerResult, MessageHandler};
 use crate::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin, PushBody, Upstream};
+use crate::workers::connection::{HandlerResult, MessageHandler};
 use std::sync::{Arc, Mutex};
 
 /// Connection selector — identifies a connection by clientID + wsID.

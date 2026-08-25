@@ -3,73 +3,77 @@
 //! Replaces the entire TS syncer process (syncer.ts, dispatcher.ts,
 //! view-syncer.ts, connection.ts, etc.) with a single Rust binary.
 //! See `packages/zero-cache/docs/rust-cvr-port/89-full-rust-syncer.md`.
+//!
+//! ## File structure
+//! The module tree mirrors the TS source layout 1:1 (`auth/`, `workers/`,
+//! `services/view_syncer/`, `custom_queries/`, `db/`) so each Rust file maps to
+//! its TS origin. The one documented exception is the per-CG **actor core**
+//! (`router.rs`): TS's separate `ViewSyncerService` (view-syncer.ts),
+//! `ConnectionContextManager` (connection-context-manager.ts) and `Syncer`
+//! (syncer.ts) classes are fused into `CgState` + `ConnectionRouter` for the
+//! single-threaded-per-CG `spawn_local` model — they cannot split into 1:1 files
+//! without un-fusing the structs (a rewrite). The remaining top-level files
+//! (`ws_server`, `ws_sink`, `http_server`, `otel`, `metrics`, `protocol`,
+//! `push_relay`, `sync_engine`, `live_count`, `trace`) are Rust-only transport /
+//! observability / process infra with no single TS origin.
 
+// TS-mirrored subtrees.
 pub mod auth;
-pub mod connect_params;
-pub mod connection;
-pub mod connection_context;
-pub mod custom_query;
-pub mod drain;
-pub mod e2e_serving_lag;
+pub mod custom_queries;
+pub mod db;
+pub mod services;
+pub mod workers;
+
+// Rust-only infra + the fused per-CG actor core (router).
 pub mod http_server;
 pub mod live_count;
-pub mod message_handler;
 pub mod metrics;
 pub mod otel;
-pub mod permissions;
-pub mod pipeline_driver;
 pub mod protocol;
 pub mod push_relay;
-pub mod query_covering;
-pub mod replica_schema;
 pub mod router;
-pub mod serving_lag;
 pub mod sync_engine;
 pub mod trace;
-// NOTE: the former `view_syncer` module (the placeholder `RustViewSyncer` +
-// `PipelineDriver`/`CVRStoreOps` traits) was removed. The real dispatch lives on
-// the CG thread: `router::CgState` owns a `sync_engine::SyncEngine`, which drives
-// `rust-ivm` (via `pipeline_driver::IvmPipelines`) and `rust-cvr`. One path.
 pub mod ws_server;
 pub mod ws_sink;
 
-pub use auth::{JwtAuthValidator, decode_jwt_claims};
-pub use connect_params::{ConnectParams, ConnectParamsError, get_connect_params};
-pub use connection::{
-    Connection, HandlerResult, LogLevel, MessageHandler, classify_error_log_level,
+pub use auth::jwt::{JwtAuthValidator, decode_jwt_claims};
+pub use auth::read_authorizer::{
+    LoadedPermissions, PermissionsReload, deny_all_permissions, hash_of_ast, load_permissions,
+    reload_permissions_if_changed, resolve_permissions, transform_and_hash_query, transform_query,
 };
-pub use connection_context::{
+pub use db::lite_tables::{
+    ReplicaVersions, compute_table_specs_from_path, compute_zql_specs, read_replica_versions,
+    read_replica_versions_from_path, validate_client_schema,
+};
+pub use http_server::{
+    HttpServerState, ServerStats, bind_http_listener, run_http_server, serve_http,
+};
+pub use protocol::*;
+pub use push_relay::HttpRelayPusher;
+pub use router::{
+    AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter, ConnectionSinks,
+    CvrPgConfig, GroupAuthState, SyncEngineConfig,
+};
+pub use services::view_syncer::connection_context_manager::{
     Auth, CCMError, ConnectParamsForRegistration, ConnectionContextManager, ConnectionFetchContext,
     ConnectionState, ConnectionValidation, FetchConfig, HeaderOptions, InitConnectionBody,
     JwtPayload, MaintenanceKind, MaintenancePlan, UpdateAuthBody, UserState, ValidationResult,
     auth_equals, resolve_auth,
 };
-pub use drain::DrainCoordinator;
-pub use http_server::{
-    HttpServerState, ServerStats, bind_http_listener, run_http_server, serve_http,
+pub use services::view_syncer::drain_coordinator::DrainCoordinator;
+pub use services::view_syncer::pipeline_driver::{
+    AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,
 };
-pub use message_handler::{
+pub use sync_engine::{SyncEngine, SyncResult, parse_existing_rows};
+pub use workers::connect_params::{ConnectParams, ConnectParamsError, get_connect_params};
+pub use workers::connection::{
+    Connection, HandlerResult, LogLevel, MessageHandler, classify_error_log_level,
+};
+pub use workers::syncer_ws_message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
     PushRelayHeaders, PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
-pub use permissions::{
-    LoadedPermissions, PermissionsReload, deny_all_permissions, hash_of_ast, load_permissions,
-    reload_permissions_if_changed, resolve_permissions, transform_and_hash_query, transform_query,
-};
-pub use pipeline_driver::{
-    AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,
-};
-pub use protocol::*;
-pub use push_relay::HttpRelayPusher;
-pub use replica_schema::{
-    ReplicaVersions, compute_table_specs_from_path, compute_zql_specs, read_replica_versions,
-    read_replica_versions_from_path, validate_client_schema,
-};
-pub use router::{
-    AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter, ConnectionSinks,
-    CvrPgConfig, GroupAuthState, SyncEngineConfig,
-};
-pub use sync_engine::{SyncEngine, SyncResult, parse_existing_rows};
 pub use ws_server::{
     ConnectionContext, WsServerConfig, accept_connection, accept_connection_with_limit,
     bind_ws_listener, run_ws_server, serve_ws, serve_ws_with_config,
