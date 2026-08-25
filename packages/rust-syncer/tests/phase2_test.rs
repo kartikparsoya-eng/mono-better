@@ -6,13 +6,13 @@
 //!   deleteClients, ackMutationResponses, changeDesiredQueries)
 //! - `drain-coordinator.ts` behavior: shouldDrain, drainNextIn
 
-use rust_syncer::connection::{LogLevel, MessageHandler, classify_error_log_level};
-use rust_syncer::drain::DrainCoordinator;
-use rust_syncer::message_handler::{
+use rust_syncer::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin};
+use rust_syncer::services::view_syncer::drain_coordinator::DrainCoordinator;
+use rust_syncer::workers::connection::{LogLevel, MessageHandler, classify_error_log_level};
+use rust_syncer::workers::syncer_ws_message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
     PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
-use rust_syncer::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin};
 use std::sync::{Arc, Mutex};
 
 // ─── Mock implementations ──────────────────────────────────────────────────
@@ -133,12 +133,12 @@ impl PusherDispatch for MockPusher {
         body: &serde_json::Value,
         _headers: &rust_syncer::PushRelayHeaders,
         _client_group_id: &str,
-    ) -> rust_syncer::connection::HandlerResult {
+    ) -> rust_syncer::workers::connection::HandlerResult {
         self.enqueue_push_calls
             .lock()
             .unwrap()
             .push((selector.clone(), body.clone()));
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     }
 
     fn init_connection(&self, selector: &ConnectionSelector) {
@@ -273,7 +273,7 @@ fn test_push_with_custom_mutation_routes_to_pusher() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(pusher.enqueue_push_calls.lock().unwrap().len(), 1);
 }
@@ -291,7 +291,7 @@ fn test_push_with_wrong_client_group_id_returns_fatal() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Fatal { .. }
+        rust_syncer::workers::connection::HandlerResult::Fatal { .. }
     ));
     assert_eq!(pusher.enqueue_push_calls.lock().unwrap().len(), 0);
 }
@@ -309,7 +309,7 @@ fn test_push_with_empty_mutations_returns_ok() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(pusher.enqueue_push_calls.lock().unwrap().len(), 0);
 }
@@ -329,7 +329,7 @@ fn test_push_with_custom_mutation_no_pusher_returns_transient() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Transient { .. }
+        rust_syncer::workers::connection::HandlerResult::Transient { .. }
     ));
 }
 
@@ -352,7 +352,7 @@ fn test_push_with_crud_mutation_routes_to_mutagen() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(mutagen.process_mutation_calls.lock().unwrap().len(), 1);
 }
@@ -370,7 +370,7 @@ fn test_push_with_crud_mutation_no_mutagen_returns_fatal() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Fatal { .. }
+        rust_syncer::workers::connection::HandlerResult::Fatal { .. }
     ));
 }
 
@@ -398,7 +398,7 @@ fn test_push_with_crud_mutation_error_returns_transient() {
 
     assert_eq!(results.len(), 1);
     match &results[0] {
-        rust_syncer::connection::HandlerResult::Transient { errors } => {
+        rust_syncer::workers::connection::HandlerResult::Transient { errors } => {
             assert_eq!(errors.len(), 1);
             assert_eq!(errors[0].kind(), &ErrorKind::MutationFailed);
         }
@@ -418,7 +418,7 @@ fn test_change_desired_queries_routes_to_view_syncer() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(vs.change_desired_queries_calls.lock().unwrap().len(), 1);
 }
@@ -438,7 +438,7 @@ fn test_update_auth_routes_to_view_syncer() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     let calls = vs.update_auth_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -460,7 +460,7 @@ fn test_update_auth_no_change_does_not_call_view_syncer_with_changed() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     let calls = vs.update_auth_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -483,7 +483,7 @@ fn test_delete_clients_routes_to_view_syncer_and_pusher() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(vs.delete_clients_calls.lock().unwrap().len(), 1);
     assert_eq!(pusher.delete_client_calls.lock().unwrap().len(), 1);
@@ -508,7 +508,7 @@ fn test_delete_clients_no_pusher_no_error() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
 }
 
@@ -525,7 +525,7 @@ fn test_delete_clients_empty_result_no_pusher_call() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(pusher.delete_client_calls.lock().unwrap().len(), 0);
 }
@@ -543,7 +543,7 @@ fn test_ack_mutation_responses_routes_to_pusher() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(pusher.ack_calls.lock().unwrap().len(), 1);
 }
@@ -560,7 +560,7 @@ fn test_ack_mutation_responses_no_pusher_no_error() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
 }
 
@@ -580,7 +580,7 @@ fn test_init_connection_routes_to_view_syncer_and_pusher() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(vs.init_connection_calls.lock().unwrap().len(), 1);
     assert_eq!(*ccm.init_connection_calls.lock().unwrap(), 1);
@@ -599,7 +599,7 @@ fn test_close_connection_is_noop() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
 }
 
@@ -615,7 +615,7 @@ fn test_inspect_routes_to_view_syncer() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
     assert_eq!(vs.inspect_calls.lock().unwrap().len(), 1);
 }
@@ -632,7 +632,7 @@ fn test_ping_returns_ok() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Ok
+        rust_syncer::workers::connection::HandlerResult::Ok
     ));
 }
 
@@ -647,7 +647,7 @@ fn test_invalid_message_returns_fatal() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Fatal { .. }
+        rust_syncer::workers::connection::HandlerResult::Fatal { .. }
     ));
 }
 
@@ -663,7 +663,7 @@ fn test_unknown_message_type_returns_fatal() {
     assert_eq!(results.len(), 1);
     assert!(matches!(
         results[0],
-        rust_syncer::connection::HandlerResult::Fatal { .. }
+        rust_syncer::workers::connection::HandlerResult::Fatal { .. }
     ));
 }
 

@@ -9,7 +9,7 @@
 //! - Stale revision handling
 //! - Fetch context configuration (query/push URLs, headers, cookies)
 
-use rust_syncer::connection_context::*;
+use rust_syncer::services::view_syncer::connection_context_manager::*;
 use std::sync::{Arc, Mutex};
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

@@ -1148,7 +1148,7 @@ fn pg_advance_lmid_change_with_no_queries() {
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
     use rust_cvr::cvr::RowRecordMap;
-    use rust_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
@@ -1362,7 +1362,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
     use rust_cvr::client_handler::WebSocketSink;
     use rust_cvr::cvr::RowRecordMap;
     use rust_cvr::schema::types::version_string;
-    use rust_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
@@ -1768,7 +1768,7 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
     use rust_cvr::cvr::RowRecordMap;
-    use rust_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 

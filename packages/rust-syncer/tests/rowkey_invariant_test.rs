@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use rusqlite::Connection;
-use rust_syncer::pipeline_driver::IvmPipelines;
+use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
 
 type SharedConnAlias = Rc<RefCell<Connection>>;
 

@@ -464,7 +464,7 @@ fn test_parse_invalid_json_errors() {
 
 // ─── Connect params ────────────────────────────────────────────────────────
 
-use rust_syncer::connect_params::{extract_protocol_version, get_connect_params};
+use rust_syncer::workers::connect_params::{extract_protocol_version, get_connect_params};
 
 #[test]
 fn test_extract_protocol_version_from_path() {

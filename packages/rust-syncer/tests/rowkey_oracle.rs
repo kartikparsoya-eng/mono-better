@@ -56,8 +56,8 @@
 
 use std::collections::BTreeSet;
 
-use rust_syncer::pipeline_driver::IvmTableSpec;
-use rust_syncer::replica_schema::{compute_table_specs_from_path, validate_client_schema};
+use rust_syncer::db::lite_tables::{compute_table_specs_from_path, validate_client_schema};
+use rust_syncer::services::view_syncer::pipeline_driver::IvmTableSpec;
 
 /// The client PK columns declared for a table, keyed by table name.
 fn parse_client_pks(client_schema: &serde_json::Value) -> Vec<(String, Vec<String>)> {

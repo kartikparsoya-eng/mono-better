@@ -20,7 +20,7 @@ use rust_cvr::client_handler::WebSocketSink;
 use rust_cvr::cvr::DesiredQuerySpec;
 use rust_cvr::cvr::RowRecordMap;
 use rust_cvr::shards::ShardID;
-use rust_syncer::pipeline_driver::IvmPipelines;
+use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
 use rust_syncer::sync_engine::{SyncEngine, empty_cvr};
 use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
@@ -368,7 +368,7 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
 /// view-syncer.pg.test.ts "initial hydration of a custom query".
 #[test]
 fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
-    use rust_syncer::custom_query::{CustomQueryContext, TransformedQuery};
+    use rust_syncer::custom_queries::transform_query::{CustomQueryContext, TransformedQuery};
 
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -407,7 +407,7 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
         allowed_urls: vec![url.to_string()],
         ..CustomQueryContext::default()
     };
-    rust_syncer::custom_query::seed_transform_cache_for_test(
+    rust_syncer::custom_queries::transform_query::seed_transform_cache_for_test(
         &ctx,
         "custom_q",
         &TransformedQuery {
@@ -530,10 +530,10 @@ fn partial_success_transform_hydrates_healthy_query() {
     };
     engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
 
-    let ctx = rust_syncer::custom_query::CustomQueryContext {
+    let ctx = rust_syncer::custom_queries::transform_query::CustomQueryContext {
         url: format!("http://{addr}/transform"),
         allowed_urls: vec![format!("http://{addr}/transform")],
-        ..rust_syncer::custom_query::CustomQueryContext::default()
+        ..rust_syncer::custom_queries::transform_query::CustomQueryContext::default()
     };
 
     // Two custom queries — both uncached, so they batch into the one mock request.
@@ -663,10 +663,10 @@ fn transform_failure_fails_only_the_offending_connection() {
         Arc::new(DirectWebSocketSink::new(tx_b)),
     );
 
-    let ctx = rust_syncer::custom_query::CustomQueryContext {
+    let ctx = rust_syncer::custom_queries::transform_query::CustomQueryContext {
         url: format!("http://{addr}/transform"),
         allowed_urls: vec![format!("http://{addr}/transform")],
-        ..rust_syncer::custom_query::CustomQueryContext::default()
+        ..rust_syncer::custom_queries::transform_query::CustomQueryContext::default()
     };
     // Only client A's config pass runs (poke_ws_ids = [wsA]); its transform fails.
     let cvr = empty_cvr("cg1", "01");
