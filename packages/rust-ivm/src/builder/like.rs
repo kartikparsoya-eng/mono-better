@@ -40,23 +40,18 @@ fn get_like_op(pattern: &str, flags: &str) -> Box<dyn Fn(&str) -> bool + 'static
         return Box::new(move |lhs: &str| lhs == pattern);
     }
 
-    // For ILIKE, lowercase the pattern before building the regex and
-    // lowercase the input before matching, since regex-lite may not
-    // support Unicode case-insensitive matching.
-    let effective_pattern = if flags == "i" {
-        pattern.to_lowercase()
-    } else {
-        pattern.to_string()
-    };
-    let re = pattern_to_regex(&effective_pattern, flags);
-    if flags == "i" {
-        Box::new(move |lhs: &str| re.is_match(&lhs.to_lowercase()))
-    } else {
-        Box::new(move |lhs: &str| re.is_match(lhs))
-    }
+    // For ILIKE, TS builds `new RegExp(pattern, 'i')` and tests the ORIGINAL
+    // strings, so the match uses Unicode case FOLDING (e.g. capital Σ folds with
+    // final sigma ς). The `regex` crate's case-insensitive mode uses the same
+    // Unicode simple case folding as JS regex `i`, so we build the regex from the
+    // un-lowercased pattern and match the un-lowercased input — NOT `to_lowercase`
+    // both sides, which diverges from folding for chars whose lowercase ≠ their
+    // fold (final sigma, etc.). Port of TS `patternToRegExp(pattern, flags)`.
+    let re = pattern_to_regex(pattern, flags);
+    Box::new(move |lhs: &str| re.is_match(lhs))
 }
 
-fn pattern_to_regex(source: &str, flags: &str) -> regex_lite::Regex {
+fn pattern_to_regex(source: &str, flags: &str) -> regex::Regex {
     let mut pattern = String::from("^");
     let chars: Vec<char> = source.chars().collect();
     let mut i = 0;
@@ -87,8 +82,12 @@ fn pattern_to_regex(source: &str, flags: &str) -> regex_lite::Regex {
     }
     pattern.push('$');
 
-    let re_flags = if flags == "i" { "is" } else { "s" };
-    regex_lite::Regex::new(&format!("(?{}){}", re_flags, pattern))
+    // TS `new RegExp(pattern + '$', flags + 's')`: dotall always on; `i` when
+    // ILIKE. `regex` (unlike regex-lite) does Unicode-aware `i` case folding.
+    regex::RegexBuilder::new(&pattern)
+        .case_insensitive(flags == "i")
+        .dot_matches_new_line(true)
+        .build()
         .expect("invalid LIKE pattern regex")
 }
 
@@ -97,4 +96,33 @@ fn is_special_regex_char(c: char) -> bool {
         c,
         '$' | '(' | ')' | '*' | '+' | '.' | '?' | '[' | ']' | '\\' | '^' | '{' | '|' | '}'
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ivm::data::Value;
+    use std::sync::Arc;
+
+    fn ilike(pattern: &str, lhs: &str) -> bool {
+        let p = get_like_predicate(&Value::Str(Arc::from(pattern)), "i");
+        p(&Value::Str(Arc::from(lhs)))
+    }
+
+    #[test]
+    fn ilike_uses_unicode_case_folding_like_ts() {
+        // Values verified against the REAL TS `getLikePredicate` (F-LIKE-1).
+        // Discriminator: capital Σ folds with final sigma ς under JS regex `i`,
+        // so this is TRUE — the OLD `to_lowercase` impl returned FALSE (the
+        // lowercase of Σ is σ, not ς). Non-vacuous per HARD RULE #7.
+        assert!(ilike("a%Σ", "aXς"));
+        assert!(ilike("%ΣΟΣ%", "xx σος yy"));
+        // ß does NOT fold to `ss` under simple case folding (matches JS regex `i`).
+        assert!(!ilike("STRASSE", "straße"));
+        // No-wildcard ILIKE fast path uses Unicode lowercase on both sides.
+        assert!(ilike("σος", "ΣΟΣ"));
+        // ASCII sanity.
+        assert!(ilike("HELLO%", "hello world"));
+        assert!(!ilike("bye%", "hello"));
+    }
 }
