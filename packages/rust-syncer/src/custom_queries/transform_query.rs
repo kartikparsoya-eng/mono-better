@@ -222,27 +222,10 @@ pub async fn transform_custom_queries(
 
     let response = post_transform(ctx, shard, &body, &query_ids).await?;
 
-    // A `QueryResponse` carries `queries: [...]`. A legacy API server instead
-    // returns a `["transformed", [...queries]]` tuple (TS `transform-query.ts`
-    // handles this as a client-fallback response). Anything else (e.g. a
-    // `TransformFailed` body) fails the whole request.
-    let queries = if let Some(arr) = response.get("queries").and_then(|q| q.as_array()) {
-        arr.clone()
-    } else if response
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        == Some("transformed")
-    {
-        response
-            .as_array()
-            .and_then(|a| a.get(1))
-            .and_then(|q| q.as_array())
-            .cloned()
-            .unwrap_or_default()
-    } else {
-        return Err(response.clone());
-    };
+    // A `QueryResponse` carries `queries: [...]`; a legacy `["transformed", [...]]`
+    // tuple is a client-fallback response. Anything else (e.g. a `TransformFailed`
+    // body) fails the whole request.
+    let queries = extract_transform_queries(&response).ok_or_else(|| response.clone())?;
 
     for q in queries {
         let id = q
@@ -274,6 +257,33 @@ pub async fn transform_custom_queries(
     }
 
     Ok(results)
+}
+
+/// Extract the per-query results from a transform response. Port of the response
+/// handling in TS `transform-query.ts`: a `QueryResponse` carries `queries: [...]`;
+/// a legacy API server returns a `["transformed", [...queries]]` tuple (treated as
+/// a client-fallback response). Returns `None` for anything else (e.g. a
+/// `TransformFailed` body) so the caller fails the whole request.
+fn extract_transform_queries(response: &Value) -> Option<Vec<Value>> {
+    if let Some(arr) = response.get("queries").and_then(|q| q.as_array()) {
+        return Some(arr.clone());
+    }
+    if response
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        == Some("transformed")
+    {
+        return Some(
+            response
+                .as_array()
+                .and_then(|a| a.get(1))
+                .and_then(|q| q.as_array())
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    None
 }
 
 /// Force the empty `/query` validation request used by auth maintenance. Port of
@@ -604,6 +614,61 @@ pub fn seed_transform_cache_for_test(ctx: &CustomQueryContext, id: &str, q: &Tra
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_transform_queries_handles_modern_and_legacy() {
+        // Modern `QueryResponse` with `queries: [...]`.
+        let modern = serde_json::json!({"queries": [{"id": "a", "ast": {}}]});
+        assert_eq!(extract_transform_queries(&modern).unwrap().len(), 1);
+        // Legacy `["transformed", [...]]` tuple → client-fallback (F-TQ-7). Fails
+        // on the pre-fix code, which only read `queries` → this arm went to Err.
+        let legacy = serde_json::json!(["transformed", [{"id": "a", "ast": {}}, {"id": "b", "ast": {}}]]);
+        assert_eq!(extract_transform_queries(&legacy).unwrap().len(), 2);
+        // A `TransformFailed` body (or any other shape) → None (whole-batch fail).
+        let failed = serde_json::json!({"kind": "TransformFailed", "message": "boom"});
+        assert!(extract_transform_queries(&failed).is_none());
+    }
+
+    #[tokio::test]
+    async fn transform_failure_carries_batch_query_ids() {
+        // A whole-request failure must carry the real batch IDs (F-TQ-1), not `[]`.
+        // The URL-not-allowed path fails synchronously (no network) with the
+        // `transform_failed` body. Pre-fix this hardcoded `queryIDs: []` → the
+        // assertion below fails on the old code.
+        let ctx = CustomQueryContext {
+            // Unique URL so the process-wide TRANSFORM_CACHE never has a hit here.
+            url: "https://f-tq-1.example/query".to_string(),
+            allowed_urls: vec!["https://allowed.example/*".to_string()],
+            ..CustomQueryContext::default()
+        };
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        let specs = vec![
+            CustomQuerySpec {
+                id: "q1".to_string(),
+                name: "n1".to_string(),
+                args: vec![],
+            },
+            CustomQuerySpec {
+                id: "q2".to_string(),
+                name: "n2".to_string(),
+                args: vec![],
+            },
+        ];
+        let err = transform_custom_queries(&ctx, &shard, &specs)
+            .await
+            .err()
+            .expect("transform should fail for a disallowed URL");
+        let ids: Vec<&str> = err["queryIDs"]
+            .as_array()
+            .expect("queryIDs array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["q1", "q2"]);
+    }
 
     #[test]
     fn is_auth_error_body_matches_ts_is_auth_error_body() {
