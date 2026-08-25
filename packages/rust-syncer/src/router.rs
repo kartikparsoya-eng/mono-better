@@ -2161,6 +2161,24 @@ impl CgState {
         }
         self.connections.insert(client_id.clone(), conn);
 
+        // TS parity: a malformed baseCookie FAILS the connection. TS parses it
+        // in the ClientHandler constructor (client-handler.ts `cookieToVersion`
+        // → `versionFromString`, schema/types.ts) — the throw escapes to the
+        // connection boundary and is wrapped as a fatal `Internal` error
+        // (`wrapWithProtocolError`, types/error-with-level.ts), sent after
+        // `connected`. The lenient registrations above keep the CG task
+        // panic-safe (Rust-only concern); this check reproduces the TS-visible
+        // outcome: ["error",{kind:"Internal"}] then close.
+        if let Some(c) = params.base_cookie.as_deref()
+            && let Err(e) = rust_cvr::schema::types::maybe_version_string(c)
+        {
+            if let Some(conn) = self.connections.get(&*client_id) {
+                conn.close_with_error(crate::protocol::ErrorBody::internal(e.to_string()));
+            }
+            self.on_connection_closed(&client_id, &ws_id);
+            return;
+        }
+
         // Handle piggybacked initConnection from the sec-websocket-protocol
         // header, routing its desired queries to the CG-owned SyncEngine.
         if let Some(init_msg) = params.init_connection_msg.clone() {
@@ -5265,6 +5283,60 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("must include client schema"))
         );
+    }
+
+    /// G36 garbage-cookie / overlarge-configversion: a baseCookie that fails
+    /// `versionFromString` (TS schema/types.ts, called from the ClientHandler
+    /// constructor's `cookieToVersion`) FAILS the connection with a fatal
+    /// `Internal` error after `connected` (`wrapWithProtocolError`,
+    /// types/error-with-level.ts) — it must NOT be silently treated as
+    /// "no base version". Covers both G36 shapes: a non-Lexi stateVersion and
+    /// a configVersion above 2^53.
+    #[test]
+    fn malformed_base_cookie_closes_with_internal_error() {
+        for bad_cookie in ["!!notlexi!!", "00:b100000000000"] {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+                handle: rt.handle().clone(),
+            });
+            let mut state = CgState::new(
+                "cg1",
+                &factory,
+                Arc::new(crate::auth::jwt::JwtAuthValidator {
+                    jwk: None,
+                    secret: None,
+                    jwks_url: None,
+                    issuer: None,
+                    audience: None,
+                }),
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(AtomicU64::new(1)),
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+            let mut params = test_params("c1", "ws1");
+            params.base_cookie = Some(bad_cookie.to_string());
+            rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+
+            let mut saw_connected = false;
+            let mut error = None;
+            while let Ok(command) = rx.try_recv() {
+                if let WsCommand::Send { msg: value, .. } = command {
+                    match value.get(0).and_then(serde_json::Value::as_str) {
+                        Some("connected") => saw_connected = true,
+                        Some("error") => error = value.get(1).cloned(),
+                        _ => {}
+                    }
+                }
+            }
+            assert!(saw_connected, "[{bad_cookie}] TS sends connected first");
+            let error =
+                error.unwrap_or_else(|| panic!("[{bad_cookie}] must close with a protocol error"));
+            assert_eq!(error["kind"], "Internal", "[{bad_cookie}] {error}");
+            assert!(
+                !state.connections.contains_key("c1"),
+                "[{bad_cookie}] connection must be torn down"
+            );
+        }
     }
 
     /// The inspector protocol gates every op behind an `authenticate` that

@@ -686,7 +686,17 @@ pub fn parse_upstream_array(arr: &[Value]) -> Result<Upstream, serde_json::Error
     let body = &arr[1];
 
     let result = match msg_type {
-        "initConnection" => Upstream::InitConnection(body.clone()),
+        "initConnection" => {
+            // TS parity: `Connection.#handleMessage` valita-parses EVERY
+            // ws-delivered message against `upstreamSchema` (connection.ts),
+            // so a malformed initConnection body (e.g. a non-array
+            // desiredQueriesPatch) is an `InvalidMessage` error — it must
+            // never reach the init handling (which would otherwise fail
+            // later with a misleading InvalidConnectionRequest). Keep the
+            // raw Value: the header-delivered init path parses it itself.
+            serde_json::from_value::<InitConnectionBody>(body.clone())?;
+            Upstream::InitConnection(body.clone())
+        }
         "ping" => Upstream::Ping,
         "deleteClients" => {
             Upstream::DeleteClients(serde_json::from_value::<DeleteClientsBody>(body.clone())?)
@@ -792,4 +802,37 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// G36 malformed-init: TS valita-parses every ws message against
+    /// `upstreamSchema` (connection.ts `#handleMessage`), so an initConnection
+    /// body with a non-array `desiredQueriesPatch` is rejected at PARSE time
+    /// (→ InvalidMessage), never reaching init handling (which used to
+    /// surface a misleading InvalidConnectionRequest for it).
+    #[test]
+    fn parse_upstream_rejects_malformed_init_connection_body() {
+        let err = parse_upstream(r#"["initConnection",{"desiredQueriesPatch":"not-a-list"}]"#);
+        assert!(
+            err.is_err(),
+            "malformed initConnection body must fail upstream parse"
+        );
+    }
+
+    #[test]
+    fn parse_upstream_accepts_valid_init_connection_body() {
+        let ok = parse_upstream(
+            r#"["initConnection",{"desiredQueriesPatch":[],"clientSchema":{"tables":{}}}]"#,
+        );
+        assert!(matches!(ok, Ok(Upstream::InitConnection(_))), "{ok:?}");
+    }
+
+    #[test]
+    fn parse_upstream_rejects_unknown_message_type() {
+        // TS: unknown tag fails the valita union → InvalidMessage.
+        assert!(parse_upstream(r#"["definitelyNotAThing",{}]"#).is_err());
+    }
 }

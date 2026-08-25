@@ -227,17 +227,15 @@ fn test_socket_closed_while_compressing_logged_as_warn() {
 
 #[test]
 fn test_epipe_in_message_logged_as_warn() {
-    // TS checks for 'errno' or transient socket codes on the thrown error.
-    // In our Rust impl, we check the error message for the pattern.
-    // The full thrown-error classification needs the thrown error object,
-    // but for the error body classification, we check the message.
+    // TS checks transient socket codes (EPIPE/ECONNRESET/ECANCELED) on the
+    // THROWN error's `code` property (`hasTransientSocketCode`). Rust has no
+    // thrown object at the classify boundary, so the errno spelling is scanned
+    // in the message instead (labeled Rust-only adaptation F-CON-3,
+    // connection.rs `has_transient_socket_code`). A real Node/socket EPIPE
+    // always carries "EPIPE" in its message, so the OUTCOME matches TS: Warn,
+    // not a paged Error, for a normal peer disconnect.
     let error = ErrorBody::internal("write EPIPE");
-    // Without the thrown error, Internal kind defaults to Error.
-    // But if the message contains "socket was closed while data was being compressed",
-    // it would be Warn. EPIPE alone doesn't trigger the message pattern check.
-    // This matches the TS behavior where EPIPE is checked on the thrown error's
-    // `code` property, not the error body's message.
-    assert_eq!(classify_error_log_level(&error), LogLevel::Error);
+    assert_eq!(classify_error_log_level(&error), LogLevel::Warn);
 }
 
 #[test]

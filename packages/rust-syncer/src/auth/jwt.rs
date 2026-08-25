@@ -409,7 +409,18 @@ impl AuthValidator for JwtAuthValidator {
         } else {
             Err("no auth key configured".to_string())
         };
-        result.map_err(|e| ErrorBody::unauthorized(format!("JWT verification failed: {e}")))
+        // TS parity: a failed verification of a PROVIDED token maps to
+        // `AuthInvalidated`, not `Unauthorized` — `resolveAuth` (auth/auth.ts)
+        // wraps any non-ProtocolError thrown by `validateLegacyJWT` as
+        // {kind: AuthInvalidated, message: `Failed to decode auth token: ...`}.
+        // `Unauthorized` is reserved for the explicit throws (no token with
+        // previous auth, missing userID, token-type change).
+        result.map_err(|e| {
+            ErrorBody::basic(
+                crate::protocol::ErrorKind::AuthInvalidated,
+                format!("Failed to decode auth token: {e}"),
+            )
+        })
     }
 }
 
@@ -555,7 +566,30 @@ mod tests {
             .validate_auth("cg", "c", Some("user2"), Some(&t))
             .await
             .unwrap_err();
-        assert_eq!(*err.kind(), crate::protocol::ErrorKind::Unauthorized);
+        // TS `resolveAuth` wraps validateLegacyJWT throws as AuthInvalidated.
+        assert_eq!(*err.kind(), crate::protocol::ErrorKind::AuthInvalidated);
+    }
+
+    /// G36 tampered-token: a validly-issued token with a corrupted signature
+    /// must map to `AuthInvalidated` with the TS `resolveAuth` message shape
+    /// (`Failed to decode auth token: ...`, auth/auth.ts catch), NOT
+    /// `Unauthorized` — the live TS image closes with AuthInvalidated.
+    #[tokio::test]
+    async fn tampered_signature_maps_to_auth_invalidated() {
+        let v = validator("s3cret");
+        let mut t = token("s3cret", "user1");
+        t.truncate(t.len() - 2);
+        t.push_str("xx");
+        let err = v
+            .validate_auth("cg", "c", Some("user1"), Some(&t))
+            .await
+            .unwrap_err();
+        assert_eq!(*err.kind(), crate::protocol::ErrorKind::AuthInvalidated);
+        assert!(
+            err.message().starts_with("Failed to decode auth token:"),
+            "message must mirror TS resolveAuth: {:?}",
+            err.message()
+        );
     }
 
     #[tokio::test]
@@ -737,6 +771,7 @@ mod tests {
             .validate_auth("cg", "c", Some("user1"), Some(&t))
             .await
             .unwrap_err();
-        assert_eq!(*err.kind(), crate::protocol::ErrorKind::Unauthorized);
+        // Verify-path failure → AuthInvalidated (TS resolveAuth catch).
+        assert_eq!(*err.kind(), crate::protocol::ErrorKind::AuthInvalidated);
     }
 }
