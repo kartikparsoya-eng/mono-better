@@ -461,13 +461,43 @@ fn main() {
     // `initConnection` doesn't pay connect latency. Since I/O no longer runs on
     // the executor runtimes, the executor count is NOT capped by the budget —
     // `K ≈ cores` compute lanes draw from the one shared pool.
+    // Boot guard — port of TS main.ts "Insufficient cvr connections" throw:
+    // TS fails boot when `cvr.maxConns < numSyncers` (the rust path runs ONE
+    // syncer with the whole budget, main.ts, so the strict-parity bound is 1).
+    if config.cvr_max_conns < 1 {
+        panic!(
+            "Insufficient cvr connections ({}) for 1 syncer",
+            config.cvr_max_conns
+        );
+    }
     let budget = config.cvr_max_conns.max(1);
     let num_shards = config.num_shards.max(1);
+    // Rust-only observability (no TS twin: TS has one pool per worker, not a
+    // shared-pool-vs-shards ratio): a budget far below the executor fan-out
+    // guarantees acquire convoys at full load — surface the ratio at boot.
+    if budget < num_shards as u32 {
+        tracing::warn!(
+            "CVR pool budget ({budget}) is below the executor shard count \
+             ({num_shards}); cold-start convoys will queue on the pool \
+             (tune CVR_MAX_CONNS / ZERO_SYNCER_SHARDS)"
+        );
+    }
+    // Acquire timeout: TS's postgres.js has NO acquire timeout — contention
+    // QUEUES (unboundedly) and degrades to latency, never to an error. The
+    // previous 10s timeout turned a cold-start convoy into `PoolTimedOut` →
+    // fail_group → clients reconnect + cold-rehydrate → MORE pool demand — a
+    // self-amplifying storm (ART G25: 548 pool timeouts, 314 CG kills). A
+    // large-but-finite bound rides out convoys like TS while keeping wedge
+    // safety TS lacks. Env-overridable for load experiments.
+    let acquire_timeout_s: u64 = env::var("CVR_ACQUIRE_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
     let cvr_pool = runtime.block_on(async {
         let opts = || {
             sqlx::postgres::PgPoolOptions::new()
                 .max_connections(budget)
-                .acquire_timeout(std::time::Duration::from_secs(10))
+                .acquire_timeout(std::time::Duration::from_secs(acquire_timeout_s))
         };
         match opts().connect(&config.cvr_pg_uri).await {
             Ok(pool) => pool,

@@ -166,6 +166,12 @@ pub async fn serve_http(
     });
 
     let app = Router::new()
+        // Port of TS `runner/zero-dispatcher.ts` `fastify.get('/healthz', → 'OK')`:
+        // always-200 LIVENESS ("process is up"), independent of PG/replica
+        // state — a different contract from /readyz (readiness). Without it a
+        // k8s livenessProbe/LB pointed at the rust status port sees 404 and
+        // kills a healthy process (B-HEALTHZ).
+        .route("/healthz", get(|| async { "OK" }))
         .route("/readyz", get(readyz_handler))
         .route("/statz", get(statz_handler))
         .route("/metrics", get(metrics_handler))

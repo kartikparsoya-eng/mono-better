@@ -36,6 +36,10 @@ pub enum WsCommand {
     Fail(ErrorBody),
     /// Close the WebSocket (graceful).
     Close(String),
+    /// Close with an explicit RFC 6455 code (e.g. 1009 Message Too Big).
+    /// Needed because the split READ half cannot write: the reader detects
+    /// the condition and relays the close through the writer's queue.
+    CloseWithCode { code: u16, reason: String },
 }
 
 /// Shed policy for the unbounded downstream channel: the channel itself must be
@@ -125,6 +129,11 @@ impl DirectWebSocketSink {
     /// Close the connection gracefully.
     pub fn close(&self, reason: String) {
         let _ = self.send_command(WsCommand::Close(reason));
+    }
+
+    /// Close with an explicit RFC 6455 close code (see `WsCommand::CloseWithCode`).
+    pub fn close_with_code(&self, code: u16, reason: String) {
+        let _ = self.send_command(WsCommand::CloseWithCode { code, reason });
     }
 
     /// Record a slow-client shed exactly once per connection (the CG re-crosses

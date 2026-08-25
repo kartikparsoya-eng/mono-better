@@ -1213,6 +1213,25 @@ impl CVRStoreHandle {
                     last_behind = Some(e);
                     continue;
                 }
+                // Rust-only addition (no TS twin: postgres.js has no acquire
+                // timeout — pool contention QUEUES instead of erroring, see
+                // main.rs pool comment). A pool-acquire timeout here is
+                // transient back-pressure, not an invalid CVR: retry like the
+                // flush path does, instead of failing the client group into a
+                // reconnect + cold-rehydrate storm.
+                Err(CVRStoreError::Sqlx(sqlx::Error::PoolTimedOut)) => {
+                    eprintln!(
+                        "CVR load attempt {}: pool acquire timed out; retrying",
+                        attempt + 1
+                    );
+                    if attempt + 1 == MAX_LOAD_ATTEMPTS {
+                        // Exhausted on pool pressure: surface the REAL error —
+                        // must not fall through to ClientNotFound below, which
+                        // would discard the client group's identity.
+                        return Err(CVRStoreError::Sqlx(sqlx::Error::PoolTimedOut));
+                    }
+                    continue;
+                }
                 other => return other,
             }
         }

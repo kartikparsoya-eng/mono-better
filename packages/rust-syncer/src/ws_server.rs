@@ -318,13 +318,16 @@ pub async fn accept_connection_with_limit(
     // once per accepted connection — TS pairs the same way via `ws.once('close')`).
     crate::metrics::record_ws_open_delta(1, protocol_version);
 
-    // Spawn the WS reader task.
+    // Spawn the WS reader task. The sink clone lets the reader relay
+    // protocol-level rejections (oversized frame → Close 1009) through the
+    // writer, since the split read half cannot write.
     tokio::spawn(run_ws_reader(
         ws_reader,
         upstream_tx,
         params.ws_id.clone(),
         last_inbound,
         protocol_version,
+        sink.clone(),
     ));
 
     Some(ConnectionContext {
@@ -406,6 +409,15 @@ async fn run_ws_writer(
                         ))).await;
                         break;
                     }
+                    Some(WsCommand::CloseWithCode { code, reason }) => {
+                        let _ = ws_writer.send(Message::Close(Some(
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: CloseCode::from(code),
+                                reason: reason.into(),
+                            }
+                        ))).await;
+                        break;
+                    }
                     Some(WsCommand::Close(reason)) => {
                         let _ = ws_writer.send(Message::Close(Some(
                             tokio_tungstenite::tungstenite::protocol::CloseFrame {
@@ -483,6 +495,7 @@ async fn run_ws_reader(
     ws_id: String,
     last_inbound: Arc<AtomicI64>,
     protocol_version: u32,
+    sink: DirectWebSocketSink,
 ) {
     while let Some(msg_result) = ws_reader.next().await {
         // Any frame from the client — including protocol-level ping/pong —
@@ -509,6 +522,19 @@ async fn run_ws_reader(
             Ok(Message::Pong(_)) => {}
             Ok(Message::Frame(_)) => {}
             Err(e) => {
+                // TS parity: Node `ws` rejects a frame above `maxPayload` by
+                // sending Close 1009 "Max payload size exceeded" (ws
+                // receiver.js RangeError → 1009). tungstenite surfaces it as
+                // a Capacity error on the READ half, which cannot write —
+                // relay the 1009 close through the writer's queue so the
+                // client sees the same close code as TS, not an abnormal
+                // 1006 teardown.
+                if matches!(e, WebSocketError::Capacity(_)) {
+                    tracing::warn!("WebSocket {ws_id} frame over max payload: {e}");
+                    crate::metrics::record_websocket_error("error_event", protocol_version);
+                    sink.close_with_code(1009, "Max payload size exceeded".to_string());
+                    break;
+                }
                 // Abrupt tab closes, mobile-network changes, and the client's
                 // intentional reconnect path commonly end without an RFC 6455
                 // close handshake. Node's `ws` reports these as ordinary
@@ -655,5 +681,76 @@ mod tests {
         assert!(!is_expected_disconnect(&WebSocketError::Protocol(
             ProtocolError::InvalidOpcode(3),
         )));
+    }
+
+    /// G36 oversized-payload: a frame above the payload cap must close with
+    /// RFC 6455 code 1009 "Max payload size exceeded" — Node `ws` behavior
+    /// (receiver RangeError → 1009), which TS zero-cache inherits via
+    /// `maxPayload`. Before the fix the reader just dropped the transport and
+    /// clients observed an abnormal 1006 with no close frame.
+    #[tokio::test]
+    async fn oversized_frame_closes_with_1009_like_node_ws() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+                max_message_size: Some(1024),
+                ..Default::default()
+            };
+            let ws = tokio_tungstenite::accept_async_with_config(stream, Some(cfg))
+                .await
+                .unwrap();
+            let (w, r) = ws.split();
+            let (tx, rx) = mpsc::unbounded_channel::<WsCommand>();
+            let (kill_tx, kill_rx) = watch::channel(false);
+            let limits = Arc::new(SinkLimits {
+                depth: Arc::new(AtomicI64::new(0)),
+                hwm: 1_000_000,
+                bytes: Arc::new(AtomicI64::new(0)),
+                byte_hwm: i64::MAX,
+                kill: kill_tx,
+                shed_counted: std::sync::atomic::AtomicBool::new(false),
+            });
+            let sink = DirectWebSocketSink::with_limits(tx, limits.clone());
+            let (up_tx, up_rx) = mpsc::channel::<String>(16);
+            let last = Arc::new(AtomicI64::new(now_epoch_ms()));
+            tokio::spawn(run_ws_writer(w, rx, limits, kill_rx, last.clone()));
+            run_ws_reader(r, up_tx, "test-ws".into(), last, PROTOCOL_VERSION, sink).await;
+            drop(up_rx);
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
+            .await
+            .unwrap();
+        ws.send(Message::Text("x".repeat(4096).into()))
+            .await
+            .unwrap();
+
+        let mut close_code = None;
+        let deadline = tokio::time::sleep(Duration::from_secs(5));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                m = ws.next() => match m {
+                    Some(Ok(Message::Close(Some(cf)))) => {
+                        close_code = Some(u16::from(cf.code));
+                        break;
+                    }
+                    Some(Ok(_)) => {}
+                    _ => break, // closed without a close frame (the old bug)
+                }
+            }
+        }
+        assert_eq!(
+            close_code,
+            Some(1009),
+            "oversized frame must close 1009 like Node ws, got {close_code:?}"
+        );
+        server.abort();
     }
 }
