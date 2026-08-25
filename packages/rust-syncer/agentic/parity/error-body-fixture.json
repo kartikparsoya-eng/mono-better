@@ -1,0 +1,29 @@
+[
+  {
+    "variant": "InvalidConnectionRequest",
+    "message": "No validated connection is available for shared query work.",
+    "body": {
+      "kind": "InvalidConnectionRequest",
+      "message": "No validated connection is available for shared query work.",
+      "origin": "zeroCache"
+    }
+  },
+  {
+    "variant": "Unauthorized",
+    "message": "Connection userID does not match validated server userID.",
+    "body": {
+      "kind": "Unauthorized",
+      "message": "Connection userID does not match validated server userID.",
+      "origin": "zeroCache"
+    }
+  },
+  {
+    "variant": "AuthInvalidated",
+    "message": "Failed to decode auth token: bad",
+    "body": {
+      "kind": "AuthInvalidated",
+      "message": "Failed to decode auth token: bad",
+      "origin": "zeroCache"
+    }
+  }
+]

@@ -94,9 +94,6 @@ CFG = {
                 "the wrapper reads DashMap state, no un-pinned math",
             "row_set_signature": "delegates to `rust_ivm engine.row_set_signature` (covered by the "
                 "rust-ivm oracle); the persisted value is asserted by `stage_e_test`",
-            "to_error_body": "pure CCMError→wire-`ErrorBody` mapping; the wire shapes are pinned by "
-                "`protocol_test` and the mapping is exercised by the phase2 error-path tests — no "
-                "single TS `toErrorBody` fn to differentiate against",
         },
     },
 }

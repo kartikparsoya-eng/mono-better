@@ -915,3 +915,36 @@ fn compare_preferred_validated_connection(
 
 // Fix the pick_token function for the "new token is older or same" case
 // (the inline code above was overly complex — simplifying here)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Layer-2 body-differential: `CCMError::to_error_body` must serialize to the
+    /// exact wire error body TS emits for each kind (built from the real
+    /// zero-protocol `ErrorKind`/`ErrorOrigin` enums in
+    /// `generate-error-body-fixture.mjs`) — pinning the kind string, the
+    /// `origin: "zeroCache"` value, and the flat `{kind,message,origin}` shape.
+    #[test]
+    fn to_error_body_parity_against_ts() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/agentic/parity/error-body-fixture.json"
+        );
+        let bytes = std::fs::read(path).expect("read error-body-fixture.json");
+        let cases: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("fixture is valid JSON");
+        for case in cases.as_array().expect("fixture is an array") {
+            let variant = case["variant"].as_str().expect("variant");
+            let message = case["message"].as_str().expect("message").to_string();
+            let err = match variant {
+                "InvalidConnectionRequest" => CCMError::InvalidConnectionRequest(message),
+                "Unauthorized" => CCMError::Unauthorized(message),
+                "AuthInvalidated" => CCMError::AuthInvalidated(message),
+                other => panic!("unknown CCMError variant in fixture: {other}"),
+            };
+            let got = serde_json::to_value(err.to_error_body()).expect("serialize");
+            assert_eq!(got, case["body"], "to_error_body mismatch for {variant}");
+        }
+    }
+}

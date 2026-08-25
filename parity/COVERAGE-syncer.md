@@ -2,24 +2,23 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **455** · ✅ COVERED **398** · 🟥 GAP (pure, untested) **0** · ⚙️ IO (integration diff) **41** · ◻️ infra/metrics **11** · ◻️ documented n/a **5**
-- Body-differential coverage of the **unit-testable pure surface**: **398/398 = 100%**
+- Rust fns total **455** · ✅ COVERED **399** · 🟥 GAP (pure, untested) **0** · ⚙️ IO (integration diff) **41** · ◻️ infra/metrics **11** · ◻️ documented n/a **4**
+- Body-differential coverage of the **unit-testable pure surface**: **399/399 = 100%**
 
 ## 🟥 GAP — pure & deterministic, NO differential fixture (build these) — 0
 
 _none_
 
-## ◻️ NON-DIFFERENTIABLE — documented n/a (no un-pinned body) — 5
+## ◻️ NON-DIFFERENTIABLE — documented n/a (no un-pinned body) — 4
 
 | fn | file | why not a body-differential |
 |---|---|---|
 | `compute_serving_lag_distribution` | workers/syncer.rs | gathers live registry snapshots then calls the already-pinned `compute_serving_lag_distribution_ms` (serving_lag_parity_against_ts); the wrapper reads DashMap state, no un-pinned math |
 | `row_set_signature` | services/view_syncer/pipeline_driver.rs | delegates to `rust_ivm engine.row_set_signature` (covered by the rust-ivm oracle); the persisted value is asserted by `stage_e_test` |
-| `to_error_body` | services/view_syncer/connection_context_manager.rs | pure CCMError→wire-`ErrorBody` mapping; the wire shapes are pinned by `protocol_test` and the mapping is exercised by the phase2 error-path tests — no single TS `toErrorBody` fn to differentiate against |
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 398
+## ✅ COVERED — body pinned to TS fixture — 399
 
 | fn | file | signature |
 |---|---|---|
@@ -279,6 +278,7 @@ _none_
 | `set_background_connection` | services/view_syncer/connection_context_manager.rs | `fn set_background_connection(&mut self, bg: Option<ConnectionSelector>) {` |
 | `set_shared_retransform_ready` | services/view_syncer/connection_context_manager.rs | `pub fn set_shared_retransform_ready(&mut self, ready: bool) {` |
 | `store_connection` | services/view_syncer/connection_context_manager.rs | `fn store_connection(&mut self, connection: ConnectionContext) -> ConnectionContext {` |
+| `to_error_body` | services/view_syncer/connection_context_manager.rs | `pub fn to_error_body(&self) -> ErrorBody {` |
 | `update_background_retransform_deadline` | services/view_syncer/connection_context_manager.rs | `fn update_background_retransform_deadline(&mut self, reset: bool) {` |
 | `validate_connection` | services/view_syncer/connection_context_manager.rs | `pub fn validate_connection(` |
 | `drain_next_in` | services/view_syncer/drain_coordinator.rs | `pub fn drain_next_in(&self, interval_ms: u64) {` |
