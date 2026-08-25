@@ -1,6 +1,6 @@
 # rust-cvr — Layer-2 (body-differential) coverage
 
-_Which Rust fns have their BODY pinned to TS output. COVERED = reachable from a differential harness (parity_check.rs + the flush/inspect/catchup PG differentials + the sequence fuzzer via seq_replay.rs), taking the transitive closure over the crate call graph. Reachability ≠ every-branch-exercised, but the harnesses drive the real API over real-TS goldens with 150+ fuzzed programs + property tests._
+_COVERED = reachable (transitive closure over the crate call graph) from a differential harness: parity_check.rs + the flush/inspect/catchup PG differentials + the sequence fuzzer (seq_replay.rs), which drive the real API against real-TS goldens with 150+ fuzzed programs + property tests. Reachability ≠ every-branch-exercised, but it is a tight proxy._
 
 - Rust fns total **186** · ✅ COVERED **162** · 🟥 GAP (pure, untested) **0** · ⚙️ IO (integration diff) **13** · ◻️ infra/metrics **4** · ◻️ documented n/a **7**
 - Body-differential coverage of the **unit-testable pure surface**: **162/162 = 100%**
@@ -188,7 +188,7 @@ _none_
 | `parse_ttl` | ttl.rs | `pub fn parse_ttl(ttl: TTL) -> i64 {` |
 | `parse_ttl_string` | ttl.rs | `pub fn parse_ttl_string(s: &str) -> TTL {` |
 
-## ⚙️ IO — async/DB/actor, use the ART mirror not a unit fixture — 13
+## ⚙️ IO — async/DB/actor/transport, use the integration diff — 13
 
 | fn | file | signature |
 |---|---|---|
