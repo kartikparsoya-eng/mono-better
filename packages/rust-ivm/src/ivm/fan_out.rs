@@ -73,9 +73,12 @@ impl Output for FanOut {
         for output in &outputs {
             output.borrow_mut().push(change.clone(), self);
         }
+        // TS fan-out.ts:78 `must(this.#fanIn, 'fan-out must have a corresponding
+        // fan-in set!')` — a fan-out without its fan-in is a graph-construction
+        // invariant violation, not a silently-skippable state. Panic (contained
+        // per-CG by pipeline_driver.rs catch_unwind → pipeline reset), matching TS.
         let fan_in = self.fan_in.borrow().clone();
-        if let Some(ref fan_in) = fan_in {
-            fan_in.borrow_mut().fan_out_done_pushing(change_type, self);
-        }
+        let fan_in = fan_in.expect("fan-out must have a corresponding fan-in set!");
+        fan_in.borrow_mut().fan_out_done_pushing(change_type, self);
     }
 }

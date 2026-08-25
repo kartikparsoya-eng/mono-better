@@ -354,6 +354,20 @@ impl Output for CapOutput {
                     _ => unreachable!(),
                 };
 
+                // TS cap.ts:262 `assert(!partitionKeyComparator ||
+                // partitionKeyComparator(old, new) === 0, 'Unexpected change of
+                // partition key')` — a partition-key-changing edit is an invariant
+                // violation (the source splits such edits into add/remove). Panic
+                // (contained per-CG by catch_unwind → pipeline reset), matching TS.
+                if let Some(pk_cols) = &cap.partition_key {
+                    assert!(
+                        pk_cols
+                            .iter()
+                            .all(|c| old_node.row.get(c) == node.row.get(c)),
+                        "Unexpected change of partition key"
+                    );
+                }
+
                 let state_key = cap.get_take_state_key(Some(&old_node.row), None);
                 let cap_state = cap.storage.borrow().get(&state_key).cloned();
 

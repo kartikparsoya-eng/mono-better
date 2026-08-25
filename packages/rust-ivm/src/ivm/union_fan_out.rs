@@ -102,17 +102,21 @@ impl UnionFanOut {
     fn push_internal(&self, change: Change, _pusher: &dyn InputBase) {
         crate::ivm::trace::recv("union_fan_out#1", &change);
         let change_type = change.change_type();
-        let fan_in = self.fan_in.borrow().clone();
-        if let Some(ref fan_in) = fan_in {
-            fan_in.borrow().fan_out_started_pushing();
-        }
+        // TS union-fan-out.ts uses `must(this.#unionFanIn)` for BOTH the
+        // started- and done-pushing signals — a union-fan-out without its
+        // union-fan-in is a graph-construction invariant violation, not a
+        // silently-skippable state. Panic (contained per-CG), matching TS.
+        let fan_in = self
+            .fan_in
+            .borrow()
+            .clone()
+            .expect("union-fan-out must have a corresponding union-fan-in set!");
+        fan_in.borrow().fan_out_started_pushing();
         let outputs: Vec<OutputHandle> = self.outputs.borrow().clone();
         for output in &outputs {
             output.borrow_mut().push(change.clone(), self);
         }
-        if let Some(ref fan_in) = fan_in {
-            fan_in.borrow().fan_out_done_pushing(change_type, self);
-        }
+        fan_in.borrow().fan_out_done_pushing(change_type, self);
     }
 }
 

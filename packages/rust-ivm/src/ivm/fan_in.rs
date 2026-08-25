@@ -52,6 +52,16 @@ impl FanIn {
         fan_out_change_type: ChangeType,
         pusher: &dyn InputBase,
     ) {
+        // TS fan-in.ts:77 — with no inputs the fan-in must not have received any
+        // pushes; a non-empty accumulator here is an invariant violation.
+        if self.inputs.is_empty() {
+            assert!(
+                self.accumulated_pushes.is_empty(),
+                "If there are no inputs then fan-in should not receive any pushes."
+            );
+            return;
+        }
+
         let output = self.output.borrow().clone();
         if let Some(output) = output {
             push_accumulated_changes(
