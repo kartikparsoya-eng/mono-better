@@ -533,6 +533,32 @@ async fn run_ws_reader(
                     tracing::warn!("WebSocket {ws_id} frame over max payload: {e}");
                     crate::metrics::record_websocket_error("error_event", protocol_version);
                     sink.close_with_code(1009, "Max payload size exceeded".to_string());
+                    // Node parity, part 2: `ws` keeps CONSUMING the socket
+                    // while it awaits the close handshake (closeTimeout), so
+                    // a client caught mid-upload can finish writing and then
+                    // read the 1009 close. Dropping the read half right away
+                    // RSTs the still-writing client and it observes 1006 with
+                    // the close frame discarded (seen live with a 12MB frame;
+                    // a small frame fits in kernel buffers and masks this).
+                    // Drain-and-discard until the peer closes or a bounded
+                    // grace period expires. Parse errors while draining are
+                    // EXPECTED: the oversized frame's payload was never
+                    // consumed, so the parser sees garbage "headers".
+                    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                        while let Some(res) = ws_reader.next().await {
+                            match res {
+                                Ok(Message::Close(_)) => break,
+                                Ok(_) => {}
+                                Err(
+                                    WebSocketError::ConnectionClosed
+                                    | WebSocketError::AlreadyClosed
+                                    | WebSocketError::Io(_),
+                                ) => break,
+                                Err(_) => {}
+                            }
+                        }
+                    })
+                    .await;
                     break;
                 }
                 // Abrupt tab closes, mobile-network changes, and the client's
@@ -726,9 +752,15 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
             .await
             .unwrap();
-        ws.send(Message::Text("x".repeat(4096).into()))
-            .await
-            .unwrap();
+        // This pins the 1009 RELAY (revert-proven). The reader-side
+        // drain-during-close (Node closeTimeout parity) cannot be pinned on
+        // loopback — buffering absorbs even 32MB so the client never blocks
+        // mid-write; its regression net is the live xyne-art G36
+        // oversized-payload case (12MB through the real network stack),
+        // which produced closed:1006 before the drain and 1009 after.
+        let _ = ws
+            .send(Message::Text("x".repeat(32 * 1024 * 1024).into()))
+            .await;
 
         let mut close_code = None;
         let deadline = tokio::time::sleep(Duration::from_secs(5));
