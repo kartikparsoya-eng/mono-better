@@ -83,6 +83,20 @@ Anything not listed here and not STALE/WRONG must match TS.
   clients always send init immediately, so the orderings are indistinguishable
   in practice; the xyne-art G36 harness tolerates both (open_side send guard).
 
+## D-10 · Push-ack latency +~20ms (Option-A relay hop)
+
+- **TS**: a custom-mutation push is fetched ONCE from the syncer's pusher to
+  the app's mutate endpoint (services/mutagen/pusher.ts → custom/fetch.ts).
+- **Rust**: pushes deliberately relay through a TS loopback endpoint
+  (push_relay.rs → server/rust-push-relay.ts → second fetch to the app) so
+  ZERO mutation logic lives in rust (the Option-A write-path design). The
+  extra loopback POST + body rebuild adds ~20ms to the steady-state push
+  ack (G42 `push`: rust ~66ms vs TS ~43ms p50; commit→ack legs identical).
+- **Gate treatment**: G42 gives the `push` class caps of 2.0×/3.0× (vs the
+  default 1.5×/2.0×) citing this entry; the number still prints every run.
+  The once-per-CG `push_first` cost is NOT part of this exception — it is
+  tracked as an open item (task #127), not a design cost.
+
 ## Minor notes (log/observability-only, not behavior)
 
 - **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.
