@@ -67,6 +67,8 @@ opentelemetry-otlp = { version = "0.32.0", default-features = false, features = 
   # needs.
   "reqwest-blocking-client",
 ] }
+urlpattern = "0.6"
+regex = "1.13.1"
 
 [build-dependencies]
 cc = "1"

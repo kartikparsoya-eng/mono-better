@@ -37,6 +37,21 @@ const PAIRS = [
   ['http://localhost:8080/query', 'http://localhost:9090/query'],
   ['https://api.example.com/query', 'https://api.example.com/query#frag'],
   ['https://api.example.com/*/items', 'https://api.example.com/tenant/items'],
+  // --- adversarial: component-boundary crossing (F-FETCH-1) ---
+  // Multi-level subdomain: URLPattern `*` crosses `.` within the host component
+  // (so this MATCHES — the F-FETCH-1 claim that it wouldn't is wrong).
+  ['https://*.example.com/*', 'https://api.v1.example.com/x'],
+  ['https://*.example.com/query', 'https://a.b.c.example.com/query'],
+  // Host/path boundary: `*` must NOT cross `://` or the host→path `/`. A flat
+  // glob would let `evil.com/…` satisfy `*.example.com` via the PATH — a real
+  // allowlist bypass URLPattern rejects (host is `evil.com`).
+  ['https://*.example.com/query', 'https://evil.com/api.example.com/query'],
+  ['https://api.example.com/*', 'https://evil.com/api.example.com/x'],
+  ['https://api.example.com/query', 'https://evil.com/https://api.example.com/query'],
+  // Scheme boundary: `*` in host must not swallow a different scheme.
+  ['https://*.example.com/query', 'http://api.example.com/query'],
+  // Host `*` must not cross into port/path.
+  ['https://*.example.com/query', 'https://api.example.com:9999/query'],
 ];
 
 const cases = PAIRS.map(([pattern, url]) => {

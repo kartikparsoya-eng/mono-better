@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use rust_cvr::shards::ShardID;
 use serde_json::Value;
+use urlpattern::{UrlPattern, UrlPatternInit, UrlPatternMatchInput, UrlPatternOptions};
 
 use crate::auth::read_authorizer::hash_of_ast;
 
@@ -112,48 +113,35 @@ impl CustomQueryContext {
     }
 }
 
-/// URLPattern-style match of `url` against `pattern` (TS `urlMatch` /
-/// `compileUrlPattern`). Supported subset: literal URLs, `*` (any characters)
-/// and `:name` path params (one non-`/` segment). The candidate's query string
-/// and fragment are ignored, matching URLPattern's implicit `search`/`hash`
-/// wildcards. Unsupported URLPattern syntax simply fails to match (the
-/// conservative direction).
+/// WHATWG URLPattern match of `url` against `pattern` (TS `urlMatch` /
+/// `compileUrlPattern`), backed by the `urlpattern` crate for true parity with
+/// TS's `urlpattern-polyfill` — full component-aware matching (protocol / host /
+/// port / path), not a flat glob.
 pub fn url_match(pattern: &str, url: &str) -> bool {
-    let candidate = url.split(['?', '#']).next().unwrap_or(url);
-    let pattern = pattern.split(['?', '#']).next().unwrap_or(pattern);
-    glob_match(pattern.as_bytes(), candidate.as_bytes())
-}
-
-fn glob_match(p: &[u8], t: &[u8]) -> bool {
-    match p.first() {
-        None => t.is_empty(),
-        Some(b'*') => (0..=t.len()).any(|i| glob_match(&p[1..], &t[i..])),
-        // `:name` — a named path segment (starts with a letter/underscore, so a
-        // port `:8080` or the `://` in a scheme stays literal). Matches one or
-        // more non-`/` characters.
-        Some(b':') if p.len() > 1 && (p[1].is_ascii_alphabetic() || p[1] == b'_') => {
-            let mut name_end = 1;
-            while name_end < p.len() && (p[name_end].is_ascii_alphanumeric() || p[name_end] == b'_')
-            {
-                name_end += 1;
-            }
-            let rest = &p[name_end..];
-            if t.is_empty() || t[0] == b'/' {
-                return false;
-            }
-            let mut consumed = 1;
-            loop {
-                if glob_match(rest, &t[consumed..]) {
-                    return true;
-                }
-                if consumed == t.len() || t[consumed] == b'/' {
-                    return false;
-                }
-                consumed += 1;
-            }
-        }
-        Some(&c) => t.first() == Some(&c) && glob_match(&p[1..], &t[1..]),
-    }
+    // Port of TS `urlMatch(url, [compileUrlPattern(pattern)])` (custom/fetch.ts):
+    // compile the pattern as a WHATWG URLPattern and `.test(url)`. Backed by the
+    // `urlpattern` crate — the same spec as TS's `urlpattern-polyfill` — so `*`
+    // matches WITHIN a component (crosses `.` in the host, `/` in the path) but
+    // NEVER across component boundaries (scheme / host / port / path). The old
+    // flat glob let `*` cross the host→path boundary, so an attacker host
+    // `https://evil.com/x.example.com/q` matched `https://*.example.com/q` — an
+    // allowlist bypass (F-FETCH-1). Unspecified pattern components default to `*`
+    // (constructor-string parsing), so query/hash are ignored exactly like TS.
+    //
+    // A pattern that fails to compile (TS throws at config time via
+    // `compileUrlPattern`) or a URL that fails to parse → no match (fail-closed).
+    let Ok(init) = UrlPatternInit::parse_constructor_string::<regex::Regex>(pattern, None) else {
+        return false;
+    };
+    let Ok(compiled) = UrlPattern::<regex::Regex>::parse(init, UrlPatternOptions::default()) else {
+        return false;
+    };
+    let Ok(target) = ::url::Url::parse(url) else {
+        return false;
+    };
+    compiled
+        .test(UrlPatternMatchInput::Url(target))
+        .unwrap_or(false)
 }
 
 /// One named query to transform.
@@ -311,8 +299,12 @@ pub async fn validate_custom_queries(
 /// Used by the auth-maintenance revocation probe to decide invalidate (auth
 /// error → close) vs defer (transient/API-down → keep + retry).
 pub fn is_auth_error_body(body: &Value) -> bool {
-    let is_auth_status =
-        |body: &Value| matches!(body.get("status").and_then(Value::as_u64), Some(401) | Some(403));
+    let is_auth_status = |body: &Value| {
+        matches!(
+            body.get("status").and_then(Value::as_u64),
+            Some(401) | Some(403)
+        )
+    };
 
     if body.get("error").and_then(Value::as_str) == Some("http") {
         return is_auth_status(body);
@@ -622,7 +614,8 @@ mod tests {
         assert_eq!(extract_transform_queries(&modern).unwrap().len(), 1);
         // Legacy `["transformed", [...]]` tuple → client-fallback (F-TQ-7). Fails
         // on the pre-fix code, which only read `queries` → this arm went to Err.
-        let legacy = serde_json::json!(["transformed", [{"id": "a", "ast": {}}, {"id": "b", "ast": {}}]]);
+        let legacy =
+            serde_json::json!(["transformed", [{"id": "a", "ast": {}}, {"id": "b", "ast": {}}]]);
         assert_eq!(extract_transform_queries(&legacy).unwrap().len(), 2);
         // A `TransformFailed` body (or any other shape) → None (whole-batch fail).
         let failed = serde_json::json!({"kind": "TransformFailed", "message": "boom"});
@@ -683,7 +676,9 @@ mod tests {
             &serde_json::json!({"error": "http", "status": 500})
         ));
         // {kind: AuthInvalidated|Unauthorized} → auth
-        assert!(is_auth_error_body(&serde_json::json!({"kind": "Unauthorized"})));
+        assert!(is_auth_error_body(
+            &serde_json::json!({"kind": "Unauthorized"})
+        ));
         assert!(is_auth_error_body(
             &serde_json::json!({"kind": "AuthInvalidated"})
         ));

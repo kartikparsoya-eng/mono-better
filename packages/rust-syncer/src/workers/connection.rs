@@ -327,8 +327,8 @@ const TRANSIENT_SOCKET_ERROR_CODES: [&str; 3] = ["epipe", "econnreset", "ecancel
 /// codes above (TS reads them off a thrown object; see `has_transient_socket_code`).
 const TRANSIENT_SOCKET_MESSAGE_PATTERNS: [&str; 4] = [
     "socket was closed while data was being compressed",
-    "connection reset",   // std::io::ErrorKind::ConnectionReset Display (ECONNRESET)
-    "broken pipe",        // std::io::ErrorKind::BrokenPipe Display (EPIPE)
+    "connection reset", // std::io::ErrorKind::ConnectionReset Display (ECONNRESET)
+    "broken pipe",      // std::io::ErrorKind::BrokenPipe Display (EPIPE)
     "operation canceled", // std::io Display (ECANCELED)
 ];
 

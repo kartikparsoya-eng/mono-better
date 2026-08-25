@@ -84,6 +84,41 @@
       "pattern": "https://api.example.com/*/items",
       "url": "https://api.example.com/tenant/items",
       "matched": true
+    },
+    {
+      "pattern": "https://*.example.com/*",
+      "url": "https://api.v1.example.com/x",
+      "matched": true
+    },
+    {
+      "pattern": "https://*.example.com/query",
+      "url": "https://a.b.c.example.com/query",
+      "matched": true
+    },
+    {
+      "pattern": "https://*.example.com/query",
+      "url": "https://evil.com/api.example.com/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://api.example.com/*",
+      "url": "https://evil.com/api.example.com/x",
+      "matched": false
+    },
+    {
+      "pattern": "https://api.example.com/query",
+      "url": "https://evil.com/https://api.example.com/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://*.example.com/query",
+      "url": "http://api.example.com/query",
+      "matched": false
+    },
+    {
+      "pattern": "https://*.example.com/query",
+      "url": "https://api.example.com:9999/query",
+      "matched": false
     }
   ]
 }
