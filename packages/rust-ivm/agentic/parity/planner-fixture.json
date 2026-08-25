@@ -1,0 +1,930 @@
+{
+  "scenarios": [
+    {
+      "name": "single-exists-semi-wins",
+      "tables": {
+        "issue": {
+          "rows": 50
+        },
+        "comments": {
+          "rows": 10000,
+          "constrainedDefault": 2
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          }
+        }
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          },
+          "flip": false
+        }
+      }
+    },
+    {
+      "name": "single-exists-flipped-wins",
+      "tables": {
+        "issue": {
+          "rows": 100000,
+          "constrainedDefault": 1
+        },
+        "comments": {
+          "rows": 5,
+          "constrainedDefault": 5
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          }
+        }
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          },
+          "flip": true
+        }
+      }
+    },
+    {
+      "name": "chunk-boundary-sensitive",
+      "tables": {
+        "issue": {
+          "rows": 500,
+          "constrainedDefault": 1,
+          "startup": 200
+        },
+        "comments": {
+          "rows": 600,
+          "constrainedDefault": 5,
+          "startup": 1
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          }
+        }
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          },
+          "flip": false
+        }
+      }
+    },
+    {
+      "name": "not-exists-unflippable",
+      "tables": {
+        "issue": {
+          "rows": 100000,
+          "constrainedDefault": 1
+        },
+        "comments": {
+          "rows": 5
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "NOT EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          }
+        }
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "NOT EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          },
+          "flip": false
+        }
+      }
+    },
+    {
+      "name": "or-two-exists-fanin",
+      "tables": {
+        "issue": {
+          "rows": 2000,
+          "filtered": 100,
+          "constrainedDefault": 1
+        },
+        "comments": {
+          "rows": 30,
+          "filtered": 6,
+          "constrainedDefault": 4,
+          "fanout": 8
+        },
+        "labels": {
+          "rows": 2000,
+          "filtered": 100,
+          "constrainedDefault": 2,
+          "fanout": 1
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "limit": 10,
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "simple",
+              "op": "=",
+              "left": {
+                "type": "column",
+                "name": "flag"
+              },
+              "right": {
+                "type": "literal",
+                "value": 1
+              }
+            },
+            {
+              "type": "or",
+              "conditions": [
+                {
+                  "type": "correlatedSubquery",
+                  "op": "EXISTS",
+                  "related": {
+                    "correlation": {
+                      "parentField": [
+                        "id"
+                      ],
+                      "childField": [
+                        "issueID"
+                      ]
+                    },
+                    "subquery": {
+                      "table": "comments",
+                      "alias": "zsubq_comments",
+                      "orderBy": [
+                        [
+                          "id",
+                          "asc"
+                        ]
+                      ],
+                      "where": {
+                        "type": "simple",
+                        "op": "=",
+                        "left": {
+                          "type": "column",
+                          "name": "flag"
+                        },
+                        "right": {
+                          "type": "literal",
+                          "value": 1
+                        }
+                      },
+                      "limit": 3
+                    },
+                    "system": "client"
+                  }
+                },
+                {
+                  "type": "correlatedSubquery",
+                  "op": "EXISTS",
+                  "related": {
+                    "correlation": {
+                      "parentField": [
+                        "id"
+                      ],
+                      "childField": [
+                        "issueID"
+                      ]
+                    },
+                    "subquery": {
+                      "table": "labels",
+                      "alias": "zsubq_labels",
+                      "orderBy": [
+                        [
+                          "id",
+                          "asc"
+                        ]
+                      ],
+                      "where": {
+                        "type": "simple",
+                        "op": "=",
+                        "left": {
+                          "type": "column",
+                          "name": "flag"
+                        },
+                        "right": {
+                          "type": "literal",
+                          "value": 1
+                        }
+                      },
+                      "limit": 7
+                    },
+                    "system": "client"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "limit": 10,
+        "where": {
+          "type": "and",
+          "conditions": [
+            {
+              "type": "simple",
+              "op": "=",
+              "left": {
+                "type": "column",
+                "name": "flag"
+              },
+              "right": {
+                "type": "literal",
+                "value": 1
+              }
+            },
+            {
+              "type": "or",
+              "conditions": [
+                {
+                  "type": "correlatedSubquery",
+                  "op": "EXISTS",
+                  "related": {
+                    "correlation": {
+                      "parentField": [
+                        "id"
+                      ],
+                      "childField": [
+                        "issueID"
+                      ]
+                    },
+                    "subquery": {
+                      "table": "comments",
+                      "alias": "zsubq_comments",
+                      "orderBy": [
+                        [
+                          "id",
+                          "asc"
+                        ]
+                      ],
+                      "where": {
+                        "type": "simple",
+                        "op": "=",
+                        "left": {
+                          "type": "column",
+                          "name": "flag"
+                        },
+                        "right": {
+                          "type": "literal",
+                          "value": 1
+                        }
+                      },
+                      "limit": 3
+                    },
+                    "system": "client"
+                  },
+                  "flip": false
+                },
+                {
+                  "type": "correlatedSubquery",
+                  "op": "EXISTS",
+                  "related": {
+                    "correlation": {
+                      "parentField": [
+                        "id"
+                      ],
+                      "childField": [
+                        "issueID"
+                      ]
+                    },
+                    "subquery": {
+                      "table": "labels",
+                      "alias": "zsubq_labels",
+                      "orderBy": [
+                        [
+                          "id",
+                          "asc"
+                        ]
+                      ],
+                      "where": {
+                        "type": "simple",
+                        "op": "=",
+                        "left": {
+                          "type": "column",
+                          "name": "flag"
+                        },
+                        "right": {
+                          "type": "literal",
+                          "value": 1
+                        }
+                      },
+                      "limit": 7
+                    },
+                    "system": "client"
+                  },
+                  "flip": false
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "nested-exists",
+      "tables": {
+        "issue": {
+          "rows": 2000,
+          "constrainedDefault": 1
+        },
+        "comments": {
+          "rows": 50,
+          "constrainedDefault": 3
+        },
+        "reactions": {
+          "rows": 10,
+          "constrainedDefault": 2
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "correlatedSubquery",
+                "op": "EXISTS",
+                "related": {
+                  "correlation": {
+                    "parentField": [
+                      "id"
+                    ],
+                    "childField": [
+                      "commentID"
+                    ]
+                  },
+                  "subquery": {
+                    "table": "reactions",
+                    "alias": "zsubq_reactions",
+                    "orderBy": [
+                      [
+                        "id",
+                        "asc"
+                      ]
+                    ]
+                  },
+                  "system": "client"
+                }
+              }
+            },
+            "system": "client"
+          }
+        }
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "zsubq_comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "correlatedSubquery",
+                "op": "EXISTS",
+                "related": {
+                  "correlation": {
+                    "parentField": [
+                      "id"
+                    ],
+                    "childField": [
+                      "commentID"
+                    ]
+                  },
+                  "subquery": {
+                    "table": "reactions",
+                    "alias": "zsubq_reactions",
+                    "orderBy": [
+                      [
+                        "id",
+                        "asc"
+                      ]
+                    ]
+                  },
+                  "system": "client"
+                },
+                "flip": true
+              }
+            },
+            "system": "client"
+          },
+          "flip": true
+        }
+      }
+    },
+    {
+      "name": "multi-col-correlation-pairing",
+      "tables": {
+        "issue": {
+          "rows": 3000,
+          "constrainedDefault": 5000,
+          "constrained": {
+            "b,a": 1
+          }
+        },
+        "links": {
+          "rows": 4000,
+          "constrainedDefault": 2
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "b",
+                "a"
+              ],
+              "childField": [
+                "y",
+                "x"
+              ]
+            },
+            "subquery": {
+              "table": "links",
+              "alias": "zsubq_links",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          }
+        }
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "where": {
+          "type": "correlatedSubquery",
+          "op": "EXISTS",
+          "related": {
+            "correlation": {
+              "parentField": [
+                "b",
+                "a"
+              ],
+              "childField": [
+                "y",
+                "x"
+              ]
+            },
+            "subquery": {
+              "table": "links",
+              "alias": "zsubq_links",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ]
+            },
+            "system": "client"
+          },
+          "flip": true
+        }
+      }
+    },
+    {
+      "name": "related-subquery-recursion",
+      "tables": {
+        "issue": {
+          "rows": 300,
+          "constrainedDefault": 1
+        },
+        "comments": {
+          "rows": 40000,
+          "constrainedDefault": 2
+        },
+        "reactions": {
+          "rows": 12,
+          "constrainedDefault": 6
+        }
+      },
+      "ast": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "related": [
+          {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "correlatedSubquery",
+                "op": "EXISTS",
+                "related": {
+                  "correlation": {
+                    "parentField": [
+                      "id"
+                    ],
+                    "childField": [
+                      "commentID"
+                    ]
+                  },
+                  "subquery": {
+                    "table": "reactions",
+                    "alias": "zsubq_reactions",
+                    "orderBy": [
+                      [
+                        "id",
+                        "asc"
+                      ]
+                    ]
+                  },
+                  "system": "client"
+                }
+              }
+            },
+            "system": "client"
+          }
+        ]
+      },
+      "plannedAst": {
+        "table": "issue",
+        "orderBy": [
+          [
+            "id",
+            "asc"
+          ]
+        ],
+        "related": [
+          {
+            "correlation": {
+              "parentField": [
+                "id"
+              ],
+              "childField": [
+                "issueID"
+              ]
+            },
+            "subquery": {
+              "table": "comments",
+              "alias": "comments",
+              "orderBy": [
+                [
+                  "id",
+                  "asc"
+                ]
+              ],
+              "where": {
+                "type": "correlatedSubquery",
+                "op": "EXISTS",
+                "related": {
+                  "correlation": {
+                    "parentField": [
+                      "id"
+                    ],
+                    "childField": [
+                      "commentID"
+                    ]
+                  },
+                  "subquery": {
+                    "table": "reactions",
+                    "alias": "zsubq_reactions",
+                    "orderBy": [
+                      [
+                        "id",
+                        "asc"
+                      ]
+                    ]
+                  },
+                  "system": "client"
+                },
+                "flip": false
+              }
+            },
+            "system": "client"
+          }
+        ]
+      }
+    }
+  ]
+}
