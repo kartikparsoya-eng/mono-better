@@ -160,7 +160,12 @@ fn cvr_flush_roundtrip_bench() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(&EMPTY_CVR_VERSION, &cvr, 0.0)
+            .flush(
+                &EMPTY_CVR_VERSION,
+                &cvr,
+                0.0,
+                &std::collections::HashMap::new(),
+            )
             .await
             .expect("create instance");
 
@@ -189,7 +194,7 @@ fn cvr_flush_roundtrip_bench() {
             store.apply_store_ops(puts);
             let t = std::time::Instant::now();
             store
-                .flush(&cvr.version, &cvr, 0.0)
+                .flush(&cvr.version, &cvr, 0.0, &std::collections::HashMap::new())
                 .await
                 .expect("flush inserts");
             let insert_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -199,9 +204,18 @@ fn cvr_flush_roundtrip_bench() {
                 .map(|i| StoreOp::DelRowRecord(mk_row(&format!("{pfx}r{i}"), None).id))
                 .collect();
             store.apply_store_ops(dels);
+            // The delete flush needs the just-inserted rows as its "existing"
+            // snapshot — with an empty one the TS-parity no-op pruning would
+            // drop every delete and the bench would measure nothing.
+            let existing: std::collections::HashMap<String, RowRecord> = (0..n)
+                .map(|i| {
+                    let r = mk_row(&format!("{pfx}r{i}"), Some(1));
+                    (rust_cvr::row_key::row_id_string(&r.id), r)
+                })
+                .collect();
             let t = std::time::Instant::now();
             store
-                .flush(&cvr.version, &cvr, 0.0)
+                .flush(&cvr.version, &cvr, 0.0, &existing)
                 .await
                 .expect("flush deletes");
             let delete_ms = t.elapsed().as_secs_f64() * 1000.0;

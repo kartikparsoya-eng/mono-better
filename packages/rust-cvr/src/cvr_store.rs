@@ -82,7 +82,16 @@ type QueryLoadRow = (
     Option<bool>,
     Option<String>,
 );
-type DesireLoadRow = (String, String, String, bool, Option<f64>, Option<f64>);
+// `deleted` is `Option<bool>`: the DDL column is nullable and TS reads NULL as
+// falsy (schema/cvr.ts:164 `deleted: boolean | null`) — F-CVR-SCHEMA-1.
+type DesireLoadRow = (
+    String,
+    String,
+    String,
+    Option<bool>,
+    Option<f64>,
+    Option<f64>,
+);
 
 // ─── Flush stats ───────────────────────────────────────────────────────────
 
@@ -346,6 +355,47 @@ impl CVRStoreHandle {
         Ok(rows.into_iter().map(InspectQueryRow::from).collect())
     }
 
+    /// Port of TS `CVRStore.updateTTLClock` (cvr-store.ts:555-561): persist the
+    /// `ttlClock` + `lastActive` of the CVR instance outside any flush. The
+    /// view-syncer calls this every `TTL_CLOCK_INTERVAL` (60s) so the on-disk
+    /// clock does not go stale between flushes — a stale clock reloaded after a
+    /// restart/rehome defers inactive-query TTL expiry, and a stale
+    /// `lastActive` skews CVR-purge GC.
+    pub async fn update_ttl_clock(
+        &self,
+        ttl_clock: TTLClock,
+        last_active: f64,
+    ) -> Result<(), CVRStoreError> {
+        sqlx::query(&format!(
+            r#"UPDATE "{}".instances
+               SET "lastActive" = to_timestamp($1 / 1000.0),
+                   "ttlClock" = $2
+               WHERE "clientGroupID" = $3"#,
+            self.schema
+        ))
+        .bind(last_active)
+        .bind(ttl_clock as f64)
+        .bind(&self.cvr_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Port of TS `CVRStore.getTTLClock` (cvr-store.ts:568-583): the current
+    /// on-disk `ttlClock` of the CVR instance, or `None` when the CVR has never
+    /// been initialized for this client group.
+    pub async fn get_ttl_clock(&self) -> Result<Option<TTLClock>, CVRStoreError> {
+        let row: Option<(f64,)> = sqlx::query_as(&format!(
+            r#"SELECT "ttlClock" FROM "{}".instances
+               WHERE "clientGroupID" = $1"#,
+            self.schema
+        ))
+        .bind(&self.cvr_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(t,)| t as TTLClock))
+    }
+
     // ─── Buffered write methods ──────────────────────────────────────
 
     pub fn put_instance(&mut self, cvr: &CVR) {
@@ -450,7 +500,9 @@ impl CVRStoreHandle {
                 client_id: client_id.to_string(),
                 query_hash: query_id.to_string(),
                 patch_version: version_string(version),
-                deleted,
+                // Writers always set an explicit boolean (as TS does); only
+                // DB reads can observe NULL.
+                deleted: Some(deleted),
                 // TS `convertTTLValues`: `ttlMs = ttl < 0 ? null : ttl` — a
                 // negative TTL (the "forever" sentinel) is persisted as SQL NULL,
                 // not a negative number. `clamp_ttl` maps -1 → MAX_TTL_MS so this
@@ -528,8 +580,45 @@ impl CVRStoreHandle {
         expected_current_version: &CVRVersion,
         cvr: &CVR,
         last_connect_time: f64,
+        existing_rows: &HashMap<String, RowRecord>,
     ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
-        // Materiality check FIRST (port of TS `#flush`): the CVR instance row is
+        // Port of TS `#flush` no-op pruning (cvr-store.ts:1066-1086): before
+        // deciding materiality, drop pending row records that would not change
+        // the CVR — (a) a delete / unreferenced tombstone for a row that is not
+        // in the CVR, and (b) a record deep-equal to what is already stored.
+        // Without this, redundant re-receives are re-written and tombstones for
+        // never-present rows are upserted, producing extra DB rows and spurious
+        // catchup row-del patches TS never emits.
+        // TS reads `this.getRowRecords()` from its embedded cache; the Rust
+        // store does not own the cache (single-atomic-writer design), so the
+        // caller passes the snapshot in — same Rust-only architectural pattern
+        // as `delete_unreferenced_rows(existing_rows)`.
+        if !self.pending.pending_row_record_updates.is_empty() {
+            let PendingWrites {
+                pending_row_record_updates,
+                force_updates,
+                ..
+            } = &mut self.pending;
+            pending_row_record_updates.retain(|id, (_, row)| {
+                if force_updates.contains(id) {
+                    return true;
+                }
+                let existing = existing_rows.get(id);
+                // TS: `existing === undefined && !row?.refCounts`
+                let unreferenced_and_absent =
+                    existing.is_none() && row.as_ref().is_none_or(|r| r.ref_counts.is_none());
+                // TS: `deepEqual(row ?? undefined, existing)` — RowRecord's
+                // derived Eq over BTreeMap refCounts is canonical, so `==` is
+                // deepEqual.
+                let unchanged = match (row.as_ref(), existing) {
+                    (None, None) => true,
+                    (Some(r), Some(e)) => r == e,
+                    _ => false,
+                };
+                !(unreferenced_and_absent || unchanged)
+            });
+        }
+        // Materiality check (port of TS `#flush`): the CVR instance row is
         // only advanced when there are material changes buffered — clients,
         // queries, desires, rows, or a pre-queued instance write from
         // `set_client_schema`/`set_profile_id`. Queuing the derivable instance
@@ -1289,9 +1378,11 @@ impl CVRStoreHandle {
         // its ttl/version are lost. Port of TS `loadCVR`, which reconstructs
         // `clientState` from the desires rows.
         for (client_id, query_hash, patch_version, deleted, ttl_ms, inactivated_at_ms) in &desires {
+            // TS reads the nullable column as falsy (`!deleted`).
+            let deleted = deleted.unwrap_or(false);
             // Only an active desire belongs in desiredQueryIDs. An inactive
             // desire remains solely in query.clientState until its TTL expires.
-            if !*deleted
+            if !deleted
                 && inactivated_at_ms.is_none()
                 && let Some(client) = cvr.clients.get_mut(client_id)
             {
@@ -1299,7 +1390,7 @@ impl CVRStoreHandle {
             }
             // TS retains an inactivated tombstone's state even when `deleted`
             // is true, because its TTL/version still drive eviction and catchup.
-            if *deleted && inactivated_at_ms.is_none() {
+            if deleted && inactivated_at_ms.is_none() {
                 continue;
             }
             if let Some(state) = cvr
@@ -1319,11 +1410,10 @@ impl CVRStoreHandle {
                 );
             }
         }
-        // Sort desired query IDs
-        for client in cvr.clients.values_mut() {
-            client.desired_query_ids.sort();
-            client.desired_query_ids.dedup();
-        }
+        // NOTE: TS deliberately does NOT sort/dedup desiredQueryIDs at load
+        // (cvr-store.ts:515 "why do we not sort desiredQueryIDs here?"), and
+        // the desires PK makes duplicates impossible — F-CVR-STORE-6: keep the
+        // DB scan order, matching TS.
 
         // Take over ownership of a CVR whose lease has lapsed. Done AFTER the
         // read-only load tx, on the pool, and gated so it only wins if nobody has
@@ -1366,8 +1456,15 @@ impl CVRStoreHandle {
         &self,
         after_version: NullableCVRVersion,
         up_to_version: &CVRVersion,
-        _current: &CVRVersion,
+        current: &CVRVersion,
     ) -> Result<Vec<PatchToVersion>, CVRStoreError> {
+        // TS early return (cvr-store.ts:731-733): nothing to catch up when the
+        // client is already at/past the target — before any SQL or version check.
+        if crate::schema::types::cmp_versions(&after_version, &Some(up_to_version.clone()))
+            != Ordering::Less
+        {
+            return Ok(Vec::new());
+        }
         let start = after_version
             .as_ref()
             .map(version_string)
@@ -1398,9 +1495,14 @@ impl CVRStoreHandle {
             Some((cv,)) => maybe_version_string(cv)?,
             None => crate::schema::types::EMPTY_CVR_VERSION.clone(),
         };
-        if cmp_cvr(&cv, up_to_version) != Ordering::Equal {
+        // TS `checkVersion(tx, ..., current)` (cvr-store.ts:743-745) verifies
+        // the on-disk version against the caller's CURRENT CVR snapshot — not
+        // against `upToCVR.version` (F-CVR-STORE-9: they coincide for today's
+        // callers, but a caller catching up to an older snapshot while the CVR
+        // has advanced must fail on `current`, exactly like TS).
+        if cmp_cvr(&cv, current) != Ordering::Equal {
             return Err(CVRStoreError::ConcurrentModification {
-                expected: version_string(up_to_version),
+                expected: version_string(current),
                 actual: version_string(&cv),
             });
         }
@@ -1414,8 +1516,7 @@ impl CVRStoreHandle {
         let queries_sql = format!(
             r#"SELECT "deleted", "queryHash", "patchVersion"
                FROM "{}".queries
-               WHERE "clientGroupID" = $1 AND "patchVersion" > $2 AND "patchVersion" <= $3
-               ORDER BY "patchVersion""#,
+               WHERE "clientGroupID" = $1 AND "patchVersion" > $2 AND "patchVersion" <= $3"#,
             self.schema
         );
         let query_rows: Vec<(Option<bool>, String, Option<String>)> = sqlx::query_as(&queries_sql)
@@ -1429,8 +1530,7 @@ impl CVRStoreHandle {
         let desires_sql = format!(
             r#"SELECT "clientID", "queryHash", "patchVersion", "deleted", "ttlMs", "inactivatedAtMs"
                FROM "{}".desires
-               WHERE "clientGroupID" = $1 AND "patchVersion" > $2 AND "patchVersion" <= $3
-               ORDER BY "patchVersion""#,
+               WHERE "clientGroupID" = $1 AND "patchVersion" > $2 AND "patchVersion" <= $3"#,
             self.schema
         );
         let desires: Vec<DesireLoadRow> = sqlx::query_as(&desires_sql)
@@ -1464,7 +1564,8 @@ impl CVRStoreHandle {
         }
         for (client_id, query_hash, patch_version, deleted, _, _) in desires {
             let to_version = maybe_version_string(&patch_version)?;
-            let patch = if deleted {
+            // TS reads the nullable column as falsy.
+            let patch = if deleted.unwrap_or(false) {
                 Patch::Query(QueryPatch::Del {
                     id: query_hash,
                     client_id: Some(client_id),
@@ -1719,7 +1820,7 @@ mod tests {
             client_id: "c1".to_string(),
             query_hash: "hash1".to_string(),
             patch_version: "v1".to_string(),
-            deleted: false,
+            deleted: Some(false),
             ttl: Some(300000.0),
             inactivated_at: None,
         };
@@ -1728,17 +1829,18 @@ mod tests {
             .insert(key.clone(), row.clone());
         // Overwrite with updated version
         let row2 = DesiresRow {
-            deleted: true,
+            deleted: Some(true),
             ..row
         };
         pending.pending_desire_updates.insert(key, row2);
         assert_eq!(pending.pending_desire_updates.len(), 1);
-        assert!(
+        assert_eq!(
             pending
                 .pending_desire_updates
                 .get("c1:hash1")
                 .unwrap()
-                .deleted
+                .deleted,
+            Some(true)
         );
     }
 
@@ -1781,6 +1883,82 @@ mod tests {
         let id_str = crate::row_key::row_id_string(&id);
         pending.force_updates.insert(id_str);
         assert!(!pending.force_updates.is_empty());
+    }
+
+    /// Port-parity regression for F-CVR-STORE-11 (TS cvr-store.ts:1066-1086):
+    /// `flush` must prune (a) row records deep-equal to what the CVR already
+    /// stores and (b) delete/unreferenced tombstones for rows not in the CVR —
+    /// and a pending set consisting ONLY of such no-ops must be a no-op flush
+    /// (`Ok(None)`), never touching PostgreSQL. The store's pool is lazy and
+    /// points at no live server, so pre-fix (no pruning) this flush attempted
+    /// PG and errored — proving the test non-vacuous.
+    #[tokio::test]
+    async fn flush_prunes_noop_row_updates_like_ts() {
+        let mut store = test_store();
+        let cvr = make_cvr();
+
+        let existing_id = RowID {
+            schema: "public".to_string(),
+            table: "issue".to_string(),
+            row_key: serde_json::json!({"id": "1"}).as_object().unwrap().clone(),
+        };
+        let existing_record = RowRecord {
+            id: existing_id.clone(),
+            row_version: "rv1".to_string(),
+            patch_version: CVRVersion {
+                state_version: "v1".to_string(),
+                config_version: None,
+            },
+            ref_counts: Some(BTreeMap::from([("q1".to_string(), 1i64)])),
+        };
+        let mut existing_rows: HashMap<String, RowRecord> = HashMap::new();
+        existing_rows.insert(
+            crate::row_key::row_id_string(&existing_id),
+            existing_record.clone(),
+        );
+
+        // (a) re-write of an identical record — TS deepEqual prune.
+        store.put_row_record(&existing_record);
+        // (b) tombstone for a row that was never in the CVR — TS
+        // `existing === undefined && !row?.refCounts` prune.
+        let absent_id = RowID {
+            schema: "public".to_string(),
+            table: "issue".to_string(),
+            row_key: serde_json::json!({"id": "ghost"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        store.del_row_record(&absent_id);
+        // (b') refCounts-null record (not a plain delete) for an absent row —
+        // also pruned by the same TS branch.
+        store.put_row_record(&RowRecord {
+            id: RowID {
+                schema: "public".to_string(),
+                table: "issue".to_string(),
+                row_key: serde_json::json!({"id": "ghost2"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+            row_version: "rv1".to_string(),
+            patch_version: CVRVersion {
+                state_version: "v1".to_string(),
+                config_version: None,
+            },
+            ref_counts: None,
+        });
+
+        let expected = CVRVersion {
+            state_version: "v1".to_string(),
+            config_version: None,
+        };
+        let result = store.flush(&expected, &cvr, 0.0, &existing_rows).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "an all-no-op pending row set must be pruned to a no-op flush \
+             (TS returns null); got {result:?}"
+        );
     }
 
     #[test]

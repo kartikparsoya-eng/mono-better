@@ -46,7 +46,10 @@ pub struct DesiresRow {
     pub client_id: String,
     pub query_hash: String,
     pub patch_version: String,
-    pub deleted: bool,
+    /// TS `deleted: boolean | null` (schema/cvr.ts:164) — the DDL column is
+    /// nullable BOOL; NULL reads as falsy (F-CVR-SCHEMA-1: a non-optional bool
+    /// made a legacy NULL fail sqlx decode where TS treats it false).
+    pub deleted: Option<bool>,
     pub ttl: Option<f64>,
     pub inactivated_at: Option<f64>,
 }

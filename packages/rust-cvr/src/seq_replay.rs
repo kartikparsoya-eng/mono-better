@@ -320,8 +320,18 @@ pub async fn run(pool: &PgPool, prog: &Program) -> Value {
             (patches, cvr_final)
         };
 
+        // Snapshot for the flush's no-op pruning — the same non-tombstone
+        // row-record set TS's `getRowRecords` cache holds at flush time (a
+        // previously-flushed row must be visible so a tombstone transition is
+        // NOT pruned as "absent").
+        let existing_at_flush = load_existing_rows(pool, &prog.cvr_id).await;
         let flushed = store
-            .flush(&orig_version, &cvr_final, prog.connect_time)
+            .flush(
+                &orig_version,
+                &cvr_final,
+                prog.connect_time,
+                &existing_at_flush,
+            )
             .await
             .expect("flush");
 

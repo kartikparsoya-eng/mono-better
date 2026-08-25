@@ -44,6 +44,9 @@ use tokio::sync::mpsc;
 /// Small delay added when scheduling TTL eviction so many near-simultaneous
 /// expirations collapse into one timer wakeup. Port of TS `TTL_TIMER_HYSTERESIS`.
 const TTL_TIMER_HYSTERESIS_MS: i64 = 50;
+/// Interval between periodic ttlClock persistence ticks. Port of TS
+/// `TTL_CLOCK_INTERVAL` (view-syncer.ts:202).
+const TTL_CLOCK_INTERVAL: i64 = 60_000;
 /// Upper bound on a single eviction-timer delay (matches `rust_cvr::ttl::MAX_TTL_MS`).
 const MAX_TTL_MS: i64 = 600_000;
 /// How long an empty client-group worker stays warm after its latest connection.
@@ -1365,6 +1368,11 @@ struct CgState {
     ttl_clock: TTLClock,
     /// Wall-clock (ms) at the last `get_ttl_clock`. Port of TS `#ttlClockBase`.
     ttl_clock_base: i64,
+    /// Port of TS `#ttlClockInterval` (view-syncer.ts:260). Realized as the
+    /// wall-clock (ms) deadline of the next ttlClock persistence tick rather
+    /// than a timer handle — the CG event loop multiplexes deadlines instead of
+    /// holding per-purpose timers. `None` = interval not running (TS `0`).
+    ttl_clock_interval: Option<i64>,
     /// Wall-clock time of the most recent newly established connection. This is
     /// the ownership lease boundary passed to every CVR load/flush.
     last_connect_time: i64,
@@ -1571,6 +1579,7 @@ impl CgState {
                 crate::services::view_syncer::e2e_serving_lag::E2EServingLagTracker::new(),
             ttl_clock: 0,
             ttl_clock_base: created_at,
+            ttl_clock_interval: None,
             last_connect_time: created_at,
             keepalive_until: created_at + CG_KEEPALIVE_MS,
             connections: HashMap::new(),
@@ -1648,6 +1657,45 @@ impl CgState {
         }
         self.ttl_clock_base = now;
         self.ttl_clock
+    }
+
+    /// Port of TS `#startTTLClockInterval` (view-syncer.ts:1091-1097): (re)arm
+    /// the periodic ttlClock persistence tick. Called after every material CVR
+    /// flush (`if (flushed)`, view-syncer.ts:1083-1086) and by the tick itself,
+    /// so the interval self-perpetuates once the first flush starts it.
+    fn start_ttl_clock_interval(&mut self) {
+        self.stop_ttl_clock_interval();
+        self.ttl_clock_interval = Some(now_ms() + TTL_CLOCK_INTERVAL);
+    }
+
+    /// Port of TS `#stopTTLClockInterval` (view-syncer.ts:1099-1102).
+    fn stop_ttl_clock_interval(&mut self) {
+        self.ttl_clock_interval = None;
+    }
+
+    /// The delay until the next ttlClock persistence tick, or `None` when the
+    /// interval is not running. Rust-only adapter: the CG event loop
+    /// multiplexes deadlines, so it needs the remaining delay rather than a
+    /// timer callback.
+    fn next_ttl_clock_delay(&self) -> Option<Duration> {
+        let deadline = self.ttl_clock_interval?;
+        Some(Duration::from_millis((deadline - now_ms()).max(0) as u64))
+    }
+
+    /// Port of TS `#updateTTLClockInCVRWithoutLock` (view-syncer.ts:1104-1119):
+    /// advance the in-memory ttlClock and persist it (with `lastActive = now`)
+    /// via `CVRStore.updateTTLClock`, outside any flush/lock. Fire-and-forget —
+    /// the store call is offloaded and failures are logged, exactly the TS
+    /// `.catch` (a missed tick self-heals on the next one).
+    fn update_ttl_clock_in_cvr_without_lock(&mut self) {
+        // TS guards call sites on `#ttlClock !== undefined`; here the clock is
+        // seeded when the CVR loads, so a loaded CVR is the equivalent guard.
+        if self.cvr.is_none() {
+            return;
+        }
+        let start = now_ms();
+        let ttl_clock = self.get_ttl_clock(start);
+        self.sync_engine.update_ttl_clock(ttl_clock, start);
     }
 
     /// Ensure the group CVR is loaded (from the store) or, when `allow_create`,
@@ -2870,6 +2918,14 @@ impl CgState {
         {
             global.remove(client_id);
         }
+        drop(global);
+        // Last client gone: sync the ttlClock to the CVR one final time before
+        // the group idles out — port of TS `#removeClient`'s clients-empty
+        // branch (view-syncer.ts:761-766; the `#ttlClock !== undefined` guard
+        // is the loaded-CVR check inside the callee).
+        if self.connections.is_empty() {
+            self.update_ttl_clock_in_cvr_without_lock();
+        }
     }
 
     /// Delay until this client-group worker can be torn down. Keeping this in
@@ -3498,12 +3554,18 @@ async fn cg_event_loop(
                 tracing::error!("CG thread {cg_id}: terminating after fatal synchronization error");
                 break;
             }
+            // A material CVR flush (re)starts the ttlClock interval — port of
+            // TS `#flushUpdater`'s `if (flushed)` (view-syncer.ts:1083-1086).
+            if state.sync_engine.take_flush_observed() {
+                state.start_ttl_clock_interval();
+            }
             continue;
         }
         let next_delay = [
             state.next_expiry_delay(),
             state.next_auth_maintenance_delay(),
             state.next_idle_shutdown_delay(),
+            state.next_ttl_clock_delay(),
         ]
         .into_iter()
         .flatten()
@@ -3537,6 +3599,17 @@ async fn cg_event_loop(
                         if state.next_expiry_delay().is_some() {
                             state.on_expiry_tick().await;
                         }
+                        // Periodic ttlClock persistence (TS #startTTLClockInterval's
+                        // callback, view-syncer.ts:1093-1096: update, then re-arm).
+                        if state.ttl_clock_interval.is_some_and(|at| at <= now_ms()) {
+                            state.update_ttl_clock_in_cvr_without_lock();
+                            state.start_ttl_clock_interval();
+                        }
+                        // An expiry tick can materially flush the CVR; a flush
+                        // restarts the ttlClock interval (view-syncer.ts:1083-1086).
+                        if state.sync_engine.take_flush_observed() {
+                            state.start_ttl_clock_interval();
+                        }
                         continue;
                     }
                 }
@@ -3553,6 +3626,11 @@ async fn cg_event_loop(
         if state.terminal {
             tracing::error!("CG thread {cg_id}: terminating after fatal synchronization error");
             break;
+        }
+        // A material CVR flush (re)starts the ttlClock interval — port of
+        // TS `#flushUpdater`'s `if (flushed)` (view-syncer.ts:1083-1086).
+        if state.sync_engine.take_flush_observed() {
+            state.start_ttl_clock_interval();
         }
     }
 }
@@ -4201,6 +4279,45 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(0)),
         )
+    }
+
+    /// F-CVR-STORE-8 interval state machine — ports of TS
+    /// `#startTTLClockInterval` / `#stopTTLClockInterval` /
+    /// `#updateTTLClockInCVRWithoutLock` (view-syncer.ts:1091-1119). The
+    /// interval must be OFF until a flush arms it (TS arms only in
+    /// `#flushUpdater`'s `if (flushed)`), arm ~TTL_CLOCK_INTERVAL out, and the
+    /// no-CVR guard must keep the update call a no-op.
+    #[test]
+    fn ttl_clock_interval_state_machine() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, None, valid);
+
+        // Not running until a flush starts it (a read-only CG never ticks).
+        assert!(state.ttl_clock_interval.is_none());
+        assert!(state.next_ttl_clock_delay().is_none());
+
+        let before = now_ms();
+        state.start_ttl_clock_interval();
+        let deadline = state.ttl_clock_interval.expect("armed");
+        assert!(
+            deadline >= before + TTL_CLOCK_INTERVAL && deadline <= now_ms() + TTL_CLOCK_INTERVAL,
+            "deadline must be TTL_CLOCK_INTERVAL (60s) out"
+        );
+        assert!(state.next_ttl_clock_delay().is_some());
+
+        // Restart replaces the deadline (TS stop-then-set).
+        state.start_ttl_clock_interval();
+        assert!(state.ttl_clock_interval.expect("re-armed") >= deadline);
+
+        state.stop_ttl_clock_interval();
+        assert!(state.ttl_clock_interval.is_none());
+
+        // No loaded CVR (TS `#ttlClock !== undefined` guard): update is a no-op
+        // and must not advance the in-memory clock bookkeeping.
+        let base_before = state.ttl_clock_base;
+        state.update_ttl_clock_in_cvr_without_lock();
+        assert_eq!(state.ttl_clock_base, base_before);
     }
 
     /// Periodic revalidation must CLOSE a connection whose token no longer

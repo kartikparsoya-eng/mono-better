@@ -88,6 +88,13 @@ pub struct SyncEngine {
     /// batch compares its queries against the running set and logs aggregate
     /// coverage stats — it has NO effect on what is served.
     enable_query_covering: bool,
+    /// Set when a store flush was MATERIAL (`flushed: true` in TS terms).
+    /// Rust-only bridge: TS's `#flushUpdater` sees `{flushed}` directly and
+    /// restarts the ttlClock interval on it (view-syncer.ts:1083-1086); here
+    /// the router polls this flag after each dispatched message via
+    /// `take_flush_observed` to do the same. `Cell` because the engine is
+    /// single-threaded (`!Send`) and flush helpers take `&self`.
+    flush_observed: std::cell::Cell<bool>,
     /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
     _census: crate::live_count::Guard,
 }
@@ -101,7 +108,44 @@ impl SyncEngine {
             clients: HashMap::new(),
             tokio_handle: None,
             enable_query_covering: true,
+            flush_observed: std::cell::Cell::new(false),
             _census: crate::live_count::Guard::new(&crate::live_count::SYNC_ENGINE),
+        }
+    }
+
+    /// Consume the "a material CVR flush happened" signal (see
+    /// `flush_observed`). Returns true at most once per flush.
+    pub fn take_flush_observed(&self) -> bool {
+        self.flush_observed.replace(false)
+    }
+
+    /// Rust-only relay to `CVRStore.updateTTLClock` (no TS twin): in TS the
+    /// view-syncer holds `#cvrStore` and calls `updateTTLClock` on it directly;
+    /// here the router cannot reach the `!Send` store (the engine owns it), so
+    /// this forwards the call, fire-and-forget on the shared-pool runtime (TS
+    /// `.catch`es and logs — view-syncer.ts:1110-1114). The 1:1 port of
+    /// `#updateTTLClockInCVRWithoutLock` itself lives in `router.rs`.
+    /// No-op without a store (in-memory / test CGs).
+    pub fn update_ttl_clock(&self, ttl_clock: rust_cvr::ttl_clock::TTLClock, last_active: i64) {
+        let Some(store_arc) = self.store.clone() else {
+            return;
+        };
+        let fut = async move {
+            let store = store_arc.lock().await;
+            if let Err(e) = store.update_ttl_clock(ttl_clock, last_active as f64).await {
+                tracing::error!("failed to update ttlClock: {e}");
+            }
+        };
+        match &self.tokio_handle {
+            // Fire-and-forget on the shared-pool runtime (the CG thread's
+            // reactor does not drive the CVR pool's connections).
+            Some(handle) => {
+                handle.spawn(fut);
+            }
+            // No injected handle (unit tests): run inline on the current task.
+            None => {
+                tokio::task::spawn_local(fut);
+            }
         }
     }
 
@@ -399,11 +443,19 @@ impl SyncEngine {
                 // promptly rather than wedging. Jitter de-synchronizes the convoy.
                 const MAX_FLUSH_ATTEMPTS: u32 = 3;
                 let mut attempt = 1u32;
+                // Snapshot of the CVR's current row records for the flush's
+                // no-op pruning (TS #flush reads this.getRowRecords() from its
+                // embedded cache; our store doesn't own the cache, so the
+                // snapshot is passed in). O(1) — Arc clone of the cache map.
+                let existing_rows = match &cache {
+                    Some(c) => c.get_row_records().await,
+                    None => Arc::new(HashMap::new()),
+                };
                 let result = loop {
                     let outcome = {
                         let mut store = store_arc.lock().await;
                         store
-                            .flush(&expected, &flushed, last_connect_time as f64)
+                            .flush(&expected, &flushed, last_connect_time as f64, &existing_rows)
                             .await
                     };
                     match outcome {
@@ -455,6 +507,13 @@ impl SyncEngine {
             Ok(store_flushed)
         })
         .await
+        .inspect(|&store_flushed| {
+            // Record material flushes for the router's ttlClock-interval
+            // restart (TS view-syncer.ts:1083-1086 `if (flushed)`).
+            if store_flushed {
+                self.flush_observed.set(true);
+            }
+        })
     }
 
     /// Apply a client's desired-queries change (from `initConnection` /

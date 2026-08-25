@@ -143,7 +143,7 @@ async fn flush_matches_ts_golden() {
             config_version: None,
         };
         store
-            .flush(&expected_version, &cvr_final, connect_time)
+            .flush(&expected_version, &cvr_final, connect_time, &existing)
             .await
             .expect("flush");
 

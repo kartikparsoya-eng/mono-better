@@ -194,7 +194,11 @@ pub fn maybe_version_string(s: &str) -> Result<CVRVersion, VersionError> {
                     lexi: parts[1].to_string(),
                     reason,
                 })?;
-            if config_version > u64::from(u32::MAX) as u128 {
+            // TS bound (types.ts:332): `configVersion > BigInt(Number.MAX_SAFE_INTEGER)`
+            // → 2^53-1, NOT u32::MAX (F-TYPES-1: a version in (2^32-1, 2^53-1]
+            // must parse like TS, not be rejected as malformed).
+            const MAX_SAFE_INTEGER: u128 = 9_007_199_254_740_991;
+            if config_version > MAX_SAFE_INTEGER {
                 return Err(VersionError::ConfigTooLarge(parts[1].to_string()));
             }
             Ok(CVRVersion {
@@ -501,6 +505,40 @@ pub fn query_record_to_query_row(cvr_id: &str, query: &QueryRecord) -> QueriesRo
 mod tests {
     use super::*;
 
+    /// F-TYPES-1 regression: the configVersion bound is TS's
+    /// `Number.MAX_SAFE_INTEGER` (2^53-1, types.ts:332), NOT u32::MAX. A
+    /// version in (u32::MAX, 2^53-1] must parse; above 2^53-1 must reject.
+    /// Pre-fix (u32::MAX bound) the first two asserts failed with
+    /// ConfigTooLarge — proven by temp-revert.
+    #[test]
+    fn maybe_version_string_config_version_bound_matches_ts() {
+        let max_safe = CVRVersion {
+            state_version: "1a9".to_string(),
+            config_version: Some(9_007_199_254_740_991),
+        };
+        assert_eq!(
+            maybe_version_string(&version_string(&max_safe)).expect("MAX_SAFE_INTEGER parses"),
+            max_safe
+        );
+        let above_u32 = CVRVersion {
+            state_version: "1a9".to_string(),
+            config_version: Some(u32::MAX as u64 + 1),
+        };
+        assert_eq!(
+            maybe_version_string(&version_string(&above_u32)).expect("(u32::MAX, 2^53) parses"),
+            above_u32
+        );
+        // Above MAX_SAFE_INTEGER: TS throws "exceeds max safe integer".
+        let too_large = CVRVersion {
+            state_version: "1a9".to_string(),
+            config_version: Some(9_007_199_254_740_992),
+        };
+        assert!(matches!(
+            maybe_version_string(&version_string(&too_large)),
+            Err(VersionError::ConfigTooLarge(_))
+        ));
+    }
+
     #[test]
     fn test_version_to_lexi_examples() {
         // Examples from lexi-version.ts doc comment.
@@ -655,10 +693,12 @@ mod tests {
 
         // versionString ∘ versionFromString is identity for well-formed
         // versions (configVersion > 0; 0 normalizes to None by design).
+        // Range widened to the TS bound (MAX_SAFE_INTEGER, not u32::MAX) with
+        // the F-TYPES-1 fix.
         #[test]
         fn prop_version_string_round_trip(
             sv in any::<u64>(),
-            cv in proptest::option::of(1u64..=u32::MAX as u64),
+            cv in proptest::option::of(1u64..=9_007_199_254_740_991u64),
         ) {
             let v = CVRVersion { state_version: version_to_lexi(sv), config_version: cv };
             prop_assert_eq!(version_from_string(&version_string(&v)), v);
