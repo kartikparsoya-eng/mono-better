@@ -161,9 +161,19 @@ pub async fn accept_connection_with_limit(
         Ok(response)
     };
 
+    // The tungstenite-layer limit sits at 2× the advertised cap; the CAP
+    // itself is enforced in `run_ws_reader` on cleanly-read messages. A
+    // tungstenite Capacity error aborts mid-frame WITHOUT consuming the
+    // payload, leaving the stream misaligned — the subsequent close
+    // handshake then races the poisoned read state and the client
+    // nondeterministically sees 1006 instead of 1009 (observed live at
+    // 12MB). Reading the frame fully (bounded by 2×cap) and rejecting
+    // above tungstenite keeps the stream aligned so the Node-parity 1009
+    // close + drain is deterministic. Frames beyond 2×cap still hit the
+    // tungstenite Capacity guard (allocation bound), with best-effort 1009.
     let ws_config = WebSocketConfig {
-        max_message_size: Some(max_payload_bytes.max(1)),
-        max_frame_size: Some(max_payload_bytes.max(1)),
+        max_message_size: Some(max_payload_bytes.max(1).saturating_mul(2)),
+        max_frame_size: Some(max_payload_bytes.max(1).saturating_mul(2)),
         ..WebSocketConfig::default()
     };
     let ws_stream = match accept_hdr_async_with_config(stream, callback, Some(ws_config)).await {
@@ -328,6 +338,7 @@ pub async fn accept_connection_with_limit(
         last_inbound,
         protocol_version,
         sink.clone(),
+        max_payload_bytes,
     ));
 
     Some(ConnectionContext {
@@ -487,6 +498,33 @@ fn now_epoch_ms() -> i64 {
 }
 
 /// WS reader task: reads WS messages, forwards raw text to upstream channel.
+/// Node `ws` closeTimeout parity: keep CONSUMING the socket after queueing a
+/// close, so a client caught mid-upload can finish writing and then read our
+/// close frame. Dropping the read half immediately RSTs the still-writing
+/// client and it observes 1006 with the close frame discarded. Bounded grace;
+/// parse errors are tolerated (a mid-frame abort leaves garbage "headers").
+async fn drain_until_peer_close(
+    ws_reader: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    >,
+) {
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(res) = ws_reader.next().await {
+            match res {
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {}
+                Err(
+                    WebSocketError::ConnectionClosed
+                    | WebSocketError::AlreadyClosed
+                    | WebSocketError::Io(_),
+                ) => break,
+                Err(_) => {}
+            }
+        }
+    })
+    .await;
+}
+
 async fn run_ws_reader(
     mut ws_reader: futures_util::stream::SplitStream<
         tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -496,11 +534,29 @@ async fn run_ws_reader(
     last_inbound: Arc<AtomicI64>,
     protocol_version: u32,
     sink: DirectWebSocketSink,
+    max_payload_bytes: usize,
 ) {
     while let Some(msg_result) = ws_reader.next().await {
         // Any frame from the client — including protocol-level ping/pong —
         // counts as liveness.
         last_inbound.store(now_epoch_ms(), Ordering::Relaxed);
+        // TS parity: Node `ws` rejects a message above `maxPayload` with
+        // Close 1009 "Max payload size exceeded". Enforced HERE, on a
+        // fully-read message (tungstenite's own limit is 2× — see the
+        // accept-time config comment), so the stream stays aligned and the
+        // close handshake + drain is deterministic.
+        let too_big = match &msg_result {
+            Ok(Message::Text(t)) => t.len() > max_payload_bytes,
+            Ok(Message::Binary(b)) => b.len() > max_payload_bytes,
+            _ => false,
+        };
+        if too_big {
+            tracing::warn!("WebSocket {ws_id} message over max payload");
+            crate::metrics::record_websocket_error("error_event", protocol_version);
+            sink.close_with_code(1009, "Max payload size exceeded".to_string());
+            drain_until_peer_close(&mut ws_reader).await;
+            break;
+        }
         match msg_result {
             Ok(Message::Text(text)) => {
                 if upstream_tx.send(text.to_string()).await.is_err() {
@@ -533,32 +589,10 @@ async fn run_ws_reader(
                     tracing::warn!("WebSocket {ws_id} frame over max payload: {e}");
                     crate::metrics::record_websocket_error("error_event", protocol_version);
                     sink.close_with_code(1009, "Max payload size exceeded".to_string());
-                    // Node parity, part 2: `ws` keeps CONSUMING the socket
-                    // while it awaits the close handshake (closeTimeout), so
-                    // a client caught mid-upload can finish writing and then
-                    // read the 1009 close. Dropping the read half right away
-                    // RSTs the still-writing client and it observes 1006 with
-                    // the close frame discarded (seen live with a 12MB frame;
-                    // a small frame fits in kernel buffers and masks this).
-                    // Drain-and-discard until the peer closes or a bounded
-                    // grace period expires. Parse errors while draining are
-                    // EXPECTED: the oversized frame's payload was never
-                    // consumed, so the parser sees garbage "headers".
-                    let _ = tokio::time::timeout(Duration::from_secs(10), async {
-                        while let Some(res) = ws_reader.next().await {
-                            match res {
-                                Ok(Message::Close(_)) => break,
-                                Ok(_) => {}
-                                Err(
-                                    WebSocketError::ConnectionClosed
-                                    | WebSocketError::AlreadyClosed
-                                    | WebSocketError::Io(_),
-                                ) => break,
-                                Err(_) => {}
-                            }
-                        }
-                    })
-                    .await;
+                    // Frames beyond 2× the cap abort mid-frame, so this
+                    // drain chews a misaligned stream (best-effort 1009);
+                    // the ≤2× path above is the deterministic one.
+                    drain_until_peer_close(&mut ws_reader).await;
                     break;
                 }
                 // Abrupt tab closes, mobile-network changes, and the client's
@@ -722,8 +756,9 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
+            // Mirror production: tungstenite limit = 2× the enforced cap.
             let cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-                max_message_size: Some(1024),
+                max_message_size: Some(2048),
                 ..Default::default()
             };
             let ws = tokio_tungstenite::accept_async_with_config(stream, Some(cfg))
@@ -744,7 +779,16 @@ mod tests {
             let (up_tx, up_rx) = mpsc::channel::<String>(16);
             let last = Arc::new(AtomicI64::new(now_epoch_ms()));
             tokio::spawn(run_ws_writer(w, rx, limits, kill_rx, last.clone()));
-            run_ws_reader(r, up_tx, "test-ws".into(), last, PROTOCOL_VERSION, sink).await;
+            run_ws_reader(
+                r,
+                up_tx,
+                "test-ws".into(),
+                last,
+                PROTOCOL_VERSION,
+                sink,
+                1024,
+            )
+            .await;
             drop(up_rx);
         });
 
@@ -752,15 +796,12 @@ mod tests {
         let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
             .await
             .unwrap();
-        // This pins the 1009 RELAY (revert-proven). The reader-side
-        // drain-during-close (Node closeTimeout parity) cannot be pinned on
-        // loopback — buffering absorbs even 32MB so the client never blocks
-        // mid-write; its regression net is the live xyne-art G36
-        // oversized-payload case (12MB through the real network stack),
-        // which produced closed:1006 before the drain and 1009 after.
-        let _ = ws
-            .send(Message::Text("x".repeat(32 * 1024 * 1024).into()))
-            .await;
+        // 1500 bytes: above the enforced cap (1024) but under the
+        // tungstenite layer's 2× limit, so the frame is read CLEANLY and
+        // rejected by the reader's own size check — the deterministic 1009
+        // path (the mid-frame Capacity abort path is best-effort only; its
+        // regression net is the live xyne-art G36 oversized-payload case).
+        let _ = ws.send(Message::Text("x".repeat(1500).into())).await;
 
         let mut close_code = None;
         let deadline = tokio::time::sleep(Duration::from_secs(5));
