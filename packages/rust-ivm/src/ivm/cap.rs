@@ -544,6 +544,12 @@ fn value_to_string(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
+        // Match TS `JSON.stringify`: `NaN`/`±Infinity` -> `"null"`, `-0` -> `"0"`.
+        // (Cap keeps its own round-trippable encoding rather than the shared
+        // `js_stringify_value` because `parse_value` must reverse it; only the F64
+        // edge cases — the actual PATTERN-B divergence — are aligned here.)
+        Value::F64(n) if !n.is_finite() => "null".to_string(),
+        Value::F64(n) if *n == 0.0 => "0".to_string(),
         Value::F64(n) => n.to_string(),
         // Escape backslashes and quotes so a string PK containing `"` (or `\`)
         // round-trips through `parse_json_array_elements` / `parse_value`

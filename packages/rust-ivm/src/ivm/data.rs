@@ -105,6 +105,27 @@ impl PartialEq for Value {
 
 impl Eq for Value {}
 
+/// Serialize a `Value` exactly as TS `JSON.stringify` would — the encoding the
+/// IVM operators use to build internal keys (exists cache key, take partition-state
+/// key, view entry id). Non-finite numbers collapse to `null` and `-0` to `0`
+/// (JSON.stringify semantics: `JSON.stringify(NaN) === 'null'`,
+/// `JSON.stringify(-0) === '0'`); strings get full JSON escaping; everything else
+/// is standard JSON. Port of the `JSON.stringify(value)` those operators call.
+///
+/// The previous `format!("{:?}", v)` / `to_string()` forms diverged: `NaN` became
+/// `"NaN"`/`"F64(NaN)"` (colliding differently than TS's `"null"`), so two keys
+/// TS treats as equal were kept distinct (and vice-versa). Unreachable for SQL PKs
+/// (JSON has no NaN literal) but a real 1:1 divergence, now removed.
+pub fn js_stringify_value(v: &Value) -> String {
+    match v {
+        // JSON.stringify(NaN) and JSON.stringify(±Infinity) are both "null".
+        Value::F64(n) if !n.is_finite() => "null".to_string(),
+        // The `Value` Serialize impl already emits integers for integral f64
+        // (so -0.0 -> i64 0 -> "0") and JSON-escapes strings.
+        _ => serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()),
+    }
+}
+
 /// Compare two values — port of TS `compareValues` (data.ts:34).
 #[inline]
 pub fn compare_values(a: &Value, b: &Value) -> CmpOrdering {
@@ -185,6 +206,27 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 #[cfg(test)]
 mod value_parity_tests {
     use super::*;
+
+    #[test]
+    fn js_stringify_value_matches_json_stringify() {
+        // Standard JSON forms.
+        assert_eq!(js_stringify_value(&Value::Null), "null");
+        assert_eq!(js_stringify_value(&Value::Bool(true)), "true");
+        assert_eq!(js_stringify_value(&Value::F64(1.0)), "1");
+        assert_eq!(js_stringify_value(&Value::F64(1.5)), "1.5");
+        assert_eq!(js_stringify_value(&Value::Str(Arc::from("ab"))), "\"ab\"");
+        // Strings get FULL JSON escaping (the old `format!("\"{}\"")` did not).
+        assert_eq!(
+            js_stringify_value(&Value::Str(Arc::from("a\"b\\c"))),
+            "\"a\\\"b\\\\c\""
+        );
+        // PATTERN-B: JSON.stringify semantics for the numeric edge cases — the
+        // whole point of the fix. NaN/±Inf -> "null", -0 -> "0".
+        assert_eq!(js_stringify_value(&Value::F64(f64::NAN)), "null");
+        assert_eq!(js_stringify_value(&Value::F64(f64::INFINITY)), "null");
+        assert_eq!(js_stringify_value(&Value::F64(f64::NEG_INFINITY)), "null");
+        assert_eq!(js_stringify_value(&Value::F64(-0.0)), "0");
+    }
 
     #[test]
     fn cloned_json_preserves_reference_identity() {

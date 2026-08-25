@@ -850,13 +850,11 @@ fn make_id(row: &FxHashMap<String, Value>, schema: &SourceSchema) -> Option<Stri
 }
 
 fn value_to_json_string(v: &Value) -> String {
-    match v {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::F64(n) => n.to_string(),
-        Value::Str(s) => format!("\"{}\"", s),
-        Value::Json(s) => s.to_string(),
-    }
+    // Port of TS `make_id`'s `JSON.stringify(pkValues)` element serialization.
+    // Delegates to the shared JSON.stringify-faithful serializer so non-finite
+    // numbers collapse to `null` and strings get full JSON escaping (the previous
+    // `format!("\"{}\"", s)` did not escape embedded quotes/backslashes).
+    crate::ivm::data::js_stringify_value(v)
 }
 
 /// Binary search returning a number.

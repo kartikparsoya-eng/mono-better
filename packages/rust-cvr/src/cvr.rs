@@ -2232,7 +2232,10 @@ mod updater_tests {
         );
         updater.received(&rows1, &existing);
         assert!(
-            updater.received_rows.get(&id_str).is_some_and(|v| v.is_none()),
+            updater
+                .received_rows
+                .get(&id_str)
+                .is_some_and(|v| v.is_none()),
             "batch 1 should leave a present-but-null received_rows entry"
         );
 
@@ -2267,7 +2270,9 @@ mod updater_tests {
         let keys: std::collections::BTreeSet<&String> = rc.keys().collect();
         assert_eq!(
             keys,
-            [&"qB".to_string()].into_iter().collect::<std::collections::BTreeSet<_>>(),
+            [&"qB".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
             "re-referenced row must carry only qB, not the retracted qA (null-vs-absent parity)"
         );
     }

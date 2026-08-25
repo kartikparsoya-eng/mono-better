@@ -231,7 +231,12 @@ impl Take {
         let mut key = String::new();
         for col in partition_key {
             let value = row.get(col).unwrap_or(&Value::Null);
-            let _ = write!(key, "{}={:?};", col, value);
+            let _ = write!(
+                key,
+                "{}={};",
+                col,
+                crate::ivm::data::js_stringify_value(value)
+            );
         }
         key
     }
@@ -243,7 +248,12 @@ impl Take {
         let mut key = String::new();
         for col in partition_key {
             let value = constraint.get(col).unwrap_or(&Value::Null);
-            let _ = write!(key, "{}={:?};", col, value);
+            let _ = write!(
+                key,
+                "{}={};",
+                col,
+                crate::ivm::data::js_stringify_value(value)
+            );
         }
         key
     }
@@ -984,7 +994,12 @@ impl Input for Take {
                         let mut key = String::new();
                         for col in &partition_key {
                             let value = node.row.get(col).unwrap_or(&Value::Null);
-                            let _ = write!(key, "{}={:?};", col, value);
+                            let _ = write!(
+                                key,
+                                "{}={};",
+                                col,
+                                crate::ivm::data::js_stringify_value(value)
+                            );
                         }
                         let bound = storage
                             .borrow()
