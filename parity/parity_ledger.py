@@ -196,7 +196,7 @@ CRATES = {
         "infra_rust": {
             "http_server.rs", "lib.rs", "live_count.rs", "metrics.rs",
             "otel.rs", "trace.rs", "ws_sink.rs", "ws_server.rs", "main.rs",
-            "protocol.rs", "replica_schema.rs",
+            "protocol.rs",
         },
         # Pure structure (lite-table type maps). Their fns became serde/match
         # tables, so they are NOT behavioral gaps.
@@ -248,22 +248,22 @@ CRATES = {
             # workers/syncer.ts
             "getwebsocketserveroptions": ("ws_server.rs WebSocketConfig", "compression opts"),
             # workers/connection.ts transient-socket handling
-            "findprotocolerror": ("connection.rs classify_error_log_level", "protocol-error classify"),
-            "istransientsocketmessage": ("connection.rs (message substring)", "transient downgrade"),
+            "findprotocolerror": ("workers/connection.rs classify_error_log_level", "protocol-error classify"),
+            "istransientsocketmessage": ("workers/connection.rs (message substring)", "transient downgrade"),
             # workers/connect-params.ts
             "normalizeheaders": ("ws_server.rs (dup-header join)", "header normalization"),
             # auth/jwt.ts -> auth.rs (whole file ports here; ledger 'DROPPED' is cosmetic)
-            "getremotekeyset": ("auth.rs JWKS_CACHE/lookup_cached_jwk", "cached remote JWKS"),
-            "loadjwk": ("auth.rs serde_json::from_str", "parse JWK"),
-            "loadsecret": ("auth.rs DecodingKey::from_secret", "secret key"),
-            "verifytokenimpl": ("auth.rs verify_sync/verify_with_jwk(s)", "JWT verify (split sync/async)"),
+            "getremotekeyset": ("auth/jwt.rs JWKS_CACHE/lookup_cached_jwk", "cached remote JWKS"),
+            "loadjwk": ("auth/jwt.rs serde_json::from_str", "parse JWK"),
+            "loadsecret": ("auth/jwt.rs DecodingKey::from_secret", "secret key"),
+            "verifytokenimpl": ("auth/jwt.rs verify_sync/verify_with_jwk(s)", "JWT verify (split sync/async)"),
             # auth/auth.ts
-            "isprovidedauth": ("connection_context.rs is_some_and non-empty", "inlined"),
+            "isprovidedauth": ("services/view_syncer/connection_context_manager.rs is_some_and non-empty", "inlined"),
             # custom/fetch.ts
             "apiattempts": ("metrics.rs record_api_attempt", "OTel counter"),
-            "apierrorfromresult": ("custom_query.rs response validation", "error extraction"),
+            "apierrorfromresult": ("custom_queries/transform_query.rs response validation", "error extraction"),
             "apiresponseerrormetricattrs": ("metrics.rs record_api_attempt attrs", "status attrs"),
-            "urlmatch": ("custom_query.rs url_match", "URLPattern subset (renamed 1:1)"),
+            "urlmatch": ("custom_queries/transform_query.rs url_match", "URLPattern subset (renamed 1:1)"),
             "compileurlpattern": ("N/A", "no separate compile step; url_match matches the raw pattern inline"),
             # workers/connection.ts — Node errno predicates with no tungstenite
             # surface. The transient-MESSAGE path (isTransientSocketMessage) IS
@@ -275,14 +275,14 @@ CRATES = {
             "logqueryfailure": ("inlined", "streamer error callback lives in rust-ivm; failures logged via tracing at the call sites"),
             "randomid": ("N/A", "TS pipelineRunID debug-correlation id; not ported"),
             # custom-queries/transform-query.ts
-            "normalizedheaders": ("custom_query.rs headers_digest", "canonical header hash"),
+            "normalizedheaders": ("custom_queries/transform_query.rs normalized_headers", "canonical header hash"),
             # connection-context-manager.ts
             "filterheaders": ("router.rs filtered_query_headers", "header allowlist"),
-            "sameconnectionselector": ("connection_context.rs set_background_connection", "inlined tuple match"),
+            "sameconnectionselector": ("services/view_syncer/connection_context_manager.rs set_background_connection", "inlined tuple match"),
             # query-covering.ts
-            "jsonequal": ("query_covering.rs json_value_eq", "deep eq w/ JS number semantics"),
+            "jsonequal": ("services/view_syncer/query_covering.rs json_equal", "deep eq w/ JS number semantics"),
             # db/lite-tables.ts
-            "keycmp": ("replica_schema.rs sort_by len-then-lex", "inlined key compare"),
+            "keycmp": ("db/lite_tables.rs sort_by len-then-lex", "inlined key compare"),
         },
     },
 }
@@ -548,7 +548,7 @@ def main():
     for tc, (tgt, note) in aliases.items():
         if tc not in ts_syms:
             continue
-        m = re.search(r"(\w+\.rs)", f"{tgt} {note}")
+        m = re.search(r"([\w/]+\.rs)", f"{tgt} {note}")
         if m:
             tf = first(ts_syms, tc)[2]
             edges[tf][m.group(1)] += 1; rust_incoming[m.group(1)].add(tf)
