@@ -572,6 +572,39 @@ fn parity_check() {
         .unwrap_or_else(|e| panic!("failed to read fixture file {}: {}", path, e));
     let fixture: Value = serde_json::from_slice(&bytes).expect("fixture is not valid JSON");
 
+    // Schema-name parity (shards.ts upstreamSchema/cvrSchema). Pins the `/cvr`
+    // slash suffix: a `_cvr` drift (which this caught) would repoint the PG schema.
+    for entry in fixture
+        .get("schemaNames")
+        .and_then(Value::as_array)
+        .expect("fixture.schemaNames missing")
+    {
+        let shard_json = entry.get("shard").expect("schema entry missing shard");
+        let shard = ShardID {
+            app_id: shard_json
+                .get("appID")
+                .and_then(Value::as_str)
+                .expect("shard appID")
+                .to_string(),
+            shard_num: shard_json
+                .get("shardNum")
+                .and_then(Value::as_u64)
+                .expect("shard shardNum") as u32,
+        };
+        assert_eq!(
+            crate::shards::upstream_schema(&shard),
+            entry.get("upstreamSchema").and_then(Value::as_str).unwrap(),
+            "upstream_schema mismatch for {:?}",
+            shard
+        );
+        assert_eq!(
+            crate::shards::cvr_schema(&shard),
+            entry.get("cvrSchema").and_then(Value::as_str).unwrap(),
+            "cvr_schema mismatch for {:?}",
+            shard
+        );
+    }
+
     // Hash parity
     for entry in fixture
         .get("hashes")

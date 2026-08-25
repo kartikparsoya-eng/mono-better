@@ -19,6 +19,7 @@ import {
   normalizedKeyOrder,
 } from '../../../zero-cache/src/types/row-key.ts';
 import {rowIDSignatureUnit} from '../../../zero-cache/src/services/view-syncer/row-set-signature.ts';
+import {upstreamSchema, cvrSchema} from '../../../zero-cache/src/types/shards.ts';
 import {
   versionToLexi,
   versionFromLexi,
@@ -956,6 +957,16 @@ const deleteClientsResults = await Promise.all(
 );
 
 const fixture = {
+  schemaNames: [
+    {appID: 'test', shardNum: 0},
+    {appID: 'roze', shardNum: 1},
+    {appID: 'zero', shardNum: 42},
+    {appID: 'my_app', shardNum: 7},
+  ].map(shard => ({
+    shard,
+    upstreamSchema: upstreamSchema(shard),
+    cvrSchema: cvrSchema(shard),
+  })),
   hashes: STRINGS.map(s => ({
     input: s,
     h32: h32(s).toString(),

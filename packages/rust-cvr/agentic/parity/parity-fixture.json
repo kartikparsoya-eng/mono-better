@@ -1,4 +1,38 @@
 {
+  "schemaNames": [
+    {
+      "shard": {
+        "appID": "test",
+        "shardNum": 0
+      },
+      "upstreamSchema": "test_0",
+      "cvrSchema": "test_0/cvr"
+    },
+    {
+      "shard": {
+        "appID": "roze",
+        "shardNum": 1
+      },
+      "upstreamSchema": "roze_1",
+      "cvrSchema": "roze_1/cvr"
+    },
+    {
+      "shard": {
+        "appID": "zero",
+        "shardNum": 42
+      },
+      "upstreamSchema": "zero_42",
+      "cvrSchema": "zero_42/cvr"
+    },
+    {
+      "shard": {
+        "appID": "my_app",
+        "shardNum": 7
+      },
+      "upstreamSchema": "my_app_7",
+      "cvrSchema": "my_app_7/cvr"
+    }
+  ],
   "hashes": [
     {
       "input": "",
