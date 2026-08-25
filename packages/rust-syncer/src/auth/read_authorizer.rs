@@ -88,7 +88,7 @@ fn transform_query_internal(query: &Value, permissions: &Value) -> Value {
 
     // rowSelectRules = permissions.tables[table].row.select — an array of
     // ["allow", Condition] tuples. Map to the condition (index 1).
-    let rule_conditions: Vec<Value> = permissions
+    let rule_conditions: Vec<Value> = match permissions
         .get("tables")
         .and_then(|t| t.get(table))
         .and_then(|t| t.get("row"))
@@ -101,8 +101,20 @@ fn transform_query_internal(query: &Value, permissions: &Value) -> Value {
                 .collect::<Vec<_>>()
         })
         .filter(|c| !c.is_empty())
-        // Deny-by-default: no rules => a single empty-OR (always false).
-        .unwrap_or_else(|| vec![json!({"type": "or", "conditions": []})]);
+    {
+        Some(conditions) => conditions,
+        None => {
+            // Deny-by-default: no rules => a single empty-OR (always false).
+            // Warn so an operator who simply forgot a permission rule can tell
+            // this apart from an intentional deny (TS `read-authorizer.ts`).
+            tracing::warn!(
+                table = %table,
+                "No permission rules found for table '{table}'. No rows will be \
+                 returned. Use ANYONE_CAN to grant read access to everyone."
+            );
+            vec![json!({"type": "or", "conditions": []})]
+        }
+    };
 
     let transformed_where = query
         .get("where")

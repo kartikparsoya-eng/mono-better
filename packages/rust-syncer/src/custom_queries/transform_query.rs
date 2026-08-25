@@ -211,15 +211,38 @@ pub async fn transform_custom_queries(
             .collect::<Vec<_>>()
     ]);
 
-    let response = post_transform(ctx, shard, &body).await?;
+    // The IDs of the queries in THIS batch. On a whole-request failure the
+    // `TransformFailed` body must carry them (TS `transform-query.ts` overrides
+    // fetch.ts's empty `[]` with `request.map(({id})=>id)`) so the client can
+    // attribute the failure to specific queries and mark/retry them.
+    let query_ids: Vec<Value> = to_fetch
+        .iter()
+        .map(|s| Value::String(s.id.clone()))
+        .collect();
 
-    // A `QueryResponse` carries `queries: [...]`; a `TransformFailed` (has
-    // `kind:"TransformFailed"` or no `queries`) fails the whole request.
-    let queries = response
-        .get("queries")
-        .and_then(|q| q.as_array())
-        .cloned()
-        .ok_or_else(|| response.clone())?;
+    let response = post_transform(ctx, shard, &body, &query_ids).await?;
+
+    // A `QueryResponse` carries `queries: [...]`. A legacy API server instead
+    // returns a `["transformed", [...queries]]` tuple (TS `transform-query.ts`
+    // handles this as a client-fallback response). Anything else (e.g. a
+    // `TransformFailed` body) fails the whole request.
+    let queries = if let Some(arr) = response.get("queries").and_then(|q| q.as_array()) {
+        arr.clone()
+    } else if response
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        == Some("transformed")
+    {
+        response
+            .as_array()
+            .and_then(|a| a.get(1))
+            .and_then(|q| q.as_array())
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        return Err(response.clone());
+    };
 
     for q in queries {
         let id = q
@@ -279,6 +302,7 @@ async fn post_transform(
     ctx: &CustomQueryContext,
     shard: &ShardID,
     body: &Value,
+    query_ids: &[Value],
 ) -> Result<Value, Value> {
     let transform_failed = |reason: &str, msg: String| -> Value {
         serde_json::json!({
@@ -286,7 +310,9 @@ async fn post_transform(
             "origin": "zero-cache",
             "reason": reason,
             "message": msg,
-            "queryIDs": [],
+            // Real batch IDs (not `[]`) so the client can attribute the failure
+            // to the specific queries. Port of TS `transform-query.ts` catch.
+            "queryIDs": query_ids,
         })
     };
 
@@ -490,16 +516,26 @@ fn get_cache_key(ctx: &CustomQueryContext, id: &str) -> String {
 }
 
 fn cache_get(ctx: &CustomQueryContext, id: &str) -> Option<TransformedQuery> {
-    let cache = TRANSFORM_CACHE.lock().ok()?;
-    let (at, q) = cache.get(&get_cache_key(ctx, id))?;
-    if at.elapsed() >= CACHE_TTL {
-        return None;
+    let mut cache = TRANSFORM_CACHE.lock().ok()?;
+    let key = get_cache_key(ctx, id);
+    match cache.get(&key) {
+        Some((at, q)) if at.elapsed() < CACHE_TTL => Some(q.clone()),
+        // Expired → evict on read so a key that is never re-requested doesn't
+        // linger forever (TS `TimedCache` reclaims via a periodic sweep).
+        Some(_) => {
+            cache.remove(&key);
+            None
+        }
+        None => None,
     }
-    Some(q.clone())
 }
 
 fn cache_set(ctx: &CustomQueryContext, id: &str, q: &TransformedQuery) {
     if let Ok(mut cache) = TRANSFORM_CACHE.lock() {
+        // Sweep expired entries before inserting. Without this the process-wide
+        // cache grows unbounded as rotating short-lived JWTs mint fresh keys that
+        // are never re-read (a leak TS's `TimedCache` interval cleanup avoids).
+        cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
         cache.insert(get_cache_key(ctx, id), (Instant::now(), q.clone()));
     }
 }

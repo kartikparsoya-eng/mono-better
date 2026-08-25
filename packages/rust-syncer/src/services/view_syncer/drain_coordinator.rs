@@ -68,8 +68,15 @@ impl DrainCoordinator {
         let adjusted = (interval_ms as f64 / TARGET_UTILIZATION) as i64;
         let now = now_ms();
 
-        // TS asserts next_drain_time <= now (should_drain() was true); the
-        // router's forced-drain loop upholds this by construction.
+        // TS `drainNextIn` asserts `nextDrainTime <= now` ("should only be called
+        // if shouldDrain()"). The router's forced-drain loop upholds this by
+        // construction, so we keep it a `debug_assert` (catches a caller logic
+        // error in tests/dev) rather than a production panic the original port
+        // deliberately avoided.
+        debug_assert!(
+            self.next_drain_time.load(Ordering::SeqCst) <= now,
+            "drain_next_in() should only be called when should_drain() is true"
+        );
         self.next_drain_time.store(now + adjusted, Ordering::SeqCst);
 
         // Push the force-drain deadline forward (TS clearTimeout + setTimeout).

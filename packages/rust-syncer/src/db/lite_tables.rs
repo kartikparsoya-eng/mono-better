@@ -239,9 +239,22 @@ fn list_unique_indexes(conn: &Connection) -> Result<HashMap<String, Vec<Vec<Stri
     Ok(out)
 }
 
+/// Port of TS `liteTableName` (`types/names.ts`): the SQLite table name for a
+/// `(schema, table)` pair — bare `table` for the `public` schema, `schema.table`
+/// otherwise. This is the name the replica actually creates tables under and the
+/// name `sqlite_master` reports, so any keyed lookup against `list_tables` output
+/// MUST use this form.
+fn lite_table_name(schema: &str, table: &str) -> String {
+    if schema == "public" {
+        table.to_string()
+    } else {
+        format!("{schema}.{table}")
+    }
+}
+
 /// Read `table → minRowVersion` from `_zero.tableMetadata`. Port of TS
 /// `TableMetadataTracker.getMinRowVersions` (the map key is the lite table name
-/// `{schema}.{table}`). Returns an empty map when the metadata table is absent
+/// via `liteTableName`). Returns an empty map when the metadata table is absent
 /// (older replicas), so it degrades gracefully.
 fn read_min_row_versions(conn: &Connection) -> Result<HashMap<String, String>, String> {
     let mut stmt = match conn
@@ -263,7 +276,13 @@ fn read_min_row_versions(conn: &Connection) -> Result<HashMap<String, String>, S
     let mut out = HashMap::new();
     for r in rows {
         let (schema, table, min_row_version) = r.map_err(|e| format!("read tableMetadata: {e}"))?;
-        out.insert(format!("{schema}.{table}"), min_row_version);
+        // Key by the LITE table name so it matches the `sqlite_master` names used
+        // at lookup time (`read_table_spec`). Port of TS `liteTableName` (which is
+        // how `getMinRowVersions` keys its map): bare `name` for the `public`
+        // schema, `schema.name` otherwise. Keying unconditionally by
+        // `"{schema}.{table}"` silently missed EVERY public-schema table (the
+        // common case), dropping the minRowVersion re-download override.
+        out.insert(lite_table_name(&schema, &table), min_row_version);
     }
     Ok(out)
 }
@@ -615,19 +634,26 @@ mod tests {
     #[test]
     fn reads_unique_indexes_and_min_row_version() {
         let conn = Connection::open_in_memory().unwrap();
+        // A `public`-schema table is created under its BARE name in the replica
+        // (`liteTableName`), so `sqlite_master` reports `"users"`, not
+        // `"public.users"`. This is the production-realistic naming — an earlier
+        // version of this test named the table `"public.users"`, which
+        // coincidentally matched the (buggy) `"{schema}.{table}"` map key and thus
+        // hid the minRowVersion keying bug. Keep it BARE so the lookup path is
+        // actually exercised.
         conn.execute_batch(
             r#"
-            CREATE TABLE "public.users" (
+            CREATE TABLE "users" (
                 "id" "text|NOT_NULL",
                 "email" "text|NOT_NULL",
                 "org" "text|NOT_NULL",
                 "team" "text|NOT_NULL",
                 "_0_version" "text"
             );
-            CREATE UNIQUE INDEX "u_id" ON "public.users" ("id");
-            CREATE UNIQUE INDEX "u_email" ON "public.users" ("email");
-            CREATE UNIQUE INDEX "u_org_team" ON "public.users" ("org", "team");
-            CREATE INDEX "nonunique" ON "public.users" ("team");
+            CREATE UNIQUE INDEX "u_id" ON "users" ("id");
+            CREATE UNIQUE INDEX "u_email" ON "users" ("email");
+            CREATE UNIQUE INDEX "u_org_team" ON "users" ("org", "team");
+            CREATE INDEX "nonunique" ON "users" ("team");
 
             CREATE TABLE "_zero.tableMetadata" (
                 "schema" TEXT NOT NULL,
@@ -647,7 +673,10 @@ mod tests {
         assert_eq!(specs.len(), 1);
         let users = &specs[0];
 
-        // minRowVersion is read from `_zero.tableMetadata` (keyed schema.table).
+        // minRowVersion is read from `_zero.tableMetadata`, keyed by the LITE
+        // table name (`liteTableName`) so it matches the bare `sqlite_master`
+        // name for `public`-schema tables. (Regression guard for the
+        // `"{schema}.{table}"`-key vs bare-name-lookup mismatch.)
         assert_eq!(users.min_row_version.as_deref(), Some("2abc"));
 
         // Primary key = keyCmp winner: fewest columns, then lexicographically
@@ -670,5 +699,46 @@ mod tests {
             !keys.contains(&vec!["team".to_string()]),
             "non-unique index excluded"
         );
+    }
+
+    #[test]
+    fn min_row_version_matches_non_public_schema_table() {
+        // A non-`public` schema table is created under `"schema.table"` in the
+        // replica, so both the `sqlite_master` name and the metadata map key are
+        // `"myapp.widgets"`. Verifies the `else` branch of `lite_table_name`
+        // keeps parity (the bug only ever affected the `public` schema).
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "myapp.widgets" (
+                "id" "text|NOT_NULL",
+                "_0_version" "text"
+            );
+            CREATE UNIQUE INDEX "w_id" ON "myapp.widgets" ("id");
+
+            CREATE TABLE "_zero.tableMetadata" (
+                "schema" TEXT NOT NULL,
+                "table" TEXT NOT NULL,
+                "minRowVersion" TEXT NOT NULL DEFAULT "00",
+                "upstreamMetadata" TEXT,
+                "metadata" TEXT,
+                PRIMARY KEY ("schema", "table")
+            );
+            INSERT INTO "_zero.tableMetadata" ("schema", "table", "minRowVersion")
+                VALUES ('myapp', 'widgets', '3def');
+            "#,
+        )
+        .unwrap();
+
+        let specs = compute_zql_specs(&conn).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].table, "myapp.widgets");
+        assert_eq!(specs[0].min_row_version.as_deref(), Some("3def"));
+    }
+
+    #[test]
+    fn lite_table_name_public_is_bare_else_qualified() {
+        assert_eq!(lite_table_name("public", "users"), "users");
+        assert_eq!(lite_table_name("myapp", "widgets"), "myapp.widgets");
     }
 }

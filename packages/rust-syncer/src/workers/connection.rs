@@ -17,9 +17,6 @@ use crate::ws_sink::DirectWebSocketSink;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-/// Downstream message interval: slightly longer than client's 5s PING_INTERVAL.
-const DOWNSTREAM_MSG_INTERVAL_MS: u64 = 6000;
-
 /// Result of handling an upstream message.
 /// Matches the TS `HandlerResult` type.
 #[derive(Debug)]
@@ -282,21 +279,6 @@ impl Connection {
             }
         }
         self.send(error_message(&error));
-    }
-
-    /// Check if a pong should be sent (keepalive).
-    ///
-    /// Port of `Connection.#maybeSendPong()`.
-    /// Called on a timer every `DOWNSTREAM_MSG_INTERVAL_MS / 2` (3s).
-    pub fn maybe_send_pong(&self) {
-        let last = *self.last_downstream_msg_time.lock().unwrap();
-        if last.elapsed().as_millis() as u64 > DOWNSTREAM_MSG_INTERVAL_MS {
-            tracing::debug!(
-                ws_id = %self.ws_id,
-                "manually sending pong"
-            );
-            self.send(pong_message());
-        }
     }
 
     /// Handle an initConnection message that was piggybacked in the

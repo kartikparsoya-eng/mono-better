@@ -42,6 +42,19 @@ pub enum ConnectParamsError {
     DecodeError(#[from] crate::protocol::DecodeError),
 }
 
+/// Collapse the URL query string into a `key → value` map where the FIRST
+/// occurrence of a duplicated key wins — matching TS `URLSearchParams.get`
+/// (`?clientID=A&clientID=B` → `A`). A plain `.collect::<HashMap>()` would keep
+/// the LAST value instead, which diverges on identity params
+/// (clientID/clientGroupID/userID) for adversarial/duplicate-key URLs.
+fn query_params_first_wins(parsed: &url::Url) -> HashMap<String, String> {
+    let mut params: HashMap<String, String> = HashMap::new();
+    for (k, v) in parsed.query_pairs() {
+        params.entry(k.to_string()).or_insert_with(|| v.to_string());
+    }
+    params
+}
+
 /// Parse connect params from a URL + headers.
 ///
 /// `protocol_version` is extracted from the URL path (e.g. `/sync/v51/connect`).
@@ -56,10 +69,7 @@ pub fn get_connect_params(
     request_headers: HashMap<String, String>,
 ) -> Result<ConnectParams, ConnectParamsError> {
     let parsed = url::Url::parse(url).map_err(|_| ConnectParamsError::MissingParam("url"))?;
-    let params: HashMap<String, String> = parsed
-        .query_pairs()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+    let params = query_params_first_wins(&parsed);
 
     let client_id = get_string(&params, "clientID", true)?.expect("required");
     let client_group_id = get_string(&params, "clientGroupID", true)?.expect("required");
@@ -180,7 +190,19 @@ fn get_boolean(params: &HashMap<String, String>, name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_js_integer;
+    use super::{parse_js_integer, query_params_first_wins};
+
+    #[test]
+    fn duplicate_query_param_first_wins_like_url_search_params() {
+        let url = url::Url::parse(
+            "http://localhost/sync/v51/connect?clientID=A&clientID=B&userID=u1&userID=u2",
+        )
+        .unwrap();
+        let params = query_params_first_wins(&url);
+        // TS `URLSearchParams.get` returns the FIRST value for a duplicated key.
+        assert_eq!(params.get("clientID").map(String::as_str), Some("A"));
+        assert_eq!(params.get("userID").map(String::as_str), Some("u1"));
+    }
 
     #[test]
     fn integer_parsing_matches_typescript_parse_int() {
