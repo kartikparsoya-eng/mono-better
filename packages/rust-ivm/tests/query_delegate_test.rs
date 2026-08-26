@@ -9,13 +9,12 @@
 //! rust-cvr triage uses for the untested `RowRecordCache` scaffold methods).
 //!
 //! It also ENCODES two documented divergences from TS `QueryDelegateImpl` that
-//! fall out of Rust's `BuilderDelegate::get_source(&self)` signature:
-//!   1. `getSource` is NOT cached (TS memoizes in `#sources`; Rust builds a fresh
-//!      `TableSource` per call because `&self` can't populate the cache).
-//!   2. `onTransactionCommit`'s returned unlisten closure is a no-op (TS deletes
-//!      the observer from its set; Rust returns `Box::new(|| {})`).
-//! Both are inert in practice (the delegate is unused), but pinned here so the
-//! divergence is a deliberate, tested fact rather than silent drift.
+//! fall out of Rust's `BuilderDelegate::get_source(&self)` signature. (1) TS
+//! `getSource` memoizes in `#sources`; Rust builds a fresh `TableSource` per call
+//! because `&self` can't populate the cache. (2) TS `onTransactionCommit` returns
+//! an unlisten closure that deletes the observer; Rust returns `Box::new(|| {})`,
+//! a no-op. Both are inert in practice (the delegate is unused), but pinned here
+//! so the divergence is a deliberate, tested fact rather than silent drift.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
