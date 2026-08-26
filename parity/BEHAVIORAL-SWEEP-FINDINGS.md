@@ -123,8 +123,38 @@ Much of rust-syncer is rust-specific orchestration (event loop, WS, workers, met
 
 _Remaining rust-syncer TS-twinned: `transform_query.rs` (custom-query transform), `services/view_syncer/*` (connection_context_manager, pipeline_driver, query_covering, e2e_serving_lag) — the CVR-integration flow (sync_engine hydrate_and_sync) where rust-cvr-style tri-state bugs could recur._
 
-## Crate: rust-syncer (after rust-ivm)
-_pending_
+### `transform-query.ts` ↔ `custom_queries/transform_query.rs` (2026-08-26)
 
-## Crate: rust-syncer (after rust-ivm)
-_pending_
+| fn | verdict | notes |
+|---|---|---|
+| `transform` (`transform_custom_queries`) | ✅ | cache split, empty-batch short-circuit (`to_fetch.is_empty()` = TS `request.length===0`), per-query `'error' in q` (present-**null** counts as error on both — `q.get("error").is_some()` ≡ JS `in`), error-responses-not-cached (`continue` before `cache_set`), `hashOfAST` on the returned AST — all match. |
+| result **order** | ⚠️→benign | TS returns `[...newResponses, ...cachedResponses]` (new-first); Rust pushes cached-first then fetched (`[cached, new]`). **Non-observable:** BOTH consumers key by `q.id` (TS view-syncer.ts:1538 `customQueries.get(q.id)`; rust sync_engine.rs:810 per-qid `executed` loop) — never index-positional. |
+| missing-`ast` entry | ⚠️ divergence (documented, low-reach) | TS validates the whole response against `queryResponseSchema` inside `fetchFromAPIServer` → a non-error entry missing `ast` fails the **whole batch** (throw→`TransformFailed`, `result` non-array, consumer skips + retries all later). Rust has no response-schema validation (dynamic `serde_json::Value`) and degrades just that entry to a per-query `Errored`. Triggers only on a malformed API-server response (server bug); Rust is *more lenient* (keeps healthy siblings). Flagged not fixed — a faithful fix means porting `queryResponseSchema`; the divergence is unreachable with a spec-conformant server. |
+| `validate` (`validate_custom_queries`) | ✅ | forces the empty `["transform", []]` POST (does NOT short-circuit like `transform`), opaque `Ok(())`; 401 → reason-http body classified auth-error. Stub-server tested. |
+| `#requestTransform` `validation` thread | ⚠️ architectural | TS `#requestTransform` returns `ConnectionValidation` (`server-validated{userID}` vs `client-fallback`) consumed by `validateConnection` to re-pin the group userID. Rust's `transform_custom_queries` drops it; connection (re)validation is handled by the separate router.rs auth-revalidation path (jwt re-verify), not by threading the server's authoritative userID back from the transform response. Behaviorally equivalent for JWT auth (userID pinned from the token); a deployment that relies on the API server *rewriting* userID mid-session would diverge. Recorded as an open architectural item, not a quick fix. |
+| `getCacheKey` (`get_cache_key`+`normalized_headers`) | ✅ | key encodes url+auth+userID+composed-headers-digest+id — TS includes token+cookie+origin+userID+customHeaders. `composed_headers` overwrite precedence (api-key→client→forwarded→Auth→Cookie→Origin) tested; process-wide cache with expiry-sweep is a labelled Rust-specific reclaim (TS per-connection `TimedCache`). |
+| `urlMatch` (`url_match`) | ✅ (security) | real WHATWG `URLPattern` (urlpattern crate) — `url-match-fixture.json` differential vs native TS `URLPattern`; component-boundary-safe (F-FETCH-1 allowlist-bypass regression pinned). |
+| `fetchFromAPIServer` (`post_transform*`) | ✅ | 4-attempt retry, 5xx/network retry with `min(1000, 100·2^(a-1)+jitter)` backoff (bounds test), 4xx immediate-fail, reserved-param guard, `?schema&appID` append, real-batch `queryIDs` on failure body (F-TQ-1 test) — all match. Timeout is a labelled Rust-specific addition (reqwest has no default; TS relies on undici's 300s). |
+| `isAuthErrorBody` (`is_auth_error_body`) | ✅ | `{error:http,status:401\|403}` / `{kind:AuthInvalidated\|Unauthorized}` / `{kind:TransformFailed\|PushFailed,reason:http,status:401\|403}` — full table tested. |
+
+**`transform-query.ts ↔ transform_query.rs`: SWEEP COMPLETE** — 0 real correctness divergences; 1 benign order diff (consumer-keyed), 1 documented low-reach leniency (missing-ast), 1 open architectural note (validation/userID thread). Strong existing test coverage incl. TS-golden url-match differential.
+
+## Crate: rust-syncer — services/view_syncer/* (in progress)
+
+### `pipeline-driver.ts` ↔ `pipeline_driver.rs` + `rust-ivm/advance_gate.rs` (2026-08-26)
+
+`pipeline_driver.rs` is a *behavioral* bridge (engine-side of pipeline-driver.ts + the parity-tested napi `EngineState`); the row-streaming + operator logic lives in rust-ivm's `Engine` (already swept — 0 divergences). The divergence-prone piece unique to pipeline-driver.ts is the **smart load-shedding / advancement-timeout reset**, ported to `rust-ivm/advance_gate.rs`.
+
+| item | verdict | notes |
+|---|---|---|
+| load-shed **constants** (`MIN_ADVANCEMENT_TIME_LIMIT_MS`, `MIN/MAX_PROJECTED_ADVANCEMENT_SAMPLE_CHANGES`, `PROJECTED_ADVANCEMENT_SAMPLE_FRACTION`, `MIN_PROJECTED_ADVANCEMENT_SAMPLE_MS`, `MIN_PROJECTED_ADVANCEMENT_CHANGES`, `PROJECTED_ADVANCEMENT_RESET_MULTIPLIER`, `LATE_ADVANCEMENT_FINISH_PROGRESS`) | ✅ | all 8 byte-identical to TS pipeline-driver.ts:167-174 (verified line-by-line). |
+| `projectedAdvancementTimeMs` / `advancementResetTimeLimitMs` / `minProjectedAdvancementSampleChanges` / `shouldResetProjectedAdvancement` / `shouldFinishLateAdvancement` / `shouldResetSlowCurrentChange` | ✅ | each ported 1:1 (same name, same guards, same `>` vs `>=`). |
+| `#shouldAdvanceYieldMaybeAbortAdvance` arm composition (`advance_reset`) | ✅ | arm order + gating identical: (1) slow-current-change always resets, (2) projected `&& !shouldFinish`, (3) economic timeout `!shouldFinish && elapsed>MIN && (elapsed>budget \|\| (elapsed>budget/2 && pos<=num/2))`. `budget` = `totalHydrationTimeMs`. **This is the B5/#145 "advancement-timeout" reset — a faithful 1:1 port, NOT a Rust-specific stall.** |
+| `ADVANCE_WALL_CLOCK_CEILING_MS` (arm 0, 60s) | Rust-only (RULE #5, labeled) | Rust `exclude`s downstream-delivery time from the economic clock (TS doesn't pause its timer), so a slow consumer could hold the WAL snapshot indefinitely — the very resource the reset bounds. An exclusion-free absolute ceiling restores TS's implicit bound. Fires only at 60s (past every TS arm) → never changes TS-covered behavior. |
+| per-row `should_stop_fetch` thread-local gate | Rust-only (RULE #5, labeled) | Rust IVM push is infallible (`Vec<Change>`, not `Result`) so it can't throw `ResetPipelinesSignal` mid-fetch like TS's `#shouldYield()` callback; a thread-local gate armed for the advance stops the row-read loop instead. RAII `GateGuard` clears on unwind so a later hydrate can't inherit a stale budget. |
+| lifecycle (`init`/`hydrate`/`advance`/`destroy`, poison→Reset, scalar-subquery→Reset, panic classification) | ✅ | `scalar_reset_message` classifies only `ScalarResetError` → `scalar-subquery` reset; other panics poison→next-advance `schema-change` reset (TS teardown parity). Field-drop order is a labeled Rust-specific G6-leak fix. |
+| AST conversion (`parse_ts_ast`/`convert_*`/`json_to_value`) | ✅ | ported verbatim from the parity-tested napi path; `static` value-position → `Null` and out-of-safe-range int → `f64` both match napi (labeled: never panic on client literals). |
+
+**`pipeline-driver.ts ↔ pipeline_driver.rs`: SWEEP COMPLETE** — 0 behavioral divergences; the advancement-timeout reset is a faithful port with 1:1 constants (answers B5/#145 code-side); 2 labeled Rust-specific additions (wall-clock ceiling, per-row gate).
+
+_next: query_covering.rs, connection_context_manager.rs, e2e_serving_lag.rs, drain_coordinator.rs_
