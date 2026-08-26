@@ -20,8 +20,9 @@ run_cov() { # crate, extra cargo args...
   local crate="$1"; shift
   echo "══ $crate ══"
   mkdir -p "$OUT/$crate"
-  (cd "$ROOT/packages/$crate" && cargo llvm-cov --all-targets "$@" \
-      --summary-only 2>&1 | tail -8 | tee "$OUT/$crate/summary.txt")
+  # --summary-only must precede any `--` test-binary args in "$@".
+  (cd "$ROOT/packages/$crate" && cargo llvm-cov --all-targets --summary-only \
+      "$@" 2>&1 | tail -8 | tee "$OUT/$crate/summary.txt")
   local s1=${PIPESTATUS[0]}
   (cd "$ROOT/packages/$crate" && cargo llvm-cov report --lcov \
       --output-path "$OUT/$crate/lcov.info")
