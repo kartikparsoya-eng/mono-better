@@ -254,6 +254,54 @@ Consequences for the collector/backend:
 
 ---
 
+## 8. Rollback
+
+The rust syncer is opt-in behind a single switch, so rollback is a config flip,
+not a code change. There is nothing rust-specific to un-migrate: the CVR
+(Postgres) and replica (SQLite) are the SAME artifacts the TS syncer reads.
+
+| Rollback | Procedure | Blast radius |
+|---|---|---|
+| **Rust → TS syncer (fastest)** | Unset `ZERO_SYNCER` (or set it to anything other than `rust`) and restart zero-cache. `main.ts:62` `useRustSyncer = process.env.ZERO_SYNCER === 'rust'` gates the entire rust child spawn; with it off, the process is the pure-TS view-syncer. | All clients reconnect once (LB/dispatcher rehome) and re-hydrate from their existing CVRs. No data migration. |
+| **Image rollback** | Redeploy the previous zero-cache image tag. If the previous image predates the rust syncer, this also removes `ZERO_SYNCER=rust`. | Same one-time reconnect burst. |
+| **Replica rollback / restore from older backup** | Covered in §6 "Replica swap / older replica": a CVR newer than the restored replica trips `ClientNotFound` and the client wipes + re-syncs fresh. Expect a re-sync burst; it is one-time and self-healing. | Fresh re-sync for clients whose CVR outran the restored replica. |
+
+**Poisoned-CVR caveat** (see the Row-key invariant section below): a bad rowKey
+written into the SHARED CVR Postgres by a buggy rust build **survives an image
+revert** — the TS syncer reads the same poisoned rows and the client keeps
+crash-looping. A code rollback is NOT sufficient here; the fix is a fresh client
+group (client re-login → new CG → new CVR) or purging the poisoned CVR rows.
+This is the one rollback that is not "just flip the switch."
+
+**Pre-rollback checklist:** confirm the target image/config is the last known-good
+(don't roll back onto another broken build), drain at the LB first (§5 Deploy
+guidance) so the reconnect storm lands on healthy instances, and keep stop-grace
+≥ 30 s.
+
+---
+
+## 9. Profiling
+
+All rust-side profiling is feature-gated and off the hot path unless explicitly
+requested, so the tools can be baked into non-prod (initial-testing) images. The
+Node dispatcher's own inspector endpoints cover the TS side; these are the rust
+analogs.
+
+| Tool | How to enable | How to collect | Reads |
+|---|---|---|---|
+| **CPU flamegraph** (`profiling` feature, pprof-rs) | Build with `RUST_SYNCER_FEATURES=profiling` (safe in initial-testing images — the sampler only runs during an active request). <!-- Cargo.toml [features] profiling --> | `curl 'http://<HTTP_PORT>/debug/pprof/flamegraph?seconds=30' > flame.svg` — samples the WHOLE process at 99 Hz for `seconds` (default 10, cap 120) and returns an SVG. <!-- http_server.rs:170-190 --> | On-CPU time — where the executor threads actually spend cycles (serialization, IVM advance, SQLite). |
+| **Heap / RSS attribution** (`dhat-heap` feature) | Build with `--features dhat-heap` (real per-allocation overhead — NOT for prod). <!-- main.rs:339-353 --> | Run a load, then SIGTERM for a graceful shutdown; dhat dumps `dhat-heap.json` (path via `ZERO_DHAT_OUT`). Open at [dh_view](https://nnethercote.github.io/dh_view/dh_view.html). | Rust-side allocations only. **SQLite page-cache / mmap / C-side allocations are invisible to dhat** — a retained snapshot connection leaks RSS while dhat stays flat (the G6 class). |
+| **Live-object census** (`/census`, always on) | No feature flag. <!-- http_server.rs:326, live_count.rs --> | `curl http://<HTTP_PORT>/census` during a load run — one line per tracked counter across all three crates (engines, connections, CVR instances, …). | Which counter climbs during a load = the leak's object class. Pair with `trace.rs` (`SYNCER_TRACE=1` stderr harness) to correlate a climbing counter with the event that created it. |
+| **Sanitizers** (ASan/LSan/TSan) | `parity/sanitize.sh` (pins nightly, builds WAL2 SQLite into the multiarch libdir; rust-cvr + rust-ivm are the leak-carrying crates). | Runs the unit suites under the sanitizer; TSan uses the `deadlock:unix*` suppression for SQLite's internal VFS lock-order. | Use-after-free / leaks (ASan+LSan) and data races (TSan) as a regression gate. |
+
+**Typical workflow for an RSS climb (the recurring hard case):** `/census`
+first to identify the growing object class; if it's a Rust object, `dhat-heap`
+to attribute the allocation site; if census is flat but RSS still climbs, the
+retention is SQLite-side (snapshot connection holders) — check `pipeline_driver.rs`
+`destroy()` and the `Drop for Engine` cascade (the G6 fix), not the Rust heap.
+
+---
+
 *Maintainers: keep this document in sync with `SyncerConfig::from_env`
 (main.rs), `rustSyncerEnv` (rust-syncer-bridge.ts), and the metric definitions
 in metrics.rs/otel.rs — those are the sources of truth this runbook was
