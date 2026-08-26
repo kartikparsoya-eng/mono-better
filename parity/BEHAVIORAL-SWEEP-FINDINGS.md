@@ -157,4 +157,51 @@ _Remaining rust-syncer TS-twinned: `transform_query.rs` (custom-query transform)
 
 **`pipeline-driver.ts ↔ pipeline_driver.rs`: SWEEP COMPLETE** — 0 behavioral divergences; the advancement-timeout reset is a faithful port with 1:1 constants (answers B5/#145 code-side); 2 labeled Rust-specific additions (wall-clock ceiling, per-row gate).
 
-_next: query_covering.rs, connection_context_manager.rs, e2e_serving_lag.rs, drain_coordinator.rs_
+### `connection-context-manager.ts` ↔ `connection_context_manager.rs` (2026-08-26)
+
+**Status: NOT WIRED — a tested reference impl** (production auth is the simplified per-CG `CgState` + router.rs revalidate/retransform tick). Parity still matters for a future promotion.
+
+| fn | verdict | notes |
+|---|---|---|
+| `resolveAuth` (`resolve_auth`) | ✅ (security-verified) | line-by-line: no-token+prev→Unauthorized, no-token→None, token+null-userID→Unauthorized, legacy-validator→`pick_token`, prev-jwt→"cannot change JWT→opaque", prev-opaque+raw==wire→reuse, else new opaque — all exact. |
+| `pickToken` (`pick_token`) | ✅ (security-verified) | prev-None→new; type-mismatch→"Token type cannot change" (Rust collapses TS's *dead* step-5 "opaque→JWT" message — unreachable in TS too, caught by the generic type-mismatch throw first); sub-mismatch→pinned-user error; iat tri-state (prev-None→new / new-None→error / `new_iat>prev_iat`→new else keep-prev) all match incl. the `<` vs `>` direction. |
+| `validateConnection` | ✅ | stale-revision→None, server-validated userID match→Unauthorized-on-mismatch, pinned-user pin-on-first + agree-or-throw, revalidate-at refresh, background refresh — all match. |
+| `updateAuth` 3-way branch | ⚠️→benign | TS's middle arm is `nextAuth === connection.auth` (JS **reference** equality — "did resolveAuth hand back the exact same object, skip store"); Rust uses `!=` **value** equality (`Auth: PartialEq`). Non-observable: `store_connection` is an idempotent map re-insert and the returned auth is `auth_equals`-equal either way. Documented — a Rust-can't-express-JS-ref-equality case. |
+| `planMaintenance` | ✅ | `maintenanceNotBeforeAt` deferral returns empty + `max(earliest, notBefore)` ONLY when `notBefore>now && earliest.is_some()`; due-revalidations sorted ascending. Matches. |
+| `compareByInsertionOrder` / `comparePreferredValidatedConnection` | ✅ | opposite directions preserved: due = **ascending** (`a-b`, ws_id asc); preferred-background = **descending** (`b-a`, ws_id desc). |
+| `refreshBackgroundConnectionContext` / `updateBackgroundRetransformDeadline` | ✅ | sticky-background (preferred promoted only when no current validated bg), reset-vs-seed deadline semantics match. |
+| `filterHeaders` / `build_fetch_context` | ⚠️ architectural (labeled) | outgoing request-header filtering (incl. #6144 forwarding) is done by router.rs; this port keeps the pre-#6144 `allowed_client_headers` shape and is not on the runtime fetch path (labeled in-file). |
+| `to_error_body` | ✅ | Layer-2 differential vs TS `ErrorKind`/`ErrorOrigin` (`error-body-fixture.json`). |
+| — | cleanup | removed a stale dangling comment ("Fix the pick_token function… simplifying here") that referred to no code and misdescribed the (correct) `pick_token`. |
+
+### `drain-coordinator.ts` ↔ `drain_coordinator.rs` (2026-08-26) — WIRED (router.rs SIGTERM drain)
+
+| item | verdict | notes |
+|---|---|---|
+| `TARGET_UTILIZATION=0.6`, `FORCE_DRAIN_PADDING=2` | ✅ | constants match. |
+| `shouldDrain`/`drainNextIn`/`forceDrainTimeout`/`draining` | ✅ | interval `/0.6`, `nextDrainTime=now+adjusted`, force deadline `+PADDING`, coalescing push-forward — all match. `assert`→`debug_assert` (labeled: router upholds it by construction, avoids a prod panic the original port declined) and deadline-atomics-vs-`Notify` (labeled: can't lose a wakeup) are Rust-specific. |
+
+### `e2e-serving-lag.ts` ↔ `e2e_serving_lag.rs` (2026-08-26) — WIRED (#6157/#6312)
+
+| item | verdict | notes |
+|---|---|---|
+| `onVersionReady`/`onVersionServed` | ✅ (differential-tested) | both-fields-required guard, coalesce-keeps-**oldest**-commit-time + **newest**-watermark, `servedVersion < watermark`→None replay-guard (LexiVersion lexicographic==numeric), negative-lag clamp-to-0 + `clamped=true` flag — exact 1:1, pinned by a Layer-2 differential against the real TS tracker (`e2e-serving-lag-fixture.json`). |
+
+### `query-covering.ts` ↔ `query_covering.rs` (2026-08-26) — SHADOW-MODE (logging only)
+
+| fn | verdict | notes |
+|---|---|---|
+| `conditionImplies` | ✅ | branch order identical: covering-None→true, covered-None→false, json-equal→true, covered-`or`→all, covering-`or`→some, covering-`and`→all, covered-`and`→some, both-simple→simple, both-correlated→correlated, else false. |
+| `simpleConditionImplies` / `equalityImplies` / `orderConditionImplies` | ✅ | full switch parity. `order_condition_implies` collapses TS's `>`/`<` two-branch disjunction into one `>=`/`<=` test (documented — both TS branches share the same threshold, semantically identical); `>=`/`<=` kept as-is. `equality_implies` NOT-IN/LIKE-family → false; `cmp_num`/`num` enforce TS's `typeof === 'number'` guard (booleans & strings → false, verified). |
+| `boundsCoveredBy` | ✅ | covering-no-limit→(no-start→true / else start+orderBy eq); covered-no-limit or `covering.limit < covered.limit`→false; else `conditionEquivalent(where) && start eq && orderBy eq`. |
+| `correlatedConditionImplies` | ✅ | op/scalar/edge match then EXISTS→covered⊆covering, NOT-EXISTS→**reversed** covering⊆covered. |
+| `sameRelatedEdge` / `relatedCoveredBy` / `astCoveredBy` / `rootKey` / index add/remove/find | ✅ | correlation/hidden/system/alias edge match; every-covered-∈-some-covering; root-key bucketing + skip-self in find. |
+| tri-state helpers (`present`/`json_eq`/`num`) | ✅ | `present` maps `Value::Null`→absent; `json_eq` treats both-absent as equal, present-vs-absent as unequal (matches TS `deepEqual(undefined, undefined)`); `num` rejects booleans. |
+
+**`query-covering.ts ↔ query_covering.rs`: SWEEP COMPLETE** — 0 divergences (faithful, with a documented semantically-identical `order` collapse).
+
+---
+
+## ✅ rust-syncer TS-twinned subset: SWEEP COMPLETE (2026-08-26)
+
+All TS-mirrored rust-syncer files swept: `transform_query.rs`, `pipeline_driver.rs` + `advance_gate.rs`, `connection_context_manager.rs`, `drain_coordinator.rs`, `e2e_serving_lag.rs`, `query_covering.rs`. **0 real correctness divergences.** Findings: 1 benign result-order (consumer-keyed), 1 documented low-reach leniency (transform missing-ast), several labeled Rust-specific additions (advance wall-clock ceiling + per-row gate, drain atomics, timeout), and 2 documented benign approximations in the not-wired connection-context-manager (ref-vs-value auth equality, header-filter architectural split). B5/#145 confirmed by-design. 1 stale comment removed. The rest of rust-syncer is Rust-specific orchestration (event loop, WS, workers, metrics) with no TS twin.

@@ -913,9 +913,6 @@ fn compare_preferred_validated_connection(
         .then(b.ws_id.cmp(&a.ws_id))
 }
 
-// Fix the pick_token function for the "new token is older or same" case
-// (the inline code above was overly complex — simplifying here)
-
 #[cfg(test)]
 mod tests {
     use super::*;
