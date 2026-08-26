@@ -1135,6 +1135,53 @@ mod tests {
         (handler, messages)
     }
 
+    // Build a handler alongside the sink's fail/cancel observation handles.
+    fn make_handler_observing_lifecycle() -> (
+        ClientHandler,
+        Arc<StdMutex<Option<String>>>,
+        Arc<StdMutex<bool>>,
+    ) {
+        let failed = Arc::new(StdMutex::new(None));
+        let cancelled = Arc::new(StdMutex::new(false));
+        let sink = MockSink {
+            messages: Arc::new(StdMutex::new(Vec::new())),
+            failed: failed.clone(),
+            cancelled: cancelled.clone(),
+        };
+        let handler = ClientHandler::new(
+            "cg1",
+            "client1",
+            "ws1",
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
+            None,
+            Arc::new(sink),
+        );
+        (handler, failed, cancelled)
+    }
+
+    // Port of TS client-handler.ts:175 `fail`: forwards to downstream.fail and
+    // does NOT cancel.
+    #[test]
+    fn fail_forwards_to_downstream_fail_only() {
+        let (handler, failed, cancelled) = make_handler_observing_lifecycle();
+        handler.fail("boom");
+        assert_eq!(*failed.lock().unwrap(), Some("boom".to_string()));
+        assert!(!*cancelled.lock().unwrap(), "fail must not cancel");
+    }
+
+    // Port of TS client-handler.ts:183 `close`: invokes downstream.cancel (a
+    // clean close), NOT fail.
+    #[test]
+    fn close_forwards_to_downstream_cancel_not_fail() {
+        let (handler, failed, cancelled) = make_handler_observing_lifecycle();
+        handler.close("done");
+        assert!(*cancelled.lock().unwrap(), "close must cancel");
+        assert_eq!(*failed.lock().unwrap(), None, "close must not fail");
+    }
+
     fn make_row_patch_put(table: &str, contents: Value) -> PatchToVersion {
         PatchToVersion {
             patch: Patch::Row(RowPatch::Put {
