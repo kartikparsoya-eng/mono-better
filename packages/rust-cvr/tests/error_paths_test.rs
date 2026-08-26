@@ -40,6 +40,21 @@ fn maybe_version_string_pins_both_branches() {
     );
 }
 
+// Regression for a fuzz-found DoS: a client cookie with a multi-byte UTF-8 char
+// in the lexi position (crash input d1b161 = "ѱa") byte-sliced version_from_lexi
+// at a non-char-boundary and PANICKED. maybe_version_string is the untrusted-
+// input path (runs on every connect), so it must NEVER panic — return Err, as
+// TS does. This test panics (aborting the whole run) on the unfixed code.
+#[test]
+fn maybe_version_string_never_panics_on_multibyte_input() {
+    // The exact fuzz crash input.
+    assert!(maybe_version_string("ѱa").is_err());
+    // A few more multi-byte / boundary-adjacent shapes, none may panic.
+    for s in ["Ñ", "é1", "1é", "café", "\u{0471}\u{0471}", "aѱ:1", "1:ѱ"] {
+        let _ = maybe_version_string(s); // Ok or Err, but never a panic.
+    }
+}
+
 // --- trackRemoved unknown-query throw ------------------------------------- //
 
 fn empty_cvr() -> CVR {

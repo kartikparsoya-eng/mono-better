@@ -244,6 +244,15 @@ pub fn version_from_lexi(lexi_version: &str) -> Result<u128, &'static str> {
     if lexi_version.len() < 2 {
         return Err("LexiVersion must have at least 2 characters");
     }
+    // The byte-slices below require byte 1 to be a char boundary. A valid lexi
+    // version is all base36 (ASCII), so a multi-byte first char is malformed —
+    // but slicing at a non-boundary PANICS. This parser runs on the untrusted
+    // client cookie (maybe_version_string), so that panic is a per-CG DoS
+    // (fuzz crash d1b161 = "ѱa"). TS indexes UTF-16 units and never panics,
+    // returning a parse error instead; mirror that with a clean Err.
+    if !lexi_version.is_char_boundary(1) {
+        return Err("Invalid base36 encoded value");
+    }
     let length_char = &lexi_version[0..1];
     let base36 = &lexi_version[1..];
     let expected_length = from_base36_u64(length_char)?;
