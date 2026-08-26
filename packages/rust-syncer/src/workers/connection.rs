@@ -485,4 +485,237 @@ mod tests {
             LogLevel::Error
         );
     }
+
+    // ─── Connection::handle_inbound / init — port of TS `Connection`
+    // (`#handleMessage`, `#handleMessageResult`, `init`, connection.ts) ──────
+
+    use crate::ws_sink::WsCommand;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
+    /// MessageHandler mock: records every dispatched message and returns a
+    /// configured list of `HandlerResult`s.
+    struct MockHandler {
+        results: Mutex<Vec<HandlerResult>>,
+        calls: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+    impl MessageHandler for MockHandler {
+        fn handle_message(&self, msg: &str) -> Vec<HandlerResult> {
+            self.calls.lock().unwrap().push(msg.to_string());
+            std::mem::take(&mut *self.results.lock().unwrap())
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn test_connection(
+        protocol_version: u32,
+        results: Vec<HandlerResult>,
+    ) -> (
+        Connection,
+        tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
+        std::sync::Arc<Mutex<Vec<String>>>,
+        std::sync::Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let closes = std::sync::Arc::new(AtomicUsize::new(0));
+        let closes_in = closes.clone();
+        let conn = Connection::new(
+            DirectWebSocketSink::new(tx),
+            protocol_version,
+            "ws1".to_string(),
+            "c1".to_string(),
+            "cg1".to_string(),
+            "zero".to_string(),
+            0,
+            Box::new(MockHandler {
+                results: Mutex::new(results),
+                calls: calls.clone(),
+            }),
+            Box::new(move || {
+                closes_in.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        (conn, rx, calls, closes)
+    }
+
+    fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>) -> Vec<WsCommand> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    /// Port of TS `Connection.init()` (connection.ts): an in-range protocol
+    /// version sends the `connected` message `{wsid, timestamp, appID,
+    /// shardNum}` and returns true.
+    #[test]
+    fn init_in_range_sends_connected_with_ws_id_app_id_and_shard() {
+        let (conn, mut rx, _calls, _closes) = test_connection(PROTOCOL_VERSION, Vec::new());
+        assert!(conn.init());
+        let cmds = drain(&mut rx);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            WsCommand::Send { msg, .. } => {
+                assert_eq!(msg[0], "connected");
+                assert_eq!(msg[1]["wsid"], "ws1");
+                assert_eq!(msg[1]["appID"], "zero");
+                assert_eq!(msg[1]["shardNum"], 0);
+                assert!(msg[1]["timestamp"].is_i64());
+            }
+            _ => panic!("expected the connected Send frame"),
+        }
+    }
+
+    /// Port of TS `Connection.init()` version gate: below the minimum → the
+    /// exact "client must be updated" VersionNotSupported message; above the
+    /// server's version → the "server must be updated" variant. Both close.
+    #[test]
+    fn init_out_of_range_closes_with_exact_version_not_supported_message() {
+        for (version, who) in [
+            (MIN_SERVER_SUPPORTED_SYNC_PROTOCOL - 1, "client"),
+            (PROTOCOL_VERSION + 1, "server"),
+        ] {
+            let (conn, mut rx, _calls, closes) = test_connection(version, Vec::new());
+            assert!(!conn.init());
+            assert!(conn.is_closed());
+            assert_eq!(closes.load(Ordering::SeqCst), 1, "on_close must fire");
+            let cmds = drain(&mut rx);
+            let error = cmds
+                .iter()
+                .find_map(|c| match c {
+                    WsCommand::Send { msg, .. } if msg[0] == "error" => Some(msg[1].clone()),
+                    _ => None,
+                })
+                .expect("expected an error frame before the close");
+            assert_eq!(error["kind"], "VersionNotSupported");
+            assert_eq!(
+                error["message"],
+                format!(
+                    "server is at sync protocol v{PROTOCOL_VERSION} and does not support v{version}. The {who} must be updated to a newer release."
+                )
+            );
+            assert!(
+                cmds.iter().any(|c| matches!(c, WsCommand::Close(_))),
+                "the connection must close after the error"
+            );
+        }
+    }
+
+    /// Port of TS `#handleMessage`'s parse catch (connection.ts): unparseable
+    /// JSON closes the connection with an InvalidMessage error — sent BEFORE
+    /// the close — and the handler is never consulted.
+    #[test]
+    fn handle_inbound_invalid_json_closes_with_invalid_message() {
+        let (conn, mut rx, calls, closes) = test_connection(PROTOCOL_VERSION, Vec::new());
+        assert!(!conn.handle_inbound("{not json"));
+        assert!(conn.is_closed());
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert!(calls.lock().unwrap().is_empty(), "handler must not run");
+        let cmds = drain(&mut rx);
+        match &cmds[0] {
+            WsCommand::Send { msg, .. } => {
+                assert_eq!(msg[0], "error");
+                assert_eq!(msg[1]["kind"], "InvalidMessage");
+            }
+            _ => panic!("expected the error frame first"),
+        }
+        assert!(matches!(cmds[1], WsCommand::Close(_)));
+    }
+
+    /// Port of TS `#handleMessage`'s ping fast-path: `["ping",{}]` answers
+    /// `["pong",{}]` directly, WITHOUT dispatching to the message handler.
+    #[test]
+    fn handle_inbound_ping_answers_pong_without_handler() {
+        let (conn, mut rx, calls, _closes) = test_connection(
+            PROTOCOL_VERSION,
+            vec![HandlerResult::Fatal {
+                error: ErrorBody::internal("must never be reached"),
+            }],
+        );
+        assert!(conn.handle_inbound(r#"["ping",{}]"#));
+        assert!(!conn.is_closed());
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "ping must bypass the handler"
+        );
+        let cmds = drain(&mut rx);
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            WsCommand::Send { msg, .. } => {
+                assert_eq!(msg, &serde_json::json!(["pong", {}]));
+            }
+            _ => panic!("expected the pong frame"),
+        }
+    }
+
+    /// Port of TS `#handleMessageResult` 'fatal': the error is sent and the
+    /// connection closes (handle_inbound returns false).
+    #[test]
+    fn handle_inbound_fatal_result_sends_error_and_closes() {
+        let (conn, mut rx, calls, closes) = test_connection(
+            PROTOCOL_VERSION,
+            vec![HandlerResult::Fatal {
+                error: ErrorBody::unauthorized("bad token"),
+            }],
+        );
+        assert!(!conn.handle_inbound(r#"["updateAuth",{"auth":"t"}]"#));
+        assert!(conn.is_closed());
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.lock().unwrap().len(), 1, "handler dispatched once");
+        let cmds = drain(&mut rx);
+        match &cmds[0] {
+            WsCommand::Send { msg, .. } => {
+                assert_eq!(msg[0], "error");
+                assert_eq!(msg[1]["kind"], "Unauthorized");
+                assert_eq!(msg[1]["message"], "bad token");
+            }
+            _ => panic!("expected the error frame"),
+        }
+        assert!(matches!(cmds[1], WsCommand::Close(_)));
+    }
+
+    /// Port of TS `#handleMessageResult` 'transient': every error is sent to
+    /// the client but the connection STAYS OPEN — the branch difference vs
+    /// 'fatal' that G36 pins.
+    #[test]
+    fn handle_inbound_transient_errors_keep_connection_open() {
+        let (conn, mut rx, _calls, closes) = test_connection(
+            PROTOCOL_VERSION,
+            vec![HandlerResult::Transient {
+                errors: vec![
+                    ErrorBody::basic(ErrorKind::MutationFailed, "m1 failed".to_string()),
+                    ErrorBody::basic(ErrorKind::MutationRateLimited, "slow down".to_string()),
+                ],
+            }],
+        );
+        assert!(conn.handle_inbound(r#"["updateAuth",{"auth":"t"}]"#));
+        assert!(!conn.is_closed());
+        assert_eq!(closes.load(Ordering::SeqCst), 0, "no close for transient");
+        let kinds: Vec<String> = drain(&mut rx)
+            .iter()
+            .filter_map(|c| match c {
+                WsCommand::Send { msg, .. } if msg[0] == "error" => {
+                    Some(msg[1]["kind"].as_str().unwrap().to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec!["MutationFailed", "MutationRateLimited"]);
+    }
+
+    /// Port of TS `#handleMessage`'s closed guard: frames arriving after close
+    /// are ignored (no pong, no dispatch), and `close` is idempotent — the
+    /// on_close callback fires exactly once.
+    #[test]
+    fn messages_after_close_are_ignored_and_close_is_idempotent() {
+        let (conn, mut rx, calls, closes) = test_connection(PROTOCOL_VERSION, Vec::new());
+        conn.close("test close");
+        assert!(!conn.handle_inbound(r#"["ping",{}]"#));
+        conn.close("second close");
+        assert_eq!(closes.load(Ordering::SeqCst), 1, "on_close fires once");
+        assert!(calls.lock().unwrap().is_empty());
+        let sends = drain(&mut rx)
+            .iter()
+            .filter(|c| matches!(c, WsCommand::Send { .. }))
+            .count();
+        assert_eq!(sends, 0, "no frame may be sent after close");
+    }
 }

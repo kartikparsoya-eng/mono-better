@@ -5528,4 +5528,460 @@ mod tests {
         assert_eq!(frame[1]["id"], "b1");
         assert!(frame[1]["value"].is_string());
     }
+
+    // ─── CgState mock-factory harness ───────────────────────────────────────
+    //
+    // Drives CgState (the fused port of TS view-syncer.ts + syncer-ws-message-
+    // handler.ts dispatch) directly on the test thread, with mock dispatch
+    // services (Noop* above), an in-memory replica carrying a real `issue`
+    // table spec, and a channel-backed DirectWebSocketSink standing in for the
+    // client socket. Models the TS view-syncer.pg.test.ts `connect()` +
+    // `nextPoke()` pattern.
+
+    fn issue_table_spec() -> crate::services::view_syncer::pipeline_driver::IvmTableSpec {
+        use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
+        IvmTableSpec {
+            table: "issue".to_string(),
+            columns: HashMap::from([
+                (
+                    "id".to_string(),
+                    IvmColumnSchema {
+                        r#type: "string".to_string(),
+                        optional: false,
+                    },
+                ),
+                (
+                    "title".to_string(),
+                    IvmColumnSchema {
+                        r#type: "string".to_string(),
+                        optional: true,
+                    },
+                ),
+            ]),
+            primary_key: vec!["id".to_string()],
+            unique_keys: None,
+            min_row_version: None,
+        }
+    }
+
+    /// Factory whose in-memory engine has a REAL `issue` table spec, so
+    /// desired-query puts against it hydrate instead of failing the group.
+    struct TablesFactory {
+        handle: tokio::runtime::Handle,
+    }
+    impl CGServicesFactory for TablesFactory {
+        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
+            Arc::new(NoopViewSyncer)
+        }
+        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
+            Arc::new(NoopCcm)
+        }
+        fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
+            None
+        }
+        fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
+            None
+        }
+        fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
+            SyncEngineConfig {
+                initialization_error: None,
+                tables: vec![issue_table_spec()],
+                replica_path: None, // in-memory sources
+                app_id: "zero".to_string(),
+                replica_version: "00".to_string(),
+                shard: ShardID {
+                    app_id: "zero".to_string(),
+                    shard_num: 0,
+                },
+                cvr_pg: None,
+                permissions: None,
+                permissions_hash: None,
+                revalidate_interval_ms: None,
+                query_config: None,
+                enable_query_covering: true,
+                tokio_handle: self.handle.clone(),
+                admin_password: None,
+                server_version: "test".to_string(),
+                metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
+            }
+        }
+    }
+
+    /// A CgState over the `issue`-table factory, plus its runtime.
+    fn tables_state(rt: &tokio::runtime::Runtime) -> CgState {
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TablesFactory {
+            handle: rt.handle().clone(),
+        });
+        CgState::new(
+            "cg1",
+            &factory,
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(1)),
+        )
+    }
+
+    /// Drain every queued `Send` frame off the sink channel.
+    fn drain_sends(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
+    ) -> Vec<serde_json::Value> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|command| match command {
+                WsCommand::Send { msg, .. } => Some(msg),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Connect `c1`/`ws1` and drain the `connected` frame.
+    fn connect_c1(
+        rt: &tokio::runtime::Runtime,
+        state: &mut CgState,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<WsCommand> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(
+            state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx)),
+        );
+        let frames = drain_sends(&mut rx);
+        assert!(
+            frames.iter().any(|f| f[0] == "connected"),
+            "expected the connected frame on connect"
+        );
+        rx
+    }
+
+    const INIT_CONNECTION_HASH1: &str = r#"["initConnection",{"clientSchema":{"tables":{}},"desiredQueriesPatch":[{"op":"put","hash":"query-hash1","ast":{"table":"issue"}}]}]"#;
+
+    /// Port of TS connection.ts `#handleMessage` ping fast-path, driven through
+    /// the CG dispatch (`on_inbound` → Connection): `["ping",{}]` answers
+    /// exactly `["pong",{}]` and nothing else.
+    #[test]
+    fn on_inbound_ping_answers_pong() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut state = tables_state(&rt);
+        let mut rx = connect_c1(&rt, &mut state);
+
+        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), r#"["ping",{}]"#.to_string()));
+        let frames = drain_sends(&mut rx);
+        assert_eq!(frames, vec![serde_json::json!(["pong", {}])]);
+        assert!(
+            state.connections.contains_key("c1"),
+            "ping must not close the connection"
+        );
+    }
+
+    /// Port of TS connection.ts `#handleMessage` parse/valita catch: malformed
+    /// JSON and an unknown message tag both fail `upstreamSchema` → the exact
+    /// InvalidMessage error frame, then the connection is torn down.
+    #[test]
+    fn on_inbound_malformed_message_closes_with_invalid_message() {
+        for bad in ["{not json", r#"["definitelyNotAThing",{}]"#] {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let mut state = tables_state(&rt);
+            let mut rx = connect_c1(&rt, &mut state);
+
+            rt.block_on(state.on_inbound("c1".into(), "ws1".into(), bad.to_string()));
+            let frames = drain_sends(&mut rx);
+            let error = frames
+                .iter()
+                .find(|f| f[0] == "error")
+                .unwrap_or_else(|| panic!("[{bad}] expected an error frame"));
+            assert_eq!(error[1]["kind"], "InvalidMessage", "[{bad}]");
+            assert!(
+                !state.connections.contains_key("c1"),
+                "[{bad}] the connection must be closed"
+            );
+            assert!(
+                !state.registered_ws.contains_key("c1"),
+                "[{bad}] the client must be unregistered"
+            );
+        }
+    }
+
+    /// Port of TS view-syncer.pg.test.ts "initial hydration" (first poke):
+    /// an initConnection with a put patch pokes the desired-queries config —
+    /// `pokeStart {pokeID:"00:01", baseCookie:null}` → `pokePart` whose
+    /// `desiredQueriesPatches` carries the client's `{op:"put",
+    /// hash:"query-hash1"}` → `pokeEnd {cookie:"00:01"}` — and records the
+    /// client + the internal `lmids` query in the CVR (TS EXPECTED_LMIDS_AST).
+    #[test]
+    fn init_connection_pokes_desired_queries_patch() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut state = tables_state(&rt);
+        let mut rx = connect_c1(&rt, &mut state);
+
+        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), INIT_CONNECTION_HASH1.to_string()));
+        let frames = drain_sends(&mut rx);
+
+        let poke_start = frames
+            .iter()
+            .find(|f| f[0] == "pokeStart")
+            .expect("expected a pokeStart");
+        assert_eq!(poke_start[1]["pokeID"], "00:01");
+        assert!(
+            poke_start[1]["baseCookie"].is_null(),
+            "first poke must be from a null baseCookie: {poke_start}"
+        );
+
+        let desired = frames
+            .iter()
+            .filter(|f| f[0] == "pokePart")
+            .find_map(|f| f[1].get("desiredQueriesPatches").cloned())
+            .expect("expected a pokePart with desiredQueriesPatches");
+        let c1_patch = desired["c1"]
+            .as_array()
+            .expect("desiredQueriesPatches keyed by clientID");
+        assert!(
+            c1_patch
+                .iter()
+                .any(|op| op["op"] == "put" && op["hash"] == "query-hash1"),
+            "expected the put for query-hash1, got {c1_patch:?}"
+        );
+
+        let poke_end = frames
+            .iter()
+            .find(|f| f[0] == "pokeEnd")
+            .expect("expected a pokeEnd");
+        assert_eq!(poke_end[1]["cookie"], "00:01");
+
+        // The hydrate pass follows as a SECOND poke: with no replica advance the
+        // stateVersion is unchanged ("00"), so the got-queries update bumps the
+        // minor (config) version — TS `CVRQueryDrivenUpdater.trackQueries`
+        // bumps the minor version when hydrating at an unchanged stateVersion
+        // (in TS's pg test the same got patch instead rides stateVersion "01"
+        // after `version-ready`).
+        let got = frames
+            .iter()
+            .filter(|f| f[0] == "pokePart")
+            .find_map(|f| f[1].get("gotQueriesPatch").cloned())
+            .expect("expected a pokePart with gotQueriesPatch");
+        assert!(
+            got.as_array()
+                .unwrap()
+                .iter()
+                .any(|op| op["op"] == "put" && op["hash"] == "query-hash1"),
+            "expected got put for query-hash1, got {got:?}"
+        );
+
+        // CVR state after config + hydrate (TS "responds to changeDesiredQueries
+        // patch" asserts the same records via CVRStore.load).
+        let cvr = state.cvr.as_ref().expect("CVR loaded");
+        assert_eq!(
+            cvr.clients.get("c1").map(|c| c.desired_query_ids.clone()),
+            Some(vec!["query-hash1".to_string()])
+        );
+        assert!(
+            cvr.queries.contains_key("lmids"),
+            "the internal lmids query must be recorded"
+        );
+        assert_eq!(cvr.version.state_version, "00");
+        // 1 = the desired-queries config bump; 2 = the same-state hydrate bump.
+        assert_eq!(cvr.version.config_version, Some(2));
+    }
+
+    /// Port of TS view-syncer.pg.test.ts "responds to changeDesiredQueries
+    /// patch": a `changeDesiredQueries` with `[put query-hash2, del
+    /// query-hash1]` bumps the config version to 2, pokes both ops to the
+    /// client, leaves `desiredQueryIDs = [query-hash2]`, and keeps the deleted
+    /// query-hash1 record with the client's state INACTIVATED (TTL grace), not
+    /// erased.
+    #[test]
+    fn change_desired_queries_pokes_put_and_del_and_updates_cvr() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut state = tables_state(&rt);
+        let mut rx = connect_c1(&rt, &mut state);
+        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), INIT_CONNECTION_HASH1.to_string()));
+        let _ = drain_sends(&mut rx);
+
+        rt.block_on(state.on_inbound(
+            "c1".into(),
+            "ws1".into(),
+            r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"query-hash2","ast":{"table":"issue"}},{"op":"del","hash":"query-hash1"}]}]"#
+                .to_string(),
+        ));
+        let frames = drain_sends(&mut rx);
+
+        // After the init's two version bumps (config "00:01" + hydrate "00:02")
+        // this change's config poke is "00:03".
+        let poke_start = frames
+            .iter()
+            .find(|f| f[0] == "pokeStart")
+            .expect("expected a pokeStart");
+        assert_eq!(poke_start[1]["pokeID"], "00:03");
+        let c1_ops: Vec<serde_json::Value> = frames
+            .iter()
+            .filter(|f| f[0] == "pokePart")
+            .filter_map(|f| f[1]["desiredQueriesPatches"]["c1"].as_array().cloned())
+            .flatten()
+            .collect();
+        assert!(
+            c1_ops
+                .iter()
+                .any(|op| op["op"] == "put" && op["hash"] == "query-hash2"),
+            "expected the put for query-hash2, got {c1_ops:?}"
+        );
+        assert!(
+            c1_ops
+                .iter()
+                .any(|op| op["op"] == "del" && op["hash"] == "query-hash1"),
+            "expected the del for query-hash1, got {c1_ops:?}"
+        );
+        let poke_end = frames
+            .iter()
+            .find(|f| f[0] == "pokeEnd")
+            .expect("expected a pokeEnd");
+        assert_eq!(poke_end[1]["cookie"], "00:03");
+
+        let cvr = state.cvr.as_ref().expect("CVR loaded");
+        // "00:03" = the put/del config bump; "00:04" = the same-state hydrate
+        // bump for the newly-got query-hash2 (see the init test).
+        assert_eq!(cvr.version.config_version, Some(4));
+        assert_eq!(
+            cvr.clients.get("c1").map(|c| c.desired_query_ids.clone()),
+            Some(vec!["query-hash2".to_string()])
+        );
+        // TS keeps the deleted query record with `clientState.foo.inactivatedAt`
+        // set (the TTL grace window), rather than deleting it outright.
+        let hash1 = cvr
+            .queries
+            .get("query-hash1")
+            .expect("query-hash1 must survive the del (inactivated, not erased)");
+        assert!(
+            hash1
+                .client_state()
+                .and_then(|cs| cs.get("c1"))
+                .is_some_and(|cs| cs.inactivated_at.is_some()),
+            "query-hash1 must be inactivated for c1"
+        );
+    }
+
+    /// Port of TS view-syncer.pg.test.ts "responds to changeDesiredQueries
+    /// patch" (the old-wsid arm): a changeDesiredQueries arriving on a stale
+    /// wsID is IGNORED — no poke, no CVR change.
+    #[test]
+    fn change_desired_queries_from_stale_ws_is_ignored() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut state = tables_state(&rt);
+        let mut rx = connect_c1(&rt, &mut state);
+        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), INIT_CONNECTION_HASH1.to_string()));
+        let _ = drain_sends(&mut rx);
+
+        rt.block_on(state.on_inbound(
+            "c1".into(),
+            "old-wsid".into(),
+            r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"query-hash-1234567890","ast":{"table":"issue"}}]}]"#
+                .to_string(),
+        ));
+        assert!(
+            drain_sends(&mut rx).is_empty(),
+            "a stale-wsID frame must produce no output"
+        );
+        let cvr = state.cvr.as_ref().unwrap();
+        assert_eq!(
+            cvr.clients.get("c1").map(|c| c.desired_query_ids.clone()),
+            Some(vec!["query-hash1".to_string()]),
+            "the stale frame must not change the desired set"
+        );
+        // Still at the init's config+hydrate version (see the init test): the
+        // stale frame must not bump it further.
+        assert_eq!(cvr.version.config_version, Some(2));
+    }
+
+    /// Port of TS `Connection.init()`'s version gate at the CG boundary: an
+    /// out-of-range protocol version gets the exact VersionNotSupported error
+    /// and the connection is never registered with the group.
+    #[test]
+    fn unsupported_protocol_version_is_rejected_and_unregistered() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut state = tables_state(&rt);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let mut params = test_params("c1", "ws1");
+        params.protocol_version = crate::protocol::MIN_SERVER_SUPPORTED_SYNC_PROTOCOL - 1;
+        rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+
+        let frames = drain_sends(&mut rx);
+        assert!(
+            !frames.iter().any(|f| f[0] == "connected"),
+            "no connected frame for an unsupported version"
+        );
+        let error = frames
+            .iter()
+            .find(|f| f[0] == "error")
+            .expect("expected the VersionNotSupported error");
+        assert_eq!(error[1]["kind"], "VersionNotSupported");
+        assert_eq!(
+            error[1]["message"],
+            format!(
+                "server is at sync protocol v{PROTOCOL_VERSION} and does not support v{}. The client must be updated to a newer release.",
+                crate::protocol::MIN_SERVER_SUPPORTED_SYNC_PROTOCOL - 1
+            )
+        );
+        assert!(state.registered_ws.is_empty());
+        assert!(state.connections.is_empty());
+    }
+
+    /// Port of `pickToken`'s pinned-user rule through the WIRE dispatch
+    /// (`["updateAuth", …]` → `handle_update_auth`): a validly-formed token for
+    /// a different user gets the exact Unauthorized error body and the
+    /// connection is closed.
+    #[test]
+    fn update_auth_cross_user_via_wire_gets_exact_unauthorized_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let _ = drain_sends(&mut rx);
+
+        rt.block_on(state.on_inbound(
+            "c1".into(),
+            "ws1".into(),
+            format!(r#"["updateAuth",{{"auth":"{}"}}]"#, fake_jwt("user-2")),
+        ));
+        let frames = drain_sends(&mut rx);
+        let error = frames
+            .iter()
+            .find(|f| f[0] == "error")
+            .expect("cross-user updateAuth must error");
+        assert_eq!(error[1]["kind"], "Unauthorized");
+        assert_eq!(
+            error[1]["message"],
+            "The user id in the new token does not match the previous token. \
+             Client groups are pinned to a single user."
+        );
+        assert!(state.registered_ws.is_empty(), "connection must be closed");
+    }
+
+    /// TS `updateAuth` with an empty/absent token is a no-op: no error, no
+    /// re-transform, connection stays registered.
+    #[test]
+    fn update_auth_empty_token_is_a_noop() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let _ = drain_sends(&mut rx);
+
+        rt.block_on(state.on_inbound(
+            "c1".into(),
+            "ws1".into(),
+            r#"["updateAuth",{"auth":""}]"#.to_string(),
+        ));
+        assert!(drain_sends(&mut rx).is_empty(), "no output for empty auth");
+        assert_eq!(state.registered_ws.len(), 1, "connection must survive");
+        assert_eq!(state.metrics.snapshot()["authChanges"], 0);
+    }
 }

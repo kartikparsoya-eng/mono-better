@@ -1395,11 +1395,6 @@ impl Engine {
         &self.sources
     }
 
-    /// Get a mutable reference to a source (for NAPI to add rows).
-    pub fn source_mut(&mut self, table: &str) -> Option<&mut Shared<dyn Source>> {
-        self.sources.get_mut(table)
-    }
-
     /// Destroy the engine and release all resources.
     /// Port of TS `destroy()`.
     pub fn destroy(&mut self) {

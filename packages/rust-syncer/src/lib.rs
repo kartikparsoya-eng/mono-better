@@ -65,7 +65,7 @@ pub use services::view_syncer::drain_coordinator::DrainCoordinator;
 pub use services::view_syncer::pipeline_driver::{
     AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,
 };
-pub use sync_engine::{SyncEngine, SyncResult, parse_existing_rows};
+pub use sync_engine::{SyncEngine, SyncResult};
 pub use workers::connect_params::{ConnectParams, ConnectParamsError, get_connect_params};
 pub use workers::connection::{
     Connection, HandlerResult, LogLevel, MessageHandler, classify_error_log_level,

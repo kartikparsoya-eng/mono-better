@@ -833,4 +833,57 @@ mod tests {
         );
         server.abort();
     }
+
+    /// Port of TS `closeWithProtocolError` (connect.ts `closeWithError`
+    /// ordering): a pre-CG connect failure sends the `["error", body]` frame
+    /// FIRST, then the close frame with code 3000 carrying the error message
+    /// as the reason — never a bare close (the client would see an opaque
+    /// 1005/1006 and could not classify the failure). G36 error surface.
+    #[tokio::test]
+    async fn send_error_and_close_sends_error_frame_then_close_3000() {
+        use futures_util::StreamExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            send_error_and_close(ws, ErrorBody::invalid_message("invalid connection params")).await;
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
+            .await
+            .unwrap();
+
+        // Frame 1: the ["error", body] tuple with the exact kind + message.
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the error frame")
+            .expect("stream ended before the error frame")
+            .unwrap();
+        let text = match first {
+            Message::Text(t) => t.to_string(),
+            other => panic!("expected the error TEXT frame first, got {other:?}"),
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(frame[0], "error");
+        assert_eq!(frame[1]["kind"], "InvalidMessage");
+        assert_eq!(frame[1]["message"], "invalid connection params");
+
+        // Frame 2: the close frame — code 3000, reason = the error message.
+        let second = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the close frame")
+            .expect("stream ended before the close frame")
+            .unwrap();
+        match second {
+            Message::Close(Some(cf)) => {
+                assert_eq!(u16::from(cf.code), 3000);
+                assert_eq!(cf.reason.as_ref(), "invalid connection params");
+            }
+            other => panic!("expected a close frame with code 3000, got {other:?}"),
+        }
+        let _ = server.await;
+    }
 }

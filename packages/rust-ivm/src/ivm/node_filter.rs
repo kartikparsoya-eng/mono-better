@@ -215,7 +215,3 @@ fn eval_or(conds: &[Condition], node: &Node) -> bool {
         .iter()
         .any(|c| condition_passes_with_size(c, node, "", 0))
 }
-
-pub fn condition_passes_node(cond: &Condition, node: &Node) -> bool {
-    condition_passes_with_size(cond, node, "", 0)
-}

@@ -407,74 +407,17 @@ pub struct ConnectedBody {
     pub shard_num: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectedMessage {
-    #[serde(rename = "0")]
-    pub msg_type: String, // "connected"
-    #[serde(rename = "1")]
-    pub body: ConnectedBody,
-}
-
-impl ConnectedMessage {
-    pub fn new(wsid: String) -> Self {
-        Self {
-            msg_type: "connected".to_string(),
-            body: ConnectedBody {
-                wsid,
-                timestamp: Some(now_ms()),
-                app_id: None,
-                shard_num: None,
-            },
-        }
-    }
-}
+// NOTE: TS `ConnectedMessage` / `PongMessage` / error messages are TUPLE type
+// aliases (`['connected', ConnectedBody]`, zero-protocol connect.ts / pong.ts),
+// not classes. The faithful ports are the free-fn builders below
+// (`connected_message` / `pong_message` / `error_message`); an early-port layer
+// of `struct {Connected,Pong,Error}Message` wrappers (which serialized as
+// objects, not tuples — a wire-shape drift) was DEAD code and has been removed.
 
 // ─── Pong ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PongBody {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PongMessage {
-    #[serde(rename = "0")]
-    pub msg_type: String, // "pong"
-    #[serde(rename = "1")]
-    pub body: PongBody,
-}
-
-impl Default for PongMessage {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PongMessage {
-    pub fn new() -> Self {
-        Self {
-            msg_type: "pong".to_string(),
-            body: PongBody {},
-        }
-    }
-}
-
-// ─── Error message ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorMessage {
-    #[serde(rename = "0")]
-    pub msg_type: String, // "error"
-    #[serde(rename = "1")]
-    pub body: ErrorBody,
-}
-
-impl ErrorMessage {
-    pub fn new(body: ErrorBody) -> Self {
-        Self {
-            msg_type: "error".to_string(),
-            body,
-        }
-    }
-}
 
 // ─── Poke messages ─────────────────────────────────────────────────────────
 
@@ -834,5 +777,39 @@ mod tests {
     fn parse_upstream_rejects_unknown_message_type() {
         // TS: unknown tag fails the valita union → InvalidMessage.
         assert!(parse_upstream(r#"["definitelyNotAThing",{}]"#).is_err());
+    }
+
+    /// Port of TS `errorBodySchema` wire shapes (zero-protocol/src/error.ts +
+    /// error-origin-enum.ts: `ZeroCache = 'zeroCache'`). G36 error-semantics
+    /// surface: the serialized `["error", body]` frames for the ClientNotFound
+    /// and VersionNotSupported constructors must be byte-exact — kind is the
+    /// PascalCase ErrorKind string, origin the camelCase `zeroCache`, and the
+    /// frame is a TUPLE (`["error", {...}]`), not an object.
+    #[test]
+    fn client_not_found_error_wire_shape_matches_ts() {
+        let body = ErrorBody::client_not_found("Client not found");
+        assert_eq!(body.kind(), &ErrorKind::ClientNotFound);
+        assert_eq!(body.message(), "Client not found");
+        assert_eq!(
+            serde_json::to_string(&error_message(&body)).unwrap(),
+            r#"["error",{"kind":"ClientNotFound","message":"Client not found","origin":"zeroCache"}]"#,
+        );
+    }
+
+    /// Byte-exact VersionNotSupported body, with the exact message TS
+    /// `Connection.init()` builds (connection.ts) for a below-minimum client.
+    #[test]
+    fn version_not_supported_error_wire_shape_matches_ts() {
+        let message = format!(
+            "server is at sync protocol v{PROTOCOL_VERSION} and does not support v29. The client must be updated to a newer release."
+        );
+        let body = ErrorBody::version_not_supported(message.clone());
+        assert_eq!(body.kind(), &ErrorKind::VersionNotSupported);
+        assert_eq!(
+            serde_json::to_string(&error_message(&body)).unwrap(),
+            format!(
+                r#"["error",{{"kind":"VersionNotSupported","message":"{message}","origin":"zeroCache"}}]"#
+            ),
+        );
     }
 }

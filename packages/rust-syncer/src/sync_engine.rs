@@ -26,7 +26,6 @@ use rust_cvr::client_handler::{Patch, PatchToVersion, RowPatch};
 use rust_cvr::cvr::{CVR, DesiredQuerySpec, StoreOp};
 use rust_cvr::cvr::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, RowRecordMap};
 use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle, InspectQueryRow};
-use rust_cvr::row_key::row_id_string;
 use rust_cvr::row_record_cache::RowRecordCache;
 use rust_cvr::schema::types::{
     CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, maybe_version_string,
@@ -1783,19 +1782,10 @@ pub fn empty_cvr(id: &str, replica_version: &str) -> CVR {
     }
 }
 
-/// Parse a `Vec<RowRecord>` JSON blob into a `RowRecordMap` (keyed by row id
-/// string). Helper for callers that hold existing rows as JSON.
-pub fn parse_existing_rows(json: &str) -> Result<RowRecordMap, String> {
-    if json.is_empty() || json == "null" {
-        return Ok(HashMap::new());
-    }
-    let records: Vec<RowRecord> =
-        serde_json::from_str(json).map_err(|e| format!("invalid existing_rows: {e}"))?;
-    Ok(records
-        .into_iter()
-        .map(|r| (row_id_string(&r.id), r))
-        .collect())
-}
+// NOTE: a `parse_existing_rows(json) -> RowRecordMap` helper once lived here
+// (pre-rust-cvr existing-rows parsing). It had no TS twin — TS loads the CVR
+// row records via `CVRStore.load` — and no remaining caller after `CVRStore`
+// took over loading; removed as dead drift.
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -1805,10 +1795,63 @@ mod tests {
     use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::cvr::CVR;
+    use rust_cvr::row_key::row_id_string;
     use rust_cvr::schema::types::{BaseQueryRecord, ClientQueryRecord, QueryRecord};
     use rust_cvr::schema::types::{CVRVersion, version_from_string};
     use rust_cvr::shards::ShardID;
     use std::collections::BTreeMap;
+
+    /// Port of napi `value_to_serde_json` REAL→JSON semantics (TS
+    /// `JSON.stringify` of a JS Number): an integral, in-i64-range REAL
+    /// serializes as an INTEGER token (JS `2` not `2.0`), a fractional REAL
+    /// keeps its fraction, and the non-finite fallbacks route through
+    /// `sqlite_real_to_json`'s sentinel object (JSON has no NaN/Infinity).
+    #[test]
+    fn real_to_json_matches_js_number_semantics() {
+        use rust_ivm::ivm::data::Value as IvmValue;
+        // Integral float → integer token, exactly as JS stringifies `2.0`.
+        assert_eq!(
+            serde_json::to_string(&value_to_serde_json(&IvmValue::F64(2.0))).unwrap(),
+            "2"
+        );
+        assert_eq!(
+            serde_json::to_string(&value_to_serde_json(&IvmValue::F64(-0.0))).unwrap(),
+            "0"
+        );
+        // JS max safe integer round-trips as an integer.
+        assert_eq!(
+            serde_json::to_string(&value_to_serde_json(&IvmValue::F64(9007199254740991.0)))
+                .unwrap(),
+            "9007199254740991"
+        );
+        // Fractional stays fractional.
+        assert_eq!(
+            serde_json::to_string(&value_to_serde_json(&IvmValue::F64(1.5))).unwrap(),
+            "1.5"
+        );
+    }
+
+    /// `sqlite_real_to_json` non-finite fallback: JSON cannot represent
+    /// NaN/±Infinity, so the value is wrapped in the `__rustIvmSqliteReal`
+    /// sentinel (Rust-only encoding for a value TS could never emit through
+    /// JSON.stringify — flagged, not silently nulled).
+    #[test]
+    fn sqlite_real_to_json_nonfinite_uses_sentinel() {
+        assert_eq!(
+            sqlite_real_to_json(f64::NAN),
+            serde_json::json!({"__rustIvmSqliteReal": "NaN"})
+        );
+        assert_eq!(
+            sqlite_real_to_json(f64::INFINITY),
+            serde_json::json!({"__rustIvmSqliteReal": "Infinity"})
+        );
+        assert_eq!(
+            sqlite_real_to_json(f64::NEG_INFINITY),
+            serde_json::json!({"__rustIvmSqliteReal": "-Infinity"})
+        );
+        // A finite value passes through as a plain JSON number.
+        assert_eq!(sqlite_real_to_json(2.5), serde_json::json!(2.5));
+    }
 
     /// A censused type must return its live-object counter to baseline once it
     /// drops — otherwise the census leaks and defeats the leak hunt. `SyncEngine`

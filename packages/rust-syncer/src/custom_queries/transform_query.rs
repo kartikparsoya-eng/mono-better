@@ -699,6 +699,116 @@ mod tests {
         })));
     }
 
+    /// Port of TS `fetchFromAPIServer` backoff (custom/fetch.ts, #6315):
+    /// `min(1000, 100·2^(attempt-1) + jitter(0..100))`. Pins the exponential
+    /// base, the jitter range, and the 1000ms cap.
+    #[test]
+    fn get_backoff_delay_ms_matches_ts_bounds() {
+        for attempt in 1..=4u32 {
+            let base = 100u64 * 2u64.pow(attempt - 1);
+            for _ in 0..8 {
+                let d = get_backoff_delay_ms(attempt);
+                assert!(
+                    d >= base.min(1000) && d <= (base + 100).min(1000),
+                    "attempt {attempt}: delay {d} outside [{}, {}]",
+                    base.min(1000),
+                    (base + 100).min(1000)
+                );
+            }
+        }
+        // Past the cap the delay clamps to exactly 1000 (jitter included).
+        assert_eq!(get_backoff_delay_ms(5), 1000, "base 1600 must cap at 1000");
+    }
+
+    /// One-shot HTTP stub: accepts a single connection, consumes the request
+    /// (headers + Content-Length body), answers with `status` + `body`, closes.
+    fn spawn_http_stub(status: &'static str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Read until the end of headers, then the Content-Length body.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            let (mut header_end, mut content_len) = (None, 0usize);
+            loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if header_end.is_none()
+                    && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+                {
+                    header_end = Some(pos + 4);
+                    let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                    content_len = headers
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                }
+                if let Some(end) = header_end
+                    && buf.len() >= end + content_len
+                {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        format!("http://{addr}/query")
+    }
+
+    /// Port of TS `CustomQueryTransformer.validate` (custom-queries/
+    /// transform-query.ts): the auth-maintenance probe POSTs an EMPTY
+    /// `["transform", []]` batch. A 200 response validates (`Ok(())`); a 401
+    /// rejection surfaces the exact ZeroCache TransformFailed/http body —
+    /// `{kind: TransformFailed, origin: zero-cache, reason: http, status: 401,
+    /// queryIDs: []}` — which `is_auth_error_body` classifies as an auth error
+    /// (revoked token → close), per the fetch.ts 4xx no-retry branch.
+    #[tokio::test]
+    async fn validate_custom_queries_ok_on_200_and_auth_error_body_on_401() {
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+
+        // Happy path: 200 with an empty QueryResponse → opaque Ok(()).
+        let ok_url = spawn_http_stub("200 OK", r#"{"queries":[]}"#);
+        let ctx = CustomQueryContext {
+            url: ok_url.clone(),
+            allowed_urls: vec![ok_url],
+            ..CustomQueryContext::default()
+        };
+        assert!(validate_custom_queries(&ctx, &shard).await.is_ok());
+
+        // Auth-revoked path: 401 fails immediately (4xx is never retried) with
+        // the reason-http body carrying the status.
+        let unauth_url = spawn_http_stub("401 Unauthorized", r#"{"message":"revoked"}"#);
+        let ctx = CustomQueryContext {
+            url: unauth_url.clone(),
+            allowed_urls: vec![unauth_url],
+            ..CustomQueryContext::default()
+        };
+        let err = validate_custom_queries(&ctx, &shard)
+            .await
+            .expect_err("401 must fail validation");
+        assert_eq!(err["kind"], "TransformFailed");
+        assert_eq!(err["origin"], "zero-cache");
+        assert_eq!(err["reason"], "http");
+        assert_eq!(err["status"], 401);
+        assert_eq!(err["queryIDs"], serde_json::json!([]));
+        assert!(
+            is_auth_error_body(&err),
+            "the 401 body must classify as an auth error: {err}"
+        );
+    }
+
     /// Layer-2 body-differential: `url_match` (the custom-query URL allowlist)
     /// must return the same bool as the REAL TS `urlMatch`+`compileUrlPattern`
     /// (native WHATWG `URLPattern`) for every (pattern, url) in

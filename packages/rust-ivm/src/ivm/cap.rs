@@ -161,22 +161,6 @@ impl Cap {
         format!("[{}]", parts.join(","))
     }
 
-    #[allow(dead_code)]
-    fn deserialize_pk_to_constraint(&self, pk_str: &str) -> Constraint {
-        // Parse the serialized PK back into a constraint.
-        // Format: [v1,v2,...] where each v is JSON-serialized.
-        // Must handle quoted strings containing commas.
-        let trimmed = pk_str.trim_start_matches('[').trim_end_matches(']');
-        let parts = parse_json_array_elements(trimmed);
-        let mut c = Constraint::default();
-        for (i, part) in parts.iter().enumerate() {
-            if i < self.primary_key.len() {
-                c.insert(self.primary_key[i].clone(), parse_value(part));
-            }
-        }
-        c
-    }
-
     fn initial_fetch(&self, req: &FetchRequest) -> NodeStream {
         if self.limit == 0 {
             let state_key = self.get_take_state_key(None, req.constraint.as_ref());

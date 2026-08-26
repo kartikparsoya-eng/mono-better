@@ -19,7 +19,7 @@ pub trait QueryInternals {
 
 /// Check if a value implements QueryInternals.
 /// Port of TS `isQueryInternals` (query-internals.ts:47).
-pub fn is_query_intals(_obj: &dyn std::any::Any) -> bool {
+pub fn is_query_internals(_obj: &dyn std::any::Any) -> bool {
     // In Rust, we use traits rather than symbol tags.
     // This function always returns true if called on a Query.
     true

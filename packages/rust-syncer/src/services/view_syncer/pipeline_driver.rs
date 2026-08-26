@@ -536,11 +536,12 @@ impl IvmPipelines {
         self.engine.as_ref()?.get_row(table, pk)
     }
 
-    /// The row-set signature (XOR of row units) for a query, or `None` if the
-    /// query is not tracked. Passthrough to `Engine::row_set_signature`.
-    pub fn row_set_signature(&self, query_id: &str) -> Option<u64> {
-        self.engine.as_ref()?.row_set_signature(query_id)
-    }
+    // NOTE: a `row_set_signature(query_id)` passthrough to
+    // `Engine::row_set_signature` once lived here; it had no caller (the
+    // sync_engine reads the CVR's persisted `row_set_signature` field and
+    // parses it via `rust_cvr::row_set_signature::parse_signature` directly)
+    // and no TS twin at this layer (TS tracks rowSetSignature in cvr-store.ts,
+    // mirrored by rust-cvr) — removed as dead drift.
 
     /// Tear down pipelines and drop the engine + snapshotter.
     ///
@@ -806,6 +807,44 @@ pub(crate) fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Port of TS `ResetPipelinesSignal('scalar-subquery')` classification
+    /// (view-syncer.ts reset branch; rust-ivm `ScalarResetError` is its twin):
+    /// only a `ScalarResetError` panic payload maps to an in-place reset
+    /// (`Some(message)` — the group REHYDRATES); any other payload returns
+    /// `None` and the caller fails the group instead.
+    #[test]
+    fn scalar_reset_message_classifies_only_scalar_reset_panics() {
+        let reset: Box<dyn std::any::Any + Send> = Box::new(ScalarResetError {
+            table: "issue".to_string(),
+            resolved: "1".to_string(),
+            new: "2".to_string(),
+        });
+        // Message mirrors the TS signal text (rust-ivm engine/mod.rs Display).
+        assert_eq!(
+            scalar_reset_message(&reset).as_deref(),
+            Some("Scalar subquery value changed for issue: 1 -> 2")
+        );
+
+        // A non-reset panic (assert message) must NOT classify as a reset.
+        let plain: Box<dyn std::any::Any + Send> = Box::new("source drift".to_string());
+        assert_eq!(scalar_reset_message(&plain), None);
+        let strpanic: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert_eq!(scalar_reset_message(&strpanic), None);
+    }
+
+    /// Port of napi `panic_message`: extracts `&str` and `String` panic
+    /// payloads verbatim; any other payload type falls back to the fixed
+    /// "engine job panicked" string (the message the advance error embeds).
+    #[test]
+    fn panic_message_extracts_str_string_and_falls_back() {
+        let s: Box<dyn std::any::Any + Send> = Box::new("assertion failed: rows");
+        assert_eq!(panic_message(&s), "assertion failed: rows");
+        let owned: Box<dyn std::any::Any + Send> = Box::new("owned panic".to_string());
+        assert_eq!(panic_message(&owned), "owned panic");
+        let opaque: Box<dyn std::any::Any + Send> = Box::new(42_u32);
+        assert_eq!(panic_message(&opaque), "engine job panicked");
+    }
 
     #[test]
     fn json_to_value_out_of_safe_range_int_coerces_not_panics() {

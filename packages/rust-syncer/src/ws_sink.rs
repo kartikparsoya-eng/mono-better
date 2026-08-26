@@ -20,7 +20,6 @@
 //! deferred-send tasks under sustained overload.
 
 use crate::protocol::{BasicErrorBody, ErrorBody, ErrorKind};
-use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -113,13 +112,10 @@ impl DirectWebSocketSink {
         let _ = self.send_command(WsCommand::Send { msg, est_bytes });
     }
 
-    /// Push a downstream message, serialized from any Serialize type.
-    pub fn push_serializable(&self, msg: &impl Serialize) {
-        let value = serde_json::to_value(msg).unwrap_or_else(|_| {
-            serde_json::json!(["error", {"kind": "Internal", "message": "serialization failed"}])
-        });
-        self.push(value);
-    }
+    // NOTE: a `push_serializable(&impl Serialize)` convenience once lived here;
+    // it had no TS twin (TS `send()` stringifies the Downstream tuple directly)
+    // and no callers — removed as dead drift. `push` / `push_sized` are the
+    // live paths.
 
     /// Send an error message and close the connection with code 3000.
     pub fn fail(&self, error: ErrorBody) {

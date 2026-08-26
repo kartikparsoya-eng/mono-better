@@ -1769,6 +1769,62 @@ mod tests {
         assert_eq!(msgs.len(), 2);
     }
 
+    /// Port of TS `sendQueryTransformFailedError` (client-handler.ts:368):
+    /// `this.fail(new ProtocolError(error))`. The ProtocolError body reaches the
+    /// client as EXACTLY one `["error", body]` frame, and the downstream is
+    /// failed terminally (`downstream.fail`, NOT `cancel` — `close()` is the
+    /// cancel path, client-handler.ts:183). Caller: rust-syncer sync_engine.rs.
+    #[test]
+    fn send_query_transform_failed_error_emits_exact_error_frame_and_fails() {
+        let messages = Arc::new(StdMutex::new(Vec::new()));
+        let failed = Arc::new(StdMutex::new(None));
+        let cancelled = Arc::new(StdMutex::new(false));
+        let sink = MockSink {
+            messages: messages.clone(),
+            failed: failed.clone(),
+            cancelled: cancelled.clone(),
+        };
+        let handler = ClientHandler::new(
+            "cg1",
+            "client1",
+            "ws1",
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
+            None,
+            Arc::new(sink),
+        );
+
+        // A TransformFailedBody-shaped error (zero-protocol error body).
+        let body = serde_json::json!({
+            "kind": "TransformFailed",
+            "origin": "zero-cache",
+            "message": "failed to transform query",
+            "queryHashes": ["qh1"],
+        });
+        handler.send_query_transform_failed_error(&body);
+
+        // Exactly one frame, byte-shape ["error", body] — not wrapped, not
+        // re-keyed, no other frames before/after.
+        let msgs = messages.lock().unwrap();
+        assert_eq!(
+            *msgs,
+            vec![serde_json::json!(["error", body])],
+            "wire frame must be exactly [\"error\", body]"
+        );
+        // TS fail() puts the subscription in a terminal failed state.
+        assert_eq!(
+            failed.lock().unwrap().as_deref(),
+            Some("query transform failed"),
+            "downstream.fail must fire"
+        );
+        assert!(
+            !*cancelled.lock().unwrap(),
+            "must fail the downstream, not cancel it (cancel is the close() path)"
+        );
+    }
+
     #[test]
     fn test_normalize_mutation_result_string() {
         let row = serde_json::json!({

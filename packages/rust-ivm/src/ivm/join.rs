@@ -492,15 +492,6 @@ pub fn row_equals_for_compound_key(a: &Row, b: &Row, key: &CompoundKey) -> bool 
     true
 }
 
-#[allow(dead_code)]
-fn generate_with_overlay_join(
-    stream: NodeStream,
-    change: Change,
-    schema: &crate::ivm::schema::SourceSchema,
-) -> NodeStream {
-    crate::ivm::join_utils::generate_with_overlay(stream, change, schema)
-}
-
 impl Drop for Join {
     fn drop(&mut self) {
         crate::live_count::dec(&crate::live_count::JOIN);
