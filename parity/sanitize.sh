@@ -91,6 +91,19 @@ case "$MODE" in
   tsan)
     "${DOCKER_RUN[@]}" "$PREAMBLE"'
       export RUSTFLAGS="-Zsanitizer=thread -Ctarget-feature=-crt-static"
+      # Suppress the ONE known-benign lock-order-inversion: SQLite'"'"'s unix VFS
+      # acquires its global unixBigLock + per-inode mutexes (unixEnterMutex /
+      # unixLock vs unixClose, both in sqlite3.c) in a discipline TSan flags as
+      # an inversion on rusqlite::Connection drop. It is SQLite-internal C code
+      # with its own no-deadlock guarantee, single-threaded here, and NOT our
+      # Rust code. Suppressing it makes a REAL lock-order-inversion in our code
+      # stand out instead of being buried under this noise.
+      cat > /tmp/tsan.supp <<SUPP
+deadlock:unixEnterMutex
+deadlock:unixLock
+deadlock:unixClose
+SUPP
+      export TSAN_OPTIONS="suppressions=/tmp/tsan.supp"
       echo "══ TSan: rust-syncer ══"
       cargo +"$NIGHTLY" test -Zbuild-std --target "$T" --no-default-features \
         --manifest-path rust-syncer/Cargo.toml --lib -- --test-threads=1
