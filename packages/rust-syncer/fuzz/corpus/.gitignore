@@ -1,0 +1,9 @@
+# Fuzz corpus. Machine-generated corpus entries (sha1-named) are local
+# artifacts of a run and are NOT source — committing thousands of them is noise.
+# Only the curated `seed-*` inputs are tracked: they seed the fuzzer with valid
+# message/param/cookie shapes and pin known regressions (e.g. the multibyte
+# "ѱa" cookie DoS in version_string/seed-multibyte-crash).
+*
+!*/
+!*/seed-*
+!.gitignore
