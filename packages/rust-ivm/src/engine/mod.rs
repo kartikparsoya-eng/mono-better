@@ -390,6 +390,15 @@ pub struct Engine {
     _next_storage_id: usize,
     /// Cancellation token for advance/hydrate abort.
     cancellation_token: CancellationToken,
+    /// Optional SQLite connection used to build the query-planner cost model.
+    /// Port-parity: TS `buildPipeline` runs `planQuery(ast, costModel)` to assign
+    /// `flip` annotations before building (builder.ts:140). rust's builder READS
+    /// `csq.flip` but nothing SET it, so exists-in-OR was always built
+    /// non-flipped — over-attaching (and over-emitting to the CVR) the backing
+    /// rows of a redundant WHERE-EXISTS branch (the ART G8 divergence). When this
+    /// connection is present, `plan_ast` runs the ported planner so flips match
+    /// TS. `None` (most unit tests) ⇒ no planning, unchanged legacy behavior.
+    cost_model_conn: Option<Rc<RefCell<rusqlite::Connection>>>,
 }
 
 impl Engine {
@@ -405,6 +414,29 @@ impl Engine {
             enable_not_exists: true, // server-side
             _next_storage_id: 0,
             cancellation_token: CancellationToken::new(),
+            cost_model_conn: None,
+        }
+    }
+
+    /// Enable query-flip planning (port parity with TS `buildPipeline` →
+    /// `planQuery`). `conn` is used only to `COUNT(*)` table sizes for the cost
+    /// model; the planner then annotates each query AST's correlated-subquery
+    /// `flip` before `build_pipeline`. Without this, exists-in-OR is built
+    /// non-flipped and over-emits WHERE-EXISTS backing rows (ART G8).
+    pub fn set_cost_model_conn(&mut self, conn: Rc<RefCell<rusqlite::Connection>>) {
+        self.cost_model_conn = Some(conn);
+    }
+
+    /// Plan `ast` (assign `flip`s via the ported cost-based planner) when a
+    /// cost-model connection is configured; otherwise return it unchanged.
+    /// Mirror of TS `buildPipeline`'s `if (costModel) ast = planQuery(...)`.
+    fn plan_ast(&self, ast: &Ast) -> Ast {
+        match &self.cost_model_conn {
+            Some(conn) => {
+                let model = crate::planner::create_snapshot_cost_model(conn.clone());
+                crate::planner::plan_query(ast, model)
+            }
+            None => ast.clone(),
         }
     }
 
@@ -553,9 +585,13 @@ impl Engine {
             let resolved = self.resolve_scalar_subqueries(&q.ast);
 
             let primary_keys = &self.primary_keys;
-            let ast = complete_ordering(&resolved.ast, &|table: &str| {
+            let ordered = complete_ordering(&resolved.ast, &|table: &str| {
                 primary_keys.get(table).cloned().unwrap_or_default()
             });
+            // Assign correlated-subquery `flip`s via the cost-based planner
+            // (parity with TS `buildPipeline` → `planQuery`). No-op when no
+            // cost-model connection is configured.
+            let ast = self.plan_ast(&ordered);
             let mut delegate = EngineDelegate {
                 sources: &self.sources,
                 enable_not_exists: self.enable_not_exists,

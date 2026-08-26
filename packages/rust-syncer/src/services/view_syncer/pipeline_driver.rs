@@ -347,6 +347,15 @@ impl IvmPipelines {
         }
 
         let mut eng = Engine::new(primary_keys.clone());
+        // Parity with TS `buildPipeline` → `planQuery(ast, costModel)`: give the
+        // engine the replica connection so it plans correlated-subquery `flip`s
+        // before building. Without this, exists-in-OR is built non-flipped and
+        // over-emits WHERE-EXISTS backing rows to the CVR (ART G8). Only the
+        // replica-backed (TableSource) path gets a cost model; MemorySource
+        // fallbacks (some tests) stay unplanned.
+        if let Some(conn) = &source_conn {
+            eng.set_cost_model_conn(conn.clone());
+        }
         for source in self.sources.values() {
             eng.register_source(source.clone());
         }
