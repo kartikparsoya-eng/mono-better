@@ -1756,6 +1756,61 @@ pub fn as_query(row: &QueriesRow) -> Result<QueryRecord, VersionError> {
 mod tests {
     use super::*;
 
+    /// Port of TS `cvrErrorKind` (cvr-store.ts:1421-1435): pins the exact otel
+    /// `error.kind` attribute string for every `CVRStoreError` variant. TS keys
+    /// on `instanceof` of four named errors and falls back to `"error"`; Rust
+    /// keys on the enum variant. This is the label emitted on the tracing span
+    /// (`ERROR_KIND_ATTRIBUTE`), so a wrong string silently mis-buckets error
+    /// telemetry. Table-driven so a new variant that forgets its arm is caught.
+    #[test]
+    fn cvr_error_kind_matches_ts_labels() {
+        use crate::schema::types::VersionError;
+        let cases: Vec<(CVRStoreError, &str)> = vec![
+            (
+                CVRStoreError::ClientNotFound("c1".to_string()),
+                "client_not_found",
+            ),
+            (
+                CVRStoreError::ConcurrentModification {
+                    expected: "00:01".to_string(),
+                    actual: "00:02".to_string(),
+                },
+                "concurrent_modification",
+            ),
+            (
+                CVRStoreError::OwnershipError {
+                    owner: "task-2".to_string(),
+                    granted_at: 1.0,
+                    last_connect_time: 0.0,
+                },
+                "ownership",
+            ),
+            (
+                CVRStoreError::InvalidClientSchema("bad".to_string()),
+                "invalid_client_schema",
+            ),
+            // Fallback arm ("error"): the variants with no dedicated TS label.
+            (
+                CVRStoreError::RowsVersionBehind {
+                    cvr_version: "00:03".to_string(),
+                    rows_version: None,
+                },
+                "error",
+            ),
+            (
+                CVRStoreError::VersionParse(VersionError::TooManyParts("a:b:c".to_string())),
+                "error",
+            ),
+        ];
+        for (err, want) in &cases {
+            assert_eq!(
+                cvr_error_kind(err),
+                *want,
+                "cvr_error_kind mismatch for {err:?}"
+            );
+        }
+    }
+
     fn test_store() -> CVRStoreHandle {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)

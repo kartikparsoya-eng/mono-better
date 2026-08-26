@@ -393,6 +393,16 @@ mod tests {
             &existing_rows,
         );
         processor.finish(&existing_rows);
+        // `total_processed` counts distinct ROWS flushed (`self.total +=
+        // self.rows.len()`), not the number of on_row_change calls. Both changes
+        // here target the same row_key, so they collapse into ONE entry — total
+        // is 1, not 2. This is the TS-parity `numChanges`-of-rows used for
+        // sync_engine logging (callers sync_engine.rs:1284/1413). (Triage cvr #10.)
+        assert_eq!(
+            processor.total_processed(),
+            1,
+            "two changes to the same row_key collapse to one processed row"
+        );
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
             config_version: Some(2),
