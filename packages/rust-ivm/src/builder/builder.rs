@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use crate::builder::filter::{create_predicate, create_simple_predicate, transform_filters};
 use crate::ivm::cap::Cap;
-use crate::ivm::data::{Row, SortOrder};
+use crate::ivm::data::SortOrder;
 use crate::ivm::exists::Exists;
 use crate::ivm::filter::Filter;
 use crate::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
@@ -628,21 +628,6 @@ pub fn assert_no_not_exists(condition: &Condition) {
 /// Port of TS `completeOrdering` — delegates to `complete_ordering` module.
 pub fn complete_ordering_ast(ast: &Ast, get_primary_key: &dyn Fn(&str) -> Vec<String>) -> Ast {
     crate::query::complete_ordering::complete_ordering(ast, get_primary_key)
-}
-
-// ---------------------------------------------------------------------------
-// Legacy predicate builder — used by the old connect() path.
-// Now replaced by create_predicate from filter.rs, but kept for backwards compat.
-// ---------------------------------------------------------------------------
-
-/// Build a predicate from a condition for source-level filtering.
-/// Uses create_predicate from filter.rs.
-pub fn build_predicate(condition: &Condition) -> Arc<dyn Fn(&Row) -> bool> {
-    // For source-level filtering, correlated subqueries are stripped (always true)
-    match condition {
-        Condition::CorrelatedSubquery(_) => Arc::new(|_| true),
-        _ => create_predicate(condition),
-    }
 }
 
 /// Uniquify correlated subquery condition aliases by appending "_<counter>".

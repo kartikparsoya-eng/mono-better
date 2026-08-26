@@ -279,12 +279,6 @@ fn check_valid(
     Ok(())
 }
 
-/// Raw scalar comparison for permissions change detection.
-#[allow(dead_code)]
-fn raw_scalar_equal(a: &rusqlite::types::Value, b: &rusqlite::types::Value) -> bool {
-    a == b
-}
-
 /// Iterate the diff, calling `emit` for each Change. Stops on first error
 /// (including ResetPipelinesSignal). Port of TS Diff[Symbol.iterator] and
 /// Go Diff.Each().
