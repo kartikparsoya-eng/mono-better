@@ -1719,6 +1719,41 @@ mod tests {
         );
     }
 
+    /// Port of TS ClientHandler `cancel` fanned across a MultiPoker: once a
+    /// patch has opened each client's poke (pokeStart), `MultiPoker::cancel`
+    /// emits a terminal `pokeEnd {cancel:true}` to EVERY live client. Before
+    /// the patch, `started` is false and cancel is a no-op (PokeHandler::cancel
+    /// line 415), which is why we add a patch first.
+    #[test]
+    fn multipoker_cancel_sends_cancel_frame_to_all_clients() {
+        let (c1, m1) = make_handler();
+        let (c2, m2) = make_handler();
+
+        let tentative = CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: Some(1),
+        };
+        let poker = MultiPoker::new(&[&c1, &c2], tentative);
+
+        // Open each poke (emits pokeStart, sets started=true).
+        poker.add_patch(&make_row_patch_put("t1", serde_json::json!({"id": 1})));
+        // Then cancel — every live client gets a terminal cancel frame.
+        poker.cancel();
+
+        for m in [&m1, &m2] {
+            let msgs = m.lock().unwrap();
+            let has_cancel = msgs.iter().any(|msg| {
+                msg.get(0).and_then(Value::as_str) == Some("pokeEnd")
+                    && msg
+                        .get(1)
+                        .and_then(|o| o.get("cancel"))
+                        .and_then(Value::as_bool)
+                        == Some(true)
+            });
+            assert!(has_cancel, "each client receives a cancel pokeEnd frame");
+        }
+    }
+
     #[test]
     fn patch_assembly_error_releases_chain() {
         let (handler, _messages) = make_handler();
