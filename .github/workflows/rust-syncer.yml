@@ -15,6 +15,10 @@ on:
   pull_request:
     branches: [rust-cvr-v1.0.0]
   workflow_dispatch:
+  # Recurring quality jobs (coverage / sanitizers / fuzz smoke) are slow and/or
+  # docker-in-docker, so they run nightly + on demand rather than on every PR.
+  schedule:
+    - cron: '0 6 * * *' # 06:00 UTC daily
 
 concurrency:
   group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.ref }}'
@@ -115,6 +119,109 @@ jobs:
         env:
           RUST_IVM_SOAK_CYCLES: 500
         run: cargo test --locked --test teardown_gate_test -- --test-threads=1
+
+  # ---- Recurring quality jobs (nightly schedule + manual dispatch only) -------
+  # Kept OFF the PR/push fast path: coverage instruments every crate, the
+  # sanitizer legs run a nightly-slim container, and the fuzz smoke links the
+  # heavy syncer deps — all too slow to block a PR. They gate regressions on a
+  # daily cadence instead.
+
+  coverage:
+    name: Test coverage (3 crates)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rust_syncer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Lets the rust-cvr PG suites actually run (they count toward coverage
+      # instead of skipping) — see parity/repo-coverage.sh's TEST_CVR_PG_URI :? guard.
+      TEST_CVR_PG_URI: postgres://postgres:postgres@localhost:5432/rust_syncer_test
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Pin Rust toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component llvm-tools-preview
+          rustup default 1.90.0
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked --version 0.6.13
+      - name: Build static WAL2 SQLite (rust-ivm coverage leg)
+        working-directory: packages/rust-ivm
+        run: scripts/build-wal2-static-lib.sh
+      - name: Coverage (repo-coverage.sh)
+        run: bash parity/repo-coverage.sh
+      - name: Upload coverage summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-coverage
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            parity/coverage/*/summary.txt
+            parity/coverage/*/uncovered-functions.txt
+
+  sanitize:
+    name: Sanitizers (ASan/LSan)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # parity/sanitize.sh is self-contained: it runs a rustlang/rust:nightly-slim
+      # container that installs its own pinned nightly + rust-src and compiles the
+      # repo's WAL2 SQLite (scanstatus_v2) into the multiarch libdir. rust-cvr +
+      # rust-ivm carry the Rc-cycle/RefCell/unsafe surface (ivm = where the G6
+      # operator-graph leak lived), so their ASan+LSan legs are the hard gate.
+      - name: ASan + LSan (rust-cvr, rust-ivm)
+        run: bash parity/sanitize.sh asan
+
+  fuzz-smoke:
+    name: Fuzz smoke (60s per target)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # cargo-fuzz drives an internal nightly; `--locked` is required because the
+      # host stable is older than a transitive dep's rustc floor. parse_upstream /
+      # connect_params link the heavy syncer deps (reqwest/ring) that FAIL to link
+      # on macOS locally — they link cleanly here on Linux, which is the point.
+      - name: Install nightly + cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz each target (60s, fail on crash)
+        working-directory: packages/rust-syncer
+        run: |
+          set -euo pipefail
+          for t in version_string parse_upstream connect_params; do
+            echo "== fuzz $t =="
+            cargo +nightly fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=4096
+          done
+      - name: Upload fuzz crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashes
+          if-no-files-found: ignore
+          retention-days: 14
+          path: packages/rust-syncer/fuzz/artifacts/**
 
   docker-build:
     name: Build and push rust-syncer zero image
