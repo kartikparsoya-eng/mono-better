@@ -27,13 +27,11 @@ pub static QUERY_DRIVEN_UPDATER: AtomicI64 = AtomicI64::new(0);
 /// The transient per-advance `CVRConfigDrivenUpdater` (should be 0 at rest).
 pub static CONFIG_DRIVEN_UPDATER: AtomicI64 = AtomicI64::new(0);
 
-pub fn inc(c: &AtomicI64) {
-    c.fetch_add(1, Ordering::Relaxed);
-}
-
-pub fn dec(c: &AtomicI64) {
-    c.fetch_sub(1, Ordering::Relaxed);
-}
+// NOTE: unlike `rust-ivm`'s live_count (which exposes free `inc`/`dec`
+// functions and calls them from each operator's ctor/Drop), rust-cvr tracks
+// exclusively through the `Guard` RAII type below — so the manual `inc`/`dec`
+// helpers had zero callers here and were removed (they inlined the same two
+// `fetch_add`/`fetch_sub` the Guard already performs).
 
 /// RAII census guard: inc on construction, dec on Drop. Embed ONE in each
 /// long-lived struct. For `Clone` types, place the guard inside the Arc'd

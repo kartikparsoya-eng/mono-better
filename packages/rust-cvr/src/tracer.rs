@@ -35,10 +35,7 @@ pub fn recv(op: &str, msg: &str) {
     }
 }
 
-/// Log an event a component EMITTED (e.g. a poke to the client).
-#[inline]
-pub fn emit(op: &str, msg: &str) {
-    if enabled() {
-        eprintln!("[cvr-trace] {op:16} EMIT  {msg}");
-    }
-}
+// NOTE: an `emit` sibling (mirroring rust-ivm trace's EMIT line) once lived here
+// but had zero callers in the CVR pipeline — the flush/poke path is instrumented
+// with `note`/`recv` only — so it was removed as dead. Re-add it symmetrically if
+// an emit-side event ever needs tracing.
