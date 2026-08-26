@@ -40,3 +40,11 @@ proptest = "1"
 pprof = { version = "0.13", features = ["flamegraph"] }
 # dhat: heap-profiling harnesses (tests/advance_leak_*.rs, #[ignore]d).
 dhat = "0.3"
+criterion = "0.5"
+
+# Axis-8 microbenchmarks for the two innermost IVM hot units — the row-set
+# signature h64 (every advance/emit) and the sort comparator (every merge /
+# binary_search). Run `cargo bench`; pin/compare with `--save-baseline <name>`.
+[[bench]]
+name = "ivm_hot_bench"
+harness = false
