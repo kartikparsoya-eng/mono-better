@@ -31,11 +31,27 @@ impl ArrayView {
     pub fn new(input: Shared<dyn Input>, format: Format) -> Rc<RefCell<ArrayView>> {
         let schema = input.borrow().get_schema();
 
+        // Port of TS array-view.ts:88 `this.#root = {'': format.singular ?
+        // undefined : []}`: the root's "" relationship is ALWAYS initialized —
+        // to an empty list for list format, or absent (undefined) for singular.
+        // Without this, an empty hydrate leaves `data()` as None ("absent")
+        // instead of Some(List([])) ("query ran, zero rows"), and add_listener's
+        // immediate fire is skipped — an observable divergence from TS.
+        let mut root = empty_root_entry();
+        root.relationships.insert(
+            String::new(),
+            if format.singular {
+                View::None // TS `undefined`
+            } else {
+                View::List(Vec::new())
+            },
+        );
+
         let av = Rc::new(RefCell::new(ArrayView {
             input: input.clone(),
             schema,
             format,
-            root: empty_root_entry(),
+            root,
             listeners: Vec::new(),
             dirty: false,
         }));
