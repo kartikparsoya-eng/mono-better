@@ -1136,6 +1136,7 @@ mod tests {
     }
 
     // Build a handler alongside the sink's fail/cancel observation handles.
+    #[allow(clippy::type_complexity)] // test helper: a one-off observation tuple
     fn make_handler_observing_lifecycle() -> (
         ClientHandler,
         Arc<StdMutex<Option<String>>>,
