@@ -1,0 +1,36 @@
+# Axis-7 coverage-guided fuzzing (PROFILING.md). Run with:
+#   cargo +nightly fuzz run parse_upstream  (from packages/rust-syncer)
+# Complements the DIFFERENTIAL fuzz loops in rust-ivm/agentic/fuzz (those
+# evolve inputs against the TS oracle; these evolve toward crashes/UB in the
+# rust parsers alone).
+[package]
+name = "rust-syncer-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rust-syncer = { path = "..", default-features = false }
+rust-cvr = { path = "../../rust-cvr" }
+
+[[bin]]
+name = "parse_upstream"
+path = "fuzz_targets/parse_upstream.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "connect_params"
+path = "fuzz_targets/connect_params.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "version_string"
+path = "fuzz_targets/version_string.rs"
+test = false
+doc = false

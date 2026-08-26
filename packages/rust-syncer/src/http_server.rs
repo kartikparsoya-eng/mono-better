@@ -165,7 +165,64 @@ pub async fn serve_http(
             .filter(|t| !t.is_empty()),
     });
 
-    let app = Router::new()
+    let app = Router::new();
+    // Axis-2 CPU profiling (PROFILING.md / task B1): sampling profiler on the
+    // status port, feature-gated. GET /debug/pprof/flamegraph?seconds=N
+    // (default 10, cap 120) samples the WHOLE process at 99Hz and returns a
+    // flamegraph SVG. The profiler only runs during an active request, so the
+    // feature is safe in initial-testing deploys; the Node dispatcher's own
+    // inspector endpoints cover the TS side (this is the rust analog).
+    #[cfg(feature = "profiling")]
+    let app = app.route(
+        "/debug/pprof/flamegraph",
+        get(
+            |axum::extract::Query(q): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >| async move {
+                let seconds = q
+                    .get("seconds")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(10)
+                    .clamp(1, 120);
+                let guard = match pprof::ProfilerGuardBuilder::default()
+                    .frequency(99)
+                    .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                    .build()
+                {
+                    Ok(g) => g,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            [("content-type", "text/plain")],
+                            format!("profiler start failed: {e}").into_bytes(),
+                        );
+                    }
+                };
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                let mut svg = Vec::new();
+                match guard.report().build() {
+                    Ok(report) => match report.flamegraph(&mut svg) {
+                        Ok(()) => (
+                            StatusCode::OK,
+                            [("content-type", "image/svg+xml")],
+                            svg,
+                        ),
+                        Err(e) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            [("content-type", "text/plain")],
+                            format!("flamegraph render failed: {e}").into_bytes(),
+                        ),
+                    },
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [("content-type", "text/plain")],
+                        format!("profile report failed: {e}").into_bytes(),
+                    ),
+                }
+            },
+        ),
+    );
+    let app = app
         // Port of TS `runner/zero-dispatcher.ts` `fastify.get('/healthz', → 'OK')`:
         // always-200 LIVENESS ("process is up"), independent of PG/replica
         // state — a different contract from /readyz (readiness). Without it a

@@ -32,8 +32,14 @@ futures-util = "0.3"
 opentelemetry = "0.32.0"
 
 [dev-dependencies]
+criterion = "0.5"
+
 proptest = "1"
 # dhat: heap-profiling harness (tests/cvr_leak_profile.rs, #[ignore]d) that churns
 # the per-advance CVRQueryDrivenUpdater.received() path to catch retained-block
 # leaks in CVR state, mirroring rust-ivm's advance_leak_profile.
 dhat = "0.3"
+
+[[bench]]
+name = "version_bench"
+harness = false
