@@ -84,10 +84,15 @@ jobs:
 
       - name: rust-ivm — fmt, clippy, test
         working-directory: packages/rust-ivm
+        # clippy --all-targets compile-checks the criterion bench (ivm_hot_bench);
+        # the test step uses `--tests` (not `--all-targets`) so it does NOT try to
+        # RUN the bench — a criterion (harness=false) binary rejects libtest's
+        # `--test-threads=1` with "unexpected argument". `--tests` still covers the
+        # lib unit tests + all integration tests + bin-as-test targets.
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
-          cargo test --locked --all-targets -- --test-threads=1
+          cargo test --locked --tests -- --test-threads=1
 
       - name: rust-cvr — fmt, clippy, test
         working-directory: packages/rust-cvr
