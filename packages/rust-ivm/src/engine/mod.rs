@@ -430,10 +430,22 @@ impl Engine {
     /// Plan `ast` (assign `flip`s via the ported cost-based planner) when a
     /// cost-model connection is configured; otherwise return it unchanged.
     /// Mirror of TS `buildPipeline`'s `if (costModel) ast = planQuery(...)`.
-    fn plan_ast(&self, ast: &Ast) -> Ast {
+    ///
+    /// `cache` is a per-hydration-batch count cache: every query in one
+    /// `add_queries_streaming` call shares it, so each table's `COUNT(*)` runs
+    /// once for the whole batch rather than once per query (the batch is at a
+    /// single replica version, so the counts are consistent). A fresh cache per
+    /// batch avoids any cross-hydration staleness.
+    fn plan_ast(&self, ast: &Ast, cache: &crate::planner::PlanCountCache) -> Ast {
         match &self.cost_model_conn {
             Some(conn) => {
-                let model = crate::planner::create_snapshot_cost_model(conn.clone());
+                // Constant version: the cache is fresh per batch, so the first
+                // query populates it and the rest reuse it.
+                let model = crate::planner::create_snapshot_cost_model_cached(
+                    conn.clone(),
+                    "batch",
+                    cache.clone(),
+                );
                 crate::planner::plan_query(ast, model)
             }
             None => ast.clone(),
@@ -577,6 +589,12 @@ impl Engine {
         // companion pipelines it builds are retained for advance-time monitoring.
         let mut built: Vec<Built> = Vec::new();
 
+        // Per-batch planner count cache: every query in this hydration shares
+        // one table-count snapshot (see `plan_ast`). Fresh per call → no
+        // cross-hydration staleness.
+        let plan_cache: crate::planner::PlanCountCache =
+            Rc::new(RefCell::new((String::new(), HashMap::new())));
+
         for q in queries {
             let _t = crate::perf_trace::scope("hydrate.build");
             let timer = Instant::now();
@@ -591,7 +609,7 @@ impl Engine {
             // Assign correlated-subquery `flip`s via the cost-based planner
             // (parity with TS `buildPipeline` → `planQuery`). No-op when no
             // cost-model connection is configured.
-            let ast = self.plan_ast(&ordered);
+            let ast = self.plan_ast(&ordered, &plan_cache);
             let mut delegate = EngineDelegate {
                 sources: &self.sources,
                 enable_not_exists: self.enable_not_exists,
