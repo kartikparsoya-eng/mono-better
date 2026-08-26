@@ -120,11 +120,20 @@ COPY packages/rust-syncer/ ./rust-syncer/
 # (leak hunts only; dhat intercepts every allocation, so never ship it).
 ARG RUST_SYNCER_FEATURES=""
 
+# Coverage variant: `--build-arg RUST_SYNCER_COVERAGE=1` compiles with LLVM
+# source-based coverage (-C instrument-coverage). The binary then writes
+# .profraw files per LLVM_PROFILE_FILE (set by the coverage compose overlay to
+# a mounted volume, with %c continuous mode so an abrupt kill doesn't lose
+# counters). ~10-30% slower — CORRECTNESS-mode gate runs only, never latency
+# gating, never ship. Report via xyne-art/tools/coverage-report.sh.
+ARG RUST_SYNCER_COVERAGE=""
+
 # `--no-default-features` disables the plain-WAL test escape hatch. The binary's
 # build.rs statically links the WAL2 amalgamation, so it reads the exact replica
 # format produced by zero-cache without depending on the runtime system SQLite.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/rust-syncer/target \
+    RUSTFLAGS="${RUST_SYNCER_COVERAGE:+-C instrument-coverage}" \
     cargo build --release --no-default-features \
       ${RUST_SYNCER_FEATURES:+--features "$RUST_SYNCER_FEATURES"} \
       --manifest-path rust-syncer/Cargo.toml \
