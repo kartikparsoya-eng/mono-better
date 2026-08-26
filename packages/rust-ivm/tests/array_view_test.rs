@@ -103,6 +103,7 @@ fn basics() {
     let view = ArrayView::new(input, list_format());
 
     // Listener captures callCount + a snapshot of the entries it was handed.
+    #[allow(clippy::type_complexity)] // test-only capture tuple
     let captured: Rc<RefCell<(usize, Vec<(f64, String, usize)>)>> =
         Rc::new(RefCell::new((0, vec![])));
     let cap = captured.clone();
@@ -180,6 +181,7 @@ fn single_format_holds_one_then_none() {
     let view = ArrayView::new(input, single_format());
 
     // callCount + whether the last-notified value was a present single entry.
+    #[allow(clippy::type_complexity)] // test-only capture tuple
     let captured: Rc<RefCell<(usize, Option<(f64, String)>)>> = Rc::new(RefCell::new((0, None)));
     let cap = captured.clone();
     let listener: rust_ivm::ivm::array_view::Listener = Rc::new(move |v: &View| {
