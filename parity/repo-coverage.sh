@@ -26,8 +26,15 @@ run_cov() { # crate, extra cargo args...
   local s1=${PIPESTATUS[0]}
   (cd "$ROOT/packages/$crate" && cargo llvm-cov report --lcov \
       --output-path "$OUT/$crate/lcov.info")
-  # Uncovered functions: lcov FNDA:0 records.
-  awk -F'[:,]' '/^SF:/{f=$2} /^FNDA:0,/{print f "\t" $3}' \
+  # Uncovered functions: the same logical fn appears once per test binary under
+  # a different v0 crate disambiguator (Cs<base62>_), so a raw FNDA:0 grep
+  # overstates uncoverage 2-3x. Normalize the disambiguator and count a fn as
+  # uncovered only if its hit total is 0 across ALL compilation units.
+  awk '/^SF:/{f=substr($0,4)}
+       /^FNDA:/{line=substr($0,6); c=index(line,","); h=substr(line,1,c-1)+0
+                sym=substr(line,c+1); gsub(/Cs[A-Za-z0-9]+_/,"Cs_",sym)
+                k=f "\t" sym; hits[k]+=h}
+       END{for(k in hits) if(hits[k]==0) print k}' \
       "$OUT/$crate/lcov.info" | sort -u > "$OUT/$crate/uncovered-functions.txt"
   echo "  uncovered functions: $(wc -l < "$OUT/$crate/uncovered-functions.txt")"
   return "$s1"
