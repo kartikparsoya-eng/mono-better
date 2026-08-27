@@ -808,7 +808,7 @@ mod tests {
         // rejected by the reader's own size check — the deterministic 1009
         // path (the mid-frame Capacity abort path is best-effort only; its
         // regression net is the live xyne-art G36 oversized-payload case).
-        let _ = ws.send(Message::Text("x".repeat(1500).into())).await;
+        let _ = ws.send(Message::Text("x".repeat(1500))).await;
 
         let mut close_code = None;
         let deadline = tokio::time::sleep(Duration::from_secs(5));
