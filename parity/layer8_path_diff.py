@@ -167,8 +167,16 @@ def load_ts_coverage(cov_dir):
 # ---------------------------------------------------------------------------
 _RUST_CRATES = {"rust_syncer": "syncer", "rust_ivm": "ivm", "rust_cvr": "cvr"}
 _LEN_IDENT = re.compile(r"(\d+)")
+# v0 crate-root disambiguators (`Cs<base62>_`) start with DIGITS inside the
+# base62 hash — a naive length-prefix parser reads them as huge idents and
+# swallows the rest of the symbol (that hid `delete_unreferenced_rows` on the
+# first run). Strip them before parsing. rustfilt, when installed, replaces
+# this heuristic entirely.
+_V0_CRATE_HASH = re.compile(r"Cs[a-zA-Z0-9]{4,}?_")
 
 def _mangled_segments(name):
+    if name.startswith("_R"):
+        name = _V0_CRATE_HASH.sub("", name)
     segs, i = [], 0
     while i < len(name):
         m = _LEN_IDENT.match(name, i)
@@ -186,45 +194,83 @@ def _mangled_segments(name):
             i = m.end()
     return segs
 
+
+def _rustfilt_demangle(names):
+    """Batch-demangle via rustfilt when available: returns {mangled:
+    demangled} or None. Demangled paths parse deterministically — no
+    heuristics."""
+    import shutil
+    import subprocess
+    exe = shutil.which("rustfilt") or os.path.expanduser("~/.cargo/bin/rustfilt")
+    if not os.path.exists(exe):
+        return None
+    out = subprocess.run([exe], input="\n".join(names), capture_output=True,
+                         text=True)
+    if out.returncode != 0:
+        return None
+    lines = out.stdout.splitlines()
+    return dict(zip(names, lines)) if len(lines) == len(names) else None
+
+
+def _demangled_idents(text):
+    """Idents from a DEMANGLED path like `<rust_cvr::cvr::Updater>::finish`."""
+    return re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)
+
 def _demangle_fn(name):
-    """mangled -> (crate_key or None, fn_ident or None)."""
+    """mangled -> (crate_key or None, [plausible fn idents]).
+
+    v0 mangling appends GENERIC-ARGUMENT paths after the function ident
+    (`_RI..35compute_serving_lag_distribution_msINt..core5slice..`), so "the
+    last segment" is often a segment of the generic arg, not the fn. Rather
+    than guess which segment is the fn, credit EVERY plausible ident — the
+    join looks names up by exact length-prefixed ident, and the primary
+    (file, name) lookup keeps precision. Missing a name here produced the
+    false TS-HOT/RUST-COLD verdicts of the first L8 run.
+    """
     segs = _mangled_segments(name)
     crate = next((c for s in segs for c in (_RUST_CRATES.get(s.lstrip("_")),)
                   if c), None)
-    fn = None
-    for s in reversed(segs):
-        if re.fullmatch(r"h[0-9a-f]{16}", s):        # legacy generic hash
-            continue
-        if "closure" in s or "$" in s or s in ("_ZN",):
-            continue
-        fn = s
-        break
-    return crate, fn
+    fns = [s for s in segs
+           if not re.fullmatch(r"h[0-9a-f]{16}", s)   # legacy generic hash
+           and "closure" not in s and "$" not in s and s != "_ZN"]
+    return crate, fns
 
 def load_rust_coverage(export_json):
     with open(export_json, encoding="utf-8") as f:
         doc = json.load(f)
     by_file_fn = defaultdict(int)   # (crate, src-relfile, canonfn) -> count
     by_fn = defaultdict(int)        # (crate, canonfn) -> count
+    # Prefer exact demangling (rustfilt) over the heuristic parser.
+    all_names = [fn.get("name", "") for data in doc.get("data", [])
+                 for fn in data.get("functions", []) if fn.get("count", 0) > 0]
+    demangled = _rustfilt_demangle(sorted(set(all_names))) or {}
     for data in doc.get("data", []):
         for fn in data.get("functions", []):
             count = fn.get("count", 0)
             if count <= 0:
                 continue
-            crate, ident = _demangle_fn(fn.get("name", ""))
+            raw = fn.get("name", "")
+            if raw in demangled:
+                idents = [s for s in _demangled_idents(demangled[raw])
+                          if s != "closure"]
+                crate = next((c for s in idents
+                              for c in (_RUST_CRATES.get(s),) if c), None)
+            else:
+                crate, idents = _demangle_fn(raw)
             fname = next((f for f in fn.get("filenames", [])
                           if "packages/rust-" in f), None)
             if fname and not crate:
                 m = re.search(r"packages/rust-(\w+)/", fname)
                 crate = m.group(1) if m and m.group(1) in ("syncer", "ivm", "cvr") \
                     else None
-            if not crate or not ident:
+            if not crate or not idents:
                 continue
-            key = canon(ident)
-            by_fn[(crate, key)] += count
-            if fname:
-                rel = fname.split("/src/", 1)[-1]
-                by_file_fn[(crate, rel, key)] += count
+            for ident in idents:
+                key = canon(ident)
+                by_fn[(crate, key)] += count
+                if fname:
+                    rel = fname.split("/src/", 1)[-1]
+                    by_file_fn[(crate, rel, key)] += count
     return by_file_fn, by_fn
 
 
@@ -302,12 +348,20 @@ def report(all_rows, out_json=None):
 def self_test():
     """Synthetic end-to-end check of both parsers + the join (no I/O deps)."""
     # legacy + closure + hash
-    assert _demangle_fn(
-        "_ZN11rust_syncer6router7CgState17query_context_for17h0123456789abcdefE"
-    ) == ("syncer", "query_context_for")
-    assert _demangle_fn(
+    c, fns = _demangle_fn(
+        "_ZN11rust_syncer6router7CgState17query_context_for17h0123456789abcdefE")
+    assert c == "syncer" and "query_context_for" in fns
+    c, fns = _demangle_fn(
         "_ZN8rust_ivm3ivm4take4Take5_push28_$u7b$$u7b$closure$u7d$$u7d$"
-        "17hfedcba9876543210E") == ("ivm", "_push")
+        "17hfedcba9876543210E")
+    assert c == "ivm" and "_push" in fns
+    # v0 generic instantiation: generic-arg path follows the fn ident — the fn
+    # must still be credited (the first-run false-cold class).
+    c, fns = _demangle_fn(
+        "_RINvNtNtCs2UINqNd1QsX_11rust_syncer7workers6syncer"
+        "35compute_serving_lag_distribution_msINtNtNtCsfo0Ls1ZyrQZ_4core"
+        "5slice4iter4IterNtB4_16ReplicaReadyStateE")
+    assert c == "syncer" and "compute_serving_lag_distribution_ms" in fns
     assert _ts_fn_key("ViewSyncer.#hydrateUnsafe") == canon("hydrateUnsafe")
     assert _ts_fn_key("get ttlClock") == canon("ttlClock")
     pairs = [{"ts_name": "planQuery", "ts_kind": "function", "ts_file": "f.ts",

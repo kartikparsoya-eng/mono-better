@@ -204,3 +204,31 @@ guarantees, error semantics) versus TS.
   `authdata_reads_from_connection_context_manager`,
   `auth_maintenance_reads_token_from_the_connection_context_manager`,
   `a_close_fully_tears_down_all_per_client_state`, the 7 `update_auth_*` tests.
+
+## I-9 — L8-surfaced coverage of invented layers (2026-08-27)
+
+The Layer-8 traffic-driven path differential (parity/L8-PATH-DIFF.md,
+parity/L8-TRIAGE.md) confirmed which TS-hot symbols are intentionally cold in
+rust because an invention replaces their layer. Contracts already registered
+above; this entry records the explicit coverage so L8 cold rows bind to it:
+
+- **I-6 (CVR write-behind)** covers `row-record-cache.ts` `clear` /
+  `executeRowUpdates` — the flush actor persists byte-identical CVR state
+  (flush PG differential) without the TS write-path helpers.
+- **Pokers/ws_sink model (I-1/I-4)** covers `client-handler.ts`
+  `close`/`cancel`/`fail` — lifecycle owned by the poker + writer-task model;
+  error/close semantics pinned by G36 + shed/Rehome tests.
+- **SQLite-backed engine (architecture)** covers the TS client-engine
+  machinery zero-cache runs server-side (`memory-source` gen_push/overlays,
+  `array-view` flush, `stopable-iterator`, per-query metrics delegate):
+  value parity is pinned by the G8 diff-oracle + ART, not per-function twins.
+- **Staggered SIGTERM drain + idle reaper** covers `drain-coordinator.ts`'s
+  elective drain consult (`shouldDrain`/`drainNextIn` after hydrate): rust
+  drains on signal with staggered deadlines and reaps idle CGs; the TS
+  keepalive-driven elective drain is not wired. Client-observable contract
+  (no mid-work connection loss without Rehome semantics) unchanged.
+
+Known REAL gap tracked separately (NOT invention-covered): the ivm
+filter-pipeline operator protocol (`beginFilter`/`endFilter`/
+`buildFilterPipeline`/`setFilterOutput` + builder DNF simplification) — see
+ZERO-DIVERGENCE-PLAN Part 3 L8 follow-ups.

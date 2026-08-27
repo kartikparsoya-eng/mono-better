@@ -275,3 +275,34 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
 **Plan items — remaining (optional, not correctness-blocking):**
 - Deeper ART modes (soak G6 leaks, capacity G22/G25, determinism G21, mutation-
   matrix G15) — run when a longer infra window is available.
+
+## L8 — traffic-driven path differential (added + executed 2026-08-27)
+
+The layer the original five could not cover: L2 proves matched functions agree
+on fixtures, ART/L5 prove the client-visible frames agree — neither proves
+rust WALKED the same code. L8 records per-function execution counts on both
+sides under byte-identical traffic (TS: `NODE_V8_COVERAGE`; rust:
+`-C instrument-coverage` via `--build-arg RUST_SYNCER_COVERAGE=1`; traffic:
+diff-oracle full catalog + mutations) and joins them through the L1 ledger.
+
+- Tooling: `parity/layer8_path_diff.py` (+ `--self-test`), capture recipe
+  `parity/L8-RUNBOOK.md`.
+- First run: 399 fn-pairs; 52 confirmed TS-HOT/RUST-COLD after fixing two
+  joiner blind spots (v0 generic-arg demangling, `Cs<hash>_` tokens →
+  rustfilt). Full disposition: `parity/L8-TRIAGE.md`.
+- Real findings FIXED: signature-unit duplicate composition (delegated to the
+  1:1 impl), poke-cookie sites bypassing `version_to_cookie`, the auth-
+  maintenance loop planning outside the ported CCM (migrated to
+  `plan_maintenance`/`validate_connection`/`fail_connection`/
+  `defer_maintenance` + single background retransform), and an ALREADY-drifted
+  ttl fallback between the two ports (cross-impl agreement test, proven
+  failing pre-fix).
+- Remaining tracked GAP (not fixed this pass): ivm filter-pipeline operator
+  protocol (`beginFilter`/`endFilter`/`buildFilterPipeline` +
+  DNF `simplifyCondition`) — rust builder uses `apply_filter` chains; value
+  parity holds on the full catalog, operator-graph structure diverges. Own
+  work item. Also: add an AST+permissions catalog case so
+  `transform_and_hash_query` gets traffic.
+- Recapture after the fixes must show the wired symbols hot — that recapture
+  is the non-vacuous proof for wiring fixes (the pre-fix capture is the
+  failing state).

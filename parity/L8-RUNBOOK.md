@@ -30,14 +30,21 @@ docker run -d --name l8ts-zero-cache --network sandbox-net \
   -v /tmp/l8cov/ts:/coverage -v l8ts_zero:/var/zero \
   --env-file /tmp/l8-ts-env.txt zero-cache-rust-syncer:local
 
-# rust side: instrumented image; %c = LLVM continuous mode (mmap-backed profraw,
-# survives a non-graceful child exit — rust-syncer is a child of the node runner)
+# rust side: instrumented image. Do NOT use %c (continuous mode): the standard
+# rustc build lacks the counter-bias symbols ("LLVM Profile Error: Neither
+# __llvm_profile_counter_bias...") AND %c disables exit-time writeout, so you
+# get a permanently-empty profraw. Plain %p + graceful exit works: rust-syncer
+# drains and exits 0 on SIGTERM (staggered drain), which runs the atexit
+# writeout — one profraw per syncer incarnation, llvm-profdata merges them.
 docker inspect xyne-sandbox-rust-test-zero-cache-art \
   --format '{{range .Config.Env}}{{println .}}{{end}}' \
   | grep -v '^PATH=\|^NODE_VERSION\|^YARN_VERSION\|^USER=\|^ZERO_APP_ID=' > /tmp/l8-rust-env.txt
 { echo ZERO_APP_ID=sandbox_rust_test_l8r; \
-  echo 'LLVM_PROFILE_FILE=/coverage/rust-%p%c.profraw'; } >> /tmp/l8-rust-env.txt
-docker run -d --name l8rust-zero-cache --network sandbox-net \
+  echo 'LLVM_PROFILE_FILE=/coverage/rust-%p.profraw'; } >> /tmp/l8-rust-env.txt
+# --restart on-failure: after the FIRST initial sync the runner exits (255)
+# during the replica-swap choreography and relies on the supervisor to bring
+# it back — without a restart policy the container just dies ~45s after ready.
+docker run -d --name l8rust-zero-cache --restart on-failure:5 --network sandbox-net \
   -v /tmp/l8cov/rust:/coverage -v l8rust_zero:/var/zero \
   --env-file /tmp/l8-rust-env.txt zero-cache-rust-syncer:l8cov
 ```
