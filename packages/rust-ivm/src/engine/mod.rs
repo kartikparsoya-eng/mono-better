@@ -110,7 +110,12 @@ pub fn row_signature_unit(table: &str, row_key: &Row) -> u64 {
         table: table.to_string(),
         row_key: key_map,
     };
-    rust_cvr::hash::h64(&rust_cvr::row_key::row_id_string(&id))
+    // Delegate to the 1:1 port of TS `rowIDSignatureUnit` so there is exactly
+    // ONE implementation of the persisted-signature hash on the live path —
+    // a second inline `h64(row_id_string(...))` composition here is how an
+    // FxHasher-class drift could re-enter without the cvr parity harness
+    // (which pins `row_id_signature_unit`) ever noticing.
+    rust_cvr::row_set_signature::row_id_signature_unit(&id)
 }
 
 // ---------------------------------------------------------------------------
