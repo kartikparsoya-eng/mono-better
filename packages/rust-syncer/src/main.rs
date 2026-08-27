@@ -554,6 +554,12 @@ fn main() {
         num_shards,
         Some(cvr_pool.clone()),
         connection_sinks,
+        // Server shard identity for the `connected` message body, emitted on the
+        // accept task (router `handle_connection`).
+        rust_cvr::shards::ShardID {
+            app_id: config.app_id.clone(),
+            shard_num: config.shard.parse::<u32>().unwrap_or(0),
+        },
     ));
 
     // Cross-CG serving-lag observability (TS `Syncer` serving-lag gauges + the

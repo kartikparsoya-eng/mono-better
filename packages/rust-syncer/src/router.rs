@@ -10,8 +10,12 @@
 //! 2. User ID pinning check — reject if group is pinned to a different user
 //! 3. Close existing connection for same clientID (replacement)
 //! 4. Register connection in context manager
-//! 5. Create Connection + MessageHandler
-//! 6. Call `connection.init()` (send `connected` message)
+//! 5. Send `connected` on the ACCEPT task (`handle_connection`), BEFORE the
+//!    connection is handed to the serial CG thread — TS parity with
+//!    `syncer.ts#handleConnection` sending `connection.init()`'s `connected`
+//!    before `await handleInitConnection`. This decouples the connect-ack from
+//!    `config_and_hydrate` (see `handle_connection`/`Connection::check_version`).
+//! 6. Create Connection + MessageHandler on the CG thread (version gate only)
 //! 7. Handle piggybacked `initConnection` from sec-websocket-protocol header
 
 use crate::custom_queries::transform_query::CustomQueryContext;
@@ -430,6 +434,11 @@ pub struct ConnectionRouter {
     serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
     /// Whether the router is shutting down.
     shutting_down: Arc<AtomicBool>,
+    /// Server shard identity ({appID, shardNum}). Read on the accept task to
+    /// build the `connected` message body (`handle_connection`). TS reads the
+    /// same from the shard config in `syncer.ts#handleConnection` when
+    /// constructing `['connected', {wsid, timestamp, appID, shardNum}]`.
+    shard: ShardID,
 }
 
 /// Info about an active connection.
@@ -543,6 +552,11 @@ impl ConnectionRouter {
             default_num_shards(),
             None,
             ConnectionSinks::new(),
+            // Storeless/test default; the real shard is threaded in from `main`.
+            ShardID {
+                app_id: "zero".to_string(),
+                shard_num: 0,
+            },
         )
     }
 
@@ -553,6 +567,7 @@ impl ConnectionRouter {
     /// draw from a single bounded connection budget, and CVR I/O is offloaded
     /// back onto that pool's runtime (`SyncEngine::offload`). `None` selects
     /// storeless CGs (tests / no-PG dev).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_sharded(
         services_factory: Arc<dyn CGServicesFactory>,
         auth_validator: Arc<dyn AuthValidator>,
@@ -561,6 +576,7 @@ impl ConnectionRouter {
         num_shards: usize,
         cvr_pool: Option<sqlx::PgPool>,
         connection_sinks: ConnectionSinks,
+        shard: ShardID,
     ) -> Self {
         let num_shards = num_shards.max(1);
         let cg_handles: Arc<DashMap<String, CGHandle>> = Arc::new(DashMap::new());
@@ -614,6 +630,7 @@ impl ConnectionRouter {
             last_notification: Arc::new(Mutex::new(None)),
             serving_lag_registry: Arc::new(crate::workers::syncer::ServingLagRegistry::new()),
             shutting_down,
+            shard,
         }
     }
 
@@ -766,7 +783,27 @@ impl ConnectionRouter {
             });
         }
 
-        // 5. Split the context: the CG thread owns connection setup + the sink,
+        // 5. Emit `connected` HERE, on the per-connection accept task, BEFORE the
+        //    connection is handed to the serial CG thread. TS parity:
+        //    `syncer.ts#handleConnection` sends `connection.init()`'s `connected`
+        //    before `await connection.handleInitConnection` (which drives
+        //    hydration). Emitting it on this task decouples the connect-ack from
+        //    `config_and_hydrate`: a client whose CG thread is mid-hydrate is
+        //    still acknowledged immediately and never trips its 10s connect
+        //    timeout. Previously `connected` was sent by `Connection::init()`
+        //    inside `on_new_connection` on the CG thread, so a reconnect arriving
+        //    during an in-flight hydrate was queued behind it → connect-timeout →
+        //    idle reap → cold re-hydrate thrash. The protocol version is already
+        //    validated in `accept_connection`; the CG thread keeps a
+        //    belt-and-suspenders `Connection::check_version` gate but no longer
+        //    touches the sink for `connected`.
+        ctx.sink.push(crate::protocol::connected_message(
+            &ws_id,
+            &self.shard.app_id,
+            self.shard.shard_num,
+        ));
+
+        // 6. Split the context: the CG thread owns connection setup + the sink,
         //    while a lightweight forwarder task funnels inbound WS frames into
         //    the CG's unified channel (so the CG loop never blocks on one conn).
         let ConnectionContext {
@@ -2151,8 +2188,13 @@ impl CgState {
             on_close,
         );
 
-        // Init: send `connected`, check protocol version.
-        if !conn.init() {
+        // Version gate ONLY. `connected` is emitted on the accept task
+        // (`handle_connection`, TS `syncer.ts#handleConnection`), NOT here, so
+        // the connect-ack is never queued behind an in-flight `config_and_hydrate`
+        // on this serial CG thread. This is the belt-and-suspenders version
+        // check (after `accept_connection`'s); on failure it closes the socket
+        // and the connection is never registered with the group.
+        if !conn.check_version() {
             self.drop_registration(&client_id, &ws_id);
             if self.open_ws_ids.remove(&ws_id) {
                 decrement_nonzero(&self.connection_count);
@@ -4707,10 +4749,16 @@ mod tests {
         );
     }
 
-    /// The CG event loop: a new connection sends `connected` and registers a
-    /// client with the SyncEngine; a notification with no CVR is graceful; a
-    /// disconnect unregisters the client. Runs on the test thread (not a tokio
-    /// worker), so the sink's `blocking_send` is legal.
+    /// The CG event loop: a new connection registers a client with the
+    /// SyncEngine; a notification with no CVR is graceful; a disconnect
+    /// unregisters the client. Runs on the test thread (not a tokio worker), so
+    /// the sink's `blocking_send` is legal.
+    ///
+    /// Note: `on_new_connection` (the SERIAL CG-thread path) must NOT emit
+    /// `connected` — that message is sent on the accept task
+    /// (`handle_connection`, TS `syncer.ts#handleConnection`) so the connect-ack
+    /// is never queued behind an in-flight `config_and_hydrate`. This test pins
+    /// that: registration happens here, `connected` does not.
     #[test]
     fn cg_state_connection_lifecycle_and_notification() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -4737,7 +4785,8 @@ mod tests {
         let sink = DirectWebSocketSink::new(tx);
         rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
-        // `connected` was pushed to the sink and the client is registered.
+        // The CG-thread path registers the client but does NOT emit `connected`
+        // (that is the accept task's job — see `handle_connection`).
         let mut connected = false;
         while let Ok(cmd) = drx.try_recv() {
             if let WsCommand::Send { msg: v, .. } = cmd
@@ -4746,7 +4795,11 @@ mod tests {
                 connected = true;
             }
         }
-        assert!(connected, "expected a connected frame");
+        assert!(
+            !connected,
+            "on_new_connection (CG thread) must NOT send `connected`; the accept \
+             task does (decoupling the ack from config_and_hydrate)"
+        );
         assert_eq!(state.registered_ws.len(), 1);
         assert_eq!(state.connections.len(), 1);
 
@@ -5077,6 +5130,191 @@ mod tests {
         rt.block_on(router.shutdown());
     }
 
+    /// A CCM whose `init_connection` blocks the CG thread on the first call,
+    /// simulating a long synchronous `config_and_hydrate`. Signals `entered`
+    /// when it reaches the block and holds until the test flips `release`.
+    struct BlockingCcm {
+        entered: Arc<AtomicBool>,
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        blocked_once: AtomicBool,
+    }
+    impl ConnContextManagerDispatch for BlockingCcm {
+        fn must_get_connection_context(&self, _s: &ConnectionSelector) -> ConnContextInfo {
+            ConnContextInfo {
+                auth: None,
+                revision: 0,
+            }
+        }
+        fn init_connection(&self, _s: &ConnectionSelector, _b: &serde_json::Value) {
+            // Only the first (blocker) connection holds the thread.
+            if self.blocked_once.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            self.entered.store(true, Ordering::SeqCst);
+            let (m, cv) = &*self.release;
+            let mut released = m.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+        }
+        fn update_auth(&self, _s: &ConnectionSelector, _b: &serde_json::Value) -> bool {
+            true
+        }
+    }
+
+    struct BlockingCcmFactory {
+        handle: tokio::runtime::Handle,
+        ccm: Arc<BlockingCcm>,
+    }
+    impl CGServicesFactory for BlockingCcmFactory {
+        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
+            Arc::new(NoopViewSyncer)
+        }
+        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
+            self.ccm.clone()
+        }
+        fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
+            None
+        }
+        fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
+            None
+        }
+        fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
+            SyncEngineConfig {
+                initialization_error: None,
+                tables: Vec::new(),
+                replica_path: None,
+                app_id: "zero".to_string(),
+                replica_version: "00".to_string(),
+                shard: ShardID {
+                    app_id: "zero".to_string(),
+                    shard_num: 0,
+                },
+                cvr_pg: None,
+                permissions: None,
+                permissions_hash: None,
+                revalidate_interval_ms: None,
+                query_config: None,
+                enable_query_covering: true,
+                tokio_handle: self.handle.clone(),
+                admin_password: None,
+                server_version: "test".to_string(),
+                metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
+            }
+        }
+    }
+
+    /// Regression (connect-ack decoupling, prod incident 2026-08-27): the
+    /// `connected` message MUST be emitted on the accept task
+    /// (`handle_connection`), NOT on the serial CG thread. When a client's CG
+    /// thread is blocked in an in-flight `config_and_hydrate` (here simulated by
+    /// a blocking `ConnectionContextManager::init_connection`), a SECOND client
+    /// on the SAME group must still receive `connected` immediately — otherwise
+    /// its 10s connect timeout fires, it disconnects, the idle CG is reaped, and
+    /// the reconnect pays a full cold re-hydrate (the thrash we observed).
+    ///
+    /// NON-VACUOUS: before the fix, `connected` was sent by `Connection::init()`
+    /// inside `on_new_connection` on the CG thread, so client B's ack was queued
+    /// behind the blocked hydrate and this `try_recv` finds nothing → the assert
+    /// fails. (Verified by reverting the `handle_connection` emission.)
+    #[test]
+    fn connected_ack_is_decoupled_from_a_blocked_cg_hydrate() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let ccm = Arc::new(BlockingCcm {
+            entered: entered.clone(),
+            release: release.clone(),
+            blocked_once: AtomicBool::new(false),
+        });
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(BlockingCcmFactory {
+            handle: rt.handle().clone(),
+            ccm,
+        });
+        let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
+            jwk: None,
+            secret: None,
+            jwks_url: None,
+            issuer: None,
+            audience: None,
+        });
+        let router = Arc::new(ConnectionRouter::new_with_limit(
+            factory,
+            validator,
+            Arc::new(crate::metrics::Metrics::default()),
+            10,
+        ));
+
+        let make_ctx = |cid: &str, ws: &str, init: bool| {
+            let mut params = test_params(cid, ws);
+            params.client_group_id = "cgX".to_string();
+            if init {
+                params.init_connection_msg = Some(
+                    serde_json::from_value(serde_json::json!([
+                        "initConnection",
+                        {"desiredQueriesPatch": []}
+                    ]))
+                    .unwrap(),
+                );
+            }
+            let (up_tx, up_rx) = tokio::sync::mpsc::channel::<String>(8);
+            let (sink_tx, sink_rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+            (
+                ConnectionContext {
+                    params,
+                    sink: DirectWebSocketSink::new(sink_tx),
+                    upstream_rx: up_rx,
+                },
+                up_tx,
+                sink_rx,
+            )
+        };
+
+        // Blocker A: its `initConnection` drives the CG thread into the blocking
+        // `init_connection`, holding the thread like a long hydrate.
+        let (ctx_a, _keep_a, _sink_a) = make_ctx("cA", "wsA", true);
+        rt.block_on(router.handle_connection(ctx_a));
+
+        // Wait until the CG thread is actually blocked.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !entered.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "blocker never reached the CG-thread init_connection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // Client B on the SAME group. Its `connected` must arrive from the accept
+        // task even though the CG thread is blocked on A.
+        let (ctx_b, _keep_b, mut sink_b) = make_ctx("cB", "wsB", false);
+        rt.block_on(router.handle_connection(ctx_b));
+
+        let mut saw_connected = false;
+        while let Ok(cmd) = sink_b.try_recv() {
+            if let WsCommand::Send { msg, .. } = cmd
+                && msg.get(0).and_then(|v| v.as_str()) == Some("connected")
+            {
+                saw_connected = true;
+            }
+        }
+
+        // Release the blocked CG thread FIRST so shutdown is clean regardless of
+        // the assertion outcome.
+        {
+            let (m, cv) = &*release;
+            *m.lock().unwrap() = true;
+            cv.notify_all();
+        }
+        assert!(
+            saw_connected,
+            "client B must receive `connected` from the accept task while the CG \
+             thread is mid-hydrate (connect-ack must not be serialized behind it)"
+        );
+
+        rt.block_on(router.shutdown());
+    }
+
     /// `place_cg` chooses the executor hosting the FEWEST groups, ignoring the
     /// cg_id hash except to break ties among equally-loaded executors. Proves the
     /// least-loaded contract directly: a heavily-loaded executor is avoided even
@@ -5102,6 +5340,10 @@ mod tests {
             3,
             None,
             ConnectionSinks::new(),
+            ShardID {
+                app_id: "zero".to_string(),
+                shard_num: 0,
+            },
         );
 
         // Fake handles (no real CG task) let us load specific executors without
@@ -5167,6 +5409,10 @@ mod tests {
             k,
             None,
             ConnectionSinks::new(),
+            ShardID {
+                app_id: "zero".to_string(),
+                shard_num: 0,
+            },
         );
 
         for i in 0..n {
@@ -5288,10 +5534,17 @@ mod tests {
     /// G36 garbage-cookie / overlarge-configversion: a baseCookie that fails
     /// `versionFromString` (TS schema/types.ts, called from the ClientHandler
     /// constructor's `cookieToVersion`) FAILS the connection with a fatal
-    /// `Internal` error after `connected` (`wrapWithProtocolError`,
-    /// types/error-with-level.ts) — it must NOT be silently treated as
-    /// "no base version". Covers both G36 shapes: a non-Lexi stateVersion and
-    /// a configVersion above 2^53.
+    /// `Internal` error (`wrapWithProtocolError`, types/error-with-level.ts) —
+    /// it must NOT be silently treated as "no base version". Covers both G36
+    /// shapes: a non-Lexi stateVersion and a configVersion above 2^53.
+    ///
+    /// The `connected`-before-`error` ordering TS guarantees is now structural:
+    /// `handle_connection` (accept task) sends `connected` BEFORE dispatching
+    /// `NewConnection` to the CG thread, and this `Internal` error is emitted
+    /// later on the CG thread by `on_new_connection`. This unit test drives
+    /// `on_new_connection` directly, so it asserts only the CG-thread half (the
+    /// `Internal` close); the ordering is covered by `handle_connection`'s
+    /// accept-task emission.
     #[test]
     fn malformed_base_cookie_closes_with_internal_error() {
         for bad_cookie in ["!!notlexi!!", "00:b100000000000"] {
@@ -5328,7 +5581,12 @@ mod tests {
                     }
                 }
             }
-            assert!(saw_connected, "[{bad_cookie}] TS sends connected first");
+            // `connected` is emitted on the accept task, NOT on this CG-thread
+            // path, so the CG thread must not send it here.
+            assert!(
+                !saw_connected,
+                "[{bad_cookie}] on_new_connection must not send `connected` (accept task does)"
+            );
             let error =
                 error.unwrap_or_else(|| panic!("[{bad_cookie}] must close with a protocol error"));
             assert_eq!(error["kind"], "Internal", "[{bad_cookie}] {error}");
@@ -5639,7 +5897,11 @@ mod tests {
             .collect()
     }
 
-    /// Connect `c1`/`ws1` and drain the `connected` frame.
+    /// Connect `c1`/`ws1` on the CG-thread path and drain any queued frames so
+    /// the returned rx starts clean for the caller's own assertions.
+    ///
+    /// Note: `on_new_connection` no longer emits `connected` (that is the accept
+    /// task's job — see `handle_connection`), so this helper does not expect it.
     fn connect_c1(
         rt: &tokio::runtime::Runtime,
         state: &mut CgState,
@@ -5650,8 +5912,8 @@ mod tests {
         );
         let frames = drain_sends(&mut rx);
         assert!(
-            frames.iter().any(|f| f[0] == "connected"),
-            "expected the connected frame on connect"
+            !frames.iter().any(|f| f[0] == "connected"),
+            "on_new_connection (CG thread) must not emit `connected`; the accept task does"
         );
         rx
     }
