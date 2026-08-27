@@ -57,17 +57,24 @@ the promotion is mechanical, not behavioral.
   `on_new_connection` dual-writes `register_connection`; `handle_update_auth`
   dual-writes `update_auth`. Maps stay AUTHORITATIVE → zero behavioral change
   (dual-write best-effort, logged-on-error). Non-vacuous test
-  `i8_stage1_ccm_tracks_connection_and_auth_via_dual_write`. Learned: CCM
-  `resolve_auth` requires a userID (TS parity) — anonymous/opaque paths need a
-  userID or the CCM rejects (see also the anonymous-opaque question in Stage 1.1).
-- **1.1 — TODO:** seed connect-time auth into `register_connection` (Stage 1.0
-  registers with `auth: None`); wire `push_config` + `validate_legacy_jwt` +
-  `now` into `ConnectionContextManager::new`; dual-write `init_connection`
+  `i8_stage1_ccm_tracks_connection_and_auth_via_dual_write`.
+- **Stage-1.0 note CORRECTED (2026-08-27):** the learning "CCM `resolve_auth`
+  requires a userID … anonymous/opaque paths need a userID or the CCM rejects"
+  was half-wrong. Verified against TS `resolveAuth` (auth.ts:49-123) AND the rust
+  1:1 port (connection_context_manager.rs:219-270): a userID is required **only
+  when a token is provided** (auth.ts:79-85). With **no** token, `resolveAuth`
+  returns `undefined` (anonymous ALLOWED, auth.ts:74-77). So the rust router
+  admitting anonymous (no-token) connections is FAITHFUL to TS — there is **no
+  anonymous-opaque divergence**. The CCM promotion is therefore pure
+  state-ownership de-duplication of the LATENT I-8 split, not a correctness fix.
+  Pinned by `resolve_auth_matches_ts_anonymous_and_userid_branches` (non-vacuous).
+- **1.1 — TODO (framing updated):** seed connect-time auth into
+  `register_connection` (Stage 1.0 registers with `auth: None`); wire
+  `push_config` + `validate_legacy_jwt` + `now` into
+  `ConnectionContextManager::new`; dual-write `init_connection`
   (userQueryURL/userPushURL) in `handle_desired_queries`; dual-write
-  `close_connection` on teardown. Open question to resolve 1:1: does TS
-  `resolveAuth` require a userID for OPAQUE tokens? Rust router allows anonymous
-  opaque (unpinned group) but the ported CCM requires a userID — reconcile
-  against auth.ts before Stage 2.
+  `close_connection` on teardown. **Blocking open question RESOLVED** (see the
+  corrected note above): no auth.ts reconciliation is needed before Stage 2.
 
 ### Stage 2 — migrate consumers to read the CCM at use time
 One consumer per commit, each reverting-proven:

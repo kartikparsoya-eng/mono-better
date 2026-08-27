@@ -944,4 +944,50 @@ mod tests {
             assert_eq!(got, case["body"], "to_error_body mismatch for {variant}");
         }
     }
+
+    /// Item-B / I-8 parity: `resolve_auth` is a 1:1 port of TS `resolveAuth`
+    /// (auth.ts:49-123). Pins the three branch outcomes that decide whether a
+    /// connection is anonymous, rejected, or authenticated — the exact question
+    /// the CCM-promotion spec (I8-CCM-PROMOTION-SPEC.md Stage 1.1) flagged as
+    /// blocking. Resolved permanently against TS source:
+    ///   - NO token, no previous auth      -> Ok(None)         anonymous ALLOWED (auth.ts:74-77)
+    ///   - NO token, but previous auth set -> Unauthorized     (auth.ts:65-72)
+    ///   - token provided, userID = None   -> Unauthorized     "require a userID" (auth.ts:79-85)
+    ///   - opaque token + userID           -> Ok(Some(Opaque)) (auth.ts:108-112)
+    ///
+    /// This CORRECTS the Stage-1.0 note ("anonymous/opaque paths need a userID or
+    /// the CCM rejects"): a userID is required ONLY when a token is provided. The
+    /// rust router admitting anonymous (no-token) connections is FAITHFUL to TS,
+    /// NOT a divergence — so the CCM promotion is pure state-ownership
+    /// de-duplication (latent I-8), not a correctness fix.
+    ///
+    /// NON-VACUOUS: flip the anonymous branch (`Ok(None)` -> `Err`) and the first
+    /// assert fails; drop the userID gate and the third assert fails.
+    #[test]
+    fn resolve_auth_matches_ts_anonymous_and_userid_branches() {
+        // Anonymous: no token -> None (allowed), with or without a userID.
+        assert_eq!(resolve_auth(None, None, None, None).unwrap(), None);
+        assert_eq!(resolve_auth(None, Some("u1"), None, None).unwrap(), None);
+
+        // No token but an already-authenticated group (previous auth present).
+        let prev = Auth::Opaque { raw: "t".into() };
+        assert!(matches!(
+            resolve_auth(Some(&prev), Some("u1"), None, None),
+            Err(CCMError::Unauthorized(_))
+        ));
+
+        // Token provided but no userID -> the exact TS message.
+        match resolve_auth(None, None, Some("opaque-tok"), None) {
+            Err(CCMError::Unauthorized(m)) => {
+                assert_eq!(m, "Authenticated connections require a userID.")
+            }
+            other => panic!("expected Unauthorized (no userID), got {other:?}"),
+        }
+
+        // Opaque token WITH a userID, no legacy validator -> opaque auth.
+        match resolve_auth(None, Some("u1"), Some("opaque-tok"), None).unwrap() {
+            Some(Auth::Opaque { raw }) => assert_eq!(raw, "opaque-tok"),
+            other => panic!("expected opaque auth, got {other:?}"),
+        }
+    }
 }
