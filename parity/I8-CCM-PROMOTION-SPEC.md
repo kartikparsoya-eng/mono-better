@@ -68,13 +68,50 @@ the promotion is mechanical, not behavioral.
   anonymous-opaque divergence**. The CCM promotion is therefore pure
   state-ownership de-duplication of the LATENT I-8 split, not a correctness fix.
   Pinned by `resolve_auth_matches_ts_anonymous_and_userid_branches` (non-vacuous).
-- **1.1 — TODO (framing updated):** seed connect-time auth into
-  `register_connection` (Stage 1.0 registers with `auth: None`); wire
-  `push_config` + `validate_legacy_jwt` + `now` into
-  `ConnectionContextManager::new`; dual-write `init_connection`
-  (userQueryURL/userPushURL) in `handle_desired_queries`; dual-write
-  `close_connection` on teardown. **Blocking open question RESOLVED** (see the
-  corrected note above): no auth.ts reconciliation is needed before Stage 2.
+- **1.1 — DONE (this session):** the CCM is now a COMPLETE, verified shadow of
+  the live maps.
+  - `ccm_register` seeds connect-time auth via `resolve_auth(None, user_id, wire,
+    None)` → `Opaque{raw}` (modern path). `push_config`/`validate_legacy_jwt`/`now`
+    stay `None` by design (see below).
+  - `ccm_init_connection` dual-writes `init_connection` (userQueryURL/Headers,
+    userPushURL/Headers) in `handle_desired_queries` on a real initConnection.
+  - `ccm_close_connection` dual-writes `close_connection` in `on_connection_closed`.
+  - Golden test `i8_stage1_ccm_tracks_connection_and_auth_via_dual_write` now
+    asserts the CCM's seeded auth == live `client_raw_auth` at connect, updateAuth
+    flows through, and close drops the CCM entry. Non-vacuous (seed→None fails it).
+  - **`push_config`/`validate_legacy_jwt`/`now` intentionally `None`:** no Stage-2
+    consumer reads the CCM's `mutate_context` (the push relay is invention I-3 and
+    keeps its own connect-time relay fields; only its AUTH cell maps to the CCM);
+    `now` defaults to `now_ms`; the modern path has no legacy JWT validator (TS
+    `validateLegacyJWT` is undefined → `resolveAuth` returns `opaque`, auth.ts:108).
+  - **KEY FINDING that de-risked authData:** TS passes `ctx.auth?.raw` (the RAW
+    token) to the transform (view-syncer-test-util.ts:861/1040) and decodes
+    `authData` at use time — the CCM stores **opaque** for modern JWTs, NOT decoded
+    claims. So NO `JwtPayload` restructure is needed: the authData consumer will
+    decode `must_get_connection_context(sel).auth.raw()` at use time, matching the
+    live `client_auth = decode_jwt_claims(token)`.
+
+### Stage 2 — migrate consumers to read the CCM at use time (REMAINING — ART-gated)
+One consumer per commit, each reverting-proven. Consume sites (router.rs):
+- authData (`client_auth`): 2585, 3429 → decode `ccm.auth.raw()` at use time.
+- Bearer/`has-auth` (`client_raw_auth`): 1887, 1923, 2462, 2872 → `ccm.auth.raw()`.
+- query ctx (`client_query_ctx`): 1995, 2469, 2618, 3449 → `ccm.query_context`.
+- push relay (`PushRelayHeaders.auth`): needs the `Arc<Mutex<CCM>>`+selector
+  plumbed into the message handler (currently holds the auth cell).
+- revalidation/pin: read `user`/`auth` from the CCM.
+
+**BEHAVIORAL RISK discovered — why Stage 2 MUST be ART-gated before shipping:**
+an *anonymous-opaque* connection (an opaque token but NO userID) is admitted by
+the live rust path (`client_raw_auth` holds the token), but `resolve_auth` rejects
+it (token + no userID → Unauthorized, auth.ts:79-85) so the CCM seeds `auth:None`.
+Flipping the Bearer/authData reads to the CCM would therefore change such a
+connection's forwarded token from the opaque token to `None`. Per TS this is the
+*more* faithful behavior (TS `resolveAuth` would reject it too), but it is a
+LIVE behavior change that must be validated by the ART re-gate (mutation/auth
+gates + G-ttl) before it ships. This is exactly why the user sequenced "ART run"
+AFTER the I-8 migration. Until Stage 1.1's shadow is confirmed byte-equal to the
+maps across a full ART run, do NOT flip the live reads — the maps stay
+authoritative (a failed best-effort dual-write must never reach a client).
 
 ### Stage 2 — migrate consumers to read the CCM at use time
 One consumer per commit, each reverting-proven:
