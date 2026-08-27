@@ -2187,6 +2187,11 @@ impl CgState {
                 protocol_version: params.protocol_version,
                 http_cookie: params.http_cookie.clone(),
                 origin: params.origin.clone(),
+                request_headers: params
+                    .request_headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
             };
             let user_id = params.user_id.as_deref().filter(|v| !v.is_empty());
             let wire = params.auth.as_deref().filter(|t| !t.is_empty());

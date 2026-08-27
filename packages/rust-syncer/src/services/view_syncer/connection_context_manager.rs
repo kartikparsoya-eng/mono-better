@@ -53,17 +53,18 @@ pub struct ConnectionSelector {
     pub ws_id: String,
 }
 
-/// NOTE: the outgoing query-API request headers (including the #6144
-/// incoming-request-header forwarding) are actually built by `router.rs`
-/// (`default_query_context` + `filtered_query_headers`) directly from
-/// [`FetchConfig`] and [`ConnectParams`]. This `HeaderOptions`/`build_fetch_context`
-/// port of `connection-context-manager.ts` is retained for structural parity but
-/// is not on the runtime fetch path, so it keeps the pre-#6144 `allowed_client_headers`
-/// shape rather than the renamed `requestHeaders` record.
+/// Port of TS `HeaderOptions` (connection-context-manager.ts:44). The outgoing
+/// query/push-API header set the manager owns: `custom_headers` (the client's
+/// `userQueryHeaders`/`userPushHeaders`), `request_headers` (the #6144 forwarded
+/// incoming request headers, filtered by `allowed_request_headers`), plus
+/// `api_key`, `cookie`, `origin`. `allowed_client_headers` is the allowlist used
+/// to filter `custom_headers` at `initConnection`.
 #[derive(Debug, Clone, Default)]
 pub struct HeaderOptions {
     pub api_key: Option<String>,
     pub custom_headers: Option<HashMap<String, String>>,
+    /// #6144 forwarded incoming request headers (TS `requestHeaders`).
+    pub request_headers: Option<HashMap<String, String>>,
     pub allowed_client_headers: Option<Vec<String>>,
     pub cookie: Option<String>,
     pub origin: Option<String>,
@@ -128,6 +129,9 @@ pub struct ConnectParamsForRegistration {
     pub protocol_version: u32,
     pub http_cookie: Option<String>,
     pub origin: Option<String>,
+    /// Raw incoming HTTP request headers (for #6144 forwarding, filtered by the
+    /// fetch config's `allowed_request_headers`).
+    pub request_headers: Vec<(String, String)>,
 }
 
 /// Fetch config for query/push endpoints.
@@ -354,6 +358,31 @@ pub fn auth_equals(a: Option<&Auth>, b: Option<&Auth>) -> bool {
     }
 }
 
+/// Port of `filterHeaders()` (connection-context-manager.ts:875): keep only the
+/// headers whose (case-insensitive) name is in `allowed`. Returns `None` when
+/// there is nothing to forward (no/empty allowlist, or no match) — matching TS's
+/// `undefined`.
+fn filter_headers(
+    headers: &[(String, String)],
+    allowed: Option<&[String]>,
+) -> Option<HashMap<String, String>> {
+    let allowed = allowed?;
+    if allowed.is_empty() {
+        return None;
+    }
+    let allow: std::collections::HashSet<String> =
+        allowed.iter().map(|h| h.to_ascii_lowercase()).collect();
+    let mut filtered: Option<HashMap<String, String>> = None;
+    for (key, value) in headers {
+        if allow.contains(&key.to_ascii_lowercase()) {
+            filtered
+                .get_or_insert_with(HashMap::new)
+                .insert(key.clone(), value.clone());
+        }
+    }
+    filtered
+}
+
 impl Auth {
     pub fn raw(&self) -> &str {
         match self {
@@ -460,6 +489,15 @@ impl ConnectionContextManager {
             allowed_url_patterns: config.as_ref().and_then(|c| c.url.clone()),
             header_options: HeaderOptions {
                 custom_headers: None,
+                // #6144: forward the allowlisted incoming request headers (TS
+                // `requestHeaders: filterHeaders(connectParams.requestHeaders,
+                // config?.allowedRequestHeaders)`).
+                request_headers: filter_headers(
+                    &params.request_headers,
+                    config
+                        .as_ref()
+                        .and_then(|c| c.allowed_request_headers.as_deref()),
+                ),
                 origin: params.origin.clone(),
                 api_key: config.as_ref().and_then(|c| c.api_key.clone()),
                 allowed_client_headers: config
@@ -943,6 +981,33 @@ mod tests {
             let got = serde_json::to_value(err.to_error_body()).expect("serialize");
             assert_eq!(got, case["body"], "to_error_body mismatch for {variant}");
         }
+    }
+
+    /// Port fidelity of `filter_headers` (TS `filterHeaders`, #6144): keep only
+    /// the allowlisted headers (case-insensitive), `None` when nothing forwards.
+    #[test]
+    fn filter_headers_matches_ts_allowlist_semantics() {
+        let headers = vec![
+            ("X-Forwarded-For".to_string(), "1.2.3.4".to_string()),
+            ("Cookie".to_string(), "secret".to_string()),
+            ("x-custom".to_string(), "v".to_string()),
+        ];
+        // Case-insensitive allowlist keeps only matched headers.
+        let allowed = vec!["x-forwarded-for".to_string(), "X-Custom".to_string()];
+        let got = filter_headers(&headers, Some(&allowed)).expect("some forwarded");
+        assert_eq!(
+            got.get("X-Forwarded-For").map(String::as_str),
+            Some("1.2.3.4")
+        );
+        assert_eq!(got.get("x-custom").map(String::as_str), Some("v"));
+        assert!(
+            !got.contains_key("Cookie"),
+            "non-allowlisted header must be dropped"
+        );
+        // No allowlist / empty allowlist / no match → None (TS `undefined`).
+        assert!(filter_headers(&headers, None).is_none());
+        assert!(filter_headers(&headers, Some(&[])).is_none());
+        assert!(filter_headers(&headers, Some(&["nope".to_string()])).is_none());
     }
 
     /// Item-B / I-8 parity: `resolve_auth` is a 1:1 port of TS `resolveAuth`

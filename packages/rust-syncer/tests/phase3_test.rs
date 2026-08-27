@@ -31,6 +31,7 @@ fn make_params(client_id: &str, ws_id: &str) -> ConnectParamsForRegistration {
         protocol_version: 0,
         http_cookie: Some(format!("cookie-{}", ws_id)),
         origin: Some(format!("origin-{}", ws_id)),
+        request_headers: Vec::new(),
     }
 }
 
