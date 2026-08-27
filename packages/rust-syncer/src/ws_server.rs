@@ -896,4 +896,85 @@ mod tests {
         }
         let _ = server.await;
     }
+
+    /// I-4 slow-client shed parity (INVENTIONS.md I-4 — closes its GAP).
+    /// The ws_sink HWM shed is a Rust invention (TS relies on runtime
+    /// backpressure); its contract is that a shed is *observationally* the SAME
+    /// backoff TS emits for a connection it can no longer serve —
+    /// `ErrorKind::Rehome` (view-syncer.ts:473 / cvr-store.ts:1373), telling the
+    /// client to reconnect to a fresh assignment. When `run_ws_writer`'s `kill`
+    /// watch trips (depth crossed the HWM in `DirectWebSocketSink`), it MUST send
+    /// an `["error", {kind:"Rehome"}]` frame FIRST, then a close frame (code
+    /// 3000) — never a bare 1006, which the client cannot classify.
+    ///
+    /// NON-VACUOUS: change `ErrorBody::rehome(...)` at the shed arm to any other
+    /// kind, or drop the error frame, and the `kind == "Rehome"` / frame-present
+    /// assertions fail. (Verified by reverting to a bare close.)
+    #[tokio::test]
+    async fn slow_client_shed_closes_with_rehome_error_then_close_3000() {
+        use futures_util::StreamExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (w, _r) = ws.split();
+            let (_tx, rx) = mpsc::unbounded_channel::<WsCommand>();
+            let (kill_tx, kill_rx) = watch::channel(false);
+            let limits = Arc::new(SinkLimits {
+                depth: Arc::new(AtomicI64::new(0)),
+                hwm: 1_000_000,
+                bytes: Arc::new(AtomicI64::new(0)),
+                byte_hwm: i64::MAX,
+                kill: kill_tx,
+                shed_counted: std::sync::atomic::AtomicBool::new(false),
+            });
+            let last = Arc::new(AtomicI64::new(now_epoch_ms()));
+            let writer = tokio::spawn(run_ws_writer(w, rx, limits.clone(), kill_rx, last));
+            // Trip the shed exactly as `DirectWebSocketSink` does when the
+            // downstream queue depth crosses the HWM.
+            let _ = limits.kill.send(true);
+            let _ = writer.await;
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
+            .await
+            .unwrap();
+
+        // Frame 1: ["error", {kind:"Rehome", ...}] — the shed backoff.
+        let first = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the shed error frame")
+            .expect("stream ended before the error frame")
+            .unwrap();
+        let text = match first {
+            Message::Text(t) => t.to_string(),
+            other => panic!("expected the error TEXT frame first, got {other:?}"),
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(frame[0], "error");
+        assert_eq!(
+            frame[1]["kind"], "Rehome",
+            "a slow-client shed must be observationally a Rehome (I-4), got {frame:?}"
+        );
+
+        // Frame 2: the close frame — code 3000.
+        let second = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for the close frame")
+            .expect("stream ended before the close frame")
+            .unwrap();
+        match second {
+            Message::Close(Some(cf)) => assert_eq!(
+                u16::from(cf.code),
+                3000,
+                "shed close must be 3000 (backoff), got {:?}",
+                cf.code
+            ),
+            other => panic!("expected close 3000 after the Rehome error, got {other:?}"),
+        }
+        let _ = server.await;
+    }
 }

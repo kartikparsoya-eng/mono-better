@@ -24,9 +24,39 @@ guarantees, error semantics) versus TS.
   #runInLockForClient` — view-syncer.ts:896,916); (b) per-CG hydration IS
   serialized in both (TS one `#lock` == rust one thread) — that serialization is
   faithful; (c) poke frame order per client is preserved.
+- **The three decoupled emissions — how each `(a)` frame stays live off the CG thread:**
+  - `connected`: emitted on the accept task (`handle_connection`), never the CG
+    thread — see I-2. Pinned by `connected_ack_is_decoupled_from_a_blocked_cg_hydrate`
+    and enforced by the L3 guard.
+  - `pong` **liveness**: guaranteed by the writer-task keepalive
+    (`run_ws_writer`, ws_server.rs:474 — sends `["pong",{}]` every
+    `DOWNSTREAM_MSG_INTERVAL_MS` if no downstream frame went out), a separate
+    tokio task that does NOT touch the CG thread. This is the 1:1 mirror of TS
+    `#maybeSendPong` (connection.ts:341, a `setInterval` off the view-syncer
+    lock), which TS documents fires exactly when "the inbound stream is backed up
+    ... pongs will be manually sent" (connection.ts:58-61). The client-initiated
+    `["ping"]→["pong"]` fast-path (connection.rs:163, TS connection.ts:220) runs
+    on the CG thread in rust, so under a blocked hydrate the *explicit* ping-reply
+    can be delayed — but the writer keepalive is precisely TS's backed-up path, so
+    the client still observes a pong within the liveness window. Contract holds
+    via the keepalive, not the ping-reply. Pinned by
+    `on_inbound_ping_answers_pong` (reply correctness) + the keepalive code path.
+  - `error` (connect-time): version-gate + malformed-params errors are emitted on
+    the accept path (`accept_connection` / `send_error_and_close`), never the CG
+    thread. Pinned by `send_error_and_close_sends_error_frame_then_close_3000` and
+    `malformed_base_cookie_closes_with_internal_error`. A shed error (slow-client)
+    is emitted from the writer task — pinned by
+    `slow_client_shed_closes_with_rehome_error_then_close_3000` (see I-4).
+    Message-*processing* errors (a throw inside `handleMessage`) ARE serialized on
+    the CG thread — faithful, because TS also runs `handleMessage` before it can
+    throw, and the throw only closes the SAME client's connection (per-client, not
+    cross-client).
 - **Tests:** `router::tests::connected_ack_is_decoupled_from_a_blocked_cg_hydrate`
-  (ack independence). **GAP:** pong + error independence under a blocked hydrate
-  (added in L5 harness — see `*_survives_a_blocked_cg_hydrate`).
+  (ack independence), `on_inbound_ping_answers_pong` (pong reply),
+  `slow_client_shed_closes_with_rehome_error_then_close_3000` (shed error frame),
+  `send_error_and_close_sends_error_frame_then_close_3000` (connect-time error
+  ordering). Pong keepalive liveness is structural (writer task, ws_server.rs:474)
+  — the L7 prose-invariant checklist carries its citation.
 - **History:** violated by bug-1 (connect-ack was on the serial path). Fixed
   `5e71e24f4`.
 
@@ -80,9 +110,12 @@ guarantees, error semantics) versus TS.
 - **No TS twin:** TS `ws.send` + backpressure via the runtime; rust splits the
   socket into tokio tasks with a bounded queue and a HWM kill.
 - **Contract:** frame order out equals enqueue order; a shed closes with the SAME
-  error TS emits for buffer overflow (Rehome). No frame reordering vs the sync
-  push path.
-- **Tests:** `ws_server` frame-order tests. **GAP:** shed-error parity assertion.
+  error TS emits for a connection it can no longer serve (Rehome,
+  view-syncer.ts:473 / cvr-store.ts:1373) — an `["error",{kind:"Rehome"}]` frame
+  FIRST, then close 3000. No frame reordering vs the sync push path.
+- **Tests:** `ws_server` frame-order tests +
+  `ws_server::tests::slow_client_shed_closes_with_rehome_error_then_close_3000`
+  (shed → Rehome error frame then close 3000; non-vacuous — a bare close fails it).
 
 ## I-5 — Drop-based teardown (Engine `destroy`)
 - **Files:** `rust-ivm` Engine `Drop`, CG idle reap in `router.rs`.
