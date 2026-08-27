@@ -1881,7 +1881,20 @@ impl CgState {
         if self.next_auth_maintenance_at.is_some() {
             return;
         }
-        if self.client_raw_auth.is_empty() {
+        // Nothing to maintain if no registered connection carries auth.
+        let any_auth = {
+            let ccm = lock_unpoisoned(&self.ccm);
+            self.registered_ws.iter().any(|(c, w)| {
+                ccm.must_get_connection_context(&CcmConnectionSelector {
+                    client_id: c.clone(),
+                    ws_id: w.clone(),
+                })
+                .ok()
+                .and_then(|ctx| ctx.auth)
+                .is_some()
+            })
+        };
+        if !any_auth {
             return;
         }
         self.next_auth_maintenance_at = Some(now_ms() + interval);
@@ -1914,13 +1927,24 @@ impl CgState {
     ///
     /// Re-arms the deadline (or clears it if no authed connection remains).
     async fn on_auth_maintenance_tick(&mut self) {
-        // Snapshot the (client_id, raw_token) pairs to re-verify. Only tokened
-        // connections are subject to revalidation.
-        let due: Vec<(String, String)> = self
-            .client_raw_auth
-            .iter()
-            .map(|(c, t)| (c.clone(), t.clone()))
-            .collect();
+        // Snapshot the (client_id, raw_token) pairs to re-verify, read from the
+        // ConnectionContextManager (TS `mustGetConnectionContext(selector).auth`).
+        // Only tokened connections are subject to revalidation.
+        let due: Vec<(String, String)> = {
+            let ccm = lock_unpoisoned(&self.ccm);
+            self.registered_ws
+                .iter()
+                .filter_map(|(c, w)| {
+                    ccm.must_get_connection_context(&CcmConnectionSelector {
+                        client_id: c.clone(),
+                        ws_id: w.clone(),
+                    })
+                    .ok()
+                    .and_then(|ctx| ctx.auth)
+                    .map(|a| (c.clone(), a.raw().to_string()))
+                })
+                .collect()
+        };
 
         let mut survivors: Vec<String> = Vec::new();
         for (client_id, token) in due {
@@ -2152,16 +2176,14 @@ impl CgState {
                 .filter(|u| !u.is_empty())
                 .map(str::to_string);
         }
-        // Arm periodic auth maintenance for this (now validated) connection.
-        // Port of `validateConnection` setting `revalidateAt = now + interval`.
-        self.arm_auth_maintenance();
-
         // Register the connection into the ConnectionContextManager (TS
-        // `registerConnection`). Auth is resolved from the connect params: the
-        // modern path (no legacy validator) yields `Opaque{raw}` when a token is
-        // present and `None` when absent (auth.ts:74-77 / :108-112). The token
-        // was already signature-verified at admission (`AuthValidator`), as TS
-        // runs the auth validator before the manager.
+        // `registerConnection`) BEFORE arming maintenance, which reads the CCM to
+        // decide whether any connection carries auth. Auth is resolved from the
+        // connect params: the modern path (no legacy validator) yields
+        // `Opaque{raw}` when a token is present and `None` when absent
+        // (auth.ts:74-77 / :108-112). The token was already signature-verified at
+        // admission (`AuthValidator`), as TS runs the auth validator before the
+        // manager.
         {
             let selector = CcmConnectionSelector {
                 client_id: params.client_id.clone(),
@@ -2182,6 +2204,10 @@ impl CgState {
             let auth = resolve_auth(None, user_id, wire, None).unwrap_or(None);
             lock_unpoisoned(&self.ccm).register_connection(&selector, &reg, auth);
         }
+
+        // Arm periodic auth maintenance for this (now validated) connection.
+        // Port of `validateConnection` setting `revalidateAt = now + interval`.
+        self.arm_auth_maintenance();
 
         // Raw auth/header material captured at connect, forwarded on a relayed
         // custom push so the TS endpoint can rebuild the userPushURL request.
@@ -2812,9 +2838,18 @@ impl CgState {
         // queries against the new Bearer token (view-syncer.pg.test.ts
         // "retransforms custom queries when opaque auth refreshes").
         let unchanged = self
-            .client_raw_auth
+            .registered_ws
             .get(client_id)
-            .map(|prev| prev == token)
+            .and_then(|ws_id| {
+                lock_unpoisoned(&self.ccm)
+                    .must_get_connection_context(&CcmConnectionSelector {
+                        client_id: client_id.to_string(),
+                        ws_id: ws_id.clone(),
+                    })
+                    .ok()
+            })
+            .and_then(|ctx| ctx.auth)
+            .map(|prev| prev.raw() == token)
             .unwrap_or(false);
         if unchanged {
             tracing::debug!(
@@ -4505,8 +4540,9 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid.clone());
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        // A userID-bearing (JWT) connection — the case revalidation applies to.
         rt.block_on(state.on_new_connection(
-            authed_params("c1", "ws1", "tok-c1"),
+            pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
         assert_eq!(state.registered_ws.len(), 1);
@@ -4746,10 +4782,12 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        rt.block_on(state.on_new_connection(
-            authed_params("c1", "ws1", "opaque-token-1"),
-            DirectWebSocketSink::new(tx),
-        ));
+        // Opaque token WITH a userID — `resolve_auth` requires a userID whenever a
+        // token is present (auth.ts:79-85), so the ConnectionContextManager holds
+        // the token and the unchanged-check can compare against it.
+        let mut params = authed_params("c1", "ws1", "opaque-token-1");
+        params.user_id = Some("user-1".to_string());
+        rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
 
         rt.block_on(state.handle_update_auth("c1", "opaque-token-1"));
         assert_eq!(
@@ -4961,8 +4999,11 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        // A userID-bearing (JWT) connection — the case revalidation applies to;
+        // `resolve_auth` requires a userID with a token (auth.ts:79-85), so the
+        // ConnectionContextManager holds its auth.
         rt.block_on(state.on_new_connection(
-            authed_params("c1", "ws1", "tok-c1"),
+            pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
         seed_test_client_schema(&mut state);
@@ -4979,6 +5020,44 @@ mod tests {
         assert_eq!(state.metrics.snapshot()["authRevalidations"], 1);
         // Re-armed (still a token present).
         assert!(state.next_auth_maintenance_at.is_some());
+    }
+
+    /// Auth maintenance reads the token from the ConnectionContextManager, not the
+    /// legacy `client_raw_auth` map. Proven by CLEARING the legacy map and showing
+    /// arming + revalidation still work from the CCM alone (the single owner).
+    ///
+    /// NON-VACUOUS: if arming/revalidation still read `client_raw_auth`, the
+    /// cleared map would leave no auth → no arm, no revalidation, and both asserts
+    /// fail.
+    #[test]
+    fn auth_maintenance_reads_token_from_the_connection_context_manager() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        seed_test_client_schema(&mut state);
+
+        // Drop the legacy map: the CCM is now the ONLY source of the token.
+        state.client_raw_auth.clear();
+        state.next_auth_maintenance_at = None;
+        state.arm_auth_maintenance();
+        assert!(
+            state.next_auth_maintenance_at.is_some(),
+            "arm_auth_maintenance must see the connection's auth via the CCM"
+        );
+
+        rt.block_on(state.on_auth_maintenance_tick());
+        assert_eq!(
+            state.registered_ws.len(),
+            1,
+            "the (valid) connection must be revalidated and survive"
+        );
+        assert_eq!(state.metrics.snapshot()["authRevalidations"], 1);
     }
 
     /// With the feature disabled (interval None) no deadline is ever armed, and a
