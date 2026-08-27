@@ -2140,7 +2140,11 @@ impl CgState {
             .collect();
         relay_request_headers.sort();
         let push_relay_headers = crate::workers::syncer_ws_message_handler::PushRelayHeaders {
-            auth: params.auth.clone().filter(|v| !v.is_empty()),
+            // Shared cell so `updateAuth` refreshes the token the relayed push
+            // forwards (TS reads it fresh per push; a snapshot goes stale → 401).
+            auth: std::sync::Arc::new(std::sync::Mutex::new(
+                params.auth.clone().filter(|v| !v.is_empty()),
+            )),
             cookie: params.http_cookie.clone(),
             origin: params.origin.clone(),
             request_headers: relay_request_headers,
@@ -2747,6 +2751,15 @@ impl CgState {
             .insert(client_id.to_string(), token.to_string());
         if let Some(ctx) = self.client_query_ctx.get_mut(client_id) {
             ctx.auth = Some(token.to_string());
+        }
+        // Refresh the token forwarded on relayed pushes. The message handler
+        // shares this `Arc` (a plain snapshot would keep relaying the expired
+        // connect-time token → API-server 401). TS parity: pusher.ts reads
+        // `mustGetConnectionContext` fresh on every push.
+        if let Some(headers) = self.client_push_headers.get(client_id)
+            && let Ok(mut cell) = headers.auth.lock()
+        {
+            *cell = Some(token.to_string());
         }
         let empty_body = serde_json::json!({});
         self.handle_desired_queries(client_id, &empty_body, true)
@@ -4641,6 +4654,56 @@ mod tests {
             state.metrics.snapshot()["authChanges"],
             0,
             "an unchanged opaque token must NOT trigger a re-transform"
+        );
+    }
+
+    /// Regression (push-relay 401, prod incident 2026-08-27): `updateAuth` MUST
+    /// refresh the token forwarded on relayed custom-mutation pushes. Rust
+    /// snapshotted `PushRelayHeaders.auth` at `initConnection` and never updated
+    /// it, so a client that refreshed its JWT mid-session kept having the STALE
+    /// connect-time token relayed to the API server → 401 "Invalid or expired
+    /// token" on every mutation. TS reads `mustGetConnectionContext` fresh per
+    /// push (pusher.ts), so the forwarded token always tracks `updateAuth`.
+    ///
+    /// NON-VACUOUS: before the fix, `handle_update_auth` did not touch the push
+    /// header, so the shared cell stays at the connect-time token and this second
+    /// assert fails. (Verified by reverting the `handle_update_auth` refresh.)
+    #[test]
+    fn update_auth_refreshes_the_forwarded_push_relay_token() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            authed_params("c1", "ws1", "token-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+
+        // Capture the SHARED auth cell (the message handler holds the same Arc).
+        // Cloning the Arc keeps the assertion valid even though a downstream
+        // re-hydrate in this storeless harness later drops the map entry.
+        let auth_cell = state
+            .client_push_headers
+            .get("c1")
+            .expect("push headers for c1")
+            .auth
+            .clone();
+
+        // The relayed push forwards the connect-time token.
+        assert_eq!(
+            auth_cell.lock().unwrap().as_deref(),
+            Some("token-1"),
+            "initial forwarded push token is the connect-time token"
+        );
+
+        // A refreshed token must be forwarded on subsequent pushes.
+        rt.block_on(state.handle_update_auth("c1", "token-2"));
+        assert_eq!(
+            auth_cell.lock().unwrap().as_deref(),
+            Some("token-2"),
+            "updateAuth must refresh the token forwarded on relayed pushes \
+             (a stale snapshot is what caused the API-server 401 storm)"
         );
     }
 

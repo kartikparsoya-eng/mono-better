@@ -90,7 +90,16 @@ pub trait MutagenDispatch: Send + Sync {
 /// zero mutation logic — it only relays these bytes.
 #[derive(Clone, Default)]
 pub struct PushRelayHeaders {
-    pub auth: Option<String>,
+    /// Bearer auth token forwarded to the TS relay endpoint. Shared + mutable
+    /// (like `push_override`, and for the same reason) because a client can
+    /// refresh its token mid-connection via `updateAuth`: the relayed push must
+    /// carry the CURRENT token. TS reads it fresh per push through
+    /// `mustGetConnectionContext` (pusher.ts `enqueuePush`), so a connect-time
+    /// snapshot diverges — the token expires and the API server rejects it with
+    /// 401 ("Invalid or expired token"), breaking every custom mutation on any
+    /// session longer than the token TTL. `handle_update_auth` writes the new
+    /// token here; the router and the message handler share this Arc.
+    pub auth: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     pub cookie: Option<String>,
     pub origin: Option<String>,
     pub request_headers: Vec<(String, String)>,

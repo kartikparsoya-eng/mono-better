@@ -223,11 +223,16 @@ impl HttpRelayPusher {
         headers: &PushRelayHeaders,
         client_group_id: &str,
     ) -> serde_json::Value {
+        // Read the CURRENT forwarded token (refreshed by `updateAuth`), not a
+        // connect-time snapshot — mirrors TS reading `mustGetConnectionContext`
+        // fresh per push (pusher.ts), so an expired token never reaches the API
+        // server as a stale 401.
+        let auth = headers.auth.lock().ok().and_then(|g| g.clone());
         let mut payload = serde_json::json!({
             "clientGroupID": client_group_id,
             "clientID": selector.client_id,
             "push": body,
-            "auth": headers.auth,
+            "auth": auth,
             "cookie": headers.cookie,
             "origin": headers.origin,
             "requestHeaders": headers.request_headers,
