@@ -2713,16 +2713,23 @@ impl CgState {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Single-user pin (port of `pickToken`): a client group is pinned to one
-        // userID. If this group already has a pinned user, the new token's `sub`
-        // MUST match it — otherwise a validly-signed token for a DIFFERENT user
-        // (the signing key is shared across users) could re-scope the entire
-        // group's `authData` mid-connection. Reject the mismatch as Unauthorized
-        // and close the connection.
+        // Single-user pin (port of `pickToken`, auth.ts:166-174): a client group
+        // is pinned to one userID. If this group already has a pinned user and the
+        // new token DECODES to a `sub`, that `sub` MUST match — otherwise a
+        // validly-signed JWT for a DIFFERENT user (the signing key is shared across
+        // users) could re-scope the entire group's `authData` mid-connection.
+        //
+        // The `sub` check applies ONLY to a token that carries one (a JWT). A truly
+        // OPAQUE token has no claims — it decodes to `{}`, contributes no `authData`
+        // identity, and TS's modern path (`validateLegacyJWT` undefined) stores it
+        // as `opaque` and does NO sub-pin on updateAuth (auth.ts:94-112); the pin is
+        // the connection's fixed `userID`, which a refresh never changes. Rejecting
+        // an opaque refresh here (as the unconditional `new_sub != pinned` check did,
+        // since `None != Some(pinned)`) wrongly closed valid opaque token rotations.
         let pin_mismatch = self
             .pinned_user_id
             .as_deref()
-            .is_some_and(|pinned| new_sub.as_deref() != Some(pinned));
+            .is_some_and(|pinned| new_sub.is_some() && new_sub.as_deref() != Some(pinned));
         if pin_mismatch {
             tracing::warn!(
                 "CG {}: updateAuth userID mismatch (pinned={:?}, new={new_sub:?}); closing",
@@ -4754,11 +4761,14 @@ mod tests {
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        // Opaque token (not a JWT), user_id None → group stays unpinned.
-        rt.block_on(state.on_new_connection(
-            authed_params("c1", "ws1", "opaque-token-1"),
-            DirectWebSocketSink::new(tx),
-        ));
+        // Opaque token (not a JWT) WITH a userID — the CCM records the token so the
+        // unchanged-check compares against a REAL previous opaque auth (this is what
+        // makes the raw-vs-decoded distinction non-vacuous: two opaque tokens both
+        // decode to `{}`, so a decoded-claims comparison would falsely skip). The
+        // group pins to `user-1`; the opaque refresh must NOT be closed by the pin.
+        let mut params = authed_params("c1", "ws1", "opaque-token-1");
+        params.user_id = Some("user-1".to_string());
+        rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
         assert_eq!(state.metrics.snapshot()["authChanges"], 0);
 
         // Refresh to a DIFFERENT opaque token → must re-transform. `auth_changes`
@@ -4784,7 +4794,8 @@ mod tests {
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         // Opaque token WITH a userID — `resolve_auth` requires a userID whenever a
         // token is present (auth.ts:79-85), so the ConnectionContextManager holds
-        // the token and the unchanged-check can compare against it.
+        // the token and the unchanged-check can compare against it. A pinned group
+        // must NOT close an opaque refresh (opaque tokens carry no `sub`).
         let mut params = authed_params("c1", "ws1", "opaque-token-1");
         params.user_id = Some("user-1".to_string());
         rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
@@ -4794,6 +4805,15 @@ mod tests {
             state.metrics.snapshot()["authChanges"],
             0,
             "an unchanged opaque token must NOT trigger a re-transform"
+        );
+        // Passing for the RIGHT reason: the connection SURVIVES (an unchanged skip,
+        // not a pin-mismatch close). Before the opaque sub-pin fix, a pinned group
+        // closed the connection here — which also read authChanges==0, masking the
+        // divergence.
+        assert_eq!(
+            state.registered_ws.len(),
+            1,
+            "an unchanged opaque refresh must keep the connection open"
         );
     }
 

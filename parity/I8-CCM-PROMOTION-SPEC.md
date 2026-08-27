@@ -157,20 +157,25 @@ Both behaviorally inert today (query_context not yet read on the live path).
 - Teardown/auth-maintenance/authData tests repointed off the deleted maps to the
   CCM (`ccm_raw_auth` test helper; teardown asserts the CCM connection is gone).
 
-**Follow-up discovered (separate focused commit) — opaque-token updateAuth pin
-divergence:** `handle_update_auth` decodes the token (`decode_jwt_claims`) and does
-a **sub-based** single-user pin check, which wrongly CLOSES any opaque-token
-refresh once the group is pinned (opaque tokens carry no `sub`). TS (modern path,
-`validateLegacyJWT` undefined) stores ALL tokens as `opaque` (auth.ts:94-112) and
-does NO sub-pin on updateAuth — the single-user pin is the connection's fixed
-`userID` (auth.ts:79 rejects a token without one; a refresh keeps the existing
-userID). Both opaque tests currently MASK this: `..._skips_retransform` passes only
-because the connection is closed (authChanges stays 0), and `..._change_retransforms`
-was kept in its no-userID form (unpinned) so it isn't tripped. Fix = route
-updateAuth pin enforcement through the CCM's `update_auth`/`resolve_auth` and drop
-the router's `decode_jwt_claims` sub-pin; then make BOTH opaque tests non-vacuous
-(userID present, assert retransform-vs-skip WITHOUT a close). Then push-relay
-`PushRelayHeaders.auth` flip + delete the cell; then I-6 + ART.
+**Follow-up — DONE (opaque-token updateAuth pin fix):** `handle_update_auth`
+decoded the token (`decode_jwt_claims`) and did an unconditional **sub-based**
+single-user pin check (`new_sub != pinned`), which — since an opaque token decodes
+to `None` and `None != Some(pinned)` — wrongly CLOSED any opaque-token refresh once
+the group was pinned. TS (modern path, `validateLegacyJWT` undefined) stores ALL
+tokens as `opaque` (auth.ts:94-112) and does NO sub-pin on updateAuth; the pin is
+the connection's fixed `userID` (auth.ts:79 rejects a token without one; a refresh
+keeps the existing userID). Fix: gate the sub-pin on `new_sub.is_some()` — apply it
+only to a token that actually carries a `sub` (a JWT), never to an opaque token
+(which carries no `authData` identity to leak). Both opaque tests are now
+NON-VACUOUS (opaque + userID; `..._skips_retransform` also asserts the connection
+SURVIVES, `..._change_retransforms` compares against a real prior opaque auth so a
+decoded-claims comparison would falsely skip) — proven to FAIL when the fix is
+reverted, while `update_auth_rejects_cross_user_token` still rejects a wrong-`sub`
+JWT (no security regression).
+
+**Still remaining:** push-relay `PushRelayHeaders.auth` flip + delete the cell
+(plumb `Arc<Mutex<CCM>>`+selector into the message handler); then I-6 PG durability
+oracle; then the ART run + full re-gate (validates the opaque-edge delta).
 
 ### Stage 2 — migrate consumers to read the CCM at use time (REMAINING — ART-gated)
 One consumer per commit, each reverting-proven. Consume sites (router.rs):
