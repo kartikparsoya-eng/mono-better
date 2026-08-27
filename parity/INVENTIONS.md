@@ -30,17 +30,29 @@ guarantees, error semantics) versus TS.
 - **History:** violated by bug-1 (connect-ack was on the serial path). Fixed
   `5e71e24f4`.
 
-## I-2 — Connect-ack on the accept task
-- **Files:** `router::handle_connection` (`connected_message` push), `Connection::check_version`.
-- **No TS twin:** direct consequence of I-1 — TS sends `connected` from the
-  per-connection worker (`syncer.ts#handleConnection` → `connection.ts::init`);
-  rust must emit it OFF the serial CG thread to match.
+## I-2 — `Connection::init()` effects applied on the accept path
+- **Files:** `router::handle_connection` (`connected_message` push),
+  `ws_server::accept_connection` (version gate), `Connection::init` (the 1:1
+  port, exercised by connection.rs unit tests).
+- **No TS twin (rule 5):** TS calls `connection.init()` (version gate + send
+  `connected`) on the per-connection accept handler (`syncer.ts#handleConnection`,
+  after `new Connection`). Rust builds `Connection` on the serial CG thread
+  (its handler binds CG-local dispatch services), so `init()` cannot run on the
+  accept task. `init()` is kept as the faithful 1:1 port; its TWO observable
+  effects are produced on the accept path: the version gate in
+  `accept_connection` (byte-identical `VersionNotSupported` message), and the
+  `connected` frame in `handle_connection` via the 1:1 `connected_message()`
+  builder. NO invented split function — the earlier `check_version()` was
+  removed.
 - **Contract:** `connected` is emitted after auth/user-pin validation and before
-  any hydration, on a context that is not serialized behind another client's
-  hydrate — byte-identical body to TS (`{wsid, timestamp, appID, shardNum}`).
+  any hydration, on a context not serialized behind another client's hydrate —
+  byte-identical body to TS (`{wsid, timestamp, appID, shardNum}`); an
+  out-of-range version is rejected with TS `init()`'s exact message.
 - **Tests:** `connected_ack_is_decoupled_from_a_blocked_cg_hydrate`,
   `cg_state_connection_lifecycle_and_notification` (CG thread must NOT emit it),
-  `malformed_base_cookie_closes_with_internal_error` (ordering).
+  `malformed_base_cookie_closes_with_internal_error` (ordering),
+  connection.rs `init_out_of_range_closes_with_exact_version_not_supported_message`
+  (version-gate message 1:1).
 
 ## I-3 — Push relay (Option-A write path)
 - **Files:** `push_relay.rs`, `PushRelayHeaders`, `server/rust-push-relay.ts` (TS loopback).

@@ -275,11 +275,21 @@ pub async fn accept_connection_with_limit(
         }
     };
 
-    // Validate protocol version.
+    // Validate protocol version — TS `Connection.init()` (connection.ts) gate.
+    // In TS this runs inside `init()` on the accept handler; the Rust syncer
+    // builds `Connection` on the CG thread, so the gate is applied here on the
+    // accept path instead. The error message is byte-identical to TS `init()`'s
+    // `VersionNotSupported` (server-vs-client phrasing by which bound was
+    // crossed) so a rejected client sees the same wire error as under TS.
     if !(MIN_SERVER_SUPPORTED_SYNC_PROTOCOL..=PROTOCOL_VERSION).contains(&protocol_version) {
         crate::metrics::record_ws_connection_failure(protocol_version, "protocol_version");
         let error = ErrorBody::version_not_supported(format!(
-            "Server supports protocol versions {MIN_SERVER_SUPPORTED_SYNC_PROTOCOL} to {PROTOCOL_VERSION}, but client requested {protocol_version}"
+            "server is at sync protocol v{PROTOCOL_VERSION} and does not support v{protocol_version}. The {} must be updated to a newer release.",
+            if protocol_version > PROTOCOL_VERSION {
+                "server"
+            } else {
+                "client"
+            }
         ));
         send_error_and_close(ws_stream, error).await;
         return None;

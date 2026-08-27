@@ -34,13 +34,16 @@ CRITICAL = [
                "serial CG thread (else the ack is queued behind config_and_hydrate).",
     },
     {
-        # The version gate on the CG thread must be check_version (no sink),
-        # NOT init() (which would re-send connected → double-send / re-couple).
+        # `Connection::init()` (version gate + `connected`) is TS's accept-handler
+        # call; in rust its effects are on the accept path (accept_connection +
+        # handle_connection). It must NEVER be called on the serial CG thread,
+        # which would re-couple the `connected` send to config_and_hydrate.
         "symbol": r"\.init\s*\(\s*\)",
         "file": "router.rs",
         "allowed": set(),           # init() must not be called from router.rs at all
         "forbidden": {"on_new_connection"},
-        "why": "I-2: on_new_connection must call check_version (no `connected`), not init().",
+        "why": "I-2: `connected`/version gate must not run on the serial CG thread; "
+               "`on_new_connection` must not call `.init()`.",
     },
 ]
 

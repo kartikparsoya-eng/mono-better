@@ -139,45 +139,6 @@ impl Connection {
         }
     }
 
-    /// Protocol-version gate ONLY — the version half of `Connection.init()`,
-    /// WITHOUT the `connected` send.
-    ///
-    /// Returns `true` if the version is in range; on an unsupported version it
-    /// closes the connection with `VersionNotSupported` and returns `false`.
-    ///
-    /// Divergence-fix rationale (Rust-specific, no TS twin): TS
-    /// `Connection.init()` sends `connected` on the per-connection accept
-    /// handler (`syncer.ts#handleConnection`), BEFORE `await
-    /// handleInitConnection` triggers hydration. The Rust syncer runs
-    /// `on_new_connection` (which builds the `Connection`) on the SERIAL CG
-    /// thread, the same thread that runs `config_and_hydrate` to completion per
-    /// message. Emitting `connected` there queues the connect-ack behind any
-    /// in-flight hydrate → a reconnect arriving mid-hydrate is not acked within
-    /// the client's 10s connect timeout → disconnect → idle reap → cold
-    /// re-hydrate thrash. So `connected` is hoisted to the accept task
-    /// (`router::handle_connection`, TS parity), and the CG thread keeps only
-    /// this version gate (belt-and-suspenders after `accept_connection`'s check;
-    /// it never touches the sink on the happy path).
-    pub fn check_version(&self) -> bool {
-        if self.protocol_version > PROTOCOL_VERSION
-            || self.protocol_version < MIN_SERVER_SUPPORTED_SYNC_PROTOCOL
-        {
-            let error = ErrorBody::version_not_supported(format!(
-                "server is at sync protocol v{PROTOCOL_VERSION} and does not support v{}. The {} must be updated to a newer release.",
-                self.protocol_version,
-                if self.protocol_version > PROTOCOL_VERSION {
-                    "server"
-                } else {
-                    "client"
-                }
-            ));
-            self.close_with_error(error);
-            false
-        } else {
-            true
-        }
-    }
-
     /// Handle an inbound message (raw JSON text from the WebSocket).
     ///
     /// Port of `Connection.#handleMessage()`.

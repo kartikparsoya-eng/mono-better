@@ -14,7 +14,8 @@
 //!    connection is handed to the serial CG thread — TS parity with
 //!    `syncer.ts#handleConnection` sending `connection.init()`'s `connected`
 //!    before `await handleInitConnection`. This decouples the connect-ack from
-//!    `config_and_hydrate` (see `handle_connection`/`Connection::check_version`).
+//!    `config_and_hydrate` (see `handle_connection`; version gate in
+//!    `ws_server::accept_connection`, both TS `Connection.init()` effects).
 //! 6. Create Connection + MessageHandler on the CG thread (version gate only)
 //! 7. Handle piggybacked `initConnection` from sec-websocket-protocol header
 
@@ -793,10 +794,10 @@ impl ConnectionRouter {
         //    timeout. Previously `connected` was sent by `Connection::init()`
         //    inside `on_new_connection` on the CG thread, so a reconnect arriving
         //    during an in-flight hydrate was queued behind it → connect-timeout →
-        //    idle reap → cold re-hydrate thrash. The protocol version is already
-        //    validated in `accept_connection`; the CG thread keeps a
-        //    belt-and-suspenders `Connection::check_version` gate but no longer
-        //    touches the sink for `connected`.
+        //    idle reap → cold re-hydrate thrash. The protocol version — TS
+        //    `init()`'s other effect — is validated in `accept_connection` with
+        //    the byte-identical `VersionNotSupported` message, so `on_new_connection`
+        //    never version-checks.
         ctx.sink.push(crate::protocol::connected_message(
             &ws_id,
             &self.shard.app_id,
@@ -2192,19 +2193,17 @@ impl CgState {
             on_close,
         );
 
-        // Version gate ONLY. `connected` is emitted on the accept task
-        // (`handle_connection`, TS `syncer.ts#handleConnection`), NOT here, so
-        // the connect-ack is never queued behind an in-flight `config_and_hydrate`
-        // on this serial CG thread. This is the belt-and-suspenders version
-        // check (after `accept_connection`'s); on failure it closes the socket
-        // and the connection is never registered with the group.
-        if !conn.check_version() {
-            self.drop_registration(&client_id, &ws_id);
-            if self.open_ws_ids.remove(&ws_id) {
-                decrement_nonzero(&self.connection_count);
-            }
-            return;
-        }
+        // TS `Connection.init()` (connection.ts) does the protocol-version gate +
+        // `connected` send on the accept handler (`syncer.ts#handleConnection`).
+        // Rust-specific (rule 5): the `Connection` is built HERE on the serial CG
+        // thread because its message handler binds the CG-local dispatch services,
+        // so `init()` cannot run on the accept task. The two observable effects of
+        // `init()` are therefore produced on the accept path instead: the version
+        // gate in `accept_connection` (ws_server.rs), and the `connected` frame in
+        // `handle_connection` via the 1:1 `connected_message()` builder — emitted
+        // BEFORE this CG-thread work so the ack is never queued behind
+        // `config_and_hydrate`. No version re-check here: every connection reaching
+        // this point already passed `accept_connection`'s gate.
         self.connections.insert(client_id.clone(), conn);
 
         // TS parity: a malformed baseCookie FAILS the connection. TS parses it
@@ -3319,13 +3318,6 @@ impl CgState {
         }
         self.mark_version_served(&cvr.version);
         self.cvr = Some(cvr);
-    }
-
-    fn drop_registration(&mut self, client_id: &str, ws_id: &str) {
-        self.registered_ws.remove(client_id);
-        self.client_base_versions.remove(client_id);
-        self.sync_engine.unregister_client(ws_id);
-        self.decrement_active_client(ws_id);
     }
 
     /// Active-clients gauge -1 (TS `#activeClients.add(-1, {protocol.version})`),
@@ -6218,38 +6210,12 @@ mod tests {
         assert_eq!(cvr.version.config_version, Some(2));
     }
 
-    /// Port of TS `Connection.init()`'s version gate at the CG boundary: an
-    /// out-of-range protocol version gets the exact VersionNotSupported error
-    /// and the connection is never registered with the group.
-    #[test]
-    fn unsupported_protocol_version_is_rejected_and_unregistered() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut state = tables_state(&rt);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        let mut params = test_params("c1", "ws1");
-        params.protocol_version = crate::protocol::MIN_SERVER_SUPPORTED_SYNC_PROTOCOL - 1;
-        rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
-
-        let frames = drain_sends(&mut rx);
-        assert!(
-            !frames.iter().any(|f| f[0] == "connected"),
-            "no connected frame for an unsupported version"
-        );
-        let error = frames
-            .iter()
-            .find(|f| f[0] == "error")
-            .expect("expected the VersionNotSupported error");
-        assert_eq!(error[1]["kind"], "VersionNotSupported");
-        assert_eq!(
-            error[1]["message"],
-            format!(
-                "server is at sync protocol v{PROTOCOL_VERSION} and does not support v{}. The client must be updated to a newer release.",
-                crate::protocol::MIN_SERVER_SUPPORTED_SYNC_PROTOCOL - 1
-            )
-        );
-        assert!(state.registered_ws.is_empty());
-        assert!(state.connections.is_empty());
-    }
+    // The protocol-version gate is TS `Connection.init()` (connection.ts); its
+    // exact `VersionNotSupported` message is pinned 1:1 by connection.rs
+    // `init_out_of_range_closes_with_exact_version_not_supported_message`. The
+    // prod gate is applied on the accept path (`ws_server::accept_connection`)
+    // with the byte-identical message, since Rust builds `Connection` on the CG
+    // thread and `on_new_connection` never sees an unvalidated version.
 
     /// Port of `pickToken`'s pinned-user rule through the WIRE dispatch
     /// (`["updateAuth", …]` → `handle_update_auth`): a validly-formed token for
