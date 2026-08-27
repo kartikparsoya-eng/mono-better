@@ -45,5 +45,8 @@ step "rust-ivm — teardown integrity soak"
 ( cd packages/rust-ivm
   cargo +$TC test --locked --test teardown_gate_test -- --test-threads=1 ); chk $? "ivm teardown soak"
 
+step "parity — L3 call-topology guard (ordering-sensitive emissions in sanctioned context)"
+python3 "$ROOT/parity/call_topology.py"; chk $? "L3 call-topology"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

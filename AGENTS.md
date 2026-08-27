@@ -49,6 +49,38 @@ rules OVERRIDE any instinct toward "cleaner" or "more idiomatic" Rust:
    one alongside it. Prefer a TS-golden fixture (drive the real TS impl → assert Rust
    matches byte-for-byte) so the test pins TS parity, not merely Rust self-consistency.
 
+8. **Port the CALL SITE and its execution context, not just the function.** A
+   ported call must run in the rust context that mirrors its TS context. TS
+   sends `connected`/`pong`/errors from the per-connection worker (concurrent),
+   NOT from the view-syncer `#lock`; rust must emit them off the serial CG
+   thread. Placing a ported call in a MORE serialized context than TS is a
+   divergence even if the function body is a perfect port (this is exactly how
+   the 2026-08-27 connect-ack outage happened). When porting/moving a call,
+   re-read the TS *caller* and its context. The `parity/call_topology.py` guard
+   pins ordering-sensitive emissions to their sanctioned context — keep it green.
+
+9. **State ownership is 1:1, and freshness matches TS.** A TS class's connection/
+   auth/config state lives in exactly ONE rust struct — no parallel copies. If TS
+   reads a value through a manager/getter at USE time (e.g. `pusher.ts` reads
+   `mustGetConnectionContext` per push), rust must read a shared cell at use
+   time; a constructor-time SNAPSHOT is legal ONLY if TS also snapshots — cite
+   the TS line in a doc-comment. A stale snapshot is how the 2026-08-27 push-relay
+   401 happened (auth captured at connect, never refreshed on `updateAuth`).
+
+10. **Rust-only inventions need a CONTRACT + TEST, not just a label.** Every
+   construct with no TS twin (thread/executor model, ws tasks, push relay, CVR
+   write-behind, Drop teardown, offload) is registered in `parity/INVENTIONS.md`
+   with its TS-observable contract (the client-visible behavior it must preserve)
+   and the test(s) pinning it. An invention may change HOW work is scheduled/
+   stored; never WHAT a client observes (frame content, ordering, latency-
+   independence, error semantics).
+
+Divergence-hunting layers (see `parity/`): L1 symbol/file ledger, L2 body-diff,
+L3 call-topology guard (`call_topology.py`), L4 snapshot-freshness sweep
+(`L4-SNAPSHOT-SWEEP.md`), L5 temporal/injected-delay tests, L6 invention registry
+(`INVENTIONS.md`), L7 prose-invariant checklist (`L7-PROSE-INVARIANTS.md`). Full
+rationale + remaining work: `parity/ZERO-DIVERGENCE-PLAN.md`.
+
 When porting or fixing: open the TS source, match names/paths/branches, then write
 the Rust. If you catch yourself renaming or relocating for tidiness, stop — that is
 the divergence these rules exist to prevent.
