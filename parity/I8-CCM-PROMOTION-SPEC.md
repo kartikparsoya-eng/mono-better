@@ -91,6 +91,40 @@ the promotion is mechanical, not behavioral.
     decode `must_get_connection_context(sel).auth.raw()` at use time, matching the
     live `client_auth = decode_jwt_claims(token)`.
 
+### Stage 2/3 — PROGRESS (this session)
+Code cleaned to a 1:1 form first (user directive): the `ccm_*` wrapper methods
+and all "Stage N"/"dual-write" labels were removed from the source; call sites
+now invoke the CCM's TS-named methods inline (`register_connection`,
+`update_auth`, `init_connection`, `close_connection`,
+`must_get_connection_context`). Staging lives ONLY in this doc.
+
+Consumers migrated to read the CCM at use time + maps deleted:
+- **authData** → `must_get_connection_context(sel).auth?.raw` decoded at use time
+  (TS `ctx.auth?.raw`). `69dfb21e2`.
+- **auth maintenance / revalidation** (arm "any auth", the revalidation set, the
+  updateAuth unchanged-check) → the CCM. Register now precedes arm (TS order).
+  `073670c49`.
+- **`client_auth` map DELETED** — first parallel auth map gone. `9d21de9f4`.
+Each migration is CI-green with a non-vacuous test; the userID-bearing (JWT) path
+is byte-identical, the opaque-no-userID edge is the ART-validated delta.
+
+**REMAINING + a design fork on `client_query_ctx`:** the CCM's `query_context`
+(`ConnectionFetchContext`) is, per connection_context_manager.rs:56-62, a
+STRUCTURAL port that is NOT on the live query-fetch path. The real
+`CustomQueryContext` is built inline in `default_query_context` from FetchConfig +
+ConnectParams and carries fields the CCM does not model — notably the #6144
+forwarded `request_headers` (allowlisted `x-forwarded-*`), plus `user_id`. So
+`client_query_ctx` cannot be flipped to the CCM's `query_context` as-is. Options:
+  (a) port the #6144 header-forwarding into the CCM's `build_fetch_context` so the
+      CCM owns the full query context, then flip; or
+  (b) keep `client_query_ctx` as a rust query-fetch structure (an I-3-class
+      invention) and migrate ONLY its `auth` field to the CCM (sourcing the Bearer
+      from `must_get_connection_context(sel).auth` at build time), which then frees
+      the last `client_raw_auth` read for deletion.
+Option (b) is smaller and keeps auth single-owned; (a) is the fuller 1:1. Pick per
+review. The push-relay `PushRelayHeaders.auth` flip is independent (needs the
+`Arc<Mutex<CCM>>` + selector plumbed into the message handler).
+
 ### Stage 2 — migrate consumers to read the CCM at use time (REMAINING — ART-gated)
 One consumer per commit, each reverting-proven. Consume sites (router.rs):
 - authData (`client_auth`): 2585, 3429 → decode `ccm.auth.raw()` at use time.
