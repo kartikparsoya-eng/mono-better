@@ -202,11 +202,7 @@ pub async fn serve_http(
                 let mut svg = Vec::new();
                 match guard.report().build() {
                     Ok(report) => match report.flamegraph(&mut svg) {
-                        Ok(()) => (
-                            StatusCode::OK,
-                            [("content-type", "image/svg+xml")],
-                            svg,
-                        ),
+                        Ok(()) => (StatusCode::OK, [("content-type", "image/svg+xml")], svg),
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             [("content-type", "text/plain")],
