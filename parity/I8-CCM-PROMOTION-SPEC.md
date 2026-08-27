@@ -125,6 +125,28 @@ Option (b) is smaller and keeps auth single-owned; (a) is the fuller 1:1. Pick p
 review. The push-relay `PushRelayHeaders.auth` flip is independent (needs the
 `Arc<Mutex<CCM>>` + selector plumbed into the message handler).
 
+**DECISION: Option A. CCM hardened for it (this session):**
+- `bc0396582` port #6144 request-header forwarding into the CCM (HeaderOptions
+  `request_headers` + ConnectParamsForRegistration `request_headers` +
+  `filter_headers` = TS `filterHeaders`); the CCM now owns the FULL query context.
+- `83b2bede7` fix: `init_connection` filters `customHeaders` by the allowlist
+  (TS `filterHeaders(userQueryHeaders, allowedClientHeaders)`, :306/:324) — a
+  latent divergence in the reference CCM, corrected before it goes live.
+Both behaviorally inert today (query_context not yet read on the live path).
+
+**Next (Step 2/3), picks up here:**
+- Step 2: at the 3 `client_query_ctx` read sites (router.rs config_and_hydrate x2
+  + on_auth_maintenance_tick validate), build `CustomQueryContext` from
+  `must_get_connection_context(sel)` — map url/allowed_urls/api_key/cookie/origin
+  from `query_context`, `client_headers`←`custom_headers`,
+  `request_headers`←`request_headers` (both HashMap→sorted Vec),
+  `auth`←`ctx.auth?.raw`, `user_id`←`ctx.user.id`; return `None` when
+  `query_context.url` is None (matches `default_query_context`'s `config?`). Golden
+  test: CCM-built == the live map value for a representative connect+init.
+- Step 3: delete `client_query_ctx`, `client_raw_auth` (its last read — the query
+  Bearer — is gone after Step 2), `default_query_context`, `filtered_query_headers`.
+- Then push-relay `PushRelayHeaders.auth` flip + delete the cell; then I-6 + ART.
+
 ### Stage 2 — migrate consumers to read the CCM at use time (REMAINING — ART-gated)
 One consumer per commit, each reverting-proven. Consume sites (router.rs):
 - authData (`client_auth`): 2585, 3429 → decode `ccm.auth.raw()` at use time.
