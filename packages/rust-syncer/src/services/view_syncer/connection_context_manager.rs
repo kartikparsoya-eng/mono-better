@@ -525,13 +525,36 @@ impl ConnectionContextManager {
             connection.query_context.url = Some(url.clone());
         }
         if let Some(ref headers) = body.user_query_headers {
-            connection.query_context.header_options.custom_headers = Some(headers.clone());
+            // Filter the client-provided headers by the allowlist — TS
+            // `customHeaders: filterHeaders(body.userQueryHeaders,
+            // this.#queryConfig?.allowedClientHeaders)` (:306).
+            let as_vec: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            connection.query_context.header_options.custom_headers = filter_headers(
+                &as_vec,
+                self.query_config
+                    .as_ref()
+                    .and_then(|c| c.allowed_client_headers.as_deref()),
+            );
         }
         if let Some(ref url) = body.user_push_url {
             connection.mutate_context.url = Some(url.clone());
         }
         if let Some(ref headers) = body.user_push_headers {
-            connection.mutate_context.header_options.custom_headers = Some(headers.clone());
+            // TS `customHeaders: filterHeaders(body.userPushHeaders,
+            // this.#pushConfig?.allowedClientHeaders)` (:324).
+            let as_vec: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            connection.mutate_context.header_options.custom_headers = filter_headers(
+                &as_vec,
+                self.push_config
+                    .as_ref()
+                    .and_then(|c| c.allowed_client_headers.as_deref()),
+            );
         }
 
         connection.revision += 1;

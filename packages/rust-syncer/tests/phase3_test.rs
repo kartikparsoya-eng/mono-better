@@ -156,7 +156,22 @@ fn set_now(now: &Arc<Mutex<i64>>, val: i64) {
 
 #[test]
 fn test_register_provisional_apply_init_replace() {
-    let mut manager = ConnectionContextManager::new(None, None, None, None, None, None);
+    // Configure the client-header allowlists so initConnection's filterHeaders
+    // (TS parity) keeps the headers this test sends.
+    let mut manager = ConnectionContextManager::new(
+        None,
+        None,
+        Some(FetchConfig {
+            allowed_client_headers: Some(vec!["foo".to_string()]),
+            ..Default::default()
+        }),
+        Some(FetchConfig {
+            allowed_client_headers: Some(vec!["baz".to_string()]),
+            ..Default::default()
+        }),
+        None,
+        None,
+    );
 
     let conn = register(&mut manager, "c1", "ws1");
     assert_eq!(conn.client_id, "c1");
