@@ -1444,7 +1444,6 @@ struct CgState {
     /// balanced across supersede/close races.
     active_client_pv: HashMap<String, u32>,
     /// client_id → decoded JWT claims (`authData` for permission rules).
-    client_auth: HashMap<String, serde_json::Value>,
     /// client_id → raw JWT (for the `Authorization: Bearer` header on
     /// custom-query transform requests).
     client_raw_auth: HashMap<String, String>,
@@ -1650,7 +1649,6 @@ impl CgState {
             client_base_versions: HashMap::new(),
             open_ws_ids: HashSet::new(),
             active_client_pv: HashMap::new(),
-            client_auth: HashMap::new(),
             client_raw_auth: HashMap::new(),
             client_push_headers: HashMap::new(),
             client_query_ctx: HashMap::new(),
@@ -2145,15 +2143,6 @@ impl CgState {
         self.client_profile_ids
             .insert(client_id.clone(), profile_id);
 
-        // Decode the (already-verified) JWT claims for use as `authData` in
-        // read-permission rules. Opaque/no token → empty claims.
-        let claims = params
-            .auth
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .map(crate::auth::jwt::decode_jwt_claims)
-            .unwrap_or_else(|| serde_json::json!({}));
-        self.client_auth.insert(client_id.clone(), claims);
         // Retain the raw token for the `Authorization: Bearer` header on
         // custom-query transform requests.
         if let Some(tok) = params.auth.as_deref().filter(|t| !t.is_empty()) {
@@ -2865,7 +2854,6 @@ impl CgState {
         // queries with the new Bearer token), detects the hash drift, and
         // re-hydrates.
         crate::metrics::Metrics::inc(&self.metrics.auth_changes);
-        self.client_auth.insert(client_id.to_string(), new_claims);
         self.client_raw_auth
             .insert(client_id.to_string(), token.to_string());
         if let Some(ctx) = self.client_query_ctx.get_mut(client_id) {
@@ -3111,7 +3099,6 @@ impl CgState {
         self.client_base_versions.remove(client_id);
         self.sync_engine.unregister_client(ws_id);
         self.decrement_active_client(ws_id);
-        self.client_auth.remove(client_id);
         self.client_raw_auth.remove(client_id);
         self.client_push_headers.remove(client_id);
         self.client_query_ctx.remove(client_id);
@@ -3522,7 +3509,6 @@ impl CgState {
             crate::metrics::record_active_client_delta(-1, pv);
         }
         self.client_base_versions.clear();
-        self.client_auth.clear();
         self.client_raw_auth.clear();
         self.client_query_ctx.clear();
         self.client_profile_ids.clear();
@@ -5242,19 +5228,15 @@ mod tests {
         rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
         // Simulate a fully-hydrated + authenticated client: seed the per-client
-        // auth state the way a completed initConnection + updateAuth would (the
-        // simple String/Value maps; connections/registered_ws are already set by
-        // on_new_connection).
-        state
-            .client_auth
-            .insert("c1".into(), serde_json::json!({"sub": "u1"}));
+        // auth state the way a completed initConnection + updateAuth would
+        // (connections/registered_ws are already set by on_new_connection).
         state
             .client_raw_auth
             .insert("c1".into(), "raw-token".into());
         state
             .client_profile_ids
             .insert("c1".into(), "profile-1".into());
-        assert!(!state.client_auth.is_empty() && !state.connections.is_empty());
+        assert!(!state.client_raw_auth.is_empty() && !state.connections.is_empty());
 
         // The mid-hydrate cancel, delivered to the serial thread after the
         // hydrate as `ConnectionClosed`.
@@ -5262,10 +5244,6 @@ mod tests {
 
         assert!(state.connections.is_empty(), "connections leaked");
         assert!(state.registered_ws.is_empty(), "registered_ws leaked");
-        assert!(
-            state.client_auth.is_empty(),
-            "client_auth leaked — stale decoded claims survive close (bug-2 soil)"
-        );
         assert!(
             state.client_raw_auth.is_empty(),
             "client_raw_auth leaked — stale raw token survives close"
