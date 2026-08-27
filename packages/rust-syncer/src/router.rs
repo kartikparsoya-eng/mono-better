@@ -21,9 +21,9 @@
 
 use crate::custom_queries::transform_query::CustomQueryContext;
 use crate::services::view_syncer::connection_context_manager::{
-    ConnectParamsForRegistration, ConnectionContextManager,
-    ConnectionSelector as CcmConnectionSelector, FetchConfig, InitConnectionBody, UpdateAuthBody,
-    resolve_auth,
+    ConnectParamsForRegistration, ConnectionContext as CcmConnectionContext,
+    ConnectionContextManager, ConnectionSelector as CcmConnectionSelector, FetchConfig,
+    InitConnectionBody, UpdateAuthBody, resolve_auth,
 };
 use crate::services::view_syncer::pipeline_driver::{IvmPipelines, IvmTableSpec};
 use crate::sync_engine::{SyncEngine, empty_cvr};
@@ -1283,78 +1283,51 @@ fn parse_desired_queries_patch(
     (puts, dels, clear)
 }
 
-/// Build the server-configured query context established during connection
-/// registration. This mirrors TS `ConnectionContextManager#getContext('query')`:
-/// the first configured URL is the default and server-controlled forwarding
-/// headers are present before any `initConnection` override is applied.
-fn default_query_context(
-    config: Option<&FetchConfig>,
-    params: &ConnectParams,
-) -> Option<CustomQueryContext> {
-    let config = config?;
-    let allowed_urls = config.url.clone()?;
-    let url = allowed_urls.first()?.clone();
-    // Forward allowlisted incoming request headers (e.g. `x-forwarded-for`) to
-    // the query API. Port of #6144 (`filterHeaders` by the
-    // `query-allowed-request-headers` allowlist, case-insensitive). Sorted so the
-    // forwarded set is deterministic regardless of the header map's iteration
-    // order.
-    let request_headers = config
-        .allowed_request_headers
-        .as_ref()
-        .map(|allowed| {
-            let allowed: HashSet<String> = allowed.iter().map(|h| h.to_ascii_lowercase()).collect();
-            let mut forwarded: Vec<(String, String)> = params
-                .request_headers
-                .iter()
-                .filter(|(name, _)| allowed.contains(&name.to_ascii_lowercase()))
-                .map(|(name, value)| (name.clone(), value.clone()))
-                .collect();
-            forwarded.sort();
-            forwarded
-        })
-        .unwrap_or_default();
+/// Build the custom-query fetch context from the ConnectionContextManager's live
+/// per-connection context. The CCM is the single owner of the query
+/// url/headers/auth/userID; TS reads `mustGetConnectionContext(selector)` and
+/// composes the query fetch from `connection.queryContext`, `connection.auth?.raw`
+/// and `connection.user.id` at request time (transform-query.ts), rather than
+/// from a separate cached map. This adapter maps the CCM's `ConnectionFetchContext`
+/// onto the transform's `CustomQueryContext`.
+///
+/// Returns `None` when the connection has no resolved query URL (no configured
+/// default and no `initConnection` `userQueryURL` override) — the client-fallback
+/// path where no custom query API is reachable, matching TS's absent fetch config.
+///
+/// Rust-only adapter (no TS twin): TS's transformer reads the connection-context
+/// fields inline; rust flattens them into `CustomQueryContext` because the ported
+/// transform_query module consumes that shape. Header maps are sorted so the
+/// forwarded set is deterministic regardless of `HashMap` iteration order.
+fn custom_query_context_from(ctx: &CcmConnectionContext) -> Option<CustomQueryContext> {
+    let query = &ctx.query_context;
+    let url = query.url.clone()?;
+    let sorted = |map: Option<&HashMap<String, String>>| {
+        let mut headers: Vec<(String, String)> = map
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        headers.sort();
+        headers
+    };
     Some(CustomQueryContext {
         url,
-        allowed_urls,
-        api_key: config.api_key.clone().filter(|value| !value.is_empty()),
-        client_headers: Vec::new(),
-        request_headers,
-        cookie: config
-            .forward_cookies
-            .then(|| params.http_cookie.clone())
-            .flatten(),
-        origin: params.origin.clone(),
-        auth: params.auth.clone().filter(|value| !value.is_empty()),
-        user_id: params.user_id.clone().filter(|value| !value.is_empty()),
+        allowed_urls: query.allowed_url_patterns.clone().unwrap_or_default(),
+        api_key: query
+            .header_options
+            .api_key
+            .clone()
+            .filter(|value| !value.is_empty()),
+        client_headers: sorted(query.header_options.custom_headers.as_ref()),
+        request_headers: sorted(query.header_options.request_headers.as_ref()),
+        cookie: query.header_options.cookie.clone(),
+        origin: query.header_options.origin.clone(),
+        auth: ctx
+            .auth
+            .as_ref()
+            .map(|a| a.raw().to_string())
+            .filter(|value| !value.is_empty()),
+        user_id: ctx.user.id.clone().filter(|value| !value.is_empty()),
     })
-}
-
-fn filtered_query_headers(
-    config: Option<&FetchConfig>,
-    body: &serde_json::Value,
-) -> Vec<(String, String)> {
-    let Some(allowed) = config.and_then(|config| config.allowed_client_headers.as_ref()) else {
-        return Vec::new();
-    };
-    let allowed: HashSet<String> = allowed
-        .iter()
-        .map(|name| name.to_ascii_lowercase())
-        .collect();
-    body.get("userQueryHeaders")
-        .and_then(|value| value.as_object())
-        .into_iter()
-        .flat_map(|headers| headers.iter())
-        .filter_map(|(name, value)| {
-            (allowed.contains(&name.to_ascii_lowercase()))
-                .then(|| {
-                    value
-                        .as_str()
-                        .map(|value| (name.clone(), value.to_string()))
-                })
-                .flatten()
-        })
-        .collect()
 }
 
 /// Per-CG state, owned by (and confined to) the CG thread. Holds the `!Send`
@@ -1391,8 +1364,6 @@ struct CgState {
     /// + query re-transform). `None` disables it. Port of TS
     ///   `ConnectionContextManager`'s `revalidateIntervalMs`.
     revalidate_interval_ms: Option<i64>,
-    /// Server default and allow-list for custom query transformation.
-    query_config: Option<FetchConfig>,
     /// Wall-clock (ms) deadline for the next auth-maintenance tick, or `None`
     /// when nothing is armed (no authed connection, or feature disabled). Port
     /// of the group's earliest `revalidateAt` deadline.
@@ -1443,19 +1414,11 @@ struct CgState {
     /// on disconnect. Only decrement a ws we incremented, so the gauge stays
     /// balanced across supersede/close races.
     active_client_pv: HashMap<String, u32>,
-    /// client_id → decoded JWT claims (`authData` for permission rules).
-    /// client_id → raw JWT (for the `Authorization: Bearer` header on
-    /// custom-query transform requests).
-    client_raw_auth: HashMap<String, String>,
     /// client_id → raw auth/header material captured at connect, needed to
     /// relay a `_zero_cleanupResults` push when this client explicitly deletes
     /// other clients (`deleteClients` → `pusher.delete_client_mutations`).
     client_push_headers:
         HashMap<String, crate::workers::syncer_ws_message_handler::PushRelayHeaders>,
-    /// client_id → the custom-query API context (`userQueryURL` + headers +
-    /// auth), captured from the client's `initConnection`. Present only for
-    /// clients that use named/custom queries.
-    client_query_ctx: HashMap<String, CustomQueryContext>,
     /// profileID supplied in the connection URL, persisted into the CVR on init.
     client_profile_ids: HashMap<String, String>,
     /// Admin password gating the inspector protocol; server version for the
@@ -1576,17 +1539,17 @@ impl CgState {
         let permissions = config.permissions;
         let permissions_hash = config.permissions_hash;
         let revalidate_interval_ms = config.revalidate_interval_ms;
-        let query_config = config.query_config;
 
         // Construct the ConnectionContextManager (TS `new ConnectionContextManager`).
-        // `push_config`/`validate_legacy_jwt` are `None`: the modern path has no
-        // legacy JWT validator (TS `validateLegacyJWT` undefined) and no consumer
-        // reads `mutate_context`; `now` defaults to `now_ms`. Seconds granularity
+        // The CCM is the single owner of the query fetch config; `push_config`/
+        // `validate_legacy_jwt` are `None`: the modern path has no legacy JWT
+        // validator (TS `validateLegacyJWT` undefined) and no consumer reads
+        // `mutate_context`; `now` defaults to `now_ms`. Seconds granularity
         // matches the TS constructor (it re-multiplies to ms internally).
         let ccm = Arc::new(Mutex::new(ConnectionContextManager::new(
             revalidate_interval_ms.map(|ms| (ms / 1000).max(0) as u64),
             None,
-            query_config.clone(),
+            config.query_config,
             None,
             None,
             None,
@@ -1633,7 +1596,6 @@ impl CgState {
             permissions,
             permissions_hash,
             revalidate_interval_ms,
-            query_config,
             next_auth_maintenance_at: None,
             pinned_user_id: None,
             cvr: None,
@@ -1649,9 +1611,7 @@ impl CgState {
             client_base_versions: HashMap::new(),
             open_ws_ids: HashSet::new(),
             active_client_pv: HashMap::new(),
-            client_raw_auth: HashMap::new(),
             client_push_headers: HashMap::new(),
-            client_query_ctx: HashMap::new(),
             client_profile_ids: HashMap::new(),
             admin_password,
             server_version,
@@ -1718,6 +1678,23 @@ impl CgState {
         }
         self.ttl_clock_base = now;
         self.ttl_clock
+    }
+
+    /// The live custom-query fetch context for a connection, read from the
+    /// ConnectionContextManager (the single owner of url/headers/auth/userID) at
+    /// use time. Mirrors TS, where the transformer reads
+    /// `mustGetConnectionContext(selector)` and composes the fetch from
+    /// `connection.queryContext` fresh on every transform (transform-query.ts).
+    /// `None` when the connection is gone or has no resolved query URL.
+    fn query_context_for(&self, client_id: &str, ws_id: &str) -> Option<CustomQueryContext> {
+        lock_unpoisoned(&self.ccm)
+            .must_get_connection_context(&CcmConnectionSelector {
+                client_id: client_id.to_string(),
+                ws_id: ws_id.to_string(),
+            })
+            .ok()
+            .as_ref()
+            .and_then(custom_query_context_from)
     }
 
     /// Port of TS `#startTTLClockInterval` (view-syncer.ts:1091-1097): (re)arm
@@ -2011,7 +1988,12 @@ impl CgState {
             // / 5xx) is DEFERRED — keep the connection and retry on the next
             // scheduled tick (TS `deferMaintenance('revalidate')`), never close on
             // a blip.
-            if let Some(ctx) = self.client_query_ctx.get(&client_id).cloned() {
+            let ctx = self
+                .registered_ws
+                .get(&client_id)
+                .cloned()
+                .and_then(|ws_id| self.query_context_for(&client_id, &ws_id));
+            if let Some(ctx) = ctx {
                 match crate::custom_queries::transform_query::validate_custom_queries(&ctx, &shard)
                     .await
                 {
@@ -2126,9 +2108,7 @@ impl CgState {
                 }
             }),
         );
-        self.client_raw_auth.remove(&client_id);
         self.client_push_headers.remove(&client_id);
-        self.client_query_ctx.remove(&client_id);
         self.client_profile_ids.remove(&client_id);
         // Until profileID is required in the URL, default it to `cg{clientGroupID}`
         // (the value the schema migration writes), exactly as TS does at the
@@ -2143,15 +2123,6 @@ impl CgState {
         self.client_profile_ids
             .insert(client_id.clone(), profile_id);
 
-        // Retain the raw token for the `Authorization: Bearer` header on
-        // custom-query transform requests.
-        if let Some(tok) = params.auth.as_deref().filter(|t| !t.is_empty()) {
-            self.client_raw_auth
-                .insert(client_id.clone(), tok.to_string());
-        }
-        if let Some(context) = default_query_context(self.query_config.as_ref(), &params) {
-            self.client_query_ctx.insert(client_id.clone(), context);
-        }
         // Pin the group's userID on the first connection that carries one.
         // Admission (`check_and_pin_user`) already guarantees every connection
         // reaching this CG shares the same userID, so capturing the first is
@@ -2485,41 +2456,12 @@ impl CgState {
             self.on_connection_closed(client_id, &ws_id);
             return;
         }
-        // Capture the custom-query API context from an `initConnection` that
-        // carries a `userQueryURL` (named queries are resolved against it). The
+        // The custom-query API context (`userQueryURL` + allowlisted headers) is
+        // recorded on the ConnectionContextManager's `initConnection` side effect
+        // below; `custom_query_context_from` reads it back at transform time. The
         // context persists for the connection's lifetime (a later
         // `changeDesiredQueries` doesn't re-send the URL).
-        if let Some(url) = body.get("userQueryURL").and_then(|v| v.as_str())
-            && !url.is_empty()
-        {
-            // The override is NOT validated here: TS records it at registration
-            // and `fetchFromAPIServer` runs the `urlMatch` allow-check at
-            // request time, surfacing a per-request TransformFailed while the
-            // connection survives. Closing the connection here (the old
-            // behavior) also rejected wildcard-allowlisted URLs, since the old
-            // check was exact string equality.
-            let custom_headers = filtered_query_headers(self.query_config.as_ref(), body);
-            let auth = self.client_raw_auth.get(client_id).cloned();
-            let allowed_urls = self
-                .query_config
-                .as_ref()
-                .and_then(|c| c.url.clone())
-                .unwrap_or_default();
-            let context = self
-                .client_query_ctx
-                .entry(client_id.to_string())
-                .or_insert_with(|| CustomQueryContext {
-                    url: url.to_string(),
-                    auth,
-                    ..CustomQueryContext::default()
-                });
-            context.url = url.to_string();
-            context.allowed_urls = allowed_urls;
-            // REPLACE the client headers (TS re-registers `customHeaders`
-            // wholesale on each initConnection); extending accumulated stale
-            // entries across repeated initConnections on one socket.
-            context.client_headers = custom_headers;
-        }
+
         // Client-deletion inputs the body may also carry (TS `#handleConfigUpdate`
         // applies query patches AND client deletions in one pass).
         let active_clients = body.get("activeClients").map(|v| str_array(Some(v)));
@@ -2670,6 +2612,7 @@ impl CgState {
             // connection. The per-client base filters inside the pokers deliver
             // each connection exactly what it hasn't seen.
             let all_ws_ids: Vec<String> = self.registered_ws.values().cloned().collect();
+            let query_ctx = self.query_context_for(client_id, &ws_id);
             match self
                 .sync_engine
                 .config_and_hydrate_with_profile(
@@ -2684,7 +2627,7 @@ impl CgState {
                     self.client_profile_ids.get(client_id).map(String::as_str),
                     self.permissions.as_ref(),
                     &auth_data,
-                    self.client_query_ctx.get(client_id),
+                    query_ctx.as_ref(),
                     state_version,
                     replica_version,
                     &existing_rows,
@@ -2853,17 +2796,13 @@ impl CgState {
             return;
         }
 
-        // Store the new auth data + raw token, then re-run the config/hydrate
-        // pass with an empty desired-queries patch. Phase 2 recomputes every
-        // query's transform against the updated authData (and re-fetches custom
-        // queries with the new Bearer token), detects the hash drift, and
-        // re-hydrates.
+        // Refresh the auth on the ConnectionContextManager (below), then re-run
+        // the config/hydrate pass with an empty desired-queries patch. Phase 2
+        // recomputes every query's transform against the updated authData (and
+        // re-fetches custom queries with the new Bearer token — `updateAuth`
+        // flows into `connection.auth`, which `custom_query_context_from` reads),
+        // detects the hash drift, and re-hydrates.
         crate::metrics::Metrics::inc(&self.metrics.auth_changes);
-        self.client_raw_auth
-            .insert(client_id.to_string(), token.to_string());
-        if let Some(ctx) = self.client_query_ctx.get_mut(client_id) {
-            ctx.auth = Some(token.to_string());
-        }
         // Refresh the token forwarded on relayed pushes. The message handler
         // shares this `Arc` (a plain snapshot would keep relaying the expired
         // connect-time token → API-server 401). TS parity: pusher.ts reads
@@ -3104,9 +3043,7 @@ impl CgState {
         self.client_base_versions.remove(client_id);
         self.sync_engine.unregister_client(ws_id);
         self.decrement_active_client(ws_id);
-        self.client_raw_auth.remove(client_id);
         self.client_push_headers.remove(client_id);
-        self.client_query_ctx.remove(client_id);
         self.client_profile_ids.remove(client_id);
         // Drop the connection from the ConnectionContextManager (TS
         // `closeConnection`).
@@ -3420,6 +3357,7 @@ impl CgState {
                 .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()))
                 .unwrap_or_else(|| serde_json::json!({}));
             let ttl_clock = self.get_ttl_clock(now);
+            let query_ctx = self.query_context_for(&client_id, &ws_id);
             // Clone the CVR into the call so a failure doesn't consume it.
             match self
                 .sync_engine
@@ -3435,7 +3373,7 @@ impl CgState {
                     self.client_profile_ids.get(&client_id).map(String::as_str),
                     self.permissions.as_ref(),
                     &auth_data,
-                    self.client_query_ctx.get(&client_id),
+                    query_ctx.as_ref(),
                     state_version,
                     replica_version,
                     &existing_rows,
@@ -3514,8 +3452,6 @@ impl CgState {
             crate::metrics::record_active_client_delta(-1, pv);
         }
         self.client_base_versions.clear();
-        self.client_raw_auth.clear();
-        self.client_query_ctx.clear();
         self.client_profile_ids.clear();
         self.open_ws_ids.clear();
         self.connection_count.store(0, Ordering::Relaxed);
@@ -4296,8 +4232,21 @@ mod tests {
         state.cvr = Some(cvr);
     }
 
+    /// I-8 Step 2 golden: `custom_query_context_from` maps the
+    /// ConnectionContextManager's live `ConnectionContext` (the single owner of
+    /// url/headers/auth/userID) onto the transform's `CustomQueryContext`, exactly
+    /// as the deleted `client_query_ctx` map did. Drives a real
+    /// register + initConnection through the CCM, then asserts every TS-config-
+    /// derived field survives the mapping (url/auth/api_key/cookie/origin/
+    /// allowed_urls/userID + the allowlist-filtered client headers).
+    ///
+    /// NON-VACUOUS: drop any field in `custom_query_context_from` (e.g. the
+    /// `auth` or `cookie` mapping) and the corresponding assert fails.
     #[test]
     fn configured_query_context_matches_typescript_defaults_and_header_filtering() {
+        use crate::services::view_syncer::connection_context_manager::{
+            Auth, ConnectionContextManager,
+        };
         let config = FetchConfig {
             url: Some(vec!["https://api.example/query".to_string()]),
             api_key: Some("secret".to_string()),
@@ -4305,40 +4254,72 @@ mod tests {
             allowed_request_headers: None,
             forward_cookies: true,
         };
-        let mut params = test_params("c1", "w1");
-        params.auth = Some("jwt".to_string());
-        params.origin = Some("https://app.example".to_string());
-        params.http_cookie = Some("session=1".to_string());
+        let mut ccm = ConnectionContextManager::new(None, None, Some(config), None, None, None);
+        let selector = CcmConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "w1".to_string(),
+        };
+        let reg = ConnectParamsForRegistration {
+            client_id: "c1".to_string(),
+            ws_id: "w1".to_string(),
+            user_id: Some("u1".to_string()),
+            profile_id: None,
+            base_cookie: None,
+            protocol_version: 1,
+            http_cookie: Some("session=1".to_string()),
+            origin: Some("https://app.example".to_string()),
+            request_headers: Vec::new(),
+        };
+        // An authenticated connection (TS requires a userID alongside a token).
+        ccm.register_connection(
+            &selector,
+            &reg,
+            Some(Auth::Opaque {
+                raw: "jwt".to_string(),
+            }),
+        );
+        // initConnection carries client headers; only the allowlisted one survives.
+        ccm.init_connection(
+            &selector,
+            &InitConnectionBody {
+                user_query_url: None,
+                user_query_headers: Some(std::collections::HashMap::from([
+                    ("x-request-id".to_string(), "allowed".to_string()),
+                    ("authorization".to_string(), "blocked".to_string()),
+                ])),
+                user_push_url: None,
+                user_push_headers: None,
+            },
+        )
+        .unwrap();
 
-        let context = default_query_context(Some(&config), &params).unwrap();
+        let ctx = ccm.must_get_connection_context(&selector).unwrap();
+        let context = custom_query_context_from(&ctx).unwrap();
         assert_eq!(context.url, "https://api.example/query");
         assert_eq!(context.auth.as_deref(), Some("jwt"));
         assert_eq!(context.api_key.as_deref(), Some("secret"));
         assert_eq!(context.cookie.as_deref(), Some("session=1"));
         assert_eq!(context.origin.as_deref(), Some("https://app.example"));
         assert_eq!(context.allowed_urls, vec!["https://api.example/query"]);
+        assert_eq!(context.user_id.as_deref(), Some("u1"));
+        // initConnection header filtering: allowlisted survives, others dropped.
+        assert_eq!(
+            context.client_headers,
+            vec![("x-request-id".to_string(), "allowed".to_string())]
+        );
         // The composed outgoing set carries them all (TS fetchFromAPIServer).
         let composed = context.composed_headers();
         assert!(composed.contains(&("X-Api-Key".to_string(), "secret".to_string())));
         assert!(composed.contains(&("Cookie".to_string(), "session=1".to_string())));
         assert!(composed.contains(&("Origin".to_string(), "https://app.example".to_string())));
-
-        let body = serde_json::json!({
-            "userQueryHeaders": {
-                "x-request-id": "allowed",
-                "authorization": "blocked"
-            }
-        });
-        assert_eq!(
-            filtered_query_headers(Some(&config), &body),
-            vec![("x-request-id".to_string(), "allowed".to_string())]
-        );
     }
 
     #[test]
     fn forwards_allowlisted_incoming_request_headers() {
         // Port of #6144: only headers on `allowed_request_headers` (case-
         // insensitive) are forwarded from the incoming request to the query API.
+        // Read back from the CCM via `custom_query_context_from` (I-8 Step 2).
+        use crate::services::view_syncer::connection_context_manager::ConnectionContextManager;
         let config = FetchConfig {
             url: Some(vec!["https://api.example/query".to_string()]),
             api_key: None,
@@ -4349,14 +4330,30 @@ mod tests {
             ]),
             forward_cookies: false,
         };
-        let mut params = test_params("c1", "w1");
-        params.request_headers = std::collections::HashMap::from([
-            ("x-forwarded-for".to_string(), "203.0.113.7".to_string()),
-            ("x-tenant".to_string(), "acme".to_string()),
-            ("authorization".to_string(), "secret".to_string()),
-        ]);
+        let mut ccm = ConnectionContextManager::new(None, None, Some(config), None, None, None);
+        let selector = CcmConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "w1".to_string(),
+        };
+        let reg = ConnectParamsForRegistration {
+            client_id: "c1".to_string(),
+            ws_id: "w1".to_string(),
+            user_id: None,
+            profile_id: None,
+            base_cookie: None,
+            protocol_version: 1,
+            http_cookie: None,
+            origin: None,
+            request_headers: vec![
+                ("x-forwarded-for".to_string(), "203.0.113.7".to_string()),
+                ("x-tenant".to_string(), "acme".to_string()),
+                ("authorization".to_string(), "secret".to_string()),
+            ],
+        };
+        ccm.register_connection(&selector, &reg, None);
 
-        let context = default_query_context(Some(&config), &params).unwrap();
+        let ctx = ccm.must_get_connection_context(&selector).unwrap();
+        let context = custom_query_context_from(&ctx).unwrap();
         // Allowlisted (case-insensitive) headers forwarded; others dropped.
         assert!(
             context
@@ -4396,6 +4393,19 @@ mod tests {
         let mut p = authed_params(client_id, ws_id, &fake_jwt(user_id));
         p.user_id = Some(user_id.to_string());
         p
+    }
+
+    /// The raw auth token the ConnectionContextManager holds for a connection.
+    /// Replaces the deleted `client_raw_auth` map in tests — the CCM is now the
+    /// single owner of per-connection auth (I-8).
+    fn ccm_raw_auth(state: &CgState, client_id: &str, ws_id: &str) -> Option<String> {
+        lock_unpoisoned(&state.ccm)
+            .get_connection_context(&CcmConnectionSelector {
+                client_id: client_id.to_string(),
+                ws_id: ws_id.to_string(),
+            })
+            .and_then(|c| c.auth)
+            .map(|a| a.raw().to_string())
     }
 
     /// AuthValidator whose verdict flips with a shared flag — to simulate a
@@ -4550,7 +4560,10 @@ mod tests {
             0,
             "expired connection must be closed"
         );
-        assert!(state.client_raw_auth.is_empty());
+        assert!(
+            ccm_raw_auth(&state, "c1", "ws1").is_none(),
+            "closed connection's auth must be gone from the CCM"
+        );
         assert_eq!(state.metrics.snapshot()["authRevalidationFailures"], 1);
         // No authed connection remains → disarmed.
         assert!(state.next_auth_maintenance_at.is_none());
@@ -4747,10 +4760,6 @@ mod tests {
             DirectWebSocketSink::new(tx),
         ));
         assert_eq!(state.metrics.snapshot()["authChanges"], 0);
-        assert_eq!(
-            state.client_raw_auth.get("c1").map(String::as_str),
-            Some("opaque-token-1")
-        );
 
         // Refresh to a DIFFERENT opaque token → must re-transform. `auth_changes`
         // is incremented on the re-transform path (before the config/hydrate),
@@ -4888,7 +4897,7 @@ mod tests {
         );
         assert_eq!(
             seeded.as_deref(),
-            state.client_raw_auth.get("c1").map(String::as_str),
+            Some(fake_jwt("user-1").as_str()),
             "seeded CCM auth must equal the connect token"
         );
 
@@ -4973,7 +4982,7 @@ mod tests {
             Some("user-1"),
             "authData from the CCM must carry the JWT sub"
         );
-        let token = state.client_raw_auth.get("c1").cloned().unwrap();
+        let token = ccm_raw_auth(&state, "c1", "ws1").unwrap();
         assert_eq!(
             via_ccm,
             crate::auth::jwt::decode_jwt_claims(&token),
@@ -5013,13 +5022,12 @@ mod tests {
         assert!(state.next_auth_maintenance_at.is_some());
     }
 
-    /// Auth maintenance reads the token from the ConnectionContextManager, not the
-    /// legacy `client_raw_auth` map. Proven by CLEARING the legacy map and showing
-    /// arming + revalidation still work from the CCM alone (the single owner).
+    /// Auth maintenance reads the token from the ConnectionContextManager — the
+    /// single owner of per-connection auth. Arming + revalidation are driven
+    /// entirely from the CCM (there is no separate auth map anymore).
     ///
-    /// NON-VACUOUS: if arming/revalidation still read `client_raw_auth`, the
-    /// cleared map would leave no auth → no arm, no revalidation, and both asserts
-    /// fail.
+    /// NON-VACUOUS: if arming/revalidation did not read the CCM, the connection's
+    /// auth would be invisible → no arm, no revalidation, and both asserts fail.
     #[test]
     fn auth_maintenance_reads_token_from_the_connection_context_manager() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5033,8 +5041,6 @@ mod tests {
         ));
         seed_test_client_schema(&mut state);
 
-        // Drop the legacy map: the CCM is now the ONLY source of the token.
-        state.client_raw_auth.clear();
         state.next_auth_maintenance_at = None;
         state.arm_auth_maintenance();
         assert!(
@@ -5232,16 +5238,23 @@ mod tests {
         let sink = DirectWebSocketSink::new(tx);
         rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
 
-        // Simulate a fully-hydrated + authenticated client: seed the per-client
-        // auth state the way a completed initConnection + updateAuth would
-        // (connections/registered_ws are already set by on_new_connection).
-        state
-            .client_raw_auth
-            .insert("c1".into(), "raw-token".into());
+        // Simulate a fully-hydrated client: seed the remaining per-client state
+        // the way a completed initConnection would (connections/registered_ws are
+        // already set by on_new_connection; the per-connection auth/query context
+        // lives in the ConnectionContextManager, registered by on_new_connection).
         state
             .client_profile_ids
             .insert("c1".into(), "profile-1".into());
-        assert!(!state.client_raw_auth.is_empty() && !state.connections.is_empty());
+        let sel = CcmConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "ws1".to_string(),
+        };
+        assert!(
+            lock_unpoisoned(&state.ccm)
+                .get_connection_context(&sel)
+                .is_some()
+                && !state.connections.is_empty()
+        );
 
         // The mid-hydrate cancel, delivered to the serial thread after the
         // hydrate as `ConnectionClosed`.
@@ -5250,12 +5263,11 @@ mod tests {
         assert!(state.connections.is_empty(), "connections leaked");
         assert!(state.registered_ws.is_empty(), "registered_ws leaked");
         assert!(
-            state.client_raw_auth.is_empty(),
-            "client_raw_auth leaked — stale raw token survives close"
-        );
-        assert!(
-            state.client_query_ctx.is_empty(),
-            "client_query_ctx leaked — stale custom-query auth/url survives close"
+            lock_unpoisoned(&state.ccm)
+                .get_connection_context(&sel)
+                .is_none(),
+            "ConnectionContextManager leaked — stale per-connection auth/query \
+             context survives close"
         );
         assert!(
             state.client_push_headers.is_empty(),

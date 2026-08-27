@@ -134,18 +134,43 @@ review. The push-relay `PushRelayHeaders.auth` flip is independent (needs the
   latent divergence in the reference CCM, corrected before it goes live.
 Both behaviorally inert today (query_context not yet read on the live path).
 
-**Next (Step 2/3), picks up here:**
-- Step 2: at the 3 `client_query_ctx` read sites (router.rs config_and_hydrate x2
-  + on_auth_maintenance_tick validate), build `CustomQueryContext` from
-  `must_get_connection_context(sel)` — map url/allowed_urls/api_key/cookie/origin
-  from `query_context`, `client_headers`←`custom_headers`,
-  `request_headers`←`request_headers` (both HashMap→sorted Vec),
-  `auth`←`ctx.auth?.raw`, `user_id`←`ctx.user.id`; return `None` when
-  `query_context.url` is None (matches `default_query_context`'s `config?`). Golden
-  test: CCM-built == the live map value for a representative connect+init.
-- Step 3: delete `client_query_ctx`, `client_raw_auth` (its last read — the query
-  Bearer — is gone after Step 2), `default_query_context`, `filtered_query_headers`.
-- Then push-relay `PushRelayHeaders.auth` flip + delete the cell; then I-6 + ART.
+**Step 2/3 — DONE (query-context migration commit):**
+- Step 2: the 3 `client_query_ctx` read sites (router.rs config_and_hydrate x2 +
+  on_auth_maintenance_tick validate) now build `CustomQueryContext` from
+  `must_get_connection_context(sel)` via the new `custom_query_context_from`
+  adapter + `CgState::query_context_for` helper — maps url/allowed_urls/api_key/
+  cookie/origin from `query_context`, `client_headers`←`custom_headers`,
+  `request_headers`←`request_headers` (both HashMap→sorted Vec), `auth`←`ctx.auth
+  .raw()`, `user_id`←`ctx.user.id`; returns `None` when `query_context.url` is
+  None. `custom_query_context_from`/`query_context_for` are labeled rust-only
+  adapters (no TS twin: TS `transform-query.ts` reads `ctx.queryContext` fields
+  inline; rust flattens onto the ported `CustomQueryContext`).
+- Step 3: DELETED `client_query_ctx`, `client_raw_auth`, `default_query_context`,
+  `filtered_query_headers`, and the dead `CgState.query_config` field (the CCM
+  owns the fetch config). The register-time inserts, the initConnection
+  client_query_ctx block, the updateAuth mutation, and all removes/clears are gone.
+- Golden: `configured_query_context_matches_typescript_defaults_and_header_filtering`
+  + `forwards_allowlisted_incoming_request_headers` now drive a real register +
+  initConnection through the CCM and assert `custom_query_context_from` reproduces
+  every TS-config-derived field. NON-VACUOUS proven (break the `auth` mapping →
+  golden FAILS).
+- Teardown/auth-maintenance/authData tests repointed off the deleted maps to the
+  CCM (`ccm_raw_auth` test helper; teardown asserts the CCM connection is gone).
+
+**Follow-up discovered (separate focused commit) — opaque-token updateAuth pin
+divergence:** `handle_update_auth` decodes the token (`decode_jwt_claims`) and does
+a **sub-based** single-user pin check, which wrongly CLOSES any opaque-token
+refresh once the group is pinned (opaque tokens carry no `sub`). TS (modern path,
+`validateLegacyJWT` undefined) stores ALL tokens as `opaque` (auth.ts:94-112) and
+does NO sub-pin on updateAuth — the single-user pin is the connection's fixed
+`userID` (auth.ts:79 rejects a token without one; a refresh keeps the existing
+userID). Both opaque tests currently MASK this: `..._skips_retransform` passes only
+because the connection is closed (authChanges stays 0), and `..._change_retransforms`
+was kept in its no-userID form (unpinned) so it isn't tripped. Fix = route
+updateAuth pin enforcement through the CCM's `update_auth`/`resolve_auth` and drop
+the router's `decode_jwt_claims` sub-pin; then make BOTH opaque tests non-vacuous
+(userID present, assert retransform-vs-skip WITHOUT a close). Then push-relay
+`PushRelayHeaders.auth` flip + delete the cell; then I-6 + ART.
 
 ### Stage 2 — migrate consumers to read the CCM at use time (REMAINING — ART-gated)
 One consumer per commit, each reverting-proven. Consume sites (router.rs):
