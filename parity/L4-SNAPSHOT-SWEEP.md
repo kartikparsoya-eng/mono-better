@@ -46,6 +46,22 @@ connect (lines 242-260) and never mutated → snapshotting is faithful.
 3. No other active snapshot divergence found: every post-connect-mutable TS
    field maps to a rust cell that is refreshed on the same trigger.
 
+## Cross-crate extension (rust-cvr / rust-ivm) — 2026-08-27
+The freshness-divergence class (per-connection/session mutable state that TS reads
+fresh at use time) is a **rust-syncer seam concern**; rust-cvr and rust-ivm are
+fed computation engines that do not independently own connection/session state.
+Audited the one shared hot-reloadable input:
+- **Permissions** — `router::maybe_reload_permissions` (wired on the advance path,
+  router.rs:3156) reloads on a hash change, refreshes `self.permissions`, and
+  re-transforms; the snapshotter aborts + rehydrates on a permissions-table change
+  (`REASON_PERMISSIONS_CHANGE`, ivm/snapshotter/diff.rs:390). Matches TS
+  (permissions change → re-transform/rehydrate). **Not a stale snapshot.**
+- Schema/table-spec + replica-version are connect/advance-time in both (replica
+  version refreshes on advance). No divergence.
+
+Net: no additional ACTIVE freshness divergence beyond auth (fixed). Only I-8
+(connection-state ownership split) remains, and it is structural, not per-field.
+
 ## Standing rule (AGENTS.md amendment)
 Storing a clone of any connection/auth/config value in a struct requires a
 doc-comment citing the TS line proving TS ALSO captures-at-construction. Default
