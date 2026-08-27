@@ -248,7 +248,19 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
     verification failed" (bad-signature rejection) — plus a cold-SQL slow-statement.
     No code-related signatures.
 
-**Plan items — remaining:**
-- **I-8 push-relay flip** (deferred purity, not a live bug — see above).
-- Optional deeper ART modes (soak G6, capacity G22/G25, determinism G21) — not
-  correctness-blocking; run when a longer infra window is available.
+**Plan items — done (push-relay flip, 2026-08-27):**
+- **I-8 push-relay flip — DONE + ART-validated** (`ce47a7306`): the message
+  handler's `ConnContextManagerDispatch` is now backed by the ported CCM via
+  `CcmDispatchAdapter` (replacing `PlaceholderConnContextManager`), so the handler's
+  mutagen-CRUD auth AND relayed-push auth read the single owner. The
+  `PushRelayHeaders.auth` `Arc<Mutex>` cell is DELETED (plain `Option<String>`
+  filled fresh per relay from `mustGetConnectionContext(sel).auth`), and the
+  `handle_update_auth` cell-refresh removed. Raw incoming-header forwarding
+  preserved. **I-8 is now FULLY complete — no parallel auth copies remain.**
+  Re-ART on `i8relay-ce47a7306`: `LOCAL ART: PASS`, G4 mutations 1193/1193 0-err,
+  G8 150/150, G11 8/0/1, 0 panics, push relay forwarding cleanly (no 401s).
+
+**Plan items — remaining (optional, not correctness-blocking):**
+- Deeper ART modes (soak G6 leaks, capacity G22/G25, determinism G21, mutation-
+  matrix G15) + the L5 temporal gates (`harness/TEMPORAL-GATES-RUN.md`) — run when
+  a longer infra window is available.
