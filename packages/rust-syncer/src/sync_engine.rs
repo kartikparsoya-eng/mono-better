@@ -29,7 +29,7 @@ use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle, InspectQueryRow};
 use rust_cvr::row_record_cache::RowRecordCache;
 use rust_cvr::schema::types::{
     CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, maybe_version_string,
-    version_string,
+    version_to_cookie,
 };
 use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
 use rust_cvr::shards::ShardID;
@@ -1306,7 +1306,10 @@ impl SyncEngine {
         };
         // NOTE: the poke is NOT ended here — the caller ends it after appending
         // catch-up patches (or immediately, when no catch-up applies).
-        let version = version_string(&flushed_cvr.version);
+        // Cookie formatting goes through the 1:1 `version_to_cookie` (TS
+        // client-handler.ts:189/201/318), not raw `version_string`, so the
+        // cookie call sites stay auditable against the TS spec.
+        let version = version_to_cookie(&flushed_cvr.version);
         Ok((
             SyncResult {
                 cvr: flushed_cvr,
@@ -1439,7 +1442,8 @@ impl SyncEngine {
         };
         pokers.end(flushed_cvr.version.clone());
 
-        let version = version_string(&flushed_cvr.version);
+        // 1:1 cookie formatting — see the twin note at the config-path site.
+        let version = version_to_cookie(&flushed_cvr.version);
         Ok(SyncResult {
             cvr: flushed_cvr,
             version,

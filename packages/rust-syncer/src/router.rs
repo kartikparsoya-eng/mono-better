@@ -22,8 +22,8 @@
 use crate::custom_queries::transform_query::CustomQueryContext;
 use crate::services::view_syncer::connection_context_manager::{
     ConnectParamsForRegistration, ConnectionContext as CcmConnectionContext,
-    ConnectionContextManager, ConnectionSelector as CcmConnectionSelector, FetchConfig,
-    InitConnectionBody, UpdateAuthBody, resolve_auth,
+    ConnectionContextManager, ConnectionSelector as CcmConnectionSelector, ConnectionValidation,
+    FetchConfig, InitConnectionBody, MaintenanceKind, UpdateAuthBody, resolve_auth,
 };
 use crate::services::view_syncer::pipeline_driver::{IvmPipelines, IvmTableSpec};
 use crate::sync_engine::{SyncEngine, empty_cvr};
@@ -1408,13 +1408,11 @@ struct CgState {
     /// The deployed permissions `hash` last loaded, for hot-reload detection
     /// (TS `reloadPermissionsIfChanged`).
     permissions_hash: Option<String>,
-    /// Interval (ms) between periodic auth maintenance ticks (JWT re-validation
-    /// + query re-transform). `None` disables it. Port of TS
-    ///   `ConnectionContextManager`'s `revalidateIntervalMs`.
-    revalidate_interval_ms: Option<i64>,
     /// Wall-clock (ms) deadline for the next auth-maintenance tick, or `None`
-    /// when nothing is armed (no authed connection, or feature disabled). Port
-    /// of the group's earliest `revalidateAt` deadline.
+    /// when nothing is armed. Sourced from the ported CCM planner
+    /// (`plan_maintenance().earliest_deadline_at` — TS
+    /// `#scheduleAuthMaintenance`); the revalidate interval itself lives in the
+    /// CCM (single owner), not here.
     next_auth_maintenance_at: Option<i64>,
     /// The userID this client group is pinned to (the `sub` of the first authed
     /// connection; `None` for an anonymous group). Admission
@@ -1512,6 +1510,10 @@ impl Drop for CgState {
         // return, TTL/idle shutdown, panic-unwind) — TS drops it when the
         // view-syncer service stops.
         self.serving_lag_registry.remove_view_syncer(&self.cg_id);
+        // TS `stop()`/`#cleanup` both call `setSharedRetransformReady(false)`
+        // (view-syncer.ts:2803/2811) — the group's shared retransform must not
+        // run once teardown starts.
+        lock_unpoisoned(&self.ccm).set_shared_retransform_ready(false);
         // Attribute *who* tore down this client group when
         // `RUST_SYNCER_DROP_BACKTRACE=1`. The census counter dec's via the
         // `_census` guard's own `Drop`.
@@ -1643,7 +1645,6 @@ impl CgState {
             app_id,
             permissions,
             permissions_hash,
-            revalidate_interval_ms,
             next_auth_maintenance_at: None,
             pinned_user_id: None,
             cvr: None,
@@ -1892,35 +1893,16 @@ impl CgState {
         }
     }
 
-    /// Arm the group auth-maintenance deadline if the feature is enabled and at
-    /// least one connection carries a JWT. Idempotent: an already-armed deadline
-    /// is left in place (matches TS, where a new validated connection does not
-    /// pull the group's earliest deadline earlier than an existing one at the
-    /// same interval). Port of the group's earliest `revalidateAt`.
+    /// Recompute the group auth-maintenance deadline from the ported planner.
+    /// Port of TS `#scheduleAuthMaintenance` (view-syncer.ts:793): stop the old
+    /// timer, ask `planMaintenance()` for `earliestDeadlineAt` (per-connection
+    /// `revalidate_at` + the group retransform deadline, with deferral backoff
+    /// applied by the CCM), and arm — or disarm when the plan reports no
+    /// deadline ("No auth maintenance wakeup scheduled").
     fn arm_auth_maintenance(&mut self) {
-        let Some(interval) = self.revalidate_interval_ms else {
-            return;
-        };
-        if self.next_auth_maintenance_at.is_some() {
-            return;
-        }
-        // Nothing to maintain if no registered connection carries auth.
-        let any_auth = {
-            let ccm = lock_unpoisoned(&self.ccm);
-            self.registered_ws.iter().any(|(c, w)| {
-                ccm.must_get_connection_context(&CcmConnectionSelector {
-                    client_id: c.clone(),
-                    ws_id: w.clone(),
-                })
-                .ok()
-                .and_then(|ctx| ctx.auth)
-                .is_some()
-            })
-        };
-        if !any_auth {
-            return;
-        }
-        self.next_auth_maintenance_at = Some(now_ms() + interval);
+        self.next_auth_maintenance_at = lock_unpoisoned(&self.ccm)
+            .plan_maintenance()
+            .earliest_deadline_at;
     }
 
     /// The delay until the next auth-maintenance tick, or `None` if none is
@@ -1950,31 +1932,39 @@ impl CgState {
     ///
     /// Re-arms the deadline (or clears it if no authed connection remains).
     async fn on_auth_maintenance_tick(&mut self) {
-        // Snapshot the (client_id, raw_token) pairs to re-verify, read from the
-        // ConnectionContextManager (TS `mustGetConnectionContext(selector).auth`).
-        // Only tokened connections are subject to revalidation.
-        let due: Vec<(String, String)> = {
-            let ccm = lock_unpoisoned(&self.ccm);
-            self.registered_ws
-                .iter()
-                .filter_map(|(c, w)| {
-                    ccm.must_get_connection_context(&CcmConnectionSelector {
-                        client_id: c.clone(),
-                        ws_id: w.clone(),
-                    })
-                    .ok()
-                    .and_then(|ctx| ctx.auth)
-                    .map(|a| (c.clone(), a.raw().to_string()))
-                })
-                .collect()
-        };
+        // Plan from the ported CCM (TS `#runAuthMaintenance`, view-syncer.ts:825:
+        // `planMaintenance()` → `dueRevalidations` + `dueRetransform`). The CCM
+        // owns the deadlines, the deferral backoff, and the background-connection
+        // choice; this loop only executes the plan.
+        let plan = lock_unpoisoned(&self.ccm).plan_maintenance();
+        if plan.due_revalidations.is_empty() && !plan.due_retransform {
+            tracing::debug!(
+                "CG {}: auth maintenance woke up with no due work",
+                self.cg_id
+            );
+            self.arm_auth_maintenance();
+            return;
+        }
 
         let mut survivors: Vec<String> = Vec::new();
-        for (client_id, token) in due {
-            // The connection may have closed since we snapshotted.
-            if !self.registered_ws.contains_key(&client_id) {
+        for due_ctx in &plan.due_revalidations {
+            let client_id = due_ctx.client_id.clone();
+            // The connection may have closed (or been replaced by a new wsID)
+            // since the plan snapshot.
+            if self.registered_ws.get(&client_id) != Some(&due_ctx.ws_id) {
                 continue;
             }
+            let selector = CcmConnectionSelector {
+                client_id: client_id.clone(),
+                ws_id: due_ctx.ws_id.clone(),
+            };
+            // An untokened (cookie/anonymous) connection has no JWT to locally
+            // re-verify — it goes straight to the server-side probe below, and
+            // its validation is recorded as the TS `client-fallback` kind.
+            let Some(token) = due_ctx.auth.as_ref().map(|a| a.raw().to_string()) else {
+                survivors.push(client_id);
+                continue;
+            };
             // Bind the subject to the group's PINNED user (not the token's own
             // `sub`, which would be a tautological `sub == sub` check). This is
             // what makes revalidation reject a token that has been swapped for a
@@ -2003,6 +1993,10 @@ impl CgState {
                         self.cg_id
                     );
                     crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+                    // TS `#failMaintenanceConnection`: record the failure in the
+                    // CCM (drops the context, revision-guarded) BEFORE failing
+                    // the socket.
+                    lock_unpoisoned(&self.ccm).fail_connection(&selector, due_ctx.revision);
                     if let Some(conn) = self.connections.get(&client_id) {
                         conn.close_with_error(error_body);
                     }
@@ -2016,14 +2010,25 @@ impl CgState {
 
         crate::metrics::Metrics::inc(&self.metrics.auth_revalidations);
 
-        // Retransform each surviving connection's queries against current auth +
-        // permissions (re-fetching custom queries with the current token).
-        let empty_body = serde_json::json!({});
+        // Probe + record each surviving due connection (TS `#validateConnection`
+        // per `dueRevalidations` entry).
         let shard = self.shard.clone();
+        let plan_by_client: std::collections::HashMap<String, (String, u32)> = plan
+            .due_revalidations
+            .iter()
+            .map(|c| (c.client_id.clone(), (c.ws_id.clone(), c.revision)))
+            .collect();
         for client_id in survivors {
-            if !self.registered_ws.contains_key(&client_id) {
+            let Some((ws_id, revision)) = plan_by_client.get(&client_id).cloned() else {
+                continue;
+            };
+            if self.registered_ws.get(&client_id) != Some(&ws_id) {
                 continue;
             }
+            let selector = CcmConnectionSelector {
+                client_id: client_id.clone(),
+                ws_id: ws_id.clone(),
+            };
 
             // Server-side revocation probe. Port of TS `#validateConnection` →
             // `CustomQueryTransformer.validate`: when a custom query API is
@@ -2031,16 +2036,12 @@ impl CgState {
             // server can reject a token that is cryptographically valid but
             // revoked/deauthorized at the app layer (local `validate_auth` above
             // only catches expiry/signature/user-swap). No query API configured →
-            // no ctx → skip (TS client-fallback path — no probe). An AUTH error
+            // no ctx → no probe (the TS `client-fallback` path). An AUTH error
             // (401/403) invalidates the connection; a transient failure (API down
-            // / 5xx) is DEFERRED — keep the connection and retry on the next
-            // scheduled tick (TS `deferMaintenance('revalidate')`), never close on
-            // a blip.
-            let ctx = self
-                .registered_ws
-                .get(&client_id)
-                .cloned()
-                .and_then(|ws_id| self.query_context_for(&client_id, &ws_id));
+            // / 5xx) DEFERS the remaining maintenance — keep the connection and
+            // retry at the deferred deadline (TS `deferMaintenance('revalidate')`
+            // + early return), never close on a blip.
+            let ctx = self.query_context_for(&client_id, &ws_id);
             if let Some(ctx) = ctx {
                 match crate::custom_queries::transform_query::validate_custom_queries(&ctx, &shard)
                     .await
@@ -2053,33 +2054,82 @@ impl CgState {
                                 self.cg_id
                             );
                             crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+                            lock_unpoisoned(&self.ccm).fail_connection(&selector, revision);
                             if let Some(conn) = self.connections.get(&client_id) {
                                 conn.close_with_error(crate::protocol::ErrorBody::unauthorized(
                                     "Connection auth validation failed",
                                 ));
                             }
-                            if let Some(ws_id) = self.registered_ws.get(&client_id).cloned() {
-                                self.on_connection_closed(&client_id, &ws_id);
+                            if let Some(ws) = self.registered_ws.get(&client_id).cloned() {
+                                self.on_connection_closed(&client_id, &ws);
                             }
                             continue;
                         }
                         tracing::warn!(
                             "CG {}: query-transform validation failed transiently for \
-                             client {client_id}; deferring retransform",
+                             client {client_id}; deferring auth maintenance",
                             self.cg_id
                         );
-                        continue;
+                        lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Revalidate);
+                        self.arm_auth_maintenance();
+                        return;
                     }
                 }
             }
 
-            self.handle_desired_queries(&client_id, &empty_body, true)
-                .await;
+            // Record the successful (re)validation: refreshes `revalidate_at`
+            // and lets the CCM promote/refresh the background connection (TS
+            // `connContextManager.validateConnection(connCtx, revision,
+            // validation)` with the client-fallback kind — the probe returns no
+            // server-validated userID).
+            if let Err(e) = lock_unpoisoned(&self.ccm).validate_connection(
+                &selector,
+                revision,
+                &ConnectionValidation::ClientFallback,
+            ) {
+                tracing::warn!(
+                    "CG {}: recording revalidation failed for client {client_id}: {e:?}",
+                    self.cg_id
+                );
+            }
         }
 
-        // Re-arm: schedule the next tick if any authed connection remains,
-        // otherwise disarm until the next connection arrives.
-        self.next_auth_maintenance_at = None;
+        // Revalidation can change which connection is safe for shared background
+        // work — replan before deciding on the group retransform (TS
+        // `refreshedPlan`, view-syncer.ts:858). ONE retransform for the group on
+        // the background connection's context (TS `#runBackgroundRetransform`),
+        // not one per survivor: `handle_desired_queries(_, {}, changed=true)`
+        // re-runs the whole CG's config/hydrate pass, so a single call already
+        // re-fetches every query with current auth/permissions.
+        let refreshed = lock_unpoisoned(&self.ccm).plan_maintenance();
+        if refreshed.due_retransform {
+            let bg = lock_unpoisoned(&self.ccm)
+                .must_get_background_connection_context()
+                .ok();
+            match bg {
+                Some(bg) if self.registered_ws.get(&bg.client_id) == Some(&bg.ws_id) => {
+                    let empty_body = serde_json::json!({});
+                    self.handle_desired_queries(&bg.client_id, &empty_body, true)
+                        .await;
+                    lock_unpoisoned(&self.ccm).mark_background_retransform_success(
+                        &CcmConnectionSelector {
+                            client_id: bg.client_id.clone(),
+                            ws_id: bg.ws_id.clone(),
+                        },
+                        bg.revision,
+                    );
+                }
+                _ => {
+                    // No safe background connection right now — defer (TS defers
+                    // via `deferMaintenance('retransform')` when the shared
+                    // retransform cannot run).
+                    lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Retransform);
+                }
+            }
+        }
+
+        // Re-arm from the refreshed plan (TS `#scheduleAuthMaintenance` in the
+        // locked-op `finally`).
         self.arm_auth_maintenance();
     }
 
@@ -2215,11 +2265,32 @@ impl CgState {
             let user_id = params.user_id.as_deref().filter(|v| !v.is_empty());
             let wire = params.auth.as_deref().filter(|t| !t.is_empty());
             let auth = resolve_auth(None, user_id, wire, None).unwrap_or(None);
-            lock_unpoisoned(&self.ccm).register_connection(&selector, &reg, auth);
+            let mut ccm = lock_unpoisoned(&self.ccm);
+            ccm.register_connection(&selector, &reg, auth);
+            // TS validates the new connection right away (initConnection →
+            // `#validateConnection` → `connContextManager.validateConnection`,
+            // view-syncer.ts:942): recording the validation gives the
+            // connection its `revalidate_at` deadline and lets the group
+            // promote a background connection. The transport-level JWT check
+            // already passed upstream; with no server-validated userID in hand
+            // this is the TS `client-fallback` validation.
+            if let Ok(ctx) = ccm.must_get_connection_context(&selector)
+                && let Err(e) = ccm.validate_connection(
+                    &selector,
+                    ctx.revision,
+                    &ConnectionValidation::ClientFallback,
+                )
+            {
+                tracing::warn!(
+                    "CG {}: connect-time validateConnection failed: {e:?}",
+                    self.cg_id
+                );
+            }
         }
 
-        // Arm periodic auth maintenance for this (now validated) connection.
-        // Port of `validateConnection` setting `revalidateAt = now + interval`.
+        // Recompute the auth-maintenance wakeup now that the CCM has a newly
+        // validated connection (TS re-arms via `#scheduleAuthMaintenance` after
+        // every locked operation).
         self.arm_auth_maintenance();
 
         // Raw auth/header material captured at connect, forwarded on a relayed
@@ -2709,6 +2780,10 @@ impl CgState {
                     self.mark_version_served(&cvr.version);
                     self.cvr = Some(cvr);
                     config_accepted = true;
+                    // Pipelines are synced — the group's shared background
+                    // retransform may now run (TS view-syncer.ts:607:
+                    // `#pipelinesSynced = true; setSharedRetransformReady(true)`).
+                    lock_unpoisoned(&self.ccm).set_shared_retransform_ready(true);
                     let elapsed_ms = hydrate_started.elapsed().as_secs_f64() * 1000.0;
                     crate::trace::note(
                         "hydrate-end",
@@ -2882,16 +2957,35 @@ impl CgState {
                 client_id: client_id.to_string(),
                 ws_id,
             };
-            let _ = lock_unpoisoned(&self.ccm).update_auth(
+            let mut ccm = lock_unpoisoned(&self.ccm);
+            let _ = ccm.update_auth(
                 &selector,
                 &UpdateAuthBody {
                     auth: Some(token.to_string()),
                 },
             );
+            // TS re-validates on updateAuth (view-syncer.ts:1012 →
+            // `connContextManager.validateConnection`): record against the
+            // BUMPED revision so the refreshed credential gets a fresh
+            // `revalidate_at` deadline.
+            if let Ok(ctx) = ccm.must_get_connection_context(&selector)
+                && let Err(e) = ccm.validate_connection(
+                    &selector,
+                    ctx.revision,
+                    &ConnectionValidation::ClientFallback,
+                )
+            {
+                tracing::warn!(
+                    "CG {}: updateAuth validateConnection failed: {e:?}",
+                    self.cg_id
+                );
+            }
         }
         let empty_body = serde_json::json!({});
         self.handle_desired_queries(client_id, &empty_body, true)
             .await;
+        // Locked-op re-arm (TS `#scheduleAuthMaintenance` in the `finally`).
+        self.arm_auth_maintenance();
     }
 
     /// Handle an inspector `["inspect", {op, id, ...}]` message. Port of
@@ -4602,7 +4696,10 @@ mod tests {
     fn periodic_revalidation_closes_expired_connection() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut state = revalidate_state(&rt, Some(300_000), valid.clone());
+        // Interval 0 → the CCM marks the connection due immediately, so the
+        // manually-fired tick below actually has revalidation work (the plan-
+        // driven tick honors `revalidate_at`; an early fire is a no-op).
+        let mut state = revalidate_state(&rt, Some(0), valid.clone());
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         // A userID-bearing (JWT) connection — the case revalidation applies to.
@@ -5144,7 +5241,8 @@ mod tests {
     fn periodic_revalidation_keeps_valid_connection_and_rearms() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        // Interval 0 → due immediately at the manual tick (see the expired test).
+        let mut state = revalidate_state(&rt, Some(0), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         // A userID-bearing (JWT) connection — the case revalidation applies to;
@@ -5180,7 +5278,8 @@ mod tests {
     fn auth_maintenance_reads_token_from_the_connection_context_manager() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        // Interval 0 → due immediately at the manual tick (see the expired test).
+        let mut state = revalidate_state(&rt, Some(0), valid);
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
@@ -5205,10 +5304,17 @@ mod tests {
         assert_eq!(state.metrics.snapshot()["authRevalidations"], 1);
     }
 
-    /// With the feature disabled (interval None) no deadline is ever armed, and a
-    /// connection without a token is never subject to revalidation.
+    /// With the feature disabled (interval None) no deadline is ever armed. An
+    /// UNTOKENED (cookie/anonymous) connection, however, IS scheduled: TS
+    /// `validateConnection` stamps `revalidateAt` on every validated connection
+    /// regardless of token presence, and maintenance re-validates it via the
+    /// server-side probe (`#validateConnection` → transformer.validate).
+    ///
+    /// NON-VACUOUS for the plan-driven migration: the previous interval-driven
+    /// arm skipped untokened connections entirely, so the `is_some` assert below
+    /// fails against the old code.
     #[test]
-    fn periodic_revalidation_disabled_or_unauthed_never_arms() {
+    fn periodic_revalidation_disabled_never_arms_but_unauthed_is_scheduled() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
@@ -5222,13 +5328,46 @@ mod tests {
         assert!(disabled.next_auth_maintenance_at.is_none());
         assert!(disabled.next_auth_maintenance_delay().is_none());
 
-        // Enabled but the connection carries no token → nothing to revalidate.
+        // Enabled + no token → still validated, still scheduled (TS parity).
         let mut unauthed = revalidate_state(&rt, Some(300_000), valid);
         let (tx2, _d2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(
             unauthed.on_new_connection(test_params("c2", "ws2"), DirectWebSocketSink::new(tx2)),
         );
-        assert!(unauthed.next_auth_maintenance_at.is_none());
+        assert!(
+            unauthed.next_auth_maintenance_at.is_some(),
+            "a validated cookie connection gets a revalidate deadline (TS \
+             validateConnection stamps revalidateAt unconditionally)"
+        );
+    }
+
+    /// The tick executes the CCM's PLAN, not a flat re-check of every
+    /// connection: with a 300s revalidate interval, a tick fired right after
+    /// connect finds nothing due and touches nothing.
+    ///
+    /// NON-VACUOUS: the previous interval-driven tick revalidated every tokened
+    /// connection on ANY tick, so `authRevalidations == 0` fails against it.
+    #[test]
+    fn maintenance_honors_ccm_revalidate_deadlines() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        seed_test_client_schema(&mut state);
+        assert!(state.next_auth_maintenance_at.is_some());
+
+        // Fire the tick 300s EARLY: the connection's `revalidate_at` is not due,
+        // so no revalidation work runs and the connection is untouched.
+        rt.block_on(state.on_auth_maintenance_tick());
+        assert_eq!(state.registered_ws.len(), 1);
+        assert_eq!(state.metrics.snapshot()["authRevalidations"], 0);
+        // Still armed for the real deadline.
+        assert!(state.next_auth_maintenance_at.is_some());
     }
 
     /// Single-user pin: once a group is pinned to user-1, an `updateAuth` bearing
