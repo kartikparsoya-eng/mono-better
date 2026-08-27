@@ -59,3 +59,14 @@ After the fixes, a fresh capture must show hot: `row_id_signature_unit`,
 `version_to_cookie`, `plan_maintenance`, `min_defined`, and (on connect)
 `validate_connection` + `set_shared_retransform_ready`. That recapture is the
 non-vacuous proof for the wiring fixes — the pre-fix run IS the failing state.
+
+## Recapture RESULT (image l8cov2, same traffic, 2026-08-27)
+
+Value space: 0 mismatches, 99/99 catalog again. Wired symbols went hot —
+`row_id_signature_unit` 335x, `version_to_cookie` 66x, `plan_maintenance`/
+`min_defined`/`set_shared_retransform_ready` firing, `validate_connection`
+4x (exactly TS's 4). `must_get_background_connection_context` remains 0
+legitimately (gated on `due_retransform`; no retransform deadline elapsed in
+the 5-minute window). Cold pairs: syncer 18→14, cvr 10→8, ivm 24 (tracked
+gap + guarded-dead ttl copies). The pre-fix capture is the proven-failing
+state; this run is the fix proof.
