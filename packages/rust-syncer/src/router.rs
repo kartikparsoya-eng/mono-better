@@ -5007,6 +5007,95 @@ mod tests {
         assert_eq!(state.connections.len(), 0);
     }
 
+    /// L7 cancel-during-hydrate teardown completeness (view-syncer.ts:916 —
+    /// closes its GAP). TS returns `downstream` synchronously from
+    /// `initConnection` so a close arriving DURING hydrate can still cancel the
+    /// subscription "even if #runInLockForClient() has not had a chance to run."
+    /// In rust that close reaches the serial CG thread as a `ConnectionClosed`
+    /// enqueued AFTER `NewConnection` (FIFO), so it is processed once the blocked
+    /// hydrate releases — that the serial channel DOES process a message queued
+    /// behind a blocked hydrate is the other half, proven by
+    /// `connected_ack_is_decoupled_from_a_blocked_cg_hydrate`. This test pins
+    /// THIS half: when that close finally runs, `on_connection_closed` must fully
+    /// tear the client down. No per-client state (auth, raw auth, query ctx, push
+    /// headers, profile id, base version, sink registration) may leak — a leak
+    /// would let a reconnecting client or a later relayed push read stale auth
+    /// (the bug-2 class this framework exists to kill).
+    ///
+    /// NON-VACUOUS: delete any single `self.<map>.remove(client_id)` line from
+    /// `on_connection_closed` and the matching `is_empty()` assertion fails.
+    #[test]
+    fn a_close_fully_tears_down_all_per_client_state() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let count = Arc::new(AtomicU64::new(0));
+        let mut state = CgState::new(
+            "cg-teardown",
+            &factory,
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+            count,
+        );
+
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink = DirectWebSocketSink::new(tx);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
+
+        // Simulate a fully-hydrated + authenticated client: seed the per-client
+        // auth state the way a completed initConnection + updateAuth would (the
+        // simple String/Value maps; connections/registered_ws are already set by
+        // on_new_connection).
+        state
+            .client_auth
+            .insert("c1".into(), serde_json::json!({"sub": "u1"}));
+        state
+            .client_raw_auth
+            .insert("c1".into(), "raw-token".into());
+        state
+            .client_profile_ids
+            .insert("c1".into(), "profile-1".into());
+        assert!(!state.client_auth.is_empty() && !state.connections.is_empty());
+
+        // The mid-hydrate cancel, delivered to the serial thread after the
+        // hydrate as `ConnectionClosed`.
+        state.on_connection_closed("c1", "ws1");
+
+        assert!(state.connections.is_empty(), "connections leaked");
+        assert!(state.registered_ws.is_empty(), "registered_ws leaked");
+        assert!(
+            state.client_auth.is_empty(),
+            "client_auth leaked — stale decoded claims survive close (bug-2 soil)"
+        );
+        assert!(
+            state.client_raw_auth.is_empty(),
+            "client_raw_auth leaked — stale raw token survives close"
+        );
+        assert!(
+            state.client_query_ctx.is_empty(),
+            "client_query_ctx leaked — stale custom-query auth/url survives close"
+        );
+        assert!(
+            state.client_push_headers.is_empty(),
+            "client_push_headers leaked — stale relay headers survive close"
+        );
+        assert!(
+            state.client_profile_ids.is_empty(),
+            "client_profile_ids leaked"
+        );
+        assert!(
+            state.client_base_versions.is_empty(),
+            "client_base_versions leaked"
+        );
+    }
+
     #[test]
     fn idle_shutdown_requires_both_keepalive_expiry_and_zero_admissions() {
         let rt = tokio::runtime::Runtime::new().unwrap();
