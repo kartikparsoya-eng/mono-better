@@ -260,7 +260,18 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
   Re-ART on `i8relay-ce47a7306`: `LOCAL ART: PASS`, G4 mutations 1193/1193 0-err,
   G8 150/150, G11 8/0/1, 0 panics, push relay forwarding cleanly (no 401s).
 
+**Plan items — done (L5 temporal gates RUN, 2026-08-27):**
+- **L5 temporal differential oracle — RUN + GREEN** against the `i8relay-ce47a7306`
+  candidate vs the TS mirror (xyne-art `587b706` fixed a G-ttl auth-pool indexing
+  bug en route):
+  - **frame-seq oracle: PASS** — TS==rust ordered frame sequences + ack latency class.
+  - **G-slow: PASS** — connect-ack p99 rust 38ms / ts 72ms, both "instant"
+    (hydrate-independent) — the direct temporal regression for prod bug-1.
+  - **G-ttl: PASS** — `unauthorized-after-refresh=0` on BOTH after refreshing an 8s
+    token mid-session — the direct temporal regression for prod bug-2 AND live
+    validation of the I-8 push-relay flip.
+  All 5 new layers (L3–L7) are now built, wired, AND exercised green.
+
 **Plan items — remaining (optional, not correctness-blocking):**
 - Deeper ART modes (soak G6 leaks, capacity G22/G25, determinism G21, mutation-
-  matrix G15) + the L5 temporal gates (`harness/TEMPORAL-GATES-RUN.md`) — run when
-  a longer infra window is available.
+  matrix G15) — run when a longer infra window is available.
