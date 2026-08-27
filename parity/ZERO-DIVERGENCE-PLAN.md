@@ -237,12 +237,16 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
     (connection survives updateAuth + re-hydrates — the opaque-pin fix) AND
     `wrong-user-pinned-group` PASS (cross-user JWT still rejected — no security
     regression). 0 auth/CCM errors; 0 panics.
-  - **`LOCAL ART: FAIL` is a G13 log-health false-positive** — the only failing
-    gate, tripped purely by ENVIRONMENTAL noise: the otel-collector container did
-    not auto-restart after the OrbStack bounce used to clear the `:80` ingress
-    wedge (→ `getaddrinfo ENOTFOUND otel-collector` spam) + one cold-SQL "slow
-    statement" warning. Zero code-related signatures. otel-collector restarted;
-    clean re-run confirms G13 drops under threshold.
+  - The first run showed `LOCAL ART: FAIL` from a G13 log-health false-positive
+    (the otel-collector container did not auto-restart after the OrbStack bounce
+    used to clear the `:80` ingress wedge → `ENOTFOUND` spam). After restarting
+    otel-collector, the **clean re-run is `LOCAL ART: PASS`** (opened 25/25, G8
+    150/150 0-mismatch, G4 1202/1202, G11 8/0/1). G13 → WATCH (4 sigs < 5
+    threshold), and those 4 are EXPECTED test-induced signatures — including the
+    `wrong-user-pinned-group` "User ID mismatch pinned/incoming" (my opaque sub-pin
+    correctly rejecting a cross-user token) and `update-auth-invalid` "updateAuth
+    verification failed" (bad-signature rejection) — plus a cold-SQL slow-statement.
+    No code-related signatures.
 
 **Plan items — remaining:**
 - **I-8 push-relay flip** (deferred purity, not a live bug — see above).
