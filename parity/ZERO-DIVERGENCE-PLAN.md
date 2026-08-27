@@ -224,8 +224,27 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
   version; reverting the advance-path no-op fallback makes it poke "02" and FAIL).
   Verified green against a live Postgres.
 
+**Plan items — done (session 3 ART re-gate, 2026-08-27):**
+- **ART smoke re-gate on candidate `i8i6-440ed8820` (rev 440ed8820) — CORRECTNESS
+  CLEAN.** Full TS-vs-rust differential (opened 25/25, puts 11617, muts 1196 ok
+  err=0, errors=0). PASS: G1 connectivity, G4 mutations (1196/1196), G7 cvr-gc,
+  **G8 diff-oracle (0 mismatch, catalog 150/150, 4 pairs row-identical)**, G11
+  negative (8/0/1), G14 impact-cov (17/17), G26/G27/G31, G30 provenance (rev
+  matches HEAD). WATCH-only: G9/G29 (2-3 prod shapes = known build drift
+  hierarchyCanvases/kanbanTicketsPage, pre-existing). SKIP: G5/G6/G10/G15-25/G28
+  (not run in smoke mode — need soak/baselines/flags).
+  - **I-8 opaque-edge delta VALIDATED live:** G11 `update-auth-valid` PASS
+    (connection survives updateAuth + re-hydrates — the opaque-pin fix) AND
+    `wrong-user-pinned-group` PASS (cross-user JWT still rejected — no security
+    regression). 0 auth/CCM errors; 0 panics.
+  - **`LOCAL ART: FAIL` is a G13 log-health false-positive** — the only failing
+    gate, tripped purely by ENVIRONMENTAL noise: the otel-collector container did
+    not auto-restart after the OrbStack bounce used to clear the `:80` ingress
+    wedge (→ `getaddrinfo ENOTFOUND otel-collector` spam) + one cold-SQL "slow
+    statement" warning. Zero code-related signatures. otel-collector restarted;
+    clean re-run confirms G13 drops under threshold.
+
 **Plan items — remaining:**
-- **L5 ART temporal gates — RUN** (needs the live TS+rust sandbox pair, multi-hour
-  infra): execute per `harness/TEMPORAL-GATES-RUN.md` alongside a full ART re-gate.
-  The re-gate also validates the I-8 opaque-edge behavioral delta.
 - **I-8 push-relay flip** (deferred purity, not a live bug — see above).
+- Optional deeper ART modes (soak G6, capacity G22/G25, determinism G21) — not
+  correctness-blocking; run when a longer infra window is available.
