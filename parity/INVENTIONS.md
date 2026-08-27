@@ -134,7 +134,25 @@ guarantees, error semantics) versus TS.
 - **Contract:** a poke is not sent to a client before the CVR state it reflects
   is durable to the SAME degree TS guarantees (no client observes a version the
   CVR hasn't recorded). Flush ordering per CG preserved.
-- **Tests:** cvr flush ordering tests. **GAP:** durability-ordering oracle.
+- **Enforcement point (located):** the version a client is poked TO must equal
+  the version the store actually PERSISTED. `flush_ops_to_store` returns whether
+  the store *materially* flushed (sync_engine.rs:377); every caller that pokes
+  gates the poked cookie on it:
+  `cfg_cvr = if store_flushed { bumped } else { cfg.base.orig.clone() }` then
+  `pokers.end(cfg_cvr.version)` (sync_engine.rs:681-690). This is the 1:1 port of
+  TS `CVRUpdater.flush`'s `if (!flushed) return {cvr: this._orig}` (cvr.ts) —
+  cited at sync_engine.rs:344-347. Adopting the bumped CVR on a no-op flush would
+  advance client cookies past the stored version (the exact "poke to a
+  non-durable version" divergence) AND fail the next material flush's version
+  guard (`ConcurrentModification`).
+- **Tests:** cvr flush ordering tests. **GAP (integration-level):** a
+  durability-ordering oracle. The precise non-vacuous assertion is now specified:
+  drive an `advance`/config cycle whose store flush is a NO-OP (no material row
+  ops) and assert `pokers.end` receives `orig.version`, NOT the bumped version —
+  i.e. no client is poked to a version the store did not write. This requires the
+  CVR-store harness (PG-gated, `TEST_CVR_PG_URI`) since the false-return path only
+  exists WITH a store (`flush_ops_to_store` returns `Ok(true)` when `store` is
+  `None`, sync_engine.rs:385-387). Tracked as the one remaining integration gap.
 
 ## I-7 — Cost-model / flip-planner COUNT(*) caching
 - **Files:** `rust-ivm` planner cache, `engine::plan_ast`.

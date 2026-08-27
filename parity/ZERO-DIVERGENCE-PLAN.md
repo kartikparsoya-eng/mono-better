@@ -180,12 +180,35 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
 - **AGENTS.md** amended with rules 8 (call-site/context), 9 (state ownership +
   freshness), 10 (invention contract), + the divergence-layer index.
 
-**Plan items — remaining (tracked as tasks):**
-- **L5 ART temporal gates** (xyne-art): G-slow (injected slow query + reconnect
-  storm → ack latency hydrate-independent), G-ttl (JWT TTL < session → zero 401s),
-  frame-sequence oracle. — the end-to-end backstop.
-- **L7/I-8 CCM promotion**: make the ported `connection_context_manager.rs` the
-  single live owner of connection/auth state; delete the parallel `CgState` auth
-  maps + placeholder CCM. Structural removal of the bug-2 soil. Multi-day + re-gate.
-- Minor test GAPs noted in INVENTIONS.md: shed-error parity (I-4),
-  durability-ordering oracle (I-6), cancel-during-hydrate (L7).
+**Plan items — done (session 2, 2026-08-27):**
+- **Item 5 — L3 call-edge ledger:** `call_topology.py` Tier-2 (cross-file
+  emitter-site allowlist) + `L3-CONTEXT-MAP.md`. Catches a bug-1 placed in ANY
+  file (not just router.rs); proven non-vacuous. `2fc090abc`.
+- **Item 3 (unit-harness) — resolved to the CORRECT invariants:** the decoupled
+  emissions (`connected` accept task, `pong` writer keepalive, connect-time
+  `error` accept path, shed `error` writer task) are all pinned; the "poke during
+  hydrate" premise was INCORRECT — per-CG pokes are faithfully serialized in both
+  (I-1 contract (b)), so no such test was written. INVENTIONS.md I-1 documents the
+  three decoupled emissions precisely.
+- **Minor GAPs — I-4 shed-error parity** (`455a1a72a`, non-vacuous socket test),
+  **L7 cancel-during-hydrate** (`9f6bd78df`, teardown-completeness test +
+  FIFO-drain reasoning), **I-1 pong/error** (resolved in prose + tests).
+- **Item 7 (CCM) — blocking ambiguity RESOLVED:** verified TS `resolveAuth`
+  (auth.ts:74-85) allows anonymous (no-token) and requires userID only WHEN a
+  token is present; the rust port is already 1:1. So there is NO anonymous-opaque
+  divergence — the promotion is pure state de-duplication, not a fix. Pinned by
+  `resolve_auth_matches_ts_...` (`a903d8155`); spec corrected.
+- **L5 ART temporal gates — scripts written** (xyne-art `fac1ced`): G-slow,
+  G-ttl, frame-sequence oracle on the `ab_common` harness; pure logic unit-smoked.
+
+**Plan items — remaining:**
+- **L5 ART temporal gates — RUN** (needs the live TS+rust sandbox pair, multi-hour
+  infra): execute per `harness/TEMPORAL-GATES-RUN.md` alongside a full ART re-gate.
+- **I-8 CCM promotion Stages 1.1→3** (the LIVE-path migration): dual-write
+  `init_connection`/`close_connection`, migrate consumers to read the CCM at use
+  time, delete the parallel `CgState` auth maps. Multi-day + ART re-gate; the spec
+  forbids landing it half-way (I8-CCM-PROMOTION-SPEC.md). Note: I-8 is LATENT
+  (dead in prod, mutagen off) — no live bug pending this.
+- **I-6 durability-ordering oracle** — enforcement point now LOCATED
+  (sync_engine.rs:681-690); non-vacuous test specified but needs the PG-gated
+  CVR-store harness (`TEST_CVR_PG_URI`). One integration gap.
