@@ -145,14 +145,19 @@ guarantees, error semantics) versus TS.
   advance client cookies past the stored version (the exact "poke to a
   non-durable version" divergence) AND fail the next material flush's version
   guard (`ConcurrentModification`).
-- **Tests:** cvr flush ordering tests. **GAP (integration-level):** a
-  durability-ordering oracle. The precise non-vacuous assertion is now specified:
-  drive an `advance`/config cycle whose store flush is a NO-OP (no material row
-  ops) and assert `pokers.end` receives `orig.version`, NOT the bumped version —
-  i.e. no client is poked to a version the store did not write. This requires the
-  CVR-store harness (PG-gated, `TEST_CVR_PG_URI`) since the false-return path only
-  exists WITH a store (`flush_ops_to_store` returns `Ok(true)` when `store` is
-  `None`, sync_engine.rs:385-387). Tracked as the one remaining integration gap.
+- **Tests (DONE):** BOTH halves of the durability-ordering oracle now pinned,
+  PG-gated (`TEST_CVR_PG_URI`), non-vacuous:
+  - STORE side — `pg_quiet_commit_noop_flush_contract`: a no-op flush returns
+    `None`, does NOT advance the stored version, and the next material flush passes
+    `orig.version` and succeeds; the counter-factual (adopting the bumped version)
+    dies on `ConcurrentModification`.
+  - CLIENT side — `pg_noop_flush_does_not_poke_client_past_stored_version`
+    (2026-08-27): drive a quiet ADVANCE (the "02" commit touches only a different
+    client group's `clients` row, so cg1's lmids query sees 0 changes → no-op
+    flush), then assert every `pokeEnd` cookie ≤ the PG stored version and none
+    reaches the never-persisted "02". Proven to FAIL when the advance-path no-op
+    fallback (sync_engine.rs:1435-1440) is reverted — the poke then carries the
+    bumped "02" cookie: "client poked to non-durable version 02; store is at 01".
 
 ## I-7 — Cost-model / flip-planner COUNT(*) caching
 - **Files:** `rust-ivm` planner cache, `engine::plan_ast`.
@@ -162,17 +167,40 @@ guarantees, error semantics) versus TS.
   plan.
 - **Tests:** `g8_mychannelparticipations_real_ast`, diff-oracle full-catalog.
 
-## I-8 — PlaceholderConnContextManager (LATENT DIVERGENCE — do not ship new consumers)
-- **Files:** `main.rs` `PlaceholderConnContextManager`.
-- **Status:** the prod CCM dispatch returns `auth:None, revision:0` always; the
-  LIVE connection/auth state lives in `CgState` maps (`client_raw_auth`,
-  `client_auth`, `client_query_ctx`, `PushRelayHeaders`). TS keeps ONE owner
-  (`ConnectionContextManager`).
-- **Why latent, not active:** the only reader of the placeholder is the mutagen
-  CRUD path (`syncer_ws_message_handler.rs:407,421`), and `create_mutagen`
-  returns `None` in prod, so that branch is dead. If CRUD mutagen is ever
-  enabled, it would read `auth:None` → a bug of the SAME class as bug-2.
-- **Contract owed:** promote the ported `connection_context_manager.rs` to be the
-  single live owner (plan item 7), or, minimally, feed the placeholder from the
-  live `CgState` auth so any future reader is correct.
-- **Tests:** NONE yet — this is the structural work remaining.
+## I-8 — Promote the ported ConnectionContextManager to single live owner
+- **Files:** `services/view_syncer/connection_context_manager.rs` (the ported CCM,
+  now owned by `CgState.ccm: Arc<Mutex<ConnectionContextManager>>`); `router.rs`.
+- **Status (2026-08-27): LARGELY DONE.** The ported CCM is now the single live
+  owner of per-connection auth + custom-query context. DELETED the parallel
+  `CgState` maps `client_auth`, `client_raw_auth`, and `client_query_ctx` (plus
+  `default_query_context`/`filtered_query_headers`/the dead `query_config` field).
+  All consumers read the CCM at use time:
+  - authData → `decode(must_get_connection_context(sel).auth.raw())` at hydrate.
+  - custom-query context → `custom_query_context_from(must_get_connection_context(
+    sel))` (rust-only adapter; TS `transform-query.ts` reads `ctx.queryContext`
+    inline) at the 3 config_and_hydrate/revalidation sites.
+  - auth-maintenance / revalidation / updateAuth-unchanged → the CCM.
+  - Register now precedes arm (TS order); a failing test pinned the ordering.
+- **Fixed en route:** the `initConnection` `customHeaders` allowlist filter (TS
+  :306/:324) and the opaque-token updateAuth sub-pin (only JWTs carry a `sub`).
+- **REMAINING (deliberately deferred, not a live bug):** the push-relay path still
+  reads `PushRelayHeaders.auth` — a shared `Arc<Mutex<Option<String>>>` refreshed
+  at updateAuth (the shipped 2026-08-27 fix). Its freshness contract IS met and
+  test-pinned (`update_auth_refreshes_the_forwarded_push_relay_token`), so this is
+  a state-dedup purity item, NOT a correctness gap. Full CCM-sourcing is risky on
+  the write path because `PushRelayHeaders.request_headers` forwards RAW incoming
+  headers (the TS relay endpoint applies its own push-config allowlist), whereas
+  the CCM's `mutate_context` PRE-filters them — a straight swap would change what
+  the relay receives. To be done as a dedicated commit: read auth from
+  `must_get_connection_context(sel)` at relay time (TS pusher.ts:107), keeping the
+  raw-header forwarding semantics, then delete the auth cell.
+- **Also still parallel:** the mutagen CRUD path reads the OLD
+  `conn_context_manager` dispatch (`syncer_ws_message_handler.rs:407`), dead in
+  prod (`create_mutagen` returns `None`); consolidating it into the ported CCM is
+  the same deferred purity item.
+- **Tests:** `configured_query_context_matches_typescript_defaults_and_header_filtering`,
+  `forwards_allowlisted_incoming_request_headers` (Step-2 golden, non-vacuous),
+  `connection_context_manager_tracks_register_update_and_close`,
+  `authdata_reads_from_connection_context_manager`,
+  `auth_maintenance_reads_token_from_the_connection_context_manager`,
+  `a_close_fully_tears_down_all_per_client_state`, the 7 `update_auth_*` tests.

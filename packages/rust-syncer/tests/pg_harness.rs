@@ -1353,6 +1353,279 @@ fn pg_advance_lmid_change_with_no_queries() {
     });
 }
 
+/// I-6 durability-ordering oracle (CLIENT-OBSERVABLE half). The store-level
+/// contract (`pg_quiet_commit_noop_flush_contract`) proves a no-op flush does not
+/// advance the STORED version. This proves the other half through the engine: a
+/// client is never POKED to a version the store did not persist.
+///
+/// Drive a config cycle whose store flush is a NO-OP (the client + its internal
+/// `lmids` query already exist and no row changed) but whose working CVR version
+/// bumped (state_version "01" → "02"). The fix at sync_engine.rs:685-690 reverts
+/// `cfg_cvr` to `orig` on a no-op flush, so `pokers.end` receives the ORIGINAL
+/// ("01"-based) version — the client's cookie never reaches the never-persisted
+/// "02". The PG stored version must also stay at "01".
+///
+/// NON-VACUOUS: revert the sync_engine no-op fallback (adopt the bumped `cfg_cvr`
+/// unconditionally) and the second-cycle `pokeEnd` carries an "02"-based cookie —
+/// a version the store never wrote — failing the `no poke past the stored version`
+/// assertion.
+#[test]
+fn pg_noop_flush_does_not_poke_client_past_stored_version() {
+    use std::sync::Arc;
+
+    use rusqlite::Connection;
+    use rust_cvr::client_handler::WebSocketSink;
+    use rust_cvr::cvr::RowRecordMap;
+    use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
+
+    let Some(uri) = pg_uri() else {
+        eprintln!(
+            "SKIP pg_noop_flush_does_not_poke_client_past_stored_version: TEST_CVR_PG_URI not set"
+        );
+        return;
+    };
+
+    let schema = "cvr_noop_poke";
+    let db_path = format!("/tmp/rust-syncer-pg-noop-poke-{}.db", std::process::id());
+    let cleanup_sqlite = || {
+        for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    };
+    cleanup_sqlite();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+
+    // Replica with only the `clients` table: one client at lastMutationID 42.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        let _ = conn.pragma_update(None, "journal_mode", "wal2");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                replicaVersion TEXT NOT NULL,
+                publications TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.replicationState" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                stateVersion TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.changeLog2" (
+                "stateVersion" TEXT NOT NULL,
+                "table"        TEXT NOT NULL,
+                "rowKey"       TEXT NOT NULL,
+                "op"           TEXT NOT NULL,
+                "pos"          INTEGER NOT NULL,
+                PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE "app_0.clients" (
+                "clientGroupID"  TEXT NOT NULL,
+                "clientID"       TEXT NOT NULL,
+                "lastMutationID" INTEGER NOT NULL,
+                "userID"         TEXT,
+                "_0_version"     TEXT NOT NULL,
+                PRIMARY KEY ("clientGroupID", "clientID")
+            );
+            INSERT INTO "_zero.replicationConfig" (lock, replicaVersion, publications)
+                VALUES ('singleton', 'replica-1', '[]');
+            INSERT INTO "_zero.replicationState" (lock, stateVersion) VALUES ('singleton', '01');
+            INSERT INTO "app_0.clients"
+                ("clientGroupID","clientID","lastMutationID","userID","_0_version")
+                VALUES ('cg1', 'c1', 42, NULL, '01');
+            "#,
+        )
+        .unwrap();
+    }
+
+    let specs = rust_syncer::compute_table_specs_from_path(&db_path).unwrap();
+    let mut pipelines = IvmPipelines::new();
+    pipelines.init(specs, Some(&db_path), "app").unwrap();
+    let mut engine = SyncEngine::new(pipelines);
+    let pool = {
+        let _g = handle.enter();
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect_lazy(&uri)
+            .unwrap()
+    };
+    engine.set_tokio_handle(handle);
+    engine
+        .set_cvr_store(
+            pool,
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-0".to_string(),
+        )
+        .unwrap();
+
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+    let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+    let sink1: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx1));
+    engine.register_client("c1", "ws1", "cg1", &shard, None, sink1);
+
+    // Materially hydrate at "01" — persists the CVR to PG.
+    let hydrated = rt
+        .block_on(engine.config_and_hydrate(
+            empty_engine_cvr("cg1", "replica-1"),
+            "c1",
+            &["ws1".to_string()],
+            &shard,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            None,
+            &serde_json::json!({}),
+            None,
+            "01".to_string(),
+            "replica-1".to_string(),
+            &RowRecordMap::new(),
+            0,
+            0,
+            0,
+        ))
+        .expect("initial hydrate");
+    while rx1.try_recv().is_ok() {} // drain the hydrate poke
+
+    // The version the store actually persisted.
+    let stored_before: (String,) = rt.block_on(async {
+        let p = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .unwrap();
+        sqlx::query_as(&format!(
+            r#"SELECT "version" FROM "{schema}".instances WHERE "clientGroupID" = 'cg1'"#
+        ))
+        .fetch_one(&p)
+        .await
+        .unwrap()
+    });
+    assert!(
+        stored_before.0.starts_with("01"),
+        "hydrate must persist an 01-based version, got {}",
+        stored_before.0
+    );
+
+    // Quiet advance: bump the replica to "02" via a commit that touches only a
+    // DIFFERENT client group's `clients` row. cg1's internal lmids query filters
+    // `clientGroupID = 'cg1'`, so it sees ZERO changes — the store flush is a
+    // no-op and the poke must stay on the stored "01" version (sync_engine.rs
+    // :1435-1440, the "batch only touched other groups' rows" quiet-commit path).
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            BEGIN;
+            INSERT INTO "app_0.clients"
+                ("clientGroupID","clientID","lastMutationID","userID","_0_version")
+                VALUES ('cg-other', 'cx', 7, NULL, '02');
+            INSERT INTO "_zero.changeLog2" ("stateVersion","table","rowKey","op","pos")
+                VALUES ('02', 'app_0.clients', '{"clientGroupID":"cg-other","clientID":"cx"}', 's', 0);
+            UPDATE "_zero.replicationState" SET stateVersion = '02';
+            COMMIT;
+            "#,
+        )
+        .unwrap();
+    }
+    let existing = rt.block_on(engine.existing_rows());
+    let advanced = rt
+        .block_on(engine.advance_and_sync(
+            hydrated,
+            "replica-1".to_string(),
+            &["ws1".to_string()],
+            &existing,
+            0,
+            0,
+            0,
+        ))
+        .expect("quiet advance");
+    assert_eq!(
+        advanced.num_changes, 0,
+        "the advance touched only cg-other, so cg1 must see zero changes"
+    );
+
+    // Collect the poke frames from the quiet cycle and check every pokeEnd cookie.
+    let mut poke_end_cookies: Vec<String> = Vec::new();
+    while let Ok(WsCommand::Send { msg: frame, .. }) = rx1.try_recv() {
+        if let Some(arr) = frame.as_array()
+            && arr.first().and_then(|v| v.as_str()) == Some("pokeEnd")
+            && let Some(cookie) = arr
+                .get(1)
+                .and_then(|b| b.get("cookie"))
+                .and_then(|c| c.as_str())
+            && !cookie.is_empty()
+        {
+            poke_end_cookies.push(cookie.to_string());
+        }
+    }
+
+    // The store must NOT have advanced past "01".
+    let stored_after: (String,) = rt.block_on(async {
+        let p = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .unwrap();
+        sqlx::query_as(&format!(
+            r#"SELECT "version" FROM "{schema}".instances WHERE "clientGroupID" = 'cg1'"#
+        ))
+        .fetch_one(&p)
+        .await
+        .unwrap()
+    });
+    assert_eq!(
+        stored_after.0, stored_before.0,
+        "a no-op flush must not advance the stored version"
+    );
+
+    // No client cookie may reach the never-persisted "02" version.
+    for cookie in &poke_end_cookies {
+        assert!(
+            !cookie.starts_with("02"),
+            "client poked to non-durable version {cookie}; store is at {} \
+             (I-6: no client observes a version the CVR hasn't recorded)",
+            stored_after.0
+        );
+        assert!(
+            cookie.as_str() <= stored_after.0.as_str(),
+            "poke cookie {cookie} exceeds the stored version {}",
+            stored_after.0
+        );
+    }
+
+    drop(engine);
+    cleanup_sqlite();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// Production lifecycle gate: connect → hydrate from the SQLite replica →
 /// persist CVR/rows in Postgres → disconnect → advance while offline → reconnect
 /// with the pre-advance cookie → catch up the missed row from Postgres.
