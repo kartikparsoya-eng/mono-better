@@ -201,14 +201,31 @@ Items 1–4 are fast and close the immediate holes; 5–7 make it structural.
 - **L5 ART temporal gates — scripts written** (xyne-art `fac1ced`): G-slow,
   G-ttl, frame-sequence oracle on the `ab_common` harness; pure logic unit-smoked.
 
+**Plan items — done (session 3, 2026-08-27):**
+- **I-8 CCM promotion — LARGELY DONE** (`df4830e51` + `99de4c97b`): the ported
+  ConnectionContextManager is now the single live owner of per-connection auth +
+  custom-query context. DELETED the parallel `client_auth`/`client_raw_auth`/
+  `client_query_ctx` maps; all consumers (authData, custom-query context,
+  auth-maintenance/revalidation, updateAuth) read the CCM at use time via
+  TS-named methods + the labeled `custom_query_context_from` adapter. Non-vacuous
+  golden (`configured_query_context_matches_...`, proven to fail on a broken auth
+  map). En route: fixed the initConnection customHeaders allowlist filter AND the
+  opaque-token updateAuth sub-pin divergence (TS pins opaque by userID, not by
+  decoding — `99de4c97b`, both opaque tests now non-vacuous, no security
+  regression). REMAINING (deferred, NOT a live bug): the push-relay
+  `PushRelayHeaders.auth` cell (freshness contract met + test-pinned) + the dead
+  mutagen-CRUD `conn_context_manager` dispatch — full CCM-sourcing is a write-path
+  purity item with a raw-vs-filtered request-header subtlety; see
+  I8-CCM-PROMOTION-SPEC.md.
+- **I-6 durability-ordering oracle — DONE** (`3444dc154`): BOTH halves pinned,
+  PG-gated, non-vacuous. Store side `pg_quiet_commit_noop_flush_contract`; client
+  side `pg_noop_flush_does_not_poke_client_past_stored_version` (a quiet advance
+  touching only another CG's row → cg1 no-op flush → every pokeEnd cookie ≤ stored
+  version; reverting the advance-path no-op fallback makes it poke "02" and FAIL).
+  Verified green against a live Postgres.
+
 **Plan items — remaining:**
 - **L5 ART temporal gates — RUN** (needs the live TS+rust sandbox pair, multi-hour
   infra): execute per `harness/TEMPORAL-GATES-RUN.md` alongside a full ART re-gate.
-- **I-8 CCM promotion Stages 1.1→3** (the LIVE-path migration): dual-write
-  `init_connection`/`close_connection`, migrate consumers to read the CCM at use
-  time, delete the parallel `CgState` auth maps. Multi-day + ART re-gate; the spec
-  forbids landing it half-way (I8-CCM-PROMOTION-SPEC.md). Note: I-8 is LATENT
-  (dead in prod, mutagen off) — no live bug pending this.
-- **I-6 durability-ordering oracle** — enforcement point now LOCATED
-  (sync_engine.rs:681-690); non-vacuous test specified but needs the PG-gated
-  CVR-store harness (`TEST_CVR_PG_URI`). One integration gap.
+  The re-gate also validates the I-8 opaque-edge behavioral delta.
+- **I-8 push-relay flip** (deferred purity, not a live bug — see above).
