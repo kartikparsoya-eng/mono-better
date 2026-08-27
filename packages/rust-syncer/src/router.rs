@@ -1365,14 +1365,11 @@ struct CgState {
     sync_engine: SyncEngine,
     view_syncer: Arc<dyn ViewSyncerDispatch>,
     conn_context_manager: Arc<dyn ConnContextManagerDispatch>,
-    /// I-8 CCM promotion (task #155, Stage 1): the ported 1:1
-    /// `ConnectionContextManager` as the eventual SINGLE owner of per-connection
-    /// auth/context state (TS `ViewSyncerService`'s `#connContextManager`). In
-    /// Stage 1 it is written in parallel with the legacy `client_*` maps (which
-    /// remain authoritative); Stage 2 migrates consumers to read it at use time
-    /// via `must_get_connection_context`, Stage 3 deletes the maps. `Arc<Mutex>`
-    /// (not `Rc<RefCell>`) so Stage 2 can back the `Send+Sync` dispatch with the
-    /// same instance without a type change. Uncontended on the single CG thread.
+    /// The single owner of per-connection auth/context state — the ported 1:1
+    /// `ConnectionContextManager` (TS `ViewSyncerService`'s `#connContextManager`).
+    /// `Arc<Mutex>` (rust-only: the CCM is shared with the `Send+Sync` dispatch;
+    /// uncontended on the single CG thread). Migration status is tracked in
+    /// `parity/I8-CCM-PROMOTION-SPEC.md`, not here.
     ccm: Arc<Mutex<ConnectionContextManager>>,
     mutagen: Option<Arc<dyn MutagenDispatch>>,
     pusher: Option<Arc<dyn PusherDispatch>>,
@@ -1582,11 +1579,11 @@ impl CgState {
         let revalidate_interval_ms = config.revalidate_interval_ms;
         let query_config = config.query_config;
 
-        // I-8 Stage 1: the ported CCM, seeded with the same maintenance interval
-        // and query config the legacy maps use. `now`/`validate_legacy_jwt`/
-        // `push_config` are wired in Stage 1.1; Stage 1 only tracks auth in
-        // parallel. Seconds granularity matches TS `ConnectionContextManager`'s
-        // constructor (it re-multiplies to ms internally).
+        // Construct the ConnectionContextManager (TS `new ConnectionContextManager`).
+        // `push_config`/`validate_legacy_jwt` are `None`: the modern path has no
+        // legacy JWT validator (TS `validateLegacyJWT` undefined) and no consumer
+        // reads `mutate_context`; `now` defaults to `now_ms`. Seconds granularity
+        // matches the TS constructor (it re-multiplies to ms internally).
         let ccm = Arc::new(Mutex::new(ConnectionContextManager::new(
             revalidate_interval_ms.map(|ms| (ms / 1000).max(0) as u64),
             None,
@@ -2159,9 +2156,32 @@ impl CgState {
         // Port of `validateConnection` setting `revalidateAt = now + interval`.
         self.arm_auth_maintenance();
 
-        // I-8 Stage 1 dual-write: mirror this registration into the ported CCM
-        // (parallel to the maps above; maps stay authoritative).
-        self.ccm_register(&params);
+        // Register the connection into the ConnectionContextManager (TS
+        // `registerConnection`). Auth is resolved from the connect params: the
+        // modern path (no legacy validator) yields `Opaque{raw}` when a token is
+        // present and `None` when absent (auth.ts:74-77 / :108-112). The token
+        // was already signature-verified at admission (`AuthValidator`), as TS
+        // runs the auth validator before the manager.
+        {
+            let selector = CcmConnectionSelector {
+                client_id: params.client_id.clone(),
+                ws_id: params.ws_id.clone(),
+            };
+            let reg = ConnectParamsForRegistration {
+                client_id: params.client_id.clone(),
+                ws_id: params.ws_id.clone(),
+                user_id: params.user_id.clone().filter(|v| !v.is_empty()),
+                profile_id: params.profile_id.clone(),
+                base_cookie: params.base_cookie.clone(),
+                protocol_version: params.protocol_version,
+                http_cookie: params.http_cookie.clone(),
+                origin: params.origin.clone(),
+            };
+            let user_id = params.user_id.as_deref().filter(|v| !v.is_empty());
+            let wire = params.auth.as_deref().filter(|t| !t.is_empty());
+            let auth = resolve_auth(None, user_id, wire, None).unwrap_or(None);
+            lock_unpoisoned(&self.ccm).register_connection(&selector, &reg, auth);
+        }
 
         // Raw auth/header material captured at connect, forwarded on a relayed
         // custom push so the TS endpoint can rebuild the userPushURL request.
@@ -2511,10 +2531,32 @@ impl CgState {
         };
         if is_init {
             self.conn_context_manager.init_connection(&selector, body);
-            // Stage 1.1 dual-write: mirror the initConnection URL/header
-            // overrides into the ported CCM (parallel to `client_query_ctx` +
-            // `client_push_headers`; those maps stay authoritative in Stage 1).
-            self.ccm_init_connection(client_id, &ws_id, body);
+            // Apply the initConnection URL/header overrides to the
+            // ConnectionContextManager (TS `handleInitConnection`).
+            let str_field = |k: &str| {
+                body.get(k)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let map_field = |k: &str| {
+                body.get(k).and_then(|v| v.as_object()).map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect::<std::collections::HashMap<String, String>>()
+                })
+            };
+            let init_body = InitConnectionBody {
+                user_query_url: str_field("userQueryURL"),
+                user_query_headers: map_field("userQueryHeaders"),
+                user_push_url: str_field("userPushURL"),
+                user_push_headers: map_field("userPushHeaders"),
+            };
+            let ccm_selector = CcmConnectionSelector {
+                client_id: client_id.to_string(),
+                ws_id: ws_id.clone(),
+            };
+            let _ = lock_unpoisoned(&self.ccm).init_connection(&ccm_selector, &init_body);
         }
 
         // Ensure a group CVR: load from the store, or start fresh (dev/no-PG).
@@ -2580,11 +2622,18 @@ impl CgState {
             // The rows the client already has (from the CVR row cache).
             let existing_rows = self.sync_engine.existing_rows().await;
             self.last_row_count = existing_rows.len();
-            // The client's decoded JWT claims (`authData` for permission rules).
-            let auth_data = self
-                .client_auth
-                .get(client_id)
-                .cloned()
+            // The client's decoded JWT claims (`authData` for permission rules),
+            // read from the ConnectionContextManager at use time — TS passes
+            // `mustGetConnectionContext(selector).auth?.raw` to the transform,
+            // which decodes the claims (view-syncer-test-util.ts:861).
+            let auth_data = lock_unpoisoned(&self.ccm)
+                .must_get_connection_context(&CcmConnectionSelector {
+                    client_id: client_id.to_string(),
+                    ws_id: ws_id.clone(),
+                })
+                .ok()
+                .and_then(|c| c.auth)
+                .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()))
                 .unwrap_or_else(|| serde_json::json!({}));
             let now = now_ms();
             let ttl_clock = self.get_ttl_clock(now);
@@ -2689,112 +2738,6 @@ impl CgState {
     /// config/hydrate pass, which recomputes each query's read-permission
     /// transform against the new `authData` and re-hydrates the pipelines whose
     /// transformation hash drifted.
-    /// I-8 Stage 1 dual-write: mirror a new connection into the ported CCM
-    /// (`ConnectionContextManager::register_connection`, TS `registerConnection`).
-    /// Best-effort — the legacy `client_*` maps stay authoritative in Stage 1, so
-    /// a CCM discrepancy can never fail the live connection.
-    fn ccm_register(&self, params: &ConnectParams) {
-        let selector = CcmConnectionSelector {
-            client_id: params.client_id.clone(),
-            ws_id: params.ws_id.clone(),
-        };
-        let reg = ConnectParamsForRegistration {
-            client_id: params.client_id.clone(),
-            ws_id: params.ws_id.clone(),
-            user_id: params.user_id.clone().filter(|v| !v.is_empty()),
-            profile_id: params.profile_id.clone(),
-            base_cookie: params.base_cookie.clone(),
-            protocol_version: params.protocol_version,
-            http_cookie: params.http_cookie.clone(),
-            origin: params.origin.clone(),
-        };
-        // Stage 1.1: seed connect-time auth. The modern path has no legacy JWT
-        // validator, so `resolve_auth` returns `Opaque{raw}` when a token is
-        // present and `None` when absent (auth.ts:108-112 / :74-77) — the SAME
-        // token the live `client_raw_auth` retains and `client_auth` decodes.
-        // The token was already signature-verified at admission (`AuthValidator`),
-        // mirroring TS where the auth validator runs before the CCM. On the rare
-        // Err path (token without a userID — which TS also rejects) fall back to
-        // None; the legacy maps remain authoritative so the live connection is
-        // never affected in Stage 1.
-        let user_id = params.user_id.as_deref().filter(|v| !v.is_empty());
-        let wire = params.auth.as_deref().filter(|t| !t.is_empty());
-        let auth = match resolve_auth(None, user_id, wire, None) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::debug!("CG {}: CCM Stage-1.1 seed auth: {e:?}", self.cg_id);
-                None
-            }
-        };
-        lock_unpoisoned(&self.ccm).register_connection(&selector, &reg, auth);
-    }
-
-    /// I-8 Stage 1 dual-write: mirror an `updateAuth` into the ported CCM
-    /// (`ConnectionContextManager::update_auth`, TS `updateAuth`). Best-effort.
-    fn ccm_update_auth(&self, client_id: &str, ws_id: &str, token: &str) {
-        let selector = CcmConnectionSelector {
-            client_id: client_id.to_string(),
-            ws_id: ws_id.to_string(),
-        };
-        if let Err(e) = lock_unpoisoned(&self.ccm).update_auth(
-            &selector,
-            &UpdateAuthBody {
-                auth: Some(token.to_string()),
-            },
-        ) {
-            tracing::debug!(
-                "CG {}: CCM Stage-1 dual-write update_auth: {e:?}",
-                self.cg_id
-            );
-        }
-    }
-
-    /// I-8 Stage 1.1 dual-write: mirror an `initConnection`'s URL/header
-    /// overrides into the ported CCM (`ConnectionContextManager::init_connection`,
-    /// TS `handleInitConnection`). Best-effort; the legacy maps stay authoritative.
-    fn ccm_init_connection(&self, client_id: &str, ws_id: &str, body: &serde_json::Value) {
-        let selector = CcmConnectionSelector {
-            client_id: client_id.to_string(),
-            ws_id: ws_id.to_string(),
-        };
-        let str_field = |k: &str| {
-            body.get(k)
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        };
-        let map_field = |k: &str| {
-            body.get(k).and_then(|v| v.as_object()).map(|o| {
-                o.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect::<std::collections::HashMap<String, String>>()
-            })
-        };
-        let init_body = InitConnectionBody {
-            user_query_url: str_field("userQueryURL"),
-            user_query_headers: map_field("userQueryHeaders"),
-            user_push_url: str_field("userPushURL"),
-            user_push_headers: map_field("userPushHeaders"),
-        };
-        if let Err(e) = lock_unpoisoned(&self.ccm).init_connection(&selector, &init_body) {
-            tracing::debug!(
-                "CG {}: CCM Stage-1.1 dual-write init_connection: {e:?}",
-                self.cg_id
-            );
-        }
-    }
-
-    /// I-8 Stage 1.1 dual-write: mirror a connection teardown into the ported CCM
-    /// (`ConnectionContextManager::close_connection`, TS `closeConnection`) so the
-    /// CCM does not retain a connection the legacy maps have removed.
-    fn ccm_close_connection(&self, client_id: &str, ws_id: &str) {
-        let selector = CcmConnectionSelector {
-            client_id: client_id.to_string(),
-            ws_id: ws_id.to_string(),
-        };
-        lock_unpoisoned(&self.ccm).close_connection(&selector);
-    }
-
     async fn handle_update_auth(&mut self, client_id: &str, token: &str) {
         if token.is_empty() {
             return;
@@ -2902,9 +2845,18 @@ impl CgState {
         {
             *cell = Some(token.to_string());
         }
-        // I-8 Stage 1 dual-write: mirror the refreshed auth into the ported CCM.
+        // Refresh the auth on the ConnectionContextManager (TS `updateAuth`).
         if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
-            self.ccm_update_auth(client_id, &ws_id, token);
+            let selector = CcmConnectionSelector {
+                client_id: client_id.to_string(),
+                ws_id,
+            };
+            let _ = lock_unpoisoned(&self.ccm).update_auth(
+                &selector,
+                &UpdateAuthBody {
+                    auth: Some(token.to_string()),
+                },
+            );
         }
         let empty_body = serde_json::json!({});
         self.handle_desired_queries(client_id, &empty_body, true)
@@ -3129,8 +3081,12 @@ impl CgState {
         self.client_push_headers.remove(client_id);
         self.client_query_ctx.remove(client_id);
         self.client_profile_ids.remove(client_id);
-        // Stage 1.1 dual-write: drop the connection from the ported CCM too.
-        self.ccm_close_connection(client_id, ws_id);
+        // Drop the connection from the ConnectionContextManager (TS
+        // `closeConnection`).
+        lock_unpoisoned(&self.ccm).close_connection(&CcmConnectionSelector {
+            client_id: client_id.to_string(),
+            ws_id: ws_id.to_string(),
+        });
         let mut global = lock_unpoisoned(&self.global_connections);
         if global
             .get(client_id)
@@ -3416,7 +3372,7 @@ impl CgState {
         // everyone to the new version; later passes then find their queries
         // running and their catch-up interval empty (cheap no-ops).
         let all_ws_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        for (client_id, _ws_id) in clients {
+        for (client_id, ws_id) in clients {
             let state_version = self
                 .sync_engine
                 .pipelines()
@@ -3425,10 +3381,16 @@ impl CgState {
             let replica_version = self.replica_version.clone();
             let existing_rows = self.sync_engine.existing_rows().await;
             self.last_row_count = existing_rows.len();
-            let auth_data = self
-                .client_auth
-                .get(&client_id)
-                .cloned()
+            // authData read from the ConnectionContextManager at use time (TS
+            // `mustGetConnectionContext(selector).auth?.raw`, decoded).
+            let auth_data = lock_unpoisoned(&self.ccm)
+                .must_get_connection_context(&CcmConnectionSelector {
+                    client_id: client_id.clone(),
+                    ws_id: ws_id.clone(),
+                })
+                .ok()
+                .and_then(|c| c.auth)
+                .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()))
                 .unwrap_or_else(|| serde_json::json!({}));
             let ttl_clock = self.get_ttl_clock(now);
             // Clone the CVR into the call so a failure doesn't consume it.
@@ -4847,24 +4809,21 @@ mod tests {
         );
     }
 
-    /// I-8 Stage 1 (task #155): the ported `ConnectionContextManager` is written
-    /// in parallel with the legacy `client_*` maps — `on_new_connection` registers
-    /// the connection into it, and `updateAuth` flows through to it. This is the
-    /// foundation for Stage 2 (migrate consumers to read the CCM at use time) and
-    /// Stage 3 (delete the maps), collapsing rust's four-copy connection state into
-    /// TS's single owner.
+    /// The ConnectionContextManager owns per-connection auth: `registerConnection`
+    /// seeds the connect-time token, `updateAuth` refreshes it, and
+    /// `closeConnection` drops the entry (no leaked auth — the bug-2 soil). Pins
+    /// that the seeded auth equals the connect token and survives a token refresh.
     ///
-    /// NON-VACUOUS: before the Stage-1 dual-write, the CCM was the placeholder
-    /// (`auth:None`); reverting `ccm_update_auth` leaves the CCM auth `None` and
-    /// this assertion fails.
+    /// NON-VACUOUS: registering with `auth: None` fails the seeded-auth assert;
+    /// skipping the `close_connection` on teardown fails the final `is_err`.
     #[test]
-    fn i8_stage1_ccm_tracks_connection_and_auth_via_dual_write() {
+    fn connection_context_manager_tracks_register_update_and_close() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut state = revalidate_state(&rt, Some(300_000), valid);
 
-        // Authed, user-pinned connection (the ported CCM's `resolve_auth`
-        // requires a userID — TS parity, connection-context-manager.ts).
+        // Authed, user-pinned connection (`resolve_auth` requires a userID when a
+        // token is present — TS auth.ts:79-85).
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
             pinned_params("c1", "ws1", "user-1"),
@@ -4875,7 +4834,6 @@ mod tests {
             client_id: "c1".to_string(),
             ws_id: "ws1".to_string(),
         };
-        // Registered into the ported CCM by the Stage-1 dual-write.
         assert!(
             state
                 .ccm
@@ -4883,15 +4841,10 @@ mod tests {
                 .unwrap()
                 .must_get_connection_context(&selector)
                 .is_ok(),
-            "on_new_connection must register the connection in the ported CCM"
+            "on_new_connection must register the connection in the CCM"
         );
 
-        // GOLDEN (Stage 1.1): the CCM's SEEDED connect-time auth equals the live
-        // `client_raw_auth` (same connect token) — the shadow is correct, which
-        // is the precondition for Stage 2 migrating consumers to read the CCM.
-        // NON-VACUOUS: Stage 1.0 registered with `auth: None`, so before the
-        // Stage-1.1 seed this is `None` while `client_raw_auth` holds the token →
-        // the equality fails.
+        // The connect-time auth is seeded from the connect token.
         let seeded = state
             .ccm
             .lock()
@@ -4902,26 +4855,31 @@ mod tests {
             .map(|a| a.raw().to_string());
         assert!(
             seeded.is_some(),
-            "connect-time auth must be SEEDED into the CCM at register (Stage 1.1)"
+            "connect-time auth must be seeded at register"
         );
         assert_eq!(
             seeded.as_deref(),
             state.client_raw_auth.get("c1").map(String::as_str),
-            "CCM seeded auth must equal the live client_raw_auth at connect"
+            "seeded CCM auth must equal the connect token"
         );
 
-        // A refreshed token for the SAME user (distinct raw) flows into the CCM
-        // via the `ccm_update_auth` dual-write. We exercise the dual-write
-        // primitive directly rather than the full `handle_update_auth`, whose
-        // no-PG re-transform (`ensure_cvr` ClientNotFound) tears the connection
-        // down — that teardown's own CCM propagation is asserted below.
+        // A refreshed token for the SAME user (distinct raw) flows through
+        // `updateAuth`. We call it directly rather than the full
+        // `handle_update_auth`, whose no-PG re-transform (`ensure_cvr`
+        // ClientNotFound) tears the connection down — that teardown is asserted
+        // below.
         let token2 = {
             use base64::Engine;
             let payload = serde_json::json!({"sub": "user-1", "iat": 2}).to_string();
             let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
             format!("hdr.{b64}.sig")
         };
-        state.ccm_update_auth("c1", "ws1", &token2);
+        let _ = state.ccm.lock().unwrap().update_auth(
+            &selector,
+            &UpdateAuthBody {
+                auth: Some(token2.clone()),
+            },
+        );
         let raw = state
             .ccm
             .lock()
@@ -4933,13 +4891,10 @@ mod tests {
         assert_eq!(
             raw.as_deref(),
             Some(token2.as_str()),
-            "updateAuth must flow into the ported CCM (I-8 Stage 1.1 dual-write)"
+            "updateAuth must refresh the CCM's auth token"
         );
 
-        // Stage 1.1 close dual-write: a teardown drops the connection from the
-        // CCM too — no leaked auth state (the bug-2 soil). NON-VACUOUS: without
-        // the `ccm_close_connection` added to `on_connection_closed`, the CCM
-        // keeps the entry and this `is_err()` fails.
+        // A teardown drops the connection from the CCM (no leaked auth).
         state.on_connection_closed("c1", "ws1");
         assert!(
             state
@@ -4948,7 +4903,52 @@ mod tests {
                 .unwrap()
                 .must_get_connection_context(&selector)
                 .is_err(),
-            "on_connection_closed must drop the connection from the ported CCM"
+            "on_connection_closed must drop the connection from the CCM"
+        );
+    }
+
+    /// The permission `authData` is read from the ConnectionContextManager at use
+    /// time (TS `mustGetConnectionContext(selector).auth?.raw`, decoded), not from
+    /// a separate cache. For a JWT connection the CCM-derived claims must carry the
+    /// token's `sub` and equal the decoded connect token — read-permission
+    /// evaluation is unchanged.
+    ///
+    /// NON-VACUOUS: a CCM returning no auth yields `{}` instead of
+    /// `{sub:"user-1"}`, failing the assert.
+    #[test]
+    fn authdata_reads_from_connection_context_manager() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+
+        let via_ccm = state
+            .ccm
+            .lock()
+            .unwrap()
+            .must_get_connection_context(&CcmConnectionSelector {
+                client_id: "c1".to_string(),
+                ws_id: "ws1".to_string(),
+            })
+            .unwrap()
+            .auth
+            .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()))
+            .unwrap_or_else(|| serde_json::json!({}));
+        assert_eq!(
+            via_ccm.get("sub").and_then(|v| v.as_str()),
+            Some("user-1"),
+            "authData from the CCM must carry the JWT sub"
+        );
+        let token = state.client_raw_auth.get("c1").cloned().unwrap();
+        assert_eq!(
+            via_ccm,
+            crate::auth::jwt::decode_jwt_claims(&token),
+            "CCM authData must equal the decoded connect token"
         );
     }
 
