@@ -183,21 +183,21 @@ guarantees, error semantics) versus TS.
   - Register now precedes arm (TS order); a failing test pinned the ordering.
 - **Fixed en route:** the `initConnection` `customHeaders` allowlist filter (TS
   :306/:324) and the opaque-token updateAuth sub-pin (only JWTs carry a `sub`).
-- **REMAINING (deliberately deferred, not a live bug):** the push-relay path still
-  reads `PushRelayHeaders.auth` — a shared `Arc<Mutex<Option<String>>>` refreshed
-  at updateAuth (the shipped 2026-08-27 fix). Its freshness contract IS met and
-  test-pinned (`update_auth_refreshes_the_forwarded_push_relay_token`), so this is
-  a state-dedup purity item, NOT a correctness gap. Full CCM-sourcing is risky on
-  the write path because `PushRelayHeaders.request_headers` forwards RAW incoming
-  headers (the TS relay endpoint applies its own push-config allowlist), whereas
-  the CCM's `mutate_context` PRE-filters them — a straight swap would change what
-  the relay receives. To be done as a dedicated commit: read auth from
-  `must_get_connection_context(sel)` at relay time (TS pusher.ts:107), keeping the
-  raw-header forwarding semantics, then delete the auth cell.
-- **Also still parallel:** the mutagen CRUD path reads the OLD
-  `conn_context_manager` dispatch (`syncer_ws_message_handler.rs:407`), dead in
-  prod (`create_mutagen` returns `None`); consolidating it into the ported CCM is
-  the same deferred purity item.
+- **Push-relay + dispatch consolidation — DONE (2026-08-27):** the message
+  handler's `ConnContextManagerDispatch` is now backed by the ported CCM via the
+  `CcmDispatchAdapter` (router.rs) instead of `PlaceholderConnContextManager`
+  (which returned `auth:None`). So BOTH the handler's live reads consolidate onto
+  the single owner: (a) the mutagen-CRUD auth (`syncer_ws_message_handler.rs`) now
+  sees real auth (the placeholder divergence is gone), and (b) the relayed-push
+  auth is read FRESH per relay from `must_get_connection_context(sel).auth`
+  (handler `relay_headers_for`; router deleteClients cleanup) — TS pusher.ts:107.
+  The parallel `PushRelayHeaders.auth` `Arc<Mutex<Option<String>>>` CELL is DELETED
+  (now a plain `Option<String>` filled per relay), and the `handle_update_auth`
+  cell-refresh is removed. The raw-header forwarding semantics are preserved
+  (`request_headers` still RAW; only `auth` moved to the CCM). Tests:
+  `ccm_dispatch_adapter_surfaces_real_connection_auth` (non-vacuous: fails when the
+  adapter returns the placeholder `None`) + the repurposed
+  `update_auth_refreshes_the_forwarded_push_relay_token`.
 - **Tests:** `configured_query_context_matches_typescript_defaults_and_header_filtering`,
   `forwards_allowlisted_incoming_request_headers` (Step-2 golden, non-vacuous),
   `connection_context_manager_tracks_register_update_and_close`,

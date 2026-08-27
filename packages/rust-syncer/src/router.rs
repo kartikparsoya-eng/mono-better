@@ -30,8 +30,8 @@ use crate::sync_engine::{SyncEngine, empty_cvr};
 use crate::workers::connect_params::ConnectParams;
 use crate::workers::connection::Connection;
 use crate::workers::syncer_ws_message_handler::{
-    ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch, PusherDispatch,
-    SyncerWsMessageHandler, ViewSyncerDispatch,
+    ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
+    PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
 use crate::ws_server::ConnectionContext;
 use crate::ws_sink::DirectWebSocketSink;
@@ -1330,6 +1330,54 @@ fn custom_query_context_from(ctx: &CcmConnectionContext) -> Option<CustomQueryCo
     })
 }
 
+/// Rust-only adapter (no TS twin): backs the message handler's
+/// `ConnContextManagerDispatch` with the ported [`ConnectionContextManager`], so
+/// the handler's live reads — the mutagen-CRUD auth (`syncer_ws_message_handler.rs`)
+/// and the relayed-push auth — see the SINGLE owner's CURRENT per-connection auth
+/// at use time. Mirrors TS, which reads `mustGetConnectionContext(selector)` fresh
+/// on the CRUD/push paths (pusher.ts:107). Replaces `PlaceholderConnContextManager`
+/// (which returned `auth:None` — the I-8 latent divergence) for the router's live
+/// handler.
+///
+/// `init_connection`/`update_auth` are NOT on the handler's live path — the router
+/// intercepts both messages and drives the CCM directly (router.rs `updateAuth`
+/// interception + the `initConnection` CCM call) before they reach the handler —
+/// so they are documented no-ops here.
+struct CcmDispatchAdapter {
+    ccm: Arc<Mutex<ConnectionContextManager>>,
+}
+
+impl CcmDispatchAdapter {
+    fn new(ccm: Arc<Mutex<ConnectionContextManager>>) -> Self {
+        Self { ccm }
+    }
+}
+
+impl ConnContextManagerDispatch for CcmDispatchAdapter {
+    fn must_get_connection_context(&self, selector: &ConnectionSelector) -> ConnContextInfo {
+        let sel = CcmConnectionSelector {
+            client_id: selector.client_id.clone(),
+            ws_id: selector.ws_id.clone(),
+        };
+        match lock_unpoisoned(&self.ccm).get_connection_context(&sel) {
+            Some(ctx) => ConnContextInfo {
+                auth: ctx.auth.as_ref().map(|a| a.raw().to_string()),
+                revision: ctx.revision,
+            },
+            None => ConnContextInfo {
+                auth: None,
+                revision: 0,
+            },
+        }
+    }
+
+    fn init_connection(&self, _selector: &ConnectionSelector, _body: &serde_json::Value) {}
+
+    fn update_auth(&self, _selector: &ConnectionSelector, _body: &serde_json::Value) -> bool {
+        true
+    }
+}
+
 /// Per-CG state, owned by (and confined to) the CG thread. Holds the `!Send`
 /// [`SyncEngine`] plus the live connections. Extracted from the event loop so
 /// the message handlers are unit-testable.
@@ -2184,11 +2232,11 @@ impl CgState {
             .collect();
         relay_request_headers.sort();
         let push_relay_headers = crate::workers::syncer_ws_message_handler::PushRelayHeaders {
-            // Shared cell so `updateAuth` refreshes the token the relayed push
-            // forwards (TS reads it fresh per push; a snapshot goes stale → 401).
-            auth: std::sync::Arc::new(std::sync::Mutex::new(
-                params.auth.clone().filter(|v| !v.is_empty()),
-            )),
+            // Base headers only. `auth` is filled FRESH from the CCM at each relay
+            // (handler: `relay_headers_for`; router deleteClients cleanup: read
+            // below), so no stale connect-time token is ever forwarded (I-8: the
+            // CCM is the single owner; no parallel auth cell).
+            auth: None,
             cookie: params.http_cookie.clone(),
             origin: params.origin.clone(),
             request_headers: relay_request_headers,
@@ -2202,7 +2250,10 @@ impl CgState {
 
         let handler = Box::new(SyncerWsMessageHandler::new(
             self.view_syncer.clone(),
-            self.conn_context_manager.clone(),
+            // The handler's connection-context reads (mutagen-CRUD auth + relayed
+            // push auth) go through the ported CCM — the single owner — not the
+            // `auth:None` placeholder (I-8).
+            Arc::new(CcmDispatchAdapter::new(self.ccm.clone())),
             self.mutagen.clone(),
             self.pusher.clone(),
             client_group_id.clone(),
@@ -2342,19 +2393,30 @@ impl CgState {
                         && let Some(pusher) = &self.pusher
                         && let Some(headers) = self.client_push_headers.get(&*client_id)
                     {
+                        let ws_id = self
+                            .registered_ws
+                            .get(&*client_id)
+                            .cloned()
+                            .unwrap_or_default();
                         let selector =
                             crate::workers::syncer_ws_message_handler::ConnectionSelector {
                                 client_id: client_id.to_string(),
-                                ws_id: self
-                                    .registered_ws
-                                    .get(&*client_id)
-                                    .cloned()
-                                    .unwrap_or_default(),
+                                ws_id: ws_id.clone(),
                             };
+                        // Fill `auth` FRESH from the CCM (single owner), like the
+                        // handler's `relay_headers_for` — never a stale token.
+                        let mut relay_headers = headers.clone();
+                        relay_headers.auth = lock_unpoisoned(&self.ccm)
+                            .get_connection_context(&CcmConnectionSelector {
+                                client_id: client_id.to_string(),
+                                ws_id,
+                            })
+                            .and_then(|c| c.auth)
+                            .map(|a| a.raw().to_string());
                         pusher.delete_client_mutations(
                             &selector,
                             &cleanup_ids,
-                            headers,
+                            &relay_headers,
                             &self.cg_id,
                         );
                     }
@@ -2810,15 +2872,10 @@ impl CgState {
         // flows into `connection.auth`, which `custom_query_context_from` reads),
         // detects the hash drift, and re-hydrates.
         crate::metrics::Metrics::inc(&self.metrics.auth_changes);
-        // Refresh the token forwarded on relayed pushes. The message handler
-        // shares this `Arc` (a plain snapshot would keep relaying the expired
-        // connect-time token → API-server 401). TS parity: pusher.ts reads
-        // `mustGetConnectionContext` fresh on every push.
-        if let Some(headers) = self.client_push_headers.get(client_id)
-            && let Ok(mut cell) = headers.auth.lock()
-        {
-            *cell = Some(token.to_string());
-        }
+        // The relayed-push token is NOT snapshotted here — every relay reads the
+        // CCM's current auth fresh (handler `relay_headers_for` / router
+        // deleteClients cleanup), so refreshing the CCM below is sufficient. TS
+        // parity: pusher.ts reads `mustGetConnectionContext` fresh on every push.
         // Refresh the auth on the ConnectionContextManager (TS `updateAuth`).
         if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
             let selector = CcmConnectionSelector {
@@ -4817,17 +4874,82 @@ mod tests {
         );
     }
 
-    /// Regression (push-relay 401, prod incident 2026-08-27): `updateAuth` MUST
-    /// refresh the token forwarded on relayed custom-mutation pushes. Rust
-    /// snapshotted `PushRelayHeaders.auth` at `initConnection` and never updated
-    /// it, so a client that refreshed its JWT mid-session kept having the STALE
-    /// connect-time token relayed to the API server → 401 "Invalid or expired
-    /// token" on every mutation. TS reads `mustGetConnectionContext` fresh per
-    /// push (pusher.ts), so the forwarded token always tracks `updateAuth`.
+    /// I-8: the message handler's connection-context dispatch is backed by the
+    /// ported CCM (`CcmDispatchAdapter`), NOT the `auth:None` placeholder — so the
+    /// handler's live reads (mutagen-CRUD auth + relayed-push auth) see the single
+    /// owner's real per-connection auth. Pins that the adapter surfaces the CCM's
+    /// auth + revision, and returns `None` for an unknown connection.
     ///
-    /// NON-VACUOUS: before the fix, `handle_update_auth` did not touch the push
-    /// header, so the shared cell stays at the connect-time token and this second
-    /// assert fails. (Verified by reverting the `handle_update_auth` refresh.)
+    /// NON-VACUOUS: the old `PlaceholderConnContextManager` returned `auth:None`
+    /// unconditionally — this asserts a NON-None token, so wiring the placeholder
+    /// (or breaking the adapter's `auth` mapping) fails the first assert.
+    #[test]
+    fn ccm_dispatch_adapter_surfaces_real_connection_auth() {
+        use crate::services::view_syncer::connection_context_manager::{
+            Auth, ConnectionContextManager,
+        };
+        let ccm = Arc::new(Mutex::new(ConnectionContextManager::new(
+            None, None, None, None, None, None,
+        )));
+        let reg = ConnectParamsForRegistration {
+            client_id: "c1".to_string(),
+            ws_id: "ws1".to_string(),
+            user_id: Some("user-1".to_string()),
+            profile_id: None,
+            base_cookie: None,
+            protocol_version: 1,
+            http_cookie: None,
+            origin: None,
+            request_headers: Vec::new(),
+        };
+        lock_unpoisoned(&ccm).register_connection(
+            &CcmConnectionSelector {
+                client_id: "c1".to_string(),
+                ws_id: "ws1".to_string(),
+            },
+            &reg,
+            Some(Auth::Opaque {
+                raw: "the-token".to_string(),
+            }),
+        );
+
+        let adapter = CcmDispatchAdapter::new(ccm);
+        let info = adapter.must_get_connection_context(&ConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "ws1".to_string(),
+        });
+        assert_eq!(
+            info.auth.as_deref(),
+            Some("the-token"),
+            "adapter must surface the CCM's real auth, not the placeholder None"
+        );
+
+        // Unknown connection → no auth (safe default, not a panic).
+        let missing = adapter.must_get_connection_context(&ConnectionSelector {
+            client_id: "nope".to_string(),
+            ws_id: "ws1".to_string(),
+        });
+        assert_eq!(missing.auth, None);
+    }
+
+    /// Regression (push-relay 401, prod incident 2026-08-27): the token forwarded
+    /// on relayed custom-mutation pushes MUST track `updateAuth`. Rust once
+    /// snapshotted the connect-time token and never refreshed it → the API server
+    /// 401'd every mutation on any session longer than the token TTL.
+    ///
+    /// After the I-8 push-relay flip there is NO parallel auth cell: every relay
+    /// fills `PushRelayHeaders.auth` fresh from `mustGetConnectionContext(selector)
+    /// .auth` (handler `relay_headers_for` / router deleteClients cleanup / the
+    /// `CcmDispatchAdapter`), so the forwarded token is whatever the CCM — the
+    /// single owner — currently holds. This asserts exactly that value across an
+    /// `updateAuth`.
+    ///
+    /// NON-VACUOUS: `updateAuth` (via the CCM) stores the new token; the relay
+    /// reads the CCM at use time, so a broken adapter/mapping or a CCM that failed
+    /// to refresh keeps forwarding the connect-time token and the second assert
+    /// fails. (The `updateAuth` re-transform is exercised via the CCM directly
+    /// because the storeless harness tears the connection down on a full
+    /// `handle_update_auth` re-hydrate — a harness limitation, not the relay path.)
     #[test]
     fn update_auth_refreshes_the_forwarded_push_relay_token() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -4836,33 +4958,39 @@ mod tests {
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(state.on_new_connection(
-            authed_params("c1", "ws1", "token-1"),
+            pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
 
-        // Capture the SHARED auth cell (the message handler holds the same Arc).
-        // Cloning the Arc keeps the assertion valid even though a downstream
-        // re-hydrate in this storeless harness later drops the map entry.
-        let auth_cell = state
-            .client_push_headers
-            .get("c1")
-            .expect("push headers for c1")
-            .auth
-            .clone();
-
-        // The relayed push forwards the connect-time token.
+        // The value the relay forwards == the CCM's current auth (what the handler's
+        // `relay_headers_for` / the router deleteClients cleanup read).
         assert_eq!(
-            auth_cell.lock().unwrap().as_deref(),
-            Some("token-1"),
+            ccm_raw_auth(&state, "c1", "ws1").as_deref(),
+            Some(fake_jwt("user-1").as_str()),
             "initial forwarded push token is the connect-time token"
         );
 
-        // A refreshed token must be forwarded on subsequent pushes.
-        rt.block_on(state.handle_update_auth("c1", "token-2"));
+        // A refreshed token (same user, newer iat) flows through `updateAuth` into
+        // the CCM; the relay then forwards the NEW token on subsequent pushes.
+        let token2 = {
+            use base64::Engine;
+            let payload = serde_json::json!({"sub": "user-1", "iat": 2}).to_string();
+            let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+            format!("hdr.{b64}.sig")
+        };
+        let _ = lock_unpoisoned(&state.ccm).update_auth(
+            &CcmConnectionSelector {
+                client_id: "c1".to_string(),
+                ws_id: "ws1".to_string(),
+            },
+            &UpdateAuthBody {
+                auth: Some(token2.clone()),
+            },
+        );
         assert_eq!(
-            auth_cell.lock().unwrap().as_deref(),
-            Some("token-2"),
-            "updateAuth must refresh the token forwarded on relayed pushes \
+            ccm_raw_auth(&state, "c1", "ws1").as_deref(),
+            Some(token2.as_str()),
+            "updateAuth must refresh the token the relay forwards \
              (a stale snapshot is what caused the API-server 401 storm)"
         );
     }

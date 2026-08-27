@@ -90,16 +90,16 @@ pub trait MutagenDispatch: Send + Sync {
 /// zero mutation logic — it only relays these bytes.
 #[derive(Clone, Default)]
 pub struct PushRelayHeaders {
-    /// Bearer auth token forwarded to the TS relay endpoint. Shared + mutable
-    /// (like `push_override`, and for the same reason) because a client can
-    /// refresh its token mid-connection via `updateAuth`: the relayed push must
-    /// carry the CURRENT token. TS reads it fresh per push through
-    /// `mustGetConnectionContext` (pusher.ts `enqueuePush`), so a connect-time
-    /// snapshot diverges — the token expires and the API server rejects it with
-    /// 401 ("Invalid or expired token"), breaking every custom mutation on any
-    /// session longer than the token TTL. `handle_update_auth` writes the new
-    /// token here; the router and the message handler share this Arc.
-    pub auth: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Bearer auth token forwarded to the TS relay endpoint. Read FRESH from the
+    /// ConnectionContextManager (the single owner of per-connection auth) at each
+    /// relay, mirroring TS `pusher.ts enqueuePush` reading
+    /// `mustGetConnectionContext(selector).auth?.raw` per push. Each relay call
+    /// site sets this from `ConnContextManagerDispatch::must_get_connection_context`
+    /// immediately before relaying, so a token refreshed mid-session via
+    /// `updateAuth` is always current — a connect-time snapshot would go stale and
+    /// the API server would reject it with 401 (the 2026-08-27 push-relay
+    /// incident). No parallel auth copy is kept (I-8: one owner).
+    pub auth: Option<String>,
     pub cookie: Option<String>,
     pub origin: Option<String>,
     pub request_headers: Vec<(String, String)>,
@@ -201,6 +201,20 @@ impl SyncerWsMessageHandler {
             _census: crate::live_count::Guard::new(&crate::live_count::WS_MESSAGE_HANDLER),
         }
     }
+
+    /// The relay headers with `auth` filled FRESH from the connection context
+    /// manager for this relay — TS reads `mustGetConnectionContext(selector).auth`
+    /// per push (pusher.ts), so a token refreshed mid-session via `updateAuth` is
+    /// always current. The static cookie/origin/request_headers/push_override are
+    /// carried from the connect-time base (TS also fixes these per connection).
+    fn relay_headers_for(&self, selector: &ConnectionSelector) -> PushRelayHeaders {
+        let mut headers = self.push_relay_headers.clone();
+        headers.auth = self
+            .conn_context_manager
+            .must_get_connection_context(selector)
+            .auth;
+        headers
+    }
 }
 
 impl MessageHandler for SyncerWsMessageHandler {
@@ -262,7 +276,7 @@ impl MessageHandler for SyncerWsMessageHandler {
                     pusher.delete_client_mutations(
                         selector,
                         &deleted_client_ids,
-                        &self.push_relay_headers,
+                        &self.relay_headers_for(selector),
                         &self.client_group_id,
                     );
                 }
@@ -319,7 +333,7 @@ impl MessageHandler for SyncerWsMessageHandler {
                     pusher.ack_mutation_responses(
                         selector,
                         &body_value,
-                        &self.push_relay_headers,
+                        &self.relay_headers_for(selector),
                         &self.client_group_id,
                     );
                 }
@@ -375,7 +389,7 @@ impl SyncerWsMessageHandler {
                     return pusher.enqueue_push(
                         selector,
                         &body_value,
-                        &self.push_relay_headers,
+                        &self.relay_headers_for(selector),
                         &self.client_group_id,
                     );
                 }
