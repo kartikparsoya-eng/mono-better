@@ -463,7 +463,11 @@ impl MemorySource {
             };
             if let Some(output) = output {
                 let output_change = self.source_change_to_change(&change);
-                filter_push(output_change, output, &pusher, predicate.as_ref());
+                filter_push(
+                    output_change,
+                    &mut |c| output.borrow_mut().push(c, &pusher),
+                    predicate.as_ref(),
+                );
             }
         }
 

@@ -1,18 +1,10 @@
-//! Tests for the plain `FanOut` / `FanIn` operators — ports of
-//! `zql/src/ivm/fan-out.ts` and `fan-in.ts`, exercised by
-//! `zql/src/ivm/fan-out-fan-in.test.ts`.
-//!
-//! NOTE (structural divergence, faithful test of what Rust implements): the TS
-//! twins are `FilterOperator`s (beginFilter/endFilter/filter/push) wired via
-//! `buildFilterPipeline`; the Rust `FanOut`/`FanIn` implement the push-only
-//! `Input`/`Output` model instead, and the Rust *builder* uses `UnionFanOut`/
-//! `UnionFanIn` for OR branches (builder.rs:381) rather than these. So the plain
-//! FanOut/FanIn are ported-but-runtime-unused twins — genuinely uncovered. These
-//! tests pin the behaviors the Rust code DOES implement, mirroring the TS test's
-//! intent: (1) FanOut forwards every change to all branches in order, (2) the
-//! missing-fan-in invariant panics (TS `must(...)`), (3) FanIn accumulates the
-//! per-branch pushes and collapses them to a single downstream push (TS
-//! "does not duplicate pushes").
+//! Tests for `FanOut` / `FanIn` — ports of `zql/src/ivm/fan-out.ts` and
+//! `fan-in.ts`, exercised per `zql/src/ivm/fan-out-fan-in.test.ts` through the
+//! real filter sub-graph protocol (FilterStart → FanOut → branches → FanIn):
+//! (1) FanOut forwards every change to all branches in order, (2) the
+//! missing-fan-in invariant panics (TS `must(...)`), (3) N converging
+//! branches collapse to a single downstream push ("does not duplicate
+//! pushes").
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,10 +14,14 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::change::{Change, ChangeType, SourceChange};
-use rust_ivm::ivm::data::{SortOrder, Value};
+use rust_ivm::ivm::data::{Node, SortOrder, Value};
 use rust_ivm::ivm::fan_in::FanIn;
 use rust_ivm::ivm::fan_out::FanOut;
-use rust_ivm::ivm::operator::{Input, InputBase, Output, OutputHandle};
+use rust_ivm::ivm::filter::Filter;
+use rust_ivm::ivm::filter_operators::{
+    FilterInputHandle, FilterOutput, FilterOutputHandle, FilterStart,
+};
+use rust_ivm::ivm::operator::InputBase;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
 
@@ -61,12 +57,18 @@ fn row_ab(a: f64, b: &str) -> FxHashMap<String, Value> {
     r
 }
 
-// Records every change it receives (change type + the row's `b` column).
+// Records every change it receives (change type + the row's `b` column) —
+// a terminal FilterOutput (accepts every node in filter loops).
 struct Collector {
     seen: Rc<RefCell<Vec<(ChangeType, String)>>>,
 }
-impl Output for Collector {
-    fn push(&mut self, change: Change, _pusher: &dyn InputBase) {
+impl FilterOutput for Collector {
+    fn begin_filter(&self) {}
+    fn end_filter(&self) {}
+    fn filter(&self, _node: &Node) -> bool {
+        true
+    }
+    fn push(&self, change: Change, _pusher: &dyn InputBase) {
         let b = match change.node().row.get("b") {
             Some(Value::Str(s)) => s.to_string(),
             _ => String::new(),
@@ -75,40 +77,41 @@ impl Output for Collector {
     }
 }
 
-#[allow(clippy::type_complexity)] // test-only helper: (handle, recorded-changes) tuple
-fn collector() -> (OutputHandle, Rc<RefCell<Vec<(ChangeType, String)>>>) {
+#[allow(clippy::type_complexity)] // test-only helper: (handle, recorded-changes)
+fn collector() -> (FilterOutputHandle, Rc<RefCell<Vec<(ChangeType, String)>>>) {
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let handle: OutputHandle = Rc::new(RefCell::new(Collector { seen: seen.clone() }));
+    let handle: FilterOutputHandle = Rc::new(RefCell::new(Collector { seen: seen.clone() }));
     (handle, seen)
 }
 
-// Port of TS `fan-out pushes along all paths`: every branch sees add/edit/remove
-// in order. The Rust FanOut does not self-register on its input (a divergence
-// from TS `input.setFilterOutput(this)`), so we wire it as the connector output
-// explicitly, then let the source push flow through.
+// Port of TS `fan-out pushes along all paths`: every branch sees
+// add/edit/remove in order. TS wires branches via `setFilterOutput` (append)
+// and satisfies the invariant with `new FanIn(fanOut, [])`.
 #[test]
 fn fan_out_pushes_along_all_paths() {
     let src = make_source();
     let input = src.borrow_mut().connect(Some(a_sort()), None, None, None);
 
-    let fan_out = FanOut::new(input.clone());
-    // Route the source connector's pushes into the fan-out.
-    let fo_out: OutputHandle = fan_out.clone();
-    input.borrow().set_output(fo_out);
+    let start = FilterStart::new(input);
+    let start_fi: FilterInputHandle = start.clone();
+    let fan_out = FanOut::new(start_fi);
 
-    // Three downstream branches.
     let (c1, s1) = collector();
     let (c2, s2) = collector();
     let (c3, s3) = collector();
-    fan_out.borrow().set_output(c1);
-    fan_out.borrow().set_output(c2);
-    fan_out.borrow().set_output(c3);
+    {
+        let fo = fan_out.borrow();
+        use rust_ivm::ivm::filter_operators::FilterInput;
+        fo.set_filter_output(c1);
+        fo.set_filter_output(c2);
+        fo.set_filter_output(c3);
+    }
 
-    // Dummy fan-in (no inputs) purely to satisfy the FanOut invariant, exactly
-    // like the TS test's `new FanIn(fanOut, [])`.
-    let schema = input.borrow().get_schema();
-    let fan_in = FanIn::new(schema);
-    fan_out.borrow().set_fan_in(fan_in);
+    // TS: `new FanIn(fanOut, [])` — no converging branch inputs; purely
+    // satisfies the fan-out invariant.
+    let schema = fan_out.borrow().get_schema();
+    let fan_in = FanIn::new(schema, Vec::new());
+    fan_out.borrow_mut().set_fan_in(fan_in);
 
     src.borrow_mut().push(SourceChange::Add {
         row: Arc::new(row_ab(1.0, "foo")),
@@ -133,19 +136,22 @@ fn fan_out_pushes_along_all_paths() {
 
 // Port of TS `must(this.#fanIn, 'fan-out must have a corresponding fan-in
 // set!')` (fan-out.ts:77): pushing through a FanOut with no fan-in wired is a
-// graph-construction invariant violation and must panic with the exact message.
+// graph-construction invariant violation and must panic with the message.
 #[test]
 #[should_panic(expected = "fan-out must have a corresponding fan-in set!")]
 fn fan_out_push_without_fan_in_panics() {
     let src = make_source();
     let input = src.borrow_mut().connect(Some(a_sort()), None, None, None);
 
-    let fan_out = FanOut::new(input.clone());
-    let fo_out: OutputHandle = fan_out.clone();
-    input.borrow().set_output(fo_out);
+    let start = FilterStart::new(input);
+    let start_fi: FilterInputHandle = start.clone();
+    let fan_out = FanOut::new(start_fi);
 
     let (c1, _s1) = collector();
-    fan_out.borrow().set_output(c1);
+    {
+        use rust_ivm::ivm::filter_operators::FilterInput;
+        fan_out.borrow().set_filter_output(c1);
+    }
     // Deliberately DO NOT call set_fan_in.
 
     src.borrow_mut().push(SourceChange::Add {
@@ -153,41 +159,37 @@ fn fan_out_push_without_fan_in_panics() {
     });
 }
 
-// Port of TS `fan-out,fan-in pairing does not duplicate pushes`: the same change
-// arriving on N branches is accumulated by FanIn and collapsed to a SINGLE
-// downstream push. We simulate N converging branches by registering the fan-in
-// as the fan-out's output N times; the source push then reaches fan_in N times,
-// and `fan_out_done_pushing` collapses the N accumulated adds to one.
+// Port of TS `fan-out,fan-in pairing does not duplicate pushes`: the same
+// change flowing through N pass-through branches is accumulated by FanIn and
+// collapsed to a SINGLE downstream push.
 #[test]
 fn fan_in_does_not_duplicate_pushes() {
     let src = make_source();
     let input = src.borrow_mut().connect(Some(a_sort()), None, None, None);
 
-    let fan_out = FanOut::new(input.clone());
-    let fo_out: OutputHandle = fan_out.clone();
-    input.borrow().set_output(fo_out);
+    let start = FilterStart::new(input);
+    let start_fi: FilterInputHandle = start.clone();
+    let fan_out = FanOut::new(start_fi);
 
-    let schema = input.borrow().get_schema();
-    let fan_in = FanIn::new(schema);
+    // Three real pass-through branches (TS builds Filter branches).
+    let branches: Vec<FilterInputHandle> = (0..3)
+        .map(|_| {
+            let fo: FilterInputHandle = fan_out.clone();
+            let f: FilterInputHandle = Filter::new(fo, Arc::new(|_| true));
+            f
+        })
+        .collect();
 
-    // Mark the fan-in as having branches (non-empty inputs => it collapses the
-    // accumulated pushes rather than asserting emptiness). The concrete input
-    // identity is irrelevant to the collapse path; the connector stands in for
-    // "there are branches feeding this fan-in".
-    fan_in.borrow_mut().add_input(input.clone());
+    let schema = fan_out.borrow().get_schema();
+    let fan_in = FanIn::new(schema, branches);
+    fan_out.borrow_mut().set_fan_in(fan_in.clone());
 
-    // Three converging branches all feed the same fan-in.
-    let fi_out_a: OutputHandle = fan_in.clone();
-    let fi_out_b: OutputHandle = fan_in.clone();
-    let fi_out_c: OutputHandle = fan_in.clone();
-    fan_out.borrow().set_output(fi_out_a);
-    fan_out.borrow().set_output(fi_out_b);
-    fan_out.borrow().set_output(fi_out_c);
-    fan_out.borrow().set_fan_in(fan_in.clone());
-
-    // Downstream of the fan-in: the single collector that must see NO duplicates.
+    // Downstream of the fan-in: the single collector that must see NO dupes.
     let (sink, seen) = collector();
-    fan_in.borrow().set_output(sink);
+    {
+        use rust_ivm::ivm::filter_operators::FilterInput;
+        fan_in.borrow().set_filter_output(sink);
+    }
 
     src.borrow_mut().push(SourceChange::Add {
         row: Arc::new(row_ab(1.0, "foo")),
@@ -198,26 +200,4 @@ fn fan_in_does_not_duplicate_pushes() {
         vec![(ChangeType::Add, "foo".to_string())],
         "three converging branches collapse to a single downstream add"
     );
-}
-
-// Port of the FanIn empty-inputs invariant (fan-in.ts:77): a fan-in with no
-// inputs must never receive pushes; `fan_out_done_pushing` on an empty
-// accumulator is a no-op (asserted below by observing no downstream push).
-#[test]
-fn fan_in_with_no_inputs_is_a_noop() {
-    let src = make_source();
-    let input = src.borrow_mut().connect(Some(a_sort()), None, None, None);
-    let schema = input.borrow().get_schema();
-    let fan_in = FanIn::new(schema);
-
-    let (sink, seen) = collector();
-    fan_in.borrow().set_output(sink);
-
-    // No inputs, no accumulated pushes: collapsing is a no-op, nothing forwarded.
-    let fan_out = FanOut::new(input.clone());
-    fan_in
-        .borrow_mut()
-        .fan_out_done_pushing(ChangeType::Add, &*fan_out.borrow());
-
-    assert!(seen.borrow().is_empty(), "empty fan-in forwards nothing");
 }

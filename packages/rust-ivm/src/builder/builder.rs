@@ -17,10 +17,13 @@ use crate::builder::filter::{create_predicate, create_simple_predicate, transfor
 use crate::ivm::cap::Cap;
 use crate::ivm::data::SortOrder;
 use crate::ivm::exists::Exists;
+use crate::ivm::fan_in::FanIn;
+use crate::ivm::fan_out::FanOut;
 use crate::ivm::filter::Filter;
+use crate::ivm::filter_operators::{FilterInputHandle, build_filter_pipeline};
 use crate::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
 use crate::ivm::join::{Join, JoinArgs};
-use crate::ivm::operator::{Input, Shared, Storage};
+use crate::ivm::operator::{Input, InputBase, Shared, Storage};
 use crate::ivm::schema::System;
 use crate::ivm::skip::Skip;
 use crate::ivm::source::Source;
@@ -233,6 +236,9 @@ fn build_pipeline_internal(
 
 /// Apply a WHERE clause to the pipeline.
 /// Port of TS `applyWhere` (builder.ts:399).
+/// Port of TS `applyWhere` (builder.ts:399): the non-flipped WHERE clause is
+/// built as a filter sub-graph (FilterStart -> filter chain -> FilterEnd);
+/// flipped subqueries take the Union fan path.
 fn apply_where(
     input: Shared<dyn Input>,
     condition: &Condition,
@@ -240,61 +246,91 @@ fn apply_where(
     name: &str,
 ) -> Shared<dyn Input> {
     if !condition_includes_flipped_subquery_at_any_level(condition) {
-        return apply_filter(input, condition, delegate, name);
+        return build_filter_pipeline(input, |filter_input| {
+            apply_filter(filter_input, condition, delegate, name)
+        });
     }
-
     apply_filter_with_flips(input, condition, delegate, name)
 }
 
-/// Apply a filter condition to the pipeline.
 /// Port of TS `applyFilter` (builder.ts:523).
-/// Handles AND (recursive), OR (group + FanOut/FanIn), CSQ (Exists), Simple (Filter).
 fn apply_filter(
-    input: Shared<dyn Input>,
+    input: FilterInputHandle,
     condition: &Condition,
     delegate: &mut dyn BuilderDelegate,
     name: &str,
-) -> Shared<dyn Input> {
+) -> FilterInputHandle {
     match condition {
-        Condition::And(conditions) => {
-            let mut end = input;
-            for cond in conditions {
-                end = apply_filter(end, cond, delegate, name);
-            }
-            end
-        }
+        Condition::And(conditions) => apply_and(input, conditions, delegate, name),
         Condition::Or(conditions) => apply_or(input, conditions, delegate, name),
-        Condition::CorrelatedSubquery(csq) => apply_csq_condition(input, csq),
-        Condition::Simple(simple) => {
-            let predicate = create_simple_predicate(simple);
-            Filter::new(input, predicate)
+        Condition::CorrelatedSubquery(csq) => {
+            apply_correlated_subquery_condition(input, csq, delegate, name)
         }
+        Condition::Simple(simple) => apply_simple_condition(input, delegate, simple),
     }
 }
 
-/// Apply an OR condition, handling subquery conditions with NodeFilter.
-/// Port of TS `applyOr` (builder.ts:553).
-fn apply_or(
-    input: Shared<dyn Input>,
+/// Port of TS `applyAnd` (builder.ts:541).
+fn apply_and(
+    mut input: FilterInputHandle,
     conditions: &[Condition],
-    _delegate: &mut dyn BuilderDelegate,
-    _name: &str,
-) -> Shared<dyn Input> {
-    let (subquery_conds, other_conds): (Vec<&Condition>, Vec<&Condition>) = conditions
-        .iter()
-        .partition(|c| !is_not_and_does_not_contain_subquery(c));
+    delegate: &mut dyn BuilderDelegate,
+    name: &str,
+) -> FilterInputHandle {
+    for sub_condition in conditions {
+        input = apply_filter(input, sub_condition, delegate, name);
+    }
+    input
+}
 
-    if subquery_conds.is_empty() {
-        let or_cond = Condition::Or(other_conds.iter().cloned().cloned().collect());
+/// Port of TS `applyOr` (builder.ts:556): no subquery conditions -> a single
+/// predicate Filter; otherwise FanOut -> per-subquery branches (+ one Filter
+/// branch for the plain conditions) -> FanIn.
+fn apply_or(
+    input: FilterInputHandle,
+    conditions: &[Condition],
+    delegate: &mut dyn BuilderDelegate,
+    name: &str,
+) -> FilterInputHandle {
+    let (subquery_conditions, other_conditions) = group_subquery_conditions(conditions);
+    if subquery_conditions.is_empty() {
+        let or_cond = Condition::Or(other_conditions.iter().cloned().cloned().collect());
         let predicate = create_predicate(&or_cond);
-        return Filter::new(input, predicate);
+        let filter: FilterInputHandle = Filter::new(input, predicate);
+        return filter;
     }
 
-    // OR with subqueries: use NodeFilter which checks node.relationships for
-    // EXISTS conditions on fetch, and reproduces Exists's boundary behaviour on
-    // push (a child add/remove that flips an EXISTS is re-emitted as ADD/REMOVE).
-    // This replaces the FanOut/FanIn pattern, whose FanIn::fetch is empty.
-    crate::ivm::node_filter::NodeFilter::new(input, conditions.to_vec())
+    let fan_out = FanOut::new(input);
+    let mut branches: Vec<FilterInputHandle> = subquery_conditions
+        .iter()
+        .map(|sub_condition| {
+            let fo: FilterInputHandle = fan_out.clone();
+            apply_filter(fo, sub_condition, delegate, name)
+        })
+        .collect();
+    if !other_conditions.is_empty() {
+        let or_cond = Condition::Or(other_conditions.iter().cloned().cloned().collect());
+        let fo: FilterInputHandle = fan_out.clone();
+        let filter: FilterInputHandle = Filter::new(fo, create_predicate(&or_cond));
+        branches.push(filter);
+    }
+    let schema = fan_out.borrow().get_schema();
+    let ret = FanIn::new(schema, branches);
+    fan_out.borrow_mut().set_fan_in(ret.clone());
+    ret
+}
+
+/// Port of TS `groupSubqueryConditions` (builder.ts:597).
+fn group_subquery_conditions(conditions: &[Condition]) -> (Vec<&Condition>, Vec<&Condition>) {
+    let mut partitioned: (Vec<&Condition>, Vec<&Condition>) = (Vec::new(), Vec::new());
+    for sub_condition in conditions {
+        if is_not_and_does_not_contain_subquery(sub_condition) {
+            partitioned.1.push(sub_condition);
+        } else {
+            partitioned.0.push(sub_condition);
+        }
+    }
+    partitioned
 }
 
 /// Check if a condition does NOT contain any subquery.
@@ -309,13 +345,26 @@ fn is_not_and_does_not_contain_subquery(condition: &Condition) -> bool {
     }
 }
 
+/// Port of TS `applySimpleCondition` (builder.ts:625).
+fn apply_simple_condition(
+    input: FilterInputHandle,
+    _delegate: &mut dyn BuilderDelegate,
+    simple: &crate::builder::ast::SimpleCondition,
+) -> FilterInputHandle {
+    let predicate = create_simple_predicate(simple);
+    let filter: FilterInputHandle = Filter::new(input, predicate);
+    filter
+}
+
 /// Apply a correlated subquery condition (EXISTS/NOT EXISTS) as a filter.
 /// Port of TS `applyCorrelatedSubqueryCondition` (builder.ts:689).
-/// Creates an Exists operator (the Join was already applied in the main pipeline).
-fn apply_csq_condition(
-    input: Shared<dyn Input>,
+/// (The Join for the subquery was already applied in the main pipeline.)
+fn apply_correlated_subquery_condition(
+    input: FilterInputHandle,
     csq: &CorrelatedSubqueryCondition,
-) -> Shared<dyn Input> {
+    _delegate: &mut dyn BuilderDelegate,
+    _name: &str,
+) -> FilterInputHandle {
     let sq = &csq.related;
     let op = csq.op.as_str();
 
@@ -325,27 +374,24 @@ fn apply_csq_condition(
     );
 
     if sq.subquery.limit == Some(0) {
-        if op == "EXISTS" {
-            let filter = Filter::new(input, Arc::new(|_| false));
-            return filter;
+        let filter: FilterInputHandle = if op == "EXISTS" {
+            Filter::new(input, Arc::new(|_| false))
         } else {
-            let filter = Filter::new(input, Arc::new(|_| true));
-            return filter;
-        }
+            Filter::new(input, Arc::new(|_| true))
+        };
+        return filter;
     }
 
     let not = op == "NOT EXISTS";
-    let _ = std::env::var("IVM_TRACE");
-    Exists::new(
+    let exists: FilterInputHandle = Exists::new(
         input,
         sq.relationship_name.clone(),
         sq.parent_key.clone(),
         not,
-    )
+    );
+    exists
 }
 
-/// Apply filter with flips (for OR with flipped subqueries).
-/// Port of TS `applyFilterWithFlips` (builder.ts:358).
 fn apply_filter_with_flips(
     input: Shared<dyn Input>,
     condition: &Condition,
@@ -362,8 +408,13 @@ fn apply_filter_with_flips(
                     condition_includes_flipped_subquery_at_any_level(c)
                 });
 
-            for cond in &without_flipped {
-                end = apply_filter(end.clone(), cond, delegate, name);
+            // TS wraps the non-flipped conjuncts in ONE filter pipeline
+            // (builder.ts:429-441).
+            if !without_flipped.is_empty() {
+                let conds: Vec<Condition> = without_flipped.iter().cloned().cloned().collect();
+                end = build_filter_pipeline(end, |filter_input| {
+                    apply_and(filter_input, &conds, delegate, name)
+                });
             }
 
             for cond in &with_flipped {
@@ -383,13 +434,13 @@ fn apply_filter_with_flips(
 
             let mut branches: Vec<Shared<dyn Input>> = Vec::new();
 
+            // TS wraps the non-flipped disjuncts branch in a filter pipeline
+            // (builder.ts:461-474).
             if !without_flipped.is_empty() {
-                let branch = apply_or(
-                    end.clone(),
-                    &without_flipped.iter().cloned().cloned().collect::<Vec<_>>(),
-                    delegate,
-                    name,
-                );
+                let conds: Vec<Condition> = without_flipped.iter().cloned().cloned().collect();
+                let branch = build_filter_pipeline(end.clone(), |filter_input| {
+                    apply_or(filter_input, &conds, delegate, name)
+                });
                 branches.push(branch);
             }
 
@@ -464,19 +515,11 @@ fn apply_correlated_subquery(
         "Expected EXISTS or NOT EXISTS operator"
     );
 
-    // limit(0) short-circuits
-    if sq.subquery.limit == Some(0) {
-        if from_condition {
-            if op == "EXISTS" {
-                // Filter that always rejects
-                let filter = Filter::new(end, Arc::new(|_| false));
-                return filter;
-            } else {
-                // NOT EXISTS with limit 0: always passes
-                let filter = Filter::new(end, Arc::new(|_| true));
-                return filter;
-            }
-        }
+    // TS (builder.ts:658-662): the join is omitted for a `limit(0)` CONDITION
+    // subquery — the always-false/true Filter is applied at the FILTER level
+    // (apply_correlated_subquery_condition). A related `limit(0)` subquery
+    // still builds its join (an empty `related` array).
+    if sq.subquery.limit == Some(0) && from_condition {
         return end;
     }
 

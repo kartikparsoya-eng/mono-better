@@ -17,6 +17,7 @@ use rust_ivm::ivm::change::{
 };
 use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::filter::Filter;
+use rust_ivm::ivm::filter_operators::build_filter_pipeline;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
 
@@ -104,10 +105,13 @@ fn test_filter_basics_fetch() {
     let conn = source
         .borrow_mut()
         .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
-    let filter = Filter::new(
-        conn,
-        Arc::new(|row| row.get("b") == Some(&Value::Str("foo".into()))),
-    );
+    let filter = build_filter_pipeline(conn, |fi| {
+        let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
+            fi,
+            Arc::new(|row| row.get("b") == Some(&Value::Str("foo".into()))),
+        );
+        f
+    });
 
     let catch = Catch::new(filter, false);
 
@@ -158,10 +162,13 @@ fn test_filter_basics_push() {
     let conn = source
         .borrow_mut()
         .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
-    let filter = Filter::new(
-        conn,
-        Arc::new(|row| row.get("b") == Some(&Value::Str("foo".into()))),
-    );
+    let filter = build_filter_pipeline(conn, |fi| {
+        let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
+            fi,
+            Arc::new(|row| row.get("b") == Some(&Value::Str("foo".into()))),
+        );
+        f
+    });
     let catch = Catch::new(filter, false);
 
     // Push some changes through the source
@@ -234,13 +241,16 @@ fn test_filter_edit_add_passes_filter() {
     let conn = source
         .borrow_mut()
         .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
-    let filter = Filter::new(
-        conn,
-        Arc::new(|row| match row.get("x") {
-            Some(Value::F64(v)) => *v % 2.0 == 0.0,
-            _ => false,
-        }),
-    );
+    let filter = build_filter_pipeline(conn, |fi| {
+        let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
+            fi,
+            Arc::new(|row| match row.get("x") {
+                Some(Value::F64(v)) => *v % 2.0 == 0.0,
+                _ => false,
+            }),
+        );
+        f
+    });
     let catch = Catch::new(filter, false);
 
     // Initial fetch: only a=2, x=2 passes the filter
@@ -296,13 +306,16 @@ fn test_filter_edit_stops_passing_becomes_remove() {
     let conn = source
         .borrow_mut()
         .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
-    let filter = Filter::new(
-        conn,
-        Arc::new(|row| match row.get("x") {
-            Some(Value::F64(v)) => *v % 2.0 == 0.0,
-            _ => false,
-        }),
-    );
+    let filter = build_filter_pipeline(conn, |fi| {
+        let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
+            fi,
+            Arc::new(|row| match row.get("x") {
+                Some(Value::F64(v)) => *v % 2.0 == 0.0,
+                _ => false,
+            }),
+        );
+        f
+    });
     let catch = Catch::new(filter, false);
 
     // a=2, x=2 passes initially
@@ -353,13 +366,16 @@ fn test_filter_edit_neither_passes_is_noop() {
     let conn = source
         .borrow_mut()
         .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
-    let filter = Filter::new(
-        conn,
-        Arc::new(|row| match row.get("x") {
-            Some(Value::F64(v)) => *v % 2.0 == 0.0,
-            _ => false,
-        }),
-    );
+    let filter = build_filter_pipeline(conn, |fi| {
+        let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
+            fi,
+            Arc::new(|row| match row.get("x") {
+                Some(Value::F64(v)) => *v % 2.0 == 0.0,
+                _ => false,
+            }),
+        );
+        f
+    });
     let catch = Catch::new(filter, false);
 
     let _ = catch.borrow().fetch(&Default::default());
@@ -396,13 +412,16 @@ fn test_filter_edit_both_pass_is_edit() {
     let conn = source
         .borrow_mut()
         .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
-    let filter = Filter::new(
-        conn,
-        Arc::new(|row| match row.get("x") {
-            Some(Value::F64(v)) => *v % 2.0 == 0.0,
-            _ => false,
-        }),
-    );
+    let filter = build_filter_pipeline(conn, |fi| {
+        let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
+            fi,
+            Arc::new(|row| match row.get("x") {
+                Some(Value::F64(v)) => *v % 2.0 == 0.0,
+                _ => false,
+            }),
+        );
+        f
+    });
     let catch = Catch::new(filter, false);
 
     let _ = catch.borrow().fetch(&Default::default());

@@ -177,7 +177,8 @@ fn filter_end_destroy_reaches_source() {
     let input = source.borrow_mut().connect(None, None, None, None);
     assert_eq!(source.borrow().connection_count(), 1);
 
-    let (_start, end) = build_filter_pipeline(input);
+    // Identity chain: FilterStart -> FilterEnd directly.
+    let end = build_filter_pipeline(input, |fi| fi);
     end.borrow_mut().destroy();
 
     assert_eq!(
@@ -196,9 +197,12 @@ fn fan_in_destroy_reaches_source() {
     assert_eq!(source.borrow().connection_count(), 2);
 
     let schema = branch_a.borrow().get_schema();
-    let fan_in = rust_ivm::ivm::fan_in::FanIn::new(schema);
-    fan_in.borrow_mut().add_input(branch_a);
-    fan_in.borrow_mut().add_input(branch_b);
+    // Wrap each connection in a FilterStart (the branch tails a real OR
+    // sub-graph would feed into the fan-in).
+    use rust_ivm::ivm::filter_operators::{FilterInputHandle, FilterStart};
+    let start_a: FilterInputHandle = FilterStart::new(branch_a);
+    let start_b: FilterInputHandle = FilterStart::new(branch_b);
+    let fan_in = rust_ivm::ivm::fan_in::FanIn::new(schema, vec![start_a, start_b]);
 
     fan_in.borrow_mut().destroy();
 

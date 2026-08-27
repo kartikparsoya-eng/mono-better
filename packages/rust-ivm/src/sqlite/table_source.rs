@@ -642,7 +642,11 @@ impl TableSource {
             if let Some(output) = output {
                 let pipeline_change = self.source_change_to_change(&change);
                 let pusher: &dyn InputBase = &NullInputBase;
-                filter_push(pipeline_change, output, pusher, predicate.as_ref());
+                filter_push(
+                    pipeline_change,
+                    &mut |c| output.borrow_mut().push(c, pusher),
+                    predicate.as_ref(),
+                );
             }
         }
 

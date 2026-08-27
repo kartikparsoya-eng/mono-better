@@ -1,84 +1,126 @@
 //! FanOut operator — port of `zql/src/ivm/fan-out.ts`.
 //!
-//! Duplicates incoming changes to multiple branches. Paired with FanIn
-//! which merges and deduplicates. After pushing to all branches, calls
-//! `FanIn::fan_out_done_pushing` to collapse accumulated changes.
+//! Forks the filter sub-graph into multiple branches; paired with a `FanIn`
+//! that merges the forks back together. A `FilterOperator`: `filter(node)`
+//! ORs the branches (short-circuiting on the first accept); `push` pushes to
+//! every branch and then tells the FanIn the fan-out is done so it can
+//! collapse the accumulated branch pushes.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ivm::change::Change;
+use crate::ivm::data::Node;
 use crate::ivm::fan_in::FanIn;
-use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared};
+use crate::ivm::filter_operators::{
+    FilterChainPusher, FilterInput, FilterInputHandle, FilterOutput, FilterOutputHandle,
+};
+use crate::ivm::operator::{InputBase, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::NodeStream;
 
+/// Port of TS `FanOut` (fan-out.ts:17).
 pub struct FanOut {
-    input: Shared<dyn Input>,
-    outputs: Rc<RefCell<Vec<OutputHandle>>>,
-    fan_in: Rc<RefCell<Option<Shared<FanIn>>>>,
+    input: FilterInputHandle,
+    /// Interior-mutable: TS `setFilterOutput` APPENDS (each branch registers
+    /// itself through the shared handle).
+    outputs: RefCell<Vec<FilterOutputHandle>>,
+    fan_in: Option<Shared<FanIn>>,
     destroy_count: usize,
+    schema: SourceSchema,
 }
 
 impl FanOut {
-    pub fn new(input: Shared<dyn Input>) -> Shared<FanOut> {
-        Rc::new(RefCell::new(FanOut {
-            input,
-            outputs: Rc::new(RefCell::new(Vec::new())),
-            fan_in: Rc::new(RefCell::new(None)),
+    pub fn new(input: FilterInputHandle) -> Shared<FanOut> {
+        let schema = input.borrow().get_schema();
+        let fan_out = Rc::new(RefCell::new(FanOut {
+            input: input.clone(),
+            outputs: RefCell::new(Vec::new()),
+            fan_in: None,
             destroy_count: 0,
-        }))
+            schema,
+        }));
+        // TS: `input.setFilterOutput(this)`.
+        let as_output: FilterOutputHandle = fan_out.clone();
+        input.borrow().set_filter_output(as_output);
+        fan_out
     }
 
-    pub fn set_fan_in(&self, fan_in: Shared<FanIn>) {
-        *self.fan_in.borrow_mut() = Some(fan_in);
+    pub fn set_fan_in(&mut self, fan_in: Shared<FanIn>) {
+        self.fan_in = Some(fan_in);
     }
 }
 
 impl InputBase for FanOut {
     fn get_schema(&self) -> SourceSchema {
-        self.input.borrow().get_schema()
+        self.schema.clone()
     }
 
+    /// TS: ref-counted — the upstream input is destroyed only when EVERY
+    /// branch has destroyed its edge into this fan-out (fan-out.ts:36-45).
     fn destroy(&mut self) {
-        let outputs_len = self.outputs.borrow().len();
-        if self.destroy_count < outputs_len {
+        let n = self.outputs.borrow().len();
+        if self.destroy_count < n {
             self.destroy_count += 1;
-            if self.destroy_count == outputs_len {
+            if self.destroy_count == n {
                 self.input.borrow_mut().destroy();
-                // Break the Rc cycle: drop the back-edges to downstream outputs
-                // and the strong ref to the reconvergence FanIn.
+                // Rust-only: break the Rc cycles on final teardown.
                 self.outputs.borrow_mut().clear();
-                *self.fan_in.borrow_mut() = None;
+                self.fan_in = None;
             }
+        } else {
+            panic!("FanOut already destroyed once for each output");
         }
     }
 }
 
-impl Input for FanOut {
-    fn set_output(&self, output: OutputHandle) {
+impl FilterInput for FanOut {
+    /// TS `setFilterOutput` APPENDS — each branch registers itself
+    /// (fan-out.ts:32).
+    fn set_filter_output(&self, output: FilterOutputHandle) {
         self.outputs.borrow_mut().push(output);
     }
-
-    fn fetch(&self, req: &crate::ivm::operator::FetchRequest) -> NodeStream {
-        self.input.borrow().fetch(req)
-    }
 }
 
-impl Output for FanOut {
-    fn push(&mut self, change: Change, _pusher: &dyn InputBase) {
-        crate::ivm::trace::recv("fan_out#1", &change);
-        let change_type = change.change_type();
-        let outputs: Vec<OutputHandle> = self.outputs.borrow().clone();
-        for output in &outputs {
-            output.borrow_mut().push(change.clone(), self);
+impl FilterOutput for FanOut {
+    fn begin_filter(&self) {
+        for output in self.outputs.borrow().iter() {
+            output.borrow().begin_filter();
         }
-        // TS fan-out.ts:78 `must(this.#fanIn, 'fan-out must have a corresponding
-        // fan-in set!')` — a fan-out without its fan-in is a graph-construction
-        // invariant violation, not a silently-skippable state. Panic (contained
-        // per-CG by pipeline_driver.rs catch_unwind → pipeline reset), matching TS.
-        let fan_in = self.fan_in.borrow().clone();
-        let fan_in = fan_in.expect("fan-out must have a corresponding fan-in set!");
-        fan_in.borrow_mut().fan_out_done_pushing(change_type, self);
+    }
+
+    fn end_filter(&self) {
+        for output in self.outputs.borrow().iter() {
+            output.borrow().end_filter();
+        }
+    }
+
+    /// TS: OR over branches, short-circuiting on the first accept
+    /// (fan-out.ts:62-71).
+    fn filter(&self, node: &Node) -> bool {
+        let mut result = false;
+        for output in self.outputs.borrow().iter() {
+            result = output.borrow().filter(node) || result;
+            if result {
+                return true;
+            }
+        }
+        result
+    }
+
+    /// TS: push to every branch, then signal the fan-in (fan-out.ts:73-80).
+    fn push(&self, change: Change, _pusher: &dyn InputBase) {
+        let pusher = FilterChainPusher {
+            schema: self.schema.clone(),
+        };
+        for out in self.outputs.borrow().iter() {
+            out.borrow().push(change.clone(), &pusher);
+        }
+        let fan_in = self
+            .fan_in
+            .clone()
+            .expect("fan-out must have a corresponding fan-in set!");
+        fan_in
+            .borrow()
+            .fan_out_done_pushing_to_all_branches(change.change_type());
     }
 }

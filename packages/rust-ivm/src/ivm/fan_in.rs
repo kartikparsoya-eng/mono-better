@@ -1,73 +1,76 @@
 //! FanIn operator — port of `zql/src/ivm/fan-in.ts`.
 //!
-//! Merges multiple streams into one, eliminating duplicates.
-//! Paired with FanOut. Accumulates pushes from branches, then collapses
-//! them via `push_accumulated_changes`.
+//! Merges the branches forked by a `FanOut` back into one filter stream,
+//! eliminating duplicates. Accumulates branch pushes and collapses them via
+//! `push_accumulated_changes` when the fan-out signals it is done.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ivm::change::{Change, ChangeType};
-use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
+use crate::ivm::data::Node;
+use crate::ivm::filter_operators::{
+    FilterChainPusher, FilterInput, FilterInputHandle, FilterOutput, FilterOutputAsOutput,
+    FilterOutputHandle,
+};
+use crate::ivm::operator::{InputBase, OutputHandle, Shared};
 use crate::ivm::push_accumulated::push_accumulated_changes;
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{NodeStream, from_vec};
 
-/// Port of TS `FanIn` (fan-in.ts:24).
+/// Port of TS `FanIn` (fan-in.ts:29).
 pub struct FanIn {
+    /// Branch tails feeding this fan-in (TS `#inputs`). destroy() forwards to
+    /// every branch so the cascade reaches the ref-counted FanOut and,
+    /// through it, the source input.
+    inputs: Vec<FilterInputHandle>,
     schema: SourceSchema,
-    accumulated_pushes: Vec<Change>,
-    output: Rc<RefCell<Option<OutputHandle>>>,
-    /// Branch tails feeding this fan-in (TS `FanIn#inputs`). destroy() must
-    /// forward to every branch so the cascade reaches the ref-counted FanOut
-    /// and, through it, the source input — otherwise a removed query's whole
-    /// OR-subtree stays anchored by its source connection (the
-    /// connection-splice leak class).
-    inputs: Vec<Shared<dyn Input>>,
+    output: Rc<RefCell<Option<FilterOutputHandle>>>,
+    accumulated_pushes: RefCell<Vec<Change>>,
 }
 
 impl FanIn {
-    pub fn new(schema: SourceSchema) -> Shared<FanIn> {
-        Rc::new(RefCell::new(FanIn {
-            schema,
-            accumulated_pushes: Vec::new(),
+    /// TS constructor `(fanOut, inputs)`: schema from the fan-out; each
+    /// branch's filter output is wired to this fan-in.
+    pub fn new(fan_out_schema: SourceSchema, inputs: Vec<FilterInputHandle>) -> Shared<FanIn> {
+        let fan_in = Rc::new(RefCell::new(FanIn {
+            inputs: inputs.clone(),
+            schema: fan_out_schema.clone(),
             output: Rc::new(RefCell::new(None)),
-            inputs: Vec::new(),
-        }))
+            accumulated_pushes: RefCell::new(Vec::new()),
+        }));
+        // TS asserts `this.#schema === input.getSchema()` (object identity);
+        // rust SourceSchema handles are value clones, so identity does not
+        // map — branches are built from the same fan-out, which guarantees it.
+        for input in &inputs {
+            let as_output: FilterOutputHandle = fan_in.clone();
+            input.borrow().set_filter_output(as_output);
+        }
+        fan_in
     }
 
-    /// Register a branch tail (TS receives these in the FanIn constructor).
-    pub fn add_input(&mut self, input: Shared<dyn Input>) {
-        self.inputs.push(input);
-    }
-
-    pub fn set_output(&self, output: OutputHandle) {
-        *self.output.borrow_mut() = Some(output);
-    }
-
-    /// Called by FanOut after all branches have been pushed.
-    /// Triggers `push_accumulated_changes`.
-    pub fn fan_out_done_pushing(
-        &mut self,
-        fan_out_change_type: ChangeType,
-        pusher: &dyn InputBase,
-    ) {
-        // TS fan-in.ts:77 — with no inputs the fan-in must not have received any
-        // pushes; a non-empty accumulator here is an invariant violation.
+    /// Port of TS `fanOutDonePushingToAllBranches` (fan-in.ts:76). `&self`:
+    /// the collapse pushes downstream, which may re-enter this cell.
+    pub fn fan_out_done_pushing_to_all_branches(&self, fan_out_change_type: ChangeType) {
         if self.inputs.is_empty() {
             assert!(
-                self.accumulated_pushes.is_empty(),
+                self.accumulated_pushes.borrow().is_empty(),
                 "If there are no inputs then fan-in should not receive any pushes."
             );
             return;
         }
-
         let output = self.output.borrow().clone();
+        // Take the batch out before pushing downstream (drops the borrow so a
+        // re-entrant accumulate cannot collide).
+        let mut drained = std::mem::take(&mut *self.accumulated_pushes.borrow_mut());
         if let Some(output) = output {
+            let out: OutputHandle = Rc::new(RefCell::new(FilterOutputAsOutput(output)));
+            let pusher = FilterChainPusher {
+                schema: self.schema.clone(),
+            };
             push_accumulated_changes(
-                &mut self.accumulated_pushes,
-                &output,
-                pusher,
+                &mut drained,
+                &out,
+                &pusher,
                 fan_out_change_type,
                 &self.schema,
             );
@@ -81,32 +84,42 @@ impl InputBase for FanIn {
     }
 
     fn destroy(&mut self) {
-        // TS parity (fan-in.ts:49): destroy every branch input so the cascade
-        // reaches the ref-counted FanOut and the source input below it.
         for input in &self.inputs {
             input.borrow_mut().destroy();
         }
+        // Rust-only: break the Rc cycles on teardown.
         self.inputs.clear();
-        // Break the Rc cycle: clear the back-edge to the downstream output.
         *self.output.borrow_mut() = None;
     }
 }
 
-impl Input for FanIn {
-    fn set_output(&self, output: OutputHandle) {
+impl FilterInput for FanIn {
+    fn set_filter_output(&self, output: FilterOutputHandle) {
         *self.output.borrow_mut() = Some(output);
-    }
-
-    fn fetch(&self, _req: &FetchRequest) -> NodeStream {
-        // FanIn doesn't fetch — it's a merge point for pushes
-        from_vec(Vec::new())
     }
 }
 
-impl Output for FanIn {
-    fn push(&mut self, change: Change, _pusher: &dyn InputBase) {
-        crate::ivm::trace::recv("fan_in#1", &change);
-        // Accumulate — will be collapsed when fan_out_done_pushing is called
-        self.accumulated_pushes.push(change);
+impl FilterOutput for FanIn {
+    fn begin_filter(&self) {
+        if let Some(output) = self.output.borrow().clone() {
+            output.borrow().begin_filter();
+        }
+    }
+
+    fn end_filter(&self) {
+        if let Some(output) = self.output.borrow().clone() {
+            output.borrow().end_filter();
+        }
+    }
+
+    /// TS: delegates straight downstream (fan-in.ts:67).
+    fn filter(&self, node: &Node) -> bool {
+        let output = self.output.borrow().clone().expect("FanIn: output not set");
+        output.borrow().filter(node)
+    }
+
+    /// TS: accumulate; the fan-out's done-signal collapses (fan-in.ts:71).
+    fn push(&self, change: Change, _pusher: &dyn InputBase) {
+        self.accumulated_pushes.borrow_mut().push(change);
     }
 }
