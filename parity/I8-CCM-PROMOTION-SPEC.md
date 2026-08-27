@@ -51,15 +51,23 @@ at connect (`init_connection`), `handle_update_auth` (`updateAuth`),
 `on_connection_closed` + group teardown. No read/write is outside these TS ops —
 the promotion is mechanical, not behavioral.
 
-### Stage 1 — make the ported CCM the LIVE owner, fed from CgState
-- Replace `PlaceholderConnContextManager` with the ported
-  `ConnectionContextManager` instance, held per-CG in `CgState`.
-- On `init_connection`/`update_auth`/desired-queries, write through the CCM's
-  1:1 methods (`init_connection`, `update_auth`) INSTEAD of the ad-hoc map writes.
-- Keep the four maps as READ-THROUGH shims that delegate to the CCM (so no
-  consumer changes yet). Tests stay green.
-- Non-vacuous check: an `updateAuth` test asserts `must_get_connection_context`
-  now returns the new auth (before: placeholder returned `None`).
+### Stage 1 — ported CCM as parallel live owner (dual-write)
+- **1.0 — DONE (commit da8b55583):** `CgState` holds the ported
+  `ConnectionContextManager` (`Arc<Mutex>`, uncontended on the CG thread).
+  `on_new_connection` dual-writes `register_connection`; `handle_update_auth`
+  dual-writes `update_auth`. Maps stay AUTHORITATIVE → zero behavioral change
+  (dual-write best-effort, logged-on-error). Non-vacuous test
+  `i8_stage1_ccm_tracks_connection_and_auth_via_dual_write`. Learned: CCM
+  `resolve_auth` requires a userID (TS parity) — anonymous/opaque paths need a
+  userID or the CCM rejects (see also the anonymous-opaque question in Stage 1.1).
+- **1.1 — TODO:** seed connect-time auth into `register_connection` (Stage 1.0
+  registers with `auth: None`); wire `push_config` + `validate_legacy_jwt` +
+  `now` into `ConnectionContextManager::new`; dual-write `init_connection`
+  (userQueryURL/userPushURL) in `handle_desired_queries`; dual-write
+  `close_connection` on teardown. Open question to resolve 1:1: does TS
+  `resolveAuth` require a userID for OPAQUE tokens? Rust router allows anonymous
+  opaque (unpinned group) but the ported CCM requires a userID — reconcile
+  against auth.ts before Stage 2.
 
 ### Stage 2 — migrate consumers to read the CCM at use time
 One consumer per commit, each reverting-proven:
