@@ -427,6 +427,25 @@ touched except where their callers move.
   CG task); structural CI guard = ledger misfiled-count threshold in
   local-rust-ci; full release gate; push.
 
+- **Stage 5 — infra-layer mirroring (user-directed 2026-08-28). DONE**
+  (8abe6b80e + 83627e6bf + 0c280577d): (5a) `protocol.rs` split into
+  `src/protocol/` mirroring `packages/zero-protocol/src` file-for-file
+  (20 files; protocol.rs = decl + re-exports, all `crate::protocol::X`
+  paths stable); (5b) `metrics.rs` → `observability/metrics.rs`, the
+  query-API instrument cluster → `custom/metrics.rs`, and
+  `custom/fetch.rs` consolidates url_match/backoff/body-preview out of
+  transform_query.rs + pusher.rs (with their TS-parity tests, per TS
+  fetch.test.ts); (5c) `SyncerConfig`+env parsing → `config/zero_config.rs`,
+  `RealServicesFactory` → `server/syncer.rs`, `otel.rs` →
+  `server/otel_start.rs`; main.rs = thin bin entry (915→474 lines).
+  Ledger scope widened with the mirrored infra TS files (custom/metrics,
+  observability/metrics, config/zero-config, server/syncer, server/otel-start,
+  mutagen/pusher, inspect-handler); ratchet re-baselined 24→25 (scope-widening
+  noise, not relocation). Deliberately NOT mirrored: `http_server.rs` /
+  `ws_server.rs` (the TS `server/worker-dispatcher.ts` + the I-1/I-4
+  reader/writer/shed invention mix — mapping documented in `src/server.rs`),
+  `ws_sink.rs`/`live_count.rs`/`trace.rs` (registered inventions).
+
 ### Risks + mitigations
 
 - **Hot-path routing change (Stage 2 #1)** → frame-seq oracle, G-frames,

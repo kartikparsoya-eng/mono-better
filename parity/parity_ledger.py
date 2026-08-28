@@ -160,12 +160,15 @@ CRATES = {
         "rust_dir": "packages/rust-syncer/src",
         "ts_label_prefix": "zero-cache/src/",
         # L9 structural ratchet (`--enforce-structure`): resolved pairs whose
-        # rust file is not the TS mirror. Baseline 24 (2026-08-28, Stage 4):
-        # documented folds (auth.ts->CCM, custom/fetch.ts->metrics/protocol,
-        # rule-3 types-utility exception) + fuzzy-matcher noise. Any GROWTH
-        # means a symbol landed outside its mirrored file — fix the location,
-        # don't bump this number without a written exception.
-        "max_misfiled": 24,
+        # rust file is not the TS mirror. Baseline 25 (2026-08-28, Stage 5:
+        # widened the scope with the newly mirrored infra files, which brings
+        # fuzzy-noise pairs of its own; Stage 5 itself RELOCATED the
+        # custom/fetch + custom/metrics + observability symbols to their
+        # mirrors). Remaining entries = documented folds (auth.ts->CCM,
+        # fetch.ts error types->protocol/, rule-3 exception) + fuzzy noise.
+        # Any GROWTH means a symbol landed outside its mirrored file — fix the
+        # location, don't bump this number without a written exception.
+        "max_misfiled": 25,
         # rust-syncer replaces the entire TS syncer WORKER process: the WS
         # connection lifecycle (workers/), the view-syncer serving loop +
         # pipeline driver (services/view-syncer/), the read-permission + JWT auth
@@ -189,7 +192,15 @@ CRATES = {
             f"{ZC}/services/view-syncer/view-syncer.ts",
             f"{ZC}/custom-queries/transform-query.ts",
             f"{ZC}/custom/fetch.ts",
+            f"{ZC}/custom/metrics.ts",
             f"{ZC}/db/lite-tables.ts",
+            # L9 Stage 5: infra layer mirrored 1:1
+            f"{ZC}/observability/metrics.ts",
+            f"{ZC}/config/zero-config.ts",
+            f"{ZC}/server/syncer.ts",
+            f"{ZC}/server/otel-start.ts",
+            f"{ZC}/services/mutagen/pusher.ts",
+            f"{ZC}/services/view-syncer/inspect-handler.ts",
         ],
         # Serving-loop / transform algorithms — a missing behavioral symbol here
         # is HIGH risk. Structural/DDL/type files are LOW risk (see structural_ts).
