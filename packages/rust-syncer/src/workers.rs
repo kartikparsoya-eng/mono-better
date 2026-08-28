@@ -1,7 +1,9 @@
-//! `workers/` — port of `zero-cache/src/workers/`: the syncer worker's connect-
-//! param parsing, connection lifecycle, WS message handler, and the serving-lag
-//! statistics from `syncer.ts`. The `Syncer` dispatch itself is fused into the
-//! per-CG actor core (`router.rs`), a documented "Rust in the right place".
+//! `workers/` — port of `zero-cache/src/workers/`: connect-param parsing, the
+//! Connection lifecycle, the Syncer (connection management + serving-lag
+//! statistics, `syncer.ts`), and the WS message handler. `cg_executor` is the
+//! RUST-ONLY scheduling substrate those ported seats run on (no TS twin —
+//! INVENTIONS.md I-1/doc 91).
+pub mod cg_executor;
 pub mod connect_params;
 pub mod connection;
 pub mod syncer;
