@@ -3002,113 +3002,23 @@ impl CgState {
         let Some(ws_id) = self.registered_ws.get(client_id).cloned() else {
             return;
         };
-        let op = body.get("op").and_then(|v| v.as_str()).unwrap_or("");
-        let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
-
-        // Auth gate — only `authenticate` is allowed before authenticating.
-        if op != "authenticate" && !self.inspector_authenticated {
-            self.sync_engine.send_inspect_response(
-                &ws_id,
-                serde_json::json!({"op": "authenticated", "id": id, "value": false}),
-            );
-            return;
-        }
-
-        // Each arm yields `Ok((responseOp, value))` or `Err(message)`; the
-        // response frame (success vs `op:"error"`) is assembled once below so
-        // every path — present and future — flows through the error shape.
-        let result: Result<(&str, serde_json::Value), String> = match op {
-            "authenticate" => {
-                let password = body.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                // Valid only if an admin password is configured AND matches.
-                let ok = self
-                    .admin_password
-                    .as_deref()
-                    .is_some_and(|p| !p.is_empty() && p == password);
-                self.inspector_authenticated = ok;
-                Ok(("authenticated", serde_json::json!(ok)))
-            }
-            "version" => Ok(("version", serde_json::json!(self.server_version))),
-            "queries" => {
-                let filter_client = body
-                    .get("clientID")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let now = now_ms();
-                let ttl_clock = self.get_ttl_clock(now);
-                let value = self
-                    .inspect_queries_value(filter_client.as_deref(), ttl_clock)
-                    .await;
-                Ok(("queries", value))
-            }
-            "metrics" => {
-                // The wire value is a RECORD with two REQUIRED TDigest fields
-                // (`serverMetricsSchema`, inspect-down.ts:7-10) — an array or
-                // `{}` fails the client's valita parse and rejects the RPC.
-                // Rust tracks no server TDigests yet, so send empty digests:
-                // `[1000]` is `new TDigest().toJSON()` (default compression,
-                // no centroids), which zero-client parses as a valid digest.
-                Ok((
-                    "metrics",
-                    serde_json::json!({
-                        "query-materialization-server": [1000],
-                        "query-update-server": [1000],
-                    }),
-                ))
-            }
-            // `analyzeQuery` (query plan / vended-rows analysis) is not ported.
-            // Route through the error op: an `analyze-query` success frame with
-            // an `{error}` payload would fail `analyzeQueryResultSchema` on the
-            // client and hang the RPC.
-            "analyze-query" => {
-                Err("analyze-query is not supported by the rust syncer yet".to_string())
-            }
-            other => {
-                tracing::warn!("CG {}: unknown inspect op {other:?}", self.cg_id);
-                Err(format!("unknown inspect op: {other}"))
-            }
-        };
-        let frame = match result {
-            Ok((resp_op, value)) => {
-                serde_json::json!({"op": resp_op, "id": id, "value": value})
-            }
-            Err(message) => serde_json::json!({"op": "error", "id": id, "value": message}),
-        };
-        self.sync_engine.send_inspect_response(&ws_id, frame);
-    }
-
-    /// Build the `queries` inspector value by delegating to the CVR store's
-    /// `inspect_queries` (SQL port of TS `CVRStore.inspectQueries`), then adding
-    /// `metrics: null` to each row. The InspectorDelegate materialization metrics
-    /// and the custom-query transformed-AST fallback are server-side machinery not
-    /// ported to the Rust syncer (the TS inspect-handler.ts enrichment layer).
-    async fn inspect_queries_value(
-        &self,
-        filter_client: Option<&str>,
-        ttl_clock: TTLClock,
-    ) -> serde_json::Value {
-        let rows = match self
-            .sync_engine
-            .inspect_queries(ttl_clock, filter_client)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("CG {}: inspect_queries failed: {e}", self.cg_id);
-                return serde_json::json!([]);
-            }
-        };
-        let out: Vec<serde_json::Value> = rows
-            .iter()
-            .map(|row| {
-                let mut v = serde_json::to_value(row).unwrap_or(serde_json::Value::Null);
-                if let serde_json::Value::Object(map) = &mut v {
-                    map.insert("metrics".to_string(), serde_json::Value::Null);
-                }
-                v
-            })
-            .collect();
-        serde_json::Value::Array(out)
+        // Resolve the per-CG dependencies (socket, TTL clock) and delegate to
+        // the 1:1 `handleInspect` (services/view_syncer/inspect_handler.rs),
+        // mirroring how TS's lock body hands inspect-handler.ts the resolved
+        // client / cvr / cvrStore.
+        let now = now_ms();
+        let ttl_clock = self.get_ttl_clock(now);
+        crate::services::view_syncer::inspect_handler::handle_inspect(
+            &self.cg_id,
+            body,
+            &ws_id,
+            &self.sync_engine,
+            &mut self.inspector_authenticated,
+            self.admin_password.as_deref(),
+            &self.server_version,
+            ttl_clock,
+        )
+        .await;
     }
 
     /// Apply client deletions from an `initConnection` / `deleteClients` body.
