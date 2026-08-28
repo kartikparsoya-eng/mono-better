@@ -384,12 +384,17 @@ touched except where their callers move.
   renames, then **port `combinePushes`** (separate commit, non-vacuous test:
   two pushes same clientID/wsID/revision merge into one POST; proven failing
   first).
-- **Stage 2 — `workers/` extraction.** `connection.rs` + `syncer.rs` out of
-  `router.rs`/`ws_server.rs`; dispatch un-interception (restoration #1) as its
-  OWN commit with frame-sequence oracle + G-frames proof; `ConnectionRouter`
-  → `Syncer`, `handle_connection` → `create_connection`. Temporary re-export
-  shims keep tests/main compiling.
-- **Stage 3 — `view_syncer.rs` reconstruction (the big one).** Move `CgState`
+- **Stage 2 — `workers/` extraction. DONE 2026-08-28** (e4b863384 +
+  bf07222ad): the Syncer connection-management seat moved to
+  workers/syncer.rs (Connection was already live in workers/connection.rs);
+  `ConnectionRouter` → `Syncer`, `handle_connection` → `create_connection`
+  (converges with the #152 connected-ack fix — TS also emits from the accept
+  path). RE-SEQUENCED: dispatch un-interception moved INTO Stage 3 — the
+  handler's view-syncer arms dispatch through the Placeholder today, so
+  un-intercepting requires the real ViewSyncerService seats Stage 3 builds.
+- **Stage 3 — `view_syncer.rs` reconstruction (the big one).** Includes the
+  dispatch un-interception (restoration #1) once the ViewSyncerService seats
+  exist, as its own commit with frame-golden proof. Move `CgState`
   → `ViewSyncerService`; de-meld `config_and_hydrate`/`advance_and_sync` into
   the TS method set by PURE extract-method (call order byte-identical —
   wire-golden pg_harness tests pin poke sequences). Any genuine order
