@@ -51,6 +51,14 @@ const BODY_PREVIEW_CAP: usize = 1024;
 struct QueuedPush {
     payload: serde_json::Value,
     target: Option<PushTarget>,
+    /// TS `combinePushes` grouping key `${clientID}:${wsID}:${revision}`
+    /// (pusher.ts:655). Rust has no connCtx revision in the queue — the relay
+    /// bakes the auth/header snapshot into the payload at enqueue — so the
+    /// revision component is the snapshot ITSELF: exactly the fields TS
+    /// `assertAreCompatiblePushes` requires equal (auth, cookie, origin,
+    /// userID, push overrides, pushVersion, schemaVersion). Same-key ⇒
+    /// TS-compatible ⇒ safe to merge.
+    combine_key: String,
 }
 
 /// Who to notify (and about which mutations) when a real push's POST fails.
@@ -117,6 +125,95 @@ fn queue_cap() -> i64 {
         .unwrap_or(DEFAULT_QUEUE_CAP)
 }
 
+/// Build the TS `combinePushes` grouping key for a queued relay push. See
+/// `QueuedPush::combine_key` for the revision-twin rationale.
+fn combine_key_of(
+    selector: &ConnectionSelector,
+    body: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> String {
+    // \u{1f} separators: unambiguous even if field values contain ':'.
+    let sep = '\u{1f}';
+    let mut key = String::new();
+    for part in [selector.client_id.as_str(), selector.ws_id.as_str()] {
+        key.push_str(part);
+        key.push(sep);
+    }
+    for field in [
+        "auth",
+        "cookie",
+        "origin",
+        "userID",
+        "userPushURL",
+        "userPushHeaders",
+        "requestHeaders",
+    ] {
+        key.push_str(
+            &payload
+                .get(field)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        );
+        key.push(sep);
+    }
+    for field in ["pushVersion", "schemaVersion"] {
+        key.push_str(&body.get(field).map(|v| v.to_string()).unwrap_or_default());
+        key.push(sep);
+    }
+    key
+}
+
+/// Port of TS `combinePushes` (pusher.ts:626): merge queued pushes with the
+/// same `clientID:wsID:revision` snapshot into one composite push (mutations
+/// arrays concatenated in order), preserving first-seen group order. Pushes
+/// for different clients/sockets/snapshots stay separate. TS's `'stop'`
+/// sentinel maps to the rust channel close (the drainer loop ends); there is
+/// no in-band sentinel to handle here.
+fn combine_pushes(entries: Vec<QueuedPush>) -> Vec<QueuedPush> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, QueuedPush> =
+        std::collections::HashMap::new();
+    for entry in entries {
+        match groups.entry(entry.combine_key.clone()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                order.push(entry.combine_key.clone());
+                v.insert(entry);
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                let composite = o.get_mut();
+                // Composite push body: concatenate `push.mutations` (TS
+                // `composite.push.mutations.push(...entry.push.mutations)`).
+                let extra = entry
+                    .payload
+                    .get("push")
+                    .and_then(|p| p.get("mutations"))
+                    .and_then(|m| m.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(muts) = composite
+                    .payload
+                    .get_mut("push")
+                    .and_then(|p| p.get_mut("mutations"))
+                    .and_then(|m| m.as_array_mut())
+                {
+                    muts.extend(extra);
+                }
+                // Failure target: a composite covering any real push must
+                // report ALL its mutation ids on a failed POST.
+                match (&mut composite.target, entry.target) {
+                    (Some(t), Some(extra_t)) => t.mutation_ids.extend(extra_t.mutation_ids),
+                    (t @ None, Some(extra_t)) => *t = Some(extra_t),
+                    (_, None) => {}
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|k| groups.remove(&k))
+        .collect()
+}
+
 /// Port of TS `PusherService` (Option-A relay seat): relays custom pushes
 /// to the TS push endpoint over HTTP, in order.
 pub struct PusherService {
@@ -154,63 +251,78 @@ impl PusherService {
                 .connect_timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_default();
-            while let Some(QueuedPush { payload, target }) = rx.recv().await {
+            while let Some(first) = rx.recv().await {
+                // TS PushWorker.run: `task = dequeue(); rest = drain();
+                // combinePushes([task, ...rest])` — pull everything already
+                // queued behind the first item and merge same-snapshot pushes
+                // into composite POSTs (order preserved).
                 drainer_depth.fetch_sub(1, Ordering::SeqCst);
-                let mut req = client
-                    .post(&relay_url)
-                    .timeout(RELAY_TIMEOUT)
-                    .json(&payload);
-                if let Some(token) = &relay_token {
-                    req = req.header("x-relay-auth", token);
+                let mut batch = vec![first];
+                while let Ok(more) = rx.try_recv() {
+                    drainer_depth.fetch_sub(1, Ordering::SeqCst);
+                    batch.push(more);
                 }
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        // Drain the body: hyper only returns the connection
-                        // to reqwest's pool once the response is consumed —
-                        // otherwise every push pays a fresh loopback connect.
-                        let _ = resp.bytes().await;
+                for QueuedPush {
+                    payload, target, ..
+                } in combine_pushes(batch)
+                {
+                    let mut req = client
+                        .post(&relay_url)
+                        .timeout(RELAY_TIMEOUT)
+                        .json(&payload);
+                    if let Some(token) = &relay_token {
+                        req = req.header("x-relay-auth", token);
                     }
-                    Ok(resp) => {
-                        // Non-2xx: the app/endpoint rejected or errored. The
-                        // client's lmid won't advance, so it re-pushes the
-                        // pending mutation on its next attempt/reconnect — but
-                        // surface a PushFailed now so it doesn't hang (TS parity:
-                        // pusher.ts fails the downstream on a non-OK response).
-                        let status = resp.status().as_u16() as i64;
-                        let preview = read_body_preview(resp, BODY_PREVIEW_CAP).await;
-                        tracing::warn!(status, "push relay returned non-2xx");
-                        if let Some(t) = target {
-                            let err =
-                                crate::protocol::ErrorBody::PushFailedHttp(PushFailedHttpBody {
-                                    kind: ErrorKind::PushFailed,
-                                    details: None,
-                                    mutation_ids: t.mutation_ids,
-                                    message: format!(
-                                        "Fetch from API server returned non-OK status {status}"
-                                    ),
-                                    origin: ErrorOrigin::ZeroCache,
-                                    reason: ErrorReason::Http,
-                                    status,
-                                    body_preview: preview,
-                                });
-                            sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                    match req.send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            // Drain the body: hyper only returns the connection
+                            // to reqwest's pool once the response is consumed —
+                            // otherwise every push pays a fresh loopback connect.
+                            let _ = resp.bytes().await;
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "push relay request failed");
-                        if let Some(t) = target {
-                            let err = crate::protocol::ErrorBody::PushFailedZeroCache(
-                                PushFailedZeroCacheBody {
-                                    kind: ErrorKind::PushFailed,
-                                    details: None,
-                                    mutation_ids: t.mutation_ids,
-                                    // TS parity: pusher.ts catch → "Failed to push: …".
-                                    message: format!("Failed to push: {e}"),
-                                    origin: ErrorOrigin::ZeroCache,
-                                    reason: ErrorReason::Internal,
-                                },
-                            );
-                            sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                        Ok(resp) => {
+                            // Non-2xx: the app/endpoint rejected or errored. The
+                            // client's lmid won't advance, so it re-pushes the
+                            // pending mutation on its next attempt/reconnect — but
+                            // surface a PushFailed now so it doesn't hang (TS parity:
+                            // pusher.ts fails the downstream on a non-OK response).
+                            let status = resp.status().as_u16() as i64;
+                            let preview = read_body_preview(resp, BODY_PREVIEW_CAP).await;
+                            tracing::warn!(status, "push relay returned non-2xx");
+                            if let Some(t) = target {
+                                let err = crate::protocol::ErrorBody::PushFailedHttp(
+                                    PushFailedHttpBody {
+                                        kind: ErrorKind::PushFailed,
+                                        details: None,
+                                        mutation_ids: t.mutation_ids,
+                                        message: format!(
+                                            "Fetch from API server returned non-OK status {status}"
+                                        ),
+                                        origin: ErrorOrigin::ZeroCache,
+                                        reason: ErrorReason::Http,
+                                        status,
+                                        body_preview: preview,
+                                    },
+                                );
+                                sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "push relay request failed");
+                            if let Some(t) = target {
+                                let err = crate::protocol::ErrorBody::PushFailedZeroCache(
+                                    PushFailedZeroCacheBody {
+                                        kind: ErrorKind::PushFailed,
+                                        details: None,
+                                        mutation_ids: t.mutation_ids,
+                                        // TS parity: pusher.ts catch → "Failed to push: …".
+                                        message: format!("Failed to push: {e}"),
+                                        origin: ErrorOrigin::ZeroCache,
+                                        reason: ErrorReason::Internal,
+                                    },
+                                );
+                                sinks.send_error_if_current(&t.client_id, &t.ws_id, &err);
+                            }
                         }
                     }
                 }
@@ -331,6 +443,7 @@ impl PusherDispatch for PusherService {
         // frame to this exact socket via `send_error_if_current`.
         let mutation_ids = mutation_ids_of(body);
         let payload = Self::relay_body(selector, body, headers, client_group_id);
+        let combine_key = combine_key_of(selector, body, &payload);
         let target = PushTarget {
             client_id: selector.client_id.clone(),
             ws_id: selector.ws_id.clone(),
@@ -342,6 +455,7 @@ impl PusherDispatch for PusherService {
             QueuedPush {
                 payload,
                 target: Some(target),
+                combine_key,
             },
             "push (client will re-push)",
         ) {
@@ -400,10 +514,12 @@ impl PusherDispatch for PusherService {
             }),
         );
         let payload = Self::relay_body(selector, &push, headers, client_group_id);
+        let combine_key = combine_key_of(selector, &push, &payload);
         self.enqueue_payload(
             QueuedPush {
                 payload,
                 target: None,
+                combine_key,
             },
             "mutation-results cleanup (single)",
         );
@@ -437,10 +553,12 @@ impl PusherDispatch for PusherService {
             }),
         );
         let payload = Self::relay_body(selector, &push, headers, client_group_id);
+        let combine_key = combine_key_of(selector, &push, &payload);
         self.enqueue_payload(
             QueuedPush {
                 payload,
                 target: None,
+                combine_key,
             },
             "mutation-results cleanup (bulk)",
         );
@@ -496,6 +614,154 @@ mod tests {
             client_id: client_id.to_string(),
             ws_id: ws_id.to_string(),
         }
+    }
+
+    /// Port of the TS `combinePushes` unit semantics (pusher.test.ts): pushes
+    /// with the same clientID/wsID/snapshot merge into ONE composite with the
+    /// mutations concatenated in order; different sockets/snapshots stay
+    /// separate; first-seen group order is preserved.
+    #[test]
+    fn combine_pushes_merges_same_connection_snapshot() {
+        let hdrs = PushRelayHeaders::default();
+        let mk = |ws: &str, id: i64| {
+            let sel = selector("cA", ws);
+            let body = serde_json::json!({"pushVersion": 1, "mutations": [
+                {"id": id, "clientID": "cA", "type": "custom", "name": "m"}
+            ]});
+            let payload = PusherService::relay_body(&sel, &body, &hdrs, "cg1");
+            let combine_key = combine_key_of(&sel, &body, &payload);
+            QueuedPush {
+                payload,
+                target: Some(PushTarget {
+                    client_id: "cA".into(),
+                    ws_id: ws.to_string(),
+                    mutation_ids: mutation_ids_of(&body),
+                }),
+                combine_key,
+            }
+        };
+        let combined = combine_pushes(vec![mk("ws1", 1), mk("ws1", 2), mk("ws2", 3), mk("ws1", 4)]);
+        assert_eq!(combined.len(), 2, "ws1 group merges; ws2 stays separate");
+        let muts = |p: &QueuedPush| {
+            p.payload["push"]["mutations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(muts(&combined[0]), vec![1, 2, 4], "in-order concat");
+        assert_eq!(muts(&combined[1]), vec![3]);
+        let t = combined[0].target.as_ref().unwrap();
+        assert_eq!(
+            t.mutation_ids.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![1, 2, 4],
+            "failure target covers every merged mutation"
+        );
+    }
+
+    /// A counting HTTP server: first request is held for `first_delay_ms`, all
+    /// requests recorded (body) and answered 200. Lets a batch build up behind
+    /// the sequential drainer.
+    async fn counting_http(
+        first_delay_ms: u64,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let record = seen.clone();
+        tokio::spawn(async move {
+            let mut first = true;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 65536];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let body = req
+                    .split_once("\r\n\r\n")
+                    .map(|(_, b)| b.to_string())
+                    .unwrap_or_default();
+                record.lock().unwrap().push(body);
+                if first {
+                    first = false;
+                    tokio::time::sleep(Duration::from_millis(first_delay_ms)).await;
+                }
+                let resp = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        (addr, seen)
+    }
+
+    /// NON-VACUOUS wiring proof for `combinePushes`: with the first POST held,
+    /// pushes that queue up behind it for the SAME connection snapshot must be
+    /// drained as ONE merged POST (TS PushWorker: dequeue + drain →
+    /// combinePushes → process). Written BEFORE the drainer wiring — it fails
+    /// with one POST per push — and passes once the drainer combines.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drainer_combines_queued_pushes_per_connection() {
+        let (addr, seen) = counting_http(500).await;
+        let sinks = ConnectionSinks::new();
+        let pusher = PusherService::new(
+            format!("http://{addr}/push"),
+            None,
+            tokio::runtime::Handle::current(),
+            sinks,
+        );
+        let hdrs = PushRelayHeaders::default();
+        let push = |id: i64| {
+            serde_json::json!({"pushVersion": 1, "mutations": [
+                {"id": id, "clientID": "cA", "type": "custom", "name": "m"}
+            ]})
+        };
+        // p1 is picked up by the drainer and held at the server.
+        let _ = pusher.enqueue_push(&selector("cA", "ws1"), &push(1), &hdrs, "cg1");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // These three queue up behind p1: two share ws1's snapshot, one is ws2.
+        let _ = pusher.enqueue_push(&selector("cA", "ws1"), &push(2), &hdrs, "cg1");
+        let _ = pusher.enqueue_push(&selector("cA", "ws1"), &push(3), &hdrs, "cg1");
+        let _ = pusher.enqueue_push(&selector("cA", "ws2"), &push(4), &hdrs, "cg1");
+
+        // Wait for the drain to complete (3 POSTs expected: p1, merged p2+p3, p4).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let n = seen.lock().unwrap().len();
+            if n >= 3 && std::time::Instant::now() > deadline - Duration::from_secs(4) {
+                // Give a beat for any (incorrect) 4th POST to land, then stop.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let bodies = seen.lock().unwrap().clone();
+        let ids_of = |b: &str| -> Vec<i64> {
+            serde_json::from_str::<serde_json::Value>(b)
+                .ok()
+                .and_then(|v| {
+                    v["push"]["mutations"]
+                        .as_array()
+                        .map(|muts| muts.iter().filter_map(|m| m["id"].as_i64()).collect())
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            bodies.len(),
+            3,
+            "same-snapshot pushes must merge into one POST (TS combinePushes); got {:?}",
+            bodies.iter().map(|b| ids_of(b)).collect::<Vec<_>>()
+        );
+        assert_eq!(ids_of(&bodies[0]), vec![1]);
+        assert_eq!(ids_of(&bodies[1]), vec![2, 3], "ws1 batch merged in order");
+        assert_eq!(ids_of(&bodies[2]), vec![4], "ws2 stays separate");
     }
 
     /// A non-2xx relay response surfaces a `PushFailedHttp` frame to the
