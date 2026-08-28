@@ -11,3 +11,7 @@ pub mod e2e_serving_lag;
 pub mod inspect_handler;
 pub mod pipeline_driver;
 pub mod query_covering;
+// The file mirrors TS `services/view-syncer/view-syncer.ts` 1:1 — the module
+// name intentionally repeats its parent (rule 3).
+#[allow(clippy::module_inception)]
+pub mod view_syncer;
