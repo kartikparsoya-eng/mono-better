@@ -448,7 +448,7 @@ impl ConnContextManagerDispatch for CcmDispatchAdapter {
 /// Per-CG state, owned by (and confined to) the CG thread. Holds the `!Send`
 /// [`SyncEngine`] plus the live connections. Extracted from the event loop so
 /// the message handlers are unit-testable.
-pub(crate) struct CgState {
+pub(crate) struct ViewSyncerService {
     cg_id: String,
     sync_engine: SyncEngine,
     view_syncer: Arc<dyn ViewSyncerDispatch>,
@@ -565,13 +565,13 @@ pub(crate) struct CgState {
     /// Process-wide serving-lag registry this CG publishes its snapshot into.
     serving_lag_registry: Arc<crate::workers::syncer::ServingLagRegistry>,
     /// Live-instance census guard (leak hunt): inc on construct, dec on drop.
-    /// THE most important census — a CgState owns the `SyncEngine` (IVM graph +
+    /// THE most important census — a ViewSyncerService owns the `SyncEngine` (IVM graph +
     /// CVR store), so a residual count after all clients disconnect pins
     /// everything below. See the `Drop` impl for the teardown backtrace hook.
     _census: crate::live_count::Guard,
 }
 
-impl Drop for CgState {
+impl Drop for ViewSyncerService {
     fn drop(&mut self) {
         // Drop this CG's serving-lag snapshot on every teardown path (normal
         // return, TTL/idle shutdown, panic-unwind) — TS drops it when the
@@ -584,11 +584,11 @@ impl Drop for CgState {
         // Attribute *who* tore down this client group when
         // `RUST_SYNCER_DROP_BACKTRACE=1`. The census counter dec's via the
         // `_census` guard's own `Drop`.
-        crate::live_count::drop_backtrace("CgState");
+        crate::live_count::drop_backtrace("ViewSyncerService");
     }
 }
 
-impl CgState {
+impl ViewSyncerService {
     #[cfg(test)]
     fn new(
         cg_id: &str,
@@ -696,7 +696,7 @@ impl CgState {
         }
 
         let created_at = now_ms();
-        CgState {
+        ViewSyncerService {
             cg_id: cg_id.to_string(),
             sync_engine,
             view_syncer,
@@ -2607,7 +2607,7 @@ pub(crate) async fn cg_event_loop(
     ctx: CgTaskContext,
     last_notification: Option<serde_json::Value>,
 ) {
-    let mut state = CgState::new_with_accepting(
+    let mut state = ViewSyncerService::new_with_accepting(
         cg_id,
         &ctx.services_factory,
         ctx.auth_validator,
@@ -2763,7 +2763,7 @@ pub(crate) async fn cg_event_loop(
 /// unbounded queue grows with the backlog. A non-notification message popped
 /// while draining is pushed to `stashed` for in-order handling by the caller.
 async fn dispatch_cg_message(
-    state: &mut CgState,
+    state: &mut ViewSyncerService,
     rx: &mut mpsc::UnboundedReceiver<CGMessage>,
     stashed: &mut std::collections::VecDeque<CGMessage>,
     msg: CGMessage,
@@ -3141,7 +3141,7 @@ mod tests {
         });
         let global = Arc::new(Mutex::new(HashMap::new()));
         let count = Arc::new(AtomicU64::new(0));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -3205,7 +3205,7 @@ mod tests {
         }
     }
 
-    fn seed_test_client_schema(state: &mut CgState) {
+    fn seed_test_client_schema(state: &mut ViewSyncerService) {
         let mut cvr = empty_cvr(&state.cg_id, &state.replica_version);
         cvr.client_schema = Some(serde_json::json!({"tables": {}}));
         state.cvr = Some(cvr);
@@ -3377,7 +3377,7 @@ mod tests {
     /// The raw auth token the ConnectionContextManager holds for a connection.
     /// Replaces the deleted `client_raw_auth` map in tests — the CCM is now the
     /// single owner of per-connection auth (I-8).
-    fn ccm_raw_auth(state: &CgState, client_id: &str, ws_id: &str) -> Option<String> {
+    fn ccm_raw_auth(state: &ViewSyncerService, client_id: &str, ws_id: &str) -> Option<String> {
         lock_unpoisoned(&state.ccm)
             .get_connection_context(&CcmConnectionSelector {
                 client_id: client_id.to_string(),
@@ -3457,12 +3457,12 @@ mod tests {
         rt: &tokio::runtime::Runtime,
         interval_ms: Option<i64>,
         valid: Arc<std::sync::atomic::AtomicBool>,
-    ) -> CgState {
+    ) -> ViewSyncerService {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(RevalidateFactory {
             handle: rt.handle().clone(),
             revalidate_interval_ms: interval_ms,
         });
-        CgState::new(
+        ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(ToggleAuthValidator { valid }),
@@ -4259,7 +4259,7 @@ mod tests {
         });
         let global = Arc::new(Mutex::new(HashMap::new()));
         let count = Arc::new(AtomicU64::new(0));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -4328,7 +4328,7 @@ mod tests {
             handle: rt.handle().clone(),
         });
         let count = Arc::new(AtomicU64::new(0));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg-teardown",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -4398,7 +4398,7 @@ mod tests {
             handle: rt.handle().clone(),
         });
         let count = Arc::new(AtomicU64::new(0));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg-idle",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -4456,7 +4456,7 @@ mod tests {
         });
         let global = Arc::new(Mutex::new(HashMap::new()));
         let count = Arc::new(AtomicU64::new(2));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -4521,7 +4521,7 @@ mod tests {
         });
         let global = Arc::new(Mutex::new(HashMap::new()));
         let count = Arc::new(AtomicU64::new(0));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5026,7 +5026,7 @@ mod tests {
         });
         let global = Arc::new(Mutex::new(HashMap::new()));
         let count = Arc::new(AtomicU64::new(0));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5070,7 +5070,7 @@ mod tests {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
         });
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5131,7 +5131,7 @@ mod tests {
             let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
                 handle: rt.handle().clone(),
             });
-            let mut state = CgState::new(
+            let mut state = ViewSyncerService::new(
                 "cg1",
                 &factory,
                 Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5187,7 +5187,7 @@ mod tests {
         });
         let global = Arc::new(Mutex::new(HashMap::new()));
         let count = Arc::new(AtomicU64::new(0));
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5259,10 +5259,10 @@ mod tests {
         assert_eq!(last[1]["value"], "9.9.9");
     }
 
-    /// A CgState pre-authenticated to the inspector, with a live connection.
+    /// A ViewSyncerService pre-authenticated to the inspector, with a live connection.
     /// Returns the state, runtime, and the sink's receive channel.
     fn inspect_test_state() -> (
-        CgState,
+        ViewSyncerService,
         tokio::runtime::Runtime,
         tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
     ) {
@@ -5270,7 +5270,7 @@ mod tests {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
         });
-        let mut state = CgState::new(
+        let mut state = ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5366,9 +5366,9 @@ mod tests {
         assert!(frame[1]["value"].is_string());
     }
 
-    // ─── CgState mock-factory harness ───────────────────────────────────────
+    // ─── ViewSyncerService mock-factory harness ───────────────────────────────────────
     //
-    // Drives CgState (the fused port of TS view-syncer.ts + syncer-ws-message-
+    // Drives ViewSyncerService (the fused port of TS view-syncer.ts + syncer-ws-message-
     // handler.ts dispatch) directly on the test thread, with mock dispatch
     // services (Noop* above), an in-memory replica carrying a real `issue`
     // table spec, and a channel-backed DirectWebSocketSink standing in for the
@@ -5444,12 +5444,12 @@ mod tests {
         }
     }
 
-    /// A CgState over the `issue`-table factory, plus its runtime.
-    fn tables_state(rt: &tokio::runtime::Runtime) -> CgState {
+    /// A ViewSyncerService over the `issue`-table factory, plus its runtime.
+    fn tables_state(rt: &tokio::runtime::Runtime) -> ViewSyncerService {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(TablesFactory {
             handle: rt.handle().clone(),
         });
-        CgState::new(
+        ViewSyncerService::new(
             "cg1",
             &factory,
             Arc::new(crate::auth::jwt::JwtAuthValidator {
@@ -5483,7 +5483,7 @@ mod tests {
     /// task's job — see `handle_connection`), so this helper does not expect it.
     fn connect_c1(
         rt: &tokio::runtime::Runtime,
-        state: &mut CgState,
+        state: &mut ViewSyncerService,
     ) -> tokio::sync::mpsc::UnboundedReceiver<WsCommand> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         rt.block_on(

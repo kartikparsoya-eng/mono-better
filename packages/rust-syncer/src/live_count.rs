@@ -16,13 +16,13 @@
 //! returns to baseline exactly when the last clone drops.
 use std::sync::atomic::{AtomicI64, Ordering};
 
-/// Per-client-group state (`router::CgState`), one per hosted client group.
-/// THE most important census for a leak hunt: a CgState owns the `SyncEngine`
+/// Per-client-group state (`view_syncer::ViewSyncerService`), one per hosted client group.
+/// THE most important census for a leak hunt: a ViewSyncerService owns the `SyncEngine`
 /// (and thus the IVM pipeline graph + CVR store handle), so a CG that never
 /// drops pins everything below it. A nonzero residual after all clients
 /// disconnect and idle-shutdown fires means a CG task is being retained.
 pub static CLIENT_GROUP: AtomicI64 = AtomicI64::new(0);
-/// `sync_engine::SyncEngine` — one per CgState. Should track CLIENT_GROUP; a
+/// `sync_engine::SyncEngine` — one per ViewSyncerService. Should track CLIENT_GROUP; a
 /// divergence means an engine escaped its owning CG.
 pub static SYNC_ENGINE: AtomicI64 = AtomicI64::new(0);
 /// `connection::Connection` — one per live client socket on a CG.
@@ -67,7 +67,7 @@ impl Drop for Guard {
 }
 
 /// Emit a `force_capture` backtrace to stderr when `RUST_SYNCER_DROP_BACKTRACE=1`.
-/// Called from the drop path of a long-lived type (e.g. `CgState`) to attribute
+/// Called from the drop path of a long-lived type (e.g. `ViewSyncerService`) to attribute
 /// *who* tore it down — steady-state runs don't pay the capture cost unless the
 /// env var is set. Mirrors the `RUST_IVM_DROP_BACKTRACE` capture in the
 /// snapshotter.

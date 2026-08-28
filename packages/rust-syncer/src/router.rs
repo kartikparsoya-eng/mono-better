@@ -1,7 +1,7 @@
 //! TRANSITIONAL SHIM (L9 Stage 3b) — `router.rs` dissolved into the 1:1 tree:
 //! the `Syncer` connection seat lives in `workers/syncer.rs`, the rust-only CG
 //! executor substrate in `workers/cg_executor.rs`, and the per-CG serving core
-//! (`CgState`/`ViewSyncerService`, the event loop, dispatch) in
+//! (`ViewSyncerService`, the event loop, dispatch) in
 //! `services/view_syncer/view_syncer.rs`. Every former `crate::router::*` path
 //! is re-exported here until the Stage-4 shim sweep deletes this file.
 

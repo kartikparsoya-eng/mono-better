@@ -10,7 +10,7 @@
 //! its TS origin. The one documented exception is the per-CG **actor core**
 //! (`router.rs`): TS's separate `ViewSyncerService` (view-syncer.ts),
 //! `ConnectionContextManager` (connection-context-manager.ts) and `Syncer`
-//! (syncer.ts) classes are fused into `CgState` + `Syncer` for the
+//! (syncer.ts) classes map to `ViewSyncerService` + `Syncer` for the
 //! single-threaded-per-CG `spawn_local` model — they cannot split into 1:1 files
 //! without un-fusing the structs (a rewrite). The remaining top-level files
 //! (`ws_server`, `ws_sink`, `http_server`, `otel`, `metrics`, `protocol`,
