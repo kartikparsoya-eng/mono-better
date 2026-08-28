@@ -2304,9 +2304,15 @@ impl ViewSyncerService {
             return;
         }
         if let Some(conn) = self.connections.get(client_id) {
-            conn.close_with_error(crate::protocol::ErrorBody::rehome(
-                "Connection superseded by a newer connection",
-            ));
+            // TS supersede closes the replaced connection FRAME-LESS
+            // (view-syncer.ts:913 `client.close("replaced by wsID: …")` →
+            // `ClientHandler.close` → `downstream.cancel()`); it does NOT send an
+            // error frame. Emitting a `Rehome` here made the superseded socket's
+            // client observe a spurious "reconnect elsewhere" signal even though
+            // the SAME client had already reconnected (this method only runs for
+            // the same-clientID supersede, CGMessage::CloseConnection). Caught by
+            // the G49 ownership differential (2026-08-28): rust=Rehome, TS=none.
+            conn.close("Connection superseded by a newer connection");
         }
         self.on_connection_closed(client_id, ws_id);
     }
@@ -4554,6 +4560,73 @@ mod tests {
              view-syncer.ts:767): an idle group with no clients runs 0 evictions"
         );
         assert!(state.next_expiry_delay().is_none());
+    }
+
+    /// A same-clientID supersede (CGMessage::CloseConnection → close_connection)
+    /// must close the replaced socket FRAME-LESS, matching TS
+    /// (view-syncer.ts:913 `client.close("replaced by wsID: …")` →
+    /// `downstream.cancel()`). It must NOT send an `["error", …]` frame — a
+    /// Rehome there tells the superseded client to reconnect elsewhere even
+    /// though the SAME client already reconnected. Non-vacuous: reverting
+    /// `close_connection` to `close_with_error(rehome(...))` makes an error frame
+    /// appear and the assertion fails. (Caught by the G49 ownership differential:
+    /// rust=Rehome, TS=none, 2026-08-28.)
+    #[test]
+    fn supersede_close_is_frameless_like_ts() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let count = Arc::new(AtomicU64::new(0));
+        let mut state = ViewSyncerService::new_test(
+            "cg-supersede",
+            &factory,
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+            count,
+        );
+
+        let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink = DirectWebSocketSink::new(tx);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
+        assert_eq!(
+            state.registered_ws.get("c1").map(String::as_str),
+            Some("ws1")
+        );
+        // Drain any connect-time commands queued on this sink.
+        while drx.try_recv().is_ok() {}
+
+        // Supersede: the CG receives CloseConnection for the still-registered ws.
+        state.close_connection("c1", "ws1");
+
+        let mut saw_error_frame = false;
+        let mut saw_close = false;
+        while let Ok(cmd) = drx.try_recv() {
+            match cmd {
+                WsCommand::Fail(_) => saw_error_frame = true,
+                WsCommand::Send { msg, .. } => {
+                    if msg.get(0).and_then(|v| v.as_str()) == Some("error") {
+                        saw_error_frame = true;
+                    }
+                }
+                WsCommand::Close(_) | WsCommand::CloseWithCode { .. } => saw_close = true,
+            }
+        }
+        assert!(
+            !saw_error_frame,
+            "supersede must NOT send an error frame — TS closes frame-less \
+             (view-syncer.ts:913); a Rehome here is a spurious reconnect signal"
+        );
+        assert!(
+            saw_close,
+            "supersede must still close the superseded socket"
+        );
     }
 
     #[test]
