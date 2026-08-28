@@ -147,8 +147,10 @@ fn clients_to_delete(
 /// is a non-blocking single-threaded event loop (doc 89's CG dispatch model),
 /// rather than blocking on one connection at a time.
 pub enum CGMessage {
-    /// A new connection was accepted — set it up (send `connected`, register a
-    /// client handler with the SyncEngine).
+    /// A new connection was accepted — register its client handler with the
+    /// SyncEngine. (`connected` is ALREADY sent by `handle_connection` on the
+    /// accept task, before this message is enqueued — the 2026-08-27 connect-ack
+    /// decoupling, task #152.)
     NewConnection {
         params: Box<ConnectParams>,
         sink: DirectWebSocketSink,
@@ -3285,13 +3287,13 @@ impl CgState {
                 return false;
             }
         };
-        match crate::auth::read_authorizer::reload_permissions_if_changed(
+        match crate::auth::load_permissions::reload_permissions_if_changed(
             &conn,
             &self.app_id,
             self.permissions_hash.as_deref(),
         ) {
-            crate::auth::read_authorizer::PermissionsReload::Unchanged => false,
-            crate::auth::read_authorizer::PermissionsReload::Changed { permissions, hash } => {
+            crate::auth::load_permissions::PermissionsReload::Unchanged => false,
+            crate::auth::load_permissions::PermissionsReload::Changed { permissions, hash } => {
                 tracing::info!(
                     "CG {}: read-permissions changed (hash {:?} → {:?}); re-transforming queries",
                     self.cg_id,
