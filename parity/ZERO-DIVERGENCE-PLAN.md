@@ -510,3 +510,52 @@ if a real divergence is ever traced to queue placement.
 - **P11-a (verify)**: one integration assertion that a purge-tombstoned CVR
   loaded by rust yields the exact TS `ClientNotFound` message bytes (client
   wipe semantics depend on it).
+
+
+---
+
+## PICKUP LIST (single source of truth for remaining work — updated 2026-08-28)
+
+Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
+341 syncer tests (`TEST_CVR_PG_URI=postgres://user:password@localhost:6434/postgres`)
++ `python3 parity/call_topology.py` + `python3 parity/parity_ledger.py syncer
+--enforce-structure` + `bash scripts/local-rust-ci.sh` == PASS.
+
+### In flight (this session)
+- [ ] **ART release gate** on `zero-cache-rust-syncer:l9-fa1bfbef4`
+      (`RUST_SYNCER_IMAGE=… SYNCER_SHARDS=200 run-rust-syncer-release.sh
+      --mode release --skip-code`); log: `/tmp/art-l9.log`.
+- [ ] **Push** the L9 series to `origin` (mono → kartikparsoya-eng/mono-better;
+      `git push --no-verify` if the GitGuardian hook false-positives).
+      11 commits: 1970feeb7 (3c-iii) … 3cb3d7036 (Part 5).
+
+### Queued next (small, self-contained — good pickups)
+- [ ] **P7-a** (Part 5): stop the ttlClock interval when the last client
+      disconnects (`stop_ttl_clock_interval()` when `registered_ws` empties —
+      TS `#deleteClientDueToDisconnect`). Non-vacuous test: tick due after
+      last disconnect must NOT issue the `UPDATE instances` write.
+- [ ] **CVR fuzzy-rename sweep**: rename the 4 fuzzy-bound rust-cvr symbols to
+      exact TS names (run `python3 parity/parity_ledger.py cvr`, see the
+      "fuzzy" rows, e.g. `RowsVersionBehindError`→current `VersionError`-class
+      names). Pure rename commits; ledger re-run proves exact.
+- [ ] **P6-a** (Part 5, verify): rust catchup reader bounded-memory for large
+      CVRs (TS pages 10k rows/cursor); add a bound note or test.
+- [ ] **P11-a** (Part 5, verify): purge-tombstoned CVR load yields the
+      byte-exact TS `ClientNotFound` message (client wipe depends on it).
+
+### Larger, optional (decide before starting)
+- [ ] **Syncer misfiled tail**: drive the 25-entry L1 ratchet list down
+      (`parity_ledger.py syncer --enforce-structure` prints it) — mostly
+      fuzzy-matcher noise + documented folds; only worth it with a matcher
+      improvement (per-file tie-break) or symbol moves with real value.
+- [ ] **worker-dispatcher mirroring**: split `http_server.rs`/`ws_server.rs`
+      against TS `server/worker-dispatcher.ts` — interwoven with I-1/I-4
+      invention tasks; needs its own design pass (documented in `src/server.rs`).
+- [ ] Dormant backlog: #103 arena/Send-ification; #143 G25 pool-sizing rerun;
+      #145 advancement-timeout by-design confirmation; #150 shard-sized
+      capacity rerun; #151 dhat/e2e profiler runs.
+
+### Done (for orientation)
+L9 Stages 1–5 all landed (Part 4 records per-stage commits); CVR path verdicts
+in Part 5; L1 structural ratchet wired into local CI; ledger extractor
+brace-bug fixed; L3 pins on the 1:1 tree.
