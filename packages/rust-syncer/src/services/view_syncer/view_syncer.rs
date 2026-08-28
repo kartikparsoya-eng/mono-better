@@ -678,6 +678,12 @@ pub struct ViewSyncerService {
     /// than a timer handle — the CG event loop multiplexes deadlines instead of
     /// holding per-purpose timers. `None` = interval not running (TS `0`).
     ttl_clock_interval: Option<i64>,
+    /// Port of TS `#expiredQueriesTimer` (view-syncer.ts:278). Wall-clock (ms)
+    /// deadline of the next TTL-eviction pass, armed by `schedule_expire_eviction`
+    /// and cleared by `stop_expire_timer`. Realized as a deadline the CG event
+    /// loop multiplexes rather than a timer handle. `None` = timer stopped
+    /// (TS `0`) — an idle group with no connected clients runs no eviction.
+    expired_queries_timer: Option<i64>,
     /// Wall-clock time of the most recent newly established connection. This is
     /// the ownership lease boundary passed to every CVR load/flush.
     last_connect_time: i64,
@@ -878,6 +884,7 @@ impl ViewSyncerService {
             ttl_clock: 0,
             ttl_clock_base: created_at,
             ttl_clock_interval: None,
+            expired_queries_timer: None,
             last_connect_time: created_at,
             keepalive_until: created_at + CG_KEEPALIVE_MS,
             connections: HashMap::new(),
@@ -1075,15 +1082,42 @@ impl ViewSyncerService {
         }
     }
 
-    /// The delay until the next TTL eviction should run, or `None` if no
-    /// inactive queries are pending. Port of TS `#scheduleExpireEviction`'s
-    /// delay computation: `clamp(next - ttlClock + hysteresis, hysteresis, MAX)`.
-    fn next_expiry_delay(&self) -> Option<Duration> {
-        let cvr = self.cvr.as_ref()?;
-        let next = rust_cvr::cvr::next_eviction_time(cvr)?;
+    /// Port of TS `#scheduleExpireEviction` (view-syncer.ts:1394-1432). Arms the
+    /// eviction timer for the earliest inactive-query expiry: stop the existing
+    /// timer, then — if any inactive query has a TTL — arm `#expiredQueriesTimer`
+    /// at the collapse-windowed delay `clamp(next - ttlClock + hysteresis,
+    /// hysteresis, MAX)`. Takes the CVR by ref to mirror TS
+    /// `#scheduleExpireEviction(lc, cvr)`; the delay is relative to the live
+    /// ttlClock, which TS reads off the freshly-synced `cvr.ttlClock` and which
+    /// `self.ttl_clock` holds here (both are the same monotonic clock value at
+    /// scheduling time).
+    fn schedule_expire_eviction(&mut self, cvr: &CVR) {
+        self.stop_expire_timer();
+        // First see if there is any inactive query with a ttl (TS `nextEvictionTime`).
+        let Some(next) = rust_cvr::cvr::next_eviction_time(cvr) else {
+            // No inactive queries with a ttl; leave the timer stopped.
+            return;
+        };
         let raw = (next - self.ttl_clock) + TTL_TIMER_HYSTERESIS_MS;
         let delay = raw.clamp(TTL_TIMER_HYSTERESIS_MS, MAX_TTL_MS);
-        Some(Duration::from_millis(delay as u64))
+        self.expired_queries_timer = Some(now_ms() + delay);
+    }
+
+    /// Port of TS `#stopExpireTimer` (view-syncer.ts:773-777). Clears the
+    /// eviction timer; no eviction runs until `schedule_expire_eviction` re-arms
+    /// it. The last-client-disconnect branch calls this (TS view-syncer.ts:767)
+    /// so an idle group with no connected clients performs zero eviction work.
+    fn stop_expire_timer(&mut self) {
+        self.expired_queries_timer = None;
+    }
+
+    /// The delay until the armed eviction timer fires, or `None` when it is
+    /// stopped (TS `#expiredQueriesTimer === 0`). Rust-only adapter: the CG
+    /// event loop multiplexes deadlines, so it needs the remaining delay rather
+    /// than a timer callback.
+    fn next_expiry_delay(&self) -> Option<Duration> {
+        let deadline = self.expired_queries_timer?;
+        Some(Duration::from_millis((deadline - now_ms()).max(0) as u64))
     }
 
     /// Fired when the eviction timer elapses: remove any now-expired queries and
@@ -1116,6 +1150,9 @@ impl ViewSyncerService {
                 // Expiry runs through the same query-sync path TS marks served
                 // at the end of (`#syncQueryPipelineSet`).
                 self.mark_version_served(&cvr.version);
+                // TS `#removeExpiredQueries` reschedules the eviction timer for
+                // the next inactive query at its tail (view-syncer.ts:651).
+                self.schedule_expire_eviction(&cvr);
                 self.cvr = Some(cvr);
             }
             Err(e) => {
@@ -2235,6 +2272,11 @@ impl ViewSyncerService {
         // is the loaded-CVR check inside the callee).
         if self.connections.is_empty() {
             self.update_ttl_clock_in_cvr_without_lock();
+            // TS `#deleteClientDueToDisconnect` also stops the eviction timer on
+            // the last disconnect (view-syncer.ts:767): an idle group with no
+            // connected clients runs zero query eviction until a client
+            // reconnects and re-arms via `schedule_expire_eviction`.
+            self.stop_expire_timer();
         }
     }
 
@@ -2819,9 +2861,18 @@ pub(crate) async fn cg_event_loop(
                         {
                             state.on_auth_maintenance_tick().await;
                         }
-                        // Evict expired queries only when some are pending (running
-                        // early on an auth-only wake would be a needless engine call).
-                        if state.next_expiry_delay().is_some() {
+                        // Fire the eviction timer only when its own deadline has
+                        // elapsed (TS `#expiredQueriesTimer` setTimeout callback);
+                        // a shared wake for another deadline must not run eviction
+                        // early. TS clears the handle at the start of the callback
+                        // (view-syncer.ts:1423) and reschedules at the tail of
+                        // `#removeExpiredQueries` (651) — so clear first, then run
+                        // on_expiry_tick (which re-arms on success).
+                        if state
+                            .expired_queries_timer
+                            .is_some_and(|at| at <= now_ms())
+                        {
+                            state.stop_expire_timer();
                             state.on_expiry_tick().await;
                         }
                         // Periodic ttlClock persistence (TS #startTTLClockInterval's
@@ -4409,6 +4460,100 @@ mod tests {
             state.client_base_versions.is_empty(),
             "client_base_versions leaked"
         );
+    }
+
+    /// Port fidelity for the `#expiredQueriesTimer` / `#scheduleExpireEviction` /
+    /// `#stopExpireTimer` trio (view-syncer.ts:278/1394/773). A config update
+    /// arms the eviction timer for an inactive TTL query; the LAST client
+    /// disconnecting must STOP it (TS `#deleteClientDueToDisconnect`,
+    /// view-syncer.ts:767) so an idle group with no clients runs zero eviction —
+    /// matching TS, which clears the timer on last disconnect and never re-arms
+    /// it until a client reconnects. Non-vacuous: reverting the
+    /// `stop_expire_timer()` call at the last-disconnect branch leaves the timer
+    /// armed and the `is_none()` assertions below fail.
+    #[test]
+    fn last_disconnect_stops_the_eviction_timer() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
+            handle: rt.handle().clone(),
+        });
+        let count = Arc::new(AtomicU64::new(0));
+        let mut state = ViewSyncerService::new_test(
+            "cg-expire",
+            &factory,
+            Arc::new(crate::auth::jwt::JwtAuthValidator {
+                jwk: None,
+                secret: None,
+                jwks_url: None,
+                issuer: None,
+                audience: None,
+            }),
+            Arc::new(Mutex::new(HashMap::new())),
+            count,
+        );
+
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink = DirectWebSocketSink::new(tx);
+        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
+        assert!(!state.connections.is_empty());
+
+        // Build a CVR whose only query is inactive for its only client with a
+        // 1s TTL, so `next_eviction_time` is Some — then arm the timer exactly
+        // as `#handleConfigUpdate`'s tail does (view-syncer.ts:1390).
+        let version = CVRVersion {
+            state_version: "00".to_string(),
+            config_version: None,
+        };
+        let mut client_state = std::collections::BTreeMap::new();
+        client_state.insert(
+            "c1".to_string(),
+            rust_cvr::schema::types::ClientState {
+                inactivated_at: Some(0),
+                ttl: 1_000,
+                version: version.clone(),
+            },
+        );
+        let query = QueryRecord::Client(rust_cvr::schema::types::ClientQueryRecord {
+            base: rust_cvr::schema::types::BaseQueryRecord {
+                id: "q1".to_string(),
+                transformation_hash: None,
+                transformation_version: None,
+                row_set_signature: None,
+            },
+            ast: serde_json::json!({"table": "users"}),
+            client_state,
+            patch_version: None,
+        });
+        let mut queries = std::collections::BTreeMap::new();
+        queries.insert("q1".to_string(), query);
+        let cvr = CVR {
+            id: "cg-expire".to_string(),
+            version,
+            last_active: 0,
+            ttl_clock: 0,
+            replica_version: Some("v1".to_string()),
+            clients: std::collections::BTreeMap::new(),
+            queries,
+            client_schema: None,
+            profile_id: None,
+        };
+        state.cvr = Some(cvr.clone());
+        state.schedule_expire_eviction(&cvr);
+        assert!(
+            state.expired_queries_timer.is_some(),
+            "a config update with an inactive TTL query must arm the eviction timer"
+        );
+        assert!(state.next_expiry_delay().is_some());
+
+        // Last client disconnects → TS `#stopExpireTimer` (view-syncer.ts:767).
+        state.on_connection_closed("c1", "ws1");
+        assert!(state.connections.is_empty());
+        assert!(
+            state.expired_queries_timer.is_none(),
+            "last disconnect must stop the eviction timer (TS #stopExpireTimer, \
+             view-syncer.ts:767): an idle group with no clients runs 0 evictions"
+        );
+        assert!(state.next_expiry_delay().is_none());
     }
 
     #[test]
@@ -6003,6 +6148,7 @@ impl ViewSyncerService {
             ttl_clock: 0,
             ttl_clock_base: created_at,
             ttl_clock_interval: None,
+            expired_queries_timer: None,
             last_connect_time: created_at,
             keepalive_until: created_at + CG_KEEPALIVE_MS,
             connections: HashMap::new(),
@@ -6668,6 +6814,9 @@ impl ViewSyncerService {
             };
             pokers.end(cfg_cvr.version.clone());
         }
+        // TS `#handleConfigUpdate` arms the eviction timer for the updated CVR's
+        // inactive queries at its tail (view-syncer.ts:1390).
+        self.schedule_expire_eviction(&cfg_cvr);
         Ok(cfg_cvr)
     }
 

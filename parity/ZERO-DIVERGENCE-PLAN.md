@@ -483,8 +483,8 @@ END-TO-END verdicts and the residual work.
 | 4 | Flush | **PORTED 1:1 + documented refinement** | deep-equal row de-dup (test `flush_prunes_noop_row_updates_like_ts`); `SELECT … FOR UPDATE` version+ownership check; pipelined writes; materiality check documented inline (the quiet-commit desync fix). Error → CG `fail_group` teardown, which SUBSUMES TS's `rowCache.clear()` (the whole cache dies with the CG). |
 | 5 | Row write-back | **PORTED + registered invention seat** | same latch semantics (`allow-defer` defers while flushing or >100); rust drives the loop via `tokio::spawn(flush_loop)` on the shared-pool runtime (TS: same-event-loop `setTimeout`); `fail_service` callback; `flushed()` returns the stored error instead of hanging. Observable contract pinned by the I-6 durability-ordering oracle. |
 | 6 | Catchup | **PORTED 1:1** | `catchup_config_patches` + `catchup_row_patches` with `exclude_query_hashes`; `flushed()` wait; `check_version` → `ConcurrentModification` → clean Rehome. |
-| 7 | TTL clock | **PORTED, one minor divergence (P7-a below)** | `get_ttl_clock` delta model; standalone `update_ttl_clock_in_cvr_without_lock`; interval armed after material flush (`take_flush_observed` bridge, documented). |
-| 8 | Query TTL expiry | **PORTED 1:1** | `next_expiry_delay` (+50ms hysteresis) + `on_expiry_tick` in the CG loop. |
+| 7 | TTL clock | **PORTED 1:1** (P7-a retracted — see below) | `get_ttl_clock` delta model; standalone `update_ttl_clock_in_cvr_without_lock`; interval armed after material flush (`take_flush_observed` bridge, documented). Interval is NOT stopped on last disconnect — faithful to TS (`#stopTTLClockInterval` is called only from `#startTTLClockInterval` and `#cleanup`, never from `#deleteClientDueToDisconnect`). |
+| 8 | Query TTL expiry | **PORTED 1:1** (timer trio restored 2026-08-28) | `#expiredQueriesTimer` → `expired_queries_timer` field; `#scheduleExpireEviction` → `schedule_expire_eviction(&cvr)` (called at the config-update tail = view-syncer.ts:1390, and the remove-expired tail = 651); `#stopExpireTimer` → `stop_expire_timer` (called on last disconnect = view-syncer.ts:767). The CG loop fires on the armed deadline and clears-before-run (TS:1423). Previously rust POLLED `next_eviction_time(cvr)` with no trio, which let an eviction+flush fire during the 0-client keepalive window that TS suppresses — now fixed + pinned by `last_disconnect_stops_the_eviction_timer`. |
 | 9 | Row-set signature | **PORTED; read-side force-re-exec N/A by architecture** | `row_id_signature_unit = h64(row_id_string)` (live since the L8 delegation fix); flush persists + fires the drift canary metric. TS's hydrate-time "stored≠candidate → removeQuery" recovery exists because TS RESTORES hydration state from the CVR; rust re-executes every query on engine reset/rehydrate, so there is no restored state to force out — the drift canary is the remaining observable. |
 | 10 | Ownership transfer | **PORTED 1:1** | load-side conditional steal + flush-side `FOR UPDATE` → `OwnershipError`/`ConcurrentModification` → Rehome. |
 | 11 | CVR purge | **OUT OF RUST SCOPE (by design)** | TS `CVRPurger` runs in the REAPER worker (`server/reaper.ts`), which the shipped combined image's TS runner still operates. Rust's contract: honor tombstones on load (✓ path 1) and hold `FOR UPDATE` during flush so `SKIP LOCKED` skips live CVRs (✓ path 4). |
@@ -498,12 +498,23 @@ queue to the store for site-parity would be high-churn/low-value. Revisit only
 if a real divergence is ever traced to queue placement.
 
 ### Remaining work items
-- **P7-a**: TS `#deleteClientDueToDisconnect` STOPS the ttlClock interval when
-  the last client disconnects; rust leaves the deadline armed until the ≤5s
-  idle teardown, so one extra `UPDATE instances SET ttlClock, lastActive` can
-  fire post-disconnect (bumps `lastActive`, marginally delaying purge
-  eligibility). Fix: `stop_ttl_clock_interval()` when `registered_ws` empties;
-  non-vacuous test (tick due after last disconnect → no UPDATE).
+- **P7-a — RETRACTED (was a false divergence), REAL fix DONE 2026-08-28.** The
+  Part-5 note conflated two different TS timers. Re-reading the TS source:
+  `#deleteClientDueToDisconnect` (view-syncer.ts:747-771) stops the *expire*
+  timer (`#stopExpireTimer`, 767) — NOT the *ttlClock* interval. The ttlClock
+  interval (`#ttlClockInterval`) is stopped only in `#startTTLClockInterval`
+  (restart) and `#cleanup` (2812, shutdown), so TS leaves it armed until
+  shutdown — exactly like rust. So the ttlClock side needs NO change.
+  The REAL gap the investigation surfaced: rust had never ported the
+  `#expiredQueriesTimer` / `#scheduleExpireEviction` / `#stopExpireTimer` trio
+  at all — it polled `next_eviction_time(cvr)` in the CG loop with no
+  clients-present gate, so an eviction pass (and its CVR flush) could fire
+  during the 0-client keepalive window that TS's `#stopExpireTimer`-on-last-
+  disconnect suppresses. **Fixed** by porting the trio 1:1 at the exact TS call
+  sites (field + `schedule_expire_eviction`/`stop_expire_timer`, clear-before-
+  run in the loop), pinned by the non-vacuous `last_disconnect_stops_the_
+  eviction_timer` test (fails with the disconnect-site `stop_expire_timer()`
+  reverted).
 - **P6-a (verify)**: TS pages catchup rows via cursor (10 000/page); confirm
   the rust catchup reader is bounded-memory for large CVRs (streamed or
   chunked), add a bound note/test.
@@ -530,10 +541,15 @@ Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
       11 commits: 1970feeb7 (3c-iii) … 3cb3d7036 (Part 5).
 
 ### Queued next (small, self-contained — good pickups)
-- [ ] **P7-a** (Part 5): stop the ttlClock interval when the last client
-      disconnects (`stop_ttl_clock_interval()` when `registered_ws` empties —
-      TS `#deleteClientDueToDisconnect`). Non-vacuous test: tick due after
-      last disconnect must NOT issue the `UPDATE instances` write.
+- [x] **P7-a** (Part 5) — RETRACTED as a false divergence + REAL fix DONE
+      2026-08-28. The ttlClock interval is faithfully left armed (TS never stops
+      it on disconnect). The actual gap was the un-ported `#expiredQueriesTimer`
+      / `#scheduleExpireEviction` / `#stopExpireTimer` trio (rust polled
+      instead), which let an eviction fire during the 0-client keepalive window.
+      Ported 1:1 at the exact TS call sites; pinned by
+      `last_disconnect_stops_the_eviction_timer` (proven failing-first). NOTE:
+      lands AFTER the ART image `l9-fa1bfbef4` was built → needs a re-ART before
+      it is considered release-validated.
 - [ ] **CVR fuzzy-rename sweep**: rename the 4 fuzzy-bound rust-cvr symbols to
       exact TS names (run `python3 parity/parity_ledger.py cvr`, see the
       "fuzzy" rows, e.g. `RowsVersionBehindError`→current `VersionError`-class
