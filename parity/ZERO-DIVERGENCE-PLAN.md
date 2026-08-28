@@ -372,7 +372,7 @@ touched except where their callers move.
   write-behind actor (rust-cvr), Drop teardown, timer mux (one `select!`
   deadline = min of the four TS `setTimeout`s — planner fns keep TS names).
 
-### Execution stages (each: move-only commits ≠ behavior commits; ledger + local CI + call_topology green per commit; ART gate per stage)
+### Execution stages (each: move-only commits ≠ behavior commits; ledger + local CI + call_topology green per commit; ONE full ART release gate at the END of the refactor — no per-stage ART, per user direction 2026-08-28)
 
 - **Stage 0 — freeze.** Current release gate green + pushed FIRST. Fix the
   two known stale comments (rule 13): `CGMessage::NewConnection` doc still
@@ -383,12 +383,12 @@ touched except where their callers move.
   (b) `inspect_handler.rs`; (c) `push_relay.rs` → `services/mutagen/pusher.rs`
   renames, then **port `combinePushes`** (separate commit, non-vacuous test:
   two pushes same clientID/wsID/revision merge into one POST; proven failing
-  first). Smoke-mode ART.
+  first).
 - **Stage 2 — `workers/` extraction.** `connection.rs` + `syncer.rs` out of
   `router.rs`/`ws_server.rs`; dispatch un-interception (restoration #1) as its
   OWN commit with frame-sequence oracle + G-frames proof; `ConnectionRouter`
   → `Syncer`, `handle_connection` → `create_connection`. Temporary re-export
-  shims keep tests/main compiling; release-mode ART.
+  shims keep tests/main compiling.
 - **Stage 3 — `view_syncer.rs` reconstruction (the big one).** Move `CgState`
   → `ViewSyncerService`; de-meld `config_and_hydrate`/`advance_and_sync` into
   the TS method set by PURE extract-method (call order byte-identical —
@@ -396,7 +396,7 @@ touched except where their callers move.
   divergence DISCOVERED during de-melding is a separate fix commit with a
   failing-first test (that surfacing is a feature, not a hazard). `#clients`
   registry moves here from SyncEngine. `sync_engine.rs` reduced to a
-  deprecated re-export shim, deleted at stage end. Release-mode ART.
+  deprecated re-export shim, deleted at stage end.
 - **Stage 4 — enforcement.** L1 ledger re-run (orchestration symbols must
   bind to their TS twins; misfiled → ~0); L3 Tier-2 extended to pin the new
   sanctioned contexts (init on accept task, pong on writer task, handler on
