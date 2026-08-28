@@ -626,6 +626,66 @@ impl SyncEngine {
             }
         }
 
+        // TS routes every config-bearing message through `#handleConfigUpdate`
+        // and then (when pipelines are synced) `#syncQueryPipelineSet`
+        // (view-syncer.ts). This orchestrator is the CG-dispatch seat that
+        // chains the two 1:1 methods on the serial CG task.
+        let cfg_cvr = self
+            .handle_config_update(
+                cvr,
+                client_id,
+                poke_ws_ids,
+                shard,
+                desired_puts,
+                desired_dels,
+                desired_clear,
+                client_schema,
+                profile_id,
+                existing_rows,
+                last_connect_time,
+                last_active,
+                ttl_clock,
+            )
+            .await?;
+        self.sync_query_pipeline_set(
+            cfg_cvr,
+            poke_ws_ids,
+            shard,
+            permissions,
+            auth_data,
+            custom_ctx,
+            state_version,
+            replica_version,
+            existing_rows,
+            last_connect_time,
+            last_active,
+            ttl_clock,
+            original_client_versions,
+        )
+        .await
+    }
+
+    /// Record the client + its desired-query changes into the CVR and poke the
+    /// config patches. Port of TS `ViewSyncerService.#handleConfigUpdate` /
+    /// `#updateCVRConfig` (view-syncer.ts) — the config-driven half of every
+    /// initConnection / changeDesiredQueries / deleteClients cycle.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_config_update(
+        &mut self,
+        cvr: CVR,
+        client_id: &str,
+        poke_ws_ids: &[String],
+        shard: &ShardID,
+        desired_puts: Vec<DesiredQuerySpec>,
+        desired_dels: Vec<String>,
+        desired_clear: bool,
+        client_schema: Option<ClientSchema>,
+        profile_id: Option<&str>,
+        existing_rows: &RowRecordMap,
+        last_connect_time: i64,
+        last_active: i64,
+        ttl_clock: TTLClock,
+    ) -> Result<CVR, String> {
         // ── Phase 1: config-driven — record client + desired queries. ──
         let mut cfg = CVRConfigDrivenUpdater::new(cvr, shard.clone());
         cfg.ensure_client(client_id);
@@ -691,7 +751,29 @@ impl SyncEngine {
             };
             pokers.end(cfg_cvr.version.clone());
         }
+        Ok(cfg_cvr)
+    }
 
+    /// Sync the pipeline set to the CVR's FULL query set (transform, add/remove,
+    /// hydrate, poke, catch up). Port of TS
+    /// `ViewSyncerService.#syncQueryPipelineSet` (view-syncer.ts).
+    #[allow(clippy::too_many_arguments)]
+    async fn sync_query_pipeline_set(
+        &mut self,
+        cfg_cvr: CVR,
+        poke_ws_ids: &[String],
+        shard: &ShardID,
+        permissions: Option<&serde_json::Value>,
+        auth_data: &serde_json::Value,
+        custom_ctx: Option<&CustomQueryContext>,
+        state_version: String,
+        replica_version: String,
+        existing_rows: &RowRecordMap,
+        last_connect_time: i64,
+        last_active: i64,
+        ttl_clock: TTLClock,
+        original_client_versions: std::collections::HashMap<String, NullableCVRVersion>,
+    ) -> Result<CVR, String> {
         // ── Phase 2: query-driven — sync the pipeline to the CVR's FULL query
         // set (port of TS `#syncQueryPipelineSet`). The executed set is derived
         // from `cfg_cvr.queries` — which, after `ensure_client`, includes the
