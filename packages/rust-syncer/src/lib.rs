@@ -14,7 +14,7 @@
 //! single-threaded-per-CG `spawn_local` model — they cannot split into 1:1 files
 //! without un-fusing the structs (a rewrite). The remaining top-level files
 //! (`ws_server`, `ws_sink`, `http_server`, `otel`, `metrics`, `protocol`,
-//! `push_relay`, `sync_engine`, `live_count`, `trace`) are Rust-only transport /
+//! `sync_engine`, `live_count`, `trace`) are Rust-only transport /
 //! observability / process infra with no single TS origin.
 
 // TS-mirrored subtrees.
@@ -30,7 +30,6 @@ pub mod live_count;
 pub mod metrics;
 pub mod otel;
 pub mod protocol;
-pub mod push_relay;
 pub mod router;
 pub mod sync_engine;
 pub mod trace;
@@ -51,11 +50,11 @@ pub use http_server::{
     HttpServerState, ServerStats, bind_http_listener, run_http_server, serve_http,
 };
 pub use protocol::*;
-pub use push_relay::HttpRelayPusher;
 pub use router::{
     AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionRouter, ConnectionSinks,
     CvrPgConfig, GroupAuthState, SyncEngineConfig,
 };
+pub use services::mutagen::pusher::PusherService;
 pub use services::view_syncer::connection_context_manager::{
     Auth, CCMError, ConnectParamsForRegistration, ConnectionContextManager, ConnectionFetchContext,
     ConnectionState, ConnectionValidation, FetchConfig, HeaderOptions, InitConnectionBody,

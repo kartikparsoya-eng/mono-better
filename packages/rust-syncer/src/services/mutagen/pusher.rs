@@ -1,4 +1,10 @@
-//! HTTP relay for custom-mutation pushes.
+//! Pusher — custom-mutation push path. Port of
+//! `services/mutagen/pusher.ts` (`PusherService` + the sequential worker loop,
+//! TS `PushWorker`), adapted to the Option-A relay architecture (registered
+//! invention): TS's in-process pusher POSTs straight to the user's API server
+//! via `fetchFromAPIServer`; rust forwards to the TS dispatcher's push
+//! endpoint, which rebuilds the `userPushURL` request. Client-observable
+//! contract (ordering, PushFailed semantics, results-via-poke) is identical.
 //!
 //! The Rust syncer keeps the sync connection read-only and runs ZERO mutation
 //! logic. When a client sends a custom `push` over the sync WebSocket, this
@@ -111,8 +117,9 @@ fn queue_cap() -> i64 {
         .unwrap_or(DEFAULT_QUEUE_CAP)
 }
 
-/// Relays custom pushes to the TS push endpoint over HTTP, in order.
-pub struct HttpRelayPusher {
+/// Port of TS `PusherService` (Option-A relay seat): relays custom pushes
+/// to the TS push endpoint over HTTP, in order.
+pub struct PusherService {
     tx: mpsc::UnboundedSender<QueuedPush>,
     /// Queued-but-not-yet-POSTed pushes (enqueue increments, drainer decrements).
     depth: Arc<AtomicI64>,
@@ -121,7 +128,7 @@ pub struct HttpRelayPusher {
     _census: crate::live_count::Guard,
 }
 
-impl HttpRelayPusher {
+impl PusherService {
     /// `relay_url` is the TS dispatcher's push endpoint (`PUSHER_URL`);
     /// `relay_token` is the shared secret gating it (`PUSHER_AUTH_TOKEN`);
     /// `sinks` lets a failed POST surface a `PushFailed` frame back to the
@@ -307,7 +314,7 @@ impl HttpRelayPusher {
     }
 }
 
-impl PusherDispatch for HttpRelayPusher {
+impl PusherDispatch for PusherService {
     fn enqueue_push(
         &self,
         selector: &ConnectionSelector,
@@ -501,7 +508,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
 
-        let pusher = HttpRelayPusher::new(
+        let pusher = PusherService::new(
             format!("http://{addr}/push"),
             None,
             tokio::runtime::Handle::current(),
@@ -544,7 +551,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         sinks.insert_for_test("cA", "ws1", DirectWebSocketSink::new(tx));
 
-        let pusher = HttpRelayPusher::new(
+        let pusher = PusherService::new(
             format!("http://{dead}/push"),
             None,
             tokio::runtime::Handle::current(),
@@ -588,7 +595,7 @@ mod tests {
         // Registered under ws2, but the push targets ws1 (the old socket).
         sinks.insert_for_test("cA", "ws2", DirectWebSocketSink::new(tx));
 
-        let pusher = HttpRelayPusher::new(
+        let pusher = PusherService::new(
             format!("http://{addr}/push"),
             None,
             tokio::runtime::Handle::current(),
@@ -622,7 +629,7 @@ mod tests {
         let push = serde_json::json!({"mutations": []});
         let headers = PushRelayHeaders::default();
 
-        let body = HttpRelayPusher::relay_body(&selector, &push, &headers, "cg1");
+        let body = PusherService::relay_body(&selector, &push, &headers, "cg1");
         assert!(body.get("userPushURL").is_none());
         assert!(body.get("userPushHeaders").is_none());
 
@@ -631,7 +638,7 @@ mod tests {
                 url: Some("https://api.example.com/push".to_string()),
                 headers: Some(vec![("x-tenant".to_string(), "acme".to_string())]),
             });
-        let body = HttpRelayPusher::relay_body(&selector, &push, &headers, "cg1");
+        let body = PusherService::relay_body(&selector, &push, &headers, "cg1");
         assert_eq!(body["userPushURL"], "https://api.example.com/push");
         assert_eq!(body["userPushHeaders"]["x-tenant"], "acme");
     }
@@ -641,7 +648,7 @@ mod tests {
     /// `name: "_zero_cleanupResults"` and validates `cleanupResultsArgSchema`.
     #[test]
     fn cleanup_push_body_matches_ts_shape() {
-        let body = HttpRelayPusher::cleanup_push_body(
+        let body = PusherService::cleanup_push_body(
             "cg1",
             "cA",
             "cleanup-cg1-cA-7".to_string(),

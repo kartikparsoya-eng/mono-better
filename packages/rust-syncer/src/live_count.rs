@@ -29,7 +29,7 @@ pub static SYNC_ENGINE: AtomicI64 = AtomicI64::new(0);
 pub static CONNECTION: AtomicI64 = AtomicI64::new(0);
 /// `message_handler::SyncerWsMessageHandler` — one per accepted connection.
 pub static WS_MESSAGE_HANDLER: AtomicI64 = AtomicI64::new(0);
-/// `push_relay::HttpRelayPusher` — one per CG that has a push relay configured.
+/// `services::mutagen::pusher::PusherService` — one per CG that has a push relay configured.
 pub static PUSHER: AtomicI64 = AtomicI64::new(0);
 
 pub fn inc(c: &AtomicI64) {

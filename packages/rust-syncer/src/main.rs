@@ -786,7 +786,7 @@ impl CGServicesFactory for RealServicesFactory {
     // the read-only rejection (the prior behavior).
     fn create_pusher(&self, _cg_id: &str) -> Option<Arc<dyn rust_syncer::PusherDispatch>> {
         let url = self.config.pusher_url.clone()?;
-        Some(Arc::new(rust_syncer::HttpRelayPusher::new(
+        Some(Arc::new(rust_syncer::PusherService::new(
             url,
             self.config.pusher_auth_token.clone(),
             self.tokio_handle.clone(),
