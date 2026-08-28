@@ -9,6 +9,7 @@
 
 use crate::protocol::{self, ErrorBody, ErrorKind, ErrorOrigin, PushBody, Upstream};
 use crate::workers::connection::{HandlerResult, MessageHandler};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 /// Connection selector — identifies a connection by clientID + wsID.
@@ -34,23 +35,35 @@ where
 
 /// Trait for the ViewSyncer dispatch interface.
 ///
-/// Phase 2 defines the trait; Phase 4 implements it.
-pub trait ViewSyncerDispatch: Send + Sync {
+/// Implemented live by the CG-side `CgViewSyncer` adapter (L9 Stage 3d), which
+/// executes each message body INLINE on the CG task — the twin of TS
+/// `viewSyncer.<method>` awaiting the view-syncer `#lock`. `async` + `?Send`
+/// (not `Send + Sync`): the live impl holds CG-local (`!Send`) state and must
+/// run to completion within the dispatch call so message handling stays
+/// strictly serial in arrival order (re-enqueueing would reorder vs TS's
+/// FIFO-at-arrival lock; `spawn_local` would interleave at await points).
+#[async_trait::async_trait(?Send)]
+pub trait ViewSyncerDispatch {
     /// Handle `changeDesiredQueries` message.
-    fn change_desired_queries(&self, selector: &ConnectionSelector, msg: &str);
+    async fn change_desired_queries(&self, selector: &ConnectionSelector, msg: &str);
 
     /// Handle `updateAuth` message.
-    fn update_auth(&self, selector: &ConnectionSelector, msg: &str, auth_revision_changed: bool);
+    async fn update_auth(
+        &self,
+        selector: &ConnectionSelector,
+        msg: &str,
+        auth_revision_changed: bool,
+    );
 
     /// Handle `deleteClients` message. Returns deleted client IDs.
-    fn delete_clients(&self, selector: &ConnectionSelector, msg: &str) -> Vec<String>;
+    async fn delete_clients(&self, selector: &ConnectionSelector, msg: &str) -> Vec<String>;
 
     /// Handle `initConnection` message. Returns true if the connection
     /// was accepted (stream started).
-    fn init_connection(&self, selector: &ConnectionSelector, msg: &str) -> bool;
+    async fn init_connection(&self, selector: &ConnectionSelector, msg: &str) -> bool;
 
     /// Handle `inspect` message.
-    fn inspect(&self, selector: &ConnectionSelector, msg: &str);
+    async fn inspect(&self, selector: &ConnectionSelector, msg: &str);
 }
 
 /// Trait for the connection context manager interface.
@@ -162,7 +175,9 @@ pub trait PusherDispatch: Send + Sync {
 ///
 /// Routes upstream messages to ViewSyncer, Mutagen, Pusher.
 pub struct SyncerWsMessageHandler {
-    view_syncer: Arc<dyn ViewSyncerDispatch>,
+    /// `Rc`, not `Arc` (L9 Stage 3d): the live dispatch is the CG-local
+    /// `CgViewSyncer` (`!Send`); the handler lives and dies on the CG task.
+    view_syncer: Rc<dyn ViewSyncerDispatch>,
     conn_context_manager: Arc<dyn ConnContextManagerDispatch>,
     mutagen: Option<Arc<dyn MutagenDispatch>>,
     pusher: Option<Arc<dyn PusherDispatch>>,
@@ -180,7 +195,7 @@ pub struct SyncerWsMessageHandler {
 impl SyncerWsMessageHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        view_syncer: Arc<dyn ViewSyncerDispatch>,
+        view_syncer: Rc<dyn ViewSyncerDispatch>,
         conn_context_manager: Arc<dyn ConnContextManagerDispatch>,
         mutagen: Option<Arc<dyn MutagenDispatch>>,
         pusher: Option<Arc<dyn PusherDispatch>>,
@@ -217,8 +232,9 @@ impl SyncerWsMessageHandler {
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl MessageHandler for SyncerWsMessageHandler {
-    fn handle_message(&self, msg: &str) -> Vec<HandlerResult> {
+    async fn handle_message(&self, msg: &str) -> Vec<HandlerResult> {
         let parsed = match protocol::parse_upstream(msg) {
             Ok(m) => m,
             Err(e) => {
@@ -246,9 +262,11 @@ impl MessageHandler for SyncerWsMessageHandler {
             }
 
             Upstream::ChangeDesiredQueries(body) => {
-                with_traceparent(body.traceparent.as_deref(), || {
-                    self.view_syncer.change_desired_queries(selector, msg);
-                });
+                // `with_traceparent` only logs the traceparent before running
+                // the body; the dispatch itself is awaited inline (the closure
+                // cannot hold an await).
+                with_traceparent(body.traceparent.as_deref(), || {});
+                self.view_syncer.change_desired_queries(selector, msg).await;
                 vec![HandlerResult::Ok]
             }
 
@@ -264,12 +282,13 @@ impl MessageHandler for SyncerWsMessageHandler {
                     self.conn_context_manager.update_auth(selector, &body_value);
                 let _ = initial; // initial revision compared above
                 self.view_syncer
-                    .update_auth(selector, msg, auth_revision_changed);
+                    .update_auth(selector, msg, auth_revision_changed)
+                    .await;
                 vec![HandlerResult::Ok]
             }
 
             Upstream::DeleteClients(_) => {
-                let deleted_client_ids = self.view_syncer.delete_clients(selector, msg);
+                let deleted_client_ids = self.view_syncer.delete_clients(selector, msg).await;
                 if let Some(pusher) = &self.pusher
                     && !deleted_client_ids.is_empty()
                 {
@@ -284,15 +303,10 @@ impl MessageHandler for SyncerWsMessageHandler {
             }
 
             Upstream::InitConnection(_) => {
-                // NOTE: in the full binary the `ConnectionRouter` intercepts
-                // `initConnection` (and `changeDesiredQueries` / `updateAuth` /
-                // `deleteClients`) on the CG thread BEFORE it reaches this
-                // handler — those tags never arrive here in production, so there
-                // is no double dispatch. The CG-thread path
-                // (`CgState::handle_desired_queries`) fires the same
-                // `connContextManager.initConnection` + `pusher.initConnection`
-                // side effects this arm does. This arm remains as the
-                // self-contained, unit-tested reference dispatch.
+                // This arm IS the production dispatch (L9 Stage 3d removed the
+                // CG-thread interception): `connContextManager.initConnection`
+                // records the connection context, then the ViewSyncer dispatch
+                // runs the config/hydrate pass inline on the CG task.
                 let body_value: serde_json::Value = {
                     let arr: Vec<serde_json::Value> = serde_json::from_str(msg).unwrap_or_default();
                     arr.get(1).cloned().unwrap_or(serde_json::Value::Null)
@@ -305,9 +319,8 @@ impl MessageHandler for SyncerWsMessageHandler {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                let accepted = with_traceparent(traceparent.as_deref(), || {
-                    self.view_syncer.init_connection(selector, msg)
-                });
+                with_traceparent(traceparent.as_deref(), || {});
+                let accepted = self.view_syncer.init_connection(selector, msg).await;
 
                 if accepted && let Some(pusher) = &self.pusher {
                     pusher.init_connection(selector);
@@ -323,7 +336,7 @@ impl MessageHandler for SyncerWsMessageHandler {
             }
 
             Upstream::Inspect(_) => {
-                self.view_syncer.inspect(selector, msg);
+                self.view_syncer.inspect(selector, msg).await;
                 vec![HandlerResult::Ok]
             }
 

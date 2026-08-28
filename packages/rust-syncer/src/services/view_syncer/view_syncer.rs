@@ -63,8 +63,10 @@ use rust_cvr::schema::types::{
 use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
 use rust_cvr::shards::ShardID;
 use rust_cvr::ttl_clock::TTLClock;
+use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -236,16 +238,6 @@ pub struct SyncEngineConfig {
 
 /// Factory trait for creating per-CG services.
 pub trait CGServicesFactory: Send + Sync {
-    /// Create the ViewSyncer dispatch for a new CG (per-connection message
-    /// handler path).
-    fn create_view_syncer(&self, client_group_id: &str) -> Arc<dyn ViewSyncerDispatch>;
-
-    /// Create the connection context manager for a new CG.
-    fn create_conn_context_manager(
-        &self,
-        client_group_id: &str,
-    ) -> Arc<dyn ConnContextManagerDispatch>;
-
     /// Create the mutagen for a new CG (if configured).
     fn create_mutagen(&self, client_group_id: &str) -> Option<Arc<dyn MutagenDispatch>>;
 
@@ -455,10 +447,137 @@ impl ConnContextManagerDispatch for CcmDispatchAdapter {
         }
     }
 
-    fn init_connection(&self, _selector: &ConnectionSelector, _body: &serde_json::Value) {}
+    /// Port of the TS `SyncerWsMessageHandler` 'initConnection' side effect
+    /// `connContextManager.initConnection(...)`: record the connection's
+    /// URL/header overrides on its context (moved here from the CG-thread
+    /// intercept in L9 Stage 3d — this dispatch is now the single site).
+    fn init_connection(&self, selector: &ConnectionSelector, body: &serde_json::Value) {
+        let str_field = |k: &str| {
+            body.get(k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let map_field = |k: &str| {
+            body.get(k).and_then(|v| v.as_object()).map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect::<std::collections::HashMap<String, String>>()
+            })
+        };
+        let init_body = InitConnectionBody {
+            user_query_url: str_field("userQueryURL"),
+            user_query_headers: map_field("userQueryHeaders"),
+            user_push_url: str_field("userPushURL"),
+            user_push_headers: map_field("userPushHeaders"),
+        };
+        let ccm_selector = CcmConnectionSelector {
+            client_id: selector.client_id.clone(),
+            ws_id: selector.ws_id.clone(),
+        };
+        let _ = lock_unpoisoned(&self.ccm).init_connection(&ccm_selector, &init_body);
+    }
 
+    /// The revision result is advisory on this path: the live view-syncer
+    /// dispatch (`handle_update_auth`) performs the ported unchanged-check
+    /// itself (raw-token compare against the CCM) and owns the CCM refresh,
+    /// so the handler's pre-dispatch CCM update is a no-op here.
     fn update_auth(&self, _selector: &ConnectionSelector, _body: &serde_json::Value) -> bool {
         true
+    }
+}
+
+/// The live `ViewSyncerDispatch` (L9 Stage 3d) — TS `Connection` holds
+/// `#viewSyncer`, and each `SyncerWsMessageHandler` arm calls
+/// `viewSyncer.<method>`, whose body runs under the view-syncer `#lock`.
+/// Rust twin: the adapter holds the CG task's own service cell and runs the
+/// 1:1 method INLINE to completion — the CG task is the lock. `borrow_mut` is
+/// safe because the inbound path (`on_inbound`) releases its borrow before
+/// awaiting the handler, and nothing inside these bodies re-enters the cell.
+pub(crate) struct CgViewSyncer {
+    svc: std::rc::Weak<std::cell::RefCell<ViewSyncerService>>,
+}
+
+/// The message body (`["tag", body]` second element) of a raw upstream frame.
+fn second_element(msg: &str) -> serde_json::Value {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(msg).unwrap_or_default();
+    arr.get(1).cloned().unwrap_or(serde_json::Value::Null)
+}
+
+// The cell is confined to the single-threaded CG task: a `RefCell` borrow held
+// across an await cannot race (no other task touches it), and the only re-entry
+// path — the inbound dispatch — releases its borrow before awaiting the handler
+// (see `on_inbound`). The lint guards multi-task executors; this is the
+// deliberate TS-`#lock` twin (L9 Stage 3d).
+#[allow(clippy::await_holding_refcell_ref)]
+#[async_trait::async_trait(?Send)]
+impl ViewSyncerDispatch for CgViewSyncer {
+    async fn change_desired_queries(&self, selector: &ConnectionSelector, msg: &str) {
+        let Some(svc) = self.svc.upgrade() else {
+            return;
+        };
+        let body = second_element(msg);
+        svc.borrow_mut()
+            .handle_desired_queries(&selector.client_id, &body, false)
+            .await;
+    }
+
+    async fn update_auth(
+        &self,
+        selector: &ConnectionSelector,
+        msg: &str,
+        _auth_revision_changed: bool,
+    ) {
+        let Some(svc) = self.svc.upgrade() else {
+            return;
+        };
+        let token = second_element(msg)
+            .get("auth")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        svc.borrow_mut()
+            .handle_update_auth(&selector.client_id, &token)
+            .await;
+    }
+
+    async fn delete_clients(&self, selector: &ConnectionSelector, msg: &str) -> Vec<String> {
+        let Some(svc) = self.svc.upgrade() else {
+            return Vec::new();
+        };
+        let body = second_element(msg);
+        let del_ids = str_array(body.get("clientIDs"));
+        let group_ids = str_array(body.get("clientGroupIDs"));
+        svc.borrow_mut()
+            .apply_client_deletions(&selector.client_id, None, &del_ids, &group_ids)
+            .await;
+        // The ack'd (cleanup-eligible) ids — explicit deletions minus the
+        // caller; the handler relays `_zero_cleanupResults` for these (TS
+        // `deleteClients` returns `deleted.clientIDs`).
+        del_ids
+            .into_iter()
+            .filter(|c| c.as_str() != selector.client_id)
+            .collect()
+    }
+
+    async fn init_connection(&self, selector: &ConnectionSelector, msg: &str) -> bool {
+        let Some(svc) = self.svc.upgrade() else {
+            return false;
+        };
+        let body = second_element(msg);
+        svc.borrow_mut()
+            .handle_desired_queries(&selector.client_id, &body, true)
+            .await
+    }
+
+    async fn inspect(&self, selector: &ConnectionSelector, msg: &str) {
+        let Some(svc) = self.svc.upgrade() else {
+            return;
+        };
+        let body = second_element(msg);
+        svc.borrow_mut()
+            .handle_inspect(&selector.client_id, &body)
+            .await;
     }
 }
 
@@ -498,8 +617,15 @@ pub struct ViewSyncerService {
     /// `SYNC_ENGINE` counter kept alive for /statz + the G7 gate; counts
     /// identically to `_census` since the merge).
     _engine_census: crate::live_count::Guard,
-    view_syncer: Arc<dyn ViewSyncerDispatch>,
-    conn_context_manager: Arc<dyn ConnContextManagerDispatch>,
+    /// Handle to this service's own shared cell, set by `cg_event_loop` right
+    /// after construction (`None` in the storeless engine-surface scaffold).
+    /// Rust-only (L9 Stage 3d): each connection's message handler gets a
+    /// `CgViewSyncer` dispatch built from this handle — the twin of TS
+    /// `Connection` holding `#viewSyncer` — so `viewSyncer.<method>` executes
+    /// inline on the CG task through a `RefCell` borrow (safe: the CG task is
+    /// single-threaded and the inbound path releases its borrow before
+    /// awaiting the handler).
+    self_handle: Option<std::rc::Weak<std::cell::RefCell<ViewSyncerService>>>,
     /// The single owner of per-connection auth/context state — the ported 1:1
     /// `ConnectionContextManager` (TS `ViewSyncerService`'s `#connContextManager`).
     /// `Arc<Mutex>` (rust-only: the CCM is shared with the `Send+Sync` dispatch;
@@ -559,8 +685,10 @@ pub struct ViewSyncerService {
     /// seconds without clients so their SQLite readers, PG pools, and OS thread
     /// do not accumulate under cold-client churn.
     keepalive_until: i64,
-    /// client_id → Connection.
-    connections: HashMap<String, Connection>,
+    /// client_id → Connection. `Rc` (L9 Stage 3d): the inbound path clones the
+    /// connection out and releases the service-cell borrow before awaiting the
+    /// handler (whose live dispatch re-borrows the cell).
+    connections: HashMap<String, Rc<Connection>>,
     /// client_id → ws_id, for clients registered with the SyncEngine.
     registered_ws: HashMap<String, String>,
     /// Client cookie captured before the CVR is loaded. TS validates this
@@ -669,8 +797,6 @@ impl ViewSyncerService {
         accepting: Arc<AtomicBool>,
         cvr_pool: Option<sqlx::PgPool>,
     ) -> Self {
-        let view_syncer = services_factory.create_view_syncer(cg_id);
-        let conn_context_manager = services_factory.create_conn_context_manager(cg_id);
         let mutagen = services_factory.create_mutagen(cg_id);
         let pusher = services_factory.create_pusher(cg_id);
         let config = services_factory.create_sync_engine_config(cg_id);
@@ -732,8 +858,7 @@ impl ViewSyncerService {
             enable_query_covering,
             flush_observed: std::cell::Cell::new(false),
             _engine_census: crate::live_count::Guard::new(&crate::live_count::SYNC_ENGINE),
-            view_syncer,
-            conn_context_manager,
+            self_handle: None,
             ccm,
             mutagen,
             pusher,
@@ -1250,7 +1375,16 @@ impl ViewSyncerService {
         self.arm_auth_maintenance();
     }
 
-    async fn on_new_connection(&mut self, params: ConnectParams, sink: DirectWebSocketSink) {
+    /// Returns the piggybacked `initConnection` message (sec-websocket-protocol
+    /// header), if any, for the caller to dispatch through the normal inbound
+    /// path — TS `Connection.init()` routes it through `#handleMessage` like
+    /// any frame. Dispatching it here would hold this method's `&mut self`
+    /// borrow across the handler (L9 Stage 3d).
+    async fn on_new_connection(
+        &mut self,
+        params: ConnectParams,
+        sink: DirectWebSocketSink,
+    ) -> Option<(Arc<str>, Arc<str>, String)> {
         crate::trace::note(
             "conn-open",
             &format!(
@@ -1440,8 +1574,16 @@ impl ViewSyncerService {
         self.client_push_headers
             .insert(client_id.clone(), push_relay_headers.clone());
 
+        // The live dispatch (L9 Stage 3d): the handler's `viewSyncer.<method>`
+        // calls execute inline on this CG task via the service's own cell (TS
+        // `Connection` holds `#viewSyncer`). A scaffold-constructed service has
+        // no cell; its adapter no-ops (those tests drive the engine surface
+        // directly).
+        let cg_view_syncer: Rc<dyn ViewSyncerDispatch> = Rc::new(CgViewSyncer {
+            svc: self.self_handle.clone().unwrap_or_default(),
+        });
         let handler = Box::new(SyncerWsMessageHandler::new(
-            self.view_syncer.clone(),
+            cg_view_syncer,
             // The handler's connection-context reads (mutagen-CRUD auth + relayed
             // push auth) go through the ported CCM — the single owner — not the
             // `auth:None` placeholder (I-8).
@@ -1490,7 +1632,7 @@ impl ViewSyncerService {
         // BEFORE this CG-thread work so the ack is never queued behind
         // `config_and_hydrate`. No version re-check here: every connection reaching
         // this point already passed `accept_connection`'s gate.
-        self.connections.insert(client_id.clone(), conn);
+        self.connections.insert(client_id.clone(), Rc::new(conn));
 
         // TS parity: a malformed baseCookie FAILS the connection. TS parses it
         // in the ClientHandler constructor (client-handler.ts `cookieToVersion`
@@ -1507,161 +1649,42 @@ impl ViewSyncerService {
                 conn.close_with_error(crate::protocol::ErrorBody::internal(e.to_string()));
             }
             self.on_connection_closed(&client_id, &ws_id);
-            return;
+            return None;
         }
 
-        // Handle piggybacked initConnection from the sec-websocket-protocol
-        // header, routing its desired queries to the CG-owned SyncEngine.
-        if let Some(init_msg) = params.init_connection_msg.clone() {
-            let v = serde_json::to_value(&init_msg).unwrap_or(serde_json::Value::Null);
-            let body = match v {
-                serde_json::Value::Array(mut arr) if arr.len() > 1 => arr.remove(1),
-                other => other,
-            };
-            self.handle_desired_queries(&client_id, &body, true).await;
-        }
-    }
-
-    async fn on_inbound(&mut self, client_id: Arc<str>, ws_id: Arc<str>, text: String) {
-        // A superseded socket can have frames already queued when its replacement
-        // is installed. Never route those frames through the new connection.
-        if self.registered_ws.get(&*client_id).map(String::as_str) != Some(&*ws_id) {
-            tracing::debug!(
-                "CG {}: ignoring stale inbound frame for {client_id}/{ws_id}",
-                self.cg_id
-            );
-            return;
-        }
-        // Parse the frame's JSON exactly once; validation and the tag dispatch
-        // below share the parsed array.
-        let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&text);
-        // Do not let the direct-engine intercept bypass protocol validation.
-        // Malformed messages must take the normal Connection fatal-error path,
-        // rather than being partially parsed and silently dropped below.
-        let valid = parsed
-            .as_deref()
-            .is_ok_and(|arr| crate::protocol::parse_upstream_array(arr).is_ok());
-        if !valid {
-            let closed = match self.connections.get(&*client_id) {
-                Some(conn) => !conn.handle_inbound(&text),
-                None => return,
-            };
-            if closed {
-                self.on_connection_closed(&client_id, &ws_id);
-            }
-            return;
-        }
-        // Intercept desired-query messages and route them to the CG-owned
-        // SyncEngine — the placeholder `ViewSyncerDispatch` can't reach the
-        // `!Send` engine. Everything else (ping, etc.) goes through Connection.
-        let arr = parsed.expect("checked valid above");
-        if let Some(tag) = arr.first().and_then(|v| v.as_str()) {
-            if tag == "initConnection" || tag == "changeDesiredQueries" {
-                if let Some(body) = arr.get(1) {
-                    self.handle_desired_queries(&client_id, body, tag == "initConnection")
-                        .await;
-                }
-                return;
-            }
-            if tag == "deleteClients" {
-                // `["deleteClients", {clientIDs, clientGroupIDs}]` — an
-                // explicit client-requested deletion (acked).
-                if let Some(body) = arr.get(1) {
-                    let del_ids = str_array(body.get("clientIDs"));
-                    let group_ids = str_array(body.get("clientGroupIDs"));
-                    self.apply_client_deletions(&client_id, None, &del_ids, &group_ids)
-                        .await;
-                    // TS parity (`syncer-ws-message-handler.ts` 'deleteClients'):
-                    // an explicit deletion also prunes the deleted clients'
-                    // stored mutation results via a `_zero_cleanupResults`
-                    // relay push. Only the explicit path does this — the
-                    // initConnection activeClients GC does not, same as TS.
-                    let cleanup_ids: Vec<String> = del_ids
-                        .iter()
-                        .filter(|c| c.as_str() != &*client_id)
-                        .cloned()
-                        .collect();
-                    if !cleanup_ids.is_empty()
-                        && let Some(pusher) = &self.pusher
-                        && let Some(headers) = self.client_push_headers.get(&*client_id)
-                    {
-                        let ws_id = self
-                            .registered_ws
-                            .get(&*client_id)
-                            .cloned()
-                            .unwrap_or_default();
-                        let selector =
-                            crate::workers::syncer_ws_message_handler::ConnectionSelector {
-                                client_id: client_id.to_string(),
-                                ws_id: ws_id.clone(),
-                            };
-                        // Fill `auth` FRESH from the CCM (single owner), like the
-                        // handler's `relay_headers_for` — never a stale token.
-                        let mut relay_headers = headers.clone();
-                        relay_headers.auth = lock_unpoisoned(&self.ccm)
-                            .get_connection_context(&CcmConnectionSelector {
-                                client_id: client_id.to_string(),
-                                ws_id,
-                            })
-                            .and_then(|c| c.auth)
-                            .map(|a| a.raw().to_string());
-                        pusher.delete_client_mutations(
-                            &selector,
-                            &cleanup_ids,
-                            &relay_headers,
-                            &self.cg_id,
-                        );
-                    }
-                }
-                return;
-            }
-            if tag == "updateAuth" {
-                // `["updateAuth", {auth}]` — a fresh credential for this
-                // client group. Re-verify it and, if the resolved auth data
-                // changed, re-transform every query (TS `ViewSyncer.updateAuth`
-                // → `#handleConfigUpdate(..., 'all')`).
-                let token = arr
-                    .get(1)
-                    .and_then(|b| b.get("auth"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                self.handle_update_auth(&client_id, token).await;
-                return;
-            }
-            if tag == "inspect" {
-                // `["inspect", {op, id, ...}]` — inspector protocol. Reaches
-                // the CG engine (the placeholder ViewSyncer can't), which
-                // gates on the admin password and answers per op.
-                if let Some(body) = arr.get(1) {
-                    self.handle_inspect(&client_id, body).await;
-                }
-                return;
-            }
-        }
-        let closed = match self.connections.get(&*client_id) {
-            Some(conn) => !conn.handle_inbound(&text),
-            None => return,
-        };
-        if closed {
-            self.on_connection_closed(&client_id, &ws_id);
-        }
+        // Piggybacked initConnection from the sec-websocket-protocol header:
+        // hand the raw message back to the caller, which dispatches it through
+        // the SAME path as a socket frame (Connection -> SyncerWsMessageHandler
+        // -> ViewSyncerDispatch), exactly like TS `Connection.init()` feeding
+        // `#handleMessage`.
+        params.init_connection_msg.as_ref().and_then(|init_msg| {
+            serde_json::to_string(init_msg).ok().map(|text| {
+                (
+                    Arc::from(client_id.as_str()),
+                    Arc::from(ws_id.as_str()),
+                    text,
+                )
+            })
+        })
     }
 
     /// Route a client's `initConnection` / `changeDesiredQueries` body to the
     /// SyncEngine: record desired queries and hydrate. Loads/creates the group
     /// CVR on first use. (Part 2 — functional cut; see `config_and_hydrate`.)
+    /// Returns whether the config pass was accepted (TS: the ViewSyncer stream
+    /// started) — the handler gates `pusher.initConnection` on it.
     async fn handle_desired_queries(
         &mut self,
         client_id: &str,
         body: &serde_json::Value,
         is_init: bool,
-    ) {
+    ) -> bool {
         let Some(ws_id) = self.registered_ws.get(client_id).cloned() else {
             tracing::warn!(
                 "CG {}: desired queries for unregistered client {client_id}",
                 self.cg_id
             );
-            return;
+            return false;
         };
         let (puts, dels, clear) = parse_desired_queries_patch(body);
         // Client push overrides (TS ConnectionContextManager handleInitConnection:
@@ -1708,13 +1731,14 @@ impl ViewSyncerService {
                 ));
             }
             self.on_connection_closed(client_id, &ws_id);
-            return;
+            return false;
         }
-        // The custom-query API context (`userQueryURL` + allowlisted headers) is
-        // recorded on the ConnectionContextManager's `initConnection` side effect
-        // below; `custom_query_context_from` reads it back at transform time. The
-        // context persists for the connection's lifetime (a later
-        // `changeDesiredQueries` doesn't re-send the URL).
+        // The custom-query API context (`userQueryURL` + allowlisted headers)
+        // was recorded on the ConnectionContextManager by the handler's
+        // `connContextManager.initConnection(...)` dispatch BEFORE this method
+        // ran (TS `SyncerWsMessageHandler` 'initConnection' — the recording
+        // moved to `CcmDispatchAdapter::init_connection` in L9 Stage 3d);
+        // `custom_query_context_from` reads it back at transform time.
 
         // Client-deletion inputs the body may also carry (TS `#handleConfigUpdate`
         // applies query patches AND client deletions in one pass).
@@ -1732,47 +1756,7 @@ impl ViewSyncerService {
         // patches produced while it was disconnected. A `changeDesiredQueries`
         // with no query change and no deletions is a genuine no-op.
         if !is_init && !has_query_change && !has_deletions {
-            return;
-        }
-
-        // On an `initConnection`, run the ConnectionContextManager init side
-        // effect FIRST (TS `SyncerWsMessageHandler` calls
-        // `connContextManager.initConnection(...)` before dispatching to the
-        // ViewSyncer). This records the connection's auth/context for the group.
-        // The router intercepts `initConnection` before it reaches the message
-        // handler, so this side effect must fire here or it is dropped.
-        let selector = ConnectionSelector {
-            client_id: client_id.to_string(),
-            ws_id: ws_id.clone(),
-        };
-        if is_init {
-            self.conn_context_manager.init_connection(&selector, body);
-            // Apply the initConnection URL/header overrides to the
-            // ConnectionContextManager (TS `handleInitConnection`).
-            let str_field = |k: &str| {
-                body.get(k)
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            };
-            let map_field = |k: &str| {
-                body.get(k).and_then(|v| v.as_object()).map(|o| {
-                    o.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                        .collect::<std::collections::HashMap<String, String>>()
-                })
-            };
-            let init_body = InitConnectionBody {
-                user_query_url: str_field("userQueryURL"),
-                user_query_headers: map_field("userQueryHeaders"),
-                user_push_url: str_field("userPushURL"),
-                user_push_headers: map_field("userPushHeaders"),
-            };
-            let ccm_selector = CcmConnectionSelector {
-                client_id: client_id.to_string(),
-                ws_id: ws_id.clone(),
-            };
-            let _ = lock_unpoisoned(&self.ccm).init_connection(&ccm_selector, &init_body);
+            return false;
         }
 
         // Ensure a group CVR: load from the store, or start fresh (dev/no-PG).
@@ -1780,7 +1764,7 @@ impl ViewSyncerService {
             Ok(true) => {}
             Ok(false) => {
                 self.fail_group("Unable to load the client view state");
-                return;
+                return false;
             }
             Err(crate::sync_engine::LoadCvrError::Store(
                 rust_cvr::cvr_store::CVRStoreError::ClientNotFound(message),
@@ -1789,12 +1773,12 @@ impl ViewSyncerService {
                     conn.close_with_error(crate::protocol::ErrorBody::client_not_found(message));
                 }
                 self.on_connection_closed(client_id, &ws_id);
-                return;
+                return false;
             }
             Err(error) => {
                 tracing::error!("CG {}: unable to load CVR: {error}", self.cg_id);
                 self.fail_group("Unable to load the client view state");
-                return;
+                return false;
             }
         }
 
@@ -1810,7 +1794,7 @@ impl ViewSyncerService {
                 conn.close_with_error(*error);
             }
             self.on_connection_closed(client_id, &ws_id);
-            return;
+            return false;
         }
         if is_init && cvr.client_schema.is_none() && client_schema.is_none() {
             if let Some(conn) = self.connections.get(client_id) {
@@ -1821,7 +1805,7 @@ impl ViewSyncerService {
                 ));
             }
             self.on_connection_closed(client_id, &ws_id);
-            return;
+            return false;
         }
 
         // Query-config pass (records the client + desired queries, hydrates,
@@ -1932,17 +1916,6 @@ impl ViewSyncerService {
             }
         }
 
-        // On an accepted `initConnection`, run the Pusher init side effect (TS
-        // calls `pusher.initConnection(...)` only after the ViewSyncer stream
-        // started). Also intercepted-away from the message handler, so it fires
-        // here. No-op when no Pusher is configured (mutations forwarded in TS).
-        if is_init
-            && config_accepted
-            && let Some(pusher) = &self.pusher
-        {
-            pusher.init_connection(&selector);
-        }
-
         // Client-deletion pass (activeClients GC + explicit `deleted`).
         if has_deletions {
             self.apply_client_deletions(
@@ -1953,6 +1926,9 @@ impl ViewSyncerService {
             )
             .await;
         }
+        // The handler's `initConnection` arm runs `pusher.initConnection` when
+        // this returns true (TS: only after the ViewSyncer stream started).
+        config_accepted
     }
 
     /// Handle an `updateAuth` message: re-verify the new credential and, if the
@@ -2663,12 +2639,58 @@ impl ViewSyncerService {
     }
 }
 
+/// Route one inbound socket frame through the ported dispatch chain:
+/// `Connection.#handleMessage` → `SyncerWsMessageHandler` →
+/// `ViewSyncerDispatch` (the `CgViewSyncer` adapter), all inline on this CG
+/// task (L9 Stage 3d — the CG-thread tag interception is gone; the handler is
+/// the single dispatch). Three phases so the service cell is NOT borrowed
+/// while the handler runs (the live dispatch re-borrows it).
+async fn on_inbound(
+    state_rc: &Rc<RefCell<ViewSyncerService>>,
+    client_id: Arc<str>,
+    ws_id: Arc<str>,
+    text: String,
+) {
+    // Phase 1 (borrow): stale-frame check + resolve the connection.
+    let conn = {
+        let state = state_rc.borrow();
+        // A superseded socket can have frames already queued when its
+        // replacement is installed. Never route those frames through the new
+        // connection.
+        if state.registered_ws.get(&*client_id).map(String::as_str) != Some(&*ws_id) {
+            tracing::debug!(
+                "CG {}: ignoring stale inbound frame for {client_id}/{ws_id}",
+                state.cg_id
+            );
+            return;
+        }
+        match state.connections.get(&*client_id) {
+            Some(conn) => Rc::clone(conn),
+            None => return,
+        }
+    };
+    // Phase 2 (no borrow): the ported dispatch, executed to completion.
+    let closed = !conn.handle_inbound(&text).await;
+    // Phase 3 (borrow): close bookkeeping.
+    if closed {
+        state_rc
+            .borrow_mut()
+            .on_connection_closed(&client_id, &ws_id);
+    }
+}
+
 /// The async body hosting one client group, run as a `spawn_local` task on its
 /// executor's `current_thread` runtime + `LocalSet`. Owns the (`!Send`)
 /// [`SyncEngine`]; drives connection setup, inbound frames, disconnects, and
 /// change-streamer notifications. Message handling and the TTL-eviction /
 /// auth-maintenance / idle-shutdown deadline ticks are multiplexed with
 /// `tokio::select!` over `rx.recv()` and `tokio::time::sleep`.
+// See `CgViewSyncer`'s allow note: the cell is confined to the single-threaded CG task: a `RefCell` borrow held
+// across an await cannot race (no other task touches it), and the only re-entry
+// path — the inbound dispatch — releases its borrow before awaiting the handler
+// (see `on_inbound`). The lint guards multi-task executors; this is the
+// deliberate TS-`#lock` twin (L9 Stage 3d).
+#[allow(clippy::await_holding_refcell_ref)]
 pub(crate) async fn cg_event_loop(
     cg_id: &str,
     mut rx: mpsc::UnboundedReceiver<CGMessage>,
@@ -2677,7 +2699,12 @@ pub(crate) async fn cg_event_loop(
     ctx: CgTaskContext,
     last_notification: Option<serde_json::Value>,
 ) {
-    let mut state = ViewSyncerService::new_with_accepting(
+    // The service lives in a shared cell (L9 Stage 3d): the per-connection
+    // handler's `CgViewSyncer` dispatch re-borrows it inline on this task (TS
+    // `Connection` holds `#viewSyncer`). Borrows are scoped; only this task
+    // touches the cell, and the inbound path releases its borrow before
+    // awaiting the handler.
+    let state_rc = Rc::new(RefCell::new(ViewSyncerService::new_with_accepting(
         cg_id,
         &ctx.services_factory,
         ctx.auth_validator,
@@ -2685,23 +2712,28 @@ pub(crate) async fn cg_event_loop(
         connection_count,
         accepting,
         ctx.cvr_pool,
-    );
-    // Publish into the process-wide serving-lag registry (replacing the
-    // standalone default the constructor installed) and register an initial
-    // snapshot so the sampler/gauges see this CG immediately.
-    state.serving_lag_registry = ctx.serving_lag_registry;
-    state.publish_serving_lag();
-    // Arm the serving-lag tracker with the newest pre-spawn commit (TS notifier
-    // latest-state replay): the group's FIRST serve then records an observation
-    // instead of silently swallowing everything before the next commit.
-    if let Some(n) = &last_notification {
-        state.arm_serving_lag(n);
+    )));
+    state_rc.borrow_mut().self_handle = Some(Rc::downgrade(&state_rc));
+    {
+        let mut state = state_rc.borrow_mut();
+        // Publish into the process-wide serving-lag registry (replacing the
+        // standalone default the constructor installed) and register an initial
+        // snapshot so the sampler/gauges see this CG immediately.
+        state.serving_lag_registry = ctx.serving_lag_registry;
+        state.publish_serving_lag();
+        // Arm the serving-lag tracker with the newest pre-spawn commit (TS notifier
+        // latest-state replay): the group's FIRST serve then records an observation
+        // instead of silently swallowing everything before the next commit.
+        if let Some(n) = &last_notification {
+            state.arm_serving_lag(n);
+        }
     }
-    if state.terminal {
+    if state_rc.borrow().terminal {
         // Surface initialization failure to the accepted socket instead of
         // dropping the queued connection silently.
-        state.accepting.store(false, Ordering::SeqCst);
+        state_rc.borrow().accepting.store(false, Ordering::SeqCst);
         if let Some(CGMessage::NewConnection { params, sink }) = rx.recv().await {
+            let state = state_rc.borrow();
             let mut global = lock_unpoisoned(&state.global_connections);
             if global
                 .get(&params.client_id)
@@ -2715,7 +2747,10 @@ pub(crate) async fn cg_event_loop(
                 "Failed to initialize the client-group sync engine",
             ));
         }
-        state.connection_count.store(0, Ordering::Relaxed);
+        state_rc
+            .borrow()
+            .connection_count
+            .store(0, Ordering::Relaxed);
         return;
     }
 
@@ -2732,10 +2767,11 @@ pub(crate) async fn cg_event_loop(
     let mut stashed: std::collections::VecDeque<CGMessage> = std::collections::VecDeque::new();
     loop {
         if let Some(msg) = stashed.pop_front() {
-            if !dispatch_cg_message(&mut state, &mut rx, &mut stashed, msg).await {
+            if !dispatch_cg_message(&state_rc, &mut rx, &mut stashed, msg).await {
                 tracing::info!("CG thread {cg_id}: shutting down");
                 break;
             }
+            let mut state = state_rc.borrow_mut();
             if state.terminal {
                 tracing::error!("CG thread {cg_id}: terminating after fatal synchronization error");
                 break;
@@ -2747,15 +2783,18 @@ pub(crate) async fn cg_event_loop(
             }
             continue;
         }
-        let next_delay = [
-            state.next_expiry_delay(),
-            state.next_auth_maintenance_delay(),
-            state.next_idle_shutdown_delay(),
-            state.next_ttl_clock_delay(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        let next_delay = {
+            let state = state_rc.borrow();
+            [
+                state.next_expiry_delay(),
+                state.next_auth_maintenance_delay(),
+                state.next_idle_shutdown_delay(),
+                state.next_ttl_clock_delay(),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+        };
 
         let msg = match next_delay {
             Some(delay) => {
@@ -2766,6 +2805,9 @@ pub(crate) async fn cg_event_loop(
                         None => break,
                     },
                     _ = tokio::time::sleep(delay) => {
+                        // Deadline ticks never dispatch through the handler, so
+                        // one borrow may span the whole block (single-task cell).
+                        let mut state = state_rc.borrow_mut();
                         if state.idle_shutdown_due() {
                             tracing::info!(
                                 "CG thread {cg_id}: idle keepalive elapsed; shutting down"
@@ -2805,10 +2847,11 @@ pub(crate) async fn cg_event_loop(
                 None => break,
             },
         };
-        if !dispatch_cg_message(&mut state, &mut rx, &mut stashed, msg).await {
+        if !dispatch_cg_message(&state_rc, &mut rx, &mut stashed, msg).await {
             tracing::info!("CG thread {cg_id}: shutting down");
             break;
         }
+        let mut state = state_rc.borrow_mut();
         if state.terminal {
             tracing::error!("CG thread {cg_id}: terminating after fatal synchronization error");
             break;
@@ -2832,24 +2875,33 @@ pub(crate) async fn cg_event_loop(
 /// (and N small serving-lag observations) where TS does one — and its
 /// unbounded queue grows with the backlog. A non-notification message popped
 /// while draining is pushed to `stashed` for in-order handling by the caller.
+#[allow(clippy::await_holding_refcell_ref)] // single-task cell — see `CgViewSyncer`
 async fn dispatch_cg_message(
-    state: &mut ViewSyncerService,
+    state_rc: &Rc<RefCell<ViewSyncerService>>,
     rx: &mut mpsc::UnboundedReceiver<CGMessage>,
     stashed: &mut std::collections::VecDeque<CGMessage>,
     msg: CGMessage,
 ) -> bool {
     match msg {
-        CGMessage::NewConnection { params, sink } => state.on_new_connection(*params, sink).await,
+        CGMessage::NewConnection { params, sink } => {
+            let piggyback = state_rc.borrow_mut().on_new_connection(*params, sink).await;
+            // Piggybacked initConnection: dispatched through the SAME inbound
+            // path as a socket frame (TS `Connection.init()` feeds
+            // `#handleMessage`), after the setup borrow above is released.
+            if let Some((client_id, ws_id, text)) = piggyback {
+                on_inbound(state_rc, client_id, ws_id, text).await;
+            }
+        }
         CGMessage::Inbound {
             client_id,
             ws_id,
             text,
-        } => state.on_inbound(client_id, ws_id, text).await,
-        CGMessage::ConnectionClosed { client_id, ws_id } => {
-            state.on_connection_closed(&client_id, &ws_id)
-        }
+        } => on_inbound(state_rc, client_id, ws_id, text).await,
+        CGMessage::ConnectionClosed { client_id, ws_id } => state_rc
+            .borrow_mut()
+            .on_connection_closed(&client_id, &ws_id),
         CGMessage::CloseConnection { client_id, ws_id } => {
-            state.close_connection(&client_id, &ws_id)
+            state_rc.borrow_mut().close_connection(&client_id, &ws_id)
         }
         CGMessage::Notification(n) => {
             let mut merged = n;
@@ -2865,10 +2917,10 @@ async fn dispatch_cg_message(
                     Err(_) => break,
                 }
             }
-            state.on_notification(merged).await
+            state_rc.borrow_mut().on_notification(merged).await
         }
         CGMessage::Shutdown => {
-            state.shutdown();
+            state_rc.borrow_mut().shutdown();
             return false;
         }
     }
@@ -2910,7 +2962,7 @@ mod tests {
     use super::*;
     use crate::protocol::PROTOCOL_VERSION;
     use crate::workers::syncer_ws_message_handler::{
-        ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, ViewSyncerDispatch,
+        ConnContextManagerDispatch, ConnectionSelector,
     };
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::schema::types::version_from_string;
@@ -3000,107 +3052,19 @@ mod tests {
         assert!(check_client_and_cvr_versions(&None, &cvr).is_ok());
     }
 
-    struct NoopViewSyncer;
-    impl ViewSyncerDispatch for NoopViewSyncer {
-        fn change_desired_queries(&self, _s: &ConnectionSelector, _m: &str) {}
-        fn update_auth(&self, _s: &ConnectionSelector, _m: &str, _c: bool) {}
-        fn delete_clients(&self, _s: &ConnectionSelector, _m: &str) -> Vec<String> {
-            Vec::new()
-        }
-        fn init_connection(&self, _s: &ConnectionSelector, _m: &str) -> bool {
-            true
-        }
-        fn inspect(&self, _s: &ConnectionSelector, _m: &str) {}
-    }
-
-    struct NoopCcm;
-    impl ConnContextManagerDispatch for NoopCcm {
-        fn must_get_connection_context(&self, _s: &ConnectionSelector) -> ConnContextInfo {
-            ConnContextInfo {
-                auth: None,
-                revision: 0,
-            }
-        }
-        fn init_connection(&self, _s: &ConnectionSelector, _b: &serde_json::Value) {}
-        fn update_auth(&self, _s: &ConnectionSelector, _b: &serde_json::Value) -> bool {
-            true
-        }
-    }
-
-    /// A CCM that counts `init_connection` calls, to prove the CG-thread path
-    /// fires the side effect the message handler would (task 12).
-    struct CountingCcm {
-        init_calls: Arc<AtomicU64>,
-    }
-    impl ConnContextManagerDispatch for CountingCcm {
-        fn must_get_connection_context(&self, _s: &ConnectionSelector) -> ConnContextInfo {
-            ConnContextInfo {
-                auth: None,
-                revision: 0,
-            }
-        }
-        fn init_connection(&self, _s: &ConnectionSelector, _b: &serde_json::Value) {
-            self.init_calls.fetch_add(1, Ordering::SeqCst);
-        }
-        fn update_auth(&self, _s: &ConnectionSelector, _b: &serde_json::Value) -> bool {
-            true
-        }
-    }
-
-    struct CountingCcmFactory {
-        handle: tokio::runtime::Handle,
-        init_calls: Arc<AtomicU64>,
-    }
-    impl CGServicesFactory for CountingCcmFactory {
-        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
-            Arc::new(NoopViewSyncer)
-        }
-        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
-            Arc::new(CountingCcm {
-                init_calls: self.init_calls.clone(),
-            })
-        }
-        fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
-            None
-        }
-        fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
-            None
-        }
-        fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
-            SyncEngineConfig {
-                initialization_error: None,
-                tables: Vec::new(),
-                replica_path: None,
-                app_id: "zero".to_string(),
-                replica_version: "00".to_string(),
-                shard: ShardID {
-                    app_id: "zero".to_string(),
-                    shard_num: 0,
-                },
-                cvr_pg: None,
-                permissions: None,
-                permissions_hash: None,
-                revalidate_interval_ms: None,
-                query_config: None,
-                enable_query_covering: true,
-                tokio_handle: self.handle.clone(),
-                admin_password: None,
-                server_version: "test".to_string(),
-                metrics: std::sync::Arc::new(crate::metrics::Metrics::default()),
-            }
-        }
+    /// Wrap a test service in the shared cell + self-handle the live dispatch
+    /// needs (L9 Stage 3d) — the test twin of `cg_event_loop`'s setup.
+    fn shared(state: ViewSyncerService) -> Rc<RefCell<ViewSyncerService>> {
+        let rc = Rc::new(RefCell::new(state));
+        let weak = Rc::downgrade(&rc);
+        rc.borrow_mut().self_handle = Some(weak);
+        rc
     }
 
     struct TestFactory {
         handle: tokio::runtime::Handle,
     }
     impl CGServicesFactory for TestFactory {
-        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
-            Arc::new(NoopViewSyncer)
-        }
-        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
-            Arc::new(NoopCcm)
-        }
         fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
             None
         }
@@ -3142,12 +3106,6 @@ mod tests {
         initial_permissions: Option<serde_json::Value>,
     }
     impl CGServicesFactory for PermsReloadFactory {
-        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
-            Arc::new(NoopViewSyncer)
-        }
-        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
-            Arc::new(NoopCcm)
-        }
         fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
             None
         }
@@ -3486,12 +3444,6 @@ mod tests {
         revalidate_interval_ms: Option<i64>,
     }
     impl CGServicesFactory for RevalidateFactory {
-        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
-            Arc::new(NoopViewSyncer)
-        }
-        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
-            Arc::new(NoopCcm)
-        }
         fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
             None
         }
@@ -3675,27 +3627,28 @@ mod tests {
     fn delete_clients_from_stale_ws_id_is_ignored() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        let cell = shared(revalidate_state(&rt, Some(300_000), valid));
 
         // Connect "foo" on ws1, then reconnect "foo" on ws2 (supersedes ws1).
         let (tx1, _d1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        rt.block_on(state.on_new_connection(
+        let _ = rt.block_on(cell.borrow_mut().on_new_connection(
             authed_params("foo", "ws1", "tok"),
             DirectWebSocketSink::new(tx1),
         ));
         let (tx2, _d2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        rt.block_on(state.on_new_connection(
+        let _ = rt.block_on(cell.borrow_mut().on_new_connection(
             authed_params("foo", "ws2", "tok"),
             DirectWebSocketSink::new(tx2),
         ));
         assert_eq!(
-            state.registered_ws.get("foo").map(String::as_str),
+            cell.borrow().registered_ws.get("foo").map(String::as_str),
             Some("ws2"),
             "reconnect should supersede ws1 with ws2"
         );
 
         // deleteClients targeting "foo" arrives on the STALE ws1 → must be dropped.
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "foo".into(),
             "ws1".into(),
             r#"["deleteClients",{"clientIDs":["foo"]}]"#.to_string(),
@@ -3704,7 +3657,7 @@ mod tests {
         // The stale frame was ignored: "foo" is still registered (on ws2), not
         // deleted.
         assert_eq!(
-            state.registered_ws.get("foo").map(String::as_str),
+            cell.borrow().registered_ws.get("foo").map(String::as_str),
             Some("ws2"),
             "deleteClients from a stale wsID must not delete the client"
         );
@@ -4779,22 +4732,29 @@ mod tests {
         rt.block_on(router.shutdown());
     }
 
-    /// A CCM whose `init_connection` blocks the CG thread on the first call,
-    /// simulating a long synchronous `config_and_hydrate`. Signals `entered`
-    /// when it reaches the block and holds until the test flips `release`.
-    struct BlockingCcm {
+    /// A Pusher whose `init_connection` blocks the CG thread on the first call,
+    /// simulating a long synchronous `config_and_hydrate`. (The seam moved with
+    /// the L9 Stage 3d un-interception: `pusher.initConnection` now fires from
+    /// the handler's `initConnection` arm ON the CG task, inside the same
+    /// dispatch that runs the config/hydrate pass — the old injectable
+    /// placeholder-CCM call is gone.) Signals `entered` when it reaches the
+    /// block and holds until the test flips `release`.
+    struct BlockingPusher {
         entered: Arc<AtomicBool>,
         release: Arc<(Mutex<bool>, std::sync::Condvar)>,
         blocked_once: AtomicBool,
     }
-    impl ConnContextManagerDispatch for BlockingCcm {
-        fn must_get_connection_context(&self, _s: &ConnectionSelector) -> ConnContextInfo {
-            ConnContextInfo {
-                auth: None,
-                revision: 0,
-            }
+    impl PusherDispatch for BlockingPusher {
+        fn enqueue_push(
+            &self,
+            _selector: &ConnectionSelector,
+            _body: &serde_json::Value,
+            _headers: &crate::workers::syncer_ws_message_handler::PushRelayHeaders,
+            _client_group_id: &str,
+        ) -> crate::workers::connection::HandlerResult {
+            crate::workers::connection::HandlerResult::Ok
         }
-        fn init_connection(&self, _s: &ConnectionSelector, _b: &serde_json::Value) {
+        fn init_connection(&self, _s: &ConnectionSelector) {
             // Only the first (blocker) connection holds the thread.
             if self.blocked_once.swap(true, Ordering::SeqCst) {
                 return;
@@ -4806,32 +4766,39 @@ mod tests {
                 released = cv.wait(released).unwrap();
             }
         }
-        fn update_auth(&self, _s: &ConnectionSelector, _b: &serde_json::Value) -> bool {
-            true
+        fn ack_mutation_responses(
+            &self,
+            _selector: &ConnectionSelector,
+            _body: &serde_json::Value,
+            _headers: &crate::workers::syncer_ws_message_handler::PushRelayHeaders,
+            _client_group_id: &str,
+        ) {
+        }
+        fn delete_client_mutations(
+            &self,
+            _selector: &ConnectionSelector,
+            _client_ids: &[String],
+            _headers: &crate::workers::syncer_ws_message_handler::PushRelayHeaders,
+            _client_group_id: &str,
+        ) {
         }
     }
 
-    struct BlockingCcmFactory {
+    struct BlockingPusherFactory {
         handle: tokio::runtime::Handle,
-        ccm: Arc<BlockingCcm>,
+        pusher: Arc<BlockingPusher>,
     }
-    impl CGServicesFactory for BlockingCcmFactory {
-        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
-            Arc::new(NoopViewSyncer)
-        }
-        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
-            self.ccm.clone()
-        }
+    impl CGServicesFactory for BlockingPusherFactory {
         fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
             None
         }
         fn create_pusher(&self, _cg: &str) -> Option<Arc<dyn PusherDispatch>> {
-            None
+            Some(self.pusher.clone())
         }
         fn create_sync_engine_config(&self, _cg: &str) -> SyncEngineConfig {
             SyncEngineConfig {
                 initialization_error: None,
-                tables: Vec::new(),
+                tables: vec![issue_table_spec()],
                 replica_path: None,
                 app_id: "zero".to_string(),
                 replica_version: "00".to_string(),
@@ -4857,7 +4824,8 @@ mod tests {
     /// `connected` message MUST be emitted on the accept task
     /// (`handle_connection`), NOT on the serial CG thread. When a client's CG
     /// thread is blocked in an in-flight `config_and_hydrate` (here simulated by
-    /// a blocking `ConnectionContextManager::init_connection`), a SECOND client
+    /// a blocking `PusherDispatch::init_connection`, which the handler's
+    /// initConnection arm fires ON the CG task), a SECOND client
     /// on the SAME group must still receive `connected` immediately — otherwise
     /// its 10s connect timeout fires, it disconnects, the idle CG is reaped, and
     /// the reconnect pays a full cold re-hydrate (the thrash we observed).
@@ -4871,14 +4839,14 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let entered = Arc::new(AtomicBool::new(false));
         let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let ccm = Arc::new(BlockingCcm {
+        let pusher = Arc::new(BlockingPusher {
             entered: entered.clone(),
             release: release.clone(),
             blocked_once: AtomicBool::new(false),
         });
-        let factory: Arc<dyn CGServicesFactory> = Arc::new(BlockingCcmFactory {
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(BlockingPusherFactory {
             handle: rt.handle().clone(),
-            ccm,
+            pusher,
         });
         let validator: Arc<dyn AuthValidator> = Arc::new(crate::auth::jwt::JwtAuthValidator {
             jwk: None,
@@ -4898,10 +4866,13 @@ mod tests {
             let mut params = test_params(cid, ws);
             params.client_group_id = "cgX".to_string();
             if init {
+                // clientSchema so the new group's init is ACCEPTED — the
+                // blocking seam (`pusher.initConnection`) only fires on an
+                // accepted config pass (TS: after the ViewSyncer stream starts).
                 params.init_connection_msg = Some(
                     serde_json::from_value(serde_json::json!([
                         "initConnection",
-                        {"desiredQueriesPatch": []}
+                        {"desiredQueriesPatch": [], "clientSchema": {"tables": {}}}
                     ]))
                     .unwrap(),
                 );
@@ -4920,7 +4891,8 @@ mod tests {
         };
 
         // Blocker A: its `initConnection` drives the CG thread into the blocking
-        // `init_connection`, holding the thread like a long hydrate.
+        // `pusher.init_connection` (fired by the handler after the accepted
+        // config pass), holding the thread like a long hydrate.
         let (ctx_a, _keep_a, _sink_a) = make_ctx("cA", "wsA", true);
         rt.block_on(router.create_connection(ctx_a));
 
@@ -5083,16 +5055,17 @@ mod tests {
         rt.block_on(router.shutdown());
     }
 
-    /// A piggybacked `initConnection` fires the ConnectionContextManager init
-    /// side effect through the CG-thread path (task 12) — previously dropped
-    /// because the router intercepts `initConnection` before the message handler.
+    /// L9 Stage 3d regression: a piggybacked `initConnection` is dispatched
+    /// through the SAME path as a socket frame (Connection → handler →
+    /// ViewSyncerDispatch), and the handler's `connContextManager.initConnection`
+    /// dispatch — now the SINGLE recording site — lands the body's
+    /// `userQueryURL` in the real CCM. Fails if the piggyback bypasses the
+    /// handler or the CCM recording is dropped/duplicated elsewhere.
     #[test]
     fn init_connection_fires_ccm_init_side_effect() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let init_calls = Arc::new(AtomicU64::new(0));
-        let factory: Arc<dyn CGServicesFactory> = Arc::new(CountingCcmFactory {
+        let factory: Arc<dyn CGServicesFactory> = Arc::new(TestFactory {
             handle: rt.handle().clone(),
-            init_calls: init_calls.clone(),
         });
         let global = Arc::new(Mutex::new(HashMap::new()));
         let count = Arc::new(AtomicU64::new(0));
@@ -5109,25 +5082,37 @@ mod tests {
             global,
             count,
         );
+        seed_test_client_schema(&mut state);
+        let cell = shared(state);
 
         let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
-        seed_test_client_schema(&mut state);
         let mut params = test_params("c1", "ws1");
-        // Piggyback an initConnection carrying an empty desired-queries patch.
+        // Piggyback an initConnection with an empty desired-queries patch and a
+        // custom-query URL (recorded only via the handler's ccm dispatch).
         params.init_connection_msg = Some(
             serde_json::from_value(serde_json::json!([
                 "initConnection",
-                {"desiredQueriesPatch": []}
+                {"desiredQueriesPatch": [], "userQueryURL": "https://api.example.com/z"}
             ]))
             .unwrap(),
         );
-        rt.block_on(state.on_new_connection(params, sink));
+        let piggyback = rt.block_on(cell.borrow_mut().on_new_connection(params, sink));
+        let (client_id, ws_id, text) =
+            piggyback.expect("on_new_connection must hand back the piggybacked initConnection");
+        rt.block_on(on_inbound(&cell, client_id, ws_id, text));
 
+        let state = cell.borrow();
+        let ctx = lock_unpoisoned(&state.ccm)
+            .must_get_connection_context(&CcmConnectionSelector {
+                client_id: "c1".to_string(),
+                ws_id: "ws1".to_string(),
+            })
+            .expect("the connection context must be registered");
         assert_eq!(
-            init_calls.load(Ordering::SeqCst),
-            1,
-            "ccm.init_connection should fire once on initConnection"
+            ctx.query_context.url.as_deref(),
+            Some("https://api.example.com/z"),
+            "userQueryURL must be recorded through the handler's ccm.initConnection dispatch"
         );
         // The initConnection hydrated the client's (internal) queries, so the
         // hot-path `hydrations` metric incremented.
@@ -5273,10 +5258,14 @@ mod tests {
         // Configure an admin password for the inspector.
         state.admin_password = Some("s3cret".to_string());
         state.server_version = "9.9.9".to_string();
+        let cell = shared(state);
 
         let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
-        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
+        let _ = rt.block_on(
+            cell.borrow_mut()
+                .on_new_connection(test_params("c1", "ws1"), sink),
+        );
 
         let drain =
             |drx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| -> Vec<serde_json::Value> {
@@ -5289,7 +5278,8 @@ mod tests {
         let _ = drain(&mut drx); // discard the `connected` frame
 
         // 1) `version` before authenticating → challenge (authenticated:false).
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["inspect",{"op":"version","id":"1"}]"#.to_string(),
@@ -5301,25 +5291,28 @@ mod tests {
         assert_eq!(last[1]["value"], false);
 
         // 2) authenticate with the wrong password → false.
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["inspect",{"op":"authenticate","id":"2","value":"nope"}]"#.to_string(),
         ));
         assert_eq!(drain(&mut drx).last().unwrap()[1]["value"], false);
-        assert!(!state.inspector_authenticated);
+        assert!(!cell.borrow().inspector_authenticated);
 
         // 3) authenticate with the right password → true.
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["inspect",{"op":"authenticate","id":"3","value":"s3cret"}]"#.to_string(),
         ));
         assert_eq!(drain(&mut drx).last().unwrap()[1]["value"], true);
-        assert!(state.inspector_authenticated);
+        assert!(cell.borrow().inspector_authenticated);
 
         // 4) `version` now returns the configured server version.
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["inspect",{"op":"version","id":"4"}]"#.to_string(),
@@ -5332,7 +5325,7 @@ mod tests {
     /// A ViewSyncerService pre-authenticated to the inspector, with a live connection.
     /// Returns the state, runtime, and the sink's receive channel.
     fn inspect_test_state() -> (
-        ViewSyncerService,
+        Rc<RefCell<ViewSyncerService>>,
         tokio::runtime::Runtime,
         tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
     ) {
@@ -5355,10 +5348,14 @@ mod tests {
         );
         state.admin_password = Some("s3cret".to_string());
         state.inspector_authenticated = true;
+        let cell = shared(state);
         let (tx, drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
-        rt.block_on(state.on_new_connection(test_params("c1", "ws1"), sink));
-        (state, rt, drx)
+        let _ = rt.block_on(
+            cell.borrow_mut()
+                .on_new_connection(test_params("c1", "ws1"), sink),
+        );
+        (cell, rt, drx)
     }
 
     fn last_inspect_frame(
@@ -5379,8 +5376,9 @@ mod tests {
 
     #[test]
     fn inspect_metrics_is_a_record_of_tdigests() {
-        let (mut state, rt, mut drx) = inspect_test_state();
-        rt.block_on(state.on_inbound(
+        let (cell, rt, mut drx) = inspect_test_state();
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["inspect",{"op":"metrics","id":"m1"}]"#.to_string(),
@@ -5405,11 +5403,12 @@ mod tests {
 
     #[test]
     fn inspect_unsupported_and_unknown_ops_answer_with_error_op() {
-        let (mut state, rt, mut drx) = inspect_test_state();
+        let (cell, rt, mut drx) = inspect_test_state();
 
         // analyze-query is not ported → `{op:"error"}`, not a success frame
         // carrying an `{error}` payload.
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["inspect",{"op":"analyze-query","id":"a1"}]"#.to_string(),
@@ -5429,7 +5428,10 @@ mod tests {
         // Driven through handle_inspect directly: protocol validation upstream
         // (parse_upstream_array, mirroring the TS valita layer) rejects unknown
         // ops before dispatch, so this covers the defensive arm.
-        rt.block_on(state.handle_inspect("c1", &serde_json::json!({"op": "bogus", "id": "b1"})));
+        rt.block_on(
+            cell.borrow_mut()
+                .handle_inspect("c1", &serde_json::json!({"op": "bogus", "id": "b1"})),
+        );
         let frame = last_inspect_frame(&mut drx);
         assert_eq!(frame[1]["op"], "error");
         assert_eq!(frame[1]["id"], "b1");
@@ -5477,12 +5479,6 @@ mod tests {
         handle: tokio::runtime::Handle,
     }
     impl CGServicesFactory for TablesFactory {
-        fn create_view_syncer(&self, _cg: &str) -> Arc<dyn ViewSyncerDispatch> {
-            Arc::new(NoopViewSyncer)
-        }
-        fn create_conn_context_manager(&self, _cg: &str) -> Arc<dyn ConnContextManagerDispatch> {
-            Arc::new(NoopCcm)
-        }
         fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
             None
         }
@@ -5553,11 +5549,12 @@ mod tests {
     /// task's job — see `handle_connection`), so this helper does not expect it.
     fn connect_c1(
         rt: &tokio::runtime::Runtime,
-        state: &mut ViewSyncerService,
+        cell: &Rc<RefCell<ViewSyncerService>>,
     ) -> tokio::sync::mpsc::UnboundedReceiver<WsCommand> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        rt.block_on(
-            state.on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx)),
+        let _ = rt.block_on(
+            cell.borrow_mut()
+                .on_new_connection(test_params("c1", "ws1"), DirectWebSocketSink::new(tx)),
         );
         let frames = drain_sends(&mut rx);
         assert!(
@@ -5575,14 +5572,19 @@ mod tests {
     #[test]
     fn on_inbound_ping_answers_pong() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut state = tables_state(&rt);
-        let mut rx = connect_c1(&rt, &mut state);
+        let cell = shared(tables_state(&rt));
+        let mut rx = connect_c1(&rt, &cell);
 
-        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), r#"["ping",{}]"#.to_string()));
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws1".into(),
+            r#"["ping",{}]"#.to_string(),
+        ));
         let frames = drain_sends(&mut rx);
         assert_eq!(frames, vec![serde_json::json!(["pong", {}])]);
         assert!(
-            state.connections.contains_key("c1"),
+            cell.borrow().connections.contains_key("c1"),
             "ping must not close the connection"
         );
     }
@@ -5594,10 +5596,15 @@ mod tests {
     fn on_inbound_malformed_message_closes_with_invalid_message() {
         for bad in ["{not json", r#"["definitelyNotAThing",{}]"#] {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let mut state = tables_state(&rt);
-            let mut rx = connect_c1(&rt, &mut state);
+            let cell = shared(tables_state(&rt));
+            let mut rx = connect_c1(&rt, &cell);
 
-            rt.block_on(state.on_inbound("c1".into(), "ws1".into(), bad.to_string()));
+            rt.block_on(on_inbound(
+                &cell,
+                "c1".into(),
+                "ws1".into(),
+                bad.to_string(),
+            ));
             let frames = drain_sends(&mut rx);
             let error = frames
                 .iter()
@@ -5605,11 +5612,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("[{bad}] expected an error frame"));
             assert_eq!(error[1]["kind"], "InvalidMessage", "[{bad}]");
             assert!(
-                !state.connections.contains_key("c1"),
+                !cell.borrow().connections.contains_key("c1"),
                 "[{bad}] the connection must be closed"
             );
             assert!(
-                !state.registered_ws.contains_key("c1"),
+                !cell.borrow().registered_ws.contains_key("c1"),
                 "[{bad}] the client must be unregistered"
             );
         }
@@ -5624,10 +5631,15 @@ mod tests {
     #[test]
     fn init_connection_pokes_desired_queries_patch() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut state = tables_state(&rt);
-        let mut rx = connect_c1(&rt, &mut state);
+        let cell = shared(tables_state(&rt));
+        let mut rx = connect_c1(&rt, &cell);
 
-        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), INIT_CONNECTION_HASH1.to_string()));
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws1".into(),
+            INIT_CONNECTION_HASH1.to_string(),
+        ));
         let frames = drain_sends(&mut rx);
 
         let poke_start = frames
@@ -5682,6 +5694,7 @@ mod tests {
 
         // CVR state after config + hydrate (TS "responds to changeDesiredQueries
         // patch" asserts the same records via CVRStore.load).
+        let state = cell.borrow();
         let cvr = state.cvr.as_ref().expect("CVR loaded");
         assert_eq!(
             cvr.clients.get("c1").map(|c| c.desired_query_ids.clone()),
@@ -5705,12 +5718,18 @@ mod tests {
     #[test]
     fn change_desired_queries_pokes_put_and_del_and_updates_cvr() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut state = tables_state(&rt);
-        let mut rx = connect_c1(&rt, &mut state);
-        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), INIT_CONNECTION_HASH1.to_string()));
+        let cell = shared(tables_state(&rt));
+        let mut rx = connect_c1(&rt, &cell);
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws1".into(),
+            INIT_CONNECTION_HASH1.to_string(),
+        ));
         let _ = drain_sends(&mut rx);
 
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"query-hash2","ast":{"table":"issue"}},{"op":"del","hash":"query-hash1"}]}]"#
@@ -5749,6 +5768,7 @@ mod tests {
             .expect("expected a pokeEnd");
         assert_eq!(poke_end[1]["cookie"], "00:03");
 
+        let state = cell.borrow();
         let cvr = state.cvr.as_ref().expect("CVR loaded");
         // "00:03" = the put/del config bump; "00:04" = the same-state hydrate
         // bump for the newly-got query-hash2 (see the init test).
@@ -5778,12 +5798,18 @@ mod tests {
     #[test]
     fn change_desired_queries_from_stale_ws_is_ignored() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut state = tables_state(&rt);
-        let mut rx = connect_c1(&rt, &mut state);
-        rt.block_on(state.on_inbound("c1".into(), "ws1".into(), INIT_CONNECTION_HASH1.to_string()));
+        let cell = shared(tables_state(&rt));
+        let mut rx = connect_c1(&rt, &cell);
+        rt.block_on(on_inbound(
+            &cell,
+            "c1".into(),
+            "ws1".into(),
+            INIT_CONNECTION_HASH1.to_string(),
+        ));
         let _ = drain_sends(&mut rx);
 
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "old-wsid".into(),
             r#"["changeDesiredQueries",{"desiredQueriesPatch":[{"op":"put","hash":"query-hash-1234567890","ast":{"table":"issue"}}]}]"#
@@ -5793,6 +5819,7 @@ mod tests {
             drain_sends(&mut rx).is_empty(),
             "a stale-wsID frame must produce no output"
         );
+        let state = cell.borrow();
         let cvr = state.cvr.as_ref().unwrap();
         assert_eq!(
             cvr.clients.get("c1").map(|c| c.desired_query_ids.clone()),
@@ -5819,15 +5846,16 @@ mod tests {
     fn update_auth_cross_user_via_wire_gets_exact_unauthorized_error() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        let cell = shared(revalidate_state(&rt, Some(300_000), valid));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        rt.block_on(state.on_new_connection(
+        let _ = rt.block_on(cell.borrow_mut().on_new_connection(
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
         let _ = drain_sends(&mut rx);
 
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             format!(r#"["updateAuth",{{"auth":"{}"}}]"#, fake_jwt("user-2")),
@@ -5843,7 +5871,10 @@ mod tests {
             "The user id in the new token does not match the previous token. \
              Client groups are pinned to a single user."
         );
-        assert!(state.registered_ws.is_empty(), "connection must be closed");
+        assert!(
+            cell.borrow().registered_ws.is_empty(),
+            "connection must be closed"
+        );
     }
 
     /// TS `updateAuth` with an empty/absent token is a no-op: no error, no
@@ -5852,22 +5883,27 @@ mod tests {
     fn update_auth_empty_token_is_a_noop() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        let cell = shared(revalidate_state(&rt, Some(300_000), valid));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
-        rt.block_on(state.on_new_connection(
+        let _ = rt.block_on(cell.borrow_mut().on_new_connection(
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
         let _ = drain_sends(&mut rx);
 
-        rt.block_on(state.on_inbound(
+        rt.block_on(on_inbound(
+            &cell,
             "c1".into(),
             "ws1".into(),
             r#"["updateAuth",{"auth":""}]"#.to_string(),
         ));
         assert!(drain_sends(&mut rx).is_empty(), "no output for empty auth");
-        assert_eq!(state.registered_ws.len(), 1, "connection must survive");
-        assert_eq!(state.metrics.snapshot()["authChanges"], 0);
+        assert_eq!(
+            cell.borrow().registered_ws.len(),
+            1,
+            "connection must survive"
+        );
+        assert_eq!(cell.borrow().metrics.snapshot()["authChanges"], 0);
     }
 }
 
@@ -5906,29 +5942,9 @@ pub enum LoadCvrError {
     Store(#[from] CVRStoreError),
 }
 
-/// Inert dispatch/auth seats for the storeless engine-surface constructor
+/// Inert auth seat for the storeless engine-surface constructor
 /// (`ViewSyncerService::new`) — rust-only test scaffold, never reached by
 /// production wiring (which constructs via `new_with_accepting`).
-struct InertViewSyncer;
-
-impl ViewSyncerDispatch for InertViewSyncer {
-    fn change_desired_queries(&self, _selector: &ConnectionSelector, _msg: &str) {}
-    fn update_auth(
-        &self,
-        _selector: &ConnectionSelector,
-        _msg: &str,
-        _auth_revision_changed: bool,
-    ) {
-    }
-    fn delete_clients(&self, _selector: &ConnectionSelector, _msg: &str) -> Vec<String> {
-        Vec::new()
-    }
-    fn init_connection(&self, _selector: &ConnectionSelector, _msg: &str) -> bool {
-        false
-    }
-    fn inspect(&self, _selector: &ConnectionSelector, _msg: &str) {}
-}
-
 struct InertAuthValidator;
 
 #[async_trait::async_trait]
@@ -5967,8 +5983,7 @@ impl ViewSyncerService {
             enable_query_covering: true,
             flush_observed: std::cell::Cell::new(false),
             _engine_census: crate::live_count::Guard::new(&crate::live_count::SYNC_ENGINE),
-            view_syncer: Arc::new(InertViewSyncer),
-            conn_context_manager: Arc::new(CcmDispatchAdapter::new(ccm.clone())),
+            self_handle: None,
             ccm,
             mutagen: None,
             pusher: None,

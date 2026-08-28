@@ -10,11 +10,11 @@
 //! `validate_connection` / `fail_connection` / `defer_maintenance` + the
 //! background-connection retransform). The old simplified per-CG fields
 //! (`pinned_user_id` / `client_raw_auth`) are deleted.
-//! `PlaceholderConnContextManager` in `main.rs` survives only as the
-//! `CGServicesFactory` default that the router's real CCM supersedes (its
-//! `init_connection` call in `handle_client_message` is a no-op dual-write
-//! vestige). Behavior changes to auth state/maintenance belong HERE, with the
-//! TS twin (`connection-context-manager.ts`) open beside it.
+//! The placeholder dispatch + its dual-write are GONE (L9 Stage 3d, 2026-08-28):
+//! the message handler's `connContextManager.initConnection` dispatch — the
+//! `CcmDispatchAdapter` in `services/view_syncer/view_syncer.rs` — is the single
+//! recording site into this CCM. Behavior changes to auth state/maintenance
+//! belong HERE, with the TS twin (`connection-context-manager.ts`) open beside it.
 //!
 //! State machine for the auth state of a single `ViewSyncerService` (one CG).
 //! Connections are registered as `provisional`, optionally backfilled with

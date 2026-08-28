@@ -13,7 +13,30 @@ use rust_syncer::workers::syncer_ws_message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
     PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,
 };
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+
+/// Drive the (now-async, L9 Stage 3d) handler dispatch to completion on a
+/// current-thread runtime — these unit tests are the synchronous twin of the
+/// CG task awaiting `handle_message` inline.
+trait HandleMessageBlocking {
+    fn handle_message_blocking(
+        &self,
+        msg: &str,
+    ) -> Vec<rust_syncer::workers::connection::HandlerResult>;
+}
+impl HandleMessageBlocking for SyncerWsMessageHandler {
+    fn handle_message_blocking(
+        &self,
+        msg: &str,
+    ) -> Vec<rust_syncer::workers::connection::HandlerResult> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(self.handle_message(msg))
+    }
+}
 
 // ─── Mock implementations ──────────────────────────────────────────────────
 
@@ -28,22 +51,23 @@ struct MockViewSyncer {
     inspect_calls: Mutex<Vec<(ConnectionSelector, String)>>,
 }
 
+#[async_trait::async_trait(?Send)]
 impl ViewSyncerDispatch for MockViewSyncer {
-    fn change_desired_queries(&self, selector: &ConnectionSelector, msg: &str) {
+    async fn change_desired_queries(&self, selector: &ConnectionSelector, msg: &str) {
         self.change_desired_queries_calls
             .lock()
             .unwrap()
             .push((selector.clone(), msg.to_string()));
     }
 
-    fn update_auth(&self, selector: &ConnectionSelector, msg: &str, changed: bool) {
+    async fn update_auth(&self, selector: &ConnectionSelector, msg: &str, changed: bool) {
         self.update_auth_calls
             .lock()
             .unwrap()
             .push((selector.clone(), msg.to_string(), changed));
     }
 
-    fn delete_clients(&self, selector: &ConnectionSelector, msg: &str) -> Vec<String> {
+    async fn delete_clients(&self, selector: &ConnectionSelector, msg: &str) -> Vec<String> {
         self.delete_clients_calls
             .lock()
             .unwrap()
@@ -51,7 +75,7 @@ impl ViewSyncerDispatch for MockViewSyncer {
         self.delete_clients_result.lock().unwrap().clone()
     }
 
-    fn init_connection(&self, selector: &ConnectionSelector, msg: &str) -> bool {
+    async fn init_connection(&self, selector: &ConnectionSelector, msg: &str) -> bool {
         self.init_connection_calls
             .lock()
             .unwrap()
@@ -59,7 +83,7 @@ impl ViewSyncerDispatch for MockViewSyncer {
         *self.init_connection_result.lock().unwrap()
     }
 
-    fn inspect(&self, selector: &ConnectionSelector, msg: &str) {
+    async fn inspect(&self, selector: &ConnectionSelector, msg: &str) {
         self.inspect_calls
             .lock()
             .unwrap()
@@ -178,13 +202,13 @@ impl PusherDispatch for MockPusher {
 // ─── Helper: create handler with mocks ─────────────────────────────────────
 
 fn create_handler(
-    view_syncer: Arc<MockViewSyncer>,
+    view_syncer: Rc<MockViewSyncer>,
     conn_context_manager: Arc<MockConnContextManager>,
     mutagen: Option<Arc<MockMutagen>>,
     pusher: Option<Arc<MockPusher>>,
 ) -> SyncerWsMessageHandler {
     SyncerWsMessageHandler::new(
-        view_syncer as Arc<dyn ViewSyncerDispatch>,
+        view_syncer as Rc<dyn ViewSyncerDispatch>,
         conn_context_manager as Arc<dyn ConnContextManagerDispatch>,
         mutagen.map(|m| m as Arc<dyn MutagenDispatch>),
         pusher.map(|p| p as Arc<dyn PusherDispatch>),
@@ -260,13 +284,13 @@ fn test_invalid_push_logged_as_info() {
 
 #[test]
 fn test_push_with_custom_mutation_routes_to_pusher() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let pusher = Arc::new(MockPusher::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"custom","id":1,"clientID":"test-client","name":"testMutation","args":[],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -278,13 +302,13 @@ fn test_push_with_custom_mutation_routes_to_pusher() {
 
 #[test]
 fn test_push_with_wrong_client_group_id_returns_fatal() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let pusher = Arc::new(MockPusher::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["push",{"clientGroupID":"wrong-group","mutations":[{"type":"custom","id":1,"clientID":"test-client","name":"testMutation","args":[],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -296,13 +320,13 @@ fn test_push_with_wrong_client_group_id_returns_fatal() {
 
 #[test]
 fn test_push_with_empty_mutations_returns_ok() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let pusher = Arc::new(MockPusher::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -317,12 +341,12 @@ fn test_push_with_custom_mutation_no_pusher_returns_transient() {
     // With no pusher configured (mutations are direct — the sync connection is
     // read-only), a `push` over the WebSocket is surfaced as a transient error
     // that keeps the read connection open (rather than tearing it down).
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"custom","id":1,"clientID":"test-client","name":"testMutation","args":[],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -333,7 +357,7 @@ fn test_push_with_custom_mutation_no_pusher_returns_transient() {
 
 #[test]
 fn test_push_with_crud_mutation_routes_to_mutagen() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let mutagen = Arc::new(MockMutagen::default());
     let pusher = Arc::new(MockPusher::default());
@@ -345,7 +369,7 @@ fn test_push_with_crud_mutation_routes_to_mutagen() {
     );
 
     let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -357,13 +381,13 @@ fn test_push_with_crud_mutation_routes_to_mutagen() {
 
 #[test]
 fn test_push_with_crud_mutation_no_mutagen_returns_fatal() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let pusher = Arc::new(MockPusher::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -374,7 +398,7 @@ fn test_push_with_crud_mutation_no_mutagen_returns_fatal() {
 
 #[test]
 fn test_push_with_crud_mutation_error_returns_transient() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let mutagen = Arc::new(MockMutagen {
         process_mutation_result: Mutex::new(Some((
@@ -392,7 +416,7 @@ fn test_push_with_crud_mutation_error_returns_transient() {
     );
 
     let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     match &results[0] {
@@ -406,12 +430,12 @@ fn test_push_with_crud_mutation_error_returns_transient() {
 
 #[test]
 fn test_change_desired_queries_routes_to_view_syncer() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["changeDesiredQueries",{"desiredQueriesPatch":[],"traceparent":"test-tp"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -423,7 +447,7 @@ fn test_change_desired_queries_routes_to_view_syncer() {
 
 #[test]
 fn test_update_auth_routes_to_view_syncer() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager {
         update_auth_result: Mutex::new(true),
         ..Default::default()
@@ -431,7 +455,7 @@ fn test_update_auth_routes_to_view_syncer() {
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["updateAuth",{"auth":"new-token"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -445,7 +469,7 @@ fn test_update_auth_routes_to_view_syncer() {
 
 #[test]
 fn test_update_auth_no_change_does_not_call_view_syncer_with_changed() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager {
         update_auth_result: Mutex::new(false),
         ..Default::default()
@@ -453,7 +477,7 @@ fn test_update_auth_no_change_does_not_call_view_syncer_with_changed() {
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["updateAuth",{"auth":"same-token"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -467,7 +491,7 @@ fn test_update_auth_no_change_does_not_call_view_syncer_with_changed() {
 
 #[test]
 fn test_delete_clients_routes_to_view_syncer_and_pusher() {
-    let vs = Arc::new(MockViewSyncer {
+    let vs = Rc::new(MockViewSyncer {
         delete_clients_result: Mutex::new(vec!["client-a".to_string()]),
         ..Default::default()
     });
@@ -476,7 +500,7 @@ fn test_delete_clients_routes_to_view_syncer_and_pusher() {
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["deleteClients",{"clientIDs":["client-a"]}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -493,7 +517,7 @@ fn test_delete_clients_routes_to_view_syncer_and_pusher() {
 
 #[test]
 fn test_delete_clients_no_pusher_no_error() {
-    let vs = Arc::new(MockViewSyncer {
+    let vs = Rc::new(MockViewSyncer {
         delete_clients_result: Mutex::new(vec!["client-a".to_string()]),
         ..Default::default()
     });
@@ -501,7 +525,7 @@ fn test_delete_clients_no_pusher_no_error() {
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["deleteClients",{"clientIDs":["client-a"]}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -512,13 +536,13 @@ fn test_delete_clients_no_pusher_no_error() {
 
 #[test]
 fn test_delete_clients_empty_result_no_pusher_call() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let pusher = Arc::new(MockPusher::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["deleteClients",{"clientIDs":[]}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -530,13 +554,13 @@ fn test_delete_clients_empty_result_no_pusher_call() {
 
 #[test]
 fn test_ack_mutation_responses_routes_to_pusher() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let pusher = Arc::new(MockPusher::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["ackMutationResponses",{"id":42,"clientID":"test-client"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -548,12 +572,12 @@ fn test_ack_mutation_responses_routes_to_pusher() {
 
 #[test]
 fn test_ack_mutation_responses_no_pusher_no_error() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["ackMutationResponses",{"id":42,"clientID":"test-client"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -564,7 +588,7 @@ fn test_ack_mutation_responses_no_pusher_no_error() {
 
 #[test]
 fn test_init_connection_routes_to_view_syncer_and_pusher() {
-    let vs = Arc::new(MockViewSyncer {
+    let vs = Rc::new(MockViewSyncer {
         init_connection_result: Mutex::new(true),
         ..Default::default()
     });
@@ -573,7 +597,7 @@ fn test_init_connection_routes_to_view_syncer_and_pusher() {
     let handler = create_handler(vs.clone(), ccm.clone(), None, Some(pusher.clone()));
 
     let msg = r#"["initConnection",{"desiredQueriesPatch":[],"traceparent":"test-tp"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -587,12 +611,12 @@ fn test_init_connection_routes_to_view_syncer_and_pusher() {
 
 #[test]
 fn test_close_connection_is_noop() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["closeConnection",[]]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -603,12 +627,12 @@ fn test_close_connection_is_noop() {
 
 #[test]
 fn test_inspect_routes_to_view_syncer() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["inspect",{"op":"queries","id":"req1","clientID":"test-client"}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -620,12 +644,12 @@ fn test_inspect_routes_to_view_syncer() {
 
 #[test]
 fn test_ping_returns_ok() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["ping",{}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -636,11 +660,11 @@ fn test_ping_returns_ok() {
 
 #[test]
 fn test_invalid_message_returns_fatal() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
-    let results = handler.handle_message("not valid json");
+    let results = handler.handle_message_blocking("not valid json");
 
     assert_eq!(results.len(), 1);
     assert!(matches!(
@@ -651,12 +675,12 @@ fn test_invalid_message_returns_fatal() {
 
 #[test]
 fn test_unknown_message_type_returns_fatal() {
-    let vs = Arc::new(MockViewSyncer::default());
+    let vs = Rc::new(MockViewSyncer::default());
     let ccm = Arc::new(MockConnContextManager::default());
     let handler = create_handler(vs.clone(), ccm.clone(), None, None);
 
     let msg = r#"["unknownType",{}]"#;
-    let results = handler.handle_message(msg);
+    let results = handler.handle_message_blocking(msg);
 
     assert_eq!(results.len(), 1);
     assert!(matches!(

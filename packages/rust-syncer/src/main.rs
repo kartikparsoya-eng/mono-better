@@ -758,17 +758,6 @@ struct RealServicesFactory {
 }
 
 impl CGServicesFactory for RealServicesFactory {
-    fn create_view_syncer(&self, _cg_id: &str) -> Arc<dyn rust_syncer::ViewSyncerDispatch> {
-        Arc::new(PlaceholderViewSyncer)
-    }
-
-    fn create_conn_context_manager(
-        &self,
-        _cg_id: &str,
-    ) -> Arc<dyn rust_syncer::ConnContextManagerDispatch> {
-        Arc::new(PlaceholderConnContextManager)
-    }
-
     // The Rust syncer runs ZERO mutation logic. CRUD mutations (mutagen → PG)
     // genuinely require mutation processing and stay unsupported here (no app
     // uses them on this path); a CRUD push still hits the "legacy CRUD disabled"
@@ -905,54 +894,6 @@ impl CGServicesFactory for RealServicesFactory {
             server_version: self.config.server_version.clone(),
             metrics: self.metrics.clone(),
         }
-    }
-}
-
-struct PlaceholderViewSyncer;
-
-impl rust_syncer::ViewSyncerDispatch for PlaceholderViewSyncer {
-    fn change_desired_queries(&self, _selector: &rust_syncer::ConnectionSelector, _msg: &str) {}
-    fn update_auth(&self, _selector: &rust_syncer::ConnectionSelector, _msg: &str, _changed: bool) {
-    }
-    fn delete_clients(
-        &self,
-        _selector: &rust_syncer::ConnectionSelector,
-        _msg: &str,
-    ) -> Vec<String> {
-        Vec::new()
-    }
-    fn init_connection(&self, _selector: &rust_syncer::ConnectionSelector, _msg: &str) -> bool {
-        true
-    }
-    fn inspect(&self, _selector: &rust_syncer::ConnectionSelector, _msg: &str) {}
-}
-
-struct PlaceholderConnContextManager;
-
-impl rust_syncer::ConnContextManagerDispatch for PlaceholderConnContextManager {
-    fn must_get_connection_context(
-        &self,
-        _selector: &rust_syncer::ConnectionSelector,
-    ) -> rust_syncer::ConnContextInfo {
-        rust_syncer::ConnContextInfo {
-            auth: None,
-            revision: 0,
-        }
-    }
-
-    fn init_connection(
-        &self,
-        _selector: &rust_syncer::ConnectionSelector,
-        _body: &serde_json::Value,
-    ) {
-    }
-
-    fn update_auth(
-        &self,
-        _selector: &rust_syncer::ConnectionSelector,
-        _body: &serde_json::Value,
-    ) -> bool {
-        true
     }
 }
 

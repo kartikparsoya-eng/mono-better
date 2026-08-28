@@ -31,12 +31,16 @@ pub enum HandlerResult {
 
 /// Trait for message handlers (port of TS `MessageHandler` interface).
 ///
-/// In Phase 2, this is implemented by `SyncerWsMessageHandler`.
-/// In the full implementation, it dispatches to ViewSyncer, Mutagen, Pusher.
-pub trait MessageHandler: Send {
+/// Implemented by `SyncerWsMessageHandler`, which dispatches to ViewSyncer,
+/// Mutagen, Pusher. `async` + `?Send` (L9 Stage 3d): the live ViewSyncer
+/// dispatch executes the message body INLINE on the CG task (TS `#lock` is
+/// FIFO-at-arrival — re-enqueueing would reorder), so the handler awaits it
+/// there and holds CG-local (`!Send`) state.
+#[async_trait::async_trait(?Send)]
+pub trait MessageHandler {
     /// Handle a parsed upstream message.
     /// Returns a list of `HandlerResult`s.
-    fn handle_message(&self, msg: &str) -> Vec<HandlerResult>;
+    async fn handle_message(&self, msg: &str) -> Vec<HandlerResult>;
 }
 
 /// Connection state.
@@ -143,7 +147,7 @@ impl Connection {
     ///
     /// Port of `Connection.#handleMessage()`.
     /// Returns `true` if the connection is still open, `false` if closed.
-    pub fn handle_inbound(&self, data: &str) -> bool {
+    pub async fn handle_inbound(&self, data: &str) -> bool {
         if self.closed.load(Ordering::Relaxed) {
             tracing::debug!("Ignoring message received after closed: {data}");
             return false;
@@ -166,7 +170,7 @@ impl Connection {
         }
 
         // Dispatch to the message handler.
-        let results = self.handler.handle_message(data);
+        let results = self.handler.handle_message(data).await;
         for result in results {
             if !self.handle_result(result) {
                 return false;
@@ -285,8 +289,8 @@ impl Connection {
     /// sec-websocket-protocol header.
     ///
     /// Port of `Connection.handleInitConnection()`.
-    pub fn handle_init_connection(&self, init_msg_json: &str) -> bool {
-        self.handle_inbound(init_msg_json)
+    pub async fn handle_init_connection(&self, init_msg_json: &str) -> bool {
+        self.handle_inbound(init_msg_json).await
     }
 
     /// Whether the connection is closed.
@@ -493,14 +497,25 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
+    /// Drive an async connection call on a current-thread runtime (the CG task
+    /// twin for these unit tests).
+    fn block_on_local<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
     /// MessageHandler mock: records every dispatched message and returns a
     /// configured list of `HandlerResult`s.
     struct MockHandler {
         results: Mutex<Vec<HandlerResult>>,
         calls: std::sync::Arc<Mutex<Vec<String>>>,
     }
+    #[async_trait::async_trait(?Send)]
     impl MessageHandler for MockHandler {
-        fn handle_message(&self, msg: &str) -> Vec<HandlerResult> {
+        async fn handle_message(&self, msg: &str) -> Vec<HandlerResult> {
             self.calls.lock().unwrap().push(msg.to_string());
             std::mem::take(&mut *self.results.lock().unwrap())
         }
@@ -605,7 +620,7 @@ mod tests {
     #[test]
     fn handle_inbound_invalid_json_closes_with_invalid_message() {
         let (conn, mut rx, calls, closes) = test_connection(PROTOCOL_VERSION, Vec::new());
-        assert!(!conn.handle_inbound("{not json"));
+        assert!(!block_on_local(conn.handle_inbound("{not json")));
         assert!(conn.is_closed());
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert!(calls.lock().unwrap().is_empty(), "handler must not run");
@@ -630,7 +645,7 @@ mod tests {
                 error: ErrorBody::internal("must never be reached"),
             }],
         );
-        assert!(conn.handle_inbound(r#"["ping",{}]"#));
+        assert!(block_on_local(conn.handle_inbound(r#"["ping",{}]"#)));
         assert!(!conn.is_closed());
         assert!(
             calls.lock().unwrap().is_empty(),
@@ -656,7 +671,9 @@ mod tests {
                 error: ErrorBody::unauthorized("bad token"),
             }],
         );
-        assert!(!conn.handle_inbound(r#"["updateAuth",{"auth":"t"}]"#));
+        assert!(!block_on_local(
+            conn.handle_inbound(r#"["updateAuth",{"auth":"t"}]"#)
+        ));
         assert!(conn.is_closed());
         assert_eq!(closes.load(Ordering::SeqCst), 1);
         assert_eq!(calls.lock().unwrap().len(), 1, "handler dispatched once");
@@ -686,7 +703,9 @@ mod tests {
                 ],
             }],
         );
-        assert!(conn.handle_inbound(r#"["updateAuth",{"auth":"t"}]"#));
+        assert!(block_on_local(
+            conn.handle_inbound(r#"["updateAuth",{"auth":"t"}]"#)
+        ));
         assert!(!conn.is_closed());
         assert_eq!(closes.load(Ordering::SeqCst), 0, "no close for transient");
         let kinds: Vec<String> = drain(&mut rx)
@@ -708,7 +727,7 @@ mod tests {
     fn messages_after_close_are_ignored_and_close_is_idempotent() {
         let (conn, mut rx, calls, closes) = test_connection(PROTOCOL_VERSION, Vec::new());
         conn.close("test close");
-        assert!(!conn.handle_inbound(r#"["ping",{}]"#));
+        assert!(!block_on_local(conn.handle_inbound(r#"["ping",{}]"#)));
         conn.close("second close");
         assert_eq!(closes.load(Ordering::SeqCst), 1, "on_close fires once");
         assert!(calls.lock().unwrap().is_empty());
