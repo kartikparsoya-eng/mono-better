@@ -1036,10 +1036,7 @@ impl ViewSyncerService {
     /// freshly created. Seeds the TTL clock from the CVR's stored value on the
     /// load/create transition (TS `#ttlClock = cvr.ttlClock; #ttlClockBase =
     /// now`). Returns whether a CVR is now available.
-    async fn ensure_cvr(
-        &mut self,
-        allow_create: bool,
-    ) -> Result<bool, crate::sync_engine::LoadCvrError> {
+    async fn ensure_cvr(&mut self, allow_create: bool) -> Result<bool, LoadCvrError> {
         if self.cvr.is_some() {
             return Ok(true);
         }
@@ -1766,9 +1763,9 @@ impl ViewSyncerService {
                 self.fail_group("Unable to load the client view state");
                 return false;
             }
-            Err(crate::sync_engine::LoadCvrError::Store(
-                rust_cvr::cvr_store::CVRStoreError::ClientNotFound(message),
-            )) => {
+            Err(LoadCvrError::Store(rust_cvr::cvr_store::CVRStoreError::ClientNotFound(
+                message,
+            ))) => {
                 if let Some(conn) = self.connections.get(client_id) {
                     conn.close_with_error(crate::protocol::ErrorBody::client_not_found(message));
                 }

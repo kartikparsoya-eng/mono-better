@@ -1,6 +1,6 @@
 //! Drain coordinator — port of `drain-coordinator.ts` (~76 LOC).
 //!
-//! Wired into production via `ConnectionRouter::drain` (router.rs), which
+//! Wired into production via `Syncer::drain` (workers/syncer.rs), which
 //! `main.rs` runs on SIGTERM: client groups are rehomed one at a time with
 //! this module's pacing instead of all at once, so a deploy does not stampede
 //! the receiving servers with simultaneous reconnect+rehydrate storms. SIGINT

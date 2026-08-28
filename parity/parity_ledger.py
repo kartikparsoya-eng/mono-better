@@ -159,6 +159,13 @@ CRATES = {
     "syncer": {
         "rust_dir": "packages/rust-syncer/src",
         "ts_label_prefix": "zero-cache/src/",
+        # L9 structural ratchet (`--enforce-structure`): resolved pairs whose
+        # rust file is not the TS mirror. Baseline 24 (2026-08-28, Stage 4):
+        # documented folds (auth.ts->CCM, custom/fetch.ts->metrics/protocol,
+        # rule-3 types-utility exception) + fuzzy-matcher noise. Any GROWTH
+        # means a symbol landed outside its mirrored file — fix the location,
+        # don't bump this number without a written exception.
+        "max_misfiled": 24,
         # rust-syncer replaces the entire TS syncer WORKER process: the WS
         # connection lifecycle (workers/), the view-syncer serving loop +
         # pipeline driver (services/view-syncer/), the read-permission + JWT auth
@@ -213,18 +220,18 @@ CRATES = {
         #   percentileNearestRank) — the last replaced by the completion-based
         #   e2e-serving-lag histogram in the per-CG Rust arch.
         "aliases": {
-            # view-syncer.ts serving loop -> router.rs / sync_engine.rs (async task)
-            "contentsandversion": ("sync_engine.rs (strip _0_version)", "inlined"),
+            # view-syncer.ts serving loop -> services/view_syncer/view_syncer.rs (async task)
+            "contentsandversion": ("view_syncer.rs engine seat (strip _0_version)", "inlined"),
             "elapsedlap": ("N/A", "per-lap timing via Instant::elapsed() inline"),
-            "expired": ("router.rs remove_expired_queries", "TTL/inactivation expiry"),
-            "keepalive": ("router.rs CgState.keepalive_until", "field + next_idle_shutdown_delay"),
-            "markinitialized": ("router.rs CgState.terminal", "init-state flag; test helper dropped"),
-            "readystate": ("router.rs CgState/event loop", "init/drain state flags"),
-            "run": ("router.rs cg_event_loop", "per-CG async serving loop"),
-            "shutdownbeforeinitializationerror": ("router.rs init-fail path", "error on terminal init failure"),
-            "start": ("router.rs ensure_cvr/CgState init", "CVR load + ttl seed"),
+            "expired": ("view_syncer.rs remove_expired_queries", "TTL/inactivation expiry"),
+            "keepalive": ("view_syncer.rs ViewSyncerService.keepalive_until", "field + next_idle_shutdown_delay"),
+            "markinitialized": ("view_syncer.rs ViewSyncerService.terminal", "init-state flag; test helper dropped"),
+            "readystate": ("view_syncer.rs ViewSyncerService/event loop", "init/drain state flags"),
+            "run": ("view_syncer.rs cg_event_loop", "per-CG async serving loop"),
+            "shutdownbeforeinitializationerror": ("view_syncer.rs init-fail path", "error on terminal init failure"),
+            "start": ("view_syncer.rs ensure_cvr/ViewSyncerService init", "CVR load + ttl seed"),
             "startwithoutyielding": ("N/A", "no setImmediate; sync Instant::now start"),
-            "stop": ("router.rs shutdown()", "per-CG drain + Rehome"),
+            "stop": ("view_syncer.rs shutdown()", "per-CG drain + Rehome"),
             "totalelapsed": ("N/A", "inline Instant::elapsed accumulation"),
             "yieldprocess": ("N/A", "tokio async yield; no global-lock setImmediate"),
             # pipeline-driver.ts -> pipeline_driver.rs + rust-ivm (advance gate, ops)
@@ -232,7 +239,7 @@ CRATES = {
             "advancementresettimelimitms": ("rust-ivm advance_gate.rs", "ported"),
             "advancewithoutdiff": ("pipeline_driver.rs advance_without_diff", "ported"),
             "assert": ("Rust assert! macro", "idiom"),
-            "currentpermissions": ("router.rs/message_handler perms reload", "perms hot-reload at CG dispatch"),
+            "currentpermissions": ("view_syncer.rs/message_handler perms reload", "perms hot-reload at CG dispatch"),
             "getrowkey": ("rust-ivm streamer get_row_key", "row-key extraction (cross-crate)"),
             "getschema": ("rust-ivm operator get_schema", "trait method (cross-crate)"),
             "minprojectedadvancementsamplechanges": ("rust-ivm advance_gate.rs", "ported"),
@@ -278,7 +285,7 @@ CRATES = {
             # custom-queries/transform-query.ts
             "normalizedheaders": ("custom_queries/transform_query.rs normalized_headers", "canonical header hash"),
             # connection-context-manager.ts
-            "filterheaders": ("router.rs filtered_query_headers", "header allowlist"),
+            "filterheaders": ("view_syncer.rs filtered_query_headers", "header allowlist"),
             "sameconnectionselector": ("services/view_syncer/connection_context_manager.rs set_background_connection", "inlined tuple match"),
             # query-covering.ts
             "jsonequal": ("services/view_syncer/query_covering.rs json_equal", "deep eq w/ JS number semantics"),
@@ -359,10 +366,16 @@ def extract_rust(path):
             skip_depth += line.count("{") - line.count("}")
             continue
         if RUST_TEST_MOD.match(line):
-            # enter skip; account for braces on this same line
-            skip_depth = 1 + line.count("{") - line.count("}")
-            if skip_depth < 1:
-                skip_depth = 1
+            # Enter skip: depth = net braces opened on this line. The old
+            # `1 + count` DOUBLE-counted `mod tests {` (depth 2), so the skip
+            # never unwound and every symbol AFTER a mid-file test module was
+            # dropped (how `workers/syncer.rs`'s `Syncer` went unextracted and
+            # TS `Syncer` fuzzy-bound `SyncerConfig`). rustfmt keeps `{` on the
+            # `mod` line, so net-braces is exact; `mod tests;` (no body here)
+            # opens nothing and is skipped as depth 0.
+            depth = line.count("{") - line.count("}")
+            if depth > 0:
+                skip_depth = depth
             continue
         m = RUST_FN.match(line)
         if m:
@@ -544,6 +557,32 @@ def main():
         rn, _, rf, rl, _ = first(rust_syms, rc)
         edges[tf][rf] += 1; rust_incoming[rf].add(tf)
         pairs_by_rf[rf].append((tf, tn, tl, rn, rl, f"fuzzy {s:.2f}"))
+    # === L9 structural guard (`--enforce-structure`): a resolved pair whose
+    # rust file is NOT the mirror of its TS file is MISFILED (rule 3). The
+    # threshold is a RATCHET (spec "max_misfiled"): documented exceptions
+    # (types-utility folding, metrics counters) are allowed; growth fails CI.
+    if "--enforce-structure" in sys.argv:
+        def mirror_of(tf):
+            return tf.replace("-", "_").replace(".ts", ".rs")
+        misfiled = sorted(
+            (tf, tn, rf, rn)
+            for rf, plist in pairs_by_rf.items()
+            for (tf, tn, _tl, rn, _rl, _tag) in plist
+            if mirror_of(tf) != rf
+        )
+        limit = spec.get("max_misfiled")
+        print(f"L1 structural guard [{crate}]: {len(misfiled)} misfiled resolved "
+              f"symbol(s) (ratchet max {limit})")
+        for tf, tn, rf, rn in misfiled:
+            print(f"  {tf}::{tn} -> {rf}::{rn}")
+        if limit is not None and len(misfiled) > limit:
+            print("L1 structural guard: FAIL — misfiled count grew past the ratchet; "
+                  "move the symbol(s) to the mirrored file or register the exception "
+                  "(spec aliases) and bump max_misfiled WITH justification.")
+            sys.exit(1)
+        print("L1 structural guard: OK")
+        sys.exit(0)
+
     # pinned aliases that name a Rust file also count as a file edge, so a TS file
     # resolved entirely via aliases (e.g. ttl-clock.ts) isn't mislabelled DROPPED.
     for tc, (tgt, note) in aliases.items():

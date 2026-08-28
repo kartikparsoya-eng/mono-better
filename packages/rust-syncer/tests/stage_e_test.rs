@@ -21,7 +21,7 @@ use rust_cvr::cvr::DesiredQuerySpec;
 use rust_cvr::cvr::RowRecordMap;
 use rust_cvr::shards::ShardID;
 use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
-use rust_syncer::sync_engine::{SyncEngine, empty_cvr};
+use rust_syncer::services::view_syncer::view_syncer::{ViewSyncerService as SyncEngine, empty_cvr};
 use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
 #[test]

@@ -22,7 +22,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::router::Syncer;
+use crate::workers::syncer::Syncer;
 
 /// Server statistics for /statz endpoint.
 #[derive(Debug, Default, Serialize)]
@@ -292,7 +292,7 @@ async fn statz_handler(
     if let Some(denied) = check_admin_auth(state.admin_password.as_deref(), &headers) {
         return denied;
     }
-    let stats = crate::router::lock_unpoisoned(&state.stats);
+    let stats = crate::services::view_syncer::view_syncer::lock_unpoisoned(&state.stats);
     let uptime_ms = state.start_time.elapsed().as_millis() as u64;
     let active_cgs = state.router.cg_count();
 
@@ -350,7 +350,7 @@ async fn heapz_handler(
     if let Some(denied) = check_admin_auth(state.admin_password.as_deref(), &headers) {
         return denied;
     }
-    let stats = crate::router::lock_unpoisoned(&state.stats);
+    let stats = crate::services::view_syncer::view_syncer::lock_unpoisoned(&state.stats);
     let response = json!({
         "type": "heap_snapshot",
         "timestamp": std::time::SystemTime::now()

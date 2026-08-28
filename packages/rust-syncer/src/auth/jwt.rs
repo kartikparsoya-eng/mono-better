@@ -15,7 +15,7 @@
 //!   the token's `kid` header.
 
 use crate::protocol::ErrorBody;
-use crate::router::AuthValidator;
+use crate::services::view_syncer::view_syncer::AuthValidator;
 use jsonwebtoken::jwk::{Jwk, JwkSet};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;

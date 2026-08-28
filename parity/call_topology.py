@@ -17,7 +17,7 @@ Two tiers:
     file for call sites of the client-observable frame primitives
     (`connected_message`, `pong_message`) and assert each site's enclosing
     function is in that primitive's sanctioned (file, fn) allowlist. Tier 1 only
-    guards router.rs; Tier 2 catches the same class in ANY file — e.g. a
+    guards single pinned files; Tier 2 catches the same class in ANY file — e.g. a
     `connected_message` emitted from a new helper on the CVR offload runtime or
     the CG dispatch path. (An earlier draft tried whole-crate call-graph
     reachability, but rust's pervasive method-name collisions — `init`, `new`,
@@ -41,22 +41,23 @@ SRC = Path(__file__).resolve().parent.parent / "packages" / "rust-syncer" / "src
 CRITICAL = [
     {
         "symbol": r"connected_message\s*\(",
-        "file": "router.rs",
-        "allowed": {"handle_connection"},
+        "file": "workers/syncer.rs",
+        "allowed": {"create_connection"},
         "forbidden": {"on_new_connection", "dispatch_cg_message", "handle_desired_queries"},
-        "why": "I-2: `connected` must be emitted on the accept task, never on the "
-               "serial CG thread (else the ack is queued behind config_and_hydrate).",
+        "why": "I-2: `connected` must be emitted on the accept task "
+               "(`Syncer::create_connection`), never on the serial CG task (else "
+               "the ack is queued behind config_and_hydrate).",
     },
     {
         # `Connection::init()` (version gate + `connected`) is TS's accept-handler
         # call; in rust its effects are on the accept path (accept_connection +
-        # handle_connection). It must NEVER be called on the serial CG thread,
+        # create_connection). It must NEVER be called on the serial CG task,
         # which would re-couple the `connected` send to config_and_hydrate.
         "symbol": r"\.init\s*\(\s*\)",
-        "file": "router.rs",
-        "allowed": set(),           # init() must not be called from router.rs at all
+        "file": "services/view_syncer/view_syncer.rs",
+        "allowed": set(),  # init() must not be called from the CG serving core at all
         "forbidden": {"on_new_connection"},
-        "why": "I-2: `connected`/version gate must not run on the serial CG thread; "
+        "why": "I-2: `connected`/version gate must not run on the serial CG task; "
                "`on_new_connection` must not call `.init()`.",
     },
 ]
@@ -72,9 +73,9 @@ EMISSIONS = [
         "symbol": "connected_message",
         # (file, fn): context — WHY this site is a sanctioned `connected` source.
         "allowed": {
-            ("router.rs", "handle_connection"):
-                "accept task — the live emission (prod path); decoupled from the "
-                "CG thread, this is the bug-1 fix.",
+            ("syncer.rs", "create_connection"):
+                "accept task — the live emission (prod path, workers/syncer.rs); "
+                "decoupled from the CG task, this is the bug-1 fix.",
             ("connection.rs", "init"):
                 "accept context by contract (I-2): `Connection::init()` is the 1:1 "
                 "TS port; it is NOT called on the prod path (only unit tests), its "

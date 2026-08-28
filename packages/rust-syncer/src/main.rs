@@ -29,8 +29,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rust_syncer::http_server::{bind_http_listener, serve_http};
-use rust_syncer::router::{CGServicesFactory, Syncer};
 use rust_syncer::ws_server::{WsServerConfig, bind_ws_listener, serve_ws_with_config};
+use rust_syncer::{CGServicesFactory, Syncer};
 
 /// Configuration parsed from environment variables.
 pub struct SyncerConfig {

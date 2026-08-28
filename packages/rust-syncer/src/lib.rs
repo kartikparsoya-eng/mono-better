@@ -30,8 +30,6 @@ pub mod live_count;
 pub mod metrics;
 pub mod otel;
 pub mod protocol;
-pub mod router;
-pub mod sync_engine;
 pub mod trace;
 pub mod ws_server;
 pub mod ws_sink;
@@ -50,10 +48,6 @@ pub use http_server::{
     HttpServerState, ServerStats, bind_http_listener, run_http_server, serve_http,
 };
 pub use protocol::*;
-pub use router::{
-    AuthValidator, CGHandle, CGMessage, CGServicesFactory, ConnectionSinks, CvrPgConfig,
-    GroupAuthState, SyncEngineConfig, Syncer,
-};
 pub use services::mutagen::pusher::PusherService;
 pub use services::view_syncer::connection_context_manager::{
     Auth, CCMError, ConnectParamsForRegistration, ConnectionContextManager, ConnectionFetchContext,
@@ -65,11 +59,16 @@ pub use services::view_syncer::drain_coordinator::DrainCoordinator;
 pub use services::view_syncer::pipeline_driver::{
     AdvanceOutcome, IvmColumnSchema, IvmPipelines, IvmTableSpec, parse_ts_ast,
 };
-pub use sync_engine::{SyncEngine, SyncResult};
+pub use services::view_syncer::view_syncer::{
+    AuthValidator, CGServicesFactory, CvrPgConfig, SyncEngineConfig,
+};
+pub use services::view_syncer::view_syncer::{SyncResult, ViewSyncerService};
+pub use workers::cg_executor::{CGHandle, CGMessage};
 pub use workers::connect_params::{ConnectParams, ConnectParamsError, get_connect_params};
 pub use workers::connection::{
     Connection, HandlerResult, LogLevel, MessageHandler, classify_error_log_level,
 };
+pub use workers::syncer::{ConnectionSinks, GroupAuthState, Syncer};
 pub use workers::syncer_ws_message_handler::{
     ConnContextInfo, ConnContextManagerDispatch, ConnectionSelector, MutagenDispatch,
     PushRelayHeaders, PusherDispatch, SyncerWsMessageHandler, ViewSyncerDispatch,

@@ -35,8 +35,8 @@ use tokio::sync::mpsc;
 use crate::protocol::{
     ErrorKind, ErrorOrigin, ErrorReason, MutationID, PushFailedHttpBody, PushFailedZeroCacheBody,
 };
-use crate::router::ConnectionSinks;
 use crate::workers::connection::HandlerResult;
+use crate::workers::syncer::ConnectionSinks;
 use crate::workers::syncer_ws_message_handler::{
     ConnectionSelector, PushRelayHeaders, PusherDispatch,
 };

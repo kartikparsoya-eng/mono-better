@@ -24,7 +24,7 @@ use dashmap::DashMap;
 // The serving loop (`cg_event_loop`, TS ViewSyncerService.run twin) and the
 // service wiring it needs still live in router.rs until Stage 3b; the executor
 // spawns it back through these crate-internal imports.
-use crate::router::{AuthValidator, CGServicesFactory, cg_event_loop};
+use crate::services::view_syncer::view_syncer::{AuthValidator, CGServicesFactory, cg_event_loop};
 use crate::workers::connect_params::ConnectParams;
 use crate::workers::syncer::ConnectionInfo;
 use crate::ws_sink::DirectWebSocketSink;

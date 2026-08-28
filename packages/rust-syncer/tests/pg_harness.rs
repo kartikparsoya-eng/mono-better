@@ -1156,7 +1156,9 @@ fn pg_advance_lmid_change_with_no_queries() {
     use rust_cvr::client_handler::WebSocketSink;
     use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
-    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::services::view_syncer::view_syncer::{
+        ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
+    };
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
     let Some(uri) = pg_uri() else {
@@ -1375,7 +1377,9 @@ fn pg_no_permissions_deployed_denies_client_ast_queries() {
     use rust_cvr::client_handler::WebSocketSink;
     use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
-    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::services::view_syncer::view_syncer::{
+        ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
+    };
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
     let Some(uri) = pg_uri() else {
@@ -1575,7 +1579,9 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
     use rust_cvr::client_handler::WebSocketSink;
     use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
-    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::services::view_syncer::view_syncer::{
+        ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
+    };
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
     let Some(uri) = pg_uri() else {
@@ -1841,7 +1847,9 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
     use rust_cvr::cvr::RowRecordMap;
     use rust_cvr::schema::types::version_string;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
-    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::services::view_syncer::view_syncer::{
+        ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
+    };
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
     let Some(uri) = pg_uri() else {
@@ -2256,7 +2264,9 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
     use rust_cvr::client_handler::WebSocketSink;
     use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
-    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::services::view_syncer::view_syncer::{
+        ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
+    };
     use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
     let Some(uri) = pg_uri() else {

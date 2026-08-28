@@ -442,7 +442,8 @@ impl SyncerWsMessageHandler {
             // Process mutations under the connection-level lock. The lock only
             // serializes (it guards `()`), so recovering from a poisoned mutex is
             // safe and avoids turning one panicked batch into a dead connection.
-            let _lock = crate::router::lock_unpoisoned(&self.mutation_lock);
+            let _lock =
+                crate::services::view_syncer::view_syncer::lock_unpoisoned(&self.mutation_lock);
 
             let mut errors: Vec<ErrorBody> = Vec::new();
             let auth_value = conn_ctx

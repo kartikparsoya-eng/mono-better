@@ -392,7 +392,17 @@ touched except where their callers move.
   path). RE-SEQUENCED: dispatch un-interception moved INTO Stage 3 — the
   handler's view-syncer arms dispatch through the Placeholder today, so
   un-intercepting requires the real ViewSyncerService seats Stage 3 builds.
-- **Stage 3 — `view_syncer.rs` reconstruction (the big one).** Includes the
+- **Stage 3 — `view_syncer.rs` reconstruction. DONE 2026-08-28** (3a
+  261e00f93 executor quarantine → workers/cg_executor.rs; 3b d632507bc
+  router.rs dissolved → services/view_syncer/view_syncer.rs; 3c-i cddff926f
+  CgState→ViewSyncerService; 3c-ii bbd4c174e config_and_hydrate de-meld into
+  handle_config_update + sync_query_pipeline_set; 3c-iii 1970feeb7 SyncEngine
+  struct dissolved into ViewSyncerService — TS owns #pipelines/#cvrStore/
+  #clients directly; 3d fea7f181c un-interception — async ViewSyncerDispatch,
+  CgViewSyncer executes inline on the CG task via the service's own
+  Rc<RefCell> cell, 5 intercepts deleted, placeholders + dual-writes retired,
+  CCM recording single-sited in CcmDispatchAdapter, failing-first proof on
+  init_connection_fires_ccm_init_side_effect). Original plan text: includes the
   dispatch un-interception (restoration #1) once the ViewSyncerService seats
   exist, as its own commit with frame-golden proof. Move `CgState`
   → `ViewSyncerService`; de-meld `config_and_hydrate`/`advance_and_sync` into
@@ -402,7 +412,16 @@ touched except where their callers move.
   failing-first test (that surfacing is a feature, not a hazard). `#clients`
   registry moves here from SyncEngine. `sync_engine.rs` reduced to a
   deprecated re-export shim, deleted at stage end.
-- **Stage 4 — enforcement.** L1 ledger re-run (orchestration symbols must
+- **Stage 4 — enforcement. IN PROGRESS 2026-08-28**: shim sweep DONE
+  (router.rs + sync_engine.rs deleted, all paths repointed); ledger re-bind
+  DONE — fixed the extractor's test-module brace double-count that swallowed
+  every symbol after a mid-file `mod tests` (TS `Syncer` now binds rust
+  `Syncer` exact; syncer scope 128 exact + 20 fuzzy); L3 pins repointed to the
+  1:1 tree (workers/syncer.rs::create_connection accept-task `connected`,
+  view_syncer.rs forbidden); L1 structural ratchet (`parity_ledger.py syncer
+  --enforce-structure`, max_misfiled=24 baseline) wired into local-rust-ci.
+  Remaining: full ART release gate on the post-L9 image, push. Original:
+  L1 ledger re-run (orchestration symbols must
   bind to their TS twins; misfiled → ~0); L3 Tier-2 extended to pin the new
   sanctioned contexts (init on accept task, pong on writer task, handler on
   CG task); structural CI guard = ledger misfiled-count threshold in

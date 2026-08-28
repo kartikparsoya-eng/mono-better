@@ -531,10 +531,12 @@ use tokio::sync::mpsc;
 
 use std::thread::JoinHandle;
 
-use crate::router::{
-    AuthValidator, CGHandle, CGMessage, CGServicesFactory, Executor, ExecutorCommand,
-    decrement_nonzero, default_num_shards, forward_inbound, lock_unpoisoned, now_ms, run_executor,
-    shard_for,
+use crate::services::view_syncer::view_syncer::{
+    AuthValidator, CGServicesFactory, decrement_nonzero, lock_unpoisoned, now_ms, shard_for,
+};
+use crate::workers::cg_executor::{
+    CGHandle, CGMessage, Executor, ExecutorCommand, default_num_shards, forward_inbound,
+    run_executor,
 };
 use crate::ws_server::ConnectionContext;
 use crate::ws_sink::DirectWebSocketSink;

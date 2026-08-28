@@ -48,5 +48,9 @@ step "rust-ivm — teardown integrity soak"
 step "parity — L3 call-topology guard (ordering-sensitive emissions in sanctioned context)"
 python3 "$ROOT/parity/call_topology.py"; chk $? "L3 call-topology"
 
+step "parity — L1 structural guard (misfiled-symbol ratchet, L9)"
+python3 "$ROOT/parity/parity_ledger.py" syncer --enforce-structure > /tmp/l1-structure.out 2>&1; chk $? "L1 structural ratchet"
+tail -1 /tmp/l1-structure.out
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail
