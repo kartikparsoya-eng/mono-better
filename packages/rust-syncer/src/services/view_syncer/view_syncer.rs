@@ -2854,6 +2854,13 @@ pub(crate) async fn cg_event_loop(
                         // one borrow may span the whole block (single-task cell).
                         let mut state = state_rc.borrow_mut();
                         if state.idle_shutdown_due() {
+                            // Port of TS view-syncer.ts:482: on the all-clients-
+                            // disconnected shutdown path, log `closing
+                            // clientGroupID=<id>` at INFO. rust reaches this via
+                            // idle-keepalive expiry (the mirror of TS
+                            // #checkForShutdownConditionsInLock); emit the same
+                            // lifecycle line so log-sequence parity holds (D gate).
+                            tracing::info!("closing clientGroupID={cg_id}");
                             tracing::info!(
                                 "CG thread {cg_id}: idle keepalive elapsed; shutting down"
                             );

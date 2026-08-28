@@ -137,12 +137,22 @@ pub fn version_string(v: &CVRVersion) -> String {
 pub enum VersionError {
     #[error("invalid version string {0:?}: more than one ':' separator")]
     TooManyParts(String),
-    #[error("invalid lexi configVersion {lexi:?}: {reason}")]
-    BadLexi { lexi: String, reason: &'static str },
-    #[error("configVersion {0:?} exceeds max safe integer")]
+    // TS propagates `versionFromLexi`'s throw RAW (lexi-version.ts:54,
+    // `Invalid LexiVersion: <value>`) for BOTH the state-version and
+    // config-version paths — with NO wrapper. Carry the exact lexi message
+    // transparently rather than re-wrapping it. (2026-08-28 A/error-frame:
+    // stale-cookie diff: rust emitted `invalid stateVersion "..": Invalid
+    // LexiVersion: length prefix mismatch` where TS emits `Invalid LexiVersion: ..`.)
+    #[error("{0}")]
+    BadLexiVersion(String),
+    // TS types.ts:332: `minorVersion ${parts[1]} exceeds max safe integer`.
+    #[error("minorVersion {0} exceeds max safe integer")]
     ConfigTooLarge(String),
-    #[error("invalid stateVersion {ver:?}: {reason}")]
-    BadStateVersion { ver: String, reason: &'static str },
+    // TS `stateVersionFromString` throws `Invalid stateVersion <ver>` only for a
+    // >2-part dotted state version (state-version.ts:34); the lexi sub-failures
+    // propagate raw as `BadLexiVersion` above.
+    #[error("Invalid stateVersion {0}")]
+    BadStateVersion(String),
     #[error("malformed query row {query_hash:?}: {reason}")]
     MalformedQuery {
         query_hash: String,
@@ -155,19 +165,18 @@ pub enum VersionError {
 /// `versionFromString` runs this in the 1-part case, so untrusted cookies with a
 /// malformed stateVersion are rejected rather than silently accepted.
 fn validate_state_version(ver: &str) -> Result<(), VersionError> {
-    let bad = |reason| VersionError::BadStateVersion {
-        ver: ver.to_string(),
-        reason,
-    };
     if !ver.contains('.') {
-        version_from_lexi(ver).map_err(bad)?;
+        // TS `stateVersionFromString` (state-version.ts:31) propagates the lexi
+        // throw RAW — no `invalid stateVersion` wrapper — so mirror that.
+        version_from_lexi(ver).map_err(VersionError::BadLexiVersion)?;
     } else {
         let parts: Vec<&str> = ver.split('.').collect();
         if parts.len() != 2 {
-            return Err(bad("expected major.minor"));
+            // TS state-version.ts:34 assert: `Invalid stateVersion ${ver}`.
+            return Err(VersionError::BadStateVersion(ver.to_string()));
         }
-        version_from_lexi(parts[0]).map_err(bad)?;
-        version_from_lexi(parts[1]).map_err(bad)?;
+        version_from_lexi(parts[0]).map_err(VersionError::BadLexiVersion)?;
+        version_from_lexi(parts[1]).map_err(VersionError::BadLexiVersion)?;
     }
     Ok(())
 }
@@ -189,11 +198,10 @@ pub fn maybe_version_string(s: &str) -> Result<CVRVersion, VersionError> {
             })
         }
         2 => {
+            // TS types.ts:330 `versionFromLexi(parts[1])` propagates the lexi
+            // throw RAW (`Invalid LexiVersion: <part>`) — no configVersion wrapper.
             let config_version =
-                version_from_lexi(parts[1]).map_err(|reason| VersionError::BadLexi {
-                    lexi: parts[1].to_string(),
-                    reason,
-                })?;
+                version_from_lexi(parts[1]).map_err(VersionError::BadLexiVersion)?;
             // TS bound (types.ts:332): `configVersion > BigInt(Number.MAX_SAFE_INTEGER)`
             // → 2^53-1, NOT u32::MAX (F-TYPES-1: a version in (2^32-1, 2^53-1]
             // must parse like TS, not be rejected as malformed).
@@ -240,26 +248,37 @@ pub fn version_to_lexi(v: u64) -> String {
     format!("{}{}", length_char, base36)
 }
 
-pub fn version_from_lexi(lexi_version: &str) -> Result<u128, &'static str> {
+pub fn version_from_lexi(lexi_version: &str) -> Result<u128, String> {
+    // Port of TS `versionFromLexi` (lexi-version.ts:44). In TS EVERY malformed-
+    // format failure throws the SAME message — `Invalid LexiVersion: <value>` —
+    // because a bad length prefix makes `parseInt(len,36)` NaN and the length
+    // assert (line 52-55) fires; only the <2-char case has its own message
+    // (`LexiVersion must have at least 2 characters, got ${length}`). Match both
+    // exactly and RAW (the caller must not re-wrap — see `BadLexiVersion`).
     if lexi_version.len() < 2 {
-        return Err("LexiVersion must have at least 2 characters");
+        return Err(format!(
+            "LexiVersion must have at least 2 characters, got {}",
+            lexi_version.len()
+        ));
     }
     // The byte-slices below require byte 1 to be a char boundary. A valid lexi
     // version is all base36 (ASCII), so a multi-byte first char is malformed —
     // but slicing at a non-boundary PANICS. This parser runs on the untrusted
     // client cookie (maybe_version_string), so that panic is a per-CG DoS
-    // (fuzz crash d1b161 = "ѱa"). TS indexes UTF-16 units and never panics,
-    // returning a parse error instead; mirror that with a clean Err.
+    // (fuzz crash d1b161 = "ѱa"). TS indexes UTF-16 units and never panics — its
+    // `parseInt` yields NaN and the length assert throws `Invalid LexiVersion:
+    // <value>`; return that SAME message (rust-only guard, TS-parity message).
     if !lexi_version.is_char_boundary(1) {
-        return Err("Invalid base36 encoded value");
+        return Err(format!("Invalid LexiVersion: {lexi_version}"));
     }
     let length_char = &lexi_version[0..1];
     let base36 = &lexi_version[1..];
-    let expected_length = from_base36_u64(length_char)?;
+    let expected_length =
+        from_base36_u64(length_char).map_err(|_| format!("Invalid LexiVersion: {lexi_version}"))?;
     if (base36.len() as u64) != expected_length + 1 {
-        return Err("Invalid LexiVersion: length prefix mismatch");
+        return Err(format!("Invalid LexiVersion: {lexi_version}"));
     }
-    u128::from_str_radix(base36, 36).map_err(|_| "Invalid base36 encoded value")
+    u128::from_str_radix(base36, 36).map_err(|_| format!("Invalid LexiVersion: {lexi_version}"))
 }
 
 fn to_base36_u64(mut n: u64) -> String {
@@ -627,10 +646,10 @@ mod tests {
             maybe_version_string("a:b:c"),
             Err(VersionError::TooManyParts("a:b:c".to_string()))
         );
-        // Malformed lexi config → BadLexi
+        // Malformed lexi config → BadLexiVersion (raw TS lexi throw)
         assert!(matches!(
             maybe_version_string("01:x"),
-            Err(VersionError::BadLexi { .. })
+            Err(VersionError::BadLexiVersion(_))
         ));
         // Well-formed still parses
         assert_eq!(
@@ -639,6 +658,42 @@ mod tests {
                 state_version: "01".to_string(),
                 config_version: Some(1)
             })
+        );
+    }
+
+    /// TS-golden message parity for malformed version strings — the client sees
+    /// this text in the error frame (2026-08-28 A/error-frame:stale-cookie diff).
+    /// TS throws `versionFromLexi`'s message RAW (lexi-version.ts:54), NOT a
+    /// wrapped `invalid stateVersion "..": ..` string.
+    ///
+    /// NON-VACUOUS: pre-fix the length-prefix case rendered
+    /// `invalid stateVersion "15": Invalid LexiVersion: length prefix mismatch`
+    /// (BadStateVersion wrapper + static reason); reverting either the enum change
+    /// or the `version_from_lexi` message makes these exact-string asserts FAIL.
+    #[test]
+    fn maybe_version_string_error_messages_match_ts_golden() {
+        // stateVersion lexi length-prefix mismatch → raw `Invalid LexiVersion: <v>`.
+        assert_eq!(
+            maybe_version_string("15").unwrap_err().to_string(),
+            "Invalid LexiVersion: 15"
+        );
+        // configVersion lexi length-prefix mismatch → same raw lexi message
+        // (no configVersion wrapper). "zz": length char 'z'=35 wants 36 base36
+        // digits but has 1 → TS `Invalid LexiVersion: zz`.
+        assert_eq!(
+            maybe_version_string("01:zz").unwrap_err().to_string(),
+            "Invalid LexiVersion: zz"
+        );
+        // <2-char lexi → the count-bearing message TS uses.
+        assert_eq!(
+            maybe_version_string("1").unwrap_err().to_string(),
+            "LexiVersion must have at least 2 characters, got 1"
+        );
+        // >2-part dotted state version → `Invalid stateVersion <ver>` (TS
+        // state-version.ts:34), NOT the lexi message.
+        assert_eq!(
+            maybe_version_string("1.2.3").unwrap_err().to_string(),
+            "Invalid stateVersion 1.2.3"
         );
     }
 
