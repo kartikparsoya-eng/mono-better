@@ -1353,6 +1353,204 @@ fn pg_advance_lmid_change_with_no_queries() {
     });
 }
 
+/// SECURITY REGRESSION (fail-open): with NO permissions doc deployed
+/// (`permissions: None`), client AST queries must still be transformed — with
+/// an EMPTY permissions config — which denies every table. This is exactly
+/// what TS does: view-syncer.ts:1549/:1929 pass
+/// `must(this.#pipelines.currentPermissions()).permissions ?? {tables: {}}`
+/// into `transformAndHashQuery`, and `transformQueryInternal` deny-by-defaults
+/// any table without `row.select` rules. Rust previously passed the AST
+/// through UNTRANSFORMED (served every row) — caught by ART G8 (#158 rider:
+/// TS returned 0 `channels` rows on a null permissions doc; rust served all).
+///
+/// NON-VACUOUS: written before the fix — it FAILS on the passthrough branch
+/// ("secret row" reaches the wire) and passes once `config_and_hydrate`
+/// substitutes the empty config. The ANYONE_CAN control below guards the
+/// other direction (a permissive config must still serve rows).
+#[test]
+fn pg_no_permissions_deployed_denies_client_ast_queries() {
+    use std::sync::Arc;
+
+    use rusqlite::Connection;
+    use rust_cvr::client_handler::WebSocketSink;
+    use rust_cvr::cvr::RowRecordMap;
+    use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
+    use rust_syncer::sync_engine::{SyncEngine, empty_cvr as empty_engine_cvr};
+    use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
+
+    let Some(uri) = pg_uri() else {
+        eprintln!(
+            "SKIP pg_no_permissions_deployed_denies_client_ast_queries: TEST_CVR_PG_URI not set"
+        );
+        return;
+    };
+
+    let schema = "cvr_no_perms_deny";
+    let db_path = format!("/tmp/rust-syncer-pg-noperms-{}.db", std::process::id());
+    let cleanup_sqlite = || {
+        for suffix in ["", "-wal", "-wal2", "-shm"] {
+            let _ = std::fs::remove_file(format!("{db_path}{suffix}"));
+        }
+    };
+    cleanup_sqlite();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        let _ = conn.pragma_update(None, "journal_mode", "wal2");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                replicaVersion TEXT NOT NULL,
+                publications TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.replicationState" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                stateVersion TEXT NOT NULL
+            );
+            CREATE TABLE "_zero.changeLog2" (
+                "stateVersion" TEXT NOT NULL,
+                "table"        TEXT NOT NULL,
+                "rowKey"       TEXT NOT NULL,
+                "op"           TEXT NOT NULL,
+                "pos"          INTEGER NOT NULL,
+                PRIMARY KEY ("stateVersion", "pos")
+            );
+            CREATE TABLE issue (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                "_0_version" TEXT NOT NULL
+            );
+            INSERT INTO "_zero.replicationConfig" (lock, replicaVersion, publications)
+                VALUES ('singleton', 'replica-1', '[]');
+            INSERT INTO "_zero.replicationState" (lock, stateVersion)
+                VALUES ('singleton', '01');
+            INSERT INTO issue (id, title, "_0_version")
+                VALUES ('i1', 'secret row', '01');
+            "#,
+        )
+        .unwrap();
+    }
+
+    // One engine per phase (an engine is per-CG); both share the replica and
+    // the PG schema. Phase 1: NO permissions deployed → deny. Phase 2 control:
+    // ANYONE_CAN (`[["allow", {type:"and", conditions:[]}]]`, the compiled form
+    // from zero-schema) → serve.
+    let hydrate_wire = |cg: &str, ws: &str, permissions: Option<&serde_json::Value>| {
+        let specs = rust_syncer::compute_table_specs_from_path(&db_path).unwrap();
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(specs, Some(&db_path), "app").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let pool = {
+            let _g = handle.enter();
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(5)
+                .connect_lazy(&uri)
+                .unwrap()
+        };
+        engine.set_tokio_handle(handle.clone());
+        engine
+            .set_cvr_store(
+                pool,
+                schema.to_string(),
+                cg.to_string(),
+                "task-0".to_string(),
+            )
+            .unwrap();
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        engine.register_client("client1", ws, cg, &shard, None, sink);
+        let puts = vec![DesiredQuerySpec {
+            hash: "q_issue".to_string(),
+            ast: Some(serde_json::json!({"table": "issue"})),
+            name: None,
+            args: None,
+            ttl: None,
+        }];
+        rt.block_on(engine.config_and_hydrate(
+            empty_engine_cvr(cg, "replica-1"),
+            "client1",
+            &[ws.to_string()],
+            &shard,
+            puts,
+            Vec::new(),
+            false,
+            None,
+            permissions,
+            &serde_json::json!({}),
+            None,
+            "01".to_string(),
+            "replica-1".to_string(),
+            &RowRecordMap::new(),
+            0,
+            0,
+            0,
+        ))
+        .expect("hydrate");
+        let mut wire = String::new();
+        while let Ok(WsCommand::Send { msg: frame, .. }) = rx.try_recv() {
+            wire.push_str(&frame.to_string());
+        }
+        wire
+    };
+
+    // Phase 1: no permissions doc → TS transforms with `{tables: {}}` →
+    // deny-by-default for `issue` → the row must NOT reach the client.
+    let denied = hydrate_wire("cg_deny", "ws_deny", None);
+    assert!(
+        denied.contains("q_issue"),
+        "hydrate must still run the config cycle (got/desired patch); wire={denied}"
+    );
+    assert!(
+        !denied.contains("secret row"),
+        "FAIL-OPEN: no-permissions-deployed must DENY client AST queries \
+         (TS view-syncer.ts:1549 `?? {{tables: {{}}}}`), but the row was served; \
+         wire={denied}"
+    );
+
+    // Phase 2 (over-deny guard): ANYONE_CAN on `issue` must serve the row.
+    let anyone_can = serde_json::json!({
+        "tables": {"issue": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}}
+    });
+    let allowed = hydrate_wire("cg_allow", "ws_allow", Some(&anyone_can));
+    assert!(
+        allowed.contains("secret row"),
+        "ANYONE_CAN must still serve rows (over-deny guard); wire={allowed}"
+    );
+
+    cleanup_sqlite();
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect(&uri)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// I-6 durability-ordering oracle (CLIENT-OBSERVABLE half). The store-level
 /// contract (`pg_quiet_commit_noop_flush_contract`) proves a no-op flush does not
 /// advance the STORED version. This proves the other half through the engine: a
@@ -1752,6 +1950,15 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         args: None,
         ttl: None,
     }];
+    // ANYONE_CAN select on `issue` — client AST queries are always transformed
+    // (permissions:None now means an EMPTY config = deny-all, per TS
+    // view-syncer.ts:1549 `?? {tables: {}}`), so tests that expect rows must
+    // deploy a permissive config, like the TS pg tests do. Both hydrate calls
+    // must use the SAME config so the reconnect keeps the transformation hash
+    // (and takes the catch-up branch, not a re-hydrate).
+    let anyone_can = serde_json::json!({
+        "tables": {"issue": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}}
+    });
     let hydrated = rt
         .block_on(engine.config_and_hydrate(
             empty_engine_cvr("cg1", "replica-1"),
@@ -1762,7 +1969,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             Vec::new(),
             false,
             None,
-            None,
+            Some(&anyone_can),
             &serde_json::json!({}),
             None,
             "01".to_string(),
@@ -1848,7 +2055,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             Vec::new(),
             false,
             None,
-            None,
+            Some(&anyone_can),
             &serde_json::json!({}),
             None,
             "02".to_string(),
@@ -2191,6 +2398,12 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
         args: None,
         ttl: None,
     }];
+    // ANYONE_CAN: client AST queries are always transformed (permissions:None
+    // = empty config = deny-all per TS view-syncer.ts:1549 `?? {tables: {}}`).
+    let anyone_can = serde_json::json!({
+        "tables": {"channel_user_status":
+            {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}}
+    });
     let hydrated = rt
         .block_on(engine.config_and_hydrate(
             empty_engine_cvr("cg1", "replica-1"),
@@ -2201,7 +2414,7 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
             Vec::new(),
             false,
             Some(client_schema),
-            None,
+            Some(&anyone_can),
             &serde_json::json!({}),
             None,
             "01".to_string(),

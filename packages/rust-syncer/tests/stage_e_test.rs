@@ -72,6 +72,11 @@ fn hydrate_real_rows_produces_row_pokes() {
     }];
     let existing_rows: RowRecordMap = HashMap::new();
 
+    // ANYONE_CAN: client AST queries are always transformed (permissions:None
+    // = empty config = deny-all per TS view-syncer.ts:1549 `?? {tables: {}}`).
+    let anyone_can = serde_json::json!({
+        "tables": {"issue": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}}
+    });
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -86,7 +91,7 @@ fn hydrate_real_rows_produces_row_pokes() {
             Vec::new(),
             false,
             None,
-            None,
+            Some(&anyone_can),
             &serde_json::json!({}),
             None,
             "00".to_string(),
@@ -302,6 +307,13 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
     ];
     let existing_rows: RowRecordMap = HashMap::new();
 
+    // ANYONE_CAN for both queried tables (see hydrate_real_rows comment).
+    let anyone_can = serde_json::json!({
+        "tables": {
+            "issue": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}},
+            "label": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}
+        }
+    });
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -316,7 +328,7 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
             Vec::new(),
             false,
             None,
-            None,
+            Some(&anyone_can),
             &serde_json::json!({}),
             None,
             "00".to_string(),

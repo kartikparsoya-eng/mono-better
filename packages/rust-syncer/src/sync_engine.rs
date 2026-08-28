@@ -585,7 +585,9 @@ impl SyncEngine {
         client_schema: Option<ClientSchema>,
         profile_id: Option<&str>,
         // Read-permission transformation inputs. When `permissions` is `None`
-        // (no permissions deployed) queries pass through untransformed.
+        // (no permissions deployed) client queries are transformed with an
+        // EMPTY config — denying every table — per TS view-syncer.ts:1549
+        // `currentPermissions().permissions ?? {tables: {}}`.
         permissions: Option<&serde_json::Value>,
         auth_data: &serde_json::Value,
         // Per-connection context for resolving named/custom queries via the
@@ -718,6 +720,14 @@ impl SyncEngine {
         // `zero.sync.view_syncer_hydration` histogram (TS `start` at the top of
         // `#syncQueryPipelineSet`); recorded below only when ≥1 query hydrated.
         let hydration_start = std::time::Instant::now();
+        // Port of TS view-syncer.ts:1549/:1929:
+        //   `must(this.#pipelines.currentPermissions()).permissions ?? {tables: {}}`
+        // — when NO permissions doc is deployed, TS still TRANSFORMS every
+        // client query with an EMPTY config, which deny-by-defaults every
+        // table (transformQueryInternal adds the empty-OR FALSE sentinel).
+        // Passing the AST through untransformed here was a fail-OPEN data
+        // leak (served the full table; caught by ART G8 via the #158 rider).
+        let empty_permissions = serde_json::json!({"tables": {}});
         let mut executed: Vec<(String, serde_json::Value, String)> = Vec::new();
         let mut custom_specs: Vec<CustomQuerySpec> = Vec::new();
         for (qid, record) in &cfg_cvr.queries {
@@ -726,10 +736,8 @@ impl SyncEngine {
                     executed.push((qid.clone(), r.ast.clone(), hash_of_ast(&r.ast)));
                 }
                 QueryRecord::Client(r) => {
-                    let (ast, hash) = match permissions {
-                        Some(perms) => transform_and_hash_query(&r.ast, perms, auth_data, false),
-                        None => (r.ast.clone(), hash_of_ast(&r.ast)),
-                    };
+                    let perms = permissions.unwrap_or(&empty_permissions);
+                    let (ast, hash) = transform_and_hash_query(&r.ast, perms, auth_data, false);
                     executed.push((qid.clone(), ast, hash));
                 }
                 QueryRecord::Custom(r) => custom_specs.push(CustomQuerySpec {

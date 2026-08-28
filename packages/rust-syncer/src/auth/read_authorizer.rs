@@ -39,9 +39,11 @@ pub fn deny_all_permissions() -> Value {
 /// engine should enforce, applying fail-CLOSED semantics on error:
 ///
 /// - `Ok(Some(perms))` → enforce those permissions.
-/// - `Ok(None)` → no permissions deployed. Pass client queries through
-///   untransformed — matches TS `load-permissions.ts`, which merely warns and
-///   serves without authorization when nothing is deployed.
+/// - `Ok(None)` → no permissions deployed. Returns `None`, matching TS
+///   `loadPermissions` returning `{permissions: null}`. The CONSUMER
+///   (sync_engine, mirroring view-syncer.ts:1549) then transforms client
+///   queries with `permissions ?? {tables: {}}` — an empty config that
+///   deny-by-defaults every table. `None` does NOT mean passthrough.
 /// - `Err(_)` → a permissions doc exists but could not be opened / parsed /
 ///   validated. Do NOT fall through to `None` (that would execute client
 ///   queries with no authorization — a fail-OPEN security hole). Enforce

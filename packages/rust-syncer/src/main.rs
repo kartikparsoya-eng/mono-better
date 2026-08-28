@@ -848,10 +848,13 @@ impl CGServicesFactory for RealServicesFactory {
                     } else {
                         format!(" --app-id={}", self.config.app_id)
                     };
+                    // TS warn text (load-permissions.ts:38-42) — note queries do
+                    // NOT pass through: the view-syncer transforms with
+                    // `?? {tables: {}}` (deny-all) until a doc is deployed.
                     tracing::warn!(
                         "CG {cg_id}: No upstream permissions deployed. Run \
                          'npx zero-deploy-permissions{app_id_flag}' to enforce \
-                         permissions. Queries pass through until then."
+                         permissions."
                     );
                 }
             }
