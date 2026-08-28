@@ -759,6 +759,91 @@ fn pg_cvr_store_load_grants_and_transfers_ownership() {
     });
 }
 
+/// P11-a: loading a CVR the purger has tombstoned (`instances.deleted = TRUE`)
+/// must fail with `ClientNotFound` carrying the BYTE-EXACT TS message
+/// (`'Client has been purged due to inactivity'`, cvr-store.ts:423-424). The
+/// message reaches the client verbatim as the `["error",…]` frame that drives it
+/// to wipe local state and start a fresh client group. Non-vacuous: reverting the
+/// message to `self.cvr_id` (or the retry-path wording) fails the exact-match.
+#[test]
+fn pg_cvr_store_load_purged_yields_exact_client_not_found_message() {
+    use rust_cvr::cvr_store::CVRStoreError;
+
+    let Some(uri) = pg_uri() else {
+        eprintln!("SKIP pg_cvr_store_load_purged: TEST_CVR_PG_URI not set");
+        return;
+    };
+    let schema = "cvr_store_purged";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let shard = ShardID {
+        app_id: "app".to_string(),
+        shard_num: 0,
+    };
+
+    rt.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&uri)
+            .await
+            .expect("connect");
+        sqlx::raw_sql(&cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create the CVR instance via a normal flush.
+        let mut cfg = CVRConfigDrivenUpdater::new(empty_cvr("cg1"), shard.clone());
+        cfg.ensure_client("c1");
+        let (cvr, _) = cfg.flush(0, 0, 0);
+        let ops = cfg.base.drain_store_ops();
+        let mut a = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-A".to_string(),
+        );
+        a.apply_store_ops(ops);
+        a.flush(&EMPTY_CVR_VERSION, &cvr, 1000.0, &Default::default())
+            .await
+            .expect("A create");
+
+        // The CVRPurger tombstones the instance for inactivity.
+        sqlx::raw_sql(&format!(
+            r#"UPDATE "{schema}".instances SET "deleted" = TRUE WHERE "clientGroupID" = 'cg1'"#
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A fresh load must refuse with the byte-exact purge message.
+        let mut b = CVRStoreHandle::new(
+            pool.clone(),
+            schema.to_string(),
+            "cg1".to_string(),
+            "task-B".to_string(),
+        );
+        let err = b
+            .load(2000.0)
+            .await
+            .expect_err("purged CVR must refuse load");
+        match err {
+            CVRStoreError::ClientNotFound(msg) => assert_eq!(
+                msg, "Client has been purged due to inactivity",
+                "purge-load message must be byte-exact with TS cvr-store.ts:424"
+            ),
+            other => panic!("expected ClientNotFound, got {other:?}"),
+        }
+
+        sqlx::raw_sql(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .execute(&pool)
+            .await
+            .unwrap();
+    });
+}
+
 /// On reload, each client's per-query desire state (ttl + inactivatedAt) must be
 /// reconstructed onto the query's `client_state`. The old load populated only
 /// `desired_query_ids`, so an INACTIVE (TTL-pending) desire reloaded as fully

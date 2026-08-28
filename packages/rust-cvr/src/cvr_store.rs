@@ -1151,14 +1151,14 @@ impl CVRStoreHandle {
 
         // OTLP: this store is the single atomic PG writer, so every flush here is
         // the "sync" flush TS records via `recordSyncFlushStats` (flush.type=sync).
-        // TS only counts rows-flushed when nothing was deferred; mirror that.
+        // The `rows_deferred == 0` row-count gate lives inside the ported fn (1:1
+        // with row-record-cache.ts:144-151).
         let elapsed_ms = flush_started.elapsed().as_secs_f64() * 1000.0;
-        let rows_flushed = if stats.rows_deferred == 0 {
-            stats.rows as u64
-        } else {
-            0
-        };
-        crate::otel_metrics::record_cvr_flush(elapsed_ms, rows_flushed, "sync");
+        crate::otel_metrics::record_sync_flush_stats(
+            stats.rows as u64,
+            stats.rows_deferred as u64,
+            elapsed_ms,
+        );
 
         if crate::tracer::enabled() {
             crate::tracer::note(
@@ -1327,10 +1327,14 @@ impl CVRStoreHandle {
                 rows_version,
             )) => {
                 // A CVR that was purged for inactivity is gone (TS throws
-                // ClientNotFoundError, which triggers a fresh client group).
+                // ClientNotFoundError, which triggers a fresh client group). The
+                // message is byte-exact with TS (cvr-store.ts:423-424) because it
+                // reaches the client verbatim as the `["error",…]` frame message.
                 if deleted {
                     drop(tx);
-                    return Err(CVRStoreError::ClientNotFound(self.cvr_id.clone()));
+                    return Err(CVRStoreError::ClientNotFound(
+                        "Client has been purged due to inactivity".to_string(),
+                    ));
                 }
                 // Ownership: if another task owns this CVR and its lease is still
                 // live (granted after our last connect), refuse to load it.

@@ -6337,11 +6337,16 @@ impl ViewSyncerService {
         // the CG loop. Matches TS's one-pool-per-worker model.
         let store = CVRStoreHandle::new(pool.clone(), schema.clone(), cvr_id.clone(), task_id);
         // Row-record cache (reads the `rows` table the store writes). A no-op
-        // fail callback + no metrics for now.
+        // fail callback + the async-flush metrics recorder (TS
+        // `#recordAsyncFlushStats`, wired via the write-behind flush loop).
         let fail: rust_cvr::row_record_cache::FailCallback = Arc::new(|e: String| {
             tracing::warn!("row cache: {e}");
         });
-        let cache = RowRecordCache::new(pool, schema, cvr_id, 100, fail, None);
+        let metrics: rust_cvr::row_record_cache::MetricsCallback =
+            Arc::new(|rows: usize, elapsed_ms: f64| {
+                rust_cvr::otel_metrics::record_async_flush_stats(rows as u64, elapsed_ms);
+            });
+        let cache = RowRecordCache::new(pool, schema, cvr_id, 100, fail, Some(metrics));
         self.store = Some(Arc::new(tokio::sync::Mutex::new(store)));
         self.row_cache = Some(cache);
         Ok(())

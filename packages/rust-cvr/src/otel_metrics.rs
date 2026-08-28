@@ -162,18 +162,27 @@ pub fn record_row_set_signature_drift() {
     instruments().row_set_signature_drifts.add(1, &[]);
 }
 
-/// Record a CVR flush — TS `recordSyncFlushStats` / `#recordAsyncFlushStats`
-/// (`row-record-cache.ts`). `flush_type` is `"sync"` or `"async"`; `rows` is the
-/// number of changed rows persisted (TS adds these to `cvr.rows-flushed`).
-pub fn record_cvr_flush(elapsed_ms: f64, rows: u64, flush_type: &'static str) {
+/// Port of TS `recordSyncFlushStats` (row-record-cache.ts:144). Records a
+/// SYNC CVR flush (`flush.type=sync`) and adds the flushed rows to
+/// `cvr.rows-flushed` ONLY when nothing was deferred — deferred rows are counted
+/// by the later async flush (TS: `if (stats.rowsDeferred === 0) …add(stats.rows)`).
+pub fn record_sync_flush_stats(rows: u64, rows_deferred: u64, elapsed_ms: f64) {
     let i = instruments();
-    i.cvr_flush_time.record(
-        elapsed_ms / 1000.0,
-        &[KeyValue::new("flush.type", flush_type)],
-    );
-    if rows > 0 {
+    i.cvr_flush_time
+        .record(elapsed_ms / 1000.0, &[KeyValue::new("flush.type", "sync")]);
+    if rows_deferred == 0 {
         i.cvr_rows_flushed.add(rows, &[]);
     }
+}
+
+/// Port of TS `#recordAsyncFlushStats` (row-record-cache.ts:153). Records an
+/// ASYNC (write-behind) CVR flush (`flush.type=async`) and always adds the
+/// flushed rows to `cvr.rows-flushed`.
+pub fn record_async_flush_stats(rows: u64, elapsed_ms: f64) {
+    let i = instruments();
+    i.cvr_flush_time
+        .record(elapsed_ms / 1000.0, &[KeyValue::new("flush.type", "async")]);
+    i.cvr_rows_flushed.add(rows, &[]);
 }
 
 /// Record a completed poke transaction — TS `#pokeTransactions` /
@@ -198,8 +207,9 @@ mod tests {
     fn record_paths_are_noops_without_provider() {
         // No meter provider installed → global meter is a no-op. These must not
         // panic and must be cheap.
-        record_cvr_flush(12.0, 5, "sync");
-        record_cvr_flush(3.0, 0, "async");
+        record_sync_flush_stats(5, 0, 12.0);
+        record_sync_flush_stats(5, 3, 12.0); // deferred → rows not added
+        record_async_flush_stats(3, 3.0);
         record_poke(8.0);
         record_poked_row();
     }

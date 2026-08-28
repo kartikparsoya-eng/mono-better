@@ -554,10 +554,24 @@ Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
       exact TS names (run `python3 parity/parity_ledger.py cvr`, see the
       "fuzzy" rows, e.g. `RowsVersionBehindError`→current `VersionError`-class
       names). Pure rename commits; ledger re-run proves exact.
-- [ ] **P6-a** (Part 5, verify): rust catchup reader bounded-memory for large
-      CVRs (TS pages 10k rows/cursor); add a bound note or test.
-- [ ] **P11-a** (Part 5, verify): purge-tombstoned CVR load yields the
-      byte-exact TS `ClientNotFound` message (client wipe depends on it).
+- [x] **CVR fuzzy sweep** — DONE 2026-08-28. cvr ledger now fuzzy **0** (was 5):
+      split the merged `record_cvr_flush` into 1:1 `record_sync_flush_stats` +
+      `record_async_flush_stats` (row-record-cache.ts:144/153; a rule-2 merge —
+      also wired the previously-`None` async recorder), and registered 4 aliases
+      for extractor blind spots (2 enum variants, 1 exact `type` alias, 1
+      valita→struct).
+- [x] **P6-a** — VERIFIED DONE 2026-08-28 (no code change). Rust row catchup is
+      bounded-memory: `CATCHUP_PAGE_SIZE = 10000` (row_record_cache.rs:207,
+      matches TS `.cursor(10000)`); a READ-ONLY REPEATABLE-READ txn task streams
+      ≤10k-row pages through a bounded mpsc channel — 1:1 with TS's
+      `for await … query.cursor(10000)`. (Config patches use `fetch_all`, but
+      those are O(queries+clients), not O(rows).)
+- [x] **P11-a** — DONE 2026-08-28. TS's purge path throws `ClientNotFoundError(
+      'Client has been purged due to inactivity')` (cvr-store.ts:423-424); rust
+      emitted `self.cvr_id` instead, and that string reaches the client verbatim
+      as the `["error",…]` frame (view_syncer.rs:1807). Fixed byte-exact +
+      PG test `pg_cvr_store_load_purged_yields_exact_client_not_found_message`
+      (proven failing-first).
 
 ### Larger, optional (decide before starting)
 - [ ] **Syncer misfiled tail**: drive the 25-entry L1 ratchet list down

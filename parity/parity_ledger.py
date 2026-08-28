@@ -71,6 +71,18 @@ CRATES = {
             "ttlclockfromnumber": ("IDENTITY", "TTLClock = i64 (ttl_clock.rs); no conversion"),
             "cvrerrorkind": ("CVRStoreError enum (cvr_store.rs)", "fn→enum discriminant"),
             "assert": ("assert_new_version (cvr.rs)", "rename"),
+            # TS error classes fold into the CVRStoreError enum; the extractor
+            # does not emit enum variants as symbols, so these fuzzy-match noise.
+            "clientnotfounderror": ("CVRStoreError::ClientNotFound (cvr_store.rs:47)",
+                                    "TS error class → Rust enum variant"),
+            "rowsversionbehinderror": ("CVRStoreError::RowsVersionBehind (cvr_store.rs:49)",
+                                       "TS error class → Rust enum variant"),
+            # Exact 1:1 type alias the extractor skips (it does not emit `type` aliases).
+            "rowsetsignatureprovider": ("RowSetSignatureProvider type (cvr.rs:277)",
+                                        "exact type alias; extractor skips `type` decls"),
+            # valita schema object → serde struct (same shape, `*Schema` suffix dropped).
+            "basequeryrecordschema": ("BaseQueryRecord struct (schema/types.rs:338)",
+                                      "valita schema → serde struct"),
         },
     },
     "ivm": {
