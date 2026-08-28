@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::custom::fetch::{BODY_PREVIEW_CAP, read_body_preview};
 use crate::protocol::{
     ErrorKind, ErrorOrigin, ErrorReason, MutationID, PushFailedHttpBody, PushFailedZeroCacheBody,
 };
@@ -40,10 +41,6 @@ use crate::workers::syncer::ConnectionSinks;
 use crate::workers::syncer_ws_message_handler::{
     ConnectionSelector, PushRelayHeaders, PusherDispatch,
 };
-
-/// Max bytes of a failing relay response body echoed back in a `PushFailed`
-/// frame (TS `bodyPreview` parity — never buffer an unbounded error body).
-const BODY_PREVIEW_CAP: usize = 1024;
 
 /// A queued relay POST plus the metadata needed to surface a failure. Real
 /// client pushes carry a `target`; synthetic cleanup pushes are fire-and-forget
@@ -88,17 +85,6 @@ fn mutation_ids_of(push_body: &serde_json::Value) -> Vec<MutationID> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// Read up to `cap` bytes of a response body as a lossy UTF-8 preview. Bounded
-/// so a huge error page can't be buffered into the `PushFailed` frame.
-async fn read_body_preview(resp: reqwest::Response, cap: usize) -> Option<String> {
-    let bytes = resp.bytes().await.ok()?;
-    if bytes.is_empty() {
-        return None;
-    }
-    let end = bytes.len().min(cap);
-    Some(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
 /// How long a single relay POST may take before it is abandoned.

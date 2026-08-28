@@ -27,7 +27,9 @@ pub mod workers;
 // Rust-only infra + the fused per-CG actor core (router).
 pub mod http_server;
 pub mod live_count;
-pub mod metrics;
+pub mod observability;
+pub use observability::metrics;
+pub mod custom;
 pub mod otel;
 pub mod protocol;
 pub mod trace;
