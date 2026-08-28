@@ -306,3 +306,118 @@ diff-oracle full catalog + mutations) and joins them through the L1 ledger.
 - Recapture after the fixes must show the wired symbols hot — that recapture
   is the non-vacuous proof for wiring fixes (the pre-fix capture is the
   failing state).
+
+## Part 4 — L9: structural 1:1 refactor of the orchestration layer (planned 2026-08-28)
+
+**Goal.** The rust-syncer ORCHESTRATION layer (today: `router.rs` 6.7k lines +
+`sync_engine.rs` + `push_relay.rs` + parts of `ws_server.rs`/`main.rs`) mirrors
+the TS tree file-for-file, function-for-function, and — the part L3 exists
+for — **call-site-for-call-site**: every ported function is invoked from the
+twin of its TS caller. Thread/executor logic stays only where rust genuinely
+needs it, quarantined in labeled invention modules with I-contracts. The
+ported crates (rust-cvr, rust-ivm zql tree, `pipeline_driver.rs`,
+`syncer_ws_message_handler.rs`, `connection_context_manager.rs`,
+`drain_coordinator.rs`, `read_authorizer.rs`) are already 1:1 and are NOT
+touched except where their callers move.
+
+### Target file map
+
+| TS (zero-cache/src) | Rust target | From (today) |
+|---|---|---|
+| `workers/syncer.ts` (`Syncer`, `#createConnection`, `drain`, `#connections`) | `workers/syncer.rs` | `router.rs::ConnectionRouter` (`handle_connection` → `create_connection`) |
+| `workers/connection.ts` (`Connection`, `init`, `#handleMessage`, `#proxyInbound/#proxyOutbound`, `#maybeSendPong`, `close`, `#closeWithError`) | `workers/connection.rs` | smeared: `ws_server.rs` reader/writer + `router.rs` dispatch |
+| `services/view-syncer/view-syncer.ts` (`ViewSyncerService` + `#runInLockForClient`, `#runInLockWithCVR`, `#handleConfigUpdate`, `#updateCVRConfig`, `#syncQueryPipelineSet`, `#addAndRemoveQueries`, `#hydrateUnchangedQueries`, `#processChanges`, `#advancePipelines`, `#catchupClients`, `#flushUpdater`, `startPoke`, `#getClients`, `#scheduleExpireEviction`, `#removeExpiredQueries`, `#scheduleAuthMaintenance`, `#runAuthMaintenance`, `#validateConnection`, `#failMaintenanceConnection`, `#runBackgroundRetransform`, `#markVersionServed`, `run`, `stop`) | `services/view_syncer/view_syncer.rs` | `router.rs::CgState` + `sync_engine.rs::SyncEngine` (`config_and_hydrate`/`advance_and_sync` de-melded into the TS decomposition; the invented `SyncEngine` name dissolves) |
+| `services/view-syncer/inspect-handler.ts` (`handleInspect`) | `services/view_syncer/inspect_handler.rs` | `router.rs::handle_inspect` |
+| `services/mutagen/pusher.ts` (`PusherService`, `PushWorker`, `combinePushes`, `#processPush`, `#fanOutResponses`, `ackMutationResponses`, `deleteClientMutations`) | `services/mutagen/pusher.rs` | `push_relay.rs` (invented name retired; **`combinePushes` is MISSING — real behavioral gap, ported with failing-first test**) |
+| `auth/load-permissions.ts` (`loadPermissions`, `reloadPermissionsIfChanged`) | `auth/load_permissions.rs` | folded into `auth/read_authorizer.rs` (pre-dates the prefer-mirrored-file rule) |
+
+### Call-site restorations (rule 8 — the deep part)
+
+1. **Dispatch un-interception.** TS routes EVERY client message
+   `Connection.#handleMessage` → `SyncerWsMessageHandler.handleMessage` →
+   `viewSyncer.*`. Rust's router today INTERCEPTS
+   `initConnection`/`changeDesiredQueries`/`updateAuth`/`deleteClients`/`inspect`
+   before the handler (handler arm is a "reference dispatch"). Target: the
+   intercepts are deleted; the handler becomes the single live dispatch, ON
+   the CG task (twin of the TS worker event loop). This also retires the
+   Placeholder dual-write of `ccm.init_connection`.
+2. **`connected` emission.** TS `#createConnection` calls `connection.init()`
+   on the accept path — pre-hydration. Rust's #152 fix already emits on the
+   accept task; restoration = rename the context (`create_connection` calling
+   `Connection::init()`), keeping the fix's semantics EXACTLY. Net: full 1:1
+   naming AND the incident fix, no tension.
+3. **`#maybeSendPong`.** Stays hosted on the per-connection writer task
+   (invention: TS timer → writer-task check, same 6s/3s constants, same
+   any-frame-suppresses semantics) but becomes a named `Connection` method the
+   task calls — the L3 ledger pins the writer task as its sanctioned context.
+4. **`run()` loop.** TS `ViewSyncerService.run()` for-awaits `#stateChanges`;
+   rust's CG message pump is the twin (CGMessage::Notification ↔
+   'version-ready'). The pump body becomes `ViewSyncerService::run` with the
+   `#pipelinesSynced` gate, `#advancePipelines`-vs-initial-sync branch, and
+   the `finally`-block scheduling (`#scheduleAuthMaintenance`) in TS order.
+5. **`#lock` ↔ serial task.** `#runInLockForClient`/`#runInLockWithCVR` are
+   kept as named wrappers around "enqueue/execute on the CG task" so lock-body
+   callbacks keep TS call shape (and the CVR-load-on-first-touch lives in
+   `#runInLockWithCVR`, where TS has it).
+
+### What stays invented (quarantined, I-registered)
+
+- `workers/cg_executor.rs` (NEW home): K executors, LocalSets, `CGHandle`,
+  the unbounded ordered channel (TS `#lock` twin), forwarder tasks. Exists
+  because the IVM Engine is `!Send`; removable only by #103 (arena rewrite).
+- `ws_server.rs`: accept loop, reader/writer tasks, sink queue/backpressure
+  shed, liveness shed, admission-cap Rehome. (TS twin is the dispatcher +
+  Node stream plumbing; behavior contracts already gated by ART.)
+- Pusher queue-cap drop-newest (inside `pusher.rs`, labeled), CVR
+  write-behind actor (rust-cvr), Drop teardown, timer mux (one `select!`
+  deadline = min of the four TS `setTimeout`s — planner fns keep TS names).
+
+### Execution stages (each: move-only commits ≠ behavior commits; ledger + local CI + call_topology green per commit; ART gate per stage)
+
+- **Stage 0 — freeze.** Current release gate green + pushed FIRST. Fix the
+  two known stale comments (rule 13): `CGMessage::NewConnection` doc still
+  says it sends `connected`; handler's "reference dispatch" note inverts at
+  Stage 2. Snapshot parity-ledger misfiled-count baseline; grep pub-API
+  consumers of `router.rs`/`sync_engine.rs` for shim planning.
+- **Stage 1 — leaf splits (low risk).** (a) `auth/load_permissions.rs`;
+  (b) `inspect_handler.rs`; (c) `push_relay.rs` → `services/mutagen/pusher.rs`
+  renames, then **port `combinePushes`** (separate commit, non-vacuous test:
+  two pushes same clientID/wsID/revision merge into one POST; proven failing
+  first). Smoke-mode ART.
+- **Stage 2 — `workers/` extraction.** `connection.rs` + `syncer.rs` out of
+  `router.rs`/`ws_server.rs`; dispatch un-interception (restoration #1) as its
+  OWN commit with frame-sequence oracle + G-frames proof; `ConnectionRouter`
+  → `Syncer`, `handle_connection` → `create_connection`. Temporary re-export
+  shims keep tests/main compiling; release-mode ART.
+- **Stage 3 — `view_syncer.rs` reconstruction (the big one).** Move `CgState`
+  → `ViewSyncerService`; de-meld `config_and_hydrate`/`advance_and_sync` into
+  the TS method set by PURE extract-method (call order byte-identical —
+  wire-golden pg_harness tests pin poke sequences). Any genuine order
+  divergence DISCOVERED during de-melding is a separate fix commit with a
+  failing-first test (that surfacing is a feature, not a hazard). `#clients`
+  registry moves here from SyncEngine. `sync_engine.rs` reduced to a
+  deprecated re-export shim, deleted at stage end. Release-mode ART.
+- **Stage 4 — enforcement.** L1 ledger re-run (orchestration symbols must
+  bind to their TS twins; misfiled → ~0); L3 Tier-2 extended to pin the new
+  sanctioned contexts (init on accept task, pong on writer task, handler on
+  CG task); structural CI guard = ledger misfiled-count threshold in
+  local-rust-ci; full release gate; push.
+
+### Risks + mitigations
+
+- **Hot-path routing change (Stage 2 #1)** → frame-seq oracle, G-frames,
+  full-catalog G8 before/after; the change is a delete of a duplicate path,
+  not new logic.
+- **De-meld reordering (Stage 3)** → extract-method only; wire goldens; any
+  reorder = separate flagged commit.
+- **API churn** → shims per stage, deleted in Stage 4.
+- **Perf** → moves/renames compile identically; G25 in every stage gate.
+- **Drift while in flight** → stages land on the branch tip sequentially; no
+  parallel feature work in `router.rs`/`sync_engine.rs` mid-stage.
+
+**Acceptance:** parity ledger shows the orchestration layer bound 1:1 to
+`syncer.ts`/`connection.ts`/`view-syncer.ts`/`pusher.ts`/`inspect-handler.ts`/
+`load-permissions.ts`; call_topology pins every restored call site; the only
+non-twinned modules are the registered inventions; full ART release gate
+green. From then on, the TS→rust diff for ANY future zero-cache change is
+file-local.
