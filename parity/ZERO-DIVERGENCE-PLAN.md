@@ -464,3 +464,49 @@ touched except where their callers move.
 non-twinned modules are the registered inventions; full ART release gate
 green. From then on, the TS→rust diff for ANY future zero-cache change is
 file-local.
+
+
+---
+
+## Part 5 — CVR path map: TS ⇄ rust verdicts + remaining work (2026-08-28)
+
+Derived from code (rust-cvr + the dissolved engine seat in rust-syncer), path
+numbering matches the TS 12-path CVR map (session notes). rust-cvr had the 1:1
+file/fn refactor on 2026-08-24; L1/L2 bind it. This part records the
+END-TO-END verdicts and the residual work.
+
+| # | Path | Verdict | Evidence / notes |
+|---|------|---------|------------------|
+| 1 | Load | **PORTED 1:1** | `MAX_LOAD_ATTEMPTS=10` + `RowsVersionBehind` retry; tombstone → `ClientNotFound("purged…")`; conditional ownership steal (`granted_at <= last_connect_time`, fire-and-forget); first-load `put_instance`; TS no-dedup-of-desiredQueryIDs quirk preserved (cvr_store.rs:1484). |
+| 2 | Config-driven update | **PORTED 1:1** | `ensure_client` creates `lmids` + `mutationResults` internal queries (incl. TS bare-`simple` where quirk); `put_desired_queries` / `mark_desired_queries_as_inactive` / `delete_client` 1:1. |
+| 3 | Query-driven update | **PORTED 1:1** | `track_queries` / `received` / `delete_unreferenced_rows`; `merge_ref_counts` zero-drop bug fixed earlier; `assert_new_version` semantics kept. |
+| 4 | Flush | **PORTED 1:1 + documented refinement** | deep-equal row de-dup (test `flush_prunes_noop_row_updates_like_ts`); `SELECT … FOR UPDATE` version+ownership check; pipelined writes; materiality check documented inline (the quiet-commit desync fix). Error → CG `fail_group` teardown, which SUBSUMES TS's `rowCache.clear()` (the whole cache dies with the CG). |
+| 5 | Row write-back | **PORTED + registered invention seat** | same latch semantics (`allow-defer` defers while flushing or >100); rust drives the loop via `tokio::spawn(flush_loop)` on the shared-pool runtime (TS: same-event-loop `setTimeout`); `fail_service` callback; `flushed()` returns the stored error instead of hanging. Observable contract pinned by the I-6 durability-ordering oracle. |
+| 6 | Catchup | **PORTED 1:1** | `catchup_config_patches` + `catchup_row_patches` with `exclude_query_hashes`; `flushed()` wait; `check_version` → `ConcurrentModification` → clean Rehome. |
+| 7 | TTL clock | **PORTED, one minor divergence (P7-a below)** | `get_ttl_clock` delta model; standalone `update_ttl_clock_in_cvr_without_lock`; interval armed after material flush (`take_flush_observed` bridge, documented). |
+| 8 | Query TTL expiry | **PORTED 1:1** | `next_expiry_delay` (+50ms hysteresis) + `on_expiry_tick` in the CG loop. |
+| 9 | Row-set signature | **PORTED; read-side force-re-exec N/A by architecture** | `row_id_signature_unit = h64(row_id_string)` (live since the L8 delegation fix); flush persists + fires the drift canary metric. TS's hydrate-time "stored≠candidate → removeQuery" recovery exists because TS RESTORES hydration state from the CVR; rust re-executes every query on engine reset/rehydrate, so there is no restored state to force out — the drift canary is the remaining observable. |
+| 10 | Ownership transfer | **PORTED 1:1** | load-side conditional steal + flush-side `FOR UPDATE` → `OwnershipError`/`ConcurrentModification` → Rehome. |
+| 11 | CVR purge | **OUT OF RUST SCOPE (by design)** | TS `CVRPurger` runs in the REAPER worker (`server/reaper.ts`), which the shipped combined image's TS runner still operates. Rust's contract: honor tombstones on load (✓ path 1) and hold `FOR UPDATE` during flush so `SKIP LOCKED` skips live CVRs (✓ path 4). |
+| 12 | CCM lifecycle | **PORTED, live single owner** | I-8 promotion done; maintenance planner (`plan_maintenance` / revalidate / background retransform) wired (L8 fixes). |
+
+**Structural note D-CVR-1 (registered, not refactored):** rust queues pending
+writes as `StoreOp`s on the UPDATER (`store_ops` vec, applied by
+`flush_ops_to_store`) where TS queues them on `CVRStore` (`#writes` /
+`#pending*`). Queue→de-dup→one-tx semantics are identical; relocating the
+queue to the store for site-parity would be high-churn/low-value. Revisit only
+if a real divergence is ever traced to queue placement.
+
+### Remaining work items
+- **P7-a**: TS `#deleteClientDueToDisconnect` STOPS the ttlClock interval when
+  the last client disconnects; rust leaves the deadline armed until the ≤5s
+  idle teardown, so one extra `UPDATE instances SET ttlClock, lastActive` can
+  fire post-disconnect (bumps `lastActive`, marginally delaying purge
+  eligibility). Fix: `stop_ttl_clock_interval()` when `registered_ws` empties;
+  non-vacuous test (tick due after last disconnect → no UPDATE).
+- **P6-a (verify)**: TS pages catchup rows via cursor (10 000/page); confirm
+  the rust catchup reader is bounded-memory for large CVRs (streamed or
+  chunked), add a bound note/test.
+- **P11-a (verify)**: one integration assertion that a purge-tombstoned CVR
+  loaded by rust yields the exact TS `ClientNotFound` message bytes (client
+  wipe semantics depend on it).
