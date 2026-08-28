@@ -269,7 +269,7 @@ pub struct CgServingSnapshot {
 const DISTRIBUTION_CACHE_TTL_MS: u128 = 200;
 
 /// Process-wide serving-lag state. Held as `Arc<ServingLagRegistry>` by the
-/// `ConnectionRouter` and cloned into every CG. `Send + Sync`.
+/// `Syncer` and cloned into every CG. `Send + Sync`.
 pub struct ServingLagRegistry {
     replica_ready_states: Mutex<Vec<ReplicaReadyState>>,
     view_syncers: DashMap<String, CgServingSnapshot>,
@@ -569,7 +569,7 @@ pub(crate) fn check_and_pin_user(group: &mut GroupAuthState, incoming: &str) -> 
 /// threads and routes connections to them (doc 91, sharded async executors).
 ///
 /// Port of the `Syncer` class's connection management.
-pub struct ConnectionRouter {
+pub struct Syncer {
     /// Map of client_group_id → CG handle.
     pub(crate) cg_handles: Arc<DashMap<String, CGHandle>>,
     /// Serializes lookup/create/evict so two first connections cannot register
@@ -695,7 +695,7 @@ impl ConnectionSinks {
     }
 }
 
-impl ConnectionRouter {
+impl Syncer {
     pub fn new(
         services_factory: Arc<dyn CGServicesFactory>,
         auth_validator: Arc<dyn AuthValidator>,
@@ -821,10 +821,10 @@ impl ConnectionRouter {
 
     /// Handle a new WebSocket connection.
     ///
-    /// Port of `Syncer.#createConnection()`.
+    /// Port of `Syncer.#createConnection()` (1:1 name since L9 Stage 2b).
     /// This runs on the tokio runtime (async) because auth validation
     /// may require HTTP fetches (JWKS).
-    pub async fn handle_connection(&self, ctx: ConnectionContext) {
+    pub async fn create_connection(&self, ctx: ConnectionContext) {
         if self.shutting_down.load(Ordering::SeqCst) {
             ctx.sink
                 .fail(crate::protocol::ErrorBody::rehome("Server is draining"));

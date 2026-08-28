@@ -22,7 +22,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::router::ConnectionRouter;
+use crate::router::Syncer;
 
 /// Server statistics for /statz endpoint.
 #[derive(Debug, Default, Serialize)]
@@ -36,7 +36,7 @@ pub struct ServerStats {
 
 /// Shared state for the HTTP server.
 pub struct HttpServerState {
-    pub router: Arc<ConnectionRouter>,
+    pub router: Arc<Syncer>,
     pub stats: Arc<Mutex<ServerStats>>,
     pub start_time: std::time::Instant,
     /// Shared secret for the `/notify` endpoints (`NOTIFY_AUTH_TOKEN`). The
@@ -147,7 +147,7 @@ pub async fn bind_http_listener(addr: SocketAddr) -> tokio::net::TcpListener {
 /// `cvr_pool`/`replica_file` power the `/readyz` probes (pass `None` in tests).
 pub async fn serve_http(
     listener: tokio::net::TcpListener,
-    router: Arc<ConnectionRouter>,
+    router: Arc<Syncer>,
     cvr_pool: Option<sqlx::PgPool>,
     replica_file: Option<String>,
 ) {
@@ -248,7 +248,7 @@ pub async fn serve_http(
 }
 
 /// Run the HTTP server on the given address (bind + serve).
-pub async fn run_http_server(addr: SocketAddr, router: Arc<ConnectionRouter>) {
+pub async fn run_http_server(addr: SocketAddr, router: Arc<Syncer>) {
     let listener = bind_http_listener(addr).await;
     serve_http(listener, router, None, None).await;
 }

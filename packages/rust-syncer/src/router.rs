@@ -192,7 +192,7 @@ pub struct CGHandle {
     /// Number of active connections on this CG.
     pub(crate) connection_count: Arc<AtomicU64>,
     pub(crate) accepting: Arc<AtomicBool>,
-    /// Index into `ConnectionRouter::executors` of the executor hosting this CG.
+    /// Index into `Syncer::executors` of the executor hosting this CG.
     /// Fixed at placement for the group's lifetime (the `!Send` `SyncEngine` is
     /// pinned to that one thread). Read by `place_cg` to compute per-executor
     /// load; carried on returned/cloned handles only for struct consistency.
@@ -211,7 +211,7 @@ impl CGHandle {
 
     /// Ask the CG task to shut down. Non-blocking: the task fails its sockets with
     /// a Rehome error and terminates on its executor; the executor's own
-    /// drain-join (see [`ConnectionRouter::shutdown`]) is what guarantees the task
+    /// drain-join (see [`Syncer::shutdown`]) is what guarantees the task
     /// has finished before the process exits.
     pub fn shutdown(&mut self) {
         self.accepting.store(false, Ordering::SeqCst);
@@ -249,7 +249,7 @@ pub(crate) enum ExecutorCommand {
 /// Router-side handle to one executor thread.
 pub(crate) struct Executor {
     pub(crate) ctrl_tx: mpsc::UnboundedSender<ExecutorCommand>,
-    /// Joined once, during [`ConnectionRouter::shutdown`]. Behind a `Mutex<Option>`
+    /// Joined once, during [`Syncer::shutdown`]. Behind a `Mutex<Option>`
     /// so `shutdown(&self)` can take ownership of the handle to join it.
     pub(crate) join: Mutex<Option<JoinHandle<()>>>,
     /// Set when a `SpawnCg` send finds the control channel closed — i.e. the
@@ -386,9 +386,12 @@ pub trait AuthValidator: Send + Sync {
 // workers/syncer.ts-mirrored file. Re-exported here so existing paths hold
 // until the Stage-4 shim removal.
 pub(crate) use crate::workers::syncer::ConnectionInfo;
+/// Transitional alias (L9 Stage 2b): `ConnectionRouter` was the pre-1:1 name
+/// of the TS `Syncer` twin. Removed with the Stage-4 shim sweep.
+pub use crate::workers::syncer::Syncer as ConnectionRouter;
 #[cfg(test)]
 pub(crate) use crate::workers::syncer::check_and_pin_user;
-pub use crate::workers::syncer::{ConnectionRouter, ConnectionSinks, GroupAuthState};
+pub use crate::workers::syncer::{ConnectionSinks, GroupAuthState, Syncer};
 
 /// Forwarder: bridges a connection's tokio inbound channel into the CG's
 /// unified `tokio::sync::mpsc` channel, so the CG thread never blocks on a
@@ -4993,13 +4996,13 @@ mod tests {
         //    the connection stays active (connection_count == 1) and the CG is
         //    NOT idle/evictable.
         let (ctx1, _keep_alive1, _sink1) = make_ctx("cgA", "cA", "wsA");
-        rt.block_on(router.handle_connection(ctx1));
+        rt.block_on(router.create_connection(ctx1));
         assert_eq!(router.cg_count(), 1);
 
         // 2. A second, distinct group at cap with no idle CG -> its sink must get
         //    a Rehome error, never ServerOverloaded.
         let (ctx2, _keep_alive2, mut sink2) = make_ctx("cgB", "cB", "wsB");
-        rt.block_on(router.handle_connection(ctx2));
+        rt.block_on(router.create_connection(ctx2));
 
         let mut saw_rehome = false;
         let mut saw_overloaded = false;
@@ -5166,7 +5169,7 @@ mod tests {
         // Blocker A: its `initConnection` drives the CG thread into the blocking
         // `init_connection`, holding the thread like a long hydrate.
         let (ctx_a, _keep_a, _sink_a) = make_ctx("cA", "wsA", true);
-        rt.block_on(router.handle_connection(ctx_a));
+        rt.block_on(router.create_connection(ctx_a));
 
         // Wait until the CG thread is actually blocked.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -5181,7 +5184,7 @@ mod tests {
         // Client B on the SAME group. Its `connected` must arrive from the accept
         // task even though the CG thread is blocked on A.
         let (ctx_b, _keep_b, mut sink_b) = make_ctx("cB", "wsB", false);
-        rt.block_on(router.handle_connection(ctx_b));
+        rt.block_on(router.create_connection(ctx_b));
 
         let mut saw_connected = false;
         while let Ok(cmd) = sink_b.try_recv() {

@@ -29,7 +29,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rust_syncer::http_server::{bind_http_listener, serve_http};
-use rust_syncer::router::{CGServicesFactory, ConnectionRouter};
+use rust_syncer::router::{CGServicesFactory, Syncer};
 use rust_syncer::ws_server::{WsServerConfig, bind_ws_listener, serve_ws_with_config};
 
 /// Configuration parsed from environment variables.
@@ -535,7 +535,7 @@ fn main() {
     // admitted) and the services factory (hands it to each CG's push relay so a
     // drainer POST failure can be surfaced to the originating socket).
     let connection_sinks = rust_syncer::ConnectionSinks::new();
-    let router = Arc::new(ConnectionRouter::new_sharded(
+    let router = Arc::new(Syncer::new_sharded(
         Arc::new(RealServicesFactory {
             config: config.clone(),
             tokio_handle: runtime.handle().clone(),
@@ -667,7 +667,7 @@ fn main() {
             // Route the connection to the appropriate CG thread
             let router = ws_router2.clone();
             tokio::spawn(async move {
-                router.handle_connection(ctx).await;
+                router.create_connection(ctx).await;
             });
         });
         tokio::pin!(server);
