@@ -85,6 +85,27 @@ When porting or fixing: open the TS source, match names/paths/branches, then wri
 the Rust. If you catch yourself renaming or relocating for tidiness, stop — that is
 the divergence these rules exist to prevent.
 
+## Docs discipline (HARD RULES 11–13)
+
+11. **`DOCS.md` is the doc registry.** Every `.md` is LIVING (maintained),
+    GENERATED (tool-owned — regenerate, never hand-edit), or ARCHIVED (frozen
+    snapshot — do not update, do not trust its status claims). Unlisted docs
+    are ARCHIVED until classified.
+
+12. **Do NOT create new `.md` files for new work.** Findings go into the
+    relevant LIVING doc, the commit message, or the parity ledgers. A genuinely
+    new doc requires archiving at least one existing doc in the same commit —
+    the LIVING set must not grow. Session-scoped notes belong in commits/tasks,
+    not files.
+
+13. **Status claims expire with the status.** Any "wired/not wired/placeholder/
+    reference implementation/TODO promote" claim in a doc-comment or doc must
+    cite its task/commit, and whoever flips the status updates the claim IN THE
+    SAME COMMIT. A stale status claim is a bug, same severity as a stale test.
+    (Origin: `connection_context_manager.rs` still said "NOT WIRED INTO
+    PRODUCTION" after the CCM became the live single owner in task #155 — an
+    editor following that header would have changed the wrong file.)
+
 ## Architecture Overview
 
 This monorepo contains **Zero** (real-time sync platform) and **Replicache** (client-side data layer), built as complementary technologies for building reactive, sync-enabled applications.

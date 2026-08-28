@@ -1,13 +1,20 @@
 //! Connection Context Manager — port of `connection-context-manager.ts`.
 //!
-//! ## STATUS: REFERENCE IMPLEMENTATION — NOT WIRED INTO PRODUCTION
+//! ## STATUS: LIVE — the single owner of per-connection auth/context (I-8)
 //!
-//! Production installs `PlaceholderConnContextManager` (see `main.rs`); the
-//! live auth model is the simplified per-CG state in `CgState`
-//! (`pinned_user_id` / `client_raw_auth` + the folded revalidate/retransform
-//! tick in `router.rs`). This module is the full TS state machine kept as a
-//! tested reference for a future promotion — behavior changes to auth
-//! maintenance belong in `router.rs`, NOT here.
+//! Promoted 2026-08-27 (task #155). Every `CgState` holds this manager as
+//! `self.ccm`; it records `initConnection`/`closeConnection`, resolves connect
+//! auth (`resolve_auth`), serves use-time context reads for the push relay,
+//! mutagen CRUD auth, and custom-query Bearer (via `CcmDispatchAdapter` in
+//! `router.rs`), and drives the auth-maintenance tick (`plan_maintenance` /
+//! `validate_connection` / `fail_connection` / `defer_maintenance` + the
+//! background-connection retransform). The old simplified per-CG fields
+//! (`pinned_user_id` / `client_raw_auth`) are deleted.
+//! `PlaceholderConnContextManager` in `main.rs` survives only as the
+//! `CGServicesFactory` default that the router's real CCM supersedes (its
+//! `init_connection` call in `handle_client_message` is a no-op dual-write
+//! vestige). Behavior changes to auth state/maintenance belong HERE, with the
+//! TS twin (`connection-context-manager.ts`) open beside it.
 //!
 //! State machine for the auth state of a single `ViewSyncerService` (one CG).
 //! Connections are registered as `provisional`, optionally backfilled with
