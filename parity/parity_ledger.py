@@ -169,6 +169,7 @@ CRATES = {
             f"{ZC}/auth/jwt.ts",
             f"{ZC}/auth/auth.ts",
             f"{ZC}/auth/read-authorizer.ts",
+            f"{ZC}/auth/load-permissions.ts",
             f"{ZC}/workers/connect-params.ts",
             f"{ZC}/workers/connection.ts",
             f"{ZC}/workers/syncer.ts",
