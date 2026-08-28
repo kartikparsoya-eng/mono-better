@@ -10,7 +10,7 @@
 
 use rust_cvr::ttl_clock::TTLClock;
 
-use crate::sync_engine::SyncEngine;
+use super::view_syncer::ViewSyncerService;
 
 /// Port of `handleInspect` (inspect-handler.ts). The auth gate lives here:
 /// every op except `authenticate` requires a previously-authenticated client
@@ -23,7 +23,7 @@ pub async fn handle_inspect(
     cg_id: &str,
     body: &serde_json::Value,
     ws_id: &str,
-    sync_engine: &SyncEngine,
+    sync_engine: &ViewSyncerService,
     inspector_authenticated: &mut bool,
     admin_password: Option<&str>,
     server_version: &str,
@@ -104,7 +104,7 @@ pub async fn handle_inspect(
 /// ported to the Rust syncer (the TS inspect-handler.ts enrichment layer).
 async fn inspect_queries_value(
     cg_id: &str,
-    sync_engine: &SyncEngine,
+    sync_engine: &ViewSyncerService,
     filter_client: Option<&str>,
     ttl_clock: TTLClock,
 ) -> serde_json::Value {
