@@ -154,6 +154,7 @@ impl CGServicesFactory for RealServicesFactory {
             revalidate_interval_ms: self.config.revalidate_interval_ms,
             query_config: self.config.query_config.clone(),
             enable_query_covering: self.config.enable_query_covering,
+            enable_query_planner: self.config.enable_query_planner,
             tokio_handle: self.tokio_handle.clone(),
             admin_password: self.config.admin_password.clone(),
             server_version: self.config.server_version.clone(),

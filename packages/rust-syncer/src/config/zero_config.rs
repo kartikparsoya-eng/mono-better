@@ -132,6 +132,10 @@ pub struct SyncerConfig {
     /// Shadow-mode query-covering detection during hydration. Port of TS
     /// `zeroConfig.enableQueryCovering` (default true); log-only.
     pub enable_query_covering: bool,
+    /// Cost-based query-flip planning during hydration. Port of TS
+    /// `zeroConfig.enableQueryPlanner` (zero-config.ts:510, default true) —
+    /// "You can disable the planner if it is picking bad strategies."
+    pub enable_query_planner: bool,
 }
 
 impl SyncerConfig {
@@ -250,6 +254,14 @@ impl SyncerConfig {
             },
             // TS default: true. An explicit false/0 (case-insensitive) disables.
             enable_query_covering: !env::var("ENABLE_QUERY_COVERING")
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "false" || v == "0"
+                })
+                .unwrap_or(false),
+            // The bridge only forwards an explicit opt-out (rust-syncer-bridge
+            // rustSyncerEnv), same contract as ENABLE_QUERY_COVERING above.
+            enable_query_planner: !env::var("ENABLE_QUERY_PLANNER")
                 .map(|v| {
                     let v = v.trim().to_ascii_lowercase();
                     v == "false" || v == "0"

@@ -225,6 +225,9 @@ pub struct SyncEngineConfig {
     /// Shadow-mode query-covering detection during hydration (TS
     /// `zeroConfig.enableQueryCovering`, default true); log-only.
     pub enable_query_covering: bool,
+    /// Cost-based query-flip planning (TS `zeroConfig.enableQueryPlanner`,
+    /// zero-config.ts:510 default true → PipelineDriver `enablePlanner`).
+    pub enable_query_planner: bool,
     /// Runtime handle for the `block_on` PG I/O edge on the CG thread.
     pub tokio_handle: tokio::runtime::Handle,
     /// Admin password gating the inspector protocol (TS `isAdminPasswordValid`).
@@ -819,6 +822,9 @@ impl ViewSyncerService {
         // Engine seat (the former `SyncEngine::new`): pipelines + CVR-store
         // fields now live directly on the service, per TS ownership.
         let mut pipelines = IvmPipelines::new();
+        // TS threads `config.enableQueryPlanner` into the PipelineDriver ctor
+        // (server/syncer.ts:222); set before `init` so `build_engine` sees it.
+        pipelines.enable_query_planner = config.enable_query_planner;
         let tokio_handle = Some(config.tokio_handle.clone());
         let enable_query_covering = config.enable_query_covering;
         let mut initialization_failed = config.initialization_error.is_some();
@@ -3149,6 +3155,7 @@ mod tests {
                 revalidate_interval_ms: None,
                 query_config: None,
                 enable_query_covering: true,
+                enable_query_planner: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -3190,6 +3197,7 @@ mod tests {
                 revalidate_interval_ms: None,
                 query_config: None,
                 enable_query_covering: true,
+                enable_query_planner: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -3528,6 +3536,7 @@ mod tests {
                 revalidate_interval_ms: self.revalidate_interval_ms,
                 query_config: None,
                 enable_query_covering: true,
+                enable_query_planner: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -5034,6 +5043,7 @@ mod tests {
                 revalidate_interval_ms: None,
                 query_config: None,
                 enable_query_covering: true,
+                enable_query_planner: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -5724,6 +5734,7 @@ mod tests {
                 revalidate_interval_ms: None,
                 query_config: None,
                 enable_query_covering: true,
+                enable_query_planner: true,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),

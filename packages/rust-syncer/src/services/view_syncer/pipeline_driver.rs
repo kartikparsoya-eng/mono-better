@@ -96,6 +96,12 @@ pub enum AdvanceOutcome {
 /// teardowns. `destroy()` and `init_from_connection` mirror this order.
 pub struct IvmPipelines {
     engine: Option<Engine>,
+    /// Port of TS `PipelineDriver`'s `enablePlanner` ctor param
+    /// (pipeline-driver.ts:305/315, fed by `config.enableQueryPlanner`,
+    /// zero-config default true). `false` ⇒ no cost model is installed and
+    /// `plan_ast` passes ASTs through unplanned — the documented "planner is
+    /// picking bad strategies" opt-out.
+    pub enable_query_planner: bool,
     syncable_tables: HashMap<String, LiteAndZqlSpec>,
     all_table_names: HashSet<String>,
     sources: HashMap<String, Rc<RefCell<dyn Source>>>,
@@ -146,6 +152,7 @@ impl IvmPipelines {
     pub fn new() -> Self {
         IvmPipelines {
             engine: None,
+            enable_query_planner: true,
             syncable_tables: HashMap::new(),
             all_table_names: HashSet::new(),
             sources: HashMap::new(),
@@ -352,9 +359,36 @@ impl IvmPipelines {
         // before building. Without this, exists-in-OR is built non-flipped and
         // over-emits WHERE-EXISTS backing rows to the CVR (ART G8). Only the
         // replica-backed (TableSource) path gets a cost model; MemorySource
-        // fallbacks (some tests) stay unplanned.
-        if let Some(conn) = &source_conn {
-            eng.set_cost_model_conn(conn.clone());
+        // fallbacks (some tests) stay unplanned. Gated on `enable_query_planner`
+        // exactly like TS (`#costModels = enablePlanner ? new WeakMap() :
+        // undefined`, pipeline-driver.ts:315 → costModel undefined → no
+        // planQuery).
+        if let Some(conn) = &source_conn
+            && self.enable_query_planner
+        {
+            {
+                eng.set_cost_model_conn(conn.clone());
+                // TS `createSQLiteCostModel(db, this.#tableSpecs)`
+                // (pipeline-driver.ts:436): the scanstatus model probes with the
+                // visible zql columns of every syncable table. Without specs the
+                // engine degrades (loudly) to the filter-blind COUNT model —
+                // the exact wiring gap behind the 2026-08-29 prod 144s
+                // flipped-join tickets hydrate.
+                let specs: HashMap<String, HashMap<String, ColumnType>> = self
+                    .syncable_tables
+                    .iter()
+                    .map(|(table, spec)| {
+                        (
+                            table.clone(),
+                            spec.zql_spec
+                                .iter()
+                                .map(|(col, cs)| (col.clone(), zql_column_type(cs)))
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                eng.set_cost_model_table_specs(specs);
+            }
         }
         for source in self.sources.values() {
             eng.register_source(source.clone());
@@ -591,6 +625,21 @@ fn column_schema(v: &IvmColumnSchema) -> ColumnSchema {
     ColumnSchema {
         r#type: v.r#type.clone(),
         optional: v.optional,
+    }
+}
+
+/// Map a zql column spec to the `ColumnType` the scanstatus cost model probes
+/// with — same string→type mapping as the TS zqlSpec `SchemaValue.type` the
+/// cost model receives via `tableSpecs` (and rust-ivm's server.rs source
+/// builder; unknown types default to Number there too).
+fn zql_column_type(cs: &ColumnSchema) -> ColumnType {
+    let optional = cs.optional;
+    match cs.r#type.as_str() {
+        "boolean" => ColumnType::Boolean { optional },
+        "string" => ColumnType::String { optional },
+        "json" => ColumnType::Json { optional },
+        "number" => ColumnType::Number { optional },
+        _ => ColumnType::Number { optional },
     }
 }
 

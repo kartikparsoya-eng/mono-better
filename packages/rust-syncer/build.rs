@@ -26,6 +26,19 @@ fn main() {
         .define("SQLITE_ENABLE_FTS5", None)
         .define("SQLITE_ENABLE_RTREE", None)
         .define("SQLITE_ENABLE_COLUMN_METADATA", None)
+        // Cost-estimator parity with the zero-sqlite3 build the TS syncer runs
+        // on (Dockerfile stage 1 defines): the query planner's scanstatus cost
+        // model (rust-ivm sqlite_cost_model.rs, port of TS
+        // createSQLiteCostModel) reads SQLITE_SCANSTAT_EST through
+        // `sqlite3_stmt_scanstatus_v2`, which only EXISTS when the amalgamation
+        // is compiled with STMT_SCANSTATUS; STAT4 (+ the same sample count)
+        // makes this build's estimates use the same histogram stats TS's does.
+        // Without STMT_SCANSTATUS the planner silently degraded to the
+        // filter-blind COUNT(*) model — the 2026-08-29 prod 144s flipped-join
+        // tickets hydrate.
+        .define("SQLITE_ENABLE_STMT_SCANSTATUS", None)
+        .define("SQLITE_ENABLE_STAT4", None)
+        .define("SQLITE_STAT4_SAMPLES", "128")
         // Emits `cargo:rustc-link-lib=static=sqlite3` + the OUT_DIR search path,
         // so it satisfies libsqlite3-sys's `-lsqlite3` with the WAL2 static lib.
         .compile("sqlite3");

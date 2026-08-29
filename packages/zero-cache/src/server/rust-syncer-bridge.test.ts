@@ -222,6 +222,33 @@ describe('rustSyncerEnv', () => {
       ).ENABLE_QUERY_COVERING,
     ).toBe('false');
   });
+
+  test('omits ENABLE_QUERY_PLANNER unless explicitly disabled', () => {
+    // Default / unset: Rust defaults to true, so no env is forwarded.
+    expect(
+      rustSyncerEnv(base, 'serving', 3100, 3200, 15).ENABLE_QUERY_PLANNER,
+    ).toBeUndefined();
+    expect(
+      rustSyncerEnv(
+        {...base, enableQueryPlanner: true},
+        'serving',
+        3100,
+        3200,
+        15,
+      ).ENABLE_QUERY_PLANNER,
+    ).toBeUndefined();
+    // Explicit opt-out is forwarded (zero-config "planner is picking bad
+    // strategies" knob must reach the rust planner too).
+    expect(
+      rustSyncerEnv(
+        {...base, enableQueryPlanner: false},
+        'serving',
+        3100,
+        3200,
+        15,
+      ).ENABLE_QUERY_PLANNER,
+    ).toBe('false');
+  });
 });
 
 describe('proxyUpgradeToRust', () => {
