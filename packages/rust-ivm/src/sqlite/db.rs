@@ -156,14 +156,26 @@ impl Database {
 /// In Rust, prepared statements borrow the connection, so we use a
 /// different pattern: the `Database` provides methods that prepare and
 /// execute within a single borrow scope.
+/// Port of TS `Statement` (zqlite/src/db.ts). STATUS: mirrored API surface,
+/// NOT the production query path (2026-08-29, L2 enrichment commit): the hot
+/// fetch path goes through `table_source.rs`'s cached-prepared streaming
+/// (`stream_query`) — an invention-class replacement — because this wrapper
+/// re-prepares per call (TS's better-sqlite3 caches natively). Wire ONLY
+/// cold paths (admin/debug/maintenance SQL) through it unless a prepared-
+/// statement cache is added first. Pinned by sqlite_db_wrapper_test.rs.
 pub struct Statement {
     sql: String,
     conn: Rc<RefCell<Connection>>,
 }
 
 impl Statement {
-    /// Create a statement handle (SQL is prepared lazily on each call).
+    /// Create a statement handle. The SQL is VALIDATED eagerly — TS
+    /// `db.prepare(sql)` throws on invalid SQL at prepare time, and this
+    /// constructor's `Result` promised the same but previously never failed
+    /// (the first error surfaced at first use instead). Execution still
+    /// re-prepares per call (the handle outlives snapshot swaps).
     pub fn new(conn: Rc<RefCell<Connection>>, sql: &str) -> Result<Self, rusqlite::Error> {
+        conn.borrow().prepare(sql)?;
         Ok(Statement {
             sql: sql.to_string(),
             conn,

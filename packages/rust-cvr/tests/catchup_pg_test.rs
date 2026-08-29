@@ -17,6 +17,91 @@ use rust_cvr::schema::types::{NullableCVRVersion, version_from_string};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// L2 triage item 3: a catchup spanning MORE than one cursor page
+/// (CATCHUP_PAGE_SIZE = 10000, the TS `.cursor(10000)` twin). The golden
+/// scenarios above are all single-page, so the multi-page pull loop and its
+/// page-boundary closures had FNDA=0. Seeds 25_000 qualifying rows → the
+/// cursor must yield 10000/10000/5000 and every seeded key exactly once.
+#[tokio::test]
+async fn catchup_pages_through_large_row_sets() {
+    let uri = match std::env::var("TEST_CVR_PG_URI") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("SKIP catchup_pages_through_large_row_sets: TEST_CVR_PG_URI unset");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&uri)
+        .await
+        .expect("connect to TEST_CVR_PG_URI");
+
+    const SCHEMA: &str = "cvr_paging";
+    const TOTAL: usize = 25_000;
+    sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE"#))
+        .execute(&pool)
+        .await
+        .expect("drop schema");
+    let ddl = include_str!("../agentic/parity/flush-schema.sql").replace("roze_1/cvr", SCHEMA);
+    sqlx::raw_sql(&ddl).execute(&pool).await.expect("ddl");
+    sqlx::raw_sql(&format!(
+        r#"
+        INSERT INTO "{SCHEMA}".instances
+            ("clientGroupID", "version", "lastActive", "replicaVersion", "ttlClock")
+        VALUES ('cgP', '03', now(), '00', 0);
+        INSERT INTO "{SCHEMA}"."rowsVersion" ("clientGroupID", "version") VALUES ('cgP', '03');
+        INSERT INTO "{SCHEMA}".rows
+            ("clientGroupID", "schema", "table", "rowKey", "rowVersion", "patchVersion", "refCounts")
+        SELECT 'cgP', '', 't', jsonb_build_object('id', g), '02', '02',
+               jsonb_build_object('q1', 1)
+        FROM generate_series(1, {TOTAL}) g;
+        "#
+    ))
+    .execute(&pool)
+    .await
+    .expect("seed paging rows");
+
+    let cache = RowRecordCache::new(
+        pool.clone(),
+        SCHEMA.to_string(),
+        "cgP".to_string(),
+        100,
+        Arc::new(|_: String| {}),
+        None,
+    );
+    let mut cursor = cache
+        .catchup_row_patches(
+            Some(version_from_string("01")),
+            &version_from_string("03"),
+            &version_from_string("03"),
+            &[],
+        )
+        .await
+        .expect("catchup starts");
+
+    let mut page_sizes: Vec<usize> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(page) = cursor.next_page().await.expect("page") {
+        page_sizes.push(page.len());
+        for r in &page {
+            let v = serde_json::to_value(r).unwrap();
+            assert_eq!(v["patchVersion"], "02");
+            let id = v["rowKey"]["id"].as_i64().expect("id key");
+            assert!(seen.insert(id), "row id {id} emitted twice across pages");
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        TOTAL,
+        "every seeded row exactly once (pages: {page_sizes:?})"
+    );
+    assert!(
+        page_sizes.len() >= 3 && page_sizes[0] == 10_000,
+        "expected 10000-row pages then a remainder, got {page_sizes:?}"
+    );
+}
+
 fn sort_key(v: &Value) -> String {
     serde_json::to_string(&serde_json::json!([v["patchVersion"], v["rowKey"]])).unwrap()
 }
