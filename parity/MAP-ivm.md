@@ -2,8 +2,8 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **477**, Rust **930** · resolved pairs **324** (exact 287 + fuzzy 37) + aliases 57
-- 🟥 TS UNRESOLVED: **97** (**31** behavioral ⇒ investigate · 66 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **606**
+- symbols: TS **509**, Rust **930** · resolved pairs **338** (exact 304 + fuzzy 34) + aliases 73
+- 🟥 TS UNRESOLVED: **99** (**31** behavioral ⇒ investigate · 68 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **592**
 
 > ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `asQueryImpl` (query/query-impl.ts), `asQueryInternals` (query/query-internals.ts), `cmpLit` (query/expression.ts), `DeepMerge` (query/query-registry.ts), `defineQueries` (query/query-registry.ts), `defineQueriesWithType` (query/query-registry.ts), `defineQuery` (query/query-registry.ts), `defineQueryWithType` (query/query-registry.ts), `deserializePKToConstraint` (ivm/cap.ts), `eb` (query/expression.ts), `filterFalse` (query/expression.ts), `filterTrue` (query/expression.ts), `filterUndefined` (query/expression.ts), `getQuery` (query/query-registry.ts), `isOneHop` (query/query-impl.ts), `isParameterReference` (query/expression.ts), `isQuery` (query/query-registry.ts), `isQueryDefinition` (query/query-registry.ts), `isQueryRegistry` (query/query-registry.ts), `isTwoHop` (query/query-impl.ts), `materializeImpl` (query/query-delegate-base.ts), `mustGetQuery` (query/query-registry.ts), `newQuery` (query/query-delegate.ts), `newQueryImpl` (query/query-impl.ts), `normalizeParser` (query/named.ts), `normalizeTTL` (query/ttl.ts), `preloadImpl` (query/query-delegate-base.ts), `syncedQueryImpl` (query/named.ts), `throwQueryNotRunnable` (query/query-impl.ts), `titleCase` (query/validate-input.ts), `withValidation` (query/named.ts)
 
@@ -17,42 +17,42 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `builder/filter.ts` (210) | **1:1** | `builder/filter.rs` (4), `builder/like.rs` (1), `builder/ast.rs` (1) |
 | `builder/like-test-cases.ts` (200) | **DROPPED** | — |
 | `builder/like.ts` (78) | **MERGED** | `builder/like.rs` (3) |
-| `ivm/array-view.ts` (188) | **MERGED** | `ivm/array_view.rs` (6), `ivm/view.rs` (1) |
-| `ivm/cap.ts` (329) | **MERGED** | `ivm/cap.rs` (11) |
-| `ivm/catch.ts` (138) | **1:1** | `ivm/catch.rs` (9), `replay.rs` (1), `ivm/flipped_join.rs` (1) |
+| `ivm/array-view.ts` (188) | **MERGED** | `ivm/array_view.rs` (9), `ivm/view.rs` (1) |
+| `ivm/cap.ts` (329) | **MERGED** | `ivm/cap.rs` (12) |
+| `ivm/catch.ts` (138) | **1:1** | `ivm/catch.rs` (9), `replay.rs` (1) |
 | `ivm/change-index-enum.ts` (9) | **MERGED** | `ivm/change.rs` (1) |
 | `ivm/change-index.ts` (5) | **DROPPED** | — |
 | `ivm/change-type-enum.ts` (9) | **MERGED** | `ivm/view.rs` (1), `ivm/source.rs` (1), `engine/mod.rs` (1) |
 | `ivm/change-type.ts` (5) | **MERGED** | `ivm/change.rs` (1) |
-| `ivm/change.ts` (75) | **SPLIT** | `ivm/change.rs` (6), `ivm/take.rs` (3), `ivm/view.rs` (1) |
-| `ivm/constraint.ts` (200) | **MERGED** | `ivm/constraint.rs` (9), `ivm/source.rs` (1) |
+| `ivm/change.ts` (75) | **MERGED** | `ivm/change.rs` (6), `ivm/take.rs` (2), `ivm/view.rs` (1) |
+| `ivm/constraint.ts` (200) | **MERGED** | `ivm/constraint.rs` (10), `ivm/source.rs` (1) |
 | `ivm/data.ts` (129) | **MERGED** | `ivm/data.rs` (7) |
 | `ivm/default-format.ts` (1) | **DROPPED** | — |
-| `ivm/exists.ts` (265) | **MERGED** | `ivm/exists.rs` (8) |
+| `ivm/exists.ts` (265) | **1:1** | `ivm/exists.rs` (12) |
 | `ivm/fan-in.ts` (94) | **1:1** | `ivm/fan_in.rs` (9) |
 | `ivm/fan-out.ts` (83) | **1:1** | `ivm/fan_out.rs` (9) |
 | `ivm/filter-operators.ts` (160) | **1:1** | `ivm/filter_operators.rs` (15) |
 | `ivm/filter-push.ts` (38) | **MERGED** | `ivm/filter_push.rs` (1) |
 | `ivm/filter.ts` (57) | **1:1** | `ivm/filter.rs` (7) |
-| `ivm/flipped-join.ts` (611) | **MERGED** | `ivm/flipped_join.rs` (10) |
+| `ivm/flipped-join.ts` (611) | **MERGED** | `ivm/flipped_join.rs` (14) |
 | `ivm/join-utils.ts` (252) | **MERGED** | `ivm/join_utils.rs` (7) |
-| `ivm/join.ts` (303) | **1:1** | `ivm/join.rs` (5) |
+| `ivm/join.ts` (303) | **1:1** | `ivm/join.rs` (9) |
 | `ivm/maybe-split-and-push-edit-change.ts` (27) | **MERGED** | `ivm/filter_push.rs` (1) |
-| `ivm/memory-source.ts` (1180) | **SPLIT** | `sqlite/table_source.rs` (11), `ivm/source.rs` (9), `ivm/join_utils.rs` (1), `ivm/data.rs` (1), `ivm/view.rs` (1), `ivm/exists.rs` (1), `ivm/constraint.rs` (1) |
+| `ivm/memory-source.ts` (1180) | **SPLIT** | `ivm/source.rs` (12), `sqlite/table_source.rs` (11), `ivm/join_utils.rs` (1), `ivm/data.rs` (1), `ivm/view.rs` (1), `ivm/constraint.rs` (1), `engine/mod.rs` (1) |
 | `ivm/memory-storage.ts` (50) | **1:1** | `ivm/memory_storage.rs` (6) |
 | `ivm/operator.ts` (140) | **1:1** | `ivm/operator.rs` (16), `ivm/constraint.rs` (1) |
 | `ivm/push-accumulated.ts` (430) | **1:1** | `ivm/push_accumulated.rs` (3) |
 | `ivm/schema.ts` (25) | **1:1** | `ivm/schema.rs` (1) |
 | `ivm/skip-yields.ts` (46) | **MERGED** | `ivm/stream.rs` (1) |
-| `ivm/skip.ts` (167) | **1:1** | `ivm/skip.rs` (6), `builder/ast.rs` (1) |
-| `ivm/snitch.ts` (224) | **1:1** | `ivm/snitch.rs` (11), `sqlite/table_source.rs` (1) |
+| `ivm/skip.ts` (167) | **1:1** | `ivm/skip.rs` (8), `builder/ast.rs` (1) |
+| `ivm/snitch.ts` (224) | **1:1** | `ivm/snitch.rs` (12), `sqlite/table_source.rs` (1) |
 | `ivm/source-change-index-enum.ts` (7) | **MERGED** | `ivm/data.rs` (1) |
 | `ivm/source-change-index.ts` (5) | **MERGED** | `replay.rs` (1) |
 | `ivm/source.ts` (101) | **SPLIT** | `ivm/source.rs` (6), `ivm/change.rs` (4), `engine/mod.rs` (1) |
 | `ivm/stopable-iterator.ts` (23) | **1:1** | `ivm/stopable_iterator.rs` (3) |
 | `ivm/stream.ts` (43) | **MERGED** | `ivm/stream.rs` (2), `streamer/mod.rs` (2) |
-| `ivm/take.ts` (757) | **MERGED** | `ivm/take.rs` (12), `ivm/cap.rs` (1) |
-| `ivm/union-fan-in.ts` (298) | **1:1** | `ivm/union_fan_in.rs` (9) |
+| `ivm/take.ts` (757) | **MERGED** | `ivm/take.rs` (17), `ivm/cap.rs` (1) |
+| `ivm/union-fan-in.ts` (298) | **1:1** | `ivm/union_fan_in.rs` (10) |
 | `ivm/union-fan-out.ts` (57) | **1:1** | `ivm/union_fan_out.rs` (7) |
 | `ivm/view-apply-change.ts` (926) | **SPLIT** | `ivm/view.rs` (18), `ivm/array_view.rs` (6), `ivm/source.rs` (1) |
 | `ivm/view.ts` (31) | **MERGED** | `ivm/view.rs` (2) |
@@ -61,7 +61,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `planner/planner-constraint.ts` (21) | **1:1** | `planner/planner_constraint.rs` (2) |
 | `planner/planner-fan-in.ts` (241) | **MERGED** | `planner/planner_fan_in.rs` (8) |
 | `planner/planner-fan-out.ts` (108) | **1:1** | `planner/planner_fan_out.rs` (9) |
-| `planner/planner-graph.ts` (471) | **1:1** | `planner/planner_graph.rs` (15) |
+| `planner/planner-graph.ts` (471) | **1:1** | `planner/planner_graph.rs` (19) |
 | `planner/planner-join.ts` (473) | **1:1** | `planner/planner_join.rs` (12) |
 | `planner/planner-node.ts` (70) | **MERGED** | `planner/planner_node.rs` (4), `planner/planner_fan_in.rs` (1), `sqlite/sqlite_stat_fanout.rs` (1) |
 | `planner/planner-source.ts` (36) | **1:1** | `planner/planner_source.rs` (2) |
@@ -90,15 +90,14 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 **Merges (many TS → one Rust file):**
 - `builder/ast.rs` ⟵ `builder/filter.ts`, `ivm/skip.ts`
 - `builder/like.rs` ⟵ `builder/filter.ts`, `builder/like.ts`
-- `engine/mod.rs` ⟵ `ivm/change-type-enum.ts`, `ivm/source.ts`
+- `engine/mod.rs` ⟵ `ivm/change-type-enum.ts`, `ivm/memory-source.ts`, `ivm/source.ts`
 - `ivm/array_view.rs` ⟵ `ivm/array-view.ts`, `ivm/view-apply-change.ts`, `query/query-delegate-base.ts`
 - `ivm/cap.rs` ⟵ `ivm/cap.ts`, `ivm/take.ts`
 - `ivm/change.rs` ⟵ `ivm/change-index-enum.ts`, `ivm/change-type.ts`, `ivm/change.ts`, `ivm/source.ts`
 - `ivm/constraint.rs` ⟵ `ivm/constraint.ts`, `ivm/memory-source.ts`, `ivm/operator.ts`
 - `ivm/data.rs` ⟵ `ivm/data.ts`, `ivm/memory-source.ts`, `ivm/source-change-index-enum.ts`
-- `ivm/exists.rs` ⟵ `ivm/exists.ts`, `ivm/memory-source.ts`
 - `ivm/filter_push.rs` ⟵ `ivm/filter-push.ts`, `ivm/maybe-split-and-push-edit-change.ts`
-- `ivm/flipped_join.rs` ⟵ `ivm/catch.ts`, `ivm/flipped-join.ts`, `query/query-impl.ts`
+- `ivm/flipped_join.rs` ⟵ `ivm/flipped-join.ts`, `query/query-impl.ts`
 - `ivm/join_utils.rs` ⟵ `ivm/join-utils.ts`, `ivm/memory-source.ts`
 - `ivm/source.rs` ⟵ `ivm/change-type-enum.ts`, `ivm/constraint.ts`, `ivm/memory-source.ts`, `ivm/source.ts`, `ivm/view-apply-change.ts`
 - `ivm/stream.rs` ⟵ `ivm/skip-yields.ts`, `ivm/stream.ts`
@@ -199,7 +198,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 🟦 **Rust-only added here (13):** `Inner`, `POLL`, `StreamCreditGate`, `StreamCreditGuard`, `acquire`, `begin`, `cancel_current`, `close`, `credit_snapshot`, `current_generation`, `gate`, `generation`, `grant`
 
-### `engine/mod.rs`  ⟵  `ivm/change-type-enum.ts`, `ivm/source.ts`
+### `engine/mod.rs`  ⟵  `ivm/change-type-enum.ts`, `ivm/memory-source.ts`, `ivm/source.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
@@ -212,6 +211,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#hydrate` (ivm/array-view.ts:140) | `hydrate` (:105) | exact |
 | `addListener` (ivm/array-view.ts:115) | `add_listener` (:79) | exact |
 | `ArrayView` (ivm/array-view.ts:50) | `ArrayView` (:21) | exact |
 | `arrayViewFactory` (query/query-delegate-base.ts:420) | `ArrayViewOutput` (:126) | fuzzy 0.50 |
@@ -220,12 +220,11 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `flush` (ivm/array-view.ts:173) | `flush` (:88) | exact |
 | `push` (ivm/array-view.ts:159) | `push` (:131) | exact |
 
-🟦 **Rust-only added here (1):** `hydrate`
-
 ### `ivm/cap.rs`  ⟵  `ivm/cap.ts`, `ivm/take.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#initialFetch` (ivm/cap.ts:125) | `initial_fetch` (:164) | exact |
 | `Cap` (ivm/cap.ts:52) | `Cap` (:88) | exact |
 | `del` (ivm/cap.ts:33) | `del` (:52) | exact |
 | `destroy` (ivm/cap.ts:295) | `destroy` (:257) | exact |
@@ -241,7 +240,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 🟥 **TS symbols not resolved into this file (1):** `deserializePKToConstraint`
 
-🟦 **Rust-only added here (12):** `CapInitialFetchGuard`, `CapOutput`, `CapStorage`, `initial_fetch`, `parse_json_array_elements`, `parse_value`, `plain_string_pk_is_byte_identical_and_roundtrips`, `quoted_pk_does_not_break_array_element_split`, `roundtrip`, `string_pk_with_quote_and_backslash_roundtrips`, `unescape_json_string`, `value_to_string`
+🟦 **Rust-only added here (11):** `CapInitialFetchGuard`, `CapOutput`, `CapStorage`, `parse_json_array_elements`, `parse_value`, `plain_string_pk_is_byte_identical_and_roundtrips`, `quoted_pk_does_not_break_array_element_split`, `roundtrip`, `string_pk_with_quote_and_backslash_roundtrips`, `unescape_json_string`, `value_to_string`
 
 ### `ivm/catch.rs`  ⟵  `ivm/catch.ts`
 
@@ -257,7 +256,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `push` (ivm/catch.ts:69) | `push` (:87) | exact |
 | `reset` (ivm/catch.ts:84) | `reset` (:72) | exact |
 
-🟥 **TS symbols not resolved into this file (2):** `CaughtEditChange`, `CaughtRemoveChange`
+🟥 **TS symbols not resolved into this file (3):** `CaughtChildChange`, `CaughtEditChange`, `CaughtRemoveChange`
 
 🟦 **Rust-only added here (1):** `CatchOutput`
 
@@ -278,7 +277,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `OLD_NODE` (ivm/change-index-enum.ts:3) | `old_node` (:72) | exact |
 | `SourceChange` (ivm/source.ts:17) | `SourceChange` (:102) | exact |
 
-🟥 **TS symbols not resolved into this file (1):** `TYPE`
+🟥 **TS symbols not resolved into this file (2):** `EditChange`, `TYPE`
 
 🟦 **Rust-only added here (1):** `node_mut`
 
@@ -317,21 +316,24 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 🟦 **Rust-only added here (16):** `MAX_SAFE`, `SortOrder`, `Value`, `cloned_json_preserves_reference_identity`, `comparator_errors_match_javascript_messages`, `deserialize`, `eq`, `independently_parsed_json_is_not_equal_or_orderable`, `is_null`, `js_json_string`, `js_stringify_value`, `js_stringify_value_matches_json_stringify`, `js_typeof`, `js_value_string`, `serialize`, `set_relationship`
 
-### `ivm/exists.rs`  ⟵  `ivm/exists.ts`, `ivm/memory-source.ts`
+### `ivm/exists.rs`  ⟵  `ivm/exists.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#fetchExists` (ivm/exists.ts:241) | `fetch_exists` (:112) | exact |
+| `#fetchSize` (ivm/exists.ts:248) | `fetch_size` (:94) | exact |
+| `#getCacheKey` (ivm/exists.ts:224) | `get_cache_key` (:27) | exact |
+| `#pushWithFilter` (ivm/exists.ts:235) | `push_with_filter` (:123) | exact |
 | `beginFilter` (ivm/exists.ts:71) | `begin_filter` (:159) | exact |
 | `destroy` (ivm/exists.ts:101) | `destroy` (:145) | exact |
 | `endFilter` (ivm/exists.ts:75) | `end_filter` (:166) | exact |
 | `Exists` (ivm/exists.ts:21) | `Exists` (:36) | exact |
 | `filter` (ivm/exists.ts:80) | `filter` (:176) | exact |
-| `generateWithFilter` (ivm/memory-source.ts:540) | `push_with_filter` (:123) | fuzzy 0.50 |
 | `getSchema` (ivm/exists.ts:105) | `get_schema` (:141) | exact |
 | `push` (ivm/exists.ts:109) | `push` (:202) | exact |
 | `setFilterOutput` (ivm/exists.ts:67) | `set_filter_output` (:153) | exact |
 
-🟦 **Rust-only added here (6):** `InPushReset`, `fetch_exists`, `fetch_size`, `filter_inner`, `get_cache_key`, `push_to_output`
+🟦 **Rust-only added here (3):** `InPushReset`, `filter_inner`, `push_to_output`
 
 ### `ivm/fan_in.rs`  ⟵  `ivm/fan-in.ts`
 
@@ -403,14 +405,15 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 |---|---|---|
 | `filterPush` (ivm/filter-push.ts:10) | `filter_push` (:17) | exact |
 
-### `ivm/flipped_join.rs`  ⟵  `ivm/catch.ts`, `ivm/flipped-join.ts`, `query/query-impl.ts`
+### `ivm/flipped_join.rs`  ⟵  `ivm/flipped-join.ts`, `query/query-impl.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#fetchBatched` (ivm/flipped-join.ts:230) | `fetch_batched` (:132) | exact |
+| `#pushChildChange` (ivm/flipped-join.ts:409) | `push_child_change` (:301) | exact |
 | `canonicalKey` (ivm/flipped-join.ts:585) | `canonical_key` (:578) | exact |
 | `canonicalKeyForTest` (ivm/flipped-join.ts:572) | `canonical_key_row` (:573) | fuzzy 0.40 |
 | `canonicalValue` (ivm/flipped-join.ts:600) | `canonical_value` (:593) | exact |
-| `CaughtChildChange` (ivm/catch.ts:28) | `push_child_change` (:301) | fuzzy 0.50 |
 | `destroy` (ivm/flipped-join.ts:148) | `destroy` (:485) | exact |
 | `fetch` (ivm/flipped-join.ts:161) | `fetch` (:498) | exact |
 | `FlippedJoin` (ivm/flipped-join.ts:93) | `FlippedJoin` (:62) | exact |
@@ -420,19 +423,23 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `setMultiConstraintChunkSizeForTest` (ivm/flipped-join.ts:65) | `set_multi_constraint_chunk_size_for_test` (:44) | exact |
 | `setOutput` (ivm/flipped-join.ts:153) | `set_output` (:494) | exact |
 
-🟦 **Rust-only added here (8):** `ChildOutput`, `FlippedJoinArgs`, `InprogressGuard`, `MULTI_CONSTRAINT_CHUNK_SIZE`, `MULTI_CONSTRAINT_CHUNK_SIZE_TEST`, `ParentOutput`, `fetch_batched`, `push_parent_change`
+🟦 **Rust-only added here (7):** `ChildOutput`, `FlippedJoinArgs`, `InprogressGuard`, `MULTI_CONSTRAINT_CHUNK_SIZE`, `MULTI_CONSTRAINT_CHUNK_SIZE_TEST`, `ParentOutput`, `push_parent_change`
 
 ### `ivm/join.rs`  ⟵  `ivm/join.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#processParentNode` (ivm/join.ts:252) | `process_parent_node` (:103) | exact |
+| `#pushChild` (ivm/join.ts:195) | `push_child` (:238) | exact |
+| `#pushChildChange` (ivm/join.ts:221) | `push_child_change` (:258) | exact |
+| `#pushParent` (ivm/join.ts:129) | `push_parent` (:185) | exact |
 | `destroy` (ivm/join.ts:106) | `destroy` (:307) | exact |
 | `fetch` (ivm/join.ts:119) | `fetch` (:320) | exact |
 | `getSchema` (ivm/join.ts:115) | `get_schema` (:303) | exact |
 | `Join` (ivm/join.ts:51) | `Join` (:33) | exact |
 | `setOutput` (ivm/join.ts:111) | `set_output` (:316) | exact |
 
-🟦 **Rust-only added here (5):** `JoinArgs`, `fetch_lazy`, `process_parent_node`, `push_child`, `push_parent`
+🟦 **Rust-only added here (2):** `JoinArgs`, `fetch_lazy`
 
 ### `ivm/join_utils.rs`  ⟵  `ivm/join-utils.ts`, `ivm/memory-source.ts`
 
@@ -502,6 +509,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#shouldBePresent` (ivm/skip.ts:83) | `should_be_present` (:53) | exact |
 | `destroy` (ivm/skip.ts:79) | `destroy` (:64) | exact |
 | `fetch` (ivm/skip.ts:53) | `fetch` (:76) | exact |
 | `getSchema` (ivm/skip.ts:49) | `get_schema` (:60) | exact |
@@ -509,7 +517,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `setOutput` (ivm/skip.ts:75) | `set_output` (:72) | exact |
 | `Skip` (ivm/skip.ts:33) | `Skip` (:18) | exact |
 
-🟦 **Rust-only added here (2):** `SkipOutput`, `should_be_present`
+🟦 **Rust-only added here (1):** `SkipOutput`
 
 ### `ivm/snitch.rs`  ⟵  `ivm/snitch.ts`
 
@@ -549,7 +557,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `SourceChangeAdd` (ivm/source.ts:9) | `source_change_to_change` (:539) | fuzzy 0.67 |
 | `SourceInput` (ivm/source.ts:99) | `SourceInput` (:628) | exact |
 
-🟥 **TS symbols not resolved into this file (1):** `SourceChangeRemove`
+🟥 **TS symbols not resolved into this file (2):** `Overlays`, `SourceChangeRemove`
 
 🟦 **Rust-only added here (37):** `CollectOutput`, `CollectStreamConfig`, `ConnPool`, `EmptyInput`, `HeapEntry`, `HistoricalOverlayContext`, `KWayMerge`, `NodeCompare`, `SharedData`, `SharedOverlay`, `SourcePusher`, `add_row`, `all_rows`, `apply_overlay_and_stream`, `apply_source_overlay`, `apply_source_overlay_impl`, `clear_advance_state`, `column_names`, `column_types`, `compute_index_compare`, `configure_streaming`, `connection_count`, `has_active_connections`, `has_db`, `historical_edit_with_unchanged_json_sort_key_replaces_in_place`, `partial_cmp`, `pk_key`, `primary_key`, `push_internal`, `rows_equal_on`, `rows_storage_equal_on`, `set_db_path`, `set_primary_key`, `set_snapshot_db`, `storage_values_equal`, `table_name`, `truncate_connections`
 
@@ -577,11 +585,15 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#getStateAndConstraint` (ivm/take.ts:218) | `get_state_and_constraint` (:261) | exact |
+| `#initialFetch` (ivm/take.ts:158) | `initial_fetch` (:312) | exact |
+| `#pushEditChange` (ivm/take.ts:432) | `push_edit_change` (:686) | exact |
+| `#pushWithRowHiddenFromFetch` (ivm/take.ts:677) | `push_with_row_hidden_from_fetch` (:902) | exact |
+| `#setTakeState` (ivm/take.ts:686) | `set_take_state` (:282) | exact |
 | `AddChange` (ivm/change.ts:17) | `push_add_change` (:469) | fuzzy 0.67 |
 | `constraintMatchesPartitionKey` (ivm/take.ts:727) | `constraint_matches_partition_key` (:1069) | exact |
 | `del` (ivm/take.ts:39) | `del` (:79) | exact |
 | `destroy` (ivm/take.ts:705) | `destroy` (:921) | exact |
-| `EditChange` (ivm/change.ts:57) | `push_edit_change` (:686) | fuzzy 0.67 |
 | `fetch` (ivm/take.ts:93) | `fetch` (:933) | exact |
 | `get` (ivm/take.ts:35) | `get` (:63) | exact |
 | `getSchema` (ivm/take.ts:89) | `get_schema` (:917) | exact |
@@ -593,7 +605,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `setOutput` (ivm/take.ts:85) | `set_output` (:929) | exact |
 | `Take` (ivm/take.ts:55) | `Take` (:160) | exact |
 
-🟦 **Rust-only added here (18):** `HiddenRowGuard`, `InitialFetchGuard`, `MAX_BOUND_KEY`, `NoopOutput`, `TakeOutput`, `TakeState`, `TakeStorage`, `compare_rows`, `edit_on_empty_partition_panics_bound_should_be_set`, `get_state_and_constraint`, `mk_row`, `optional_constraint_matches_partition_key`, `push_change`, `push_with_row_hidden_from_fetch`, `set_take_state`, `storage_round_trip_row`, `take_state_key_for_constraint`, `take_state_key_for_row`
+🟦 **Rust-only added here (15):** `HiddenRowGuard`, `InitialFetchGuard`, `MAX_BOUND_KEY`, `NoopOutput`, `TakeOutput`, `TakeState`, `TakeStorage`, `compare_rows`, `edit_on_empty_partition_panics_bound_should_be_set`, `mk_row`, `optional_constraint_matches_partition_key`, `push_change`, `storage_round_trip_row`, `take_state_key_for_constraint`, `take_state_key_for_row`
 
 ### `ivm/trace.rs`  ⟵  _(new)_
 
@@ -604,6 +616,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#pushInternalChange` (ivm/union-fan-in.ts:145) | `push_internal_change` (:158) | exact |
 | `destroy` (ivm/union-fan-in.ts:97) | `destroy` (:216) | exact |
 | `fanOutDonePushing` (ivm/union-fan-in.ts:193) | `fan_out_done_pushing` (:123) | exact |
 | `fanOutStartedPushing` (ivm/union-fan-in.ts:185) | `fan_out_started_pushing` (:109) | exact |
@@ -614,7 +627,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `setOutput` (ivm/union-fan-in.ts:219) | `set_output` (:226) | exact |
 | `UnionFanIn` (ivm/union-fan-in.ts:25) | `UnionFanIn` (:30) | exact |
 
-🟦 **Rust-only added here (4):** `UfiOutput`, `add_input`, `output_adapter`, `push_internal_change`
+🟦 **Rust-only added here (3):** `UfiOutput`, `add_input`, `output_adapter`
 
 ### `ivm/union_fan_out.rs`  ⟵  `ivm/union-fan-out.ts`
 
@@ -1115,10 +1128,8 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#writeChange` (ivm/memory-source.ts:486) | `write_change` (:736) | exact |
 | `FetchCountMessage` (ivm/snitch.ts:189) | `fetch_count` (:1398) | fuzzy 0.67 |
-| `writeChange` (ivm/memory-source.ts:615) | `write_change` (:736) | exact |
-
-🟥 **TS symbols not resolved into this file (1):** `Overlays`
 
 🟦 **Rust-only added here (39):** `LazyRows`, `LazyRowsIter`, `NullInputBase`, `RowErr`, `SharedSnapshotDb`, `_write_change_unused`, `applied_change_obeys_ts_sql_null_start_semantics`, `applied_changes_for_request`, `boolean_matches_ts_double_bang`, `check_exists`, `check_exists_failure_propagates_not_false`, `classify_row_error`, `conn_with_rows`, `conn_with_value`, `conv`, `existing_input_uses_replacement_snapshot_connection`, `fetch_reads_all_columns_and_values`, `fetch_resumes_all_rows_after_guard_drops`, `fetch_returns_all_rows_when_gate_under_floor`, `fetch_returns_all_rows_when_no_gate_armed`, `fetch_stops_when_gate_over_budget`, `integer_over_2_53_panics_like_ts`, `invalid_json_panics_like_ts`, `json_sqlite_text_to_ivm`, `number_string_passthrough`, `past_gate`, `push_body`, `read_error_panics_not_swallowed_to_null`, `set_db`, `sql_start_matches`, `sqlite_value_to_ivm`, `stream_query`, `stream_query_bind_failure_propagates_not_empty`, `stream_query_busy_propagates_not_empty`, `stream_query_prepare_failure_propagates_not_empty`, `table_source_get_row_reads_current_snapshot_with_types`, `try_new`, `valid_json_tagged`, `validate_change`
 
@@ -1182,7 +1193,10 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `ArrayView` | ivm/array-view.ts:50 | `ArrayView` ivm/array_view.rs:21 | ✅ exact |
 | `data` | ivm/array-view.ts:111 | `data` ivm/array_view.rs:74 | ✅ exact |
 | `addListener` | ivm/array-view.ts:115 | `add_listener` ivm/array_view.rs:79 | ✅ exact |
+| `#fireListeners` | ivm/array-view.ts:126 | INLINED ivm/array_view.rs flush notify | 📌 listeners Vec |
+| `#fireListener` | ivm/array-view.ts:132 | INLINED ivm/array_view.rs flush notify | 📌 listeners Vec |
 | `destroy` | ivm/array-view.ts:136 | `destroy` ivm/array_view.rs:101 | ✅ exact |
+| `#hydrate` | ivm/array-view.ts:140 | `hydrate` ivm/array_view.rs:105 | ✅ exact |
 | `push` | ivm/array-view.ts:159 | `push` ivm/array_view.rs:131 | ✅ exact |
 | `flush` | ivm/array-view.ts:173 | `flush` ivm/array_view.rs:88 | ✅ exact |
 | `updateTTL` | query/typed-view.ts:21 | `update_ttl` query/typed_view.rs:31 | ✅ exact |
@@ -1193,13 +1207,15 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `setOutput` | ivm/cap.ts:79 | `set_output` ivm/cap.rs:265 | ✅ exact |
 | `getSchema` | ivm/cap.ts:83 | `get_schema` ivm/cap.rs:253 | ✅ exact |
 | `fetch` | ivm/cap.ts:87 | `fetch` ivm/cap.rs:269 | ✅ exact |
+| `#initialFetch` | ivm/cap.ts:125 | `initial_fetch` ivm/cap.rs:164 | ✅ exact |
+| `#pushEditChange` | ivm/take.ts:432 | `push_edit_change` ivm/take.rs:686 | ✅ exact |
 | `getCapStateKey` | ivm/cap.ts:300 | `CapState` ivm/cap.rs:26 | 🔁 rename 0.67 |
 | `serializePK` | ivm/cap.ts:315 | `serialize_pk` ivm/cap.rs:155 | ✅ exact |
 | `deserializePKToConstraint` | ivm/cap.ts:319 | — | 🟥 UNRESOLVED |
 | `CaughtNode` | ivm/catch.ts:11 | `CaughtNode` ivm/catch.rs:15 | ✅ exact |
 | `CaughtAddChange` | ivm/catch.ts:18 | `caught_change_to_json` replay.rs:352 | 🔁 rename 0.50 |
 | `CaughtRemoveChange` | ivm/catch.ts:23 | — | 🟥 UNRESOLVED |
-| `CaughtChildChange` | ivm/catch.ts:28 | `push_child_change` ivm/flipped_join.rs:301 | 🔁 rename 0.50 |
+| `CaughtChildChange` | ivm/catch.ts:28 | — | 🟥 UNRESOLVED |
 | `CaughtEditChange` | ivm/catch.ts:37 | — | 🟥 UNRESOLVED |
 | `CaughtChange` | ivm/catch.ts:43 | `CaughtChange` ivm/catch.rs:22 | ✅ exact |
 | `Catch` | ivm/catch.ts:53 | `Catch` ivm/catch.rs:41 | ✅ exact |
@@ -1220,7 +1236,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `AddChange` | ivm/change.ts:17 | `push_add_change` ivm/take.rs:469 | 🔁 rename 0.67 |
 | `RemoveChange` | ivm/change.ts:22 | `push_remove_change` ivm/take.rs:581 | 🔁 rename 0.67 |
 | `ChildChange` | ivm/change.ts:29 | `ChildViewChange` ivm/view.rs:175 | 🔁 rename 0.67 |
-| `EditChange` | ivm/change.ts:57 | `push_edit_change` ivm/take.rs:686 | 🔁 rename 0.67 |
+| `EditChange` | ivm/change.ts:57 | — | 🟥 UNRESOLVED |
 | `makeAddChange` | ivm/change.ts:61 | `make_add_change` ivm/change.rs:81 | ✅ exact |
 | `makeRemoveChange` | ivm/change.ts:65 | `make_remove_change` ivm/change.rs:85 | ✅ exact |
 | `makeChildChange` | ivm/change.ts:69 | `make_child_change` ivm/change.rs:89 | ✅ exact |
@@ -1234,6 +1250,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `primaryKeyConstraintFromFilters` | ivm/constraint.ts:114 | `primary_key_constraint_from_filters` ivm/constraint.rs:125 | ✅ exact |
 | `extractColumn` | ivm/constraint.ts:147 | `extract_column` ivm/constraint.rs:112 | ✅ exact |
 | `SetOfConstraint` | ivm/constraint.ts:162 | — | 🟥 UNRESOLVED |
+| `#indexOf` | ivm/constraint.ts:169 | ivm/constraint.rs find_index_for_columns | 📌 renamed |
 | `has` | ivm/constraint.ts:173 | `has` ivm/source.rs:261 | ✅ exact |
 | `constraintEquals` | ivm/constraint.ts:185 | `constraint_equals` ivm/constraint.rs:154 | ✅ exact |
 | `compareValues` | ivm/data.ts:32 | `compare_values` ivm/data.rs:131 | ✅ exact |
@@ -1248,6 +1265,10 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `beginFilter` | ivm/exists.ts:71 | `begin_filter` ivm/exists.rs:159 | ✅ exact |
 | `endFilter` | ivm/exists.ts:75 | `end_filter` ivm/exists.rs:166 | ✅ exact |
 | `filter` | ivm/exists.ts:80 | `filter` ivm/exists.rs:176 | ✅ exact |
+| `#getCacheKey` | ivm/exists.ts:224 | `get_cache_key` ivm/exists.rs:27 | ✅ exact |
+| `#pushWithFilter` | ivm/exists.ts:235 | `push_with_filter` ivm/exists.rs:123 | ✅ exact |
+| `#fetchExists` | ivm/exists.ts:241 | `fetch_exists` ivm/exists.rs:112 | ✅ exact |
+| `#fetchSize` | ivm/exists.ts:248 | `fetch_size` ivm/exists.rs:94 | ✅ exact |
 | `FanIn` | ivm/fan-in.ts:30 | `FanIn` ivm/fan_in.rs:21 | ✅ exact |
 | `fanOutDonePushingToAllBranches` | ivm/fan-in.ts:76 | `fan_out_done_pushing_to_all_branches` ivm/fan_in.rs:53 | ✅ exact |
 | `FanOut` | ivm/fan-out.ts:17 | `FanOut` ivm/fan_out.rs:22 | ✅ exact |
@@ -1263,6 +1284,12 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `getMultiConstraintChunkSize` | ivm/flipped-join.ts:60 | `get_multi_constraint_chunk_size` ivm/flipped_join.rs:40 | ✅ exact |
 | `setMultiConstraintChunkSizeForTest` | ivm/flipped-join.ts:65 | `set_multi_constraint_chunk_size_for_test` ivm/flipped_join.rs:44 | ✅ exact |
 | `FlippedJoin` | ivm/flipped-join.ts:93 | `FlippedJoin` ivm/flipped_join.rs:62 | ✅ exact |
+| `#fetchBatched` | ivm/flipped-join.ts:230 | `fetch_batched` ivm/flipped_join.rs:132 | ✅ exact |
+| `#fetchChunked` | ivm/flipped-join.ts:311 | INLINED ivm/flipped_join.rs chunked IN() fetch | 📌 get_multi_constraint_chunk_size + chunk loop |
+| `#yieldParentWithOverlay` | ivm/flipped-join.ts:332 | ivm/flipped_join.rs generate_with_overlay_no_yield | 📌 renamed (no coop yield) |
+| `#pushChild` | ivm/join.ts:195 | `push_child` ivm/join.rs:238 | ✅ exact |
+| `#pushChildChange` | ivm/flipped-join.ts:409 | `push_child_change` ivm/flipped_join.rs:301 | ✅ exact |
+| `#pushParent` | ivm/join.ts:129 | `push_parent` ivm/join.rs:185 | ✅ exact |
 | `canonicalKeyForTest` | ivm/flipped-join.ts:572 | `canonical_key_row` ivm/flipped_join.rs:573 | 🔁 rename 0.40 |
 | `canonicalKey` | ivm/flipped-join.ts:585 | `canonical_key` ivm/flipped_join.rs:578 | ✅ exact |
 | `canonicalValue` | ivm/flipped-join.ts:600 | `canonical_value` ivm/flipped_join.rs:593 | ✅ exact |
@@ -1274,6 +1301,7 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `isJoinMatch` | ivm/join-utils.ts:219 | `is_join_match` ivm/join_utils.rs:37 | ✅ exact |
 | `buildJoinConstraint` | ivm/join-utils.ts:238 | `build_join_constraint` ivm/join_utils.rs:56 | ✅ exact |
 | `Join` | ivm/join.ts:51 | `Join` ivm/join.rs:33 | ✅ exact |
+| `#processParentNode` | ivm/join.ts:252 | `process_parent_node` ivm/join.rs:103 | ✅ exact |
 | `maybeSplitAndPushEditChange` | ivm/maybe-split-and-push-edit-change.ts:11 | ivm/filter_push.rs EDIT arm | 📌 inlined: edit crossing predicate splits into remove/add |
 | `Overlay` | ivm/memory-source.ts:59 | `OverlayGuard` ivm/source.rs:117 | 🔁 rename 0.50 |
 | `Overlays` | ivm/memory-source.ts:64 | — | 🟥 UNRESOLVED |
@@ -1282,13 +1310,17 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `tableSchema` | ivm/memory-source.ts:127 | sqlite/table_source.rs | 📌 -> SQLite |
 | `fork` | ivm/memory-source.ts:135 | N/A | 📌 TS memory-source fork; Rust source is SQLite-backed |
 | `connect` | ivm/source.ts:68 | `connect` ivm/source.rs:53 | ✅ exact |
+| `#disconnect` | ivm/memory-source.ts:205 | engine/mod.rs (:1591) | 📌 doc-cited |
+| `#getPrimaryIndex` | ivm/memory-source.ts:219 | INLINED ivm/source.rs primary_key()/re-key | 📌 restructured: source keyed on PK, no index registry |
+| `#getOrCreateIndex` | ivm/memory-source.ts:225 | ivm/source.rs (:847) | 📌 doc-cited |
 | `getIndexKeys` | ivm/memory-source.ts:253 | sqlite/table_source.rs | 📌 -> SQLite index |
+| `#fetchMulti` | ivm/memory-source.ts:403 | fetch_batched (batched multi-constraint fetch) | 📌 renamed |
 | `genPush` | ivm/source.ts:96 | `gen_push` ivm/source.rs:65 | ✅ exact |
+| `#writeChange` | ivm/memory-source.ts:486 | `write_change` sqlite/table_source.rs:736 | ✅ exact |
 | `generateWithConstraint` | ivm/memory-source.ts:528 | INLINED ivm/source.rs fetch constraint filter | 📌 generator → iterator |
-| `generateWithFilter` | ivm/memory-source.ts:540 | `push_with_filter` ivm/exists.rs:123 | 🔁 rename 0.50 |
+| `generateWithFilter` | ivm/memory-source.ts:540 | INLINED ivm/source.rs fetch filter arm | 📌 generator → iterator |
 | `genPushAndWriteWithSplitEdit` | ivm/memory-source.ts:548 | INLINED sqlite/table_source.rs write_change | 📌 split-edit arm of write_change |
 | `genPushAndWrite` | ivm/memory-source.ts:604 | INLINED sqlite/table_source.rs write_change | 📌 push+write generator → direct calls |
-| `writeChange` | ivm/memory-source.ts:615 | `write_change` sqlite/table_source.rs:736 | ✅ exact |
 | `setOverlay` | ivm/memory-source.ts:673 | sqlite/table_source.rs | 📌 -> SQLite |
 | `generateWithStart` | ivm/memory-source.ts:676 | `generate_with_start` ivm/join_utils.rs:337 | ✅ exact |
 | `computeOverlays` | ivm/memory-source.ts:745 | sqlite/table_source.rs | 📌 -> SQLite (overlays via SQLite tx) |
@@ -1327,7 +1359,10 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `skipYields` | ivm/skip-yields.ts:44 | `skip_yields` ivm/stream.rs:56 | ✅ exact |
 | `Bound` | ivm/skip.ts:24 | `Bound` builder/ast.rs:29 | ✅ exact |
 | `Skip` | ivm/skip.ts:33 | `Skip` ivm/skip.rs:18 | ✅ exact |
+| `#shouldBePresent` | ivm/skip.ts:83 | `should_be_present` ivm/skip.rs:53 | ✅ exact |
+| `#getStart` | ivm/skip.ts:107 | ivm/skip.rs (:83) | 📌 doc-cited |
 | `Snitch` | ivm/snitch.ts:25 | `Snitch` ivm/snitch.rs:50 | ✅ exact |
+| `#log` | ivm/snitch.ts:58 | ivm/snitch.rs log_message | 📌 renamed — bare `log` is ambiguous |
 | `fetchGenerator` | ivm/snitch.ts:70 | ivm/snitch.rs fetch | 📌 TS fetch() delegates to *fetchGenerator; rust folds both into fetch |
 | `toChangeRecord` | ivm/snitch.ts:94 | `to_change_record` ivm/snitch.rs:189 | ✅ exact |
 | `FilterSnitch` | ivm/snitch.ts:121 | — | 🟥 UNRESOLVED |
@@ -1362,10 +1397,14 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `consume` | ivm/stream.ts:30 | streamer/mod.rs | 📌 -> Rust Iterator consume |
 | `drainGenerator` | ivm/stream.ts:35 | N/A | 📌 TS generator drain -> Rust Iterator drop/for_each |
 | `PartitionKey` | ivm/take.ts:42 | `PartitionKey` ivm/take.rs:99 | ✅ exact |
+| `#getStateAndConstraint` | ivm/take.ts:218 | `get_state_and_constraint` ivm/take.rs:261 | ✅ exact |
+| `#pushWithRowHiddenFromFetch` | ivm/take.ts:677 | `push_with_row_hidden_from_fetch` ivm/take.rs:902 | ✅ exact |
+| `#setTakeState` | ivm/take.ts:686 | `set_take_state` ivm/take.rs:282 | ✅ exact |
 | `getTakeStateKey` | ivm/take.ts:710 | `get_take_state_key` ivm/cap.rs:129 | ✅ exact |
 | `constraintMatchesPartitionKey` | ivm/take.ts:727 | `constraint_matches_partition_key` ivm/take.rs:1069 | ✅ exact |
 | `makePartitionKeyComparator` | ivm/take.ts:745 | `make_partition_key_comparator` ivm/take.rs:1051 | ✅ exact |
 | `UnionFanIn` | ivm/union-fan-in.ts:25 | `UnionFanIn` ivm/union_fan_in.rs:30 | ✅ exact |
+| `#pushInternalChange` | ivm/union-fan-in.ts:145 | `push_internal_change` ivm/union_fan_in.rs:158 | ✅ exact |
 | `fanOutStartedPushing` | ivm/union-fan-in.ts:185 | `fan_out_started_pushing` ivm/union_fan_in.rs:109 | ✅ exact |
 | `fanOutDonePushing` | ivm/union-fan-in.ts:193 | `fan_out_done_pushing` ivm/union_fan_in.rs:123 | ✅ exact |
 | `mergeFetches` | ivm/union-fan-in.ts:224 | `merge_fetches` ivm/union_fan_in.rs:322 | ✅ exact |
@@ -1455,6 +1494,10 @@ TS origin files: **71**  ·  Rust files: **91** (23 new)
 | `getTotalCost` | planner/planner-graph.ts:122 | `get_total_cost` planner/planner_graph.rs:103 | ✅ exact |
 | `capturePlanningSnapshot` | planner/planner-graph.ts:136 | `capture_planning_snapshot` planner/planner_graph.rs:108 | ✅ exact |
 | `restorePlanningSnapshot` | planner/planner-graph.ts:157 | `restore_planning_snapshot` planner/planner_graph.rs:130 | ✅ exact |
+| `#validateSnapshotShape` | planner/planner-graph.ts:167 | planner/planner_graph.rs typed PlanState | 📌 shape validation is the type system's job in rust |
+| `#restoreConnections` | planner/planner-graph.ts:193 | planner/planner_graph.rs restore_planning_snapshot | 📌 snapshot capture/restore restructure |
+| `#restoreJoins` | planner/planner-graph.ts:203 | planner/planner_graph.rs restore_planning_snapshot | 📌 snapshot capture/restore restructure |
+| `#restoreFanNodes` | planner/planner-graph.ts:225 | planner/planner_graph.rs restore_planning_snapshot | 📌 snapshot capture/restore restructure |
 | `plan` | planner/planner-graph.ts:256 | `plan` planner/planner_graph.rs:154 | ✅ exact |
 | `buildFOFICache` | planner/planner-graph.ts:389 | `build_fofi_cache` planner/planner_graph.rs:233 | ✅ exact |
 | `checkAndConvertFOFI` | planner/planner-graph.ts:406 | `check_and_convert_fofi` planner/planner_graph.rs:298 | ✅ exact |

@@ -611,6 +611,14 @@ impl ViewSyncerDispatch for CgViewSyncer {
     }
 }
 
+/// One query's replacement history inside the thrash window. Port of the TS
+/// `#queryReplacements` record shape `{count, windowStart}` (view-syncer.ts
+/// `#checkForThrashing`).
+struct QueryReplacementRecord {
+    count: u32,
+    window_start: i64,
+}
+
 /// Per-CG state, owned by (and confined to) the CG thread. Holds the `!Send`
 /// [`SyncEngine`] plus the live connections. Extracted from the event loop so
 /// the message handlers are unit-testable.
@@ -693,6 +701,10 @@ pub struct ViewSyncerService {
     pinned_user_id: Option<String>,
     /// The in-memory CVR, lazily loaded from the store on first notification.
     cvr: Option<CVR>,
+    /// Per-query transformation-replacement records for thrash detection.
+    /// Port of TS `#queryReplacements` (view-syncer.ts, consumed by
+    /// `#checkForThrashing`).
+    query_replacements: HashMap<String, QueryReplacementRecord>,
     /// End-to-end serving-lag tracker: pairs each `version-ready`'s upstream
     /// commit time with the moment its version is served, feeding the
     /// `zero.sync.e2e_serving_lag` histogram. Port of TS `#e2eServingLagTracker`.
@@ -914,6 +926,7 @@ impl ViewSyncerService {
             pipelines,
             store: None,
             row_cache: None,
+            query_replacements: HashMap::new(),
             clients: HashMap::new(),
             tokio_handle,
             enable_query_covering,
@@ -1220,6 +1233,45 @@ impl ViewSyncerService {
                 // clients rehome and the next owner reloads a consistent pair.
                 tracing::error!("CG {}: remove_expired_queries failed: {e}", self.cg_id);
                 self.fail_group("TTL expiry sync failed");
+            }
+        }
+    }
+
+    /// Port of TS `#checkForThrashing` (view-syncer.ts:2121-2148): sliding
+    /// 60s window per query — a query whose transformation hash is replaced
+    /// ≥3 times inside the window warns (it usually means clients with
+    /// DIFFERENT auth contexts share one client group, each re-transform
+    /// tearing down the other's pipeline). Warn-only, like TS.
+    fn check_for_thrashing(&mut self, query_id: &str) {
+        const THRASH_WINDOW_MS: i64 = 60_000; // TS: 60 seconds
+        const THRASH_THRESHOLD: u32 = 3;
+        let now = now_ms();
+
+        match self.query_replacements.get_mut(query_id) {
+            None => {
+                self.query_replacements.insert(
+                    query_id.to_string(),
+                    QueryReplacementRecord {
+                        count: 1,
+                        window_start: now,
+                    },
+                );
+            }
+            // TS: outside the window → delete the old entry, start a fresh one.
+            Some(record) if now - record.window_start > THRASH_WINDOW_MS => {
+                record.count = 1;
+                record.window_start = now;
+            }
+            Some(record) => {
+                record.count += 1;
+                if record.count >= THRASH_THRESHOLD {
+                    tracing::warn!(
+                        "Query thrashing detected for query {query_id}. {} replacements in 60s. \
+                         This may indicate clients with different auth contexts connecting to \
+                         the same client group.",
+                        record.count
+                    );
+                }
             }
         }
     }
@@ -3620,6 +3672,45 @@ mod tests {
     /// interval must be OFF until a flush arms it (TS arms only in
     /// `#flushUpdater`'s `if (flushed)`), arm ~TTL_CLOCK_INTERVAL out, and the
     /// no-CVR guard must keep the update call a no-op.
+    /// Port-parity for `#checkForThrashing` (view-syncer.ts:2121-2148): three
+    /// transformation replacements INSIDE the 60s window reach the warn
+    /// threshold; a replacement OUTSIDE the window starts a FRESH record
+    /// (count back to 1 — TS deletes + reinserts `{count: 1}`), and records
+    /// are per-query. Pins the window-reset branch: a port that only ever
+    /// increments would pass the in-window assertions but fail the reset one.
+    #[test]
+    fn check_for_thrashing_window_and_threshold() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, None, valid);
+
+        state.check_for_thrashing("q1");
+        assert_eq!(state.query_replacements.get("q1").unwrap().count, 1);
+        state.check_for_thrashing("q1");
+        state.check_for_thrashing("q1");
+        assert_eq!(
+            state.query_replacements.get("q1").unwrap().count,
+            3,
+            "3 in-window replacements must reach the TS THRASH_THRESHOLD"
+        );
+
+        // Age the record past THRASH_WINDOW_MS (60s): the next replacement
+        // must reset, not increment to 4.
+        state.query_replacements.get_mut("q1").unwrap().window_start = now_ms() - 60_001;
+        state.check_for_thrashing("q1");
+        let rec = state.query_replacements.get("q1").unwrap();
+        assert_eq!(
+            rec.count, 1,
+            "outside-window replacement starts a fresh count"
+        );
+        assert!(now_ms() - rec.window_start < 60_000, "fresh window start");
+
+        // Records are per-query (TS keys #queryReplacements by queryID).
+        state.check_for_thrashing("q2");
+        assert_eq!(state.query_replacements.get("q2").unwrap().count, 1);
+        assert_eq!(state.query_replacements.get("q1").unwrap().count, 1);
+    }
+
     #[test]
     fn ttl_clock_interval_state_machine() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -6273,6 +6364,7 @@ impl ViewSyncerService {
             pipelines,
             store: None,
             row_cache: None,
+            query_replacements: HashMap::new(),
             clients: HashMap::new(),
             tokio_handle: None,
             enable_query_covering: true,
@@ -7137,7 +7229,13 @@ impl ViewSyncerService {
             custom_specs.iter().map(|s| s.id.as_str()).collect();
         for (qid, transformed_ast, transformation_hash) in executed {
             let is_custom = custom_ids.contains(qid.as_str());
-            match self.pipelines.query_transformation_hash(&qid) {
+            // Owned copy: `check_for_thrashing` needs `&mut self` inside the
+            // changed-hash arm, which a live `&self.pipelines` borrow forbids.
+            let running_hash = self
+                .pipelines
+                .query_transformation_hash(&qid)
+                .map(str::to_string);
+            match running_hash {
                 // Already running with this exact transform → nothing to do.
                 Some(h) if h == transformation_hash => {
                     if is_custom {
@@ -7149,6 +7247,9 @@ impl ViewSyncerService {
                 // pipeline down before re-hydrating with the new transform.
                 Some(_) => {
                     if is_custom {
+                        // TS order: `#checkForThrashing(queryID)` THEN
+                        // `#queryTransformationHashChanges.add(1)`.
+                        self.check_for_thrashing(&qid);
                         crate::metrics::record_query_transformation_hash_change();
                     }
                     retransform_removes.push(qid.clone());

@@ -2,10 +2,10 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **286**, Rust **638** · resolved pairs **168** (exact 139 + fuzzy 29) + aliases 62
-- 🟥 TS UNRESOLVED: **62** (**24** behavioral ⇒ investigate · 38 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **470**
+- symbols: TS **359**, Rust **708** · resolved pairs **195** (exact 159 + fuzzy 36) + aliases 111
+- 🟥 TS UNRESOLVED: **59** (**22** behavioral ⇒ investigate · 37 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **513**
 
-> ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `accumulate` (services/view-syncer/pipeline-driver.ts), `apiRequests` (custom/metrics.ts), `assertAreCompatiblePushes` (services/mutagen/pusher.ts), `assertNormalized` (config/zero-config.ts), `getMeter` (observability/metrics.ts), `getNormalizedZeroConfig` (config/zero-config.ts), `getOrCreateGauge` (observability/metrics.ts), `getOrCreateHistogram` (observability/metrics.ts), `getOrCreateLatencyHistogram` (observability/metrics.ts), `getOrCreateUpDownCounter` (observability/metrics.ts), `getServerVersion` (config/zero-config.ts), `getZeroConfig` (config/zero-config.ts), `hasExpiredQueries` (services/view-syncer/view-syncer.ts), `hasRefs` (services/mutagen/pusher.ts), `initEventSink` (server/syncer.ts), `metricsForProtocol` (services/view-syncer/inspect-handler.ts), `recordMs` (observability/metrics.ts), `ref` (services/mutagen/pusher.ts), `registerSQLiteCorruptionDiagnosticTarget` (server/syncer.ts), `resetWarnOnceState` (config/zero-config.ts), `rowSetSignature` (services/view-syncer/pipeline-driver.ts), `startAnonymousTelemetry` (server/syncer.ts), `unref` (services/mutagen/pusher.ts), `warnOnce` (config/zero-config.ts)
+> ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `apiRequests` (custom/metrics.ts), `assertAreCompatiblePushes` (services/mutagen/pusher.ts), `assertNormalized` (config/zero-config.ts), `getMeter` (observability/metrics.ts), `getNormalizedZeroConfig` (config/zero-config.ts), `getOrCreateGauge` (observability/metrics.ts), `getOrCreateHistogram` (observability/metrics.ts), `getOrCreateLatencyHistogram` (observability/metrics.ts), `getOrCreateUpDownCounter` (observability/metrics.ts), `getServerVersion` (config/zero-config.ts), `getZeroConfig` (config/zero-config.ts), `hasRefs` (services/mutagen/pusher.ts), `initEventSink` (server/syncer.ts), `metricsForProtocol` (services/view-syncer/inspect-handler.ts), `recordMs` (observability/metrics.ts), `ref` (services/mutagen/pusher.ts), `registerSQLiteCorruptionDiagnosticTarget` (server/syncer.ts), `resetWarnOnceState` (config/zero-config.ts), `rowSetSignature` (services/view-syncer/pipeline-driver.ts), `startAnonymousTelemetry` (server/syncer.ts), `unref` (services/mutagen/pusher.ts), `warnOnce` (config/zero-config.ts)
 
 ## 1 · File structure diff
 
@@ -18,38 +18,41 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `auth/load-permissions.ts` (100) | **1:1** | `auth/load_permissions.rs` (3) |
 | `auth/read-authorizer.ts` (152) | **1:1** | `auth/read_authorizer.rs` (5) |
 | `config/zero-config.ts` (1299) | **MERGED** | `services/view_syncer/inspect_handler.rs` (1) |
-| `custom-queries/transform-query.ts` (290) | **MERGED** | `custom_queries/transform_query.rs` (5), `auth/jwt.rs` (1) |
+| `custom-queries/transform-query.ts` (290) | **MERGED** | `custom_queries/transform_query.rs` (6), `auth/jwt.rs` (1) |
 | `custom/fetch.ts` (569) | **SPLIT** | `custom/fetch.rs` (3), `custom/metrics.rs` (3), `custom_queries/transform_query.rs` (3), `protocol/error_reason_enum.rs` (1), `protocol/error.rs` (1) |
 | `custom/metrics.ts` (93) | **MERGED** | `custom/metrics.rs` (3) |
 | `db/lite-tables.ts` (356) | **1:1** | `db/lite_tables.rs` (5), `services/view_syncer/pipeline_driver.rs` (1) |
 | `observability/metrics.ts` (239) | **MERGED** | `custom_queries/transform_query.rs` (1), `workers/syncer.rs` (1), `observability/metrics.rs` (1), `server/otel_start.rs` (1) |
 | `server/otel-start.ts` (107) | **MERGED** | `server/otel_start.rs` (2) |
 | `server/syncer.ts` (295) | **MERGED** | `custom_queries/transform_query.rs` (1) |
-| `services/mutagen/pusher.ts` (712) | **1:1** | `services/mutagen/pusher.rs` (6), `live_count.rs` (1) |
-| `services/view-syncer/connection-context-manager.ts` (892) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (29) |
+| `services/mutagen/pusher.ts` (712) | **1:1** | `services/mutagen/pusher.rs` (8), `live_count.rs` (1) |
+| `services/view-syncer/connection-context-manager.ts` (892) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (37) |
 | `services/view-syncer/drain-coordinator.ts` (76) | **1:1** | `services/view_syncer/drain_coordinator.rs` (6) |
-| `services/view-syncer/e2e-serving-lag.ts` (82) | **1:1** | `services/view_syncer/e2e_serving_lag.rs` (6) |
+| `services/view-syncer/e2e-serving-lag.ts` (82) | **MERGED** | `services/view_syncer/e2e_serving_lag.rs` (6) |
 | `services/view-syncer/inspect-handler.ts` (215) | **MERGED** | `services/view_syncer/inspect_handler.rs` (1) |
-| `services/view-syncer/pipeline-driver.ts` (1558) | **MERGED** | `services/view_syncer/pipeline_driver.rs` (12), `ws_sink.rs` (1), `services/view_syncer/connection_context_manager.rs` (1), `protocol/error.rs` (1), `observability/metrics.rs` (1) |
-| `services/view-syncer/query-covering.ts` (444) | **1:1** | `services/view_syncer/query_covering.rs` (25) |
-| `services/view-syncer/view-syncer.ts` (3002) | **1:1** | `services/view_syncer/view_syncer.rs` (21), `protocol/error.rs` (1) |
+| `services/view-syncer/pipeline-driver.ts` (1558) | **MERGED** | `services/view_syncer/pipeline_driver.rs` (13), `ws_sink.rs` (1), `services/view_syncer/view_syncer.rs` (1), `services/view_syncer/connection_context_manager.rs` (1), `protocol/error.rs` (1), `observability/metrics.rs` (1) |
+| `services/view-syncer/query-covering.ts` (444) | **MERGED** | `services/view_syncer/query_covering.rs` (25) |
+| `services/view-syncer/view-syncer.ts` (3002) | **MERGED** | `services/view_syncer/view_syncer.rs` (50), `services/view_syncer/query_covering.rs` (2), `custom_queries/transform_query.rs` (1), `protocol/error.rs` (1), `services/view_syncer/e2e_serving_lag.rs` (1) |
 | `workers/connect-params.ts` (100) | **1:1** | `workers/connect_params.rs` (2), `ws_server.rs` (1) |
-| `workers/connection.ts` (485) | **1:1** | `workers/connection.rs` (13), `ws_sink.rs` (1) |
+| `workers/connection.ts` (485) | **1:1** | `workers/connection.rs` (17), `ws_sink.rs` (2), `observability/metrics.rs` (1) |
 | `workers/syncer-ws-message-handler.ts` (283) | **1:1** | `workers/syncer_ws_message_handler.rs` (3) |
-| `workers/syncer.ts` (759) | **MERGED** | `workers/syncer.rs` (15), `ws_server.rs` (1) |
+| `workers/syncer.ts` (759) | **MERGED** | `workers/syncer.rs` (17), `observability/metrics.rs` (1), `ws_server.rs` (1) |
 
 **New Rust files (no TS origin — added in the port):**  `auth.rs` (6), `config.rs` (4), `config/zero_config.rs` (311), `custom.rs` (5), `custom_queries.rs` (4), `db.rs` (3), `http_server.rs` (513), `lib.rs` (84), `main.rs` (474), `observability.rs` (4), `protocol.rs` (116), `protocol/change_desired_queries.rs` (14), `protocol/connect.rs` (106), `protocol/delete_clients.rs` (14), `protocol/down.rs` (11), `protocol/error_kind_enum.rs` (30), `protocol/error_origin_enum.rs` (14), `protocol/inspect_up.rs` (41), `protocol/mutation_id.rs` (12), `protocol/mutations_patch.rs` (18), `protocol/poke.rs` (47), `protocol/pong.rs` (15), `protocol/protocol_version.rs` (9), `protocol/push.rs` (31), `protocol/queries_patch.rs` (55), `protocol/row_patch.rs` (33), `protocol/up.rs` (95), `protocol/update_auth.rs` (10), `protocol/version.rs` (8), `server.rs` (9), `server/syncer.rs` (166), `services.rs` (4), `services/mutagen.rs` (4), `services/view_syncer.rs` (17), `trace.rs` (30), `workers.rs` (10), `workers/cg_executor.rs` (340)
 
 **Merges (many TS → one Rust file):**
 - `auth/jwt.rs` ⟵ `auth/jwt.ts`, `custom-queries/transform-query.ts`
 - `custom/metrics.rs` ⟵ `custom/fetch.ts`, `custom/metrics.ts`
-- `custom_queries/transform_query.rs` ⟵ `auth/auth.ts`, `custom-queries/transform-query.ts`, `custom/fetch.ts`, `observability/metrics.ts`, `server/syncer.ts`
-- `observability/metrics.rs` ⟵ `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`
+- `custom_queries/transform_query.rs` ⟵ `auth/auth.ts`, `custom-queries/transform-query.ts`, `custom/fetch.ts`, `observability/metrics.ts`, `server/syncer.ts`, `services/view-syncer/view-syncer.ts`
+- `observability/metrics.rs` ⟵ `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`, `workers/connection.ts`, `workers/syncer.ts`
 - `protocol/error.rs` ⟵ `custom/fetch.ts`, `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
 - `server/otel_start.rs` ⟵ `observability/metrics.ts`, `server/otel-start.ts`
 - `services/view_syncer/connection_context_manager.rs` ⟵ `auth/auth.ts`, `services/view-syncer/connection-context-manager.ts`, `services/view-syncer/pipeline-driver.ts`
+- `services/view_syncer/e2e_serving_lag.rs` ⟵ `services/view-syncer/e2e-serving-lag.ts`, `services/view-syncer/view-syncer.ts`
 - `services/view_syncer/inspect_handler.rs` ⟵ `config/zero-config.ts`, `services/view-syncer/inspect-handler.ts`
 - `services/view_syncer/pipeline_driver.rs` ⟵ `db/lite-tables.ts`, `services/view-syncer/pipeline-driver.ts`
+- `services/view_syncer/query_covering.rs` ⟵ `services/view-syncer/query-covering.ts`, `services/view-syncer/view-syncer.ts`
+- `services/view_syncer/view_syncer.rs` ⟵ `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
 - `workers/syncer.rs` ⟵ `observability/metrics.ts`, `workers/syncer.ts`
 - `ws_server.rs` ⟵ `workers/connect-params.ts`, `workers/syncer.ts`
 - `ws_sink.rs` ⟵ `services/view-syncer/pipeline-driver.ts`, `workers/connection.ts`
@@ -122,10 +125,11 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 🟦 **Rust-only added here (2):** `ApiOtel`, `INSTRUMENTS`
 
-### `custom_queries/transform_query.rs`  ⟵  `auth/auth.ts`, `custom-queries/transform-query.ts`, `custom/fetch.ts`, `observability/metrics.ts`, `server/syncer.ts`
+### `custom_queries/transform_query.rs`  ⟵  `auth/auth.ts`, `custom-queries/transform-query.ts`, `custom/fetch.ts`, `observability/metrics.ts`, `server/syncer.ts`, `services/view-syncer/view-syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#processTransformedCustomQueries` (services/view-syncer/view-syncer.ts:1696) | `CustomTransformed` (:132) | fuzzy 0.50 |
 | `cache` (observability/metrics.ts:42) | `cache_get` (:531) | fuzzy 1.00 |
 | `CustomQueryTransformer` (custom-queries/transform-query.ts:82) | `CustomQueryContext` (:49) | fuzzy 0.50 |
 | `getCacheKey` (custom-queries/transform-query.ts:259) | `get_cache_key` (:521) | exact |
@@ -136,7 +140,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 🟥 **TS symbols not resolved into this file (14):** `Category`, `HashedTransformResponse`, `LONG_DURATION_HISTOGRAM_BOUNDARIES_S`, `NATIVE_HISTOGRAM_INSTRUMENT_NAMES`, `TransformResponse`, `getMeter`, `getOrCreateGauge`, `getOrCreateHistogram`, `getOrCreateLatencyHistogram`, `getOrCreateUpDownCounter`, `initEventSink`, `recordMs`, `registerSQLiteCorruptionDiagnosticTarget`, `startAnonymousTelemetry`
 
-🟦 **Rust-only added here (15):** `CACHE_TTL`, `CustomTransformed`, `FETCH_MAX_ATTEMPTS`, `HTTP_CLIENT`, `RESERVED_PARAMS`, `TRANSFORM_CACHE`, `TransformedQuery`, `cache_set`, `composed_headers`, `extract_transform_queries`, `post_transform_attempts`, `seed_transform_cache_for_test`, `set_header`, `transform_custom_queries`, `validate_custom_queries`
+🟦 **Rust-only added here (14):** `CACHE_TTL`, `FETCH_MAX_ATTEMPTS`, `HTTP_CLIENT`, `RESERVED_PARAMS`, `TRANSFORM_CACHE`, `TransformedQuery`, `cache_set`, `composed_headers`, `extract_transform_queries`, `post_transform_attempts`, `seed_transform_cache_for_test`, `set_header`, `transform_custom_queries`, `validate_custom_queries`
 
 ### `db/lite_tables.rs`  ⟵  `db/lite-tables.ts`
 
@@ -169,14 +173,16 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 🟦 **Rust-only added here (3):** `ALLOC`, `ShutdownSignal`, `main`
 
-### `observability/metrics.rs`  ⟵  `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`
+### `observability/metrics.rs`  ⟵  `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`, `workers/connection.ts`, `workers/syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#recordViewSyncerLagSamples` (workers/syncer.ts:489) | `view_syncer_lag_otel` (:210) | fuzzy 0.50 |
+| `#recordWebSocketError` (workers/connection.ts:282) | `record_websocket_error` (:478) | exact |
 | `LatencyHistogram` (observability/metrics.ts:91) | `Histogram` (:659) | fuzzy 0.50 |
 | `reset` (services/view-syncer/pipeline-driver.ts:343) | `record_reset` (:779) | fuzzy 0.50 |
 
-🟦 **Rust-only added here (60):** `C`, `CvrAttemptOtel`, `G`, `GAUGES`, `HIST_BOUNDS_SECS`, `I`, `INSTRUMENT`, `Metrics`, `OTEL_LATENCY_BOUNDARIES_S`, `Otel`, `QueryTransformOtel`, `ServingLagOtel`, `WS_QUEUED_BYTES`, `WS_QUEUED_FRAMES`, `active_clients`, `cvr_flush_failures`, `default`, `failed_client_groups`, `fmt`, `now_ms`, `observe_millis`, `observe_secs`, `proto_attr`, `record_active_client_delta`, `record_advance`, `record_cvr_flush_attempt`, `record_cvr_flush_failure`, `record_cvr_load_attempt`, `record_e2e_serving_lag`, `record_e2e_serving_lag_clamp`, `record_fail_group`, `record_hydration`, `record_query_transformation`, `record_query_transformation_hash_change`, `record_query_transformation_no_op`, `record_query_transformation_time`, `record_view_syncer_hydration`, `record_view_syncer_lag_ms`, `record_websocket_error`, `record_ws_connection_attempt`, `record_ws_connection_failure`, `record_ws_connection_success`, `record_ws_open_delta`, `record_ws_queued_bytes_delta`, `record_ws_queued_delta`, `record_ws_shed`, `register_cvr_pool_gauges`, `register_serving_lag_gauges`, `render`, `render_prometheus`, `view_syncer_hydration_otel`, `view_syncer_lag_otel`, `ws_connection_attempts`, `ws_connection_failures`, `ws_connection_successes`, `ws_errors`, `ws_open_connections`, `ws_queued_bytes_gauge`, `ws_queued_frames_gauge`, `ws_sheds`
+🟦 **Rust-only added here (58):** `C`, `CvrAttemptOtel`, `G`, `GAUGES`, `HIST_BOUNDS_SECS`, `I`, `INSTRUMENT`, `Metrics`, `OTEL_LATENCY_BOUNDARIES_S`, `Otel`, `QueryTransformOtel`, `ServingLagOtel`, `WS_QUEUED_BYTES`, `WS_QUEUED_FRAMES`, `active_clients`, `cvr_flush_failures`, `default`, `failed_client_groups`, `fmt`, `now_ms`, `observe_millis`, `observe_secs`, `proto_attr`, `record_active_client_delta`, `record_advance`, `record_cvr_flush_attempt`, `record_cvr_flush_failure`, `record_cvr_load_attempt`, `record_e2e_serving_lag`, `record_e2e_serving_lag_clamp`, `record_fail_group`, `record_hydration`, `record_query_transformation`, `record_query_transformation_hash_change`, `record_query_transformation_no_op`, `record_query_transformation_time`, `record_view_syncer_hydration`, `record_view_syncer_lag_ms`, `record_ws_connection_attempt`, `record_ws_connection_failure`, `record_ws_connection_success`, `record_ws_open_delta`, `record_ws_queued_bytes_delta`, `record_ws_queued_delta`, `record_ws_shed`, `register_cvr_pool_gauges`, `register_serving_lag_gauges`, `render`, `render_prometheus`, `view_syncer_hydration_otel`, `ws_connection_attempts`, `ws_connection_failures`, `ws_connection_successes`, `ws_errors`, `ws_open_connections`, `ws_queued_bytes_gauge`, `ws_queued_frames_gauge`, `ws_sheds`
 
 ### `protocol/change_desired_queries.rs`  ⟵  _(new)_
 
@@ -316,6 +322,12 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#demoteConnection` (services/view-syncer/connection-context-manager.ts:663) | `demote_connection` (:849) | exact |
+| `#nextRevalidateAt` (services/view-syncer/connection-context-manager.ts:837) | `next_revalidate_at` (:937) | exact |
+| `#refreshBackgroundConnectionContext` (services/view-syncer/connection-context-manager.ts:682) | `refresh_background_connection_context` (:861) | exact |
+| `#setBackgroundConnection` (services/view-syncer/connection-context-manager.ts:784) | `set_background_connection` (:908) | exact |
+| `#storeConnection` (services/view-syncer/connection-context-manager.ts:774) | `store_connection` (:818) | exact |
+| `#updateBackgroundRetransformDeadline` (services/view-syncer/connection-context-manager.ts:813) | `update_background_retransform_deadline` (:922) | exact |
 | `Auth` (auth/auth.ts:25) | `Auth` (:90) | exact |
 | `authEquals` (auth/auth.ts:36) | `auth_equals` (:350) | exact |
 | `closeConnection` (services/view-syncer/connection-context-manager.ts:136) | `close_connection` (:682) | exact |
@@ -353,7 +365,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 🟥 **TS symbols not resolved into this file (3):** `ConnectionContextManagerImpl`, `JWTAuth`, `OpaqueAuth`
 
-🟦 **Rust-only added here (17):** `CCMError`, `ConnectParamsForRegistration`, `JwtPayload`, `MaintenanceKind`, `MaintenancePlan`, `ValidationResult`, `build_fetch_context`, `demote_connection`, `next_revalidate_at`, `now`, `raw`, `refresh_background_connection_context`, `remove_connection_internal`, `set_background_connection`, `store_connection`, `to_error_body`, `update_background_retransform_deadline`
+🟦 **Rust-only added here (11):** `CCMError`, `ConnectParamsForRegistration`, `JwtPayload`, `MaintenanceKind`, `MaintenancePlan`, `ValidationResult`, `build_fetch_context`, `now`, `raw`, `remove_connection_internal`, `to_error_body`
 
 ### `services/view_syncer/drain_coordinator.rs`  ⟵  `services/view-syncer/drain-coordinator.ts`
 
@@ -368,7 +380,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 🟦 **Rust-only added here (2):** `FORCE_DRAIN_PADDING`, `TARGET_UTILIZATION`
 
-### `services/view_syncer/e2e_serving_lag.rs`  ⟵  `services/view-syncer/e2e-serving-lag.ts`
+### `services/view_syncer/e2e_serving_lag.rs`  ⟵  `services/view-syncer/e2e-serving-lag.ts`, `services/view-syncer/view-syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
@@ -405,14 +417,15 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `mustGetTableSpec` (db/lite-tables.ts:326) | `IvmTableSpec` (:49) | fuzzy 0.50 |
 | `removeQuery` (services/view-syncer/pipeline-driver.ts:834) | `remove_query` (:424) | exact |
 
-🟥 **TS symbols not resolved into this file (9):** `PipelineDriver`, `PipelineHydrationReason`, `RowAdd`, `RowChange`, `RowEdit`, `RowRemove`, `Timer`, `accumulate`, `rowSetSignature`
+🟥 **TS symbols not resolved into this file (7):** `PipelineDriver`, `PipelineHydrationReason`, `RowAdd`, `RowEdit`, `RowRemove`, `Timer`, `rowSetSignature`
 
 🟦 **Rust-only added here (27):** `AdvanceOutcome`, `IvmColumnSchema`, `IvmPipelines`, `TsAst`, `TsBound`, `TsCondition`, `TsCorrelatedSubquery`, `TsCorrelation`, `TsValuePosition`, `active_query_ids`, `build_engine`, `column_schema`, `column_type`, `convert_ast`, `convert_condition`, `convert_csq`, `convert_value_position`, `has_query`, `init_from_connection`, `json_to_value`, `panic_message`, `parse_ts_ast`, `query_transformation_hash`, `running_queries`, `scalar_reset_message`, `set_query_transformation_hash`, `zql_column_type`
 
-### `services/view_syncer/query_covering.rs`  ⟵  `services/view-syncer/query-covering.ts`
+### `services/view_syncer/query_covering.rs`  ⟵  `services/view-syncer/query-covering.ts`, `services/view-syncer/view-syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#findQueryCoverageShadowHit` (services/view-syncer/view-syncer.ts:1781) | `QueryCoverageShadowHit` (:50) | fuzzy 0.80 |
 | `add` (services/view-syncer/query-covering.ts:67) | `add` (:141) | exact |
 | `astCoveredBy` (services/view-syncer/query-covering.ts:129) | `ast_covered_by` (:202) | exact |
 | `boundsCoveredBy` (services/view-syncer/query-covering.ts:143) | `bounds_covered_by` (:217) | exact |
@@ -438,30 +451,44 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `sameRelatedEdge` (services/view-syncer/query-covering.ts:262) | `same_related_edge` (:326) | exact |
 | `simpleConditionImplies` (services/view-syncer/query-covering.ts:274) | `simple_condition_implies` (:333) | exact |
 
-🟦 **Rust-only added here (11):** `IndexedRunningQuery`, `QueryCoverageShadowHit`, `cmp_num`, `conditions`, `field_eq`, `json_eq`, `log_shadow_summary`, `num`, `present`, `related_of`, `subquery`
+🟦 **Rust-only added here (10):** `IndexedRunningQuery`, `cmp_num`, `conditions`, `field_eq`, `json_eq`, `log_shadow_summary`, `num`, `present`, `related_of`, `subquery`
 
-### `services/view_syncer/view_syncer.rs`  ⟵  `services/view-syncer/view-syncer.ts`
+### `services/view_syncer/view_syncer.rs`  ⟵  `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#catchupClients` (services/view-syncer/view-syncer.ts:2390) | `catchup_clients` (:7476) | exact |
+| `#checkForThrashing` (services/view-syncer/view-syncer.ts:2121) | `check_for_thrashing` (:1245) | exact |
+| `#getTTLClock` (services/view-syncer/view-syncer.ts:1053) | `get_ttl_clock` (:1045) | exact |
+| `#markVersionServed` (services/view-syncer/view-syncer.ts:677) | `mark_version_served` (:2484) | exact |
+| `#runAuthMaintenance` (services/view-syncer/view-syncer.ts:824) | `arm_auth_maintenance` (:1285) | fuzzy 0.50 |
+| `#scheduleAuthMaintenance` (services/view-syncer/view-syncer.ts:793) | `next_auth_maintenance_delay` (:1294) | fuzzy 0.40 |
+| `#scheduleExpireEviction` (services/view-syncer/view-syncer.ts:1394) | `schedule_expire_eviction` (:1162) | exact |
+| `#scheduleShutdown` (services/view-syncer/view-syncer.ts:713) | `shutdown` (:2739) | fuzzy 0.50 |
+| `#startTTLClockInterval` (services/view-syncer/view-syncer.ts:1091) | `start_ttl_clock_interval` (:1075) | exact |
+| `#stopExpireTimer` (services/view-syncer/view-syncer.ts:773) | `stop_expire_timer` (:1178) | exact |
+| `#stopTTLClockInterval` (services/view-syncer/view-syncer.ts:1099) | `stop_ttl_clock_interval` (:1081) | exact |
+| `#syncQueryPipelineSet` (services/view-syncer/view-syncer.ts:1872) | `sync_query_pipeline_set` (:7091) | exact |
+| `#updateTTLClockInCVRWithoutLock` (services/view-syncer/view-syncer.ts:1104) | `update_ttl_clock_in_cvr_without_lock` (:1099) | exact |
 | `changeDesiredQueries` (services/view-syncer/view-syncer.ts:138) | `change_desired_queries` (:545) | exact |
 | `checkClientAndCVRVersions` (services/view-syncer/view-syncer.ts:2875) | `check_client_and_cvr_versions` (:90) | exact |
 | `deleteClients` (services/view-syncer/view-syncer.ts:143) | `delete_clients` (:574) | exact |
+| `hasExpiredQueries` (services/view-syncer/view-syncer.ts:2933) | `remove_expired_queries` (:7920) | fuzzy 0.50 |
 | `initConnection` (services/view-syncer/view-syncer.ts:133) | `init_connection` (:484) | exact |
 | `inspect` (services/view-syncer/view-syncer.ts:148) | `inspect` (:603) | exact |
-| `queryCount` (services/view-syncer/view-syncer.ts:658) | `query_count` (:1002) | exact |
-| `rowCount` (services/view-syncer/view-syncer.ts:662) | `row_count` (:1008) | exact |
-| `servedVersion` (services/view-syncer/view-syncer.ts:666) | `mark_version_served` (:2432) | fuzzy 0.67 |
-| `servingLagEligible` (services/view-syncer/view-syncer.ts:670) | `serving_lag_eligible` (:996) | exact |
+| `queryCount` (services/view-syncer/view-syncer.ts:658) | `query_count` (:1015) | exact |
+| `RowChange` (services/view-syncer/pipeline-driver.ts:83) | `RowChangeMaps` (:8057) | fuzzy 0.67 |
+| `rowCount` (services/view-syncer/view-syncer.ts:662) | `row_count` (:1021) | exact |
+| `servingLagEligible` (services/view-syncer/view-syncer.ts:670) | `serving_lag_eligible` (:1009) | exact |
 | `TTL_CLOCK_INTERVAL` (services/view-syncer/view-syncer.ts:202) | `TTL_CLOCK_INTERVAL` (:80) | exact |
 | `TTL_TIMER_HYSTERESIS` (services/view-syncer/view-syncer.ts:210) | `TTL_TIMER_HYSTERESIS_MS` (:77) | fuzzy 0.75 |
 | `updateAuth` (services/view-syncer/view-syncer.ts:149) | `update_auth` (:515) | exact |
 | `ViewSyncer` (services/view-syncer/view-syncer.ts:132) | `CgViewSyncer` (:527) | fuzzy 0.67 |
-| `ViewSyncerService` (services/view-syncer/view-syncer.ts:214) | `ViewSyncerService` (:617) | exact |
+| `ViewSyncerService` (services/view-syncer/view-syncer.ts:214) | `ViewSyncerService` (:625) | exact |
 
-🟥 **TS symbols not resolved into this file (3):** `SyncContext`, `TimeSliceTimer`, `hasExpiredQueries`
+🟥 **TS symbols not resolved into this file (2):** `SyncContext`, `TimeSliceTimer`
 
-🟦 **Rust-only added here (54):** `AuthValidator`, `CGServicesFactory`, `CG_KEEPALIVE_MS`, `CcmDispatchAdapter`, `CvrPgConfig`, `MAX_TTL_MS`, `SyncEngineConfig`, `T`, `apply_client_deletions`, `arm_auth_maintenance`, `arm_serving_lag`, `cg_event_loop`, `clients_to_delete`, `custom_query_context_from`, `decrement_active_client`, `decrement_nonzero`, `dispatch_cg_message`, `ensure_cvr`, `fail_group`, `fail_group_with_error`, `get_ttl_clock`, `handle_desired_queries`, `handle_update_auth`, `idle_shutdown_due`, `lock_unpoisoned`, `maybe_reload_permissions`, `merge_notifications`, `new_test`, `new_with_accepting`, `next_auth_maintenance_delay`, `next_expiry_delay`, `next_idle_shutdown_delay`, `next_ttl_clock_delay`, `older_replica_error`, `on_auth_maintenance_tick`, `on_connection_closed`, `on_expiry_tick`, `on_inbound`, `on_new_connection`, `on_notification`, `parse_desired_queries_patch`, `publish_serving_lag`, `query_context_for`, `reset_pipelines_and_rehydrate`, `schedule_expire_eviction`, `second_element`, `shard_for`, `shutdown`, `slow_hydrate_threshold_ms`, `start_ttl_clock_interval`, `stop_expire_timer`, `stop_ttl_clock_interval`, `str_array`, `update_ttl_clock_in_cvr_without_lock`
+🟦 **Rust-only added here (110):** `AuthValidator`, `CGServicesFactory`, `CG_KEEPALIVE_MS`, `CcmDispatchAdapter`, `CvrPgConfig`, `InertAuthValidator`, `LoadCvrError`, `MAX_FLUSH_ATTEMPTS`, `MAX_TTL_MS`, `QueryReplacementRecord`, `SyncEngineConfig`, `SyncResult`, `T`, `THRASH_THRESHOLD`, `THRASH_WINDOW_MS`, `ZERO_VERSION_COLUMN`, `accumulate_signature`, `advance_and_sync`, `advance_and_sync_uses_header_version_not_empty`, `advance_poke_targets`, `advance_poke_targets_excludes_lagging_clients`, `apply_client_deletions`, `arm_serving_lag`, `catchup_clients_without_store_is_noop`, `catchup_floor`, `catchup_floor_uses_original_cookie_not_advanced_version`, `cg_event_loop`, `changed_transformation_hash_rehydrates_query`, `clear_op_drops_all_desired_queries`, `client_primary_keys_from_schema`, `clients_for`, `clients_to_delete`, `config_and_hydrate`, `config_and_hydrate_from_desired_queries_pokes_client`, `config_and_hydrate_reissue_takes_catchup_branch_without_store`, `config_and_hydrate_with_profile`, `config_poke_targets`, `config_poke_targets_include_new_but_exclude_lagging_clients`, `custom_query_context_from`, `decrement_active_client`, `decrement_nonzero`, `delete_clients_removes_client_and_acks`, `dispatch_cg_message`, `empty_cvr`, `ensure_cvr`, `existing_rows`, `expired_query_is_removed_after_ttl_elapses`, `fail_client`, `fail_group`, `fail_group_with_error`, `flush_ops_to_store`, `flush_to_store`, `gather_catchup_patches`, `handle_config_update`, `handle_desired_queries`, `handle_update_auth`, `hydrate_and_sync`, `hydrate_and_sync_emits_poke_frames`, `idle_shutdown_due`, `inspect_queries`, `load_cvr`, `lock_unpoisoned`, `make_cvr`, `maybe_reload_permissions`, `merge_notifications`, `new_test`, `new_with_accepting`, `next_expiry_delay`, `next_idle_shutdown_delay`, `next_ttl_clock_delay`, `offload`, `older_replica_error`, `on_auth_maintenance_tick`, `on_connection_closed`, `on_expiry_tick`, `on_inbound`, `on_new_connection`, `on_notification`, `parse_desired_queries_patch`, `pipelines`, `publish_serving_lag`, `query_context_for`, `query_name_of`, `real_to_json_matches_js_number_semantics`, `register_client`, `reset_pipelines_and_rehydrate`, `row_change_to_maps`, `row_id`, `row_op_is_noop`, `row_op_is_noop_matches_ts_dedup`, `row_record`, `row_to_contents`, `second_element`, `seed_signatures_from_cvr`, `send_inspect_response`, `set_cvr_store`, `set_enable_query_covering`, `set_tokio_handle`, `shard_for`, `signature_provider`, `slow_hydrate_threshold_ms`, `sqlite_real_to_json`, `sqlite_real_to_json_nonfinite_uses_sentinel`, `str_array`, `sync_engine_census_returns_to_baseline_after_drop`, `take_flush_observed`, `unregister_client`, `update_ttl_clock`, `users_spec`, `value_to_serde_json`
 
 ### `trace.rs`  ⟵  _(new)_
 
@@ -486,6 +513,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#closeWithError` (workers/connection.ts:331) | `close_with_error` (:224) | exact |
 | `close` (workers/connection.ts:168) | `close` (:232) | exact |
 | `Connection` (workers/connection.ts:78) | `Connection` (:59) | exact |
 | `handleInitConnection` (workers/connection.ts:190) | `handle_init_connection` (:292) | exact |
@@ -500,12 +528,14 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 🟥 **TS symbols not resolved into this file (1):** `StreamResult`
 
-🟦 **Rust-only added here (13):** `LogLevel`, `TRANSIENT_SOCKET_ERROR_CODES`, `TRANSIENT_SOCKET_MESSAGE_PATTERNS`, `WsState`, `classify_error_log_level`, `client_id`, `close_with_error`, `handle_close`, `handle_error`, `handle_inbound`, `handle_result`, `is_closed`, `ws_id`
+🟦 **Rust-only added here (12):** `LogLevel`, `TRANSIENT_SOCKET_ERROR_CODES`, `TRANSIENT_SOCKET_MESSAGE_PATTERNS`, `WsState`, `classify_error_log_level`, `client_id`, `handle_close`, `handle_error`, `handle_inbound`, `handle_result`, `is_closed`, `ws_id`
 
 ### `workers/syncer.rs`  ⟵  `observability/metrics.ts`, `workers/syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `#computeServingLagDistribution` (workers/syncer.ts:468) | `compute_serving_lag_distribution` (:336) | exact |
+| `#recordReplicaReadyState` (workers/syncer.ts:496) | `record_replica_ready_state` (:305) | exact |
 | `boundReplicaReadyStates` (workers/syncer.ts:82) | `bound_replica_ready_states` (:83) | exact |
 | `computeMaxServingLagMs` (workers/syncer.ts:247) | `compute_max_serving_lag_ms` (:232) | exact |
 | `computeServingLagDistributionMs` (workers/syncer.ts:174) | `compute_serving_lag_distribution_ms` (:175) | exact |
@@ -525,7 +555,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 🟥 **TS symbols not resolved into this file (1):** `SyncerWorkerData`
 
-🟦 **Rust-only added here (28):** `CgServingSnapshot`, `ConnectionInfo`, `ConnectionSinks`, `DISTRIBUTION_CACHE_TTL_MS`, `MAX_DRAIN_MS`, `ServingLagDistribution`, `ServingLagRegistry`, `VIEW_SYNCER_LAG_SAMPLE_INTERVAL_MS`, `active_client_groups`, `broadcast_notification`, `cg_count`, `check_and_pin_user`, `compute_serving_lag_distribution`, `create_connection`, `insert_for_test`, `metrics_prometheus`, `metrics_snapshot`, `new_sharded`, `new_with_limit`, `place_cg`, `record_replica_ready_state`, `remove_view_syncer`, `send_error_if_current`, `send_notification`, `stats`, `total_queries`, `total_rows`, `upsert_view_syncer`
+🟦 **Rust-only added here (26):** `CgServingSnapshot`, `ConnectionInfo`, `ConnectionSinks`, `DISTRIBUTION_CACHE_TTL_MS`, `MAX_DRAIN_MS`, `ServingLagDistribution`, `ServingLagRegistry`, `VIEW_SYNCER_LAG_SAMPLE_INTERVAL_MS`, `active_client_groups`, `broadcast_notification`, `cg_count`, `check_and_pin_user`, `create_connection`, `insert_for_test`, `metrics_prometheus`, `metrics_snapshot`, `new_sharded`, `new_with_limit`, `place_cg`, `remove_view_syncer`, `send_error_if_current`, `send_notification`, `stats`, `total_queries`, `total_rows`, `upsert_view_syncer`
 
 ### `workers/syncer_ws_message_handler.rs`  ⟵  `workers/syncer-ws-message-handler.ts`
 
@@ -546,7 +576,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `push` (services/view-syncer/pipeline-driver.ts:1432) | `push` (:103) | exact |
+| `#push` (services/view-syncer/pipeline-driver.ts:1201) | `push` (:103) | exact |
 | `WebSocketLike` (workers/connection.ts:361) | `DirectWebSocketSink` (:80) | fuzzy 0.40 |
 
 🟦 **Rust-only added here (9):** `SinkLimits`, `WsCommand`, `cancel`, `close_with_code`, `count_shed_once`, `fail`, `push_sized`, `send_command`, `with_limits`
@@ -603,6 +633,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `destroy` | services/view-syncer/pipeline-driver.ts:447 | `destroy` services/view_syncer/pipeline_driver.rs:597 | ✅ exact |
 | `validate` | custom-queries/transform-query.ts:111 | `validate_auth` auth/jwt.rs:381 | 🔁 rename 0.50 |
 | `transform` | custom-queries/transform-query.ts:117 | `post_transform` custom_queries/transform_query.rs:304 | 🔁 rename 0.50 |
+| `#requestTransform` | custom-queries/transform-query.ts:188 | custom_queries/transform_query.rs post_transform | 📌 renamed |
 | `getCacheKey` | custom-queries/transform-query.ts:259 | `get_cache_key` custom_queries/transform_query.rs:521 | ✅ exact |
 | `normalizedHeaders` | custom-queries/transform-query.ts:278 | `normalized_headers` custom_queries/transform_query.rs:514 | ✅ exact |
 | `compileUrlPattern` | custom/fetch.ts:52 | N/A | 📌 no separate compile step; url_match matches the raw pattern inline |
@@ -669,6 +700,9 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `hasRefs` | services/mutagen/pusher.ts:240 | — | 🟥 UNRESOLVED |
 | `run` | services/mutagen/pusher.ts:244 | view_syncer.rs cg_event_loop | 📌 per-CG async serving loop |
 | `stop` | services/mutagen/pusher.ts:249 | view_syncer.rs shutdown() | 📌 per-CG drain + Rehome |
+| `#fanOutResponses` | services/mutagen/pusher.ts:366 | N/A — Option-A relay (I-3): push results ride CVR pokes | 📌 no per-connection response fan-out by design |
+| `#processPush` | services/mutagen/pusher.ts:490 | services/mutagen/pusher.rs drainer loop + combine_pushes | 📌 one-at-a-time FIFO drain |
+| `#failDownstream` | services/mutagen/pusher.ts:612 | services/mutagen/pusher.rs drainer-failure PushFailed frame | 📌 relay-hop failure path |
 | `combinePushes` | services/mutagen/pusher.ts:626 | `combine_pushes` services/mutagen/pusher.rs:164 | ✅ exact |
 | `assertAreCompatiblePushes` | services/mutagen/pusher.ts:669 | — | 🟥 UNRESOLVED |
 | `ConnectionState` | services/view-syncer/connection-context-manager.ts:17 | `ConnectionState` services/view_syncer/connection_context_manager.rs:36 | ✅ exact |
@@ -695,6 +729,14 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `getGroupState` | services/view-syncer/connection-context-manager.ts:159 | `get_group_state` services/view_syncer/connection_context_manager.rs:769 | ✅ exact |
 | `planMaintenance` | services/view-syncer/connection-context-manager.ts:161 | `plan_maintenance` services/view_syncer/connection_context_manager.rs:775 | ✅ exact |
 | `ConnectionContextManagerImpl` | services/view-syncer/connection-context-manager.ts:176 | — | 🟥 UNRESOLVED |
+| `#removeConnection` | services/view-syncer/connection-context-manager.ts:635 | services/view_syncer/connection_context_manager.rs remove_connection_internal | 📌 renamed (_internal suffix) |
+| `#demoteConnection` | services/view-syncer/connection-context-manager.ts:663 | `demote_connection` services/view_syncer/connection_context_manager.rs:849 | ✅ exact |
+| `#refreshBackgroundConnectionContext` | services/view-syncer/connection-context-manager.ts:682 | `refresh_background_connection_context` services/view_syncer/connection_context_manager.rs:861 | ✅ exact |
+| `#storeConnection` | services/view-syncer/connection-context-manager.ts:774 | `store_connection` services/view_syncer/connection_context_manager.rs:818 | ✅ exact |
+| `#setGroup` | services/view-syncer/connection-context-manager.ts:779 | INLINED services/view_syncer/connection_context_manager.rs GroupAuthState | 📌 group-state restructure |
+| `#setBackgroundConnection` | services/view-syncer/connection-context-manager.ts:784 | `set_background_connection` services/view_syncer/connection_context_manager.rs:908 | ✅ exact |
+| `#updateBackgroundRetransformDeadline` | services/view-syncer/connection-context-manager.ts:813 | `update_background_retransform_deadline` services/view_syncer/connection_context_manager.rs:922 | ✅ exact |
+| `#nextRevalidateAt` | services/view-syncer/connection-context-manager.ts:837 | `next_revalidate_at` services/view_syncer/connection_context_manager.rs:937 | ✅ exact |
 | `compareByInsertionOrder` | services/view-syncer/connection-context-manager.ts:844 | `compare_by_insertion_order` services/view_syncer/connection_context_manager.rs:968 | ✅ exact |
 | `comparePreferredValidatedConnection` | services/view-syncer/connection-context-manager.ts:851 | `compare_preferred_validated_connection` services/view_syncer/connection_context_manager.rs:975 | ✅ exact |
 | `minDefined` | services/view-syncer/connection-context-manager.ts:858 | `min_defined` services/view_syncer/connection_context_manager.rs:959 | ✅ exact |
@@ -717,7 +759,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `RowAdd` | services/view-syncer/pipeline-driver.ts:77 | — | 🟥 UNRESOLVED |
 | `RowRemove` | services/view-syncer/pipeline-driver.ts:79 | — | 🟥 UNRESOLVED |
 | `RowEdit` | services/view-syncer/pipeline-driver.ts:81 | — | 🟥 UNRESOLVED |
-| `RowChange` | services/view-syncer/pipeline-driver.ts:83 | — | 🟥 UNRESOLVED |
+| `RowChange` | services/view-syncer/pipeline-driver.ts:83 | `RowChangeMaps` services/view_syncer/view_syncer.rs:8057 | 🔁 rename 0.67 |
 | `PipelineHydrationReason` | services/view-syncer/pipeline-driver.ts:123 | — | 🟥 UNRESOLVED |
 | `Timer` | services/view-syncer/pipeline-driver.ts:158 | — | 🟥 UNRESOLVED |
 | `projectedAdvancementTimeMs` | services/view-syncer/pipeline-driver.ts:180 | rust-ivm advance_gate.rs | 📌 ported |
@@ -730,23 +772,40 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `init` | services/view-syncer/pipeline-driver.ts:325 | `init` services/view_syncer/pipeline_driver.rs:233 | ✅ exact |
 | `initialized` | services/view-syncer/pipeline-driver.ts:334 | `initialized` services/view_syncer/pipeline_driver.rs:216 | ✅ exact |
 | `reset` | services/view-syncer/pipeline-driver.ts:343 | `record_reset` observability/metrics.rs:779 | 🔁 rename 0.50 |
+| `#initAndResetCommon` | services/view-syncer/pipeline-driver.ts:354 | services/view_syncer/pipeline_driver.rs reset_pipelines_and_rehydrate | 📌 init/reset common path |
 | `replicaVersion` | services/view-syncer/pipeline-driver.ts:386 | pipeline_driver.rs snapshotter current_version | 📌 field/getter |
 | `currentVersion` | services/view-syncer/pipeline-driver.ts:395 | `current_version` services/view_syncer/pipeline_driver.rs:221 | ✅ exact |
 | `currentPermissions` | services/view-syncer/pipeline-driver.ts:403 | view_syncer.rs/message_handler perms reload | 📌 perms hot-reload at CG dispatch |
 | `advanceWithoutDiff` | services/view-syncer/pipeline-driver.ts:422 | pipeline_driver.rs advance_without_diff | 📌 ported |
+| `#ensureCostModelExistsIfEnabled` | services/view-syncer/pipeline-driver.ts:430 | CROSS-CRATE rust-ivm engine ensure_cost_model | 📌 planner cost model (2026-08-29 wiring) |
 | `queries` | services/view-syncer/pipeline-driver.ts:458 | pipeline_driver.rs running_queries/active_query_ids | 📌 split getters |
 | `totalHydrationTimeMs` | services/view-syncer/pipeline-driver.ts:462 | rust-ivm engine total_hydration_time_ms | 📌 ported (cross-crate) |
+| `#logQueryPipelineLifecycle` | services/view-syncer/pipeline-driver.ts:470 | N/A — logging-only | 📌 rust uses tracing at the pipeline call sites |
+| `#resolveScalarSubqueries` | services/view-syncer/pipeline-driver.ts:508 | CROSS-CRATE rust-ivm sqlite/resolve_scalar_subqueries + engine (:1395) | 📌 doc-cited |
 | `addQuery` | services/view-syncer/pipeline-driver.ts:574 | rust-ivm engine add_queries | 📌 streaming add (cross-crate) |
+| `#addQueryImpl` | services/view-syncer/pipeline-driver.ts:594 | CROSS-CRATE rust-ivm engine add_queries/add_queries_streaming | 📌 pipeline add |
 | `removeQuery` | services/view-syncer/pipeline-driver.ts:834 | `remove_query` services/view_syncer/pipeline_driver.rs:424 | ✅ exact |
+| `#destroyPipeline` | services/view-syncer/pipeline-driver.ts:846 | view_syncer.rs pipeline teardown + engine remove_query | 📌 sync_query_pipeline_set removes |
 | `rowSetSignature` | services/view-syncer/pipeline-driver.ts:874 | — | 🟥 UNRESOLVED |
+| `#trackRowSetSignatures` | services/view-syncer/pipeline-driver.ts:884 | CROSS-CRATE rust-ivm engine (:80) + rust-cvr row_set_signature | 📌 doc-cited |
 | `getRow` | services/view-syncer/pipeline-driver.ts:906 | `get_row` services/view_syncer/pipeline_driver.rs:578 | ✅ exact |
 | `advance` | services/view-syncer/pipeline-driver.ts:923 | `advance` services/view_syncer/pipeline_driver.rs:500 | ✅ exact |
-| `accumulate` | services/view-syncer/pipeline-driver.ts:1276 | — | 🟥 UNRESOLVED |
+| `#getSource` | services/view-syncer/pipeline-driver.ts:1054 | CROSS-CRATE rust-ivm engine (:372) + source (:96) | 📌 doc-cited |
+| `#shouldYield` | services/view-syncer/pipeline-driver.ts:1078 | CROSS-CRATE rust-ivm advance_gate yield decision | 📌 coop-yield ported to the gate |
+| `#shouldAdvanceYieldMaybeAbortAdvance` | services/view-syncer/pipeline-driver.ts:1094 | CROSS-CRATE rust-ivm advance_gate | 📌 doc-cited |
+| `#throwSlowCurrentChangeReset` | services/view-syncer/pipeline-driver.ts:1159 | CROSS-CRATE rust-ivm advance_gate reset errors | 📌 slow-current-change reset |
+| `#throwProjectedAdvancementReset` | services/view-syncer/pipeline-driver.ts:1175 | CROSS-CRATE rust-ivm advance_gate reset errors | 📌 advancement-timeout reset (task #145) |
+| `#createStorage` | services/view-syncer/pipeline-driver.ts:1197 | CROSS-CRATE rust-ivm builder (:49) + memory_storage | 📌 operator storage |
+| `#push` | services/view-syncer/pipeline-driver.ts:1201 | `push` ws_sink.rs:103 | ✅ exact |
+| `#startAccumulating` | services/view-syncer/pipeline-driver.ts:1223 | CROSS-CRATE rust-ivm Streamer accumulated buffer | 📌 folded into Streamer lifecycle |
+| `#stopAccumulating` | services/view-syncer/pipeline-driver.ts:1233 | CROSS-CRATE rust-ivm Streamer accumulated buffer | 📌 folded into Streamer lifecycle |
+| `#logQueryFailure` | services/view-syncer/pipeline-driver.ts:1240 | inlined | 📌 streamer error callback lives in rust-ivm; failures logged via tracing at the call sites |
+| `accumulate` | services/view-syncer/pipeline-driver.ts:1276 | CROSS-CRATE rust-ivm Streamer accumulated buffer | 📌 start/stop folded into the Streamer lifecycle |
 | `stream` | services/view-syncer/pipeline-driver.ts:1285 | CROSS-CRATE rust-ivm streamer/mod | 📌 RowChange streaming lives in the ivm crate's Streamer |
+| `#streamChanges` | services/view-syncer/pipeline-driver.ts:1296 | CROSS-CRATE rust-ivm streamer (:96) | 📌 doc-cited |
+| `#streamNodes` | services/view-syncer/pipeline-driver.ts:1342 | CROSS-CRATE rust-ivm streamer (:159) | 📌 doc-cited |
 | `setOutput` | services/view-syncer/pipeline-driver.ts:1416 | rust-ivm operator set_output | 📌 trait method (cross-crate) |
 | `fetch` | services/view-syncer/pipeline-driver.ts:1428 | `FetchConfig` services/view_syncer/connection_context_manager.rs:146 | 🔁 rename 0.50 |
-| `push` | services/view-syncer/pipeline-driver.ts:1432 | `push` ws_sink.rs:103 | ✅ exact |
-| `logQueryFailure` | services/view-syncer/pipeline-driver.ts:1451 | inlined | 📌 streamer error callback lives in rust-ivm; failures logged via tracing at the call sites |
 | `toAdds` | services/view-syncer/pipeline-driver.ts:1472 | INLINED — rust-ivm engine hydrate emits Adds directly | 📌 no Node→AddChange adaptor needed |
 | `getRowKey` | services/view-syncer/pipeline-driver.ts:1482 | rust-ivm streamer get_row_key | 📌 row-key extraction (cross-crate) |
 | `hydrate` | services/view-syncer/pipeline-driver.ts:1491 | `hydrate` services/view_syncer/pipeline_driver.rs:441 | ✅ exact |
@@ -786,24 +845,59 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `shutdownBeforeInitializationError` | services/view-syncer/view-syncer.ts:181 | view_syncer.rs init-fail path | 📌 error on terminal init failure |
 | `TTL_CLOCK_INTERVAL` | services/view-syncer/view-syncer.ts:202 | `TTL_CLOCK_INTERVAL` services/view_syncer/view_syncer.rs:80 | ✅ exact |
 | `TTL_TIMER_HYSTERESIS` | services/view-syncer/view-syncer.ts:210 | `TTL_TIMER_HYSTERESIS_MS` services/view_syncer/view_syncer.rs:77 | 🔁 rename 0.75 |
-| `ViewSyncerService` | services/view-syncer/view-syncer.ts:214 | `ViewSyncerService` services/view_syncer/view_syncer.rs:617 | ✅ exact |
+| `ViewSyncerService` | services/view-syncer/view-syncer.ts:214 | `ViewSyncerService` services/view_syncer/view_syncer.rs:625 | ✅ exact |
+| `#runInLockWithCVR` | services/view-syncer/view-syncer.ts:454 | INLINED view_syncer.rs CG-thread handlers + lazy CVR load | 📌 the #lock dissolved into the serial executor (I-1) |
 | `readyState` | services/view-syncer/view-syncer.ts:521 | view_syncer.rs ViewSyncerService/event loop | 📌 init/drain state flags |
-| `queryCount` | services/view-syncer/view-syncer.ts:658 | `query_count` services/view_syncer/view_syncer.rs:1002 | ✅ exact |
-| `rowCount` | services/view-syncer/view-syncer.ts:662 | `row_count` services/view_syncer/view_syncer.rs:1008 | ✅ exact |
-| `servedVersion` | services/view-syncer/view-syncer.ts:666 | `mark_version_served` services/view_syncer/view_syncer.rs:2432 | 🔁 rename 0.67 |
-| `servingLagEligible` | services/view-syncer/view-syncer.ts:670 | `serving_lag_eligible` services/view_syncer/view_syncer.rs:996 | ✅ exact |
+| `queryCount` | services/view-syncer/view-syncer.ts:658 | `query_count` services/view_syncer/view_syncer.rs:1015 | ✅ exact |
+| `rowCount` | services/view-syncer/view-syncer.ts:662 | `row_count` services/view_syncer/view_syncer.rs:1021 | ✅ exact |
+| `servedVersion` | services/view-syncer/view-syncer.ts:666 | services/view_syncer/e2e_serving_lag.rs (:75) | 📌 doc-cited |
+| `servingLagEligible` | services/view-syncer/view-syncer.ts:670 | `serving_lag_eligible` services/view_syncer/view_syncer.rs:1009 | ✅ exact |
+| `#markVersionServed` | services/view-syncer/view-syncer.ts:677 | `mark_version_served` services/view_syncer/view_syncer.rs:2484 | ✅ exact |
 | `keepalive` | services/view-syncer/view-syncer.ts:702 | view_syncer.rs ViewSyncerService.keepalive_until | 📌 field + next_idle_shutdown_delay |
+| `#scheduleShutdown` | services/view-syncer/view-syncer.ts:713 | `shutdown` services/view_syncer/view_syncer.rs:2739 | 🔁 rename 0.50 |
+| `#checkForShutdownConditionsInLock` | services/view-syncer/view-syncer.ts:728 | view_syncer.rs (:2918) | 📌 doc-cited; the lock is the CG serial executor (I-1) |
+| `#deleteClientDueToDisconnect` | services/view-syncer/view-syncer.ts:747 | view_syncer.rs (:2332) | 📌 doc-cited |
+| `#stopExpireTimer` | services/view-syncer/view-syncer.ts:773 | `stop_expire_timer` services/view_syncer/view_syncer.rs:1178 | ✅ exact |
+| `#stopAuthMaintenanceTimer` | services/view-syncer/view-syncer.ts:779 | INLINED view_syncer.rs next_auth_maintenance_at=None | 📌 timer → deadline field (arm_auth_maintenance) |
+| `#scheduleAuthMaintenance` | services/view-syncer/view-syncer.ts:793 | `next_auth_maintenance_delay` services/view_syncer/view_syncer.rs:1294 | 🔁 rename 0.40 |
+| `#runAuthMaintenance` | services/view-syncer/view-syncer.ts:824 | `arm_auth_maintenance` services/view_syncer/view_syncer.rs:1285 | 🔁 rename 0.50 |
+| `#getTTLClock` | services/view-syncer/view-syncer.ts:1053 | `get_ttl_clock` services/view_syncer/view_syncer.rs:1045 | ✅ exact |
+| `#flushUpdater` | services/view-syncer/view-syncer.ts:1069 | view_syncer.rs (:2882) flush_ops_to_store/flush_to_store | 📌 doc-cited |
+| `#startTTLClockInterval` | services/view-syncer/view-syncer.ts:1091 | `start_ttl_clock_interval` services/view_syncer/view_syncer.rs:1075 | ✅ exact |
+| `#stopTTLClockInterval` | services/view-syncer/view-syncer.ts:1099 | `stop_ttl_clock_interval` services/view_syncer/view_syncer.rs:1081 | ✅ exact |
+| `#updateTTLClockInCVRWithoutLock` | services/view-syncer/view-syncer.ts:1104 | `update_ttl_clock_in_cvr_without_lock` services/view_syncer/view_syncer.rs:1099 | ✅ exact |
+| `#updateCVRConfig` | services/view-syncer/view-syncer.ts:1124 | view_syncer.rs (:6905) handle_config_update | 📌 doc-cited |
+| `#runInLockForClient` | services/view-syncer/view-syncer.ts:1179 | view_syncer.rs (:4465) — CG serial executor replaces the TS #lock (I-1) | 📌 doc-cited |
+| `#getClients` | services/view-syncer/view-syncer.ts:1260 | view_syncer.rs (:1936) active_clients | 📌 doc-cited |
+| `#scheduleExpireEviction` | services/view-syncer/view-syncer.ts:1394 | `schedule_expire_eviction` services/view_syncer/view_syncer.rs:1162 | ✅ exact |
+| `#hydrateUnchangedQueries` | services/view-syncer/view-syncer.ts:1449 | INLINED view_syncer.rs sync_query_pipeline_set | 📌 unchanged-hash arm no-ops; changed hash rehydrates (pinned by test) |
+| `#processTransformedCustomQueries` | services/view-syncer/view-syncer.ts:1696 | `CustomTransformed` custom_queries/transform_query.rs:132 | 🔁 rename 0.50 |
+| `#sendQueryTransformErrorToClients` | services/view-syncer/view-syncer.ts:1728 | INLINED view_syncer.rs (:7075) transform_errors fan-out | 📌 batch + whole-batch failure arms |
+| `#addQueryMaterializationServerMetric` | services/view-syncer/view-syncer.ts:1773 | N/A — InspectorDelegate enrichment | 📌 inspect handler returns empty TDigests; status doc-cited there |
+| `#findQueryCoverageShadowHit` | services/view-syncer/view-syncer.ts:1781 | `QueryCoverageShadowHit` services/view_syncer/query_covering.rs:50 | 🔁 rename 0.80 |
+| `#logQueryCoverageShadowSummary` | services/view-syncer/view-syncer.ts:1805 | services/view_syncer/query_covering.rs (:60) | 📌 doc-cited |
+| `#syncQueryPipelineSet` | services/view-syncer/view-syncer.ts:1872 | `sync_query_pipeline_set` services/view_syncer/view_syncer.rs:7091 | ✅ exact |
+| `#checkForThrashing` | services/view-syncer/view-syncer.ts:2121 | `check_for_thrashing` services/view_syncer/view_syncer.rs:1245 | ✅ exact |
+| `#addAndRemoveQueries` | services/view-syncer/view-syncer.ts:2151 | INLINED view_syncer.rs sync_query_pipeline_set | 📌 add/remove arms of the pipeline-set sync |
+| `#catchupClients` | services/view-syncer/view-syncer.ts:2390 | `catchup_clients` services/view_syncer/view_syncer.rs:7476 | ✅ exact |
+| `#processChanges` | services/view-syncer/view-syncer.ts:2472 | INLINED view_syncer.rs advance path (CROSS-CRATE change_processor) | 📌 doc-cited |
+| `#advancePipelines` | services/view-syncer/view-syncer.ts:2567 | view_syncer.rs (:7321) advance loop | 📌 doc-cited |
+| `#runBackgroundRetransform` | services/view-syncer/view-syncer.ts:2668 | view_syncer.rs (:1431) | 📌 doc-cited |
+| `#failMaintenanceConnection` | services/view-syncer/view-syncer.ts:2786 | view_syncer.rs (:1327) | 📌 doc-cited |
+| `#cleanup` | services/view-syncer/view-syncer.ts:2810 | view_syncer.rs Drop teardown + engine destroy | 📌 I-4 teardown |
 | `markInitialized` | services/view-syncer/view-syncer.ts:2838 | view_syncer.rs ViewSyncerService.terminal | 📌 init-state flag; test helper dropped |
 | `yieldProcess` | services/view-syncer/view-syncer.ts:2861 | N/A | 📌 tokio async yield; no global-lock setImmediate |
 | `contentsAndVersion` | services/view-syncer/view-syncer.ts:2865 | view_syncer.rs engine seat (strip _0_version) | 📌 inlined |
 | `checkClientAndCVRVersions` | services/view-syncer/view-syncer.ts:2875 | `check_client_and_cvr_versions` services/view_syncer/view_syncer.rs:90 | ✅ exact |
 | `isTransformFailedError` | services/view-syncer/view-syncer.ts:2897 | `TransformFailedHttpBody` protocol/error.rs:82 | 🔁 rename 0.40 |
 | `expired` | services/view-syncer/view-syncer.ts:2908 | view_syncer.rs remove_expired_queries | 📌 TTL/inactivation expiry |
-| `hasExpiredQueries` | services/view-syncer/view-syncer.ts:2933 | — | 🟥 UNRESOLVED |
+| `hasExpiredQueries` | services/view-syncer/view-syncer.ts:2933 | `remove_expired_queries` services/view_syncer/view_syncer.rs:7920 | 🔁 rename 0.50 |
 | `TimeSliceTimer` | services/view-syncer/view-syncer.ts:2943 | — | 🟥 UNRESOLVED |
 | `start` | services/view-syncer/view-syncer.ts:2952 | view_syncer.rs ensure_cvr/ViewSyncerService init | 📌 CVR load + ttl seed |
 | `startWithoutYielding` | services/view-syncer/view-syncer.ts:2959 | N/A | 📌 no setImmediate; sync Instant::now start |
+| `#startLap` | services/view-syncer/view-syncer.ts:2971 | N/A — TS lock-lap CPU metric; CG serial executor (I-1) replaces the lock | 📌 lap timing not ported (observability) |
 | `elapsedLap` | services/view-syncer/view-syncer.ts:2976 | N/A | 📌 per-lap timing via Instant::elapsed() inline |
+| `#stopLap` | services/view-syncer/view-syncer.ts:2981 | N/A — TS lock-lap CPU metric; CG serial executor (I-1) replaces the lock | 📌 lap timing not ported (observability) |
 | `totalElapsed` | services/view-syncer/view-syncer.ts:2997 | N/A | 📌 inline Instant::elapsed accumulation |
 | `ConnectParams` | workers/connect-params.ts:9 | `ConnectParams` workers/connect_params.rs:10 | ✅ exact |
 | `normalizeHeaders` | workers/connect-params.ts:32 | ws_server.rs (dup-header join) | 📌 header normalization |
@@ -815,6 +909,12 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `Connection` | workers/connection.ts:78 | `Connection` workers/connection.rs:59 | ✅ exact |
 | `close` | workers/connection.ts:168 | `close` workers/connection.rs:232 | ✅ exact |
 | `handleInitConnection` | workers/connection.ts:190 | `handle_init_connection` workers/connection.rs:292 | ✅ exact |
+| `#handleMessageResult` | workers/connection.ts:234 | workers/connection.rs (:184) handle_result | 📌 doc-cited |
+| `#recordWebSocketError` | workers/connection.ts:282 | `record_websocket_error` observability/metrics.rs:478 | ✅ exact |
+| `#proxyInbound` | workers/connection.ts:289 | workers/connection.rs handle_inbound/forward_inbound | 📌 renamed |
+| `#proxyOutbound` | workers/connection.ts:304 | ws_sink.rs outbound task (I-2) | 📌 per-connection mpsc sender |
+| `#closeWithThrown` | workers/connection.ts:324 | workers/connection.rs close_with_error | 📌 renamed: no thrown objects at the rust WS boundary |
+| `#closeWithError` | workers/connection.ts:331 | `close_with_error` workers/connection.rs:224 | ✅ exact |
 | `send` | workers/connection.ts:348 | `send` workers/connection.rs:249 | ✅ exact |
 | `sendError` | workers/connection.ts:356 | `send_error` workers/connection.rs:257 | ✅ exact |
 | `WebSocketLike` | workers/connection.ts:361 | `DirectWebSocketSink` ws_sink.rs:80 | 🔁 rename 0.40 |
@@ -840,4 +940,7 @@ TS origin files: **24**  ·  Rust files: **63** (37 new)
 | `computeMaxServingLagMs` | workers/syncer.ts:247 | `compute_max_serving_lag_ms` workers/syncer.rs:232 | ✅ exact |
 | `getWebSocketServerOptions` | workers/syncer.ts:255 | ws_server.rs WebSocketConfig | 📌 compression opts |
 | `Syncer` | workers/syncer.ts:288 | `Syncer` workers/syncer.rs:574 | ✅ exact |
+| `#computeServingLagDistribution` | workers/syncer.ts:468 | `compute_serving_lag_distribution` workers/syncer.rs:336 | ✅ exact |
+| `#recordViewSyncerLagSamples` | workers/syncer.ts:489 | `view_syncer_lag_otel` observability/metrics.rs:210 | 🔁 rename 0.50 |
+| `#recordReplicaReadyState` | workers/syncer.ts:496 | `record_replica_ready_state` workers/syncer.rs:305 | ✅ exact |
 | `drain` | workers/syncer.ts:732 | `drain` workers/syncer.rs:1229 | ✅ exact |

@@ -90,10 +90,27 @@ CRATES = {
             # EMPTY_CVR_VERSION → ConcurrentModification branch.
             "checkversion": ("INLINED cvr_store.rs catchup version guard",
                              "plain-SELECT re-check of instances.version vs `current`"),
+            # Private #-methods (surfaced by the #-method extractor fix,
+            # 2026-08-29). Each verified against the rust doc-comment citation.
+            "checkversionandownership": ("INLINED cvr_store.rs flush_internal (:700)",
+                                         "doc-cited version+ownership guard; Err rolls back tx"),
+            "deleteunreferencedrow": ("change_processor.rs delete_unreferenced_rows",
+                                      "renamed plural + relocated (doc-cited :201)"),
+            "ensureloaded": ("INLINED row_record_cache.rs (:239)", "doc-cited lazy load"),
+            "flushdesires": ("INLINED cvr_store.rs flush_internal desires upsert (:959)",
+                             "doc-cited"),
+            "flushqueries": ("INLINED cvr_store.rs flush_internal queries upsert (:835)",
+                             "doc-cited"),
+            "lookuprowsforexecutedandremovedqueries": ("INLINED cvr.rs (:1199)", "doc-cited"),
+            "updatequeryfields": ("INLINED cvr_store.rs queries json_to_recordset upsert",
+                                  "patchVersion/transformationHash/-Version columns"),
         },
         # 2026-08-29 first pin (was unenforced): 3 = census constants +
         # recordSyncFlushStats in otel_metrics.rs + seq_replay SCHEMA copy.
-        "max_misfiled": 3,
+        # 3→5 same day: the #-method extractor surfaced #recordLoad and
+        # #recordAsyncFlushStats — same sanctioned otel_metrics.rs counter
+        # family as recordSyncFlushStats (infra_rust).
+        "max_misfiled": 5,
     },
     "ivm": {
         "rust_dir": "packages/rust-ivm/src",
@@ -201,12 +218,39 @@ CRATES = {
             "pinned": ("planner/runtime.rs", "method"),
             "delete": ("array_view.rs Vec::remove", "inlined"),
             "unreachable": ("Rust unreachable!() macro", "idiom"),
+            # Private #-methods (surfaced by the #-method extractor fix,
+            # 2026-08-29). Verified against doc citations / mirror-file greps.
+            "disconnect": ("engine/mod.rs (:1591)", "doc-cited"),
+            "fetchchunked": ("INLINED ivm/flipped_join.rs chunked IN() fetch",
+                             "get_multi_constraint_chunk_size + chunk loop"),
+            "fetchmulti": ("fetch_batched (batched multi-constraint fetch)", "renamed"),
+            "firelistener": ("INLINED ivm/array_view.rs flush notify", "listeners Vec"),
+            "firelisteners": ("INLINED ivm/array_view.rs flush notify", "listeners Vec"),
+            "generatewithfilter": ("INLINED ivm/source.rs fetch filter arm",
+                                   "generator → iterator"),
+            "getorcreateindex": ("ivm/source.rs (:847)", "doc-cited"),
+            "getprimaryindex": ("INLINED ivm/source.rs primary_key()/re-key",
+                                "restructured: source keyed on PK, no index registry"),
+            "getstart": ("ivm/skip.rs (:83)", "doc-cited"),
+            "indexof": ("ivm/constraint.rs find_index_for_columns", "renamed"),
+            "log": ("ivm/snitch.rs log_message", "renamed — bare `log` is ambiguous"),
+            "restoreconnections": ("planner/planner_graph.rs restore_planning_snapshot",
+                                   "snapshot capture/restore restructure"),
+            "restorefannodes": ("planner/planner_graph.rs restore_planning_snapshot",
+                                "snapshot capture/restore restructure"),
+            "restorejoins": ("planner/planner_graph.rs restore_planning_snapshot",
+                             "snapshot capture/restore restructure"),
+            "validatesnapshotshape": ("planner/planner_graph.rs typed PlanState",
+                                      "shape validation is the type system's job in rust"),
+            "yieldparentwithoverlay": ("ivm/flipped_join.rs generate_with_overlay_no_yield",
+                                       "renamed (no coop yield)"),
         },
         # 2026-08-29 first pin (was unenforced): 74 = the enum-shim/type-file
         # folds (change-type-enum → change.rs family), the sanctioned
         # memory-source → source.rs/table_source.rs split, and common-name
         # collision remainders with no mirror pair on either side.
-        "max_misfiled": 74,
+        # 74→71 same day: mid-file-test-mod skip fix re-bound 3 to mirrors.
+        "max_misfiled": 71,
     },
     "syncer": {
         "rust_dir": "packages/rust-syncer/src",
@@ -231,7 +275,12 @@ CRATES = {
         # 2026-08-29 ratcheted 26→25 after mirror-aware occurrence binding:
         # the remainder is census constants + genuinely relocated fns
         # (is_admin_password_valid in inspect_handler.rs vs config/, #163).
-        "max_misfiled": 25,
+        # 25→30 same day: the #-method + mid-file-test-mod extractor fixes
+        # surfaced 5 previously-INVISIBLE bindings — 2 real metric-fn
+        # relocations (#recordWebSocketError, #recordViewSyncerLagSamples →
+        # observability/metrics.rs; #163 family) + 3 common-name fuzzy
+        # collisions (#push/fetch/reset). Growth is new visibility, not drift.
+        "max_misfiled": 30,
         # rust-syncer replaces the entire TS syncer WORKER process: the WS
         # connection lifecycle (workers/), the view-syncer serving loop +
         # pipeline driver (services/view-syncer/), the read-permission + JWT auth
@@ -390,6 +439,92 @@ CRATES = {
                        "RowChange streaming lives in the ivm crate's Streamer"),
             "toadds": ("INLINED — rust-ivm engine hydrate emits Adds directly",
                        "no Node→AddChange adaptor needed"),
+            "accumulate": ("CROSS-CRATE rust-ivm Streamer accumulated buffer",
+                           "start/stop folded into the Streamer lifecycle"),
+            # Private #-methods (surfaced by the #-method extractor fix,
+            # 2026-08-29). Verified against rust doc citations / mirror greps.
+            # `#checkForThrashing` is NOT here: it was a REAL gap, ported
+            # 2026-08-29 (check_for_thrashing, view_syncer.rs) — exact-binds.
+            "addandremovequeries": ("INLINED view_syncer.rs sync_query_pipeline_set",
+                                    "add/remove arms of the pipeline-set sync"),
+            "addqueryimpl": ("CROSS-CRATE rust-ivm engine add_queries/add_queries_streaming",
+                             "pipeline add"),
+            "addquerymaterializationservermetric": ("N/A — InspectorDelegate enrichment",
+                                                    "inspect handler returns empty TDigests; status doc-cited there"),
+            "advancepipelines": ("view_syncer.rs (:7321) advance loop", "doc-cited"),
+            "checkforshutdownconditionsinlock": ("view_syncer.rs (:2918)",
+                                                 "doc-cited; the lock is the CG serial executor (I-1)"),
+            "cleanup": ("view_syncer.rs Drop teardown + engine destroy", "I-4 teardown"),
+            "closewiththrown": ("workers/connection.rs close_with_error",
+                                "renamed: no thrown objects at the rust WS boundary"),
+            "createstorage": ("CROSS-CRATE rust-ivm builder (:49) + memory_storage",
+                              "operator storage"),
+            "deleteclientduetodisconnect": ("view_syncer.rs (:2332)", "doc-cited"),
+            "destroypipeline": ("view_syncer.rs pipeline teardown + engine remove_query",
+                                "sync_query_pipeline_set removes"),
+            "ensurecostmodelexistsifenabled": ("CROSS-CRATE rust-ivm engine ensure_cost_model",
+                                               "planner cost model (2026-08-29 wiring)"),
+            "faildownstream": ("services/mutagen/pusher.rs drainer-failure PushFailed frame",
+                               "relay-hop failure path"),
+            "failmaintenanceconnection": ("view_syncer.rs (:1327)", "doc-cited"),
+            "fanoutresponses": ("N/A — Option-A relay (I-3): push results ride CVR pokes",
+                                "no per-connection response fan-out by design"),
+            "flushupdater": ("view_syncer.rs (:2882) flush_ops_to_store/flush_to_store",
+                             "doc-cited"),
+            "getclients": ("view_syncer.rs (:1936) active_clients", "doc-cited"),
+            "getsource": ("CROSS-CRATE rust-ivm engine (:372) + source (:96)", "doc-cited"),
+            "handlemessageresult": ("workers/connection.rs (:184) handle_result", "doc-cited"),
+            "hydrateunchangedqueries": ("INLINED view_syncer.rs sync_query_pipeline_set",
+                                        "unchanged-hash arm no-ops; changed hash rehydrates (pinned by test)"),
+            "initandresetcommon": ("services/view_syncer/pipeline_driver.rs reset_pipelines_and_rehydrate",
+                                   "init/reset common path"),
+            "logquerycoverageshadowsummary": ("services/view_syncer/query_covering.rs (:60)",
+                                              "doc-cited"),
+            "logquerypipelinelifecycle": ("N/A — logging-only",
+                                          "rust uses tracing at the pipeline call sites"),
+            "processchanges": ("INLINED view_syncer.rs advance path (CROSS-CRATE change_processor)",
+                               "doc-cited"),
+            "processpush": ("services/mutagen/pusher.rs drainer loop + combine_pushes",
+                            "one-at-a-time FIFO drain"),
+            "proxyinbound": ("workers/connection.rs handle_inbound/forward_inbound", "renamed"),
+            "proxyoutbound": ("ws_sink.rs outbound task (I-2)", "per-connection mpsc sender"),
+            "removeconnection": ("services/view_syncer/connection_context_manager.rs remove_connection_internal",
+                                 "renamed (_internal suffix)"),
+            "requesttransform": ("custom_queries/transform_query.rs post_transform", "renamed"),
+            "resolvescalarsubqueries": ("CROSS-CRATE rust-ivm sqlite/resolve_scalar_subqueries + engine (:1395)",
+                                        "doc-cited"),
+            "runbackgroundretransform": ("view_syncer.rs (:1431)", "doc-cited"),
+            "runinlockforclient": ("view_syncer.rs (:4465) — CG serial executor replaces the TS #lock (I-1)",
+                                   "doc-cited"),
+            "runinlockwithcvr": ("INLINED view_syncer.rs CG-thread handlers + lazy CVR load",
+                                 "the #lock dissolved into the serial executor (I-1)"),
+            "sendquerytransformerrortoclients": ("INLINED view_syncer.rs (:7075) transform_errors fan-out",
+                                                 "batch + whole-batch failure arms"),
+            "servedversion": ("services/view_syncer/e2e_serving_lag.rs (:75)", "doc-cited"),
+            "setgroup": ("INLINED services/view_syncer/connection_context_manager.rs GroupAuthState",
+                         "group-state restructure"),
+            "shouldadvanceyieldmaybeabortadvance": ("CROSS-CRATE rust-ivm advance_gate", "doc-cited"),
+            "shouldyield": ("CROSS-CRATE rust-ivm advance_gate yield decision",
+                            "coop-yield ported to the gate"),
+            "startaccumulating": ("CROSS-CRATE rust-ivm Streamer accumulated buffer",
+                                  "folded into Streamer lifecycle"),
+            "stopaccumulating": ("CROSS-CRATE rust-ivm Streamer accumulated buffer",
+                                 "folded into Streamer lifecycle"),
+            "startlap": ("N/A — TS lock-lap CPU metric; CG serial executor (I-1) replaces the lock",
+                         "lap timing not ported (observability)"),
+            "stoplap": ("N/A — TS lock-lap CPU metric; CG serial executor (I-1) replaces the lock",
+                        "lap timing not ported (observability)"),
+            "stopauthmaintenancetimer": ("INLINED view_syncer.rs next_auth_maintenance_at=None",
+                                         "timer → deadline field (arm_auth_maintenance)"),
+            "streamchanges": ("CROSS-CRATE rust-ivm streamer (:96)", "doc-cited"),
+            "streamnodes": ("CROSS-CRATE rust-ivm streamer (:159)", "doc-cited"),
+            "throwprojectedadvancementreset": ("CROSS-CRATE rust-ivm advance_gate reset errors",
+                                               "advancement-timeout reset (task #145)"),
+            "throwslowcurrentchangereset": ("CROSS-CRATE rust-ivm advance_gate reset errors",
+                                            "slow-current-change reset"),
+            "trackrowsetsignatures": ("CROSS-CRATE rust-ivm engine (:80) + rust-cvr row_set_signature",
+                                      "doc-cited"),
+            "updatecvrconfig": ("view_syncer.rs (:6905) handle_config_update", "doc-cited"),
         },
     },
 }
@@ -464,22 +599,25 @@ def extract_rust(path):
     out = []
     with open(path, encoding="utf-8") as f:
         lines = f.readlines()
-    skip_depth = 0          # >0 => currently inside a test module
+    skip_close = None       # closing-brace line ending the current test module
     for i, line in enumerate(lines, 1):
-        if skip_depth > 0:
-            skip_depth += line.count("{") - line.count("}")
+        if skip_close is not None:
+            if line.rstrip() == skip_close:
+                skip_close = None
             continue
         if RUST_TEST_MOD.match(line):
-            # Enter skip: depth = net braces opened on this line. The old
-            # `1 + count` DOUBLE-counted `mod tests {` (depth 2), so the skip
-            # never unwound and every symbol AFTER a mid-file test module was
-            # dropped (how `workers/syncer.rs`'s `Syncer` went unextracted and
-            # TS `Syncer` fuzzy-bound `SyncerConfig`). rustfmt keeps `{` on the
-            # `mod` line, so net-braces is exact; `mod tests;` (no body here)
-            # opens nothing and is skipped as depth 0.
-            depth = line.count("{") - line.count("}")
-            if depth > 0:
-                skip_depth = depth
+            # Skip to the module's closing brace AT THE SAME INDENT. Brace
+            # COUNTING desyncs on braces inside string literals/comments — an
+            # unbalanced `}` in a test-fixture string ate everything after
+            # view_syncer.rs's MID-FILE tests mod, hiding ~3000 lines of the
+            # second production `impl ViewSyncerService` block (catchup_clients,
+            # sync_query_pipeline_set, …) from the ledger. rustfmt puts the
+            # closing brace alone at the mod's own indent and nothing inside
+            # the body sits at that indent, so the indent anchor is exact.
+            # `mod tests;` (no body) and one-line `mod tests {}` skip nothing.
+            if "{" in line and not line.rstrip().endswith("}"):
+                indent = re.match(r"^(\s*)", line).group(1)
+                skip_close = indent + "}"
             continue
         m = RUST_FN.match(line)
         if m:
@@ -507,10 +645,13 @@ TS_TOP = re.compile(
 )
 TS_PLAIN_FN = re.compile(r"^(?:async\s+)?function(?:\s*\*)?\s+(\w+)")
 # indented class member: `  foo(`, `  async foo(`, `  foo<T>(`, `  static foo(`,
-# generator `  *foo(` / `  async *foo(`
+# generator `  *foo(` / `  async *foo(`, private `  #foo(` (rule 2: private TS
+# methods port 1:1 under the transliterated name; canon() strips the `#`).
+# The name-followed-by-`(`/`<` requirement keeps field decls (`  #input;`,
+# `  #output: T = x;`) out.
 TS_METHOD = re.compile(
     r"^  (?:public |private |protected |static |readonly |async |get |set |override )*"
-    r"(?:\*\s*)?(\w+)\s*[(<]"
+    r"(?:\*\s*)?(#?\w+)\s*[(<]"
 )
 TS_METHOD_ARROW = re.compile(
     r"^  (?:public |private |protected |static |readonly )*"
