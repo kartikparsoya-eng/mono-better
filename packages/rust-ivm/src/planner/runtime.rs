@@ -5,7 +5,9 @@
 //! decisions the TS driver applies to its own AST (no AST re-serialization).
 //!
 //! ## Cost models
-//! The DEFAULT production model is the scanstatus/stat-fanout model
+//! The production model — selected by `Engine::ensure_cost_model`
+//! (engine/mod.rs), which is what the rust-syncer's `plan_ast` path actually
+//! uses — is the scanstatus/stat-fanout model
 //! (`crate::sqlite::sqlite_cost_model::create_sqlite_cost_model`) — the exact
 //! port of TS `createSQLiteCostModel`: filter-aware probe SQL prepared on the
 //! snapshot connection, `SQLITE_SCANSTAT_EST` row estimates, stat4/stat1
@@ -14,8 +16,13 @@
 //!
 //! `create_snapshot_cost_model` here is the LEGACY row-count model
 //! (filter-blind `COUNT(*)`; constrained read ≈ 1 row; fanout 1.0/none),
-//! selectable via `RUST_IVM_PLANNER_COST_MODEL=count` as an escape hatch and
-//! still used by the mock-cost oracle tests.
+//! selectable via `RUST_IVM_PLANNER_COST_MODEL=count` as an escape hatch, the
+//! loud fallback when scanstatus/specs are unavailable, and still used by the
+//! mock-cost oracle tests. NOTE (2026-08-29): the syncer's `Engine::plan_ast`
+//! silently used THIS model in prod while this header claimed scanstatus was
+//! the default — the cost-model gap behind the 144s flipped-join `tickets`
+//! hydrate. `engine_planner_wiring_test.rs` now pins the engine-level
+//! selection.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

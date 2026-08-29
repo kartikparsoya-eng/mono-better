@@ -404,6 +404,17 @@ pub struct Engine {
     /// connection is present, `plan_ast` runs the ported planner so flips match
     /// TS. `None` (most unit tests) ⇒ no planning, unchanged legacy behavior.
     cost_model_conn: Option<Rc<RefCell<rusqlite::Connection>>>,
+    /// Visible (zql) column specs per table for the scanstatus cost model's
+    /// probe SQL — the analog of TS `PipelineDriver.#tableSpecs` passed to
+    /// `createSQLiteCostModel(db, tableSpecs)` (pipeline-driver.ts:436).
+    /// Pre-sorted once per schema (see `prepare_table_specs`).
+    cost_model_specs: Option<Rc<crate::sqlite::sqlite_cost_model::PreparedTableSpecs>>,
+    /// Lazily-built scanstatus cost model, cached for the engine's life — the
+    /// analog of TS `PipelineDriver.#costModels` (a WeakMap keyed by snapshot
+    /// db; TS gets a fresh db handle per snapshot advance, rust keeps ONE wal2
+    /// connection whose data advances in place, so engine-lifetime caching is
+    /// the equivalent scope). Invalidated when the conn or specs change.
+    cached_cost_model: Option<crate::planner::ConnectionCostModel>,
 }
 
 impl Engine {
@@ -420,41 +431,145 @@ impl Engine {
             _next_storage_id: 0,
             cancellation_token: CancellationToken::new(),
             cost_model_conn: None,
+            cost_model_specs: None,
+            cached_cost_model: None,
         }
     }
 
     /// Enable query-flip planning (port parity with TS `buildPipeline` →
-    /// `planQuery`). `conn` is used only to `COUNT(*)` table sizes for the cost
-    /// model; the planner then annotates each query AST's correlated-subquery
-    /// `flip` before `build_pipeline`. Without this, exists-in-OR is built
-    /// non-flipped and over-emits WHERE-EXISTS backing rows (ART G8).
+    /// `planQuery`). `conn` backs the scanstatus cost model's probe statements
+    /// (TS `createSQLiteCostModel(db, ...)`); the planner then annotates each
+    /// query AST's correlated-subquery `flip` before `build_pipeline`. Without
+    /// this, exists-in-OR is built non-flipped and over-emits WHERE-EXISTS
+    /// backing rows (ART G8). Pair with [`Self::set_cost_model_table_specs`] —
+    /// conn without specs degrades (loudly) to the legacy COUNT(*) model.
     pub fn set_cost_model_conn(&mut self, conn: Rc<RefCell<rusqlite::Connection>>) {
         self.cost_model_conn = Some(conn);
+        self.cached_cost_model = None;
+    }
+
+    /// Install the visible-column specs the scanstatus cost model probes with —
+    /// the analog of TS `PipelineDriver.#tableSpecs` in
+    /// `createSQLiteCostModel(db, this.#tableSpecs)` (pipeline-driver.ts:436).
+    pub fn set_cost_model_table_specs(
+        &mut self,
+        specs: HashMap<String, HashMap<String, crate::ivm::schema::ColumnType>>,
+    ) {
+        self.cost_model_specs = Some(Rc::new(
+            crate::sqlite::sqlite_cost_model::prepare_table_specs(specs),
+        ));
+        self.cached_cost_model = None;
+    }
+
+    /// Build (or reuse) the production cost model. Selection, in order:
+    /// 1. `RUST_IVM_PLANNER_COST_MODEL=count` → legacy COUNT(*) escape hatch
+    ///    (the documented "planner picking bad strategies" knob, runtime.rs);
+    /// 2. scanstatus/stat-fanout model — the port of TS `createSQLiteCostModel`,
+    ///    what TS ALWAYS plans with (pipeline-driver.ts:436);
+    /// 3. loud fallback to COUNT(*) when specs are missing (MemorySource tests)
+    ///    or the linked SQLite lacks SQLITE_ENABLE_STMT_SCANSTATUS.
+    ///
+    /// The 2026-08-29 prod 144s `tickets` hydrate was this exact seam: the
+    /// engine planned with the filter-blind COUNT model (constrained fetch ≈ 1
+    /// row, fanout 1.0), flipped a join whose real parent-side fanout was tens
+    /// of thousands of rows, and the flipped-join batch fetch ran 44.8s per
+    /// batch. TS on the same query plans with scanstatus and does not flip.
+    fn ensure_cost_model(
+        &mut self,
+        conn: &Rc<RefCell<rusqlite::Connection>>,
+        cache: &crate::planner::PlanCountCache,
+    ) -> crate::planner::ConnectionCostModel {
+        let use_count = std::env::var("RUST_IVM_PLANNER_COST_MODEL").as_deref() == Ok("count");
+        if !use_count {
+            if let Some(model) = &self.cached_cost_model {
+                return model.clone();
+            }
+            if let Some(specs) = &self.cost_model_specs {
+                match crate::sqlite::sqlite_cost_model::create_sqlite_cost_model_prepared(
+                    conn.clone(),
+                    specs.clone(),
+                ) {
+                    Ok(model) => {
+                        self.cached_cost_model = Some(model.clone());
+                        return model;
+                    }
+                    Err(e) => {
+                        // Explicit, once-per-engine loud fallback — never
+                        // estimate blind silently (sqlite_cost_model.rs
+                        // contract).
+                        eprintln!(
+                            "WARNING: planner falling back to COUNT(*) cost \
+                             model (TS plans with scanstatus): {e}"
+                        );
+                    }
+                }
+            } else {
+                eprintln!(
+                    "WARNING: planner cost-model conn set without table specs; \
+                     falling back to COUNT(*) cost model (TS plans with \
+                     scanstatus — call set_cost_model_table_specs)"
+                );
+            }
+            // Cache the fallback so the warning fires once per engine, not
+            // once per query.
+            let model = crate::planner::create_snapshot_cost_model_cached(
+                conn.clone(),
+                "batch",
+                cache.clone(),
+            );
+            self.cached_cost_model = Some(model.clone());
+            return model;
+        }
+        // Escape hatch: fresh per batch like the pre-scanstatus wiring
+        // (version key "batch"; the shared cache de-dups COUNT(*)s).
+        crate::planner::create_snapshot_cost_model_cached(conn.clone(), "batch", cache.clone())
     }
 
     /// Plan `ast` (assign `flip`s via the ported cost-based planner) when a
     /// cost-model connection is configured; otherwise return it unchanged.
     /// Mirror of TS `buildPipeline`'s `if (costModel) ast = planQuery(...)`.
     ///
-    /// `cache` is a per-hydration-batch count cache: every query in one
-    /// `add_queries_streaming` call shares it, so each table's `COUNT(*)` runs
-    /// once for the whole batch rather than once per query (the batch is at a
-    /// single replica version, so the counts are consistent). A fresh cache per
-    /// batch avoids any cross-hydration staleness.
-    fn plan_ast(&self, ast: &Ast, cache: &crate::planner::PlanCountCache) -> Ast {
-        match &self.cost_model_conn {
-            Some(conn) => {
-                // Constant version: the cache is fresh per batch, so the first
-                // query populates it and the rest reuse it.
-                let model = crate::planner::create_snapshot_cost_model_cached(
-                    conn.clone(),
-                    "batch",
-                    cache.clone(),
-                );
-                crate::planner::plan_query(ast, model)
+    /// A scanstatus probe interrupted by the watchdog (`sqlite3_interrupt`
+    /// racing planning) unwinds with the typed `CostProbeInterrupted` payload;
+    /// like the napi-era caller, degrade to planning WITHOUT flips instead of
+    /// letting the panic tear down the client group.
+    fn plan_ast(&mut self, ast: &Ast, cache: &crate::planner::PlanCountCache) -> Ast {
+        let Some(conn) = self.cost_model_conn.clone() else {
+            return ast.clone();
+        };
+        let model = self.ensure_cost_model(&conn, cache);
+        let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::planner::plan_query(ast, model)
+        }));
+        match planned {
+            Ok(planned) => planned,
+            Err(payload) => {
+                if let Some(interrupted) =
+                    payload.downcast_ref::<crate::sqlite::sqlite_cost_model::CostProbeInterrupted>()
+                {
+                    eprintln!(
+                        "planner probe interrupted; building without flips: {}",
+                        interrupted.0
+                    );
+                    ast.clone()
+                } else {
+                    std::panic::resume_unwind(payload)
+                }
             }
-            None => ast.clone(),
         }
+    }
+
+    /// Rust-only test/inspection hook (no TS twin — TS pins planner behavior
+    /// through PipelineDriver tests; the standalone engine needs direct access
+    /// to the flip decisions `plan_ast` actually produces, model selection
+    /// included). Returns the ordered flips per `flip_order`.
+    #[doc(hidden)]
+    pub fn planned_flips_for_test(&mut self, ast_json: &serde_json::Value) -> Vec<Option<bool>> {
+        let ast = crate::replay::json_to_ast(ast_json);
+        let cache: crate::planner::PlanCountCache =
+            Rc::new(RefCell::new((String::new(), HashMap::new())));
+        let planned = self.plan_ast(&ast, &cache);
+        crate::planner::flip_order(&planned)
     }
 
     /// Install the client-declared primary keys (TS `buildPrimaryKeys(clientSchema)`)

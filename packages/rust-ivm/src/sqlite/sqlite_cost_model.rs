@@ -457,7 +457,7 @@ pub fn create_sqlite_cost_model_prepared(
 
     let fanout_estimator = Rc::new(SQLiteStatFanout::new(conn.clone()));
 
-    // WEAK capture: the returned model is cached on EngineState for the engine's
+    // WEAK capture: the returned model is cached on Engine.cached_cost_model for the engine's
     // life. Moving a STRONG `conn` into this closure would keep the snapshot
     // connection's Rc::strong_count > 1 at Snapshot::drop, skipping the explicit
     // close and leaking the connection (schema/stat4/statement-cache =

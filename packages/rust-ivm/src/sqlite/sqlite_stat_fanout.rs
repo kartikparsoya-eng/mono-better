@@ -51,7 +51,7 @@ pub const DEFAULT_FANOUT: f64 = 3.0;
 /// Port of TS `SQLiteStatFanout` (sqlite-stat-fanout.ts:89).
 pub struct SQLiteStatFanout {
     /// WEAK ref to the snapshot connection. The cost model (which owns this
-    /// fanout) is cached on `EngineState.cost_model_cache` for the engine's
+    /// fanout) is cached on `Engine.cached_cost_model` for the engine's
     /// life; a STRONG ref here would keep the snapshot connection's
     /// `Rc::strong_count > 1` at `Snapshot::drop`, which skips the explicit
     /// `sqlite3_close` (snapshotter.rs:295) and leaks the whole connection —
