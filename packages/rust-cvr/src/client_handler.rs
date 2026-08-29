@@ -636,17 +636,24 @@ impl PokeHandler {
                 });
             }
             RowPatch::Del { id } => {
+                // Port of TS client-handler.ts:267-284: `assert(typeof
+                // clientID === 'string', 'client id must be a string')` covers
+                // missing AND wrong-typed keys with ONE message; `Number(
+                // mutationID)` + `assert(finite && id >= 0, 'mutation id must
+                // be a finite number')` REJECTS a negative id (previously the
+                // rust arm accepted it — divergence).
                 let client_id = id
                     .row_key
                     .get("clientID")
                     .and_then(|v| v.as_str())
-                    .ok_or("clientID missing in mutation rowKey")?
+                    .ok_or("client id must be a string")?
                     .to_string();
                 let mutation_id = id
                     .row_key
                     .get("mutationID")
                     .and_then(|v| v.as_i64())
-                    .ok_or("mutationID missing in rowKey")?;
+                    .filter(|id| *id >= 0)
+                    .ok_or("mutation id must be a finite number")?;
 
                 patches.push(MutationPatchEntry {
                     op: "del".to_string(),
@@ -1577,6 +1584,95 @@ mod tests {
         assert_eq!(mp[0]["mutation"]["id"]["clientID"], "clientA");
         assert_eq!(mp[0]["mutation"]["id"]["id"], 5);
         assert_eq!(mp[0]["mutation"]["result"]["ok"], true);
+    }
+
+    fn make_mutation_del_patch(row_key: Value) -> PatchToVersion {
+        PatchToVersion {
+            patch: Patch::Row(RowPatch::Del {
+                id: RowID {
+                    schema: "s".to_string(),
+                    table: "app_0.mutations".to_string(),
+                    row_key: row_key.as_object().unwrap().clone(),
+                },
+            }),
+            to_version: CVRVersion {
+                state_version: "v2".to_string(),
+                config_version: Some(1),
+            },
+        }
+    }
+
+    /// TS-golden for the mutationsPatch DEL arm (client-handler.ts:267-284):
+    /// `{op:'del', id:{clientID, id}}` — byte-exact entry shape.
+    #[test]
+    fn test_mutations_patch_del_shape() {
+        let (handler, messages) = make_handler();
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+        poke.add_patch(&make_mutation_del_patch(serde_json::json!({
+            "clientGroupID": "cg1",
+            "clientID": "clientA",
+            "mutationID": 7,
+        })))
+        .unwrap();
+        poke.end(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: Some(1),
+        })
+        .unwrap();
+        let msgs = messages.lock().unwrap();
+        let mp = msgs[1][1].get("mutationsPatch").unwrap();
+        assert_eq!(
+            mp[0],
+            serde_json::json!({"op": "del", "id": {"clientID": "clientA", "id": 7}}),
+            "del entry must match the TS shape byte-exactly"
+        );
+    }
+
+    /// Port-parity for the TS del-arm asserts (client-handler.ts:268-277):
+    /// a missing/non-string clientID → 'client id must be a string'; a
+    /// missing or NEGATIVE mutationID → 'mutation id must be a finite
+    /// number'. The negative case pins the `id >= 0` guard the rust arm
+    /// previously lacked (proven failing before the fix).
+    #[test]
+    fn test_mutations_patch_del_error_arms() {
+        let (handler, _messages) = make_handler();
+        let poke = handler.start_poke(CVRVersion {
+            state_version: "v2".to_string(),
+            config_version: None,
+        });
+
+        let err = poke
+            .add_patch(&make_mutation_del_patch(
+                serde_json::json!({"mutationID": 7}),
+            ))
+            .unwrap_err();
+        assert!(err.contains("client id must be a string"), "got: {err}");
+
+        let err = poke
+            .add_patch(&make_mutation_del_patch(
+                serde_json::json!({"clientID": "clientA"}),
+            ))
+            .unwrap_err();
+        assert!(
+            err.contains("mutation id must be a finite number"),
+            "got: {err}"
+        );
+
+        // TS: `assert(!Number.isNaN(id) && Number.isFinite(id) && id >= 0)`
+        // — a NEGATIVE mutation id must fail the del, exactly like TS.
+        let err = poke
+            .add_patch(&make_mutation_del_patch(serde_json::json!({
+                "clientID": "clientA",
+                "mutationID": -1,
+            })))
+            .unwrap_err();
+        assert!(
+            err.contains("mutation id must be a finite number"),
+            "got: {err}"
+        );
     }
 
     #[test]

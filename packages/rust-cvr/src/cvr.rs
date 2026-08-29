@@ -2063,6 +2063,44 @@ mod updater_tests {
         );
     }
 
+    /// Port-parity for `updatedVersion()` (TS cvr.ts:789 — returns the LIVE
+    /// `_cvr.version`, not a snapshot): before `track_queries` it reflects the
+    /// constructor's stateVersion bump; after `track_queries` it equals the
+    /// version `track_queries` returned (which may carry the lazy
+    /// `ensure_new_version` minor bump). rust-syncer reads it for
+    /// `pokers_version` (view_syncer.rs), so a stale snapshot here would poke
+    /// clients at the wrong cookie.
+    #[test]
+    fn test_updated_version_tracks_live_cvr_version() {
+        let mut cvr = make_test_cvr();
+        cvr.queries.insert(
+            "hash1".to_string(),
+            QueryRecord::Client(ClientQueryRecord {
+                base: BaseQueryRecord {
+                    id: "hash1".to_string(),
+                    transformation_hash: None,
+                    transformation_version: None,
+                    row_set_signature: None,
+                },
+                ast: serde_json::json!({"schema": "s", "table": "t"}),
+                client_state: BTreeMap::new(),
+                patch_version: None,
+            }),
+        );
+
+        let mut updater = make_query_driven_updater(cvr, "v2");
+        let before = updater.updated_version();
+        assert_eq!(before.state_version, "v2");
+        assert!(before.config_version.is_none());
+
+        let (tracked_version, _patches) = updater.track_queries(&[("hash1", "th1")], &[]);
+        assert_eq!(
+            updater.updated_version(),
+            tracked_version,
+            "updated_version must be the LIVE version track_queries advanced to"
+        );
+    }
+
     #[test]
     fn test_track_queries_executed() {
         let mut cvr = make_test_cvr();
