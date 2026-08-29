@@ -97,6 +97,21 @@ Anything not listed here and not STALE/WRONG must match TS.
   The once-per-CG `push_first` cost is NOT part of this exception — it is
   tracked as an open item (task #127), not a design cost.
 
+## D-11 · Hydration flush batch: default 100 vs TS `CURSOR_PAGE_SIZE = 10000` (env-tunable)
+
+- **TS** (`view-syncer.ts:2844`): `#processChanges` flushes the accumulated row
+  batch to the CVR updater + pokers every **10000** rows, hardcoded.
+- **Rust** (`rust-cvr/src/change_processor.rs`): `DEFAULT_CURSOR_PAGE_SIZE = 100`,
+  overridable via **`CVR_CURSOR_PAGE_SIZE`** (invalid/0 → 100). Deliberate
+  (maintainer decision 2026-08-29): a 100-row batch streams poke parts onto the
+  wire ~100× earlier during large hydrates and keeps `updater.received` batches
+  small. The boundary changes only WHEN patches flush into the one open poke —
+  content and ordering are unchanged and the client still applies at pokeEnd,
+  so the G8 diff-oracle surface is unaffected.
+- **Pinned by**: `change_processor.rs` tests `cursor_page_size_env_resolution` +
+  `new_reads_env_and_default_flushes_at_100_rows` (default proven failing at
+  10000 via temp-revert).
+
 ## Minor notes (log/observability-only, not behavior)
 
 - **Error message texts** (F-CVR-STORE-19): `CVRStoreError` kinds map 1:1 to the TS error classes (and `cvr_error_kind` labels match TS `cvrErrorKind` exactly), but two `Display` strings differ — `OwnershipError` prints raw epoch ms where TS prints ISO dates, and `ClientNotFound` carries a "Client not found:" prefix. Log-only.

@@ -20,9 +20,25 @@ use serde_json::{Map, Value};
 
 const ZERO_VERSION_COLUMN_NAME: &str = "_0_version";
 
-// Default matches Go IVM's hydrateChunkSize / advanceChunkSize so the streaming
-// chunk boundary aligns with the CVR flush boundary.
-const DEFAULT_CURSOR_PAGE_SIZE: usize = 10000;
+// Rust-only ops knob (2026-08-29, registered in parity/PARITY-EXCEPTIONS.md):
+// DELIBERATE default divergence from TS `CURSOR_PAGE_SIZE = 10000`
+// (view-syncer.ts:2844). A 100-row batch streams poke parts onto the wire
+// ~100× earlier during large hydrates and keeps `updater.received` batches
+// small (smoother memory/backpressure); the boundary changes WHEN patches
+// flush into the ONE open poke, never their content or order — the client
+// still applies everything at pokeEnd. Override with `CVR_CURSOR_PAGE_SIZE`
+// (invalid or 0 falls back to 100).
+const DEFAULT_CURSOR_PAGE_SIZE: usize = 100;
+
+/// Resolve the batch size from an env value (pure for race-free tests):
+/// unset/garbage/zero → DEFAULT_CURSOR_PAGE_SIZE. Zero must not pass through —
+/// the flush check is `rows.len() % page_size`.
+fn cursor_page_size_from(env_val: Option<&str>) -> usize {
+    env_val
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_CURSOR_PAGE_SIZE)
+}
 
 /// The row-level change kinds `ChangeProcessor` acts on — the subset of the IVM
 /// `ChangeType` that reaches the CVR row path (the streamer only ever emits
@@ -51,7 +67,15 @@ pub struct ChangeProcessor<'a> {
 
 impl<'a> ChangeProcessor<'a> {
     pub fn new(updater: &'a mut CVRQueryDrivenUpdater, pokers: &'a MultiPoker) -> Self {
-        Self::with_page_size(updater, pokers, DEFAULT_CURSOR_PAGE_SIZE)
+        let page_size =
+            cursor_page_size_from(std::env::var("CVR_CURSOR_PAGE_SIZE").ok().as_deref());
+        Self::with_page_size(updater, pokers, page_size)
+    }
+
+    /// The active flush boundary (env-resolved in `new`). Test hook.
+    #[doc(hidden)]
+    pub fn cursor_page_size(&self) -> usize {
+        self.cursor_page_size
     }
 
     pub fn with_page_size(
@@ -300,6 +324,89 @@ mod tests {
             &[],                // removed
         );
         u
+    }
+
+    /// Env resolution for `CVR_CURSOR_PAGE_SIZE` (pure — no process-env
+    /// races): unset/garbage/zero fall back to the 100 default; a valid
+    /// positive integer wins. Also pins the DELIBERATE default divergence
+    /// from TS CURSOR_PAGE_SIZE=10000 (a revert to 10000 fails here).
+    #[test]
+    fn cursor_page_size_env_resolution() {
+        assert_eq!(cursor_page_size_from(None), 100);
+        assert_eq!(cursor_page_size_from(Some("7")), 7);
+        assert_eq!(cursor_page_size_from(Some(" 250 ")), 250);
+        assert_eq!(
+            cursor_page_size_from(Some("0")),
+            100,
+            "0 would panic the modulo check"
+        );
+        assert_eq!(cursor_page_size_from(Some("banana")), 100);
+        assert_eq!(cursor_page_size_from(Some("-5")), 100);
+    }
+
+    /// `new()` must actually READ the env (the wiring, not just the parser),
+    /// and the 100-row DEFAULT must flush mid-hydration (patches reach the
+    /// poker before `finish`; under the old 10000 default nothing flushes
+    /// here). One test on purpose: the env-set window and the default-pin
+    /// construction must not run in parallel threads (process env is global).
+    #[test]
+    fn new_reads_env_and_default_flushes_at_100_rows() {
+        let cvr = make_cvr();
+        let mut updater = make_updater(cvr);
+        let (handler, messages) = make_client_handler();
+        let pokers = MultiPoker::new(
+            &[&handler],
+            CVRVersion {
+                state_version: "00".to_string(),
+                config_version: Some(1),
+            },
+        );
+
+        // SAFETY: test-only env mutation, removed immediately after `new()`.
+        // A huge value so any processor constructed concurrently elsewhere
+        // just never mid-flushes (old-default behavior) during the window.
+        unsafe { std::env::set_var("CVR_CURSOR_PAGE_SIZE", "999983") };
+        let processor = ChangeProcessor::new(&mut updater, &pokers);
+        unsafe { std::env::remove_var("CVR_CURSOR_PAGE_SIZE") };
+        assert_eq!(processor.cursor_page_size(), 999_983, "env wiring");
+        drop(processor);
+
+        let mut processor = ChangeProcessor::new(&mut updater, &pokers);
+        assert_eq!(processor.cursor_page_size(), 100, "default without env");
+
+        // MultiPoker::new already emitted pokeStart; measure growth from here.
+        let baseline = messages.lock().unwrap().len();
+        let existing_rows: RowRecordMap = HashMap::new();
+        for i in 0..100 {
+            let mut row = Map::new();
+            row.insert("id".to_string(), Value::String(format!("row{i}")));
+            row.insert("_0_version".to_string(), Value::String("v1".to_string()));
+            let mut row_key = Map::new();
+            row_key.insert("id".to_string(), Value::String(format!("row{i}")));
+            processor.on_row_change(
+                RowChangeType::Add,
+                "hash1",
+                "t",
+                row_key,
+                Some(row),
+                &existing_rows,
+            );
+            if i < 99 {
+                assert_eq!(
+                    messages.lock().unwrap().len(),
+                    baseline,
+                    "no flush before the boundary (row {i})"
+                );
+            }
+        }
+        let msgs = messages.lock().unwrap();
+        assert!(
+            msgs.iter().any(|m| m[1]
+                .get("rowsPatch")
+                .map(|p| !p.as_array().unwrap().is_empty())
+                .unwrap_or(false)),
+            "the 100th row must flush a rowsPatch mid-hydration"
+        );
     }
 
     #[test]
