@@ -68,8 +68,17 @@ pub trait ViewSyncerDispatch {
 
 /// Trait for the connection context manager interface.
 pub trait ConnContextManagerDispatch: Send + Sync {
-    /// Get connection context, panicking if not found.
-    fn must_get_connection_context(&self, selector: &ConnectionSelector) -> ConnContextInfo;
+    /// Get connection context — MUST semantics: `Err` (the TS
+    /// `mustGetConnectionContext` throw, an `InvalidConnectionRequest`
+    /// ProtocolError) when no context is registered for `selector`. Callers on
+    /// the push/CRUD paths surface the error to the client; they must NEVER
+    /// proceed with a defaulted/empty context — a silently-defaulted
+    /// `auth: None` is how the 2026-08-29 prod relay POSTed pushes with no
+    /// Authorization at all ("No token provided" 401s).
+    fn must_get_connection_context(
+        &self,
+        selector: &ConnectionSelector,
+    ) -> Result<ConnContextInfo, Box<ErrorBody>>;
 
     /// Initialize/update connection from initConnection body.
     fn init_connection(&self, selector: &ConnectionSelector, body: &serde_json::Value);
@@ -79,6 +88,7 @@ pub trait ConnContextManagerDispatch: Send + Sync {
 }
 
 /// Info about a connection context needed by the message handler.
+#[derive(Debug)]
 pub struct ConnContextInfo {
     pub auth: Option<String>,
     pub revision: u32,
@@ -113,6 +123,13 @@ pub struct PushRelayHeaders {
     /// the API server would reject it with 401 (the 2026-08-27 push-relay
     /// incident). No parallel auth copy is kept (I-8: one owner).
     pub auth: Option<String>,
+    /// The connection-context revision `auth` was read at (TS
+    /// `connCtx.revision`, captured per push at enqueue like
+    /// `entry.connCtx.revision` in pusher.ts). The pusher's auth-failure
+    /// invalidation passes it to `failConnection(selector, revision)` so a
+    /// 401 on an OLD token can never tear down a connection that has since
+    /// re-authed (the CCM's stale-revision guard).
+    pub revision: u32,
     pub cookie: Option<String>,
     pub origin: Option<String>,
     pub request_headers: Vec<(String, String)>,
@@ -169,7 +186,21 @@ pub trait PusherDispatch: Send + Sync {
         headers: &PushRelayHeaders,
         client_group_id: &str,
     );
+
+    /// Install the push-auth-failure invalidation hook. Port of the TS pusher's
+    /// `isAuthErrorBody(response)` → `#connContextManager.failConnection(
+    /// entry.connCtx, entry.connCtx.revision)` (pusher.ts:539/569): when the
+    /// relayed push comes back 401/403, the connection's context is removed at
+    /// the captured revision, so the connection's next message must-fails and
+    /// the client reconnects with FRESH auth instead of relaying a dead token
+    /// forever (the 2026-08-29 401 storm). Default no-op for dispatch impls
+    /// without a connection-context owner (tests).
+    fn set_auth_fail_hook(&self, _hook: AuthFailHook) {}
 }
+
+/// Callback invoked by the pusher's drainer on a 401/403 relay response:
+/// `(selector, revision)` → `ConnectionContextManager::fail_connection`.
+pub type AuthFailHook = std::sync::Arc<dyn Fn(&ConnectionSelector, u32) + Send + Sync>;
 
 /// The message handler — port of `SyncerWsMessageHandler`.
 ///
@@ -217,18 +248,25 @@ impl SyncerWsMessageHandler {
         }
     }
 
-    /// The relay headers with `auth` filled FRESH from the connection context
-    /// manager for this relay — TS reads `mustGetConnectionContext(selector).auth`
-    /// per push (pusher.ts), so a token refreshed mid-session via `updateAuth` is
-    /// always current. The static cookie/origin/request_headers/push_override are
-    /// carried from the connect-time base (TS also fixes these per connection).
-    fn relay_headers_for(&self, selector: &ConnectionSelector) -> PushRelayHeaders {
-        let mut headers = self.push_relay_headers.clone();
-        headers.auth = self
+    /// The relay headers with `auth` (+ its revision) filled FRESH from the
+    /// connection context manager for this relay — TS reads
+    /// `mustGetConnectionContext(selector).auth` per push (pusher.ts), so a
+    /// token refreshed mid-session via `updateAuth` is always current. The
+    /// static cookie/origin/request_headers/push_override are carried from the
+    /// connect-time base (TS also fixes these per connection). `Err` = no
+    /// context registered — the TS mustGet throw; callers surface it, never
+    /// relay headerless.
+    fn relay_headers_for(
+        &self,
+        selector: &ConnectionSelector,
+    ) -> Result<PushRelayHeaders, Box<ErrorBody>> {
+        let ctx = self
             .conn_context_manager
-            .must_get_connection_context(selector)
-            .auth;
-        headers
+            .must_get_connection_context(selector)?;
+        let mut headers = self.push_relay_headers.clone();
+        headers.auth = ctx.auth;
+        headers.revision = ctx.revision;
+        Ok(headers)
     }
 }
 
@@ -275,12 +313,14 @@ impl MessageHandler for SyncerWsMessageHandler {
                     let arr: Vec<serde_json::Value> = serde_json::from_str(msg).unwrap_or_default();
                     arr.get(1).cloned().unwrap_or(serde_json::Value::Null)
                 };
-                let initial = self
+                // TS reads mustGetConnectionContext before updateAuth (revision
+                // compare); advisory here — a missing context surfaces via
+                // update_auth itself, so the Result is intentionally discarded.
+                let _ = self
                     .conn_context_manager
                     .must_get_connection_context(selector);
                 let auth_revision_changed =
                     self.conn_context_manager.update_auth(selector, &body_value);
-                let _ = initial; // initial revision compared above
                 self.view_syncer
                     .update_auth(selector, msg, auth_revision_changed)
                     .await;
@@ -292,12 +332,18 @@ impl MessageHandler for SyncerWsMessageHandler {
                 if let Some(pusher) = &self.pusher
                     && !deleted_client_ids.is_empty()
                 {
-                    pusher.delete_client_mutations(
-                        selector,
-                        &deleted_client_ids,
-                        &self.relay_headers_for(selector),
-                        &self.client_group_id,
-                    );
+                    // TS deleteClientMutations uses the SOFT read
+                    // (`getConnectionContext`, pusher.ts:181) and skips the
+                    // cleanup when the context is gone — mirror: skip, never
+                    // relay headerless.
+                    if let Ok(headers) = self.relay_headers_for(selector) {
+                        pusher.delete_client_mutations(
+                            selector,
+                            &deleted_client_ids,
+                            &headers,
+                            &self.client_group_id,
+                        );
+                    }
                 }
                 vec![HandlerResult::Ok]
             }
@@ -343,12 +389,18 @@ impl MessageHandler for SyncerWsMessageHandler {
             Upstream::AckMutationResponses(body) => {
                 if let Some(pusher) = &self.pusher {
                     let body_value = serde_json::to_value(&body).unwrap_or(serde_json::Value::Null);
-                    pusher.ack_mutation_responses(
-                        selector,
-                        &body_value,
-                        &self.relay_headers_for(selector),
-                        &self.client_group_id,
-                    );
+                    // TS ackMutationResponses uses the SOFT read
+                    // (`getConnectionContext`, pusher.ts:120) and silently
+                    // skips the fire-and-forget cleanup when the context is
+                    // gone — mirror that: skip, never relay headerless.
+                    if let Ok(headers) = self.relay_headers_for(selector) {
+                        pusher.ack_mutation_responses(
+                            selector,
+                            &body_value,
+                            &headers,
+                            &self.client_group_id,
+                        );
+                    }
                 }
                 vec![HandlerResult::Ok]
             }
@@ -399,10 +451,18 @@ impl SyncerWsMessageHandler {
                         .ok()
                         .and_then(|arr: Vec<serde_json::Value>| arr.into_iter().nth(1))
                         .unwrap_or(serde_json::Value::Null);
+                    // TS enqueuePush reads `mustGetConnectionContext(selector)`
+                    // (pusher.ts:107) — a missing context THROWS and the
+                    // view-syncer fails the connection with the error. Mirror:
+                    // Fatal with the mustGet error; never relay headerless.
+                    let headers = match self.relay_headers_for(selector) {
+                        Ok(h) => h,
+                        Err(error) => return HandlerResult::Fatal { error: *error },
+                    };
                     return pusher.enqueue_push(
                         selector,
                         &body_value,
-                        &self.relay_headers_for(selector),
+                        &headers,
                         &self.client_group_id,
                     );
                 }
@@ -430,10 +490,15 @@ impl SyncerWsMessageHandler {
                 }
             };
 
-            // Get auth from connection context.
-            let conn_ctx = self
+            // Get auth from connection context — must semantics (TS mustGet
+            // throws; the connection is failed with the error).
+            let conn_ctx = match self
                 .conn_context_manager
-                .must_get_connection_context(selector);
+                .must_get_connection_context(selector)
+            {
+                Ok(ctx) => ctx,
+                Err(error) => return HandlerResult::Fatal { error: *error },
+            };
             // Assert auth is JWT (not opaque).
             // In TS: assert(auth?.type !== 'opaque', 'Only JWT auth is supported for CRUD mutations')
             // We skip this assertion here since auth type is not available in the

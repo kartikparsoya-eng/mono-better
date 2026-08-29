@@ -39,7 +39,7 @@ use crate::protocol::{
 use crate::workers::connection::HandlerResult;
 use crate::workers::syncer::ConnectionSinks;
 use crate::workers::syncer_ws_message_handler::{
-    ConnectionSelector, PushRelayHeaders, PusherDispatch,
+    AuthFailHook, ConnectionSelector, PushRelayHeaders, PusherDispatch,
 };
 
 /// A queued relay POST plus the metadata needed to surface a failure. Real
@@ -65,6 +65,12 @@ struct PushTarget {
     /// still the client's current socket (see `send_error_if_current`).
     ws_id: String,
     mutation_ids: Vec<MutationID>,
+    /// The connection-context revision the relayed auth was read at (TS
+    /// `entry.connCtx.revision`). On a 401/403 relay response the auth-failure
+    /// hook passes it to `failConnection(selector, revision)` — the CCM's
+    /// stale-revision guard makes invalidating an already-re-authed
+    /// connection a no-op (TS "Ignoring failConnection for stale revision").
+    revision: u32,
 }
 
 /// Extract `{id, clientID}` pairs from a push body's `mutations` array. Shared
@@ -204,6 +210,10 @@ fn combine_pushes(entries: Vec<QueuedPush>) -> Vec<QueuedPush> {
 /// to the TS push endpoint over HTTP, in order.
 pub struct PusherService {
     tx: mpsc::UnboundedSender<QueuedPush>,
+    /// Push-auth-failure invalidation hook (TS pusher.ts:539 `isAuthErrorBody`
+    /// → `failConnection`). Installed post-construction by the view-syncer
+    /// (which owns the ConnectionContextManager); `None` until wired.
+    auth_fail_hook: std::sync::Arc<std::sync::Mutex<Option<AuthFailHook>>>,
     /// Queued-but-not-yet-POSTed pushes (enqueue increments, drainer decrements).
     depth: Arc<AtomicI64>,
     cap: i64,
@@ -225,6 +235,9 @@ impl PusherService {
         let (tx, mut rx) = mpsc::unbounded_channel::<QueuedPush>();
         let depth = Arc::new(AtomicI64::new(0));
         let drainer_depth = depth.clone();
+        let auth_fail_hook: std::sync::Arc<std::sync::Mutex<Option<AuthFailHook>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let drainer_auth_fail_hook = auth_fail_hook.clone();
         // Single sequential drainer: builds the reqwest client inside the
         // runtime (so its pool/timers bind to the reactor) and POSTs each queued
         // push one at a time, preserving per-connection mutation order.
@@ -276,6 +289,25 @@ impl PusherService {
                             let preview = read_body_preview(resp, BODY_PREVIEW_CAP).await;
                             tracing::warn!(status, "push relay returned non-2xx");
                             if let Some(t) = target {
+                                // TS parity (pusher.ts:535-547): an auth error
+                                // body (http 401/403, `isAuthErrorBody`) FAILS
+                                // the connection at the captured revision
+                                // BEFORE the PushFailed is surfaced, so the
+                                // client's next message must-fails and it
+                                // reconnects with FRESH auth instead of
+                                // retrying a dead token forever (the
+                                // 2026-08-29 401 storm).
+                                if status == 401 || status == 403 {
+                                    let hook =
+                                        drainer_auth_fail_hook.lock().ok().and_then(|g| g.clone());
+                                    if let Some(hook) = hook {
+                                        let sel = ConnectionSelector {
+                                            client_id: t.client_id.clone(),
+                                            ws_id: t.ws_id.clone(),
+                                        };
+                                        hook(&sel, t.revision);
+                                    }
+                                }
                                 let err = crate::protocol::ErrorBody::PushFailedHttp(
                                     PushFailedHttpBody {
                                         kind: ErrorKind::PushFailed,
@@ -316,6 +348,7 @@ impl PusherService {
         });
         Self {
             tx,
+            auth_fail_hook,
             depth,
             cap: queue_cap(),
             _census: crate::live_count::Guard::new(&crate::live_count::PUSHER),
@@ -413,6 +446,12 @@ impl PusherService {
 }
 
 impl PusherDispatch for PusherService {
+    fn set_auth_fail_hook(&self, hook: AuthFailHook) {
+        if let Ok(mut guard) = self.auth_fail_hook.lock() {
+            *guard = Some(hook);
+        }
+    }
+
     fn enqueue_push(
         &self,
         selector: &ConnectionSelector,
@@ -434,6 +473,7 @@ impl PusherDispatch for PusherService {
             client_id: selector.client_id.clone(),
             ws_id: selector.ws_id.clone(),
             mutation_ids: mutation_ids.clone(),
+            revision: headers.revision,
         };
         // Enqueue only — never blocks, so this is safe on the async CG-executor
         // threads. The drainer POSTs sequentially (see `new`).
@@ -622,6 +662,7 @@ mod tests {
                     client_id: "cA".into(),
                     ws_id: ws.to_string(),
                     mutation_ids: mutation_ids_of(&body),
+                    revision: 0,
                 }),
                 combine_key,
             }
@@ -690,6 +731,86 @@ mod tests {
     /// drained as ONE merged POST (TS PushWorker: dequeue + drain →
     /// combinePushes → process). Written BEFORE the drainer wiring — it fails
     /// with one POST per push — and passes once the drainer combines.
+    /// Minimal relay stub answering every POST with `status` (connection-close).
+    async fn status_http(status: u16) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 65536];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-length: 2\r\nconnection: close\r\n\r\nno"
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        addr
+    }
+
+    /// NON-VACUOUS auth-invalidation guard (TS pusher.ts:539: `isAuthErrorBody`
+    /// → `failConnection(ctx, revision)`): a 401 relay response MUST fire the
+    /// auth-fail hook with the enqueue-time (selector, revision); a plain 500
+    /// MUST NOT. Written against the 2026-08-29 prod 401 storm, where rust
+    /// surfaced PushFailed but never invalidated the connection, so the client
+    /// retried a dead token forever. Proven failing with the hook call removed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auth_failure_relay_response_fires_fail_connection_hook() {
+        for (status, expect_hook) in [(401u16, true), (500u16, false)] {
+            let addr = status_http(status).await;
+            let sinks = ConnectionSinks::new();
+            let pusher = PusherService::new(
+                format!("http://{addr}/push"),
+                None,
+                tokio::runtime::Handle::current(),
+                sinks,
+            );
+            let fired: std::sync::Arc<std::sync::Mutex<Vec<(String, String, u32)>>> =
+                Default::default();
+            let rec = fired.clone();
+            pusher.set_auth_fail_hook(std::sync::Arc::new(move |sel, rev| {
+                rec.lock()
+                    .unwrap()
+                    .push((sel.client_id.clone(), sel.ws_id.clone(), rev));
+            }));
+            let hdrs = PushRelayHeaders {
+                auth: Some("expired-token".into()),
+                revision: 7,
+                ..Default::default()
+            };
+            let body = serde_json::json!({"pushVersion": 1, "mutations": [
+                {"id": 1, "clientID": "cA", "type": "custom", "name": "m"}
+            ]});
+            let _ = pusher.enqueue_push(&selector("cA", "ws1"), &body, &hdrs, "cg1");
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if !fired.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let got = fired.lock().unwrap().clone();
+            if expect_hook {
+                assert_eq!(
+                    got,
+                    vec![("cA".to_string(), "ws1".to_string(), 7)],
+                    "401 relay response must invalidate the connection at the \
+                     enqueue-time revision (TS failConnection parity)"
+                );
+            } else {
+                assert!(
+                    got.is_empty(),
+                    "a non-auth relay failure (500) must NOT invalidate the connection"
+                );
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drainer_combines_queued_pushes_per_connection() {
         let (addr, seen) = counting_http(500).await;

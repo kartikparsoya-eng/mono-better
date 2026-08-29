@@ -100,11 +100,14 @@ struct MockConnContextManager {
 }
 
 impl ConnContextManagerDispatch for MockConnContextManager {
-    fn must_get_connection_context(&self, _selector: &ConnectionSelector) -> ConnContextInfo {
-        ConnContextInfo {
+    fn must_get_connection_context(
+        &self,
+        _selector: &ConnectionSelector,
+    ) -> Result<ConnContextInfo, Box<rust_syncer::protocol::ErrorBody>> {
+        Ok(ConnContextInfo {
             auth: self.auth.lock().unwrap().clone(),
             revision: *self.revision.lock().unwrap(),
-        }
+        })
     }
 
     fn init_connection(&self, _selector: &ConnectionSelector, _body: &serde_json::Value) {

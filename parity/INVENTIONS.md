@@ -94,10 +94,26 @@ guarantees, error semantics) versus TS.
   the **current** (not connect-time) auth token and the current
   `userPushURL`/`userPushHeaders`. TS reads `mustGetConnectionContext(selector)`
   per push (pusher.ts:107).
+- **Contract (must-get + auth-failure invalidation, 2026-08-29):** a push from
+  a connection with NO registered context is an ERROR to that client (TS
+  `mustGetConnectionContext` throw, `InvalidConnectionRequest`) — the relay
+  must NEVER fire an Authorization-less POST (the prod "No token provided"
+  401s). A 401/403 relay response must `failConnection(selector, revision)` at
+  the enqueue-time revision (TS pusher.ts:539 `isAuthErrorBody` →
+  `#connContextManager.failConnection`), so the client's next message
+  must-fails and it reconnects with fresh auth instead of retrying a dead
+  token (the 2026-08-29 401 storm).
 - **Tests:** `update_auth_refreshes_the_forwarded_push_relay_token`,
-  `relay_body_carries_user_push_overrides`.
+  `relay_body_carries_user_push_overrides`,
+  `ccm_dispatch_adapter_surfaces_real_connection_auth` (must-get: missing
+  context ⇒ `InvalidConnectionRequest`, never a defaulted `auth: None`),
+  `auth_failure_relay_response_fires_fail_connection_hook` (401 fires
+  `fail_connection` at the captured revision; 500 does not).
 - **History:** violated by bug-2 (auth was a connect-time snapshot). Fixed
   `97440d021` (auth → shared `Arc<Mutex>` refreshed in `handle_update_auth`).
+  Violated again 2026-08-29 (adapter defaulted a missing context to
+  `auth: None` → headerless relays; no failConnection on 401 → dead-token
+  retry storm) — both fixed with the tests above.
 - **Contract note (non-auth fields):** `cookie`/`origin`/`request_headers`/
   `user_id` are connect-time in BOTH — TS sets them once in the initial context
   and neither `updateAuth` nor `initConnection` mutate them (connection-context-

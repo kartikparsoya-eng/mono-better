@@ -24,7 +24,7 @@ use crate::custom_queries::transform_query::{
     CustomQueryContext, CustomQuerySpec, CustomTransformed, transform_custom_queries,
 };
 use crate::services::view_syncer::connection_context_manager::{
-    ConnectParamsForRegistration, ConnectionContext as CcmConnectionContext,
+    CCMError, ConnectParamsForRegistration, ConnectionContext as CcmConnectionContext,
     ConnectionContextManager, ConnectionSelector as CcmConnectionSelector, ConnectionValidation,
     FetchConfig, InitConnectionBody, MaintenanceKind, UpdateAuthBody, resolve_auth,
 };
@@ -433,20 +433,39 @@ impl CcmDispatchAdapter {
 }
 
 impl ConnContextManagerDispatch for CcmDispatchAdapter {
-    fn must_get_connection_context(&self, selector: &ConnectionSelector) -> ConnContextInfo {
+    fn must_get_connection_context(
+        &self,
+        selector: &ConnectionSelector,
+    ) -> Result<ConnContextInfo, Box<crate::protocol::ErrorBody>> {
         let sel = CcmConnectionSelector {
             client_id: selector.client_id.clone(),
             ws_id: selector.ws_id.clone(),
         };
-        match lock_unpoisoned(&self.ccm).get_connection_context(&sel) {
-            Some(ctx) => ConnContextInfo {
+        // MUST semantics — port of TS `mustGetConnectionContext` (a missing
+        // context THROWS `InvalidConnectionRequest`). This adapter previously
+        // defaulted to `auth: None` on a miss, which the push relay then
+        // forwarded as an Authorization-less POST — the 2026-08-29 prod
+        // "No token provided" 401s. Never default; surface the error.
+        match lock_unpoisoned(&self.ccm).must_get_connection_context(&sel) {
+            Ok(ctx) => Ok(ConnContextInfo {
                 auth: ctx.auth.as_ref().map(|a| a.raw().to_string()),
                 revision: ctx.revision,
-            },
-            None => ConnContextInfo {
-                auth: None,
-                revision: 0,
-            },
+            }),
+            // Each CCMError variant already names its TS ProtocolError kind.
+            Err(CCMError::InvalidConnectionRequest(m)) => {
+                Err(Box::new(crate::protocol::ErrorBody::basic(
+                    crate::protocol::ErrorKind::InvalidConnectionRequest,
+                    m,
+                )))
+            }
+            Err(CCMError::Unauthorized(m)) => Err(Box::new(crate::protocol::ErrorBody::basic(
+                crate::protocol::ErrorKind::Unauthorized,
+                m,
+            ))),
+            Err(CCMError::AuthInvalidated(m)) => Err(Box::new(crate::protocol::ErrorBody::basic(
+                crate::protocol::ErrorKind::AuthInvalidated,
+                m,
+            ))),
         }
     }
 
@@ -858,6 +877,28 @@ impl ViewSyncerService {
             None,
             None,
         )));
+
+        // Wire the pusher's auth-failure invalidation into THIS CG's CCM (TS
+        // pusher.ts:539: `isAuthErrorBody(response)` → `#connContextManager
+        // .failConnection(entry.connCtx, entry.connCtx.revision)`). The hook
+        // runs on the pusher's drainer task; the CCM's revision guard makes a
+        // stale invalidation (connection already re-authed) a no-op.
+        if let Some(p) = &pusher {
+            let hook_ccm = ccm.clone();
+            p.set_auth_fail_hook(Arc::new(move |selector, revision| {
+                let sel = CcmConnectionSelector {
+                    client_id: selector.client_id.clone(),
+                    ws_id: selector.ws_id.clone(),
+                };
+                let failed = lock_unpoisoned(&hook_ccm).fail_connection(&sel, revision);
+                if failed.is_some() {
+                    tracing::warn!(
+                        client_id = %selector.client_id,
+                        "Push auth failed; invalidating connection"
+                    );
+                }
+            }));
+        }
 
         let created_at = now_ms();
         let mut svc = ViewSyncerService {
@@ -1603,6 +1644,8 @@ impl ViewSyncerService {
             // below), so no stale connect-time token is ever forwarded (I-8: the
             // CCM is the single owner; no parallel auth cell).
             auth: None,
+            // Filled together with `auth` per relay (relay_headers_for).
+            revision: 0,
             cookie: params.http_cookie.clone(),
             origin: params.origin.clone(),
             request_headers: relay_request_headers,
@@ -3925,22 +3968,33 @@ mod tests {
         );
 
         let adapter = CcmDispatchAdapter::new(ccm);
-        let info = adapter.must_get_connection_context(&ConnectionSelector {
-            client_id: "c1".to_string(),
-            ws_id: "ws1".to_string(),
-        });
+        let info = adapter
+            .must_get_connection_context(&ConnectionSelector {
+                client_id: "c1".to_string(),
+                ws_id: "ws1".to_string(),
+            })
+            .expect("registered connection must resolve");
         assert_eq!(
             info.auth.as_deref(),
             Some("the-token"),
             "adapter must surface the CCM's real auth, not the placeholder None"
         );
 
-        // Unknown connection → no auth (safe default, not a panic).
-        let missing = adapter.must_get_connection_context(&ConnectionSelector {
-            client_id: "nope".to_string(),
-            ws_id: "ws1".to_string(),
-        });
-        assert_eq!(missing.auth, None);
+        // Unknown connection → the TS `mustGetConnectionContext` THROW
+        // (InvalidConnectionRequest), NOT a defaulted `auth: None`. The old
+        // "safe default" here is exactly what relayed Authorization-less
+        // pushes in prod (2026-08-29 "No token provided" 401s).
+        let missing = adapter
+            .must_get_connection_context(&ConnectionSelector {
+                client_id: "nope".to_string(),
+                ws_id: "ws1".to_string(),
+            })
+            .expect_err("missing connection context must be an error, never a default");
+        assert_eq!(
+            *missing.kind(),
+            crate::protocol::ErrorKind::InvalidConnectionRequest,
+            "must mirror the TS mustGetConnectionContext ProtocolError kind"
+        );
     }
 
     /// Regression (push-relay 401, prod incident 2026-08-27): the token forwarded
@@ -6789,6 +6843,7 @@ impl ViewSyncerService {
         // and then (when pipelines are synced) `#syncQueryPipelineSet`
         // (view-syncer.ts). This orchestrator is the CG-dispatch seat that
         // chains the two 1:1 methods on the serial CG task.
+        let cfg_started = std::time::Instant::now();
         let cfg_cvr = self
             .handle_config_update(
                 cvr,
@@ -6806,6 +6861,19 @@ impl ViewSyncerService {
                 ttl_clock,
             )
             .await?;
+        // Phase profiling (SYNCER_TRACE): the config-update phase does query
+        // transformation (read-permission rewrite + named/custom-query
+        // resolution + flip planning) BEFORE any row fetch. Timing it separately
+        // isolates a data-independent per-query planning cost from the
+        // fetch/materialize and flush phases below.
+        crate::trace::note(
+            "hydrate-config",
+            &format!(
+                "cg={} config_update_ms={:.1}",
+                self.cg_id,
+                cfg_started.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
         self.sync_query_pipeline_set(
             cfg_cvr,
             poke_ws_ids,
@@ -7518,12 +7586,28 @@ impl ViewSyncerService {
         // the fold over this hydrate's changes yields the query's full signature.
         let mut sig_acc: HashMap<String, u64> = HashMap::new();
         let mut processor = ChangeProcessor::new(&mut updater, &pokers);
+        // Phase profiling (SYNCER_TRACE): the `pipelines.hydrate` call is the
+        // initial fetch (SQLite source reads) + IVM operator materialization —
+        // the dominant hydration cost. Timing it separately from the CVR flush,
+        // together with the row-change count, distinguishes "fetching too many
+        // rows" (query-shape / planning) from "slow per-row cold I/O".
+        let fetch_started = std::time::Instant::now();
         self.pipelines.hydrate(queries, |rc| {
             accumulate_signature(&mut sig_acc, rc);
             if let Some((ct, qid, table, rk, row)) = row_change_to_maps(rc) {
                 processor.on_row_change(ct, &qid, &table, rk, row, existing_rows);
             }
         })?;
+        crate::trace::note(
+            "hydrate-fetch",
+            &format!(
+                "cg={} queries={} rows={} fetch_materialize_ms={:.1}",
+                self.cg_id,
+                queries.len(),
+                processor.total_processed(),
+                fetch_started.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
         // Record the transformation hash each query was hydrated with, so a later
         // config pass can detect a changed hash (drift / auth re-transform) and
         // re-hydrate. Port of the `transformationHash` carried in the TS pipeline
@@ -7542,6 +7626,7 @@ impl ViewSyncerService {
         // Share the CVR with the offloaded flush via `Arc` (refcount bump, not a
         // deep copy); reclaim it after the awaited flush drops its clone.
         let flushed_arc = Arc::new(flushed_cvr);
+        let flush_started = std::time::Instant::now();
         let store_flushed = self
             .flush_to_store(
                 &mut updater,
@@ -7550,6 +7635,17 @@ impl ViewSyncerService {
                 existing_rows,
             )
             .await?;
+        // Phase profiling (SYNCER_TRACE): CVR-store persist cost, split from the
+        // fetch/materialize above so total hydration is fully attributed.
+        crate::trace::note(
+            "hydrate-flush",
+            &format!(
+                "cg={} store_flush_ms={:.1} flushed={}",
+                self.cg_id,
+                flush_started.elapsed().as_secs_f64() * 1000.0,
+                store_flushed
+            ),
+        );
         // No-op store flush → revert to the ORIGINAL CVR (see `flush_to_store`).
         let flushed_cvr = if store_flushed {
             Arc::try_unwrap(flushed_arc).unwrap_or_else(|a| (*a).clone())
