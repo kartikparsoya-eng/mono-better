@@ -180,7 +180,15 @@ CRATES = {
         # fetch.ts error types->protocol/, rule-3 exception) + fuzzy noise.
         # Any GROWTH means a symbol landed outside its mirrored file — fix the
         # location, don't bump this number without a written exception.
-        "max_misfiled": 25,
+        # 2026-08-29 exception (25 -> 26): pre-existing fuzzy-noise pair —
+        # verified NOT introduced by the planner-model/pusher-auth fixes (count
+        # is 26 with those changes stashed too). The extra binding is a
+        # live-census CONSTANT name-colliding with a TS class (the
+        # `pusher.ts::Pusher -> live_count.rs::PUSHER` family from the Stage-5
+        # scope widening); the real ports live in their mirrors. The Stage-4
+        # ledger re-bind (task #162) should alias these census constants and
+        # ratchet back down.
+        "max_misfiled": 26,
         # rust-syncer replaces the entire TS syncer WORKER process: the WS
         # connection lifecycle (workers/), the view-syncer serving loop +
         # pipeline driver (services/view-syncer/), the read-permission + JWT auth
