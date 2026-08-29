@@ -97,20 +97,27 @@ Anything not listed here and not STALE/WRONG must match TS.
   The once-per-CG `push_first` cost is NOT part of this exception — it is
   tracked as an open item (task #127), not a design cost.
 
-## D-11 · Hydration flush batch: default 100 vs TS `CURSOR_PAGE_SIZE = 10000` (env-tunable)
+## D-11 · `CVR_CURSOR_PAGE_SIZE` env knob (default = TS 10000) — POST-MORTEM of a retracted divergence
 
 - **TS** (`view-syncer.ts:2844`): `#processChanges` flushes the accumulated row
   batch to the CVR updater + pokers every **10000** rows, hardcoded.
-- **Rust** (`rust-cvr/src/change_processor.rs`): `DEFAULT_CURSOR_PAGE_SIZE = 100`,
-  overridable via **`CVR_CURSOR_PAGE_SIZE`** (invalid/0 → 100). Deliberate
-  (maintainer decision 2026-08-29): a 100-row batch streams poke parts onto the
-  wire ~100× earlier during large hydrates and keeps `updater.received` batches
-  small. The boundary changes only WHEN patches flush into the one open poke —
-  content and ordering are unchanged and the client still applies at pokeEnd,
-  so the G8 diff-oracle surface is unaffected.
-- **Pinned by**: `change_processor.rs` tests `cursor_page_size_env_resolution` +
-  `new_reads_env_and_default_flushes_at_100_rows` (default proven failing at
-  10000 via temp-revert).
+- **Rust** (`rust-cvr/src/change_processor.rs`): same 10000 default, plus a
+  rust-only **`CVR_CURSOR_PAGE_SIZE`** env for experiments (invalid/0 → 10000).
+- **RETRACTED divergence (2026-08-29)**: the default was briefly lowered to 100
+  on the theory that the boundary only changes WHEN patches flush. **That theory
+  was wrong and prod falsified it within 25 minutes**: CG `kggpbcl9ths15umnnr`
+  panicked at `cvr.rs:1009` ("Expected CVR version to have been bumped above
+  original"). The batch is the **de-dupe window** — same-row churn nets out
+  inside one batch, and `received()` skips the version stamp only for rows whose
+  state MATCHES the CVR record. A smaller batch flushes rows MID-churn, whose
+  transient state differs from the CVR, in passes that legitimately never bump
+  the version (the poke-start cookie contract, TS `#assertNewVersion`
+  cvr.ts:764-776). The value participates in correctness; rule 1 applies.
+- **Pinned by**: `cursor_page_size_env_resolution` +
+  `new_reads_env_and_defaults_to_ts_page_size` (default = 10000) +
+  `small_flush_boundary_splits_churn_and_trips_version_assert` (the prod panic
+  reproduced at page size 1, `#[should_panic]`). Do NOT lower the env below a
+  pass's churn window; it exists for controlled experiments only.
 
 ## Minor notes (log/observability-only, not behavior)
 
