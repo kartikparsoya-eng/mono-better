@@ -102,7 +102,12 @@ guarantees, error semantics) versus TS.
   the enqueue-time revision (TS pusher.ts:539 `isAuthErrorBody` →
   `#connContextManager.failConnection`), so the client's next message
   must-fails and it reconnects with fresh auth instead of retrying a dead
-  token (the 2026-08-29 401 storm).
+  token (the 2026-08-29 401 storm). The TS loopback hop must be
+  status-TRANSPARENT for auth rejections: an upstream 401/403 keeps its status
+  on the relay response (rust-push-relay.ts) — collapsing it to 502 renders
+  the rust failConnection branch inert (observed in prod 2026-08-29:
+  backend 401 → relay 502 → 0 invalidations; pinned by
+  rust-push-relay.test.ts).
 - **Tests:** `update_auth_refreshes_the_forwarded_push_relay_token`,
   `relay_body_carries_user_push_overrides`,
   `ccm_dispatch_adapter_surfaces_real_connection_auth` (must-get: missing

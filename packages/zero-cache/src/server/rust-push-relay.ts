@@ -1,7 +1,9 @@
 import {createServer, type Server} from 'node:http';
 import type {AddressInfo} from 'node:net';
 import type {LogContext} from '@rocicorp/logger';
+import {isProtocolError} from '../../../zero-protocol/src/error.ts';
 import {mutateResponseSchema} from '../../../zero-protocol/src/mutate-server.ts';
+import {isAuthErrorBody} from '../auth/auth.ts';
 import type {getNormalizedZeroConfig} from '../config/zero-config.ts';
 import {compileUrlPattern, fetchFromAPIServer} from '../custom/fetch.ts';
 import type {
@@ -166,11 +168,24 @@ export function startRustPushRelay(
           res.end(JSON.stringify(response));
         } catch (e) {
           // The mutation was not applied. The client's lastMutationID won't
-          // advance, so it re-pushes on its next attempt. Surface as 502 so the
-          // Rust syncer logs it.
+          // advance, so it re-pushes on its next attempt.
           lc.warn?.(
             `push relay to ${relayed.userPushURL ?? pushURL} failed for client ${relayed.clientID}: ${String(e)}`,
           );
+          // An upstream AUTH rejection must keep its real status: the rust
+          // drainer's failConnection branch (the port of pusher.ts
+          // `isAuthErrorBody(response)` → `failConnection`) keys on the relay
+          // response being 401/403. Collapsing it to 502 left the dead-token
+          // client retrying forever (2026-08-29 prod: backend 401 → relay 502
+          // → 0 invalidations). Everything else stays 502 so the Rust syncer
+          // logs it as a relay-hop failure.
+          if (isProtocolError(e) && isAuthErrorBody(e.errorBody)) {
+            const status =
+              'status' in e.errorBody && typeof e.errorBody.status === 'number'
+                ? e.errorBody.status
+                : 401;
+            return fail(status, `push forward failed: ${String(e)}`);
+          }
           return fail(502, `push forward failed: ${String(e)}`);
         }
       })();
