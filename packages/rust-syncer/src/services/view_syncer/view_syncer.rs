@@ -418,10 +418,12 @@ fn custom_query_context_from(ctx: &CcmConnectionContext) -> Option<CustomQueryCo
 /// (which returned `auth:None` — the I-8 latent divergence) for the router's live
 /// handler.
 ///
-/// `init_connection`/`update_auth` are NOT on the handler's live path — the router
-/// intercepts both messages and drives the CCM directly (router.rs `updateAuth`
-/// interception + the `initConnection` CCM call) before they reach the handler —
-/// so they are documented no-ops here.
+/// `update_auth` here is ADVISORY only: the live CCM refresh for an
+/// `updateAuth` message happens in `ViewSyncerService::handle_update_auth`
+/// (unchanged-token skip, sub-pin, `ccm.update_auth` + re-validation — the
+/// port of TS view-syncer.ts:1012), which the handler reaches via
+/// `ViewSyncerDispatch::update_auth`. `init_connection` IS live here (records
+/// the connection's URL/header overrides on its context).
 struct CcmDispatchAdapter {
     ccm: Arc<Mutex<ConnectionContextManager>>,
 }
@@ -449,6 +451,12 @@ impl ConnContextManagerDispatch for CcmDispatchAdapter {
         match lock_unpoisoned(&self.ccm).must_get_connection_context(&sel) {
             Ok(ctx) => Ok(ConnContextInfo {
                 auth: ctx.auth.as_ref().map(|a| a.raw().to_string()),
+                is_opaque: matches!(
+                    ctx.auth,
+                    Some(
+                        crate::services::view_syncer::connection_context_manager::Auth::Opaque { .. }
+                    )
+                ),
                 revision: ctx.revision,
             }),
             // Each CCMError variant already names its TS ProtocolError kind.

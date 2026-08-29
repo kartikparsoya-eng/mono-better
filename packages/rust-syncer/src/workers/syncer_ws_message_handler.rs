@@ -91,6 +91,10 @@ pub trait ConnContextManagerDispatch: Send + Sync {
 #[derive(Debug)]
 pub struct ConnContextInfo {
     pub auth: Option<String>,
+    /// Whether `auth` is an OPAQUE token (CCM `Auth::Opaque`, TS
+    /// `auth.type === 'opaque'`). The CRUD path rejects opaque auth exactly
+    /// like the TS assert (syncer-ws-message-handler.ts:152-155).
+    pub is_opaque: bool,
     pub revision: u32,
 }
 
@@ -499,10 +503,15 @@ impl SyncerWsMessageHandler {
                 Ok(ctx) => ctx,
                 Err(error) => return HandlerResult::Fatal { error: *error },
             };
-            // Assert auth is JWT (not opaque).
-            // In TS: assert(auth?.type !== 'opaque', 'Only JWT auth is supported for CRUD mutations')
-            // We skip this assertion here since auth type is not available in the
-            // ConnContextInfo struct. The full implementation in Phase 4 will check.
+            // Port of TS `assert(auth?.type !== 'opaque', 'Only JWT auth is
+            // supported for CRUD mutations')` (syncer-ws-message-handler.ts:
+            // 152-155). The TS assert THROW closes the connection with an
+            // Internal error; absent auth passes (undefined !== 'opaque').
+            if conn_ctx.is_opaque {
+                return HandlerResult::Fatal {
+                    error: ErrorBody::internal("Only JWT auth is supported for CRUD mutations"),
+                };
+            }
 
             // Process mutations under the connection-level lock. The lock only
             // serializes (it guards `()`), so recovering from a poisoned mutex is

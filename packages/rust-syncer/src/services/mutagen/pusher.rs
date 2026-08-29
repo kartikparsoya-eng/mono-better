@@ -505,6 +505,13 @@ impl PusherDispatch for PusherService {
         }
     }
 
+    /// Architectural no-op (I-3, Option-A relay): TS `initConnection`
+    /// creates the per-client DOWNSTREAM stream that push results flow back
+    /// on and cancels a superseded socket's stream (pusher.ts:307-330). In
+    /// the relay architecture there is no pusher downstream — mutation
+    /// results reach the client through the CVR's `lmids`/`mutationResults`
+    /// queries (poke path), and superseded-socket delivery is prevented by
+    /// `send_error_if_current` on the failure path. See INVENTIONS.md I-3.
     fn init_connection(&self, _selector: &ConnectionSelector) {}
 
     fn ack_mutation_responses(

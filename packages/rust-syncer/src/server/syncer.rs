@@ -9,10 +9,12 @@ use crate::config::zero_config::SyncerConfig;
 use crate::services::view_syncer::view_syncer::CGServicesFactory;
 
 /// Per-CG services factory. Builds a real `SyncEngine` config from the process
-/// config (replica path, CVR Postgres, shard). Mutagen/pusher are intentionally
-/// absent (mutations are HTTP-direct — see `create_mutagen`); the
-/// connection-context dispatch is a light placeholder (the CG-thread path owns
-/// auth state directly, see `router.rs`).
+/// config (replica path, CVR Postgres, shard). `create_mutagen` returns `None`
+/// (legacy CRUD is disabled by design — a CRUD push gets the "disabled"
+/// rejection); `create_pusher` builds the LIVE Option-A push relay when
+/// `PUSHER_URL` is set. Connection-context state is owned by the per-CG
+/// `ConnectionContextManager`, dispatched to the handler via
+/// `CcmDispatchAdapter` (view_syncer.rs).
 pub struct RealServicesFactory {
     pub config: Arc<SyncerConfig>,
     pub tokio_handle: tokio::runtime::Handle,

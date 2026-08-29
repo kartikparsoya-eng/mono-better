@@ -94,6 +94,7 @@ impl ViewSyncerDispatch for MockViewSyncer {
 #[derive(Default)]
 struct MockConnContextManager {
     auth: Mutex<Option<String>>,
+    is_opaque: Mutex<bool>,
     revision: Mutex<u32>,
     update_auth_result: Mutex<bool>,
     init_connection_calls: Mutex<usize>,
@@ -106,6 +107,7 @@ impl ConnContextManagerDispatch for MockConnContextManager {
     ) -> Result<ConnContextInfo, Box<rust_syncer::protocol::ErrorBody>> {
         Ok(ConnContextInfo {
             auth: self.auth.lock().unwrap().clone(),
+            is_opaque: *self.is_opaque.lock().unwrap(),
             revision: *self.revision.lock().unwrap(),
         })
     }
@@ -356,6 +358,41 @@ fn test_push_with_custom_mutation_no_pusher_returns_transient() {
         results[0],
         rust_syncer::workers::connection::HandlerResult::Transient { .. }
     ));
+}
+
+#[test]
+fn test_push_with_crud_mutation_opaque_auth_is_rejected() {
+    // Port of TS `assert(auth?.type !== 'opaque', 'Only JWT auth is supported
+    // for CRUD mutations')` (syncer-ws-message-handler.ts:152-155). The old
+    // rust handler SKIPPED this check ("Phase 4 will check"), silently
+    // processing CRUD mutations under opaque auth that TS rejects — proven
+    // failing with the check removed.
+    let vs = Rc::new(MockViewSyncer::default());
+    let ccm = Arc::new(MockConnContextManager::default());
+    *ccm.auth.lock().unwrap() = Some("opaque-token".to_string());
+    *ccm.is_opaque.lock().unwrap() = true;
+    let mutagen = Arc::new(MockMutagen::default());
+    let handler = create_handler(vs.clone(), ccm.clone(), Some(mutagen.clone()), None);
+
+    let msg = r#"["push",{"clientGroupID":"test-client-group","mutations":[{"type":"crud","id":1,"clientID":"test-client","name":"mutate","args":[{"ops":[]}],"timestamp":123}],"pushVersion":1,"schemaVersion":1,"timestamp":123,"requestID":"req-1"}]"#;
+    let results = handler.handle_message_blocking(msg);
+
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        rust_syncer::workers::connection::HandlerResult::Fatal { error } => {
+            assert_eq!(
+                error.message(),
+                "Only JWT auth is supported for CRUD mutations",
+                "must carry the exact TS assert message"
+            );
+        }
+        other => panic!("opaque-auth CRUD must be a Fatal error, got {other:?}"),
+    }
+    assert_eq!(
+        mutagen.process_mutation_calls.lock().unwrap().len(),
+        0,
+        "mutagen must NOT process mutations under opaque auth"
+    );
 }
 
 #[test]
