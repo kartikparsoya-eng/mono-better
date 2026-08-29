@@ -83,7 +83,17 @@ CRATES = {
             # valita schema object → serde struct (same shape, `*Schema` suffix dropped).
             "basequeryrecordschema": ("BaseQueryRecord struct (schema/types.rs:338)",
                                       "valita schema → serde struct"),
+            # Snapshot-read version guard: rust inlines it into both catchup
+            # paths (cvr_store.rs catchup_config_patches ~:1554 and
+            # row_record_cache.rs catchup_row_patches), doc-cited to
+            # cvr-store.ts:1348/:743-745 incl. the missing-instance-row →
+            # EMPTY_CVR_VERSION → ConcurrentModification branch.
+            "checkversion": ("INLINED cvr_store.rs catchup version guard",
+                             "plain-SELECT re-check of instances.version vs `current`"),
         },
+        # 2026-08-29 first pin (was unenforced): 3 = census constants +
+        # recordSyncFlushStats in otel_metrics.rs + seq_replay SCHEMA copy.
+        "max_misfiled": 3,
     },
     "ivm": {
         "rust_dir": "packages/rust-ivm/src",
@@ -113,6 +123,31 @@ CRATES = {
         # inlined, renamed, relocated cross-crate, a JS-only idiom Rust drops, or
         # replaced by SQLite. Zero genuine gaps found in the triaged set.
         "aliases": {
+            # maybe-split-and-push-edit-change.ts — rust inlines it into the
+            # filter_push.rs EDIT arm (predicate-crossing edit → remove+add),
+            # per the Rust-only signature-delta note in that file's doc.
+            "maybesplitandpusheditchange": ("ivm/filter_push.rs EDIT arm",
+                                            "inlined: edit crossing predicate splits into remove/add"),
+            # TS generator plumbing (surfaced by the `function*`/`*method`
+            # extractor fix): rust restructures coop-yield generators into
+            # iterators/direct calls — the LOGIC lives at the cited site.
+            "fetchgenerator": ("ivm/snitch.rs fetch",
+                               "TS fetch() delegates to *fetchGenerator; rust folds both into fetch"),
+            "generaterows": ("INLINED ivm/source.rs fetch scan walk", "generator → iterator"),
+            "generatewithconstraint": ("INLINED ivm/source.rs fetch constraint filter",
+                                       "generator → iterator"),
+            "generatewithoverlayinner": ("INLINED ivm/source.rs apply_source_overlays",
+                                         "generator → iterator"),
+            "generatewithoverlayinnerunordered": ("INLINED ivm/source.rs apply_source_overlays",
+                                                  "unordered overlay arm"),
+            "genpushandwrite": ("INLINED sqlite/table_source.rs write_change",
+                                "push+write generator → direct calls"),
+            "genpushandwritewithsplitedit": ("INLINED sqlite/table_source.rs write_change",
+                                             "split-edit arm of write_change"),
+            "getchildnodes": ("INLINED ivm/view.rs apply_change_internal child walk",
+                              "generator → loop"),
+            "runimpl": ("query/query_delegate_base.rs run",
+                        "TS module-level default run() impl folds into the trait impls"),
             # view-apply-change.ts → array_view.rs (array maintenance inlined)
             "arraywith": ("array_view.rs new_view[pos]=…", "inlined"),
             "insertat": ("array_view.rs Vec::insert", "inlined"),
@@ -167,6 +202,11 @@ CRATES = {
             "delete": ("array_view.rs Vec::remove", "inlined"),
             "unreachable": ("Rust unreachable!() macro", "idiom"),
         },
+        # 2026-08-29 first pin (was unenforced): 74 = the enum-shim/type-file
+        # folds (change-type-enum → change.rs family), the sanctioned
+        # memory-source → source.rs/table_source.rs split, and common-name
+        # collision remainders with no mirror pair on either side.
+        "max_misfiled": 74,
     },
     "syncer": {
         "rust_dir": "packages/rust-syncer/src",
@@ -188,7 +228,10 @@ CRATES = {
         # scope widening); the real ports live in their mirrors. The Stage-4
         # ledger re-bind (task #162) should alias these census constants and
         # ratchet back down.
-        "max_misfiled": 26,
+        # 2026-08-29 ratcheted 26→25 after mirror-aware occurrence binding:
+        # the remainder is census constants + genuinely relocated fns
+        # (is_admin_password_valid in inspect_handler.rs vs config/, #163).
+        "max_misfiled": 25,
         # rust-syncer replaces the entire TS syncer WORKER process: the WS
         # connection lifecycle (workers/), the view-syncer serving loop +
         # pipeline driver (services/view-syncer/), the read-permission + JWT auth
@@ -322,6 +365,31 @@ CRATES = {
             "jsonequal": ("services/view_syncer/query_covering.rs json_equal", "deep eq w/ JS number semantics"),
             # db/lite-tables.ts
             "keycmp": ("db/lite_tables.rs sort_by len-then-lex", "inlined key compare"),
+            # server/otel-start.ts — the mirrored file EXISTS
+            # (server/otel_start.rs) but its fn names diverge: node OTel
+            # auto-instrumentation vs the rust SDK have no shared surface.
+            # Flagged for #163 (infra-layer mirroring), not silently 1:1.
+            "startotelauto": ("server/otel_start.rs init_metrics/metrics_enabled",
+                              "rust otel init path; node auto-instr has no rust twin"),
+            "getinstance": ("N/A — node OtelManager singleton wrapper",
+                            "rust init is free fns in server/otel_start.rs"),
+            # auth/jwt.ts (surfaced by the async-export extractor fix)
+            "createjwkpair": ("N/A — JWK-pair GENERATION helper (tests/tooling)",
+                              "rust only verifies tokens, never mints keys"),
+            "verifytoken": ("auth/jwt.rs verify_with_jwks / verify_sync cluster",
+                            "name-diverged verify path; 1:1 rename pending #163"),
+            # custom/fetch.ts — rust splits the API fetch by call-class:
+            # transform via post_transform, custom push via the TS loopback
+            # relay (Option-A, INVENTIONS.md I-3), so node keeps mutation logic.
+            "fetchfromapiserver": ("custom_queries/transform_query.rs post_transform",
+                                   "push-class calls go via services/mutagen/pusher.rs relay POST (I-3)"),
+            "runworker": ("N/A — node worker bootstrap",
+                          "rust process entry is the invented main/http_server pair"),
+            # pipeline-driver.ts generators (surfaced by the generator fix)
+            "stream": ("CROSS-CRATE rust-ivm streamer/mod",
+                       "RowChange streaming lives in the ivm crate's Streamer"),
+            "toadds": ("INLINED — rust-ivm engine hydrate emits Adds directly",
+                       "no Node→AddChange adaptor needed"),
         },
     },
 }
@@ -378,6 +446,11 @@ def distinctive(shared):
 RUST_FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
 RUST_TYPE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(struct|enum|trait)\s+(\w+)")
 RUST_CONST = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(\w+)")
+# top-level `type` aliases only (column 0): associated types inside `impl` /
+# `trait` bodies are indented and stay excluded. Without this, a TS `type`
+# ported as a Rust alias (e.g. `SchemaQuery`) never bound and its mirrored
+# file pair read as DROPPED+new.
+RUST_TYPE_ALIAS = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?type\s+(\w+)")
 
 RUST_TEST_MOD = re.compile(r"^\s*(?:pub\s+)?mod\s+tests?\b|^\s*mod\s+test_\w+\b")
 
@@ -419,20 +492,25 @@ def extract_rust(path):
         m = RUST_CONST.match(line)
         if m:
             out.append((canon(m.group(1)), m.group(1), "const", i, line.strip()))
+            continue
+        m = RUST_TYPE_ALIAS.match(line)
+        if m:
+            out.append((canon(m.group(1)), m.group(1), "type", i, line.strip()))
     return out
 
 # ---------------------------------------------------------------------------
 # TS extraction
 # ---------------------------------------------------------------------------
 TS_TOP = re.compile(
-    r"^export\s+(?:default\s+)?(?:abstract\s+)?"
-    r"(function|const|class|type|interface|enum)\s+(\w+)"
+    r"^export\s+(?:default\s+)?(?:abstract\s+)?(?:async\s+)?"
+    r"(function|const|class|type|interface|enum)(?:\s*\*)?\s+(\w+)"
 )
-TS_PLAIN_FN = re.compile(r"^(?:async\s+)?function\s+(\w+)")
-# indented class member: `  foo(`, `  async foo(`, `  foo<T>(`, `  static foo(`
+TS_PLAIN_FN = re.compile(r"^(?:async\s+)?function(?:\s*\*)?\s+(\w+)")
+# indented class member: `  foo(`, `  async foo(`, `  foo<T>(`, `  static foo(`,
+# generator `  *foo(` / `  async *foo(`
 TS_METHOD = re.compile(
     r"^  (?:public |private |protected |static |readonly |async |get |set |override )*"
-    r"(\w+)\s*[(<]"
+    r"(?:\*\s*)?(\w+)\s*[(<]"
 )
 TS_METHOD_ARROW = re.compile(
     r"^  (?:public |private |protected |static |readonly )*"
@@ -550,6 +628,29 @@ def main():
     def first(d, k):
         return d[k][0]
 
+    def mirror_of_ts(tf):
+        return tf.replace("-", "_").replace(".ts", ".rs")
+
+    # A canon with several occurrences on both sides (common names: `filter`,
+    # `destroy`, `getSchema`, `push`) used to bind first-occurrence-first —
+    # e.g. filter-operators.ts::filter ⇢ exists.rs::filter — SHADOWING the
+    # true ivm/filter.ts::Filter ⇄ ivm/filter.rs::Filter pair, so mirrored
+    # files read as sharing zero symbols. Prefer the occurrence pair whose
+    # files mirror (rule 3); fall back to first-first as before.
+    rep_pair = {}
+    for k in matched:
+        tlist, rlist = ts_syms[k], rust_syms[k]
+        pick = None
+        for t in tlist:
+            mf = mirror_of_ts(t[2])
+            for r in rlist:
+                if r[2] == mf:
+                    pick = (t, r)
+                    break
+            if pick:
+                break
+        rep_pair[k] = pick or (tlist[0], rlist[0])
+
     aliases = spec.get("aliases", {})  # canon_ts -> (target|"INLINED"|"ABSENT", note)
 
     # === resolve renames via fuzzy token overlap (greedy global best-first) ===
@@ -578,11 +679,31 @@ def main():
     rust_incoming = defaultdict(set)                  # rf -> {tf}
     # per-Rust-file buckets of resolved pairs
     pairs_by_rf = defaultdict(list)                   # rf -> [(ts_name, rust_name, tag)]
+    # Credit EVERY mirror-consistent occurrence pair as a file edge: a canon
+    # living in several mirrored file pairs (`filter` in both
+    # filter-operators.ts⇄filter_operators.rs AND filter.ts⇄filter.rs) is
+    # evidence for EACH pair — a single representative starved the second
+    # mirror and left it DROPPED. One row per (canon, TS file); canons with no
+    # mirror-consistent pair fall back to the rep_pair as before.
     for k in matched:
-        tn, _, tf, tl, _ = first(ts_syms, k)
-        rn, _, rf, rl, _ = first(rust_syms, k)
-        edges[tf][rf] += 1; rust_incoming[rf].add(tf)
-        pairs_by_rf[rf].append((tf, tn, tl, rn, rl, "exact"))
+        tlist, rlist = ts_syms[k], rust_syms[k]
+        credited = set()
+        for t in tlist:
+            mf = mirror_of_ts(t[2])
+            if mf in credited:
+                continue
+            r = next((r for r in rlist if r[2] == mf), None)
+            if r is None:
+                continue
+            credited.add(mf)
+            tn, _, tf, tl, _ = t
+            rn, _, rf, rl, _ = r
+            edges[tf][rf] += 1; rust_incoming[rf].add(tf)
+            pairs_by_rf[rf].append((tf, tn, tl, rn, rl, "exact"))
+        if not credited:
+            (tn, _, tf, tl, _), (rn, _, rf, rl, _) = rep_pair[k]
+            edges[tf][rf] += 1; rust_incoming[rf].add(tf)
+            pairs_by_rf[rf].append((tf, tn, tl, rn, rl, "exact"))
     for tc, (rc, s) in fuzzy.items():
         tn, _, tf, tl, _ = first(ts_syms, tc)
         rn, _, rf, rl, _ = first(rust_syms, rc)
@@ -616,13 +737,31 @@ def main():
 
     # pinned aliases that name a Rust file also count as a file edge, so a TS file
     # resolved entirely via aliases (e.g. ttl-clock.ts) isn't mislabelled DROPPED.
+    all_rust_files = walk_rs(os.path.join(REPO, spec["rust_dir"]))
     for tc, (tgt, note) in aliases.items():
         if tc not in ts_syms:
             continue
         m = re.search(r"([\w/]+\.rs)", f"{tgt} {note}")
-        if m:
-            tf = first(ts_syms, tc)[2]
-            edges[tf][m.group(1)] += 1; rust_incoming[m.group(1)].add(tf)
+        if not m:
+            continue
+        tf = first(ts_syms, tc)[2]
+        # Resolve the cited filename against the crate's real files: notes often
+        # cite the bare name (`view_syncer.rs`), which used to create a PHANTOM
+        # file key beside `services/view_syncer/view_syncer.rs` and inflate
+        # SPLIT labels. Exact path > unique suffix > mirror-of-TS-file among
+        # suffix matches; an unresolvable citation adds no edge.
+        cap = m.group(1)
+        if cap in all_rust_files:
+            rf = cap
+        else:
+            cands = [fn for fn in all_rust_files if fn.endswith("/" + cap)]
+            if len(cands) == 1:
+                rf = cands[0]
+            elif mirror_of_ts(tf) in cands:
+                rf = mirror_of_ts(tf)
+            else:
+                continue
+        edges[tf][rf] += 1; rust_incoming[rf].add(tf)
 
     # LOC per file
     def loc(path):
@@ -636,7 +775,6 @@ def main():
         p = os.path.join(REPO, rp)
         if os.path.exists(p):
             ts_loc[ts_label(spec, p)] = loc(p)
-    all_rust_files = walk_rs(os.path.join(REPO, spec["rust_dir"]))
     rust_loc = {fn: loc(os.path.join(REPO, spec["rust_dir"], fn)) for fn in all_rust_files}
 
     # classify each TS file's relationship
@@ -737,9 +875,9 @@ def main():
     print("| TS symbol | origin | → Rust | status |")
     print("|---|---|---|---|")
     for k in sorted(ts_keys, key=lambda k: (first(ts_syms, k)[2], first(ts_syms, k)[3])):
-        tn, tk, tf, tl, _ = first(ts_syms, k)
+        tn, tk, tf, tl, _ = (rep_pair[k][0] if k in matched else first(ts_syms, k))
         if k in matched:
-            rn, _, rf, rl, _ = first(rust_syms, k)
+            rn, _, rf, rl, _ = rep_pair[k][1]
             print(f"| `{tn}` | {tf}:{tl} | `{rn}` {rf}:{rl} | ✅ exact |")
         elif k in fuzzy:
             rc, s = fuzzy[k]; rn, _, rf, rl, _ = first(rust_syms, rc)

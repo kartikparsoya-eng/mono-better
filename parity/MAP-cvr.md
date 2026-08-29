@@ -2,30 +2,25 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **160**, Rust **325** · resolved pairs **104** (exact 104 + fuzzy 0) + aliases 11
-- 🟥 TS UNRESOLVED: **48** (**0** behavioral ⇒ investigate · 48 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **221**
+- symbols: TS **162**, Rust **339** · resolved pairs **108** (exact 108 + fuzzy 0) + aliases 12
+- 🟥 TS UNRESOLVED: **46** (**0** behavioral ⇒ investigate · 46 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **231**
 
 ## 1 · File structure diff
 
-TS origin files: **8**  ·  Rust files: **21** (9 new)
+TS origin files: **8**  ·  Rust files: **21** (10 new)
 
 | TS file (LOC) | rel | Rust file(s) (shared syms) |
 |---|---|---|
 | `client-handler.ts` (467) | **1:1** | `client_handler.rs` (18) |
-| `cvr-store.ts` (1447) | **1:1** | `cvr_store.rs` (25), `row_record_cache.rs` (4), `cvr.rs` (2), `live_count.rs` (1) |
-| `cvr.ts` (1197) | **MERGED** | `cvr.rs` (26) |
-| `row-record-cache.ts` (485) | **MERGED** | `row_record_cache.rs` (3), `otel_metrics.rs` (1), `live_count.rs` (1) |
+| `cvr-store.ts` (1447) | **1:1** | `cvr_store.rs` (28), `live_count.rs` (1) |
+| `cvr.ts` (1197) | **1:1** | `cvr.rs` (30) |
+| `row-record-cache.ts` (485) | **1:1** | `row_record_cache.rs` (8), `otel_metrics.rs` (1) |
 | `row-set-signature.ts` (30) | **1:1** | `row_set_signature.rs` (3) |
 | `schema/cvr.ts` (359) | **1:1** | `schema/cvr.rs` (8), `seq_replay.rs` (1) |
-| `schema/types.ts` (393) | **1:1** | `schema/types.rs` (19), `parity_check.rs` (1) |
-| `ttl-clock.ts` (15) | **1:1** | `ttl_clock.rs` (2) |
+| `schema/types.ts` (393) | **1:1** | `schema/types.rs` (21) |
+| `ttl-clock.ts` (15) | **1:1** | `ttl_clock.rs` (3) |
 
-**New Rust files (no TS origin — added in the port):**  `bin/cvr_seq_replay.rs` (39), `change_processor.rs` (662), `hash.rs` (75), `lib.rs` (35), `row_key.rs` (300), `schema/mod.rs` (6), `shards.rs` (22), `tracer.rs` (41), `ttl.rs` (145)
-
-**Merges (many TS → one Rust file):**
-- `cvr.rs` ⟵ `cvr-store.ts`, `cvr.ts`
-- `live_count.rs` ⟵ `cvr-store.ts`, `row-record-cache.ts`
-- `row_record_cache.rs` ⟵ `cvr-store.ts`, `row-record-cache.ts`
+**New Rust files (no TS origin — added in the port):**  `bin/cvr_seq_replay.rs` (39), `change_processor.rs` (662), `hash.rs` (75), `lib.rs` (35), `parity_check.rs` (1657), `row_key.rs` (300), `schema/mod.rs` (6), `shards.rs` (22), `tracer.rs` (41), `ttl.rs` (145)
 
 ## 2 · Per-file functional divergence
 
@@ -66,7 +61,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 
 🟦 **Rust-only added here (33):** `DEFAULT_POKE_PART_MAX_BYTES`, `MAX_DEPTH`, `MAX_SAFE_INTEGER`, `MultiPoker`, `MutationPatchEntry`, `MutationPatchId`, `MutationPatchMutation`, `PART_COUNT_FLUSH_THRESHOLD`, `POKE_PART_ENVELOPE_EST`, `PokePartBody`, `PokeState`, `QueryPatchEntry`, `ROW_PATCH_ENVELOPE_EST`, `RowPatchInfo`, `RowPatchOp`, `V`, `WebSocketSink`, `acquire_chain`, `add_mutation_patch`, `drop`, `ensure_body`, `estimate_json_bytes`, `estimate_row_patch_bytes`, `flush_body`, `go`, `normalize_mutation_result`, `poke_part_max_bytes`, `push`, `push_sized`, `release_chain`, `set_base_version_for_test`, `update_lmids`, `upstream_schema`
 
-### `cvr.rs`  ⟵  `cvr-store.ts`, `cvr.ts`
+### `cvr.rs`  ⟵  `cvr.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
@@ -78,11 +73,11 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `CVRConfigDrivenUpdater` (cvr.ts:212) | `CVRConfigDrivenUpdater` (:352) | exact |
 | `CVRQueryDrivenUpdater` (cvr.ts:560) | `CVRQueryDrivenUpdater` (:821) | exact |
 | `CVRUpdater` (cvr.ts:141) | `CVRUpdater` (:283) | exact |
-| `deleteClient` (cvr-store.ts:674) | `delete_client` (:789) | exact |
+| `deleteClient` (cvr.ts:502) | `delete_client` (:789) | exact |
 | `deleteDesiredQueries` (cvr.ts:422) | `delete_desired_queries` (:635) | exact |
 | `deleteUnreferencedRows` (cvr.ts:959) | `delete_unreferenced_rows` (:1167) | exact |
 | `ensureClient` (cvr.ts:220) | `ensure_client` (:371) | exact |
-| `flush` (cvr-store.ts:1231) | `flush` (:332) | exact |
+| `flush` (cvr.ts:183) | `flush` (:332) | exact |
 | `getInactiveQueries` (cvr.ts:1087) | `get_inactive_queries` (:190) | exact |
 | `getMutationResultsQuery` (cvr.ts:96) | `get_mutation_results_query` (:138) | exact |
 | `markDesiredQueriesAsInactive` (cvr.ts:414) | `mark_desired_queries_as_inactive` (:625) | exact |
@@ -91,15 +86,17 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `nextEvictionTime` (cvr.ts:1156) | `next_eviction_time` (:264) | exact |
 | `putDesiredQueries` (cvr.ts:317) | `put_desired_queries` (:480) | exact |
 | `received` (cvr.ts:836) | `received` (:1022) | exact |
+| `RefCounts` (cvr.ts:531) | `RefCounts` (:1317) | exact |
+| `RowSetSignatureProvider` (cvr.ts:544) | `RowSetSignatureProvider` (:277) | exact |
 | `RowUpdate` (cvr.ts:51) | `RowUpdate` (:1325) | exact |
 | `setClientSchema` (cvr.ts:273) | `set_client_schema` (:444) | exact |
 | `setProfileID` (cvr.ts:299) | `set_profile_id` (:464) | exact |
 | `trackQueries` (cvr.ts:617) | `track_queries` (:894) | exact |
 | `updatedVersion` (cvr.ts:789) | `updated_version` (:883) | exact |
 
-🟥 **TS symbols not resolved into this file (3):** `CVRSnapshot`, `Column`, `RefCounts`
+🟥 **TS symbols not resolved into this file (2):** `CVRSnapshot`, `Column`
 
-🟦 **Rust-only added here (36):** `CLIENT_LMID_QUERY_ID`, `CLIENT_MUTATION_RESULTS_QUERY_ID`, `DesiredQuerySpec`, `InactiveQuery`, `StoreOp`, `assert_new_version`, `delete_queries`, `drain_store_ops`, `make_query_driven_updater`, `make_shard`, `make_test_cvr`, `test_clear_desired_queries`, `test_delete_client`, `test_delete_client_not_found`, `test_delete_desired_queries`, `test_delete_unreferenced_rows`, `test_ensure_client_creates_client_and_internal_queries`, `test_ensure_client_idempotent`, `test_flush_with_signature_provider`, `test_inactivate_missing_client_state_does_not_fabricate_entry`, `test_put_desired_queries_new`, `test_put_desired_queries_no_change`, `test_query_updater_bumps_version_on_new_state_version`, `test_query_updater_does_not_bump_on_same_state_version`, `test_received_new_row`, `test_received_null_then_reref_drops_stale_existing_refs`, `test_received_unref_row`, `test_set_client_schema_mismatch`, `test_set_client_schema_new`, `test_set_client_schema_same`, `test_set_profile_id`, `test_track_queries_executed`, `test_track_queries_removed`, `test_unref_empty_row_version_bumps_patch_version`, `track_executed`, `track_removed`
+🟦 **Rust-only added here (37):** `CLIENT_LMID_QUERY_ID`, `CLIENT_MUTATION_RESULTS_QUERY_ID`, `DesiredQuerySpec`, `InactiveQuery`, `RowRecordMap`, `StoreOp`, `assert_new_version`, `delete_queries`, `drain_store_ops`, `make_query_driven_updater`, `make_shard`, `make_test_cvr`, `test_clear_desired_queries`, `test_delete_client`, `test_delete_client_not_found`, `test_delete_desired_queries`, `test_delete_unreferenced_rows`, `test_ensure_client_creates_client_and_internal_queries`, `test_ensure_client_idempotent`, `test_flush_with_signature_provider`, `test_inactivate_missing_client_state_does_not_fabricate_entry`, `test_put_desired_queries_new`, `test_put_desired_queries_no_change`, `test_query_updater_bumps_version_on_new_state_version`, `test_query_updater_does_not_bump_on_same_state_version`, `test_received_new_row`, `test_received_null_then_reref_drops_stale_existing_refs`, `test_received_unref_row`, `test_set_client_schema_mismatch`, `test_set_client_schema_new`, `test_set_client_schema_same`, `test_set_profile_id`, `test_track_queries_executed`, `test_track_queries_removed`, `test_unref_empty_row_version_bumps_patch_version`, `track_executed`, `track_removed`
 
 ### `cvr_store.rs`  ⟵  `cvr-store.ts`
 
@@ -109,7 +106,9 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `catchupConfigPatches` (cvr-store.ts:725) | `catchup_config_patches` (:169) | exact |
 | `cvrErrorKind` (cvr-store.ts:1421) | `cvr_error_kind` (:1667) | exact |
 | `CVRFlushStats` (cvr-store.ts:67) | `CVRFlushStats` (:100) | exact |
+| `deleteClient` (cvr-store.ts:674) | `delete_client` (:422) | exact |
 | `delRowRecord` (cvr-store.ts:536) | `del_row_record` (:524) | exact |
+| `flush` (cvr-store.ts:1231) | `flush` (:582) | exact |
 | `forceUpdates` (cvr-store.ts:545) | `force_updates` (:531) | exact |
 | `getTTLClock` (cvr-store.ts:569) | `get_ttl_clock` (:387) | exact |
 | `insertClient` (cvr-store.ts:662) | `insert_client` (:415) | exact |
@@ -127,19 +126,18 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 
 🟥 **TS symbols not resolved into this file (3):** `ConcurrentModificationException`, `InvalidClientSchemaError`, `OwnershipError`
 
-🟦 **Rust-only added here (18):** `CVRStoreCatchupReader`, `CVRStoreError`, `CVRStoreHandle`, `InspectQueryRow`, `InspectQueryRowDb`, `LOAD_ATTEMPT_INTERVAL_MS`, `LoadResult`, `MAX_LOAD_ATTEMPTS`, `PartialQueriesRow`, `PendingWrites`, `apply_store_ops`, `catchup_reader`, `flush_internal`, `from`, `has_pending_writes`, `is_empty`, `load_once`, `load_with_retries`
+🟦 **Rust-only added here (21):** `CVRStoreCatchupReader`, `CVRStoreError`, `CVRStoreHandle`, `DesireLoadRow`, `InspectQueryRow`, `InspectQueryRowDb`, `InstanceLoadRow`, `LOAD_ATTEMPT_INTERVAL_MS`, `LoadResult`, `MAX_LOAD_ATTEMPTS`, `PartialQueriesRow`, `PendingWrites`, `QueryLoadRow`, `apply_store_ops`, `catchup_reader`, `flush_internal`, `from`, `has_pending_writes`, `is_empty`, `load_once`, `load_with_retries`
 
 ### `hash.rs`  ⟵  _(new)_
 
 
 🟦 **Rust-only added here (4):** `h128`, `h32`, `h64`, `xxh32_seeded`
 
-### `live_count.rs`  ⟵  `cvr-store.ts`, `row-record-cache.ts`
+### `live_count.rs`  ⟵  `cvr-store.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
 | `CVRStore` (cvr-store.ts:180) | `CVR_STORE` (:17) | exact |
-| `RowRecordCache` (row-record-cache.ts:90) | `ROW_RECORD_CACHE` (:20) | exact |
 
 🟦 **Rust-only added here (5):** `CONFIG_DRIVEN_UPDATER`, `Guard`, `QUERY_DRIVEN_UPDATER`, `drop_backtrace`, `snapshot`
 
@@ -151,32 +149,30 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 
 🟦 **Rust-only added here (9):** `Instruments`, `LATENCY_BOUNDARIES_S`, `record_async_flush_stats`, `record_flush_attempt`, `record_load`, `record_poke`, `record_poked_row`, `record_query`, `record_row_set_signature_drift`
 
-### `parity_check.rs`  ⟵  `schema/types.ts`
+### `parity_check.rs`  ⟵  _(new)_
 
-| TS symbol | Rust symbol | match |
-|---|---|---|
-| `ClientQueryRecord` (schema/types.ts:235) | `client_query_record` (:198) | exact |
 
 🟦 **Rust-only added here (24):** `CaptureSink`, `base_cvr`, `build_client_state`, `build_cvr_from_spec`, `build_existing_rows`, `build_query_record_from_spec`, `build_received_rows`, `build_row_patch_from_spec`, `dummy_base`, `make_row_id_from_json`, `norm_desire_state`, `norm_patch`, `norm_put_desired_op`, `parity_check`, `parity_shard`, `parse_refcounts`, `parse_u64`, `patch_sort_key`, `patch_to_version_from_json`, `queries_row_from_json`, `queries_row_to_json`, `sorted_norm`, `spec_from_json`, `ttl_from_json`
 
 ### `row_key.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (10):** `CACHE_GEN_CAP`, `DIGITS`, `RowIdStringCache`, `base36_encode`, `get`, `insert`, `normalized_key_order`, `row_id_hash`, `row_id_string`, `row_id_string_cached`
+🟦 **Rust-only added here (12):** `CACHE_GEN_CAP`, `DIGITS`, `RowIdStringCache`, `RowKey`, `RowKeyType`, `base36_encode`, `get`, `insert`, `normalized_key_order`, `row_id_hash`, `row_id_string`, `row_id_string_cached`
 
-### `row_record_cache.rs`  ⟵  `cvr-store.ts`, `row-record-cache.ts`
+### `row_record_cache.rs`  ⟵  `row-record-cache.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
 | `apply` (row-record-cache.ts:234) | `apply` (:291) | exact |
-| `catchupRowPatches` (cvr-store.ts:709) | `catchup_row_patches` (:493) | exact |
+| `catchupRowPatches` (row-record-cache.ts:341) | `catchup_row_patches` (:493) | exact |
 | `clear` (row-record-cache.ts:334) | `clear` (:420) | exact |
 | `executeRowUpdates` (row-record-cache.ts:414) | `execute_row_updates` (:433) | exact |
-| `flushed` (cvr-store.ts:1284) | `flushed` (:399) | exact |
-| `getRowRecords` (cvr-store.ts:520) | `get_row_records` (:281) | exact |
-| `hasPendingUpdates` (cvr-store.ts:1279) | `has_pending_updates` (:389) | exact |
+| `flushed` (row-record-cache.ts:326) | `flushed` (:399) | exact |
+| `getRowRecords` (row-record-cache.ts:215) | `get_row_records` (:281) | exact |
+| `hasPendingUpdates` (row-record-cache.ts:318) | `has_pending_updates` (:389) | exact |
+| `RowRecordCache` (row-record-cache.ts:90) | `RowRecordCache` (:190) | exact |
 
-🟦 **Rust-only added here (18):** `CATCHUP_PAGE_SIZE`, `CacheState`, `CatchupCursor`, `CatchupTaskContext`, `DEFAULT_DEFERRED_THRESHOLD`, `ExecuteResult`, `FlushLoopContext`, `FlushMode`, `IDLE_TX_TIMEOUT_MS`, `RowKeyRef`, `RowUpdateStatements`, `RowsRowDb`, `catchup_task`, `catchup_task_inner`, `empty`, `flush_loop`, `flush_one_iteration`, `next_page`
+🟦 **Rust-only added here (20):** `CATCHUP_PAGE_SIZE`, `CacheState`, `CatchupCursor`, `CatchupTaskContext`, `DEFAULT_DEFERRED_THRESHOLD`, `ExecuteResult`, `FailCallback`, `FlushLoopContext`, `FlushMode`, `IDLE_TX_TIMEOUT_MS`, `MetricsCallback`, `RowKeyRef`, `RowUpdateStatements`, `RowsRowDb`, `catchup_task`, `catchup_task_inner`, `empty`, `flush_loop`, `flush_one_iteration`, `next_page`
 
 ### `row_set_signature.rs`  ⟵  `row-set-signature.ts`
 
@@ -199,7 +195,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `rowsRowToRowRecord` (schema/cvr.ts:229) | `rows_row_to_row_record` (:95) | exact |
 | `RowsVersionRow` (schema/cvr.ts:331) | `RowsVersionRow` (:73) | exact |
 
-🟥 **TS symbols not resolved into this file (15):** `compareClientsRows`, `compareDesiresRows`, `compareInstancesRows`, `compareQueriesRows`, `compareRowsRows`, `createClientsTable`, `createDesiresTable`, `createInstancesTable`, `createQueriesTable`, `createRowsTable`, `createRowsVersionTable`, `createSchema`, `createTables`, `rowsRowToRowID`, `stringifySorted`
+🟥 **TS symbols not resolved into this file (16):** `compareClientsRows`, `compareDesiresRows`, `compareInstancesRows`, `compareQueriesRows`, `compareRowsRows`, `createClientsTable`, `createDesiresTable`, `createInstancesTable`, `createQueriesTable`, `createRowsTable`, `createRowsVersionTable`, `createSchema`, `createTables`, `rowsRowToRowID`, `setupCVRTables`, `stringifySorted`
 
 🟦 **Rust-only added here (1):** `RowRecordError`
 
@@ -207,6 +203,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `ClientQueryRecord` (schema/types.ts:235) | `ClientQueryRecord` (:375) | exact |
 | `ClientRecord` (schema/types.ts:119) | `ClientRecord` (:326) | exact |
 | `cmpVersions` (schema/types.ts:55) | `cmp_versions` (:83) | exact |
 | `CustomQueryRecord` (schema/types.ts:243) | `CustomQueryRecord` (:385) | exact |
@@ -215,6 +212,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `InternalQueryRecord` (schema/types.ts:188) | `InternalQueryRecord` (:368) | exact |
 | `maxVersion` (schema/types.ts:72) | `max_version` (:93) | exact |
 | `maybeVersionString` (schema/types.ts:392) | `maybe_version_string` (:189) | exact |
+| `NullableCVRVersion` (schema/types.ts:53) | `NullableCVRVersion` (:63) | exact |
 | `oneAfter` (schema/types.ts:44) | `one_after` (:38) | exact |
 | `QueryPatch` (schema/types.ts:303) | `QueryPatch` (:459) | exact |
 | `QueryRecord` (schema/types.ts:251) | `QueryRecord` (:346) | exact |
@@ -226,9 +224,9 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `versionToCookie` (schema/types.ts:76) | `version_to_cookie` (:107) | exact |
 | `versionToNullableCookie` (schema/types.ts:80) | `version_to_nullable_cookie` (:111) | exact |
 
-🟥 **TS symbols not resolved into this file (22):** `CvrID`, `DelQueryPatch`, `DelRowPatch`, `MetadataPatch`, `NullableCVRVersion`, `PutQueryPatch`, `clientQueryRecordSchema`, `clientRecordSchema`, `cookieToVersion`, `customQueryRecordSchema`, `cvrIDSchema`, `cvrVersionSchema`, `delRowPatchSchema`, `internalQueryRecordSchema`, `metadataPatchSchema`, `patchSchema`, `putRowPatchSchema`, `queryPatchSchema`, `queryRecordSchema`, `rowIDSchema`, `rowPatchSchema`, `rowRecordSchema`
+🟥 **TS symbols not resolved into this file (21):** `CvrID`, `DelQueryPatch`, `DelRowPatch`, `MetadataPatch`, `PutQueryPatch`, `clientQueryRecordSchema`, `clientRecordSchema`, `cookieToVersion`, `customQueryRecordSchema`, `cvrIDSchema`, `cvrVersionSchema`, `delRowPatchSchema`, `internalQueryRecordSchema`, `metadataPatchSchema`, `patchSchema`, `putRowPatchSchema`, `queryPatchSchema`, `queryRecordSchema`, `rowIDSchema`, `rowPatchSchema`, `rowRecordSchema`
 
-🟦 **Rust-only added here (16):** `BaseQueryRecord`, `ClientState`, `VersionError`, `base`, `base_mut`, `client_state_mut`, `cmp_cvr`, `from_base36_u64`, `id`, `is_internal`, `patch_version`, `patch_version_mut`, `to_base36_u64`, `validate_state_version`, `version_from_lexi`, `version_to_lexi`
+🟦 **Rust-only added here (18):** `AST`, `BaseQueryRecord`, `ClientSchema`, `ClientState`, `VersionError`, `base`, `base_mut`, `client_state_mut`, `cmp_cvr`, `from_base36_u64`, `id`, `is_internal`, `patch_version`, `patch_version_mut`, `to_base36_u64`, `validate_state_version`, `version_from_lexi`, `version_to_lexi`
 
 ### `seq_replay.rs`  ⟵  `schema/cvr.ts`
 
@@ -255,8 +253,11 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 
 ### `ttl_clock.rs`  ⟵  `ttl-clock.ts`
 
+| TS symbol | Rust symbol | match |
+|---|---|---|
+| `TTLClock` (ttl-clock.ts:5) | `TTLClock` (:5) | exact |
 
-🟥 **TS symbols not resolved into this file (2):** `TTLClock`, `ttlClockSchema`
+🟥 **TS symbols not resolved into this file (1):** `ttlClockSchema`
 
 ## 3 · Flat one-to-one symbol map (every TS symbol resolved)
 
@@ -288,7 +289,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `asQuery` | cvr-store.ts:119 | `as_query` cvr_store.rs:1677 | ✅ exact |
 | `CVRStore` | cvr-store.ts:180 | `CVR_STORE` live_count.rs:17 | ✅ exact |
 | `load` | cvr-store.ts:274 | `load` cvr_store.rs:1183 | ✅ exact |
-| `getRowRecords` | cvr-store.ts:520 | `get_row_records` row_record_cache.rs:281 | ✅ exact |
+| `getRowRecords` | row-record-cache.ts:215 | `get_row_records` row_record_cache.rs:281 | ✅ exact |
 | `putRowRecord` | cvr-store.ts:524 | `put_row_record` cvr_store.rs:517 | ✅ exact |
 | `delRowRecord` | cvr-store.ts:536 | `del_row_record` cvr_store.rs:524 | ✅ exact |
 | `forceUpdates` | cvr-store.ts:545 | `force_updates` cvr_store.rs:531 | ✅ exact |
@@ -300,15 +301,16 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `updateQuery` | cvr-store.ts:644 | `update_query` cvr_store.rs:435 | ✅ exact |
 | `updateRowSetSignature` | cvr-store.ts:658 | `update_row_set_signature` cvr_store.rs:477 | ✅ exact |
 | `insertClient` | cvr-store.ts:662 | `insert_client` cvr_store.rs:415 | ✅ exact |
-| `deleteClient` | cvr-store.ts:674 | `delete_client` cvr.rs:789 | ✅ exact |
+| `deleteClient` | cvr-store.ts:674 | `delete_client` cvr_store.rs:422 | ✅ exact |
 | `putDesiredQuery` | cvr-store.ts:684 | `put_desired_query` cvr_store.rs:486 | ✅ exact |
-| `catchupRowPatches` | cvr-store.ts:709 | `catchup_row_patches` row_record_cache.rs:493 | ✅ exact |
+| `catchupRowPatches` | row-record-cache.ts:341 | `catchup_row_patches` row_record_cache.rs:493 | ✅ exact |
 | `catchupConfigPatches` | cvr-store.ts:725 | `catchup_config_patches` cvr_store.rs:169 | ✅ exact |
 | `rowCount` | cvr-store.ts:1227 | `row_count` cvr_store.rs:303 | ✅ exact |
-| `flush` | cvr-store.ts:1231 | `flush` cvr.rs:332 | ✅ exact |
-| `hasPendingUpdates` | cvr-store.ts:1279 | `has_pending_updates` row_record_cache.rs:389 | ✅ exact |
-| `flushed` | cvr-store.ts:1284 | `flushed` row_record_cache.rs:399 | ✅ exact |
+| `flush` | cvr-store.ts:1231 | `flush` cvr_store.rs:582 | ✅ exact |
+| `hasPendingUpdates` | row-record-cache.ts:318 | `has_pending_updates` row_record_cache.rs:389 | ✅ exact |
+| `flushed` | row-record-cache.ts:326 | `flushed` row_record_cache.rs:399 | ✅ exact |
 | `inspectQueries` | cvr-store.ts:1288 | `inspect_queries` cvr_store.rs:314 | ✅ exact |
+| `checkVersion` | cvr-store.ts:1337 | INLINED cvr_store.rs catchup version guard | 📌 plain-SELECT re-check of instances.version vs `current` |
 | `ClientNotFoundError` | cvr-store.ts:1354 | CVRStoreError::ClientNotFound (cvr_store.rs:47) | 📌 TS error class → Rust enum variant |
 | `ConcurrentModificationException` | cvr-store.ts:1367 | — | 🟥 UNRESOLVED |
 | `OwnershipError` | cvr-store.ts:1382 | — | 🟥 UNRESOLVED |
@@ -332,8 +334,8 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `deleteDesiredQueries` | cvr.ts:422 | `delete_desired_queries` cvr.rs:635 | ✅ exact |
 | `clearDesiredQueries` | cvr.ts:497 | `clear_desired_queries` cvr.rs:775 | ✅ exact |
 | `Column` | cvr.ts:530 | — | 🟥 UNRESOLVED |
-| `RefCounts` | cvr.ts:531 | — | 🟥 UNRESOLVED |
-| `RowSetSignatureProvider` | cvr.ts:544 | RowSetSignatureProvider type (cvr.rs:277) | 📌 exact type alias; extractor skips `type` decls |
+| `RefCounts` | cvr.ts:531 | `RefCounts` cvr.rs:1317 | ✅ exact |
+| `RowSetSignatureProvider` | cvr.ts:544 | `RowSetSignatureProvider` cvr.rs:277 | ✅ exact |
 | `CVRQueryDrivenUpdater` | cvr.ts:560 | `CVRQueryDrivenUpdater` cvr.rs:821 | ✅ exact |
 | `trackQueries` | cvr.ts:617 | `track_queries` cvr.rs:894 | ✅ exact |
 | `updatedVersion` | cvr.ts:789 | `updated_version` cvr.rs:883 | ✅ exact |
@@ -344,7 +346,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `nextEvictionTime` | cvr.ts:1156 | `next_eviction_time` cvr.rs:264 | ✅ exact |
 | `newQueryRecord` | cvr.ts:1167 | `new_query_record` cvr.rs:97 | ✅ exact |
 | `assert` | cvr.ts:1186 | assert_new_version (cvr.rs) | 📌 rename |
-| `RowRecordCache` | row-record-cache.ts:90 | `ROW_RECORD_CACHE` live_count.rs:20 | ✅ exact |
+| `RowRecordCache` | row-record-cache.ts:90 | `RowRecordCache` row_record_cache.rs:190 | ✅ exact |
 | `recordSyncFlushStats` | row-record-cache.ts:144 | `record_sync_flush_stats` otel_metrics.rs:169 | ✅ exact |
 | `apply` | row-record-cache.ts:234 | `apply` row_record_cache.rs:291 | ✅ exact |
 | `clear` | row-record-cache.ts:334 | `clear` row_record_cache.rs:420 | ✅ exact |
@@ -375,12 +377,13 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `createRowsTable` | schema/cvr.ts:301 | — | 🟥 UNRESOLVED |
 | `RowsVersionRow` | schema/cvr.ts:331 | `RowsVersionRow` schema/cvr.rs:73 | ✅ exact |
 | `createTables` | schema/cvr.ts:336 | — | 🟥 UNRESOLVED |
+| `setupCVRTables` | schema/cvr.ts:348 | — | 🟥 UNRESOLVED |
 | `stringifySorted` | schema/cvr.ts:357 | — | 🟥 UNRESOLVED |
 | `cvrVersionSchema` | schema/types.ts:13 | — | 🟥 UNRESOLVED |
 | `CVRVersion` | schema/types.ts:38 | `CVRVersion` schema/types.rs:30 | ✅ exact |
 | `EMPTY_CVR_VERSION` | schema/types.ts:40 | `EMPTY_CVR_VERSION` schema/types.rs:50 | ✅ exact |
 | `oneAfter` | schema/types.ts:44 | `one_after` schema/types.rs:38 | ✅ exact |
-| `NullableCVRVersion` | schema/types.ts:53 | — | 🟥 UNRESOLVED |
+| `NullableCVRVersion` | schema/types.ts:53 | `NullableCVRVersion` schema/types.rs:63 | ✅ exact |
 | `cmpVersions` | schema/types.ts:55 | `cmp_versions` schema/types.rs:83 | ✅ exact |
 | `maxVersion` | schema/types.ts:72 | `max_version` schema/types.rs:93 | ✅ exact |
 | `versionToCookie` | schema/types.ts:76 | `version_to_cookie` schema/types.rs:107 | ✅ exact |
@@ -394,7 +397,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `internalQueryRecordSchema` | schema/types.ts:183 | — | 🟥 UNRESOLVED |
 | `InternalQueryRecord` | schema/types.ts:188 | `InternalQueryRecord` schema/types.rs:368 | ✅ exact |
 | `clientQueryRecordSchema` | schema/types.ts:228 | — | 🟥 UNRESOLVED |
-| `ClientQueryRecord` | schema/types.ts:235 | `client_query_record` parity_check.rs:198 | ✅ exact |
+| `ClientQueryRecord` | schema/types.ts:235 | `ClientQueryRecord` schema/types.rs:375 | ✅ exact |
 | `customQueryRecordSchema` | schema/types.ts:237 | — | 🟥 UNRESOLVED |
 | `CustomQueryRecord` | schema/types.ts:243 | `CustomQueryRecord` schema/types.rs:385 | ✅ exact |
 | `queryRecordSchema` | schema/types.ts:245 | — | 🟥 UNRESOLVED |
@@ -418,7 +421,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `versionFromString` | schema/types.ts:322 | `version_from_string` schema/types.rs:225 | ✅ exact |
 | `queryRecordToQueryRow` | schema/types.ts:342 | `query_record_to_query_row` schema/types.rs:488 | ✅ exact |
 | `maybeVersionString` | schema/types.ts:392 | `maybe_version_string` schema/types.rs:189 | ✅ exact |
-| `TTLClock` | ttl-clock.ts:5 | — | 🟥 UNRESOLVED |
+| `TTLClock` | ttl-clock.ts:5 | `TTLClock` ttl_clock.rs:5 | ✅ exact |
 | `ttlClockSchema` | ttl-clock.ts:7 | — | 🟥 UNRESOLVED |
 | `ttlClockAsNumber` | ttl-clock.ts:9 | IDENTITY | 📌 TTLClock = i64 (ttl_clock.rs); no conversion |
 | `ttlClockFromNumber` | ttl-clock.ts:13 | IDENTITY | 📌 TTLClock = i64 (ttl_clock.rs); no conversion |

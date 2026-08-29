@@ -2,56 +2,57 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **275**, Rust **629** · resolved pairs **162** (exact 135 + fuzzy 27) + aliases 54
-- 🟥 TS UNRESOLVED: **65** (**26** behavioral ⇒ investigate · 39 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **467**
+- symbols: TS **286**, Rust **638** · resolved pairs **168** (exact 139 + fuzzy 29) + aliases 62
+- 🟥 TS UNRESOLVED: **62** (**24** behavioral ⇒ investigate · 38 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **470**
 
-> ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `accumulate` (services/view-syncer/pipeline-driver.ts), `apiRequests` (custom/metrics.ts), `assertAreCompatiblePushes` (services/mutagen/pusher.ts), `assertNormalized` (config/zero-config.ts), `getInstance` (server/otel-start.ts), `getMeter` (observability/metrics.ts), `getNormalizedZeroConfig` (config/zero-config.ts), `getOrCreateGauge` (observability/metrics.ts), `getOrCreateHistogram` (observability/metrics.ts), `getOrCreateLatencyHistogram` (observability/metrics.ts), `getOrCreateUpDownCounter` (observability/metrics.ts), `getServerVersion` (config/zero-config.ts), `getZeroConfig` (config/zero-config.ts), `hasExpiredQueries` (services/view-syncer/view-syncer.ts), `hasRefs` (services/mutagen/pusher.ts), `initEventSink` (server/syncer.ts), `metricsForProtocol` (services/view-syncer/inspect-handler.ts), `recordMs` (observability/metrics.ts), `ref` (services/mutagen/pusher.ts), `registerSQLiteCorruptionDiagnosticTarget` (server/syncer.ts), `resetWarnOnceState` (config/zero-config.ts), `rowSetSignature` (services/view-syncer/pipeline-driver.ts), `startAnonymousTelemetry` (server/syncer.ts), `startOtelAuto` (server/otel-start.ts), `unref` (services/mutagen/pusher.ts), `warnOnce` (config/zero-config.ts)
+> ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `accumulate` (services/view-syncer/pipeline-driver.ts), `apiRequests` (custom/metrics.ts), `assertAreCompatiblePushes` (services/mutagen/pusher.ts), `assertNormalized` (config/zero-config.ts), `getMeter` (observability/metrics.ts), `getNormalizedZeroConfig` (config/zero-config.ts), `getOrCreateGauge` (observability/metrics.ts), `getOrCreateHistogram` (observability/metrics.ts), `getOrCreateLatencyHistogram` (observability/metrics.ts), `getOrCreateUpDownCounter` (observability/metrics.ts), `getServerVersion` (config/zero-config.ts), `getZeroConfig` (config/zero-config.ts), `hasExpiredQueries` (services/view-syncer/view-syncer.ts), `hasRefs` (services/mutagen/pusher.ts), `initEventSink` (server/syncer.ts), `metricsForProtocol` (services/view-syncer/inspect-handler.ts), `recordMs` (observability/metrics.ts), `ref` (services/mutagen/pusher.ts), `registerSQLiteCorruptionDiagnosticTarget` (server/syncer.ts), `resetWarnOnceState` (config/zero-config.ts), `rowSetSignature` (services/view-syncer/pipeline-driver.ts), `startAnonymousTelemetry` (server/syncer.ts), `unref` (services/mutagen/pusher.ts), `warnOnce` (config/zero-config.ts)
 
 ## 1 · File structure diff
 
-TS origin files: **24**  ·  Rust files: **63** (36 new)
+TS origin files: **24**  ·  Rust files: **63** (37 new)
 
 | TS file (LOC) | rel | Rust file(s) (shared syms) |
 |---|---|---|
-| `auth/auth.ts` (243) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (4), `custom_queries/transform_query.rs` (1) |
-| `auth/jwt.ts` (89) | **MERGED** | `auth/jwt.rs` (4) |
+| `auth/auth.ts` (243) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (6), `custom_queries/transform_query.rs` (1) |
+| `auth/jwt.ts` (89) | **MERGED** | `auth/jwt.rs` (5) |
 | `auth/load-permissions.ts` (100) | **1:1** | `auth/load_permissions.rs` (3) |
 | `auth/read-authorizer.ts` (152) | **1:1** | `auth/read_authorizer.rs` (5) |
-| `config/zero-config.ts` (1299) | **1:1** | `services/view_syncer/inspect_handler.rs` (1) |
-| `custom-queries/transform-query.ts` (290) | **MERGED** | `custom_queries/transform_query.rs` (5), `services/view_syncer/pipeline_driver.rs` (1), `auth/jwt.rs` (1) |
-| `custom/fetch.ts` (569) | **SPLIT** | `custom/metrics.rs` (4), `custom/fetch.rs` (3), `metrics.rs` (2), `custom_queries/transform_query.rs` (2), `protocol/error_reason_enum.rs` (1), `protocol/error.rs` (1) |
-| `custom/metrics.ts` (93) | **MERGED** | `custom/metrics.rs` (2) |
+| `config/zero-config.ts` (1299) | **MERGED** | `services/view_syncer/inspect_handler.rs` (1) |
+| `custom-queries/transform-query.ts` (290) | **MERGED** | `custom_queries/transform_query.rs` (5), `auth/jwt.rs` (1) |
+| `custom/fetch.ts` (569) | **SPLIT** | `custom/fetch.rs` (3), `custom/metrics.rs` (3), `custom_queries/transform_query.rs` (3), `protocol/error_reason_enum.rs` (1), `protocol/error.rs` (1) |
+| `custom/metrics.ts` (93) | **MERGED** | `custom/metrics.rs` (3) |
 | `db/lite-tables.ts` (356) | **1:1** | `db/lite_tables.rs` (5), `services/view_syncer/pipeline_driver.rs` (1) |
 | `observability/metrics.ts` (239) | **MERGED** | `custom_queries/transform_query.rs` (1), `workers/syncer.rs` (1), `observability/metrics.rs` (1), `server/otel_start.rs` (1) |
-| `server/otel-start.ts` (107) | **DROPPED** | — |
+| `server/otel-start.ts` (107) | **MERGED** | `server/otel_start.rs` (2) |
 | `server/syncer.ts` (295) | **MERGED** | `custom_queries/transform_query.rs` (1) |
-| `services/mutagen/pusher.ts` (712) | **1:1** | `services/mutagen/pusher.rs` (6), `view_syncer.rs` (2), `live_count.rs` (1) |
-| `services/view-syncer/connection-context-manager.ts` (892) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (28), `view_syncer.rs` (1) |
+| `services/mutagen/pusher.ts` (712) | **1:1** | `services/mutagen/pusher.rs` (6), `live_count.rs` (1) |
+| `services/view-syncer/connection-context-manager.ts` (892) | **MERGED** | `services/view_syncer/connection_context_manager.rs` (29) |
 | `services/view-syncer/drain-coordinator.ts` (76) | **1:1** | `services/view_syncer/drain_coordinator.rs` (6) |
 | `services/view-syncer/e2e-serving-lag.ts` (82) | **1:1** | `services/view_syncer/e2e_serving_lag.rs` (6) |
-| `services/view-syncer/inspect-handler.ts` (215) | **DROPPED** | — |
-| `services/view-syncer/pipeline-driver.ts` (1558) | **SPLIT** | `services/view_syncer/pipeline_driver.rs` (7), `advance_gate.rs` (6), `pipeline_driver.rs` (3), `services/view_syncer/connection_context_manager.rs` (1), `observability/metrics.rs` (1), `view_syncer.rs` (1) |
-| `services/view-syncer/query-covering.ts` (444) | **1:1** | `services/view_syncer/query_covering.rs` (24), `observability/metrics.rs` (1) |
-| `services/view-syncer/view-syncer.ts` (3002) | **SPLIT** | `services/view_syncer/view_syncer.rs` (12), `view_syncer.rs` (7), `protocol/error.rs` (1) |
+| `services/view-syncer/inspect-handler.ts` (215) | **MERGED** | `services/view_syncer/inspect_handler.rs` (1) |
+| `services/view-syncer/pipeline-driver.ts` (1558) | **MERGED** | `services/view_syncer/pipeline_driver.rs` (12), `ws_sink.rs` (1), `services/view_syncer/connection_context_manager.rs` (1), `protocol/error.rs` (1), `observability/metrics.rs` (1) |
+| `services/view-syncer/query-covering.ts` (444) | **1:1** | `services/view_syncer/query_covering.rs` (25) |
+| `services/view-syncer/view-syncer.ts` (3002) | **1:1** | `services/view_syncer/view_syncer.rs` (21), `protocol/error.rs` (1) |
 | `workers/connect-params.ts` (100) | **1:1** | `workers/connect_params.rs` (2), `ws_server.rs` (1) |
-| `workers/connection.ts` (485) | **1:1** | `workers/connection.rs` (10), `live_count.rs` (1), `workers/cg_executor.rs` (1), `ws_sink.rs` (1) |
-| `workers/syncer-ws-message-handler.ts` (283) | **1:1** | `workers/syncer_ws_message_handler.rs` (2) |
+| `workers/connection.ts` (485) | **1:1** | `workers/connection.rs` (13), `ws_sink.rs` (1) |
+| `workers/syncer-ws-message-handler.ts` (283) | **1:1** | `workers/syncer_ws_message_handler.rs` (3) |
 | `workers/syncer.ts` (759) | **MERGED** | `workers/syncer.rs` (15), `ws_server.rs` (1) |
 
-**New Rust files (no TS origin — added in the port):**  `auth.rs` (6), `config.rs` (4), `config/zero_config.rs` (311), `custom.rs` (5), `custom_queries.rs` (4), `db.rs` (3), `http_server.rs` (513), `lib.rs` (84), `main.rs` (474), `observability.rs` (4), `protocol.rs` (116), `protocol/change_desired_queries.rs` (14), `protocol/connect.rs` (106), `protocol/delete_clients.rs` (14), `protocol/down.rs` (11), `protocol/error_kind_enum.rs` (30), `protocol/error_origin_enum.rs` (14), `protocol/inspect_up.rs` (41), `protocol/mutation_id.rs` (12), `protocol/mutations_patch.rs` (18), `protocol/poke.rs` (47), `protocol/pong.rs` (15), `protocol/protocol_version.rs` (9), `protocol/push.rs` (31), `protocol/queries_patch.rs` (55), `protocol/row_patch.rs` (33), `protocol/up.rs` (95), `protocol/update_auth.rs` (10), `protocol/version.rs` (8), `server.rs` (9), `server/syncer.rs` (166), `services.rs` (4), `services/mutagen.rs` (4), `services/view_syncer.rs` (17), `trace.rs` (30), `workers.rs` (10)
+**New Rust files (no TS origin — added in the port):**  `auth.rs` (6), `config.rs` (4), `config/zero_config.rs` (311), `custom.rs` (5), `custom_queries.rs` (4), `db.rs` (3), `http_server.rs` (513), `lib.rs` (84), `main.rs` (474), `observability.rs` (4), `protocol.rs` (116), `protocol/change_desired_queries.rs` (14), `protocol/connect.rs` (106), `protocol/delete_clients.rs` (14), `protocol/down.rs` (11), `protocol/error_kind_enum.rs` (30), `protocol/error_origin_enum.rs` (14), `protocol/inspect_up.rs` (41), `protocol/mutation_id.rs` (12), `protocol/mutations_patch.rs` (18), `protocol/poke.rs` (47), `protocol/pong.rs` (15), `protocol/protocol_version.rs` (9), `protocol/push.rs` (31), `protocol/queries_patch.rs` (55), `protocol/row_patch.rs` (33), `protocol/up.rs` (95), `protocol/update_auth.rs` (10), `protocol/version.rs` (8), `server.rs` (9), `server/syncer.rs` (166), `services.rs` (4), `services/mutagen.rs` (4), `services/view_syncer.rs` (17), `trace.rs` (30), `workers.rs` (10), `workers/cg_executor.rs` (340)
 
 **Merges (many TS → one Rust file):**
 - `auth/jwt.rs` ⟵ `auth/jwt.ts`, `custom-queries/transform-query.ts`
 - `custom/metrics.rs` ⟵ `custom/fetch.ts`, `custom/metrics.ts`
 - `custom_queries/transform_query.rs` ⟵ `auth/auth.ts`, `custom-queries/transform-query.ts`, `custom/fetch.ts`, `observability/metrics.ts`, `server/syncer.ts`
-- `live_count.rs` ⟵ `services/mutagen/pusher.ts`, `workers/connection.ts`
-- `observability/metrics.rs` ⟵ `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/query-covering.ts`
-- `protocol/error.rs` ⟵ `custom/fetch.ts`, `services/view-syncer/view-syncer.ts`
+- `observability/metrics.rs` ⟵ `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`
+- `protocol/error.rs` ⟵ `custom/fetch.ts`, `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
+- `server/otel_start.rs` ⟵ `observability/metrics.ts`, `server/otel-start.ts`
 - `services/view_syncer/connection_context_manager.rs` ⟵ `auth/auth.ts`, `services/view-syncer/connection-context-manager.ts`, `services/view-syncer/pipeline-driver.ts`
-- `services/view_syncer/pipeline_driver.rs` ⟵ `custom-queries/transform-query.ts`, `db/lite-tables.ts`, `services/view-syncer/pipeline-driver.ts`
-- `view_syncer.rs` ⟵ `services/mutagen/pusher.ts`, `services/view-syncer/connection-context-manager.ts`, `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
+- `services/view_syncer/inspect_handler.rs` ⟵ `config/zero-config.ts`, `services/view-syncer/inspect-handler.ts`
+- `services/view_syncer/pipeline_driver.rs` ⟵ `db/lite-tables.ts`, `services/view-syncer/pipeline-driver.ts`
 - `workers/syncer.rs` ⟵ `observability/metrics.ts`, `workers/syncer.ts`
 - `ws_server.rs` ⟵ `workers/connect-params.ts`, `workers/syncer.ts`
+- `ws_sink.rs` ⟵ `services/view-syncer/pipeline-driver.ts`, `workers/connection.ts`
 
 ## 2 · Per-file functional divergence
 
@@ -102,6 +103,8 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `getBodyPreview` (custom/fetch.ts:62) | `BODY_PREVIEW_CAP` (:49) | fuzzy 0.67 |
 | `urlMatch` (custom/fetch.ts:389) | `url_match` (:11) | exact |
 
+🟥 **TS symbols not resolved into this file (1):** `FetchMetricsOptions`
+
 🟦 **Rust-only added here (1):** `read_body_preview`
 
 ### `custom/metrics.rs`  ⟵  `custom/fetch.ts`, `custom/metrics.ts`
@@ -111,11 +114,11 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `apiAttemptDuration` (custom/fetch.ts:568) | `API_DURATION_BOUNDARIES_S` (:22) | fuzzy 0.50 |
 | `apiInFlight` (custom/fetch.ts:116) | `record_api_in_flight` (:116) | fuzzy 0.75 |
 | `apiRequestDuration` (custom/metrics.ts:63) | `record_api_request_duration` (:74) | fuzzy 0.75 |
-| `apiRequestMetricAttrs` (custom/fetch.ts:516) | `api_request_metric_attrs` (:59) | exact |
+| `ApiRequestMetricAttrs` (custom/metrics.ts:31) | `api_request_metric_attrs` (:59) | exact |
 | `ApiRequestResult` (custom/metrics.ts:15) | `record_api_request` (:67) | fuzzy 0.50 |
 | `recordApiAttempt` (custom/fetch.ts:549) | `record_api_attempt` (:84) | exact |
 
-🟥 **TS symbols not resolved into this file (7):** `ApiAttemptMetricAttrs`, `ApiAttemptResult`, `ApiCleanupType`, `ApiMetricBaseAttrs`, `ApiOperation`, `FetchMetricsOptions`, `apiRequests`
+🟥 **TS symbols not resolved into this file (6):** `ApiAttemptMetricAttrs`, `ApiAttemptResult`, `ApiCleanupType`, `ApiMetricBaseAttrs`, `ApiOperation`, `apiRequests`
 
 🟦 **Rust-only added here (2):** `ApiOtel`, `INSTRUMENTS`
 
@@ -153,11 +156,10 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 
 🟦 **Rust-only added here (14):** `HttpServerState`, `ServerStats`, `bind_http_listener`, `census_handler`, `check_admin_auth`, `check_notify_request`, `heapz_handler`, `metrics_handler`, `notify_broadcast_handler`, `notify_handler`, `readyz_handler`, `run_http_server`, `serve_http`, `statz_handler`
 
-### `live_count.rs`  ⟵  `services/mutagen/pusher.ts`, `workers/connection.ts`
+### `live_count.rs`  ⟵  `services/mutagen/pusher.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `Connection` (workers/connection.ts:78) | `CONNECTION` (:29) | exact |
 | `Pusher` (services/mutagen/pusher.ts:40) | `PUSHER` (:33) | exact |
 
 🟦 **Rust-only added here (10):** `CLIENT_GROUP`, `Guard`, `SYNC_ENGINE`, `WS_MESSAGE_HANDLER`, `dec`, `drop`, `drop_backtrace`, `inc`, `new`, `snapshot`
@@ -167,11 +169,10 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 
 🟦 **Rust-only added here (3):** `ALLOC`, `ShutdownSignal`, `main`
 
-### `observability/metrics.rs`  ⟵  `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/query-covering.ts`
+### `observability/metrics.rs`  ⟵  `observability/metrics.ts`, `services/view-syncer/pipeline-driver.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
-| `add` (services/view-syncer/query-covering.ts:67) | `add` (:753) | exact |
 | `LatencyHistogram` (observability/metrics.ts:91) | `Histogram` (:659) | fuzzy 0.50 |
 | `reset` (services/view-syncer/pipeline-driver.ts:343) | `record_reset` (:779) | fuzzy 0.50 |
 
@@ -185,7 +186,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 ### `protocol/connect.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (6):** `ConnectedBody`, `DecodeError`, `InitConnectionBody`, `SecProtocols`, `connected_message`, `decode_sec_protocols`
+🟦 **Rust-only added here (7):** `ConnectedBody`, `DecodeError`, `InitConnectionBody`, `InitConnectionMessage`, `SecProtocols`, `connected_message`, `decode_sec_protocols`
 
 ### `protocol/delete_clients.rs`  ⟵  _(new)_
 
@@ -197,14 +198,15 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 
 🟦 **Rust-only added here (1):** `downstream_message`
 
-### `protocol/error.rs`  ⟵  `custom/fetch.ts`, `services/view-syncer/view-syncer.ts`
+### `protocol/error.rs`  ⟵  `custom/fetch.ts`, `services/view-syncer/pipeline-driver.ts`, `services/view-syncer/view-syncer.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
 | `apiFailedBody` (custom/fetch.ts:411) | `PushFailedHttpBody` (:44) | fuzzy 0.40 |
+| `hydrateInternal` (services/view-syncer/pipeline-driver.ts:1505) | `internal` (:190) | fuzzy 0.50 |
 | `isTransformFailedError` (services/view-syncer/view-syncer.ts:2897) | `TransformFailedHttpBody` (:82) | fuzzy 0.40 |
 
-🟦 **Rust-only added here (18):** `BackoffBody`, `BasicErrorBody`, `ErrorBody`, `PushFailedServerBody`, `PushFailedZeroCacheBody`, `TransformFailedServerBody`, `TransformFailedZeroCacheBody`, `basic`, `client_not_found`, `error_message`, `internal`, `invalid_message`, `invalid_push`, `kind`, `message`, `rehome`, `unauthorized`, `version_not_supported`
+🟦 **Rust-only added here (17):** `BackoffBody`, `BasicErrorBody`, `ErrorBody`, `PushFailedServerBody`, `PushFailedZeroCacheBody`, `TransformFailedServerBody`, `TransformFailedZeroCacheBody`, `basic`, `client_not_found`, `error_message`, `invalid_message`, `invalid_push`, `kind`, `message`, `rehome`, `unauthorized`, `version_not_supported`
 
 ### `protocol/error_kind_enum.rs`  ⟵  _(new)_
 
@@ -235,7 +237,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 ### `protocol/mutations_patch.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (1):** `MutationPatchOp`
+🟦 **Rust-only added here (2):** `MutationPatchOp`, `MutationsPatch`
 
 ### `protocol/poke.rs`  ⟵  _(new)_
 
@@ -260,12 +262,12 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 ### `protocol/queries_patch.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (4):** `QueriesClearOp`, `QueriesDelOp`, `QueriesPatchOp`, `QueriesPutOp`
+🟦 **Rust-only added here (6):** `QueriesClearOp`, `QueriesDelOp`, `QueriesPatch`, `QueriesPatchOp`, `QueriesPutOp`, `UpQueriesPatch`
 
 ### `protocol/row_patch.rs`  ⟵  _(new)_
 
 
-🟦 **Rust-only added here (1):** `RowPatchOp`
+🟦 **Rust-only added here (2):** `RowPatchOp`, `RowsPatch`
 
 ### `protocol/up.rs`  ⟵  _(new)_
 
@@ -277,7 +279,12 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 
 🟦 **Rust-only added here (1):** `UpdateAuthBody`
 
-### `server/otel_start.rs`  ⟵  `observability/metrics.ts`
+### `protocol/version.rs`  ⟵  _(new)_
+
+
+🟦 **Rust-only added here (2):** `NullableVersion`, `Version`
+
+### `server/otel_start.rs`  ⟵  `observability/metrics.ts`, `server/otel-start.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
@@ -329,6 +336,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `getGroupState` (services/view-syncer/connection-context-manager.ts:159) | `get_group_state` (:769) | exact |
 | `GroupAuthState` (services/view-syncer/connection-context-manager.ts:95) | `GroupAuthState` (:121) | exact |
 | `HeaderOptions` (services/view-syncer/connection-context-manager.ts:44) | `HeaderOptions` (:70) | exact |
+| `initConnection` (services/view-syncer/connection-context-manager.ts:111) | `init_connection` (:524) | exact |
 | `markBackgroundRetransformSuccess` (services/view-syncer/connection-context-manager.ts:140) | `mark_background_retransform_success` (:688) | exact |
 | `minDefined` (services/view-syncer/connection-context-manager.ts:858) | `min_defined` (:959) | exact |
 | `mustGetBackgroundConnectionContext` (services/view-syncer/connection-context-manager.ts:157) | `must_get_background_connection_context` (:761) | exact |
@@ -336,14 +344,16 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `pickToken` (auth/auth.ts:126) | `pick_token` (:284) | exact |
 | `planMaintenance` (services/view-syncer/connection-context-manager.ts:161) | `plan_maintenance` (:775) | exact |
 | `registerConnection` (services/view-syncer/connection-context-manager.ts:105) | `register_connection` (:446) | exact |
+| `resolveAuth` (auth/auth.ts:49) | `resolve_auth` (:230) | exact |
 | `setSharedRetransformReady` (services/view-syncer/connection-context-manager.ts:145) | `set_shared_retransform_ready` (:708) | exact |
 | `updateAuth` (services/view-syncer/connection-context-manager.ts:116) | `update_auth` (:573) | exact |
 | `UserState` (services/view-syncer/connection-context-manager.ts:23) | `UserState` (:43) | exact |
 | `validateConnection` (services/view-syncer/connection-context-manager.ts:121) | `validate_connection` (:608) | exact |
+| `ValidateLegacyJWT` (auth/auth.ts:27) | `LegacyJwtValidator` (:224) | fuzzy 0.50 |
 
-🟥 **TS symbols not resolved into this file (4):** `ConnectionContextManagerImpl`, `JWTAuth`, `OpaqueAuth`, `ValidateLegacyJWT`
+🟥 **TS symbols not resolved into this file (3):** `ConnectionContextManagerImpl`, `JWTAuth`, `OpaqueAuth`
 
-🟦 **Rust-only added here (18):** `CCMError`, `ConnectParamsForRegistration`, `JwtPayload`, `MaintenanceKind`, `MaintenancePlan`, `ValidationResult`, `build_fetch_context`, `demote_connection`, `next_revalidate_at`, `now`, `raw`, `refresh_background_connection_context`, `remove_connection_internal`, `resolve_auth`, `set_background_connection`, `store_connection`, `to_error_body`, `update_background_retransform_deadline`
+🟦 **Rust-only added here (17):** `CCMError`, `ConnectParamsForRegistration`, `JwtPayload`, `MaintenanceKind`, `MaintenancePlan`, `ValidationResult`, `build_fetch_context`, `demote_connection`, `next_revalidate_at`, `now`, `raw`, `refresh_background_connection_context`, `remove_connection_internal`, `set_background_connection`, `store_connection`, `to_error_body`, `update_background_retransform_deadline`
 
 ### `services/view_syncer/drain_coordinator.rs`  ⟵  `services/view-syncer/drain-coordinator.ts`
 
@@ -369,25 +379,27 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `pending` (services/view-syncer/e2e-serving-lag.ts:22) | `pending` (:38) | exact |
 | `PendingUpstreamCommit` (services/view-syncer/e2e-serving-lag.ts:3) | `PendingUpstreamCommit` (:14) | exact |
 
-### `services/view_syncer/inspect_handler.rs`  ⟵  `config/zero-config.ts`
+### `services/view_syncer/inspect_handler.rs`  ⟵  `config/zero-config.ts`, `services/view-syncer/inspect-handler.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `handleInspect` (services/view-syncer/inspect-handler.ts:25) | `handle_inspect` (:41) | exact |
 | `isAdminPasswordValid` (config/zero-config.ts:1242) | `is_admin_password_valid` (:23) | exact |
 
-🟥 **TS symbols not resolved into this file (15):** `AuthConfig`, `LegacyJWTAuthConfig`, `RateLimit`, `ReplicaOptions`, `ZERO_ENV_VAR_PREFIX`, `ZeroConfig`, `appOptions`, `assertNormalized`, `getNormalizedZeroConfig`, `getServerVersion`, `getZeroConfig`, `resetWarnOnceState`, `shardOptions`, `warnOnce`, `zeroOptions`
+🟥 **TS symbols not resolved into this file (16):** `AuthConfig`, `LegacyJWTAuthConfig`, `RateLimit`, `ReplicaOptions`, `ZERO_ENV_VAR_PREFIX`, `ZeroConfig`, `appOptions`, `assertNormalized`, `getNormalizedZeroConfig`, `getServerVersion`, `getZeroConfig`, `metricsForProtocol`, `resetWarnOnceState`, `shardOptions`, `warnOnce`, `zeroOptions`
 
-🟦 **Rust-only added here (2):** `handle_inspect`, `inspect_queries_value`
+🟦 **Rust-only added here (1):** `inspect_queries_value`
 
-### `services/view_syncer/pipeline_driver.rs`  ⟵  `custom-queries/transform-query.ts`, `db/lite-tables.ts`, `services/view-syncer/pipeline-driver.ts`
+### `services/view_syncer/pipeline_driver.rs`  ⟵  `db/lite-tables.ts`, `services/view-syncer/pipeline-driver.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
 | `advance` (services/view-syncer/pipeline-driver.ts:923) | `advance` (:500) | exact |
 | `buildPrimaryKeys` (services/view-syncer/pipeline-driver.ts:1520) | `set_client_primary_keys` (:416) | fuzzy 0.50 |
 | `currentVersion` (services/view-syncer/pipeline-driver.ts:395) | `current_version` (:221) | exact |
-| `destroy` (custom-queries/transform-query.ts:98) | `destroy` (:597) | exact |
+| `destroy` (services/view-syncer/pipeline-driver.ts:447) | `destroy` (:597) | exact |
 | `getRow` (services/view-syncer/pipeline-driver.ts:906) | `get_row` (:578) | exact |
+| `hydrate` (services/view-syncer/pipeline-driver.ts:1491) | `hydrate` (:441) | exact |
 | `init` (services/view-syncer/pipeline-driver.ts:325) | `init` (:233) | exact |
 | `initialized` (services/view-syncer/pipeline-driver.ts:334) | `initialized` (:216) | exact |
 | `mustGetTableSpec` (db/lite-tables.ts:326) | `IvmTableSpec` (:49) | fuzzy 0.50 |
@@ -395,12 +407,13 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 
 🟥 **TS symbols not resolved into this file (9):** `PipelineDriver`, `PipelineHydrationReason`, `RowAdd`, `RowChange`, `RowEdit`, `RowRemove`, `Timer`, `accumulate`, `rowSetSignature`
 
-🟦 **Rust-only added here (28):** `AdvanceOutcome`, `IvmColumnSchema`, `IvmPipelines`, `TsAst`, `TsBound`, `TsCondition`, `TsCorrelatedSubquery`, `TsCorrelation`, `TsValuePosition`, `active_query_ids`, `build_engine`, `column_schema`, `column_type`, `convert_ast`, `convert_condition`, `convert_csq`, `convert_value_position`, `has_query`, `hydrate`, `init_from_connection`, `json_to_value`, `panic_message`, `parse_ts_ast`, `query_transformation_hash`, `running_queries`, `scalar_reset_message`, `set_query_transformation_hash`, `zql_column_type`
+🟦 **Rust-only added here (27):** `AdvanceOutcome`, `IvmColumnSchema`, `IvmPipelines`, `TsAst`, `TsBound`, `TsCondition`, `TsCorrelatedSubquery`, `TsCorrelation`, `TsValuePosition`, `active_query_ids`, `build_engine`, `column_schema`, `column_type`, `convert_ast`, `convert_condition`, `convert_csq`, `convert_value_position`, `has_query`, `init_from_connection`, `json_to_value`, `panic_message`, `parse_ts_ast`, `query_transformation_hash`, `running_queries`, `scalar_reset_message`, `set_query_transformation_hash`, `zql_column_type`
 
 ### `services/view_syncer/query_covering.rs`  ⟵  `services/view-syncer/query-covering.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `add` (services/view-syncer/query-covering.ts:67) | `add` (:141) | exact |
 | `astCoveredBy` (services/view-syncer/query-covering.ts:129) | `ast_covered_by` (:202) | exact |
 | `boundsCoveredBy` (services/view-syncer/query-covering.ts:143) | `bounds_covered_by` (:217) | exact |
 | `columnLiteralParts` (services/view-syncer/query-covering.ts:399) | `ColumnLiteralParts` (:409) | exact |
@@ -434,6 +447,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `changeDesiredQueries` (services/view-syncer/view-syncer.ts:138) | `change_desired_queries` (:545) | exact |
 | `checkClientAndCVRVersions` (services/view-syncer/view-syncer.ts:2875) | `check_client_and_cvr_versions` (:90) | exact |
 | `deleteClients` (services/view-syncer/view-syncer.ts:143) | `delete_clients` (:574) | exact |
+| `initConnection` (services/view-syncer/view-syncer.ts:133) | `init_connection` (:484) | exact |
 | `inspect` (services/view-syncer/view-syncer.ts:148) | `inspect` (:603) | exact |
 | `queryCount` (services/view-syncer/view-syncer.ts:658) | `query_count` (:1002) | exact |
 | `rowCount` (services/view-syncer/view-syncer.ts:662) | `row_count` (:1008) | exact |
@@ -441,6 +455,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `servingLagEligible` (services/view-syncer/view-syncer.ts:670) | `serving_lag_eligible` (:996) | exact |
 | `TTL_CLOCK_INTERVAL` (services/view-syncer/view-syncer.ts:202) | `TTL_CLOCK_INTERVAL` (:80) | exact |
 | `TTL_TIMER_HYSTERESIS` (services/view-syncer/view-syncer.ts:210) | `TTL_TIMER_HYSTERESIS_MS` (:77) | fuzzy 0.75 |
+| `updateAuth` (services/view-syncer/view-syncer.ts:149) | `update_auth` (:515) | exact |
 | `ViewSyncer` (services/view-syncer/view-syncer.ts:132) | `CgViewSyncer` (:527) | fuzzy 0.67 |
 | `ViewSyncerService` (services/view-syncer/view-syncer.ts:214) | `ViewSyncerService` (:617) | exact |
 
@@ -453,11 +468,8 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 
 🟦 **Rust-only added here (2):** `ENABLED`, `note`
 
-### `workers/cg_executor.rs`  ⟵  `workers/connection.ts`
+### `workers/cg_executor.rs`  ⟵  _(new)_
 
-| TS symbol | Rust symbol | match |
-|---|---|---|
-| `send` (workers/connection.ts:348) | `send` (:93) | exact |
 
 🟦 **Rust-only added here (11):** `CGHandle`, `CGMessage`, `CgMapCleanup`, `CgTaskContext`, `Executor`, `ExecutorCommand`, `connection_count`, `default_num_shards`, `executor_loop`, `forward_inbound`, `run_executor`
 
@@ -475,12 +487,15 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | TS symbol | Rust symbol | match |
 |---|---|---|
 | `close` (workers/connection.ts:168) | `close` (:232) | exact |
+| `Connection` (workers/connection.ts:78) | `Connection` (:59) | exact |
 | `handleInitConnection` (workers/connection.ts:190) | `handle_init_connection` (:292) | exact |
 | `handleMessage` (workers/connection.ts:52) | `handle_message` (:43) | exact |
 | `HandlerResult` (workers/connection.ts:31) | `HandlerResult` (:23) | exact |
 | `hasTransientSocketCode` (workers/connection.ts:466) | `has_transient_socket_code` (:342) | exact |
+| `init` (workers/connection.ts:138) | `init` (:125) | exact |
 | `isTransientSocketMessage` (workers/connection.ts:477) | `is_transient_socket_message` (:349) | exact |
 | `MessageHandler` (workers/connection.ts:51) | `MessageHandler` (:40) | exact |
+| `send` (workers/connection.ts:348) | `send` (:249) | exact |
 | `sendError` (workers/connection.ts:356) | `send_error` (:257) | exact |
 
 🟥 **TS symbols not resolved into this file (1):** `StreamResult`
@@ -516,23 +531,25 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `handleMessage` (workers/syncer-ws-message-handler.ts:72) | `handle_message` (:279) | exact |
 | `SyncerWsMessageHandler` (workers/syncer-ws-message-handler.ts:36) | `SyncerWsMessageHandler` (:212) | exact |
 | `withTraceparent` (workers/syncer-ws-message-handler.ts:28) | `with_traceparent` (:26) | exact |
 
-🟦 **Rust-only added here (10):** `ConnContextInfo`, `ConnContextManagerDispatch`, `MutagenDispatch`, `PushOverride`, `PushRelayHeaders`, `PusherDispatch`, `ViewSyncerDispatch`, `handle_push`, `process_mutation`, `relay_headers_for`
+🟦 **Rust-only added here (11):** `AuthFailHook`, `ConnContextInfo`, `ConnContextManagerDispatch`, `MutagenDispatch`, `PushOverride`, `PushRelayHeaders`, `PusherDispatch`, `ViewSyncerDispatch`, `handle_push`, `process_mutation`, `relay_headers_for`
 
 ### `ws_server.rs`  ⟵  `workers/connect-params.ts`, `workers/syncer.ts`
 
 
 🟦 **Rust-only added here (23):** `DEFAULT_DOWNSTREAM_BYTE_HWM`, `DEFAULT_DOWNSTREAM_QUEUE_HWM`, `DEFAULT_LIVENESS_TIMEOUT_MS`, `DEFAULT_MAX_PAYLOAD_BYTES`, `DOWNSTREAM_MSG_INTERVAL_MS`, `KEEPALIVE_CHECK_INTERVAL_MS`, `NODE_SINGLETON_HEADERS`, `WsServerConfig`, `accept_connection`, `accept_connection_with_limit`, `bind_ws_listener`, `downstream_byte_hwm`, `downstream_queue_hwm`, `drain_until_peer_close`, `is_expected_disconnect`, `liveness_timeout_ms`, `now_epoch_ms`, `run_ws_reader`, `run_ws_server`, `run_ws_writer`, `send_error_and_close`, `serve_ws`, `serve_ws_with_config`
 
-### `ws_sink.rs`  ⟵  `workers/connection.ts`
+### `ws_sink.rs`  ⟵  `services/view-syncer/pipeline-driver.ts`, `workers/connection.ts`
 
 | TS symbol | Rust symbol | match |
 |---|---|---|
+| `push` (services/view-syncer/pipeline-driver.ts:1432) | `push` (:103) | exact |
 | `WebSocketLike` (workers/connection.ts:361) | `DirectWebSocketSink` (:80) | fuzzy 0.40 |
 
-🟦 **Rust-only added here (10):** `SinkLimits`, `WsCommand`, `cancel`, `close_with_code`, `count_shed_once`, `fail`, `push`, `push_sized`, `send_command`, `with_limits`
+🟦 **Rust-only added here (9):** `SinkLimits`, `WsCommand`, `cancel`, `close_with_code`, `count_shed_once`, `fail`, `push_sized`, `send_command`, `with_limits`
 
 ## 3 · Flat one-to-one symbol map (every TS symbol resolved)
 
@@ -541,13 +558,16 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `JWTAuth` | auth/auth.ts:14 | — | 🟥 UNRESOLVED |
 | `OpaqueAuth` | auth/auth.ts:20 | — | 🟥 UNRESOLVED |
 | `Auth` | auth/auth.ts:25 | `Auth` services/view_syncer/connection_context_manager.rs:90 | ✅ exact |
-| `ValidateLegacyJWT` | auth/auth.ts:27 | — | 🟥 UNRESOLVED |
+| `ValidateLegacyJWT` | auth/auth.ts:27 | `LegacyJwtValidator` services/view_syncer/connection_context_manager.rs:224 | 🔁 rename 0.50 |
 | `isProvidedAuth` | auth/auth.ts:32 | services/view_syncer/connection_context_manager.rs is_some_and non-empty | 📌 inlined |
 | `authEquals` | auth/auth.ts:36 | `auth_equals` services/view_syncer/connection_context_manager.rs:350 | ✅ exact |
+| `resolveAuth` | auth/auth.ts:49 | `resolve_auth` services/view_syncer/connection_context_manager.rs:230 | ✅ exact |
 | `pickToken` | auth/auth.ts:126 | `pick_token` services/view_syncer/connection_context_manager.rs:284 | ✅ exact |
 | `isAuthErrorBody` | auth/auth.ts:211 | `is_auth_error_body` custom_queries/transform_query.rs:270 | ✅ exact |
+| `createJwkPair` | auth/jwt.ts:14 | N/A — JWK-pair GENERATION helper (tests/tooling) | 📌 rust only verifies tokens, never mints keys |
 | `getRemoteKeyset` | auth/jwt.ts:32 | auth/jwt.rs JWKS_CACHE/lookup_cached_jwk | 📌 cached remote JWKS |
 | `tokenConfigOptions` | auth/jwt.ts:41 | — | 🟥 UNRESOLVED |
+| `verifyToken` | auth/jwt.ts:50 | auth/jwt.rs verify_with_jwks / verify_sync cluster | 📌 name-diverged verify path; 1:1 rename pending #163 |
 | `loadJwk` | auth/jwt.ts:73 | auth/jwt.rs serde_json::from_str | 📌 parse JWK |
 | `loadSecret` | auth/jwt.ts:77 | auth/jwt.rs DecodingKey::from_secret | 📌 secret key |
 | `verifyTokenImpl` | auth/jwt.ts:81 | auth/jwt.rs verify_sync/verify_with_jwk(s) | 📌 JWT verify (split sync/async) |
@@ -580,7 +600,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `TransformResponse` | custom-queries/transform-query.ts:35 | — | 🟥 UNRESOLVED |
 | `HashedTransformResponse` | custom-queries/transform-query.ts:43 | — | 🟥 UNRESOLVED |
 | `CustomQueryTransformer` | custom-queries/transform-query.ts:82 | `CustomQueryContext` custom_queries/transform_query.rs:49 | 🔁 rename 0.50 |
-| `destroy` | custom-queries/transform-query.ts:98 | `destroy` services/view_syncer/pipeline_driver.rs:597 | ✅ exact |
+| `destroy` | services/view-syncer/pipeline-driver.ts:447 | `destroy` services/view_syncer/pipeline_driver.rs:597 | ✅ exact |
 | `validate` | custom-queries/transform-query.ts:111 | `validate_auth` auth/jwt.rs:381 | 🔁 rename 0.50 |
 | `transform` | custom-queries/transform-query.ts:117 | `post_transform` custom_queries/transform_query.rs:304 | 🔁 rename 0.50 |
 | `getCacheKey` | custom-queries/transform-query.ts:259 | `get_cache_key` custom_queries/transform_query.rs:521 | ✅ exact |
@@ -588,13 +608,14 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `compileUrlPattern` | custom/fetch.ts:52 | N/A | 📌 no separate compile step; url_match matches the raw pattern inline |
 | `getBodyPreview` | custom/fetch.ts:62 | `BODY_PREVIEW_CAP` custom/fetch.rs:49 | 🔁 rename 0.67 |
 | `FetchMetricsOptions` | custom/fetch.ts:92 | — | 🟥 UNRESOLVED |
+| `fetchFromAPIServer` | custom/fetch.ts:97 | custom_queries/transform_query.rs post_transform | 📌 push-class calls go via services/mutagen/pusher.rs relay POST (I-3) |
 | `apiInFlight` | custom/fetch.ts:116 | `record_api_in_flight` custom/metrics.rs:116 | 🔁 rename 0.75 |
 | `urlMatch` | custom/fetch.ts:389 | `url_match` custom/fetch.rs:11 | ✅ exact |
 | `getBackoffDelayMs` | custom/fetch.ts:407 | `get_backoff_delay_ms` custom/fetch.rs:38 | ✅ exact |
 | `apiFailedBody` | custom/fetch.ts:411 | `PushFailedHttpBody` protocol/error.rs:44 | 🔁 rename 0.40 |
 | `apiErrorFromResult` | custom/fetch.ts:462 | custom_queries/transform_query.rs response validation | 📌 error extraction |
 | `legacyPushErrorReason` | custom/fetch.ts:484 | `ErrorReason` protocol/error_reason_enum.rs:9 | 🔁 rename 0.50 |
-| `apiRequestMetricAttrs` | custom/fetch.ts:516 | `api_request_metric_attrs` custom/metrics.rs:59 | ✅ exact |
+| `ApiRequestMetricAttrs` | custom/metrics.ts:31 | `api_request_metric_attrs` custom/metrics.rs:59 | ✅ exact |
 | `apiResponseErrorMetricAttrs` | custom/fetch.ts:528 | metrics.rs record_api_attempt attrs | 📌 status attrs |
 | `recordApiAttempt` | custom/fetch.ts:549 | `record_api_attempt` custom/metrics.rs:84 | ✅ exact |
 | `apiAttempts` | custom/fetch.ts:567 | metrics.rs record_api_attempt | 📌 OTel counter |
@@ -628,10 +649,11 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `getOrCreateLatencyHistogram` | observability/metrics.ts:179 | — | 🟥 UNRESOLVED |
 | `getOrCreateCounter` | observability/metrics.ts:193 | `get_or_create_cg` workers/syncer.rs:1023 | 🔁 rename 0.50 |
 | `getOrCreateGauge` | observability/metrics.ts:218 | — | 🟥 UNRESOLVED |
-| `getInstance` | server/otel-start.ts:23 | — | 🟥 UNRESOLVED |
-| `startOtelAuto` | server/otel-start.ts:30 | — | 🟥 UNRESOLVED |
+| `getInstance` | server/otel-start.ts:23 | N/A — node OtelManager singleton wrapper | 📌 rust init is free fns in server/otel_start.rs |
+| `startOtelAuto` | server/otel-start.ts:30 | server/otel_start.rs init_metrics/metrics_enabled | 📌 rust otel init path; node auto-instr has no rust twin |
 | `randomID` | server/syncer.ts:49 | N/A | 📌 TS pipelineRunID debug-correlation id; not ported |
 | `getCustomQueryConfig` | server/syncer.ts:53 | `CustomQuerySpec` custom_queries/transform_query.rs:117 | 🔁 rename 0.50 |
+| `runWorker` | server/syncer.ts:74 | N/A — node worker bootstrap | 📌 rust process entry is the invented main/http_server pair |
 | `assert` | server/syncer.ts:79 | Rust assert! macro | 📌 idiom |
 | `initEventSink` | server/syncer.ts:90 | — | 🟥 UNRESOLVED |
 | `registerSQLiteCorruptionDiagnosticTarget` | server/syncer.ts:95 | — | 🟥 UNRESOLVED |
@@ -690,6 +712,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `onVersionReady` | services/view-syncer/e2e-serving-lag.ts:35 | `on_version_ready` services/view_syncer/e2e_serving_lag.rs:50 | ✅ exact |
 | `onVersionServed` | services/view-syncer/e2e-serving-lag.ts:55 | `on_version_served` services/view_syncer/e2e_serving_lag.rs:72 | ✅ exact |
 | `Observation` | services/view-syncer/e2e-serving-lag.ts:77 | `Observation` services/view_syncer/e2e_serving_lag.rs:21 | ✅ exact |
+| `handleInspect` | services/view-syncer/inspect-handler.ts:25 | `handle_inspect` services/view_syncer/inspect_handler.rs:41 | ✅ exact |
 | `metricsForProtocol` | services/view-syncer/inspect-handler.ts:193 | — | 🟥 UNRESOLVED |
 | `RowAdd` | services/view-syncer/pipeline-driver.ts:77 | — | 🟥 UNRESOLVED |
 | `RowRemove` | services/view-syncer/pipeline-driver.ts:79 | — | 🟥 UNRESOLVED |
@@ -719,10 +742,15 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `getRow` | services/view-syncer/pipeline-driver.ts:906 | `get_row` services/view_syncer/pipeline_driver.rs:578 | ✅ exact |
 | `advance` | services/view-syncer/pipeline-driver.ts:923 | `advance` services/view_syncer/pipeline_driver.rs:500 | ✅ exact |
 | `accumulate` | services/view-syncer/pipeline-driver.ts:1276 | — | 🟥 UNRESOLVED |
+| `stream` | services/view-syncer/pipeline-driver.ts:1285 | CROSS-CRATE rust-ivm streamer/mod | 📌 RowChange streaming lives in the ivm crate's Streamer |
 | `setOutput` | services/view-syncer/pipeline-driver.ts:1416 | rust-ivm operator set_output | 📌 trait method (cross-crate) |
 | `fetch` | services/view-syncer/pipeline-driver.ts:1428 | `FetchConfig` services/view_syncer/connection_context_manager.rs:146 | 🔁 rename 0.50 |
+| `push` | services/view-syncer/pipeline-driver.ts:1432 | `push` ws_sink.rs:103 | ✅ exact |
 | `logQueryFailure` | services/view-syncer/pipeline-driver.ts:1451 | inlined | 📌 streamer error callback lives in rust-ivm; failures logged via tracing at the call sites |
+| `toAdds` | services/view-syncer/pipeline-driver.ts:1472 | INLINED — rust-ivm engine hydrate emits Adds directly | 📌 no Node→AddChange adaptor needed |
 | `getRowKey` | services/view-syncer/pipeline-driver.ts:1482 | rust-ivm streamer get_row_key | 📌 row-key extraction (cross-crate) |
+| `hydrate` | services/view-syncer/pipeline-driver.ts:1491 | `hydrate` services/view_syncer/pipeline_driver.rs:441 | ✅ exact |
+| `hydrateInternal` | services/view-syncer/pipeline-driver.ts:1505 | `internal` protocol/error.rs:190 | 🔁 rename 0.50 |
 | `buildPrimaryKeys` | services/view-syncer/pipeline-driver.ts:1520 | `set_client_primary_keys` services/view_syncer/pipeline_driver.rs:416 | 🔁 rename 0.50 |
 | `mustGetPrimaryKey` | services/view-syncer/pipeline-driver.ts:1530 | rust-ivm engine build | 📌 PK validated on build |
 | `scalarValuesEqual` | services/view-syncer/pipeline-driver.ts:1553 | rust-ivm engine scalar_values_equal | 📌 ported (cross-crate) |
@@ -731,7 +759,7 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `isQueryCoveredBy` | services/view-syncer/query-covering.ts:40 | `is_query_covered_by` services/view_syncer/query_covering.rs:97 | ✅ exact |
 | `findCoveringQuery` | services/view-syncer/query-covering.ts:44 | `find_covering_query` services/view_syncer/query_covering.rs:106 | ✅ exact |
 | `QueryCoveringIndex` | services/view-syncer/query-covering.ts:55 | `QueryCoveringIndex` services/view_syncer/query_covering.rs:120 | ✅ exact |
-| `add` | services/view-syncer/query-covering.ts:67 | `add` observability/metrics.rs:753 | ✅ exact |
+| `add` | services/view-syncer/query-covering.ts:67 | `add` services/view_syncer/query_covering.rs:141 | ✅ exact |
 | `remove` | services/view-syncer/query-covering.ts:81 | `remove` services/view_syncer/query_covering.rs:158 | ✅ exact |
 | `rootKey` | services/view-syncer/query-covering.ts:125 | `root_key` services/view_syncer/query_covering.rs:193 | ✅ exact |
 | `astCoveredBy` | services/view-syncer/query-covering.ts:129 | `ast_covered_by` services/view_syncer/query_covering.rs:202 | ✅ exact |
@@ -784,10 +812,10 @@ TS origin files: **24**  ·  Rust files: **63** (36 new)
 | `StreamResult` | workers/connection.ts:45 | — | 🟥 UNRESOLVED |
 | `MessageHandler` | workers/connection.ts:51 | `MessageHandler` workers/connection.rs:40 | ✅ exact |
 | `handleMessage` | workers/connection.ts:52 | `handle_message` workers/connection.rs:43 | ✅ exact |
-| `Connection` | workers/connection.ts:78 | `CONNECTION` live_count.rs:29 | ✅ exact |
+| `Connection` | workers/connection.ts:78 | `Connection` workers/connection.rs:59 | ✅ exact |
 | `close` | workers/connection.ts:168 | `close` workers/connection.rs:232 | ✅ exact |
 | `handleInitConnection` | workers/connection.ts:190 | `handle_init_connection` workers/connection.rs:292 | ✅ exact |
-| `send` | workers/connection.ts:348 | `send` workers/cg_executor.rs:93 | ✅ exact |
+| `send` | workers/connection.ts:348 | `send` workers/connection.rs:249 | ✅ exact |
 | `sendError` | workers/connection.ts:356 | `send_error` workers/connection.rs:257 | ✅ exact |
 | `WebSocketLike` | workers/connection.ts:361 | `DirectWebSocketSink` ws_sink.rs:80 | 🔁 rename 0.40 |
 | `findProtocolError` | workers/connection.ts:433 | workers/connection.rs classify_error_log_level | 📌 protocol-error classify |
