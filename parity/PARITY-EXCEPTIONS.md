@@ -97,6 +97,21 @@ Anything not listed here and not STALE/WRONG must match TS.
   The once-per-CG `push_first` cost is NOT part of this exception — it is
   tracked as an open item (task #127), not a design cost.
 
+## D-12 · API-metric recorders folded into `custom/metrics.rs` (OTel idiom)
+
+- **TS**: `custom/metrics.ts` exports lazy instrument ACCESSORS (`apiAttempts()`,
+  `apiAttemptDuration()`, `apiInFlight()`); `custom/fetch.ts` defines the
+  RECORDERS that call them (`recordApiAttempt`, `apiRequestMetricAttrs`).
+- **Rust**: `custom/metrics.rs` holds the instruments in a static `api_otel()`
+  and the recorders (`record_api_attempt`, `api_request_metric_attrs`) live
+  beside them; `custom/fetch.rs` calls `record_api_attempt(...)`.
+- **Why (rule 5, OTel idiom)**: rust OTel holds instruments once and records
+  through them, so recorder-beside-instrument is the natural cohesion. Splitting
+  `record_api_attempt` back into `fetch.rs` (to mirror fetch.ts) would force it
+  to reach into `metrics.rs`'s `api_otel()` internals — worse, not more 1:1.
+  This is the only remaining `custom/fetch.ts` "split" contributor; the rest of
+  fetch.ts is 1:1 in `custom/fetch.rs`.
+
 ## D-11 · `CVR_CURSOR_PAGE_SIZE` env knob (default = TS 10000) — POST-MORTEM of a retracted divergence
 
 - **TS** (`view-syncer.ts:2844`): `#processChanges` flushes the accumulated row

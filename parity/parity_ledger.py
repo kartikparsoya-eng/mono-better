@@ -409,8 +409,19 @@ CRATES = {
             "verifytokenimpl": ("auth/jwt.rs verify_sync/verify_with_jwk(s)", "JWT verify (split sync/async)"),
             # auth/auth.ts
             "isprovidedauth": ("services/view_syncer/connection_context_manager.rs is_some_and non-empty", "inlined"),
-            # custom/fetch.ts
+            # custom/fetch.ts — the api-metric recorders (recordApiAttempt +
+            # apiRequestMetricAttrs) live in custom/metrics.rs beside the OTel
+            # instruments they drive (api_otel()), a rust OTel-idiom fold:
+            # TS splits lazy instrument-accessors (metrics.ts) from the caller
+            # that adds attrs (fetch.ts recordApiAttempt); rust holds the
+            # instruments statically and records next to them, so splitting the
+            # recorder back into fetch.rs would reach into metrics.rs internals.
+            # Registered in PARITY-EXCEPTIONS.md (rule 5). (2026-08-31)
             "apiattempts": ("metrics.rs record_api_attempt", "OTel counter"),
+            "recordapiattempt": ("metrics.rs record_api_attempt",
+                                 "OTel-idiom fold: recorder lives beside its instruments"),
+            "apirequestmetricattrs": ("metrics.rs api_request_metric_attrs",
+                                      "OTel-idiom fold: attrs helper beside the instruments"),
             "apierrorfromresult": ("custom_queries/transform_query.rs response validation", "error extraction"),
             "apiresponseerrormetricattrs": ("metrics.rs record_api_attempt attrs", "status attrs"),
             "urlmatch": ("custom_queries/transform_query.rs url_match", "URLPattern subset (renamed 1:1)"),

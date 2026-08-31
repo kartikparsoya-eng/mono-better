@@ -2,7 +2,7 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **359**, Rust **709** · resolved pairs **195** (exact 159 + fuzzy 36) + aliases 111
+- symbols: TS **359**, Rust **709** · resolved pairs **195** (exact 159 + fuzzy 36) + aliases 113
 - 🟥 TS UNRESOLVED: **59** (**22** behavioral ⇒ investigate · 37 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **514**
 
 > ⚠️ **Behavioral TS symbols with no Rust resolution — check these:** `apiRequests` (custom/metrics.ts), `assertAreCompatiblePushes` (services/mutagen/pusher.ts), `assertNormalized` (config/zero-config.ts), `getMeter` (observability/metrics.ts), `getNormalizedZeroConfig` (config/zero-config.ts), `getOrCreateGauge` (observability/metrics.ts), `getOrCreateHistogram` (observability/metrics.ts), `getOrCreateLatencyHistogram` (observability/metrics.ts), `getOrCreateUpDownCounter` (observability/metrics.ts), `getServerVersion` (config/zero-config.ts), `getZeroConfig` (config/zero-config.ts), `hasRefs` (services/mutagen/pusher.ts), `initEventSink` (server/syncer.ts), `metricsForProtocol` (services/view-syncer/inspect-handler.ts), `recordMs` (observability/metrics.ts), `ref` (services/mutagen/pusher.ts), `registerSQLiteCorruptionDiagnosticTarget` (server/syncer.ts), `resetWarnOnceState` (config/zero-config.ts), `rowSetSignature` (services/view-syncer/pipeline-driver.ts), `startAnonymousTelemetry` (server/syncer.ts), `unref` (services/mutagen/pusher.ts), `warnOnce` (config/zero-config.ts)
