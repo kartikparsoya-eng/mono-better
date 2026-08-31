@@ -15,11 +15,11 @@
 //! set (the default), so the analysis reflects the plan production executes
 //! (mirrors analyze.ts:52 `config.enableQueryPlanner`).
 //!
+//! `explainQueries` substituted-binding fallback (analyze.ts:112-119) IS ported:
+//! after `run_ast`, `sqlitePlans` is filled for any query SQLite prepared but did
+//! not execute (so no scanstatus EXPLAIN was captured); execution-time plans win.
+//!
 //! DEFERRED vs TS `analyzeQuery` (labeled follow-ups):
-//! - `explainQueries` substituted-binding fallback (analyze.ts:113-119):
-//!   `sqlitePlans` already carries the execution-time scanstatus plans captured
-//!   for scanned tables; the fallback (plans for prepared-but-unscanned queries)
-//!   needs a fresh `Database` handle and is deferred (A5).
 //! - `joinPlans` planner-debug serialization (B7, see `run_ast`).
 
 use crate::protocol::analyze_query_result::AnalyzeQueryResult;
@@ -60,5 +60,84 @@ pub fn analyze_query(
         synced_rows,
         vended_rows,
     };
-    run_ast(&mut pipelines, ast_json, &options)
+    let mut result = run_ast(&mut pipelines, ast_json, &options)?;
+
+    // TS analyze.ts:112-119 — fill `sqlitePlans` for any query SQLite prepared
+    // but did NOT execute (so scanStatus captured no EXPLAIN), using the
+    // substituted-binding fallback. Execution-time plans (captured via
+    // scanstatus in the fetch path) WIN; the fallback only fills gaps. Rust owns
+    // the analysis engine's connections internally, so it opens a fresh read
+    // handle over the same replica — the plan is identical (same schema + stat
+    // tables). Keyed on the vended SQLs in `readRowCountsByQuery`.
+    let read_counts = result.read_row_counts_by_query.clone().unwrap_or_default();
+    if !read_counts.is_empty() {
+        // `explain_queries` reads only the SQL keys; convert u64 → usize counts.
+        let counts_for_explain: rust_ivm::sqlite::explain_queries::RowCountsBySource = read_counts
+            .into_iter()
+            .map(|(src, by_sql)| {
+                (
+                    src,
+                    by_sql
+                        .into_iter()
+                        .map(|(sql, c)| (sql, c as usize))
+                        .collect(),
+                )
+            })
+            .collect();
+        let db = rust_ivm::sqlite::db::Database::new(replica_path)
+            .map_err(|e| format!("analyze-query: open replica for explain: {e}"))?;
+        let db = std::rc::Rc::new(std::cell::RefCell::new(db));
+        let fallback = rust_ivm::sqlite::explain_queries::explain_queries(&counts_for_explain, &db);
+        result.sqlite_plans = Some(merge_explain_fallback(result.sqlite_plans.take(), fallback));
+    }
+
+    Ok(result)
+}
+
+/// Merge the `explainQueries` fallback plans into the captured plans, keeping the
+/// captured (execution-time / scanstatus) plan for any query present in both.
+/// Port of the merge loop in TS `analyze.ts:113-118` (`if (!captured[query])`).
+fn merge_explain_fallback(
+    captured: Option<std::collections::HashMap<String, Vec<String>>>,
+    fallback: std::collections::HashMap<String, Vec<String>>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut captured = captured.unwrap_or_default();
+    for (query, plan) in fallback {
+        // Captured (execution-time) plans win; the fallback only fills gaps.
+        captured.entry(query).or_insert(plan);
+    }
+    captured
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_explain_fallback;
+    use std::collections::HashMap;
+
+    /// NON-VACUOUS: the fallback must FILL queries missing from the captured
+    /// plans but must NOT overwrite a captured (execution-time) plan. Reverting
+    /// the merge to `insert` (overwrite) flips the "captured wins" assertion;
+    /// dropping the merge entirely drops the fallback-only query.
+    #[test]
+    fn merge_keeps_captured_and_fills_gaps() {
+        let captured = HashMap::from([("q1".to_string(), vec!["CAPTURED".to_string()])]);
+        let fallback = HashMap::from([
+            ("q1".to_string(), vec!["FALLBACK".to_string()]),
+            ("q2".to_string(), vec!["FALLBACK2".to_string()]),
+        ]);
+        let merged = merge_explain_fallback(Some(captured), fallback);
+        // Captured plan for q1 is preserved (NOT overwritten by the fallback).
+        assert_eq!(merged.get("q1"), Some(&vec!["CAPTURED".to_string()]));
+        // The fallback fills q2, which the captured plans lacked.
+        assert_eq!(merged.get("q2"), Some(&vec!["FALLBACK2".to_string()]));
+    }
+
+    /// With no captured plans (e.g. a build without SQLITE_ENABLE_STMT_SCANSTATUS),
+    /// the fallback is the sole source of plans.
+    #[test]
+    fn merge_uses_fallback_when_no_captured_plans() {
+        let fallback = HashMap::from([("q1".to_string(), vec!["FALLBACK".to_string()])]);
+        let merged = merge_explain_fallback(None, fallback);
+        assert_eq!(merged.get("q1"), Some(&vec!["FALLBACK".to_string()]));
+    }
 }

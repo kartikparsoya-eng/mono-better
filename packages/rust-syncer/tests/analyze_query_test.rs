@@ -208,3 +208,47 @@ fn analyze_binds_auth_data_into_permission_rules() {
 
     cleanup(&path);
 }
+
+/// A5: after analyze, `sqlitePlans` carries a plan for EVERY vended SQL in
+/// `readRowCountsByQuery` — the explainQueries fallback (analyze.ts:112-119)
+/// fills any query SQLite prepared but did not populate a scanstatus EXPLAIN
+/// for. This is the TS post-condition: no vended query is left without a plan.
+/// NON-VACUOUS on builds without SQLITE_ENABLE_STMT_SCANSTATUS (where run_ast
+/// captures no plans and the fallback is the ONLY source): reverting the
+/// fallback leaves sqlitePlans empty while readRowCountsByQuery is non-empty.
+#[test]
+fn analyze_fills_sqlite_plans_for_every_vended_query() {
+    let path = tmp_path("plans");
+    build_users_replica(&path);
+    let ast = users_ast();
+
+    let result =
+        rust_syncer::services::analyze::analyze_query(&path, "app", &ast, true, false, None, None)
+            .expect("analyze");
+
+    let read_counts = result
+        .read_row_counts_by_query
+        .clone()
+        .expect("readRowCountsByQuery present");
+    // The users scan vended rows, so there is at least one SQL to plan.
+    let all_sqls: Vec<String> = read_counts
+        .values()
+        .flat_map(|by_sql| by_sql.keys().cloned())
+        .collect();
+    assert!(
+        !all_sqls.is_empty(),
+        "the users scan vended at least one SQL; got {read_counts:?}"
+    );
+
+    let plans = result.sqlite_plans.clone().unwrap_or_default();
+    for sql in &all_sqls {
+        assert!(
+            plans.contains_key(sql),
+            "every vended SQL must have a sqlitePlan (explainQueries fallback); \
+             missing plan for {sql:?}; plans={:?}",
+            plans.keys().collect::<Vec<_>>()
+        );
+    }
+
+    cleanup(&path);
+}
