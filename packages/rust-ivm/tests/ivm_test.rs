@@ -10,9 +10,9 @@ use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, RelatedSubquery, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{make_source_change_add, make_source_change_remove};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::{make_source_change_add, make_source_change_remove};
 
 fn make_row(pairs: &[(&str, Value)]) -> rust_ivm::ivm::data::Row {
     let map: FxHashMap<String, Value> = pairs

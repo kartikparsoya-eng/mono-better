@@ -210,7 +210,7 @@ fn test_table_source_push_add() {
 
     // Push an add
     let new_row = make_row(&[("id", Value::F64(2.0)), ("name", Value::Str("Bob".into()))]);
-    source.push(rust_ivm::ivm::change::make_source_change_add(new_row));
+    source.push(rust_ivm::ivm::source::make_source_change_add(new_row));
 
     // Verify it was written to SQLite
     let count: i64 = db
@@ -254,7 +254,7 @@ fn test_table_source_push_remove() {
         ("id", Value::F64(1.0)),
         ("name", Value::Str("Alice".into())),
     ]);
-    source.push(rust_ivm::ivm::change::make_source_change_remove(row));
+    source.push(rust_ivm::ivm::source::make_source_change_remove(row));
 
     // Verify it was deleted from SQLite
     let count: i64 = db
@@ -290,7 +290,7 @@ fn test_table_source_push_edit() {
         ("name", Value::Str("Alice".into())),
     ]);
     let new_row = make_row(&[("id", Value::F64(1.0)), ("name", Value::Str("Bob".into()))]);
-    source.push(rust_ivm::ivm::change::make_source_change_edit(
+    source.push(rust_ivm::ivm::source::make_source_change_edit(
         new_row, old_row,
     ));
 

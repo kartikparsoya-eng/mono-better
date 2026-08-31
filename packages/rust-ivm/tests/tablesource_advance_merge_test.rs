@@ -15,12 +15,12 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{
-    make_source_change_add, make_source_change_edit, make_source_change_remove,
-};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::operator::{Basis, FetchRequest, Input, Start};
 use rust_ivm::ivm::schema::ColumnType;
+use rust_ivm::ivm::source::{
+    make_source_change_add, make_source_change_edit, make_source_change_remove,
+};
 use rust_ivm::ivm::stream::StreamItem;
 use rust_ivm::sqlite::table_source::TableSource;
 

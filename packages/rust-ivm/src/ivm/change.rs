@@ -94,46 +94,5 @@ pub fn make_edit_change(node: Node, old_node: Node) -> Change {
     Change::Edit { node, old_node }
 }
 
-/// Source-level change — port of TS `SourceChange` (source.ts:4).
-///
-/// TS: `SourceChangeAdd = [ChangeType.ADD, row: Row, extra: null]`
-/// TS: `SourceChangeEdit = [ChangeType.EDIT, row: Row, oldRow: Row]`
-#[derive(Clone, Debug)]
-pub enum SourceChange {
-    Add {
-        row: crate::ivm::data::Row,
-    },
-    Remove {
-        row: crate::ivm::data::Row,
-    },
-    Edit {
-        row: crate::ivm::data::Row,
-        old_row: crate::ivm::data::Row,
-    },
-}
-
-impl SourceChange {
-    #[inline]
-    pub fn change_type(&self) -> ChangeType {
-        match self {
-            SourceChange::Add { .. } => ChangeType::Add,
-            SourceChange::Remove { .. } => ChangeType::Remove,
-            SourceChange::Edit { .. } => ChangeType::Edit,
-        }
-    }
-}
-
-pub fn make_source_change_add(row: crate::ivm::data::Row) -> SourceChange {
-    SourceChange::Add { row }
-}
-
-pub fn make_source_change_remove(row: crate::ivm::data::Row) -> SourceChange {
-    SourceChange::Remove { row }
-}
-
-pub fn make_source_change_edit(
-    row: crate::ivm::data::Row,
-    old_row: crate::ivm::data::Row,
-) -> SourceChange {
-    SourceChange::Edit { row, old_row }
-}
+// `SourceChange` + `makeSourceChange*` live in TS `ivm/source.ts`, so their
+// Rust twins live in `ivm/source.rs` (moved 2026-08-31 for 1:1 file parity).

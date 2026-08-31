@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{
-    make_source_change_add, make_source_change_edit, make_source_change_remove,
-};
 use rust_ivm::ivm::data::{Node, Row, Value};
 use rust_ivm::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
 use rust_ivm::ivm::operator::{FetchRequest, Input, OutputHandle};
 use rust_ivm::ivm::schema::{ColumnType, System};
 use rust_ivm::ivm::source::{CollectOutput, MemorySource};
+use rust_ivm::ivm::source::{
+    make_source_change_add, make_source_change_edit, make_source_change_remove,
+};
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
     let map: FxHashMap<String, Value> = pairs

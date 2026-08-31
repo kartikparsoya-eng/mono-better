@@ -22,13 +22,13 @@ use crate::builder::ast::{
 };
 use crate::builder::builder::{BuilderDelegate, build_pipeline, complete_ordering_ast};
 use crate::ivm::catch::{Catch, CaughtChange, CaughtNode};
-use crate::ivm::change::{
-    SourceChange, make_source_change_add, make_source_change_edit, make_source_change_remove,
-};
 use crate::ivm::data::{Row, Value, row as make_row};
 use crate::ivm::operator::{FetchRequest, Shared};
 use crate::ivm::schema::ColumnType;
-use crate::ivm::source::{MemorySource, Source};
+use crate::ivm::source::{
+    MemorySource, Source, SourceChange, make_source_change_add, make_source_change_edit,
+    make_source_change_remove,
+};
 
 // Value / Row conversion: serde_json <-> Rust (mirrors src/bin/server.rs).
 

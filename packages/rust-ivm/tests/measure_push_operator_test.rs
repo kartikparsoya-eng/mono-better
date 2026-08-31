@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{Change, SourceChange};
+use rust_ivm::ivm::change::Change;
 use rust_ivm::ivm::data::{SortOrder, Value};
 use rust_ivm::ivm::operator::{Input, InputBase, Output, OutputHandle};
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::SourceChange;
 use rust_ivm::query::measure_push_operator::{MeasurePushOperator, MetricsDelegate};
 
 fn str_val(s: &str) -> Value {

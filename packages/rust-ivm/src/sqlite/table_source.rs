@@ -23,16 +23,14 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use rustc_hash::FxHashMap;
 
 use crate::builder::ast::Condition;
-use crate::ivm::change::{
-    Change, SourceChange, make_add_change, make_edit_change, make_remove_change,
-};
+use crate::ivm::change::{Change, make_add_change, make_edit_change, make_remove_change};
 use crate::ivm::data::{
     Comparator, Node, Row, SortOrder, Value, compare_values, make_comparator, values_equal,
 };
 use crate::ivm::filter_push::filter_push;
 use crate::ivm::operator::{Basis, FetchRequest, Input, InputBase, OutputHandle, Shared, Start};
 use crate::ivm::schema::{ColumnType, SourceSchema, System};
-use crate::ivm::source::Source;
+use crate::ivm::source::{Source, SourceChange};
 use crate::ivm::stream::NodeStream;
 use crate::snapshotter::spec::quote_ident;
 use crate::sqlite::query_builder::{SqlParam, SqlQuery, build_select_query};

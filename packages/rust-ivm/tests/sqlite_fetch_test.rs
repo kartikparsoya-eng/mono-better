@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use rust_ivm::builder::ast::Ast;
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{
-    make_source_change_add, make_source_change_edit, make_source_change_remove,
-};
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::{
+    make_source_change_add, make_source_change_edit, make_source_change_remove,
+};
 
 fn clean_db(path: &str) {
     for p in [path, &format!("{}-wal", path), &format!("{}-shm", path)] {

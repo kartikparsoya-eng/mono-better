@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{Change, ChangeType, SourceChange};
+use rust_ivm::ivm::change::{Change, ChangeType};
 use rust_ivm::ivm::data::{Node, SortOrder, Value};
 use rust_ivm::ivm::fan_in::FanIn;
 use rust_ivm::ivm::fan_out::FanOut;
@@ -24,6 +24,7 @@ use rust_ivm::ivm::filter_operators::{
 use rust_ivm::ivm::operator::InputBase;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::SourceChange;
 
 fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))

@@ -30,13 +30,13 @@ use rust_ivm::builder::ast::{
     SimpleCondition, ValuePosition,
 };
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{
-    ChangeType, SourceChange, make_source_change_add, make_source_change_edit,
-    make_source_change_remove,
-};
+use rust_ivm::ivm::change::ChangeType;
 use rust_ivm::ivm::data::{Row, Value, row as make_row};
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::{
+    MemorySource, SourceChange, make_source_change_add, make_source_change_edit,
+    make_source_change_remove,
+};
 
 // ---------------------------------------------------------------------------
 // Value / Row conversion: serde_json ↔ Rust

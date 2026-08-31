@@ -13,10 +13,10 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::array_view::ArrayView;
-use rust_ivm::ivm::change::SourceChange;
 use rust_ivm::ivm::data::{SortOrder, Value};
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::SourceChange;
 use rust_ivm::ivm::view::{Format, View};
 
 fn num(n: f64) -> Value {

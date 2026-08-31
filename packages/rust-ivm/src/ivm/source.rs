@@ -18,7 +18,7 @@ use rustc_hash::FxHashMap;
 
 use crate::builder::ast::Condition;
 use crate::ivm::change::{
-    Change, SourceChange, make_add_change, make_edit_change, make_remove_change,
+    Change, ChangeType, make_add_change, make_edit_change, make_remove_change,
 };
 use crate::ivm::constraint::{Constraint, constraint_matches_primary_key, constraint_matches_row};
 use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, make_comparator, values_equal};
@@ -28,6 +28,53 @@ use crate::ivm::operator::{
 };
 use crate::ivm::schema::{SourceSchema, System};
 use crate::ivm::stream::{NodeStream, StreamItem, empty_stream, from_vec};
+
+/// Source-level change — port of TS `SourceChange` (source.ts:4).
+///
+/// TS: `SourceChangeAdd = [ChangeType.ADD, row: Row, extra: null]`
+/// TS: `SourceChangeEdit = [ChangeType.EDIT, row: Row, oldRow: Row]`
+#[derive(Clone, Debug)]
+pub enum SourceChange {
+    Add {
+        row: crate::ivm::data::Row,
+    },
+    Remove {
+        row: crate::ivm::data::Row,
+    },
+    Edit {
+        row: crate::ivm::data::Row,
+        old_row: crate::ivm::data::Row,
+    },
+}
+
+impl SourceChange {
+    #[inline]
+    pub fn change_type(&self) -> ChangeType {
+        match self {
+            SourceChange::Add { .. } => ChangeType::Add,
+            SourceChange::Remove { .. } => ChangeType::Remove,
+            SourceChange::Edit { .. } => ChangeType::Edit,
+        }
+    }
+}
+
+/// Port of TS `makeSourceChangeAdd` (source.ts:22).
+pub fn make_source_change_add(row: crate::ivm::data::Row) -> SourceChange {
+    SourceChange::Add { row }
+}
+
+/// Port of TS `makeSourceChangeRemove` (source.ts:26).
+pub fn make_source_change_remove(row: crate::ivm::data::Row) -> SourceChange {
+    SourceChange::Remove { row }
+}
+
+/// Port of TS `makeSourceChangeEdit` (source.ts:30).
+pub fn make_source_change_edit(
+    row: crate::ivm::data::Row,
+    old_row: crate::ivm::data::Row,
+) -> SourceChange {
+    SourceChange::Edit { row, old_row }
+}
 
 // ---------------------------------------------------------------------------
 // Source trait — port of TS `Source` interface (source.ts:42).

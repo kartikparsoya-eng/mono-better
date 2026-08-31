@@ -13,11 +13,11 @@ use std::time::Instant;
 
 use crate::builder::ast::Ast;
 use crate::builder::builder::{BuilderDelegate, build_pipeline};
-use crate::ivm::change::{Change, SourceChange};
+use crate::ivm::change::Change;
 use crate::ivm::data::{Row, Value};
 use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared, Storage};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::source::{CollectOutput, Source};
+use crate::ivm::source::{CollectOutput, Source, SourceChange};
 use crate::query::complete_ordering::complete_ordering;
 use crate::streamer::{RowChange, Streamer, TableSpecInfo};
 
@@ -1217,7 +1217,7 @@ impl Engine {
                         if sc.next_value.is_some() {
                             crate::otel_metrics::record_conflict_row_deleted();
                         }
-                        let change = crate::ivm::change::make_source_change_remove(
+                        let change = crate::ivm::source::make_source_change_remove(
                             sqlite_value_to_row(prev_row, col_types),
                         );
                         let push_reset = {
@@ -1246,9 +1246,9 @@ impl Engine {
                 if let Some(next) = &sc.next_value {
                     let row = sqlite_value_to_row(next, col_types);
                     let change = if let Some(old_row) = edit_old_row {
-                        crate::ivm::change::make_source_change_edit(row, old_row)
+                        crate::ivm::source::make_source_change_edit(row, old_row)
                     } else {
-                        crate::ivm::change::make_source_change_add(row)
+                        crate::ivm::source::make_source_change_add(row)
                     };
                     let push_reset = {
                         let _t = crate::perf_trace::scope("advance.push");
@@ -1891,7 +1891,7 @@ mod scalar_reset_tests {
                 &sources,
                 &[],
                 "unqueried",
-                crate::ivm::change::make_source_change_remove(missing_row),
+                crate::ivm::source::make_source_change_remove(missing_row),
                 &HashMap::new(),
                 &HashMap::new(),
                 &mut |_| {},

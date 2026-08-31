@@ -27,10 +27,10 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::SourceChange;
 use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::SourceChange;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
     let map: FxHashMap<String, Value> = pairs

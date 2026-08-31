@@ -11,10 +11,11 @@ use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Ast, Condition, SimpleCondition, ValuePosition};
 use rust_ivm::engine::{Engine, QuerySpec};
-use rust_ivm::ivm::change::{ChangeType, make_source_change_add, make_source_change_edit};
+use rust_ivm::ivm::change::ChangeType;
 use rust_ivm::ivm::data::Value;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::{make_source_change_add, make_source_change_edit};
 use rust_ivm::streamer::RowChange;
 
 fn source(

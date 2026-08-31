@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{Change, SourceChange};
+use rust_ivm::ivm::change::Change;
 use rust_ivm::ivm::constraint::{Constraint, MultiConstraint};
 use rust_ivm::ivm::data::{Node, Row, Value};
 use rust_ivm::ivm::operator::{Basis, FetchRequest, Input, InputBase, Output, Start};
 use rust_ivm::ivm::schema::ColumnType;
+use rust_ivm::ivm::source::SourceChange;
 use rust_ivm::ivm::source::{CollectOutput, MemorySource};
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {

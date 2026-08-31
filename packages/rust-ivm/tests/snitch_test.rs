@@ -11,12 +11,13 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::{Change, SourceChange};
+use rust_ivm::ivm::change::Change;
 use rust_ivm::ivm::data::{Node, Row, SortOrder, Value};
 use rust_ivm::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle};
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::snitch::{ChangeRecord, LogType, Snitch, SnitchMessage, to_change_record};
 use rust_ivm::ivm::source::MemorySource;
+use rust_ivm::ivm::source::SourceChange;
 
 fn str_val(s: &str) -> Value {
     Value::Str(Arc::from(s))

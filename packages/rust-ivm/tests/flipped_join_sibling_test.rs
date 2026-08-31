@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use rust_ivm::ivm::change::make_source_change_add;
 use rust_ivm::ivm::data::{Node, Value};
 use rust_ivm::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
 use rust_ivm::ivm::operator::{FetchRequest, Input, OutputHandle};
 use rust_ivm::ivm::schema::{ColumnType, System};
+use rust_ivm::ivm::source::make_source_change_add;
 use rust_ivm::ivm::source::{CollectOutput, MemorySource};
 
 fn str_val(s: &str) -> Value {
