@@ -142,3 +142,69 @@ fn analyze_applies_read_permissions() {
 
     cleanup(&path);
 }
+
+/// A4: the requesting connection's decoded JWT claims (`authData`) bind the
+/// permission rules' static parameters. NON-VACUOUS: a rule `name = authData.name`
+/// returns only the matching row when auth is present, and 0 rows (+ the no-auth
+/// warning) when auth is absent. If A4's auth threading is reverted (auth forced
+/// to `None`), the authed case returns 0 instead of 1 and the assertion fails.
+#[test]
+fn analyze_binds_auth_data_into_permission_rules() {
+    let path = tmp_path("auth");
+    build_users_replica(&path);
+    let ast = users_ast();
+
+    // A select rule: a user may read a `users` row only when its `name` equals
+    // the caller's `authData.name`.
+    let perms = json!({
+        "tables": { "users": { "row": { "select": [[
+            "allow",
+            {"type":"simple","op":"=",
+             "left":{"type":"column","name":"name"},
+             "right":{"type":"static","anchor":"authData","field":"name"}}
+        ]]}}}
+    });
+
+    // Authed as Alice → the static binds to "Alice" → exactly Alice's row.
+    let authed = rust_syncer::services::analyze::analyze_query(
+        &path,
+        "app",
+        &ast,
+        true,
+        false,
+        Some(perms.clone()),
+        Some(json!({"name": "Alice"})),
+    )
+    .expect("analyze authed");
+    assert_eq!(
+        authed.synced_row_count, 1,
+        "auth 'Alice' permits exactly the one matching row; got {} (rows={:?})",
+        authed.synced_row_count, authed.synced_rows
+    );
+
+    // No auth → the static resolves to NULL → `name = NULL` matches nothing.
+    let anon = rust_syncer::services::analyze::analyze_query(
+        &path,
+        "app",
+        &ast,
+        true,
+        false,
+        Some(perms),
+        None,
+    )
+    .expect("analyze anon");
+    assert_eq!(
+        anon.synced_row_count, 0,
+        "without auth the rule compares against NULL and returns 0 rows; got {}",
+        anon.synced_row_count
+    );
+    assert!(
+        anon.warnings
+            .iter()
+            .any(|w| w.contains("No auth data provided")),
+        "anon analyze warns about NULL auth-data; got {:?}",
+        anon.warnings
+    );
+
+    cleanup(&path);
+}

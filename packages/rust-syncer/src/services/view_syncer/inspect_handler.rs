@@ -30,6 +30,9 @@ pub async fn handle_inspect(
     admin_password: Option<&str>,
     server_version: &str,
     ttl_clock: TTLClock,
+    // The requesting connection's decoded JWT claims (TS `ctx.auth`), consumed
+    // only by the `analyze-query` op for read-permission static-param binding.
+    analyze_auth: Option<serde_json::Value>,
 ) {
     let op = body.get("op").and_then(|v| v.as_str()).unwrap_or("");
     let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -83,7 +86,7 @@ pub async fn handle_inspect(
         // `analyze-query` — port of the TS inspect-handler `analyze-query` case
         // (inspect-handler.ts:115) → `analyzeQuery`. Runs a throwaway read-only
         // analysis engine over the replica and returns an `AnalyzeQueryResult`.
-        "analyze-query" => analyze_query_op(cg_id, sync_engine, body).await,
+        "analyze-query" => analyze_query_op(cg_id, sync_engine, body, analyze_auth).await,
         other => {
             tracing::warn!("CG {cg_id}: unknown inspect op {other:?}");
             Err(format!("unknown inspect op: {other}"))
@@ -110,6 +113,7 @@ async fn analyze_query_op(
     cg_id: &str,
     sync_engine: &ViewSyncerService,
     body: &serde_json::Value,
+    analyze_auth: Option<serde_json::Value>,
 ) -> Result<(&'static str, serde_json::Value), String> {
     if body.get("name").is_some() && body.get("args").is_some() {
         return Err(
@@ -155,9 +159,8 @@ async fn analyze_query_op(
         .unwrap_or(false);
 
     // The analysis engine is `!Send` (Rc/RefCell IVM), so build + run it on a
-    // blocking thread; only the `Send` result crosses back.
-    // A4 wires `auth` (the connection's JWT claims); until then analyze binds
-    // permission static-params against NULL.
+    // blocking thread; only the `Send` result crosses back. The connection's
+    // decoded JWT claims (TS `ctx.auth`) bind the permission static-params.
     let result = tokio::task::spawn_blocking(move || {
         // TS inspect-handler.ts:135-147 — for a legacy query, load the deployed
         // permissions from the replica so analyze applies the same read-rules the
@@ -170,7 +173,7 @@ async fn analyze_query_op(
             synced_rows,
             vended_rows,
             permissions,
-            None,
+            analyze_auth,
         )
     })
     .await

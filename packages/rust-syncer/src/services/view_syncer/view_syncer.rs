@@ -2266,6 +2266,20 @@ impl ViewSyncerService {
         // client / cvr / cvrStore.
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
+        // The requesting connection's decoded JWT claims for `analyze-query`'s
+        // permission binding — TS `ctx.auth?.type === 'jwt' ? ctx.auth : undefined`
+        // (inspect-handler.ts:157). Read from the CCM at USE time (freshness,
+        // HARD RULE 9), mirroring the sync path's `mustGetConnectionContext(...)
+        // .auth?.raw` decode. `None` when the connection carries no auth (so
+        // run_ast warns + binds NULL); `Some` (even `{}`) means an auth is present.
+        let analyze_auth: Option<serde_json::Value> = lock_unpoisoned(&self.ccm)
+            .must_get_connection_context(&CcmConnectionSelector {
+                client_id: client_id.to_string(),
+                ws_id: ws_id.clone(),
+            })
+            .ok()
+            .and_then(|c| c.auth)
+            .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()));
         // Copy the auth flag in/out around the borrow of `self` (bool is Copy;
         // the CG task is strictly serial, so nothing else reads it meanwhile).
         let mut inspector_authenticated = self.inspector_authenticated;
@@ -2278,6 +2292,7 @@ impl ViewSyncerService {
             self.admin_password.as_deref(),
             &self.server_version,
             ttl_clock,
+            analyze_auth,
         )
         .await;
         self.inspector_authenticated = inspector_authenticated;
