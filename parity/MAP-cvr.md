@@ -2,8 +2,8 @@
 
 _Deterministic. File edges + symbol pairs are derived from **shared symbol content**, never filenames — so renamed files (e.g. `drain-coordinator.ts`→`drain.rs`) and renamed symbols (`cvrErrorKind`→`CVRStoreError`) still bind. Bodies are not compared; behavior drift needs Layer-2 body review._
 
-- symbols: TS **177**, Rust **339** · resolved pairs **116** (exact 116 + fuzzy 0) + aliases 19
-- 🟥 TS UNRESOLVED: **46** (**0** behavioral ⇒ investigate · 46 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **223**
+- symbols: TS **177**, Rust **342** · resolved pairs **116** (exact 116 + fuzzy 0) + aliases 19
+- 🟥 TS UNRESOLVED: **46** (**0** behavioral ⇒ investigate · 46 structural: zod/DDL/type-alias ⇒ serde/inline-SQL, expected) · 🟦 Rust-only ADDED: **226**
 
 ## 1 · File structure diff
 
@@ -35,7 +35,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 ### `change_processor.rs`  ⟵  `cvr.ts`
 
 
-🟦 **Rust-only added here (11):** `ChangeProcessor`, `DEFAULT_CURSOR_PAGE_SIZE`, `RowChangeType`, `ZERO_VERSION_COLUMN_NAME`, `finish`, `finish_received`, `flush_batch`, `new`, `on_row_change`, `total_processed`, `with_page_size`
+🟦 **Rust-only added here (13):** `ChangeProcessor`, `DEFAULT_CURSOR_PAGE_SIZE`, `RowChangeType`, `ZERO_VERSION_COLUMN_NAME`, `cursor_page_size`, `cursor_page_size_from`, `finish`, `finish_received`, `flush_batch`, `new`, `on_row_change`, `total_processed`, `with_page_size`
 
 ### `client_handler.rs`  ⟵  `client-handler.ts`
 
@@ -45,22 +45,22 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `#updateLMIDs` (client-handler.ts:376) | `update_lmids` (:567) | exact |
 | `addPatch` (client-handler.ts:73) | `add_patch` (:292) | exact |
 | `cancel` (client-handler.ts:74) | `cancel` (:104) | exact |
-| `ClientHandler` (client-handler.ts:114) | `ClientHandler` (:757) | exact |
-| `close` (client-handler.ts:183) | `close` (:828) | exact |
+| `ClientHandler` (client-handler.ts:114) | `ClientHandler` (:764) | exact |
+| `close` (client-handler.ts:183) | `close` (:835) | exact |
 | `end` (client-handler.ts:75) | `end` (:429) | exact |
-| `ensureSafeJSON` (client-handler.ts:449) | `ensure_safe_json` (:700) | exact |
+| `ensureSafeJSON` (client-handler.ts:449) | `ensure_safe_json` (:707) | exact |
 | `fail` (client-handler.ts:175) | `fail` (:103) | exact |
-| `makeRowPatch` (client-handler.ts:416) | `make_row_patch` (:720) | exact |
+| `makeRowPatch` (client-handler.ts:416) | `make_row_patch` (:727) | exact |
 | `Patch` (client-handler.ts:65) | `Patch` (:25) | exact |
 | `PatchToVersion` (client-handler.ts:67) | `PatchToVersion` (:44) | exact |
 | `PokeHandler` (client-handler.ts:72) | `PokeHandler` (:259) | exact |
 | `RowPatch` (client-handler.ts:62) | `RowPatch` (:33) | exact |
-| `sendDeleteClients` (client-handler.ts:347) | `send_delete_clients` (:893) | exact |
-| `sendInspectResponse` (client-handler.ts:371) | `send_inspect_response` (:923) | exact |
-| `sendQueryTransformApplicationErrors` (client-handler.ts:363) | `send_query_transform_application_errors` (:915) | exact |
-| `sendQueryTransformFailedError` (client-handler.ts:367) | `send_query_transform_failed_error` (:933) | exact |
-| `startPoke` (client-handler.ts:85) | `start_poke` (:833) | exact |
-| `version` (client-handler.ts:166) | `version` (:820) | exact |
+| `sendDeleteClients` (client-handler.ts:347) | `send_delete_clients` (:900) | exact |
+| `sendInspectResponse` (client-handler.ts:371) | `send_inspect_response` (:930) | exact |
+| `sendQueryTransformApplicationErrors` (client-handler.ts:363) | `send_query_transform_application_errors` (:922) | exact |
+| `sendQueryTransformFailedError` (client-handler.ts:367) | `send_query_transform_failed_error` (:940) | exact |
+| `startPoke` (client-handler.ts:85) | `start_poke` (:840) | exact |
+| `version` (client-handler.ts:166) | `version` (:827) | exact |
 
 🟥 **TS symbols not resolved into this file (3):** `ConfigPatch`, `DeleteRowPatch`, `PutRowPatch`
 
@@ -105,7 +105,7 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 
 🟥 **TS symbols not resolved into this file (2):** `CVRSnapshot`, `Column`
 
-🟦 **Rust-only added here (33):** `CLIENT_LMID_QUERY_ID`, `CLIENT_MUTATION_RESULTS_QUERY_ID`, `DesiredQuerySpec`, `InactiveQuery`, `RowRecordMap`, `StoreOp`, `drain_store_ops`, `make_query_driven_updater`, `make_shard`, `make_test_cvr`, `test_clear_desired_queries`, `test_delete_client`, `test_delete_client_not_found`, `test_delete_desired_queries`, `test_delete_unreferenced_rows`, `test_ensure_client_creates_client_and_internal_queries`, `test_ensure_client_idempotent`, `test_flush_with_signature_provider`, `test_inactivate_missing_client_state_does_not_fabricate_entry`, `test_put_desired_queries_new`, `test_put_desired_queries_no_change`, `test_query_updater_bumps_version_on_new_state_version`, `test_query_updater_does_not_bump_on_same_state_version`, `test_received_new_row`, `test_received_null_then_reref_drops_stale_existing_refs`, `test_received_unref_row`, `test_set_client_schema_mismatch`, `test_set_client_schema_new`, `test_set_client_schema_same`, `test_set_profile_id`, `test_track_queries_executed`, `test_track_queries_removed`, `test_unref_empty_row_version_bumps_patch_version`
+🟦 **Rust-only added here (34):** `CLIENT_LMID_QUERY_ID`, `CLIENT_MUTATION_RESULTS_QUERY_ID`, `DesiredQuerySpec`, `InactiveQuery`, `RowRecordMap`, `StoreOp`, `drain_store_ops`, `make_query_driven_updater`, `make_shard`, `make_test_cvr`, `test_clear_desired_queries`, `test_delete_client`, `test_delete_client_not_found`, `test_delete_desired_queries`, `test_delete_unreferenced_rows`, `test_ensure_client_creates_client_and_internal_queries`, `test_ensure_client_idempotent`, `test_flush_with_signature_provider`, `test_inactivate_missing_client_state_does_not_fabricate_entry`, `test_put_desired_queries_new`, `test_put_desired_queries_no_change`, `test_query_updater_bumps_version_on_new_state_version`, `test_query_updater_does_not_bump_on_same_state_version`, `test_received_new_row`, `test_received_null_then_reref_drops_stale_existing_refs`, `test_received_unref_row`, `test_set_client_schema_mismatch`, `test_set_client_schema_new`, `test_set_client_schema_same`, `test_set_profile_id`, `test_track_queries_executed`, `test_track_queries_removed`, `test_unref_empty_row_version_bumps_patch_version`, `test_updated_version_tracks_live_cvr_version`
 
 ### `cvr_store.rs`  ⟵  `cvr-store.ts`
 
@@ -284,19 +284,19 @@ TS origin files: **8**  ·  Rust files: **21** (9 new)
 | `addPatch` | client-handler.ts:73 | `add_patch` client_handler.rs:292 | ✅ exact |
 | `cancel` | client-handler.ts:74 | `cancel` client_handler.rs:104 | ✅ exact |
 | `end` | client-handler.ts:75 | `end` client_handler.rs:429 | ✅ exact |
-| `startPoke` | client-handler.ts:85 | `start_poke` client_handler.rs:833 | ✅ exact |
-| `ClientHandler` | client-handler.ts:114 | `ClientHandler` client_handler.rs:757 | ✅ exact |
-| `version` | client-handler.ts:166 | `version` client_handler.rs:820 | ✅ exact |
+| `startPoke` | client-handler.ts:85 | `start_poke` client_handler.rs:840 | ✅ exact |
+| `ClientHandler` | client-handler.ts:114 | `ClientHandler` client_handler.rs:764 | ✅ exact |
+| `version` | client-handler.ts:166 | `version` client_handler.rs:827 | ✅ exact |
 | `#push` | client-handler.ts:170 | `push` client_handler.rs:94 | ✅ exact |
 | `fail` | client-handler.ts:175 | `fail` client_handler.rs:103 | ✅ exact |
-| `close` | client-handler.ts:183 | `close` client_handler.rs:828 | ✅ exact |
-| `sendDeleteClients` | client-handler.ts:347 | `send_delete_clients` client_handler.rs:893 | ✅ exact |
-| `sendQueryTransformApplicationErrors` | client-handler.ts:363 | `send_query_transform_application_errors` client_handler.rs:915 | ✅ exact |
-| `sendQueryTransformFailedError` | client-handler.ts:367 | `send_query_transform_failed_error` client_handler.rs:933 | ✅ exact |
-| `sendInspectResponse` | client-handler.ts:371 | `send_inspect_response` client_handler.rs:923 | ✅ exact |
+| `close` | client-handler.ts:183 | `close` client_handler.rs:835 | ✅ exact |
+| `sendDeleteClients` | client-handler.ts:347 | `send_delete_clients` client_handler.rs:900 | ✅ exact |
+| `sendQueryTransformApplicationErrors` | client-handler.ts:363 | `send_query_transform_application_errors` client_handler.rs:922 | ✅ exact |
+| `sendQueryTransformFailedError` | client-handler.ts:367 | `send_query_transform_failed_error` client_handler.rs:940 | ✅ exact |
+| `sendInspectResponse` | client-handler.ts:371 | `send_inspect_response` client_handler.rs:930 | ✅ exact |
 | `#updateLMIDs` | client-handler.ts:376 | `update_lmids` client_handler.rs:567 | ✅ exact |
-| `makeRowPatch` | client-handler.ts:416 | `make_row_patch` client_handler.rs:720 | ✅ exact |
-| `ensureSafeJSON` | client-handler.ts:449 | `ensure_safe_json` client_handler.rs:700 | ✅ exact |
+| `makeRowPatch` | client-handler.ts:416 | `make_row_patch` client_handler.rs:727 | ✅ exact |
+| `ensureSafeJSON` | client-handler.ts:449 | `ensure_safe_json` client_handler.rs:707 | ✅ exact |
 | `CVRFlushStats` | cvr-store.ts:67 | `CVRFlushStats` cvr_store.rs:100 | ✅ exact |
 | `convertTTLValues` | cvr-store.ts:88 | INLINED | 📌 cvr_store.rs upsert SQL: ttl/1000 + null-on-negative |
 | `asQuery` | cvr-store.ts:119 | `as_query` cvr_store.rs:1677 | ✅ exact |

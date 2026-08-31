@@ -628,12 +628,29 @@ loop, extracted), `hash.rs`, `row_key.rs`, `shards.rs`, `tracer.rs`,
 | `query/typed-view.ts` | `query/typed_view.rs` |
 | `query/validate-input.ts` | `query/validate_input.rs` |
 
+The `sqlite/` subtree is a 1:1 port of the **`zqlite` TS package**
+(`packages/zqlite/src/…` → `packages/rust-ivm/src/sqlite/…`), the SQLite-backed
+half of the engine — NOT rust-only inventions:
+
+| TS file | Rust file |
+|---|---|
+| `zqlite/table-source.ts` | `sqlite/table_source.rs` |
+| `zqlite/db.ts` | `sqlite/db.rs` |
+| `zqlite/query-delegate.ts` | `sqlite/query_delegate.rs` |
+| `zqlite/query-builder.ts` | `sqlite/query_builder.rs` |
+| `zqlite/database-storage.ts` | `sqlite/database_storage.rs` |
+| `zqlite/explain-queries.ts` | `sqlite/explain_queries.rs` |
+| `zqlite/options.ts` | `sqlite/options.rs` |
+| `zqlite/resolve-scalar-subqueries.ts` | `sqlite/resolve_scalar_subqueries.rs` |
+| `zqlite/sqlite-cost-model.ts` | `sqlite/sqlite_cost_model.rs` |
+| `zqlite/sqlite-stat-fanout.ts` | `sqlite/sqlite_stat_fanout.rs` |
+
 Dropped (no port needed): `builder/like-test-cases.ts` (test data),
-`ivm/change-index.ts`, `ivm/default-format.ts` (1–5 LOC type shims).
-Rust-only inventions: `advance_gate.rs`, `perf_trace.rs`, `otel_metrics.rs`,
-`snapshotter/*`, and the `sqlite/*` backing (`db.rs`, `sqlite_cost_model.rs`,
-`interrupt.rs`, `resolve_scalar_subqueries.rs`, `database_storage.rs`,
-`explain_queries.rs`, `options.rs`).
+`ivm/change-index.ts`, `ivm/default-format.ts` (1–5 LOC type shims),
+`zqlite/internal/*` (statement-cache/sql helpers folded into `db.rs`/query
+building). Genuinely rust-only (no TS twin): `advance_gate.rs`, `perf_trace.rs`,
+`otel_metrics.rs`, `snapshotter/*`, `sqlite/interrupt.rs` (SQLite progress-
+handler cancellation watchdog).
 
 ### rust-syncer (← `packages/zero-cache/src/…` → `packages/rust-syncer/src/…`)
 

@@ -115,6 +115,9 @@ CRATES = {
     "ivm": {
         "rust_dir": "packages/rust-ivm/src",
         "ts_label_prefix": "zql/src/",
+        # zqlite/ TS files ported into rust-ivm/src/sqlite/ — label them under
+        # `sqlite/` so they mirror-match the rust files (see ts_label).
+        "ts_label_rewrites": [("zqlite/src/", "sqlite/")],
         # rust-ivm ports the ZQL IVM engine: the operators (ivm/), the query
         # builder (builder/ + query/), and the query planner (planner/). mutate/
         # is client-side CRUD, not ported into the engine crate.
@@ -127,12 +130,24 @@ CRATES = {
             # the pure client-fluent + TS type-level files have no runtime to
             # port; excluded below so they don't read as false behavioral gaps.
             "packages/zql/src/query/",
+            # zqlite/ is the SQLite-backed half of the engine — ported 1:1 into
+            # rust-ivm/src/sqlite/ (table_source.rs ← table-source.ts, db.rs ←
+            # db.ts, sqlite_cost_model.rs ← sqlite-cost-model.ts, …). WITHOUT
+            # this origin the sqlite/*.rs files read as "new/invention" and
+            # their symbols (fetch/connect/get_row/…) FALSELY collided with
+            # zql/ivm/memory-source.ts, manufacturing a phantom SPLIT. Added
+            # 2026-08-31 to resolve memory-source.ts → source.rs as clean 1:1.
+            "packages/zqlite/src/",
         ],
         "ts_exclude": (
             "query/query.ts",          # TS type machinery: PullRow/QueryReturn/DeepMerge/…
             "query/create-builder.ts", # client fluent-builder factory
             "planner/planner-debug.ts",  # planner debug-event system — not ported
             "builder/debug-delegate.ts", # debug/instrumentation delegate — not ported
+            # zqlite internal helpers folded into their consumers (no 1:1 twin):
+            # statement-cache → db.rs, sql/sql-inline → query_builder/view.
+            "zqlite/src/internal/",
+            "zqlite/src/mod.ts",       # barrel re-export
         ),
         "structural_ts": set(),
         # Triaged 2026-08-24 (3 parallel Explore agents + import-graph checks).
@@ -250,7 +265,11 @@ CRATES = {
         # memory-source → source.rs/table_source.rs split, and common-name
         # collision remainders with no mirror pair on either side.
         # 74→71 same day: mid-file-test-mod skip fix re-bound 3 to mirrors.
-        "max_misfiled": 71,
+        # 71→73 (2026-08-31): adding the zqlite/ origin correctly bound the 10
+        # sqlite/*.rs files (previously false "inventions"), which surfaced 2
+        # more legit cross-binds (query-delegate NewQueryDelegate, table-source
+        # symbols → engine/mod) — new visibility, not drift.
+        "max_misfiled": 73,
     },
     "syncer": {
         "rust_dir": "packages/rust-syncer/src",
@@ -724,9 +743,16 @@ def expand_ts_files(spec):
 
 def ts_label(spec, path):
     """File label for a TS origin path — strip the crate's ts_label_prefix so
-    subdir files read as e.g. 'ivm/join.ts' / 'schema/cvr.ts'."""
-    pref = spec.get("ts_label_prefix", "view-syncer/")
+    subdir files read as e.g. 'ivm/join.ts' / 'schema/cvr.ts'. Optional
+    `ts_label_rewrites` (list of (find, replace)) is applied FIRST, so a
+    cross-package origin ported into a rust subdir mirrors correctly — e.g.
+    ivm maps `packages/zqlite/src/` → `sqlite/` so `zqlite/src/table-source.ts`
+    labels as `sqlite/table-source.ts` and mirror-matches `sqlite/table_source.rs`."""
     r = rel(path)
+    for find, repl in spec.get("ts_label_rewrites", ()):
+        if find in r:
+            return repl + r.split(find, 1)[-1]
+    pref = spec.get("ts_label_prefix", "view-syncer/")
     return r.split(pref, 1)[-1] if pref in r else r
 
 def walk_rs(root):
