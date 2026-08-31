@@ -10,26 +10,9 @@
 
 use rust_cvr::ttl_clock::TTLClock;
 
-use super::view_syncer::ViewSyncerService;
+use crate::config::zero_config::is_admin_password_valid;
 
-/// Port of TS `isAdminPasswordValid` (config/zero-config.ts). In DEVELOPMENT
-/// mode (`NODE_ENV=development`) with no admin password configured and none
-/// provided, access is allowed (open inspector). Otherwise a configured admin
-/// password must be non-empty and match. rust previously omitted the dev-mode
-/// branch (`admin_password.is_some_and(...)` alone), so a dev sandbox with no
-/// `ZERO_ADMIN_PASSWORD` LOCKED the inspector where TS OPENED it — caught by the
-/// G49/E inspect-auth differential (2026-08-28: rust authenticated:false, TS
-/// answered `queries` as an authenticated CG).
-pub fn is_admin_password_valid(
-    password: &str,
-    admin_password: Option<&str>,
-    dev_mode: bool,
-) -> bool {
-    if password.is_empty() && admin_password.is_none() && dev_mode {
-        return true;
-    }
-    admin_password.is_some_and(|p| !p.is_empty() && p == password)
-}
+use super::view_syncer::ViewSyncerService;
 
 /// Port of `handleInspect` (inspect-handler.ts). The auth gate lives here:
 /// every op except `authenticate` requires a previously-authenticated client
@@ -145,28 +128,4 @@ async fn inspect_queries_value(
         })
         .collect();
     serde_json::Value::Array(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_admin_password_valid;
-
-    /// Port fidelity for TS `isAdminPasswordValid` (config/zero-config.ts). The
-    /// dev-mode-no-password branch is the one rust omitted (G49/E finding).
-    /// Non-vacuous: dropping that branch (the pre-fix `admin_password.is_some_and`
-    /// alone) makes the first assertion fail — dev sandbox would lock the inspector.
-    #[test]
-    fn is_admin_password_valid_matches_ts() {
-        // dev mode + no admin password + no password provided → OPEN (the fix).
-        assert!(is_admin_password_valid("", None, true));
-        // production (not dev) + no admin password → LOCKED.
-        assert!(!is_admin_password_valid("", None, false));
-        // admin password configured: must match exactly.
-        assert!(is_admin_password_valid("secret", Some("secret"), true));
-        assert!(!is_admin_password_valid("wrong", Some("secret"), true));
-        // empty configured password never authenticates.
-        assert!(!is_admin_password_valid("", Some(""), true));
-        // dev mode does NOT bypass a configured password.
-        assert!(!is_admin_password_valid("", Some("secret"), true));
-    }
 }
