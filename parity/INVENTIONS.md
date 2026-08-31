@@ -253,3 +253,40 @@ Known REAL gap tracked separately (NOT invention-covered): the ivm
 filter-pipeline operator protocol (`beginFilter`/`endFilter`/
 `buildFilterPipeline`/`setFilterOutput` + builder DNF simplification) — see
 ZERO-DIVERGENCE-PLAN Part 3 L8 follow-ups.
+
+## I-10 — Inspector server metrics on the per-CG (not per-worker) delegate; `query-update-server` seam
+- **Files:** `server/inspector_delegate.rs` (the ported `InspectorDelegate`
+  metrics + AST store), `tdigest.rs`, `services/view_syncer/view_syncer.rs`
+  (recording sites + the per-CG `inspector_delegate` field),
+  `services/view_syncer/inspect_handler.rs` (`metrics`/`queries` ops).
+- **No TS twin (scope):** TS constructs ONE `InspectorDelegate` per Syncer
+  worker (server/syncer.ts:207) shared across every `ViewSyncerService`, so
+  `getMetricsJSON()` is a worker-global aggregate. Rust runs each client group
+  on its own `!Send` CG thread (I-1/I-2) with no shared mutable worker object,
+  so the delegate is per-CG.
+- **Contract (metrics/queries ops):** the `queries` op's per-query rows are
+  observationally identical to TS — they are keyed by the caller's own queryIDs,
+  which live in this CG. The `metrics` op returns THIS client group's aggregate
+  rather than a cross-CG one; since the inspector is a diagnostic scoped to the
+  connecting client, the per-CG aggregate is a strict subset (the caller's own
+  queries), never wrong data for another group.
+- **`query-update-server` seam (NOT wired — documented gap):** TS wraps every
+  per-query source connection in a `MeasurePushOperator` (pipeline-driver.ts:650)
+  that times each incremental push and reports `query-update-server`. Rust's
+  advance is a shared-source fan-out: one `source.push(change)` propagates to ALL
+  subscribed pipelines at once (`engine::advance_streaming`, the batched-advance
+  invention), so there is no per-query per-push seam to attribute update timing
+  to without wrapping each pipeline's source connection and distorting the hot
+  path. The `query-update-server` digest is therefore always empty (`[1000]`),
+  and `query-materialization-server` (fed from the engine's existing per-query
+  `hydration_time_ms`, no new timer) is fully populated. Client-observable
+  effect: a query that has received incremental updates shows a populated
+  materialization/hydration metric but an empty update digest. Wiring it 1:1
+  would require the arena/Send-ification rewrite (#103) that gives each pipeline
+  an isolable source input.
+- **Tests:** `tdigest::tests::ts_golden_matches_real_tdigest` (byte-exact vs the
+  real TS TDigest), the `server::inspector_delegate::tests::*` unit suite
+  (metrics wire shapes + `metrics_for_protocol`),
+  `inspect_metrics_returns_delegate_global_aggregates` (op wiring, non-vacuous),
+  `hydrate_and_sync_records_inspector_materialization_and_ast` (recording,
+  non-vacuous).
