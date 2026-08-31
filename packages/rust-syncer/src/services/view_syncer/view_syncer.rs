@@ -7823,6 +7823,23 @@ impl ViewSyncerService {
                 continue;
             }
             self.pipelines.set_query_transformation_hash(qid, new_hash);
+            // Inspector recording — port of the `#hydrateUnchangedQueries` tail
+            // (view-syncer.ts:1640-1641): `#addQueryMaterializationServerMetric(
+            // transformationHash, elapsed)` + `#inspectorDelegate.addQuery(
+            // transformationHash, transformedAst)`. Faithful to TS, BOTH are keyed
+            // by the transformationHash (`new_hash`), not the queryID — recorded
+            // before the drift check, so a query that drifts and is removed below
+            // still contributed its materialization sample to the global aggregate.
+            if let Some(ms) = self.pipelines.hydration_time_ms(qid) {
+                self.inspector_delegate.borrow_mut().add_metric(
+                    rust_ivm::query::metrics_delegate::Metric::QueryMaterializationServer,
+                    ms,
+                    new_hash,
+                );
+            }
+            self.inspector_delegate
+                .borrow_mut()
+                .add_query(new_hash, transformed_ast.clone());
             // Drift detection (TS view-syncer.ts:1659-1673): compare the candidate
             // signature to the CVR-stored one. Skip when there is NO stored
             // signature (legacy pre-feature query — a forced re-execution would
@@ -7920,6 +7937,9 @@ impl ViewSyncerService {
         // are TTL/errored removals, TS's default stop reason `remove-query`.
         for qid in remove_queries {
             self.pipelines.remove_query(qid, "remove-query");
+            // Port of `this.#inspectorDelegate.removeQuery(q.id)` (view-syncer.ts:
+            // 2238) — drop this query's per-query server metrics + stored AST.
+            self.inspector_delegate.borrow_mut().remove_query(qid);
         }
 
         // Freshly-hydrated queries start from an empty row set (signature 0), so
@@ -7968,6 +7988,27 @@ impl ViewSyncerService {
         // query map.
         for (qid, hash) in add_queries {
             self.pipelines.set_query_transformation_hash(qid, hash);
+        }
+        // Record the per-query server materialization metric + AST for the
+        // inspector — port of the `#syncQueryPipelineSet` add tail
+        // (view-syncer.ts:2297-2298): `#addQueryMaterializationServerMetric(q.id,
+        // elapsed)` + `#inspectorDelegate.addQuery(q.id, q.ast)`, both keyed by the
+        // queryID (`q.id`), which is what the `queries` op looks up per row. Rust's
+        // per-query hydrate time comes from the engine's own timing
+        // (`hydration_time_ms`, set during the batched hydrate above) rather than a
+        // TS wall-clock `timer`, so a query the engine did not register (e.g.
+        // cancel-during-hydrate) simply records no metric.
+        for (qid, ast_json) in queries {
+            if let Some(ms) = self.pipelines.hydration_time_ms(qid) {
+                self.inspector_delegate.borrow_mut().add_metric(
+                    rust_ivm::query::metrics_delegate::Metric::QueryMaterializationServer,
+                    ms,
+                    qid,
+                );
+            }
+            if let Ok(ast) = serde_json::from_str::<serde_json::Value>(ast_json) {
+                self.inspector_delegate.borrow_mut().add_query(qid, ast);
+            }
         }
         processor.finish(existing_rows)?;
         let num_changes = processor.total_processed();
@@ -9046,6 +9087,77 @@ mod engine_tests {
                     .is_some_and(|ps| ps.iter().any(|p| p["op"] == "del"))
         });
         assert!(has_del, "late catch-up patch must be delivered in the poke");
+    }
+
+    /// D-c: `hydrate_and_sync` records the per-query inspector server metrics —
+    /// `query-materialization-server` (from the engine's hydration timing) and
+    /// the queryID→AST map (`add_query`), both keyed by the queryID, exactly as
+    /// TS `#syncQueryPipelineSet` (view-syncer.ts:2297-2298). NON-VACUOUS: after
+    /// hydrating q1, the delegate reports the AST and a `query-hydration-server-ms`
+    /// for q1; removing the recording loop makes both `get_ast_for_query` and
+    /// `get_metrics_json_for_query` return `None`, failing the asserts.
+    #[tokio::test]
+    async fn hydrate_and_sync_records_inspector_materialization_and_ast() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        engine.register_client(
+            "client1",
+            "ws1",
+            "cg1",
+            &ShardID {
+                app_id: "app".to_string(),
+                shard_num: 0,
+            },
+            None,
+            sink,
+        );
+
+        let existing_rows: RowRecordMap = HashMap::new();
+        let ast = r#"{"table":"users"}"#;
+        engine
+            .hydrate_and_sync(
+                make_cvr(),
+                "00".to_string(),
+                "v1".to_string(),
+                &[("q1".to_string(), "hash1".to_string())],
+                &[],
+                &["ws1".to_string()],
+                &[("q1".to_string(), ast.to_string())],
+                &existing_rows,
+                0,
+                0,
+                0,
+                &std::collections::HashSet::new(),
+            )
+            .await
+            .unwrap();
+
+        // The AST is stored for the `queries` op fallback (`getASTForQuery`).
+        assert_eq!(
+            engine.inspector_delegate().borrow().get_ast_for_query("q1"),
+            Some(&serde_json::json!({"table": "users"})),
+            "hydrate must record the query AST in the inspector delegate"
+        );
+        // A per-query materialization metric was recorded (hydration ms present).
+        let per_query = engine
+            .inspector_delegate()
+            .borrow_mut()
+            .get_metrics_json_for_query("q1")
+            .expect("q1 must have per-query metrics after hydrate");
+        assert!(
+            per_query.get("query-hydration-server-ms").is_some(),
+            "the hydration ms must be recorded for q1; got {per_query}"
+        );
+        // The global materialization aggregate carries exactly one sample.
+        let global = engine.inspector_delegate().borrow_mut().get_metrics_json();
+        let mat = global["query-materialization-server"].as_array().unwrap();
+        // `[compression, mean, weight]` — one centroid of weight 1.
+        assert_eq!(mat.len(), 3, "one materialization sample: {mat:?}");
+        assert_eq!(mat[2], serde_json::json!(1), "weight 1");
     }
 
     /// Regression for the advance-path panic: `advance_and_sync` must construct

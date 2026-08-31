@@ -212,6 +212,17 @@ impl IvmPipelines {
         self.active_queries.keys().cloned().collect()
     }
 
+    /// The engine's per-query hydration time (ms), or `None` if the query is not
+    /// a registered pipeline. Surfaces the `add_queries_streaming`
+    /// `QueryResult.hydration_time_ms` for the inspector's
+    /// `query-materialization-server` metric (the TS `elapsed` recorded by the
+    /// view-syncer around `pipelines.addQuery`).
+    pub fn hydration_time_ms(&self, query_id: &str) -> Option<f64> {
+        self.engine
+            .as_ref()
+            .and_then(|e| e.hydration_time_ms(query_id))
+    }
+
     /// The currently-hydrated queries as `(query_id, transformed_ast_json,
     /// transformation_hash)`. Full port of TS `pipelineDriver.queries()` (which
     /// carries `transformedAst` + `transformationHash`), used to seed the
