@@ -49,6 +49,15 @@ pub struct QuerySpec {
 pub struct QueryResult {
     pub query_id: String,
     pub changes: Vec<RowChange>,
+    /// Wall-clock hydration time for this query's pipeline (Phase 2 fetch +
+    /// materialize). Port of the TS pipeline `hydrationTimeMs` field
+    /// (pipeline-driver.ts:773) so the driver can emit the per-query
+    /// `#logQueryPipelineLifecycle` line.
+    pub hydration_time_ms: f64,
+    /// Number of `RowChange`s produced by this query's initial hydration
+    /// (main rows + scalar-subquery companion rows). Port of the TS pipeline
+    /// `hydrationRowCount` field (pipeline-driver.ts:774).
+    pub hydration_row_count: u64,
 }
 
 /// Per-query build products carried across the three hydrate phases (build,
@@ -70,6 +79,9 @@ struct PipelineEntry {
     collector: Shared<CollectOutput>,
     query_id: String,
     hydration_time_ms: f64,
+    /// Rows produced by this query's initial hydration. Port of the TS pipeline
+    /// `hydrationRowCount` field (pipeline-driver.ts:774).
+    hydration_row_count: u64,
     transformed_ast: Ast,
     /// Live companion pipelines monitoring resolved scalar subqueries for this
     /// query (empty for queries with no scalar subqueries).
@@ -658,6 +670,17 @@ impl Engine {
         if total == 0.0 { 0.0 } else { total }
     }
 
+    /// Rows produced by a query's initial hydration, or `None` if the query
+    /// has no registered pipeline. Port of reading TS `pipeline.hydrationRowCount`
+    /// (pipeline-driver.ts:774) — the payload the driver's per-query lifecycle
+    /// log reports.
+    pub fn hydration_row_count(&self, query_id: &str) -> Option<u64> {
+        self.pipelines
+            .iter()
+            .find(|p| p.query_id == query_id)
+            .map(|p| p.hydration_row_count)
+    }
+
     /// Replace the native wall-clock measurement with the caller's
     /// pause-aware hydration timer.
     pub fn set_hydration_time_ms(&mut self, query_id: &str, hydration_time_ms: f64) -> bool {
@@ -758,8 +781,14 @@ impl Engine {
         // inconsistent operator state, so on cancel we register NOTHING and
         // destroy what we built (the queries are being discarded anyway).
         let mut cancelled = false;
+        // Per-query hydration row count (main rows + companion rows). Port of the
+        // TS `hydrationRowCount++` counter in `#addQueryImpl` (pipeline-driver.ts:
+        // 633/686/693) — the payload the driver's `#logQueryPipelineLifecycle`
+        // reports so a slow query is identifiable by rows-considered.
+        let mut row_counts: HashMap<String, u64> = HashMap::new();
         'hydrate: for b in &built {
             let _t = crate::perf_trace::scope("hydrate.fetch");
+            let mut b_row_count: u64 = 0;
             if self.cancellation_token.is_cancelled() {
                 cancelled = true;
                 break 'hydrate;
@@ -793,6 +822,7 @@ impl Engine {
                 streamer.accumulate(&b.query_id, &b.schema, std::slice::from_ref(&change));
                 for rc in streamer.stream() {
                     let _t = crate::perf_trace::scope("deliver.row");
+                    b_row_count += 1;
                     on_row_change(&rc);
                 }
             }
@@ -828,6 +858,7 @@ impl Engine {
                 };
                 let row_key = crate::streamer::get_row_key(pk, row);
                 let _t = crate::perf_trace::scope("deliver.row");
+                b_row_count += 1;
                 on_row_change(&RowChange {
                     change_type: crate::ivm::change::ChangeType::Add,
                     query_id: b.query_id.clone(),
@@ -837,6 +868,7 @@ impl Engine {
                     is_hidden: false,
                 });
             }
+            row_counts.insert(b.query_id.clone(), b_row_count);
         }
 
         if cancelled {
@@ -857,9 +889,12 @@ impl Engine {
         let mut results = Vec::new();
         for b in built {
             let hydration_time_ms = b.timer.elapsed().as_secs_f64() * 1000.0;
+            let hydration_row_count = row_counts.get(&b.query_id).copied().unwrap_or(0);
             results.push(QueryResult {
                 query_id: b.query_id.clone(),
                 changes: Vec::new(),
+                hydration_time_ms,
+                hydration_row_count,
             });
 
             let mut live_companions = Vec::with_capacity(b.companions.len());
@@ -892,6 +927,7 @@ impl Engine {
                 collector: b.collector,
                 query_id: b.query_id,
                 hydration_time_ms,
+                hydration_row_count,
                 transformed_ast: b.transformed_ast,
                 companions: live_companions,
             });

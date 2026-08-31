@@ -432,6 +432,37 @@ impl IvmPipelines {
         }
     }
 
+    /// Port of TS `PipelineDriver.#logQueryPipelineLifecycle`
+    /// (pipeline-driver.ts:470). Emits one `query pipeline lifecycle` info event
+    /// per query-pipeline transition so a slow/heavy query is identifiable from
+    /// logs by `hydration_time_ms` + `hydration_row_count`.
+    ///
+    /// Rust-only shape (HARD RULE 5): an associated fn (no `&self`) rather than a
+    /// method, because the caller holds a `&mut self.engine` borrow across the
+    /// hydrate and cannot also borrow `&self`; TS `this.#lc.withContext(...)` is
+    /// replaced by the global `tracing` subscriber. `pipelineRunID` /
+    /// `transformationHash` / `queryName` / `hydrationReason` are not available at
+    /// this layer (they live one layer up in the view-syncer, or are set after
+    /// hydrate) and TS itself omits each from the log line when it is undefined —
+    /// so their absence here is protocol-faithful, not a divergence.
+    fn log_query_pipeline_lifecycle(
+        zero_event: &str,
+        query_hash: &str,
+        hydration_time_ms: Option<f64>,
+        hydration_row_count: Option<u64>,
+    ) {
+        match (hydration_time_ms, hydration_row_count) {
+            (Some(t), Some(n)) => tracing::info!(
+                zero_event,
+                query_hash,
+                hydration_time_ms = t,
+                hydration_row_count = n,
+                "query pipeline lifecycle"
+            ),
+            _ => tracing::info!(zero_event, query_hash, "query pipeline lifecycle"),
+        }
+    }
+
     /// Hydrate the given queries against the current snapshot, streaming each
     /// `RowChange` to `on_row` as it is produced. `queries` is a slice of
     /// `(query_id, ast_json)` where `ast_json` is the TS-shaped transformed AST.
@@ -461,16 +492,69 @@ impl IvmPipelines {
             });
         }
 
+        // Per-query hydrate lifecycle logging — port of TS
+        // `#logQueryPipelineLifecycle` (pipeline-driver.ts:470/608/784/796/815).
+        // TS wraps each `addQuery` in a start/finish/failed/aborted envelope; Rust
+        // hydrates the whole query set in ONE `add_queries_streaming` call (the
+        // documented !Send batching invention), so the per-query boundaries come
+        // from the returned `QueryResult`s: `-start` before the batch, `-finish`
+        // (with timing + row count) for each pipeline the engine registered,
+        // `-aborted` for a started-but-unregistered query (cancel-during-hydrate),
+        // and `-failed` on a hydrate panic. This is the always-on analog of TS
+        // `VENDED` (which is gated behind the `trackRowCountsVended` debug flag) —
+        // it makes a slow/heavy query identifiable from logs by time + rows.
+        for (query_id, _ast_json) in queries {
+            Self::log_query_pipeline_lifecycle(
+                "query-pipeline-hydrate-start",
+                query_id,
+                None,
+                None,
+            );
+        }
+
         // A hydrate panic (e.g. a source-drift assert) must roll back the
         // partially-wired source connections before re-throwing, so a follow-up
         // rehydrate builds a clean graph — matching napi `HydrateAndSyncTask`.
         let checkpoint = eng.source_connection_checkpoint();
         let hydrated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = eng.add_queries_streaming(&specs, |rc| on_row(rc));
+            eng.add_queries_streaming(&specs, |rc| on_row(rc))
         }));
-        if let Err(payload) = hydrated {
-            eng.rollback_source_connections(&checkpoint);
-            std::panic::resume_unwind(payload);
+        let results = match hydrated {
+            Ok(results) => results,
+            Err(payload) => {
+                eng.rollback_source_connections(&checkpoint);
+                for (query_id, _ast_json) in queries {
+                    Self::log_query_pipeline_lifecycle(
+                        "query-pipeline-hydrate-failed",
+                        query_id,
+                        None,
+                        None,
+                    );
+                }
+                std::panic::resume_unwind(payload);
+            }
+        };
+        let finished: HashSet<&str> = results.iter().map(|r| r.query_id.as_str()).collect();
+        for r in &results {
+            Self::log_query_pipeline_lifecycle(
+                "query-pipeline-hydrate-finish",
+                &r.query_id,
+                Some(r.hydration_time_ms),
+                Some(r.hydration_row_count),
+            );
+        }
+        // A query that started but the engine never registered was aborted
+        // mid-stream (cancel-during-hydrate → engine discards partial pipelines
+        // and returns no result for it).
+        for (query_id, _ast_json) in queries {
+            if !finished.contains(query_id.as_str()) {
+                Self::log_query_pipeline_lifecycle(
+                    "query-pipeline-hydrate-aborted",
+                    query_id,
+                    None,
+                    None,
+                );
+            }
         }
         // Track the newly-hydrated queries so `has_query` reports them. The
         // transformation hash is recorded by the caller (`hydrate_and_sync`)
@@ -1017,4 +1101,11 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("Engine not initialized"));
     }
+
+    // The per-query hydrate lifecycle log (TS `#logQueryPipelineLifecycle`) is
+    // exercised end-to-end in `tests/hydrate_lifecycle_log_test.rs`. That test
+    // captures `tracing` output, so it lives in its OWN integration-test binary:
+    // `tracing`'s callsite-interest cache is process-global, and other in-process
+    // lib tests installing their own subscribers would poison it (the 2-field
+    // `-start` callsite got cached disabled by an unrelated test).
 }

@@ -157,3 +157,42 @@ fn set_table_spec_coexists_with_hydrate() {
     }]);
     assert_eq!(results[0].changes.len(), 1);
 }
+
+// Port of the TS pipeline `hydrationRowCount` field (pipeline-driver.ts:774) +
+// its `hydrationTimeMs` (773): `add_queries_streaming` must report, per query,
+// how many rows the initial hydration produced and its wall-clock time — the
+// payload the driver's `#logQueryPipelineLifecycle` (`VENDED`-parity) log emits.
+// Non-vacuous: three rows so a dropped counter (0) or a hardcoded 1 both fail.
+#[test]
+fn hydration_row_count_tracks_rows_produced() {
+    let source = make_source("users", &["id"]);
+    add_row(&source, &[("id", Value::F64(1.0))]);
+    add_row(&source, &[("id", Value::F64(2.0))]);
+    add_row(&source, &[("id", Value::F64(3.0))]);
+    let mut engine = Engine::new(HashMap::new());
+    engine.register_source(source);
+
+    let results = engine.add_queries(&[QuerySpec {
+        query_id: "q1".to_string(),
+        ast: basic_ast("users"),
+    }]);
+    assert_eq!(
+        results[0].hydration_row_count, 3,
+        "QueryResult carries the exact per-query hydration row count"
+    );
+    assert!(
+        results[0].hydration_time_ms.is_finite() && results[0].hydration_time_ms >= 0.0,
+        "QueryResult carries a non-negative hydration time"
+    );
+    // Accessor mirrors TS reading `pipeline.hydrationRowCount`.
+    assert_eq!(
+        engine.hydration_row_count("q1"),
+        Some(3),
+        "registered pipeline exposes its hydration row count"
+    );
+    assert_eq!(
+        engine.hydration_row_count("does-not-exist"),
+        None,
+        "unknown query id returns None"
+    );
+}
