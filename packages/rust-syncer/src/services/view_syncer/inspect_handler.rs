@@ -11,6 +11,9 @@
 use rust_cvr::ttl_clock::TTLClock;
 
 use crate::config::zero_config::is_admin_password_valid;
+use crate::custom_queries::transform_query::{
+    CustomQueryContext, CustomQuerySpec, CustomTransformed, transform_custom_queries,
+};
 
 use super::view_syncer::ViewSyncerService;
 
@@ -33,6 +36,9 @@ pub async fn handle_inspect(
     // The requesting connection's decoded JWT claims (TS `ctx.auth`), consumed
     // only by the `analyze-query` op for read-permission static-param binding.
     analyze_auth: Option<serde_json::Value>,
+    // The requesting connection's custom-query transform context (TS `ctx`),
+    // consumed only by the `analyze-query` named-query path.
+    analyze_custom_ctx: Option<CustomQueryContext>,
 ) {
     let op = body.get("op").and_then(|v| v.as_str()).unwrap_or("");
     let id = body.get("id").cloned().unwrap_or(serde_json::Value::Null);
@@ -86,7 +92,9 @@ pub async fn handle_inspect(
         // `analyze-query` — port of the TS inspect-handler `analyze-query` case
         // (inspect-handler.ts:115) → `analyzeQuery`. Runs a throwaway read-only
         // analysis engine over the replica and returns an `AnalyzeQueryResult`.
-        "analyze-query" => analyze_query_op(cg_id, sync_engine, body, analyze_auth).await,
+        "analyze-query" => {
+            analyze_query_op(cg_id, sync_engine, body, analyze_auth, analyze_custom_ctx).await
+        }
         other => {
             tracing::warn!("CG {cg_id}: unknown inspect op {other:?}");
             Err(format!("unknown inspect op: {other}"))
@@ -102,37 +110,23 @@ pub async fn handle_inspect(
 }
 
 /// Port of the TS inspect-handler `analyze-query` case (inspect-handler.ts:115).
-/// Extracts the AST from the body, then runs [`analyze_query`] over the replica
+/// Resolves the AST — either the legacy `body.ast`/`body.value` or, for a named
+/// query (`body.name`/`body.args`), transformed against the user's query API
+/// server (`transformCustomQuery`) — then runs [`analyze_query`] over the replica
 /// on a blocking thread (the IVM analysis engine is `!Send`) and returns the
-/// serialized `AnalyzeQueryResult`.
-///
-/// DEFERRED vs TS (labeled): named-query transform (`body.name`/`body.args` →
-/// `transformCustomQuery`) and the read-permission transform (see
-/// `services::run_ast`). Only the legacy `body.ast` path is ported.
+/// serialized `AnalyzeQueryResult`. Only legacy queries load read-permissions;
+/// a named query is already transformed by the API server (`legacyQuery=false`).
 async fn analyze_query_op(
     cg_id: &str,
     sync_engine: &ViewSyncerService,
     body: &serde_json::Value,
     analyze_auth: Option<serde_json::Value>,
+    analyze_custom_ctx: Option<CustomQueryContext>,
 ) -> Result<(&'static str, serde_json::Value), String> {
-    if body.get("name").is_some() && body.get("args").is_some() {
-        return Err(
-            "analyze-query for named queries is not yet supported by the rust syncer \
-             (legacy AST only)"
-                .to_string(),
-        );
-    }
-    // TS: `let ast = body.ast ?? body.value`.
-    let ast = match body.get("ast").or_else(|| body.get("value")) {
-        Some(v) if !v.is_null() => v.clone(),
-        _ => {
-            return Err(
-                "AST is required for analyze-query operation. Either provide an AST \
-                 directly or ensure custom query transformation is configured."
-                    .to_string(),
-            );
-        }
-    };
+    // Resolve the AST (legacy `body.ast`/`body.value` or a named-query transform)
+    // and whether it's a legacy (permission-loading) query.
+    let (ast, legacy_query) =
+        resolve_analyze_ast(body, analyze_custom_ctx, sync_engine.shard()).await?;
     let ast_json =
         serde_json::to_string(&ast).map_err(|e| format!("analyze-query: serialize AST: {e}"))?;
 
@@ -162,10 +156,14 @@ async fn analyze_query_op(
     // blocking thread; only the `Send` result crosses back. The connection's
     // decoded JWT claims (TS `ctx.auth`) bind the permission static-params.
     let result = tokio::task::spawn_blocking(move || {
-        // TS inspect-handler.ts:135-147 — for a legacy query, load the deployed
-        // permissions from the replica so analyze applies the same read-rules the
-        // client sees. (Named queries skip this — legacyQuery=false; see A3.)
-        let permissions = load_legacy_analyze_permissions(&replica_path, &app_id)?;
+        // TS inspect-handler.ts:135-147 — ONLY a legacy query loads the deployed
+        // permissions (a named query is already permission-transformed by the API
+        // server, so `legacyQuery=false` skips the load).
+        let permissions = if legacy_query {
+            load_legacy_analyze_permissions(&replica_path, &app_id)?
+        } else {
+            None
+        };
         crate::services::analyze::analyze_query(
             &replica_path,
             &app_id,
@@ -185,6 +183,66 @@ async fn analyze_query_op(
     let value = serde_json::to_value(&result)
         .map_err(|e| format!("analyze-query: serialize result: {e}"))?;
     Ok(("analyze-query", value))
+}
+
+/// Resolve the AST to analyze from an `analyze-query` body, returning
+/// `(ast, legacy_query)`. Port of inspect-handler.ts:116-133:
+/// `let ast = body.ast ?? body.value; let legacyQuery = true;` then, for a named
+/// query (`body.name && body.args`), transform it against the user's query API
+/// server (`transformCustomQuery` → `hashOfNameAndArgs` id) and set
+/// `legacyQuery=false`; finally throw when no AST is available. A named query
+/// with no configured transform context errors like the TS `assert`.
+async fn resolve_analyze_ast(
+    body: &serde_json::Value,
+    analyze_custom_ctx: Option<CustomQueryContext>,
+    shard: &rust_cvr::shards::ShardID,
+) -> Result<(serde_json::Value, bool), String> {
+    // TS: `let ast = body.ast ?? body.value; let legacyQuery = true;`.
+    let mut ast: Option<serde_json::Value> = body
+        .get("ast")
+        .or_else(|| body.get("value"))
+        .filter(|v| !v.is_null())
+        .cloned();
+    let mut legacy_query = true;
+
+    // TS: `if (body.name && body.args)` — a named query. Get its AST from the API
+    // server by transforming it (inspect-handler.ts:119-127); legacyQuery=false.
+    if let (Some(name), Some(args)) = (
+        body.get("name")
+            .and_then(|v| v.as_str())
+            .filter(|n| !n.is_empty()),
+        body.get("args").and_then(|v| v.as_array()),
+    ) {
+        let ctx = analyze_custom_ctx.ok_or_else(|| {
+            "Custom query transformation requested but no CustomQueryTransformer is configured"
+                .to_string()
+        })?;
+        // TS `transformCustomQuery` uses `hashOfNameAndArgs(name, args)` as the id.
+        let spec = CustomQuerySpec {
+            id: crate::hash_of_name_and_args(name, args),
+            name: name.to_string(),
+            args: args.clone(),
+        };
+        let transformed = transform_custom_queries(&ctx, shard, std::slice::from_ref(&spec))
+            .await
+            .map_err(|e| format!("Error transforming custom query {name}: {e}"))?;
+        ast = Some(match transformed.into_iter().next() {
+            Some(CustomTransformed::Ok(tq)) => tq.ast,
+            Some(CustomTransformed::Errored { error, .. }) => {
+                return Err(format!("Error transforming custom query {name}: {error}"));
+            }
+            None => return Err("No transformation result returned".to_string()),
+        });
+        legacy_query = false;
+    }
+
+    // TS: `if (ast === undefined) throw ...`.
+    let ast = ast.ok_or_else(|| {
+        "AST is required for analyze-query operation. Either provide an AST \
+         directly or ensure custom query transformation is configured."
+            .to_string()
+    })?;
+    Ok((ast, legacy_query))
 }
 
 /// Load the deployed permissions for a legacy analyze-query. Port of the
@@ -319,5 +377,102 @@ mod tests {
         for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
+    }
+
+    fn test_ctx() -> CustomQueryContext {
+        CustomQueryContext {
+            url: "http://api.example/query".to_string(),
+            allowed_urls: vec![],
+            api_key: None,
+            client_headers: vec![],
+            request_headers: vec![],
+            cookie: None,
+            origin: None,
+            auth: None,
+            user_id: None,
+        }
+    }
+
+    fn test_shard() -> rust_cvr::shards::ShardID {
+        rust_cvr::shards::ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        }
+    }
+
+    /// A3: a named analyze-query (`body.name`/`body.args`) is transformed against
+    /// the user's query API server and analyzed as a NON-legacy query (so the
+    /// deployed read-permissions are NOT re-applied — the API server already did).
+    /// The transform cache is seeded so no network call is made. NON-VACUOUS:
+    /// reverting the named path (treating it as legacy / not transforming) either
+    /// returns `legacy_query=true` or fails to find the AST.
+    #[tokio::test]
+    async fn named_query_transforms_via_cache_and_is_not_legacy() {
+        use crate::custom_queries::transform_query::{
+            TransformedQuery, seed_transform_cache_for_test,
+        };
+
+        let ctx = test_ctx();
+        let transformed_ast = serde_json::json!({"table": "users", "orderBy": [["id", "asc"]]});
+        let id = crate::hash_of_name_and_args("myQuery", &[serde_json::json!(7)]);
+        seed_transform_cache_for_test(
+            &ctx,
+            &id,
+            &TransformedQuery {
+                id: id.clone(),
+                ast: transformed_ast.clone(),
+                hash: "h".to_string(),
+            },
+        );
+
+        let body = serde_json::json!({"op": "analyze-query", "name": "myQuery", "args": [7]});
+        let (ast, legacy) = resolve_analyze_ast(&body, Some(ctx), &test_shard())
+            .await
+            .expect("named query resolves via the seeded transform cache");
+        assert_eq!(ast, transformed_ast, "the transformed AST is returned");
+        assert!(
+            !legacy,
+            "a named query is not a legacy query (skips loadPermissions)"
+        );
+    }
+
+    /// A3: a named query with no configured transform context errors like the TS
+    /// `assert(this.#customQueryTransformer, ...)`. NON-VACUOUS: the error text
+    /// pins the branch; removing the `ok_or_else` guard changes the failure.
+    #[tokio::test]
+    async fn named_query_without_transform_context_errors() {
+        let body = serde_json::json!({"op": "analyze-query", "name": "q", "args": []});
+        let err = resolve_analyze_ast(&body, None, &test_shard())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("no CustomQueryTransformer is configured"),
+            "expected the missing-transformer error; got {err:?}"
+        );
+    }
+
+    /// A legacy analyze-query (`body.ast`) resolves to that AST as a legacy query.
+    #[tokio::test]
+    async fn legacy_body_ast_is_legacy_query() {
+        let ast = serde_json::json!({"table": "users"});
+        let body = serde_json::json!({"op": "analyze-query", "ast": ast});
+        let (out, legacy) = resolve_analyze_ast(&body, None, &test_shard())
+            .await
+            .expect("legacy ast resolves");
+        assert_eq!(out, ast);
+        assert!(
+            legacy,
+            "a body.ast query is a legacy (permission-loading) query"
+        );
+    }
+
+    /// A bodiless analyze-query (no ast, no named query) errors "AST is required".
+    #[tokio::test]
+    async fn bodiless_analyze_query_requires_ast() {
+        let body = serde_json::json!({"op": "analyze-query"});
+        let err = resolve_analyze_ast(&body, None, &test_shard())
+            .await
+            .unwrap_err();
+        assert!(err.contains("AST is required"), "got {err:?}");
     }
 }

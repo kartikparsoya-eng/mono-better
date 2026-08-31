@@ -6,7 +6,7 @@
 //!   - `zql/src/builder/builder.ts`               — bindStaticParameters
 //!   - `zql/src/query/expression.ts`              — simplifyCondition / flatten
 //!   - `zero-protocol/src/ast.ts`                 — normalizeAST / cmpCondition
-//!   - `zero-protocol/src/query-hash.ts`          — hashOfAST
+//!   - `zero-protocol/src/query-hash.ts`          — hashOfAST / hashOfNameAndArgs
 //!
 //! (`loadPermissions`/`reloadPermissionsIfChanged` live in the mirrored file
 //! `auth/load_permissions.rs`.)
@@ -331,6 +331,13 @@ pub fn hash_of_ast(ast: &Value) -> String {
     let normalized = normalize_ast(ast);
     let json = serde_json::to_string(&normalized).unwrap_or_default();
     base36(rust_cvr::hash::h64(&json))
+}
+
+/// Port of `hashOfNameAndArgs` (query-hash.ts): the query id for a named
+/// (custom) query — `h64(`${name}:${JSON.stringify(args)}`).toString(36)`.
+pub fn hash_of_name_and_args(name: &str, args: &[Value]) -> String {
+    let args_string = serde_json::to_string(args).unwrap_or_else(|_| "[]".to_string());
+    base36(rust_cvr::hash::h64(&format!("{name}:{args_string}")))
 }
 
 /// Port of `normalizeAST` (transformAST with the NORMALIZE_TRANSFORM: identity
@@ -734,6 +741,22 @@ mod tests {
             let actual = transform_query(query, permissions, auth_data);
             assert_eq!(&actual, expected, "transformQuery mismatch [{}]", desc);
         }
+    }
+
+    #[test]
+    fn hash_of_name_and_args_matches_ts_golden_vectors() {
+        // Golden values from the real TS `hashOfNameAndArgs` (zero-protocol
+        // query-hash.ts) via tsx. Pins `h64(`${name}:${JSON.stringify(args)}`)
+        // + base36 parity for the custom-query id.
+        assert_eq!(hash_of_name_and_args("issueList", &[]), "25dbilw8lpf3s");
+        assert_eq!(
+            hash_of_name_and_args("issueByID", &[json!(42), json!("open")]),
+            "29yr8t22bt0es"
+        );
+        assert_eq!(
+            hash_of_name_and_args("q", &[json!({"a": 1}), json!("x")]),
+            "rmxr8k7bakva"
+        );
     }
 
     #[test]

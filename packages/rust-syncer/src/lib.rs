@@ -43,7 +43,9 @@ pub use auth::load_permissions::{
     LoadedPermissions, PermissionsReload, deny_all_permissions, load_permissions,
     reload_permissions_if_changed, resolve_permissions,
 };
-pub use auth::read_authorizer::{hash_of_ast, transform_and_hash_query, transform_query};
+pub use auth::read_authorizer::{
+    hash_of_ast, hash_of_name_and_args, transform_and_hash_query, transform_query,
+};
 pub use db::lite_tables::{
     ReplicaVersions, compute_table_specs_from_path, compute_zql_specs, read_replica_versions,
     read_replica_versions_from_path, validate_client_schema,

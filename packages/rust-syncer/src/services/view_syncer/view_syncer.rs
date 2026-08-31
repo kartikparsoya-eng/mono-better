@@ -829,6 +829,12 @@ impl ViewSyncerService {
         &self.app_id
     }
 
+    /// This CG's shard id. Used by the `analyze-query` named-query path to
+    /// transform custom queries against the user's query API server.
+    pub fn shard(&self) -> &ShardID {
+        &self.shard
+    }
+
     #[cfg(test)]
     fn new_test(
         cg_id: &str,
@@ -2280,6 +2286,12 @@ impl ViewSyncerService {
             .ok()
             .and_then(|c| c.auth)
             .map(|a| crate::auth::jwt::decode_jwt_claims(a.raw()));
+        // The requesting connection's custom-query transform context (API-server
+        // url/headers/auth), built from the CCM at use time — TS passes `ctx` to
+        // `inspectorDelegate.transformCustomQuery` for the `analyze-query` named
+        // path (inspect-handler.ts:121). `None` when no CustomQueryTransformer is
+        // configured for this connection.
+        let analyze_custom_ctx = self.query_context_for(client_id, &ws_id);
         // Copy the auth flag in/out around the borrow of `self` (bool is Copy;
         // the CG task is strictly serial, so nothing else reads it meanwhile).
         let mut inspector_authenticated = self.inspector_authenticated;
@@ -2293,6 +2305,7 @@ impl ViewSyncerService {
             &self.server_version,
             ttl_clock,
             analyze_auth,
+            analyze_custom_ctx,
         )
         .await;
         self.inspector_authenticated = inspector_authenticated;
