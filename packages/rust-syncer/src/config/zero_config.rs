@@ -136,11 +136,17 @@ pub struct SyncerConfig {
     /// `zeroConfig.enableQueryPlanner` (zero-config.ts:510, default true) —
     /// "You can disable the planner if it is picking bad strategies."
     pub enable_query_planner: bool,
+    /// Enable the per-hydrate VENDED row-count diagnostic. Port of TS
+    /// `queryHydrationStats` (zero-config.ts:1213 sets
+    /// `runtimeDebugFlags.trackRowCountsVended = true`). Off by default (prod);
+    /// [`apply_runtime_debug_flags`](SyncerConfig::apply_runtime_debug_flags)
+    /// flips the process-global flag the VENDED log gate reads.
+    pub query_hydration_stats: bool,
 }
 
 impl SyncerConfig {
     pub fn from_env() -> Self {
-        Self {
+        let config = Self {
             ws_port: env::var("PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -267,6 +273,29 @@ impl SyncerConfig {
                     v == "false" || v == "0"
                 })
                 .unwrap_or(false),
+            // TS default: false. An explicit true/1 (case-insensitive) enables
+            // the VENDED diagnostic. (TS env: `ZERO_QUERY_HYDRATION_STATS`.)
+            query_hydration_stats: env::var("ZERO_QUERY_HYDRATION_STATS")
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "true" || v == "1"
+                })
+                .unwrap_or(false),
+        };
+        // TS getZeroConfig applies this flag as a side effect of config load.
+        config.apply_runtime_debug_flags();
+        config
+    }
+
+    /// Apply the config's runtime debug toggles to the process-global
+    /// `runtimeDebugFlags`. Port of the side effect in TS `getZeroConfig`
+    /// (zero-config.ts:1213): `if (queryHydrationStats)
+    /// runtimeDebugFlags.trackRowCountsVended = true`. Called once at startup
+    /// from `from_env`; separated out so it is testable without env mutation.
+    pub fn apply_runtime_debug_flags(&self) {
+        if self.query_hydration_stats {
+            rust_ivm::builder::debug_delegate::runtime_debug_flags()
+                .set_track_row_counts_vended(true);
         }
     }
 }
