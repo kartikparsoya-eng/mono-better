@@ -69,24 +69,28 @@ pub async fn handle_inspect(
                 .get("clientID")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let value =
-                inspect_queries_value(cg_id, sync_engine, filter_client.as_deref(), ttl_clock)
-                    .await;
+            let value = inspect_queries_value(
+                cg_id,
+                sync_engine,
+                ws_id,
+                filter_client.as_deref(),
+                ttl_clock,
+            )
+            .await;
             Ok(("queries", value))
         }
         "metrics" => {
-            // The wire value is a RECORD with two REQUIRED TDigest fields
-            // (`serverMetricsSchema`, inspect-down.ts:7-10) — an array or
-            // `{}` fails the client's valita parse and rejects the RPC.
-            // Rust tracks no server TDigests yet, so send empty digests:
-            // `[1000]` is `new TDigest().toJSON()` (default compression,
-            // no centroids), which zero-client parses as a valid digest.
+            // Port of the TS `metrics` case (inspect-handler.ts:80):
+            // `inspectorDelegate.getMetricsJSON()` — the two global aggregate
+            // TDigests for this client group. The wire value is a RECORD with
+            // both `serverMetricsSchema` fields REQUIRED (inspect-down.ts:7);
+            // an empty digest serializes as `[1000]` (`new TDigest().toJSON()`).
             Ok((
                 "metrics",
-                serde_json::json!({
-                    "query-materialization-server": [1000],
-                    "query-update-server": [1000],
-                }),
+                sync_engine
+                    .inspector_delegate()
+                    .borrow_mut()
+                    .get_metrics_json(),
             ))
         }
         // `analyze-query` — port of the TS inspect-handler `analyze-query` case
@@ -272,13 +276,18 @@ fn load_legacy_analyze_permissions(
 }
 
 /// Build the `queries` inspector value by delegating to the CVR store's
-/// `inspect_queries` (SQL port of TS `CVRStore.inspectQueries`), then adding
-/// `metrics: null` to each row. The InspectorDelegate materialization metrics
-/// and the custom-query transformed-AST fallback are server-side machinery not
-/// ported to the Rust syncer (the TS inspect-handler.ts enrichment layer).
+/// `inspect_queries` (SQL port of TS `CVRStore.inspectQueries`), then enriching
+/// each row exactly as TS does (inspect-handler.ts:63-70):
+/// - `ast`: `row.ast ?? inspectorDelegate.getASTForQuery(row.queryID) ?? null`
+///   — the server-generated AST fallback for custom queries whose stored `ast`
+///   is null.
+/// - `metrics`: `metricsForProtocol(inspectorDelegate.getMetricsJSONForQuery(
+///   row.queryID), ctx.protocolVersion)` — the per-query server metrics in the
+///   wire shape the connection's protocol version expects.
 async fn inspect_queries_value(
     cg_id: &str,
     sync_engine: &ViewSyncerService,
+    ws_id: &str,
     filter_client: Option<&str>,
     ttl_clock: TTLClock,
 ) -> serde_json::Value {
@@ -289,12 +298,32 @@ async fn inspect_queries_value(
             return serde_json::json!([]);
         }
     };
+    let protocol_version = sync_engine.protocol_version_for_ws(ws_id);
+    let delegate = sync_engine.inspector_delegate();
     let out: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
             let mut v = serde_json::to_value(row).unwrap_or(serde_json::Value::Null);
+            let per_query = delegate
+                .borrow_mut()
+                .get_metrics_json_for_query(&row.query_id);
+            let metrics = crate::server::inspector_delegate::metrics_for_protocol(
+                per_query,
+                protocol_version,
+            )
+            .unwrap_or(serde_json::Value::Null);
             if let serde_json::Value::Object(map) = &mut v {
-                map.insert("metrics".to_string(), serde_json::Value::Null);
+                // AST fallback: only when the stored `ast` is null/absent.
+                let needs_ast = map.get("ast").is_none_or(serde_json::Value::is_null);
+                if needs_ast {
+                    let ast = delegate
+                        .borrow()
+                        .get_ast_for_query(&row.query_id)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    map.insert("ast".to_string(), ast);
+                }
+                map.insert("metrics".to_string(), metrics);
             }
             v
         })

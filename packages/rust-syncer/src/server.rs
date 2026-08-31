@@ -5,5 +5,6 @@
 //! (`worker-dispatcher.ts`) is `http_server.rs`/`ws_server.rs` (invention-
 //! heavy: I-1/I-4 reader/writer tasks; documented in INVENTIONS.md).
 
+pub mod inspector_delegate;
 pub mod otel_start;
 pub mod syncer;

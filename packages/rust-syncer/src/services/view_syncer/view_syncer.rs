@@ -771,6 +771,13 @@ pub struct ViewSyncerService {
     /// (TS `InspectorDelegate.isAuthenticated(clientGroupID)`). Set once per CG
     /// by a successful `authenticate` op.
     inspector_authenticated: bool,
+    /// Per-CG inspector server-metrics + queryID→AST store (TS
+    /// `InspectorDelegate`, server/inspector_delegate.rs). Fed the per-query
+    /// `query-materialization-server` timing at hydrate and `add_query`/
+    /// `remove_query` at the query lifecycle; read by the `metrics`/`queries`
+    /// inspect ops. `RefCell` because `to_json` mutates the digest (`#process`)
+    /// while the read ops borrow the service immutably.
+    inspector_delegate: std::cell::RefCell<crate::server::inspector_delegate::InspectorDelegate>,
     /// JWT validator, for re-verifying an `updateAuth` token mid-connection.
     auth_validator: Arc<dyn AuthValidator>,
     global_connections: Arc<Mutex<HashMap<String, ConnectionInfo>>>,
@@ -833,6 +840,25 @@ impl ViewSyncerService {
     /// transform custom queries against the user's query API server.
     pub fn shard(&self) -> &ShardID {
         &self.shard
+    }
+
+    /// This CG's inspector metrics + AST store (TS `InspectorDelegate`). Read by
+    /// the `metrics`/`queries` inspect ops and written at the query lifecycle.
+    pub fn inspector_delegate(
+        &self,
+    ) -> &std::cell::RefCell<crate::server::inspector_delegate::InspectorDelegate> {
+        &self.inspector_delegate
+    }
+
+    /// The sync protocol version negotiated by a connection (TS
+    /// `ctx.protocolVersion`), used by the `queries` op's `metricsForProtocol`
+    /// wire-shape selection. Falls back to the server's current
+    /// `PROTOCOL_VERSION` when the ws is not (yet) registered.
+    pub fn protocol_version_for_ws(&self, ws_id: &str) -> u32 {
+        self.active_client_pv
+            .get(ws_id)
+            .copied()
+            .unwrap_or(crate::protocol::PROTOCOL_VERSION)
     }
 
     #[cfg(test)]
@@ -989,6 +1015,9 @@ impl ViewSyncerService {
             server_version,
             metrics,
             inspector_authenticated: false,
+            inspector_delegate: std::cell::RefCell::new(
+                crate::server::inspector_delegate::InspectorDelegate::new(),
+            ),
             auth_validator,
             global_connections,
             connection_count,
@@ -5798,15 +5827,29 @@ mod tests {
         last
     }
 
-    // NOTE: the `queries` inspector rows are now produced by the SQL port
-    // `CVRStore::inspect_queries` (rust-cvr) — router::inspect_queries_value just
-    // delegates + adds `metrics: null`. The row-shape / TTL-filter / got-flag /
+    // NOTE: the `queries` inspector rows are produced by the SQL port
+    // `CVRStore::inspect_queries` (rust-cvr); `inspect_queries_value` enriches
+    // each row with the per-query `metrics` (via the InspectorDelegate +
+    // `metrics_for_protocol`) and the `getASTForQuery` AST fallback, 1:1 with
+    // TS inspect-handler.ts:63-70. The row-shape / TTL-filter / got-flag /
     // rowCount / client-filter coverage lives in rust-cvr tests/inspect_pg_test.rs
     // (PG-gated), against the real desires/queries/rows tables.
 
+    /// The `metrics` op returns the InspectorDelegate's real global aggregate
+    /// digests (TS `getMetricsJSON()`), not a hardcoded empty pair. NON-VACUOUS:
+    /// a `query-materialization-server` metric seeded into the delegate shows up
+    /// as `[1000, 12, 1]` in the frame; reverting the op to the old hardcoded
+    /// `[1000]` (or not feeding the delegate) makes the exact-array assert fail.
     #[test]
-    fn inspect_metrics_is_a_record_of_tdigests() {
+    fn inspect_metrics_returns_delegate_global_aggregates() {
+        use rust_ivm::query::metrics_delegate::Metric;
         let (cell, rt, mut drx) = inspect_test_state();
+        // Seed one materialization sample into this CG's delegate.
+        cell.borrow().inspector_delegate().borrow_mut().add_metric(
+            Metric::QueryMaterializationServer,
+            12.0,
+            "q1",
+        );
         rt.block_on(on_inbound(
             &cell,
             "c1".into(),
@@ -5822,13 +5865,14 @@ mod tests {
             value.is_object(),
             "metrics value must be a record, not an array"
         );
-        // Both fields REQUIRED by serverMetricsSchema, each a TDigest JSON
-        // (non-empty number array; [compression] for an empty digest).
-        for key in ["query-materialization-server", "query-update-server"] {
-            let digest = value[key].as_array().unwrap();
-            assert!(!digest.is_empty());
-            assert!(digest[0].is_number());
-        }
+        // The seeded materialization point flows through to the global digest.
+        assert_eq!(
+            value["query-materialization-server"],
+            serde_json::json!([1000, 12, 1]),
+            "seeded materialization metric must appear in the global aggregate"
+        );
+        // No update samples → the update digest is empty `[1000]`.
+        assert_eq!(value["query-update-server"], serde_json::json!([1000]));
     }
 
     #[test]
@@ -6456,6 +6500,9 @@ impl ViewSyncerService {
             server_version: String::new(),
             metrics: Arc::new(crate::metrics::Metrics::default()),
             inspector_authenticated: false,
+            inspector_delegate: std::cell::RefCell::new(
+                crate::server::inspector_delegate::InspectorDelegate::new(),
+            ),
             auth_validator: Arc::new(InertAuthValidator),
             global_connections: Arc::new(Mutex::new(HashMap::new())),
             connection_count: Arc::new(AtomicU64::new(0)),
