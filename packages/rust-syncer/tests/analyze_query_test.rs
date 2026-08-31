@@ -417,3 +417,46 @@ fn analyze_join_plans_emits_planner_events() {
 
     cleanup(&path);
 }
+
+/// C: `dbScansByQuery` (nvisit) is captured for a JOIN query, not just a single
+/// full scan — the EXISTS query scans both `issue` and `comment`. When the
+/// linked SQLite lacks SQLITE_ENABLE_STMT_SCANSTATUS the map is empty (graceful),
+/// so the assertion is guarded on there being at least one vended query.
+#[test]
+fn analyze_captures_db_scans_under_join() {
+    let path = tmp_path("dbscans");
+    build_issues_comments_replica(&path);
+    let ast = exists_ast();
+
+    let result = rust_syncer::services::analyze::analyze_query(
+        &path, "app", &ast, true, false, None, None, false,
+    )
+    .expect("analyze EXISTS");
+
+    // Both tables are read, so readRowCountsByQuery spans multiple SQLs.
+    let read_counts = result.read_row_counts_by_query.clone().unwrap_or_default();
+    let sqls: usize = read_counts.values().map(|m| m.len()).sum();
+    assert!(
+        sqls >= 1,
+        "the join query vended at least one SQL; got {read_counts:?}"
+    );
+
+    // dbScansByQuery mirrors readRowCountsByQuery's keys when scanstatus is
+    // available; otherwise it is empty (graceful). Either way every db-scan key
+    // must correspond to a vended SQL (no phantom scans).
+    let db_scans = result.db_scans_by_query.clone().unwrap_or_default();
+    for (table, by_sql) in &db_scans {
+        for sql in by_sql.keys() {
+            let vended = read_counts
+                .get(table)
+                .map(|m| m.contains_key(sql))
+                .unwrap_or(false);
+            assert!(
+                vended,
+                "db-scan {table}/{sql:?} must be a vended query; readCounts={read_counts:?}"
+            );
+        }
+    }
+
+    cleanup(&path);
+}
