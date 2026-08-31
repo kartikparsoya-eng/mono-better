@@ -7268,9 +7268,11 @@ impl ViewSyncerService {
             queries.push((qid, transformed_ast.to_string()));
         }
         // Tear down drifted pipelines directly (no CVR removal — the query is
-        // still desired; only its compiled pipeline is rebuilt).
+        // still desired; only its compiled pipeline is rebuilt). TS does this
+        // inside `addQuery` as `removeQuery(queryID, 'replace-query')`
+        // (pipeline-driver.ts:606), so the stop reason is `replace-query`.
         for qid in &retransform_removes {
-            self.pipelines.remove_query(qid);
+            self.pipelines.remove_query(qid, "replace-query");
         }
 
         // Shadow-mode query covering (#6182): seeded lazily and AFTER the
@@ -7686,9 +7688,10 @@ impl ViewSyncerService {
         }
 
         // Remove queries from the engine before hydrating new ones (matches the
-        // TS path that calls `pipelines.removeQuery(q.id)` before hydrate).
+        // TS path that calls `pipelines.removeQuery(q.id)` before hydrate). These
+        // are TTL/errored removals, TS's default stop reason `remove-query`.
         for qid in remove_queries {
-            self.pipelines.remove_query(qid);
+            self.pipelines.remove_query(qid, "remove-query");
         }
 
         // Freshly-hydrated queries start from an empty row set (signature 0), so

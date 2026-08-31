@@ -103,3 +103,49 @@ fn hydrate_emits_query_pipeline_lifecycle_log() {
     );
     assert!(logged.contains("q1"), "query hash present; got: {logged}");
 }
+
+/// Non-vacuous: tearing a hydrated pipeline down must emit `query-pipeline-stop`
+/// (port of TS `#destroyPipeline`, pipeline-driver.ts:846) carrying `stopReason`,
+/// `pipelineLifetimeMs`, and the pipeline's hydration stats. Reverting the log in
+/// `destroy_pipeline` (or dropping a field) makes this fail.
+#[test]
+fn remove_query_emits_query_pipeline_stop_log() {
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufWriter(buf.clone()))
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let mut p = IvmPipelines::new();
+        p.init(vec![users_spec()], None, "zero").unwrap();
+        p.hydrate(
+            &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
+            |_rc| {},
+        )
+        .unwrap();
+        // TS `removeQuery(queryID, stopReason)` → `#destroyPipeline`. TTL/errored
+        // removals use the default stop reason `remove-query`.
+        p.remove_query("q1", "remove-query");
+    });
+
+    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains("query-pipeline-stop"),
+        "stop event emitted; got: {logged}"
+    );
+    assert!(
+        logged.contains("stop_reason") && logged.contains("remove-query"),
+        "stop carries the stop_reason; got: {logged}"
+    );
+    assert!(
+        logged.contains("pipeline_lifetime_ms"),
+        "stop carries pipeline_lifetime_ms; got: {logged}"
+    );
+    assert!(
+        logged.contains("hydration_time_ms") && logged.contains("hydration_row_count"),
+        "stop carries the pipeline's hydration stats; got: {logged}"
+    );
+    assert!(logged.contains("q1"), "query hash present; got: {logged}");
+}

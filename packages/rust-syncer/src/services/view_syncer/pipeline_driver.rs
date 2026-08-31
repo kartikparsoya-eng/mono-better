@@ -91,10 +91,23 @@ pub enum AdvanceOutcome {
 ///      the error — a `SQLITE_BUSY` close then silently leaks the whole
 ///      handle (~11.5MB page cache + fds per CG churn; ART G6).
 ///
-/// This ordering IS the fix for that silent sqlite-close leak: with
-/// `snapshotter` declared after `sources`, the census warning in
-/// `Snapshot::drop` fires only on true bypasses instead of on 100% of
-/// teardowns. `destroy()` and `init_from_connection` mirror this order.
+/// Port of TS `QueryPipelineLifecycleLog` (pipeline-driver.ts:133) — the record
+/// `#logQueryPipelineLifecycle` formats. `pipelineRunID` / `transformationHash` /
+/// `queryName` / `hydrationReason` are omitted: they are not available at this
+/// rust layer (they live in the view-syncer or are set after hydrate), and TS
+/// itself drops each from the log line when it is `undefined`, so their absence
+/// is protocol-faithful. `zero_event` is always a fixed literal; `stop_reason`
+/// only present for the `query-pipeline-stop` event.
+#[derive(Default)]
+struct QueryPipelineLifecycleLog {
+    zero_event: &'static str,
+    query_hash: String,
+    hydration_time_ms: Option<f64>,
+    hydration_row_count: Option<u64>,
+    stop_reason: Option<&'static str>,
+    pipeline_lifetime_ms: Option<f64>,
+}
+
 pub struct IvmPipelines {
     engine: Option<Engine>,
     /// Port of TS `PipelineDriver`'s `enablePlanner` ctor param
@@ -237,6 +250,11 @@ impl IvmPipelines {
         db_path: Option<&str>,
         app_id: &str,
     ) -> Result<(), String> {
+        // Port of TS `reset(clientSchema)` (pipeline-driver.ts:343): rebuilding on
+        // a schema change stops each existing pipeline with reason `reset`.
+        for query_id in self.query_order.clone() {
+            self.destroy_pipeline(&query_id, "reset");
+        }
         if let Some(eng) = self.engine.as_mut() {
             eng.destroy();
         }
@@ -284,6 +302,11 @@ impl IvmPipelines {
         tables: Vec<IvmTableSpec>,
         conn: SharedConn,
     ) -> Result<(), String> {
+        // Port of TS `reset(clientSchema)` (pipeline-driver.ts:343): rebuilding on
+        // a schema change stops each existing pipeline with reason `reset`.
+        for query_id in self.query_order.clone() {
+            self.destroy_pipeline(&query_id, "reset");
+        }
         if let Some(eng) = self.engine.as_mut() {
             eng.destroy();
         }
@@ -422,10 +445,10 @@ impl IvmPipelines {
     }
 
     /// Remove a query's pipeline (and its row-set signature entry).
-    pub fn remove_query(&mut self, query_id: &str) {
-        if let Some(eng) = self.engine.as_mut() {
-            eng.remove_query(query_id);
-        }
+    /// Port of TS `removeQuery(queryID, stopReason)` (pipeline-driver.ts:834):
+    /// `#destroyPipeline` (stop-log + teardown), then delete the bookkeeping.
+    pub fn remove_query(&mut self, query_id: &str, stop_reason: &'static str) {
+        self.destroy_pipeline(query_id, stop_reason);
         self.active_queries.remove(query_id);
         if self.query_asts.remove(query_id).is_some() {
             self.query_order.retain(|q| q != query_id);
@@ -445,14 +468,34 @@ impl IvmPipelines {
     /// this layer (they live one layer up in the view-syncer, or are set after
     /// hydrate) and TS itself omits each from the log line when it is undefined —
     /// so their absence here is protocol-faithful, not a divergence.
-    fn log_query_pipeline_lifecycle(
-        zero_event: &str,
-        query_hash: &str,
-        hydration_time_ms: Option<f64>,
-        hydration_row_count: Option<u64>,
-    ) {
-        match (hydration_time_ms, hydration_row_count) {
-            (Some(t), Some(n)) => tracing::info!(
+    fn log_query_pipeline_lifecycle(log: QueryPipelineLifecycleLog) {
+        let QueryPipelineLifecycleLog {
+            zero_event,
+            query_hash,
+            hydration_time_ms,
+            hydration_row_count,
+            stop_reason,
+            pipeline_lifetime_ms,
+        } = log;
+        // tracing fields cannot be conditionally omitted within a single macro
+        // call, so branch on the event shape: `-stop` (all fields), `-finish`
+        // (timing + rows), and `-start`/`-failed`/`-aborted` (hash only).
+        match (
+            stop_reason,
+            hydration_time_ms,
+            hydration_row_count,
+            pipeline_lifetime_ms,
+        ) {
+            (Some(sr), Some(t), Some(n), Some(lt)) => tracing::info!(
+                zero_event,
+                query_hash,
+                stop_reason = sr,
+                hydration_time_ms = t,
+                hydration_row_count = n,
+                pipeline_lifetime_ms = lt,
+                "query pipeline lifecycle"
+            ),
+            (None, Some(t), Some(n), _) => tracing::info!(
                 zero_event,
                 query_hash,
                 hydration_time_ms = t,
@@ -460,6 +503,36 @@ impl IvmPipelines {
                 "query pipeline lifecycle"
             ),
             _ => tracing::info!(zero_event, query_hash, "query pipeline lifecycle"),
+        }
+    }
+
+    /// Port of TS `#destroyPipeline` (pipeline-driver.ts:846): emit the
+    /// `query-pipeline-stop` lifecycle event for `query_id`, then tear the
+    /// pipeline down. TS's `pipeline.input.destroy()` half is delegated to
+    /// `Engine::remove_query` (the operator graph lives in `rust-ivm::Engine`) —
+    /// the sole point where this one TS method is split across the crate boundary;
+    /// the log stays in the driver, exactly as in TS. The log is a no-op when the
+    /// query has no registered pipeline, matching TS's `if (pipeline)` guard in
+    /// `removeQuery`/`destroy`/`reset`.
+    fn destroy_pipeline(&mut self, query_id: &str, stop_reason: &'static str) {
+        if let Some(eng) = self.engine.as_ref()
+            && let (Some(t), Some(n), Some(lt)) = (
+                eng.hydration_time_ms(query_id),
+                eng.hydration_row_count(query_id),
+                eng.pipeline_lifetime_ms(query_id),
+            )
+        {
+            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
+                zero_event: "query-pipeline-stop",
+                query_hash: query_id.to_string(),
+                hydration_time_ms: Some(t),
+                hydration_row_count: Some(n),
+                stop_reason: Some(stop_reason),
+                pipeline_lifetime_ms: Some(lt),
+            });
+        }
+        if let Some(eng) = self.engine.as_mut() {
+            eng.remove_query(query_id);
         }
     }
 
@@ -504,12 +577,11 @@ impl IvmPipelines {
         // `VENDED` (which is gated behind the `trackRowCountsVended` debug flag) —
         // it makes a slow/heavy query identifiable from logs by time + rows.
         for (query_id, _ast_json) in queries {
-            Self::log_query_pipeline_lifecycle(
-                "query-pipeline-hydrate-start",
-                query_id,
-                None,
-                None,
-            );
+            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
+                zero_event: "query-pipeline-hydrate-start",
+                query_hash: query_id.clone(),
+                ..Default::default()
+            });
         }
 
         // A hydrate panic (e.g. a source-drift assert) must roll back the
@@ -524,36 +596,35 @@ impl IvmPipelines {
             Err(payload) => {
                 eng.rollback_source_connections(&checkpoint);
                 for (query_id, _ast_json) in queries {
-                    Self::log_query_pipeline_lifecycle(
-                        "query-pipeline-hydrate-failed",
-                        query_id,
-                        None,
-                        None,
-                    );
+                    Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
+                        zero_event: "query-pipeline-hydrate-failed",
+                        query_hash: query_id.clone(),
+                        ..Default::default()
+                    });
                 }
                 std::panic::resume_unwind(payload);
             }
         };
         let finished: HashSet<&str> = results.iter().map(|r| r.query_id.as_str()).collect();
         for r in &results {
-            Self::log_query_pipeline_lifecycle(
-                "query-pipeline-hydrate-finish",
-                &r.query_id,
-                Some(r.hydration_time_ms),
-                Some(r.hydration_row_count),
-            );
+            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
+                zero_event: "query-pipeline-hydrate-finish",
+                query_hash: r.query_id.clone(),
+                hydration_time_ms: Some(r.hydration_time_ms),
+                hydration_row_count: Some(r.hydration_row_count),
+                ..Default::default()
+            });
         }
         // A query that started but the engine never registered was aborted
         // mid-stream (cancel-during-hydrate → engine discards partial pipelines
         // and returns no result for it).
         for (query_id, _ast_json) in queries {
             if !finished.contains(query_id.as_str()) {
-                Self::log_query_pipeline_lifecycle(
-                    "query-pipeline-hydrate-aborted",
-                    query_id,
-                    None,
-                    None,
-                );
+                Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
+                    zero_event: "query-pipeline-hydrate-aborted",
+                    query_hash: query_id.clone(),
+                    ..Default::default()
+                });
             }
         }
         // Track the newly-hydrated queries so `has_query` reports them. The
@@ -680,6 +751,11 @@ impl IvmPipelines {
     /// `Snapshot::drop` is the sole conn owner and runs the explicit,
     /// checked, LOUD sqlite close instead of rusqlite's silent implicit one.
     pub fn destroy(&mut self) {
+        // Port of TS `destroy()` (pipeline-driver.ts:447): stop every pipeline
+        // with reason `destroy` before releasing the engine.
+        for query_id in self.query_order.clone() {
+            self.destroy_pipeline(&query_id, "destroy");
+        }
         if let Some(eng) = self.engine.as_mut() {
             eng.destroy();
         }

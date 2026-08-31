@@ -82,6 +82,11 @@ struct PipelineEntry {
     /// Rows produced by this query's initial hydration. Port of the TS pipeline
     /// `hydrationRowCount` field (pipeline-driver.ts:774).
     hydration_row_count: u64,
+    /// When this pipeline finished hydrating and was registered. Port of the TS
+    /// pipeline `pipelineReadyAtMs` field (pipeline-driver.ts:770/777); drives
+    /// the `pipelineLifetimeMs` in the `query-pipeline-stop` log. (Rust uses
+    /// `Instant` where TS uses `Date.now()`.)
+    pipeline_ready_at: Instant,
     transformed_ast: Ast,
     /// Live companion pipelines monitoring resolved scalar subqueries for this
     /// query (empty for queries with no scalar subqueries).
@@ -692,6 +697,28 @@ impl Engine {
         }
     }
 
+    /// Wall-clock hydration time for a query's pipeline, or `None` if the query
+    /// has no registered pipeline. Port of reading TS `pipeline.hydrationTimeMs`
+    /// (pipeline-driver.ts:773) — read by the driver at teardown to emit
+    /// `query-pipeline-stop`.
+    pub fn hydration_time_ms(&self, query_id: &str) -> Option<f64> {
+        self.pipelines
+            .iter()
+            .find(|p| p.query_id == query_id)
+            .map(|p| p.hydration_time_ms)
+    }
+
+    /// Milliseconds since a query's pipeline finished hydrating (was registered),
+    /// or `None` if it has no registered pipeline. Port of TS
+    /// `Date.now() - pipeline.pipelineReadyAtMs` (pipeline-driver.ts:861) — the
+    /// `pipelineLifetimeMs` the driver reports in `query-pipeline-stop`.
+    pub fn pipeline_lifetime_ms(&self, query_id: &str) -> Option<f64> {
+        self.pipelines
+            .iter()
+            .find(|p| p.query_id == query_id)
+            .map(|p| p.pipeline_ready_at.elapsed().as_secs_f64() * 1000.0)
+    }
+
     /// Remove a query's pipeline.
     /// Port of TS `removeQuery()`.
     pub fn remove_query(&mut self, query_id: &str) {
@@ -928,6 +955,7 @@ impl Engine {
                 query_id: b.query_id,
                 hydration_time_ms,
                 hydration_row_count,
+                pipeline_ready_at: Instant::now(),
                 transformed_ast: b.transformed_ast,
                 companions: live_companions,
             });
