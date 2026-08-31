@@ -252,3 +252,47 @@ fn analyze_fills_sqlite_plans_for_every_vended_query() {
 
     cleanup(&path);
 }
+
+/// B6: when permissions are applied, `afterPermissions` renders the transformed
+/// query back to ZQL (`ast.table + astToZQL(ast)`); with no permissions it is
+/// absent. NON-VACUOUS: reverting the afterPermissions wiring in run_ast leaves
+/// the field `None` even under applyPermissions and the is_some assertion fails.
+#[test]
+fn analyze_populates_after_permissions() {
+    let path = tmp_path("after");
+    build_users_replica(&path);
+    let ast = users_ast();
+
+    // ANYONE_CAN → the transformed WHERE is always-true (renders to nothing),
+    // leaving the orderBy — so afterPermissions is "users.orderBy('id', 'asc')".
+    let allow = rust_syncer::services::analyze::analyze_query(
+        &path,
+        "app",
+        &ast,
+        true,
+        false,
+        Some(anyone_can("users")),
+        None,
+    )
+    .expect("analyze with ANYONE_CAN");
+    let after = allow
+        .after_permissions
+        .as_deref()
+        .expect("afterPermissions is set when permissions are applied");
+    assert!(
+        after.starts_with("users") && after.contains(".orderBy('id', 'asc')"),
+        "afterPermissions renders the transformed query as ZQL; got {after:?}"
+    );
+
+    // No permissions applied → afterPermissions omitted (TS leaves it undefined).
+    let none =
+        rust_syncer::services::analyze::analyze_query(&path, "app", &ast, true, false, None, None)
+            .expect("analyze without permissions");
+    assert!(
+        none.after_permissions.is_none(),
+        "afterPermissions is absent when permissions are not applied; got {:?}",
+        none.after_permissions
+    );
+
+    cleanup(&path);
+}

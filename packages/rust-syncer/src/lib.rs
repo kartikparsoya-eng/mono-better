@@ -18,6 +18,7 @@
 //! observability / process infra with no single TS origin.
 
 // TS-mirrored subtrees.
+pub mod ast_to_zql;
 pub mod auth;
 pub mod custom_queries;
 pub mod db;

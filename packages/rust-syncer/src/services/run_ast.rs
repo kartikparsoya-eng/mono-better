@@ -108,6 +108,7 @@ pub fn run_ast(
     options: &RunAstOptions,
 ) -> Result<AnalyzeQueryResult, String> {
     let mut warnings: Vec<String> = Vec::new();
+    let mut after_permissions: Option<String> = None;
 
     // Port of run-ast.ts:74-90 — apply read-permissions to the AST before
     // hydrating so the analysis reflects exactly the rows a client is allowed to
@@ -135,10 +136,17 @@ pub fn run_ast(
             serde_json::from_str(ast_json).map_err(|e| format!("run_ast: parse AST: {e}"))?;
         // read-authorizer.ts `transformAndHashQuery(..., internalQuery=false)`.
         let (transformed, _hash) = transform_and_hash_query(&ast, permissions, &auth_data, false);
-        // B6 (deferred, labeled): `result.afterPermissions =
-        //   formatOutput(transformed.table + astToZQL(transformed))` — the
-        //   astToZQL/formatOutput pretty-printer is not yet ported; the transform
-        //   itself (the security-relevant part) runs here.
+        // TS run-ast.ts:89 — `result.afterPermissions = await formatOutput(
+        //   ast.table + astToZQL(ast))`. `formatOutput` (oxfmt) is not ported;
+        //   we use the raw `ast_to_zql` string (oxfmt's own on-error fallback).
+        let table = transformed
+            .get("table")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        after_permissions = Some(format!(
+            "{table}{}",
+            crate::ast_to_zql::ast_to_zql(&transformed)
+        ));
         transformed_ast_json = serde_json::to_string(&transformed)
             .map_err(|e| format!("run_ast: serialize transformed AST: {e}"))?;
         &transformed_ast_json
@@ -208,7 +216,7 @@ pub fn run_ast(
         start: 0.0,
         end: elapsed,
         elapsed: Some(elapsed),
-        after_permissions: None,
+        after_permissions,
         vended_row_counts: None, // deprecated; TS runAst does not set it
         vended_rows: None,       // deprecated
         sqlite_plans: Some(sqlite_plans),
