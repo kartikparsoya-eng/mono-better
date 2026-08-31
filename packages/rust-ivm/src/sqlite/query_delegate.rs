@@ -66,6 +66,8 @@ impl crate::builder::builder::BuilderDelegate for ZqliteQueryDelegate {
         let conn = self.db.borrow().conn();
         // Build column schema from the database. For now, default to String type
         // — the actual types are resolved at fetch time via rusqlite's Value enum.
+        // No column schema here (types resolved at fetch time) ⇒ `TableSource::new`
+        // sees no columns and emits `SELECT *`.
         let columns: HashMap<String, ColumnType> = HashMap::new();
         let source = TableSource::new(conn, table_name, columns, pk);
         let shared: Shared<dyn Source> = Rc::new(RefCell::new(source));

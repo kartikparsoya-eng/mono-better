@@ -52,6 +52,11 @@ pub struct IvmColumnSchema {
 pub struct IvmTableSpec {
     pub table: String,
     pub columns: HashMap<String, IvmColumnSchema>,
+    /// Column names in DECLARED (`pragma_table_info`) order — the order TS emits
+    /// the SELECT column list in (`Object.keys(columns)`), which is
+    /// client-observable in an analyzeQuery result. Empty ⇒ fall back to the
+    /// (unordered) `columns` keys.
+    pub column_order: Vec<String>,
     pub primary_key: Vec<String>,
     /// PK plus any unique indexes; drives scalar-subquery resolution. Defaults
     /// to `[primary_key]` when `None`.
@@ -351,9 +356,21 @@ impl IvmPipelines {
                 columns.insert(col.clone(), column_type(&schema.r#type, schema.optional));
             }
 
+            // Declared column order (TS `Object.keys(columns)`) for the SELECT
+            // list; fall back to the HashMap keys when a spec carries none.
+            let column_order = if spec.column_order.is_empty() {
+                columns.keys().cloned().collect()
+            } else {
+                spec.column_order.clone()
+            };
             let rc_source: Rc<RefCell<dyn Source>> = if let Some(conn) = &source_conn {
-                let table_source =
-                    TableSource::new(conn.clone(), &spec.table, columns, spec.primary_key.clone());
+                let table_source = TableSource::with_column_order(
+                    conn.clone(),
+                    &spec.table,
+                    columns,
+                    column_order,
+                    spec.primary_key.clone(),
+                );
                 Rc::new(RefCell::new(table_source))
             } else {
                 let source = MemorySource::new(&spec.table, columns, spec.primary_key.clone());
@@ -1206,6 +1223,7 @@ mod tests {
     fn users_spec() -> IvmTableSpec {
         IvmTableSpec {
             table: "users".to_string(),
+            column_order: Vec::new(),
             columns: HashMap::from([
                 (
                     "id".to_string(),

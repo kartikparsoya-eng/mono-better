@@ -30,6 +30,7 @@ fn users_spec() -> IvmTableSpec {
                 optional: false,
             },
         )]),
+        column_order: vec!["id".to_string()],
         primary_key: vec!["id".to_string()],
         unique_keys: None,
         min_row_version: None,

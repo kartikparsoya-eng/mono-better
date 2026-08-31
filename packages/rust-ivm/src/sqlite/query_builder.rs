@@ -70,9 +70,14 @@ pub fn build_select_query(
     if columns.is_empty() {
         sql.push('*');
     } else {
+        // TS joins the SELECT column list with `sql`,`` — NO space
+        // (query-builder.ts:38). (ORDER BY below uses `, ` WITH a space, matching
+        // TS `orderByToSQL`.) The exact separator is client-observable: it is part
+        // of the `readRowCountsByQuery` / `sqlitePlans` keys in an analyzeQuery
+        // result.
         for (i, col) in columns.iter().enumerate() {
             if i > 0 {
-                sql.push_str(", ");
+                sql.push(',');
             }
             sql.push_str(&quote_ident(col));
         }

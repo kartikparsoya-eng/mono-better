@@ -332,6 +332,12 @@ fn read_table_spec(
         .map_err(|e| format!("query table_info({table}): {e}"))?;
 
     let mut columns = std::collections::HashMap::new();
+    // The kept columns in `pragma_table_info` (declared / `cid`) order. TS builds
+    // its zqlSpec columns as an insertion-ordered object and emits the SELECT
+    // list via `Object.keys(columns)` (query-builder.ts:37), so the SELECT column
+    // order — which is client-observable in an analyzeQuery result's SQL keys —
+    // is the DECLARED order, not the (nondeterministic) HashMap order.
+    let mut column_order: Vec<String> = Vec::new();
     // Columns that are NOT NULL upstream (eligible to form a row key). A key over
     // a nullable column can't uniquely identify a row, so only these are usable.
     let mut not_null_columns: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -360,6 +366,7 @@ fn read_table_spec(
                 optional,
             },
         );
+        column_order.push(col_name);
     }
 
     if columns.is_empty() {
@@ -415,6 +422,7 @@ fn read_table_spec(
     Ok(Some(IvmTableSpec {
         table: table.to_string(),
         columns,
+        column_order,
         primary_key,
         unique_keys,
         min_row_version: min_row_versions.get(table).cloned(),
@@ -532,6 +540,7 @@ mod tests {
     fn validates_client_schema_against_replica_specs() {
         let spec = IvmTableSpec {
             table: "users".to_string(),
+            column_order: Vec::new(),
             columns: HashMap::from([
                 (
                     "id".to_string(),

@@ -5929,6 +5929,7 @@ mod tests {
         use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
         IvmTableSpec {
             table: "issue".to_string(),
+            column_order: Vec::new(),
             columns: HashMap::from([
                 (
                     "id".to_string(),
@@ -8916,6 +8917,7 @@ mod engine_tests {
     fn users_spec() -> IvmTableSpec {
         IvmTableSpec {
             table: "users".to_string(),
+            column_order: Vec::new(),
             columns: HashMap::from([(
                 "id".to_string(),
                 IvmColumnSchema {

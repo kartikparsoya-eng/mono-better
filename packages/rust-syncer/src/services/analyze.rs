@@ -19,8 +19,9 @@
 //! after `run_ast`, `sqlitePlans` is filled for any query SQLite prepared but did
 //! not execute (so no scanstatus EXPLAIN was captured); execution-time plans win.
 //!
-//! DEFERRED vs TS `analyzeQuery` (labeled follow-ups):
-//! - `joinPlans` planner-debug serialization (B7, see `run_ast`).
+//! `joinPlans` planner-debug serialization (B7) IS ported (see `run_ast` +
+//! `rust_ivm::planner::planner_debug`). The whole `AnalyzeQueryResult` is pinned
+//! to the real TS `analyzeQuery` by `tests/analyze_query_golden_test.rs`.
 
 use crate::protocol::analyze_query_result::AnalyzeQueryResult;
 

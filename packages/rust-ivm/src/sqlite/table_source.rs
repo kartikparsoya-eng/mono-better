@@ -536,7 +536,29 @@ impl TableSource {
         columns: HashMap<String, ColumnType>,
         primary_key: Vec<String>,
     ) -> Self {
-        let column_names: Vec<String> = columns.keys().cloned().collect();
+        // No explicit column order ⇒ derive from the HashMap keys. Callers that
+        // need the declared (TS `Object.keys`) SELECT order use
+        // [`with_column_order`]; this path is used by tests and the columns-less
+        // `ZqliteQueryDelegate` stub (which emits `SELECT *`).
+        Self::with_column_order(db, table_name, columns, Vec::new(), primary_key)
+    }
+
+    /// Like [`new`](Self::new) but with an explicit DECLARED column order (TS
+    /// `Object.keys(columns)`, `pragma_table_info` order). The order drives the
+    /// SELECT column list, which is client-observable in an analyzeQuery result's
+    /// SQL keys. An empty `column_order` falls back to the HashMap key order.
+    pub fn with_column_order(
+        db: Rc<RefCell<Connection>>,
+        table_name: &str,
+        columns: HashMap<String, ColumnType>,
+        column_order: Vec<String>,
+        primary_key: Vec<String>,
+    ) -> Self {
+        let column_names: Vec<String> = if column_order.is_empty() {
+            columns.keys().cloned().collect()
+        } else {
+            column_order
+        };
         let primary_index_sort: SortOrder = Arc::new(
             primary_key
                 .iter()
