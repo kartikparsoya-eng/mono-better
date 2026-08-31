@@ -1300,15 +1300,13 @@ impl CVRQueryDrivenUpdater {
                     continue;
                 }
 
-                // A stored signature that CHANGED (vs first-time None) is a real
-                // drift: the same transformation hash produced a different row
-                // set → non-deterministic execution. Count it (TS
-                // query.row-set-signature-drifts canary); a first-time signature
-                // is not a drift.
-                if stored.is_some() {
-                    crate::otel_metrics::record_row_set_signature_drift();
-                }
-
+                // Persist the changed signature — TS `cvr.ts` flush
+                // (view-syncer/cvr.ts:808-825) PERSISTS only; it does NOT count
+                // drift. The `row-set-signature-drifts` counter lives in
+                // `hydrate_unchanged_queries` (TS `#hydrateUnchangedQueries`),
+                // which checks drift ONLY at the same db state — counting here
+                // would also fire when the db legitimately advanced (a new row set
+                // for a new db state, not non-determinism), over-counting.
                 let hex = crate::row_set_signature::format_signature(sig);
                 if let Some(query) = self.base.cvr.queries.get_mut(&query_id) {
                     query.base_mut().row_set_signature = Some(hex.clone());
@@ -2575,13 +2573,13 @@ mod updater_tests {
         );
     }
 
-    /// Non-vacuous guard for the row-set-signature DRIFT branch (cvr.rs
-    /// flush, the `#rowSetSignatureDrifts` mechanism — TS records the metric in
-    /// `#hydrateUnchangedQueries`, rust records it here at flush when the
-    /// provider's freshly-computed signature differs from the CVR-stored one).
-    /// A CHANGED stored signature is a real drift → persist the new value +
-    /// emit the store op; an UNCHANGED one is a no-op (cvr.rs `if stored ==
-    /// Some(sig) { continue }`). Reverting either branch makes an assertion fail.
+    /// Non-vacuous guard for the row-set-signature PERSIST branch in flush (TS
+    /// `cvr.ts` flush, view-syncer/cvr.ts:808-825 — persist only, no drift
+    /// count; the `row-set-signature-drifts` counter lives in
+    /// `hydrate_unchanged_queries`). A CHANGED provider signature persists the
+    /// new value + emits the store op; an UNCHANGED one is a no-op (cvr.rs `if
+    /// stored == Some(sig) { continue }`). Reverting either branch fails an
+    /// assertion.
     #[test]
     fn test_flush_records_signature_drift_only_when_changed() {
         let prior = crate::row_set_signature::format_signature(11111u64);

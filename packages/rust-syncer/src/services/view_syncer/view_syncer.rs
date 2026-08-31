@@ -7104,23 +7104,15 @@ impl ViewSyncerService {
         ttl_clock: TTLClock,
         original_client_versions: std::collections::HashMap<String, NullableCVRVersion>,
     ) -> Result<CVR, String> {
-        // DIVERGENCE (documented, ART-gated): TS `#syncQueryPipelineSet` first
-        // runs `#hydrateUnchangedQueries` (view-syncer.ts:1449) — a PROACTIVE
-        // re-hydrate of every already-gotten same-hash query on EVERY sync, to
-        // detect row-set-signature drift on still-alive pipelines. Rust does NOT
-        // do that proactive pass: it (re-)hydrates a gotten query only when its
-        // pipeline is MISSING or its transformation hash CHANGED (the loop below).
-        // The drift MACHINERY that pass feeds is already present, though: the
-        // `zero.sync.query.row-set-signature-drifts` counter + signature persist
-        // fire from the CVR flush (cvr.rs, via the `signature_provider` populated
-        // in `hydrate_and_sync`), and a drifted re-hydration's rows are re-emitted
-        // by `received()` + the same-hash force-bump — so the reconnect/reap drift
-        // case IS covered. The only thing the proactive pass adds is catching
-        // non-determinism on a LONG-LIVED CG that never re-hydrates (rare), at the
-        // cost of re-executing every query on every sync. Porting it is a
-        // serving-path perf change that must be ART-gated first; until then the
-        // same-hash force-bump reason stays `missing-pipeline` (TS's value when
-        // `driftedQueryIDs` is empty). See parity/ZERO-DIVERGENCE-PLAN.md.
+        // TS `#syncQueryPipelineSet` first runs `#hydrateUnchangedQueries`
+        // (view-syncer.ts:592/1449) — a PROACTIVE re-hydrate of every
+        // already-gotten same-hash query each sync, to drift-check still-alive
+        // pipelines. That is ported below as `hydrate_unchanged_queries`, called
+        // once `executed` is built. PERF/ART: it re-executes every alive same-hash
+        // pipeline on every sync (TS's design) — a serving-path cost that must be
+        // confirmed by an ART gate before deploy; it changes no client-observable
+        // output. Its `drifted_query_ids` feed the `hydrate_and_sync` force-bump
+        // reason label.
         //
         // ── Phase 2: query-driven — sync the pipeline to the CVR's FULL query
         // set (port of TS `#syncQueryPipelineSet`). The executed set is derived
@@ -7230,6 +7222,14 @@ impl ViewSyncerService {
                 }
             }
         }
+
+        // Port of TS `#hydrateUnchangedQueries` (view-syncer.ts:592): PROACTIVELY
+        // re-hydrate already-gotten same-hash queries and drift-check them against
+        // the CVR-stored signature. Non-drifted ones keep their rebuilt pipeline
+        // (the loop below then skips them — no bump); drifted ones are removed here
+        // and fall through to the loop as `None` (re-added → re-executed via the
+        // updater path, with the force-bump reason keyed off this drifted set).
+        let drifted_query_ids = self.hydrate_unchanged_queries(&cfg_cvr, &executed, &state_version);
 
         // Drift check: (re-)hydrate a query when it is missing OR its
         // transformation hash changed (auth re-transform / a new custom AST).
@@ -7390,6 +7390,7 @@ impl ViewSyncerService {
                     last_connect_time,
                     last_active,
                     ttl_clock,
+                    &drifted_query_ids,
                 )
                 .await?;
             // Catch-up rides the SAME poke as the hydrate (TS shape: catchup
@@ -7657,6 +7658,98 @@ impl ViewSyncerService {
         acc
     }
 
+    /// Port of TS `#hydrateUnchangedQueries` (view-syncer.ts:1449). On a
+    /// config-sync where the CVR is at the current db state, PROACTIVELY
+    /// re-hydrate every already-gotten, same-transformation-hash, still-desired
+    /// query and compare its freshly-computed row-set signature against the
+    /// CVR-stored one. A mismatch means non-deterministic execution (e.g. a Cap
+    /// operator picking a different N-row subset) → record the drift, remove the
+    /// pipeline so the main reconciliation re-executes it via the updater path
+    /// (emitting the row diff), and return its id in the drifted set. Non-drifted
+    /// queries keep their rebuilt pipeline WITHOUT a version bump (their rows are
+    /// already in the CVR) — this is what stops a plain reconnect from
+    /// force-bumping every query.
+    ///
+    /// `executed` is the already-transformed `(qid, transformed_ast, new_hash)`
+    /// set the caller built (rust transforms once and reuses; TS re-transforms
+    /// here — behaviorally identical, same ASTs + hashes). Returns the drifted
+    /// query ids, which `hydrate_and_sync` uses for the force-bump reason label.
+    ///
+    /// PERF/ART: this re-executes every alive same-hash pipeline on every sync
+    /// (TS's design). It is a serving-path cost that must be confirmed by an ART
+    /// gate before deploy; it does not change WHAT a client observes.
+    fn hydrate_unchanged_queries(
+        &mut self,
+        cfg_cvr: &CVR,
+        executed: &[(String, serde_json::Value, String)],
+        state_version: &str,
+    ) -> std::collections::HashSet<String> {
+        let mut drifted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // TS view-syncer.ts:1458 — when the CVR is behind the db, hydration must
+        // run through the updater path, so skip the proactive re-check.
+        if cfg_cvr.version.state_version != state_version {
+            return drifted;
+        }
+        for (qid, transformed_ast, new_hash) in executed {
+            let Some(record) = cfg_cvr.queries.get(qid) else {
+                continue;
+            };
+            // Only already-gotten, SAME-transformation-hash queries (TS
+            // `gotQueries` + the `transformationHash === q.transformationHash`
+            // keep, view-syncer.ts:1465/1538/1561).
+            if record.base().transformation_hash.as_deref() != Some(new_hash.as_str()) {
+                continue;
+            }
+            // No-longer-desired: every client state inactivated (TS
+            // view-syncer.ts:1474-1482). Internal queries are always desired.
+            // NOTE: TS uses `Array.every`, which is VACUOUSLY TRUE for an empty
+            // clientState — so a gotten query with no live client is skipped;
+            // rust must not add a `!cs.is_empty()` guard (that would diverge).
+            if !record.is_internal()
+                && let Some(cs) = record.client_state()
+                && cs.values().all(|s| s.inactivated_at.is_some())
+            {
+                continue;
+            }
+            // Re-hydrate (TS `#pipelines.addQuery(..., 'unchanged-query-rehydrate')`),
+            // folding the candidate row-set signature caller-side — rust's
+            // streaming `hydrate` does not maintain `engine.row_set_signature`, so
+            // the caller folds it exactly as `hydrate_and_sync` does. Rows are
+            // discarded: the CVR already holds them; this pass only rebuilds the
+            // pipeline and checks drift.
+            let mut sig_acc: HashMap<String, u64> = HashMap::new();
+            let one = [(qid.clone(), transformed_ast.to_string())];
+            if let Err(e) = self
+                .pipelines
+                .hydrate(&one, |rc| accumulate_signature(&mut sig_acc, rc))
+            {
+                tracing::warn!("hydrate_unchanged_queries: hydrate {qid} failed: {e}");
+                continue;
+            }
+            self.pipelines.set_query_transformation_hash(qid, new_hash);
+            // Drift detection (TS view-syncer.ts:1659-1673): compare the candidate
+            // signature to the CVR-stored one. Skip when there is NO stored
+            // signature (legacy pre-feature query — a forced re-execution would
+            // needlessly resend rows). A mismatch → record the drift, remove the
+            // pipeline (so the main reconciliation re-executes + emits the diff),
+            // and mark it drifted.
+            let candidate = sig_acc.get(qid).copied().unwrap_or(0);
+            if let Some(hex) = record.base().row_set_signature.as_deref()
+                && let Ok(stored) = rust_cvr::row_set_signature::parse_signature(Some(hex))
+                && stored != candidate
+            {
+                tracing::warn!(
+                    "rowSetSignature drift for query {qid}: prior={stored:x} new={candidate:x}; \
+                     removing from pipelines for full re-execution"
+                );
+                rust_cvr::otel_metrics::record_row_set_signature_drift();
+                self.pipelines.remove_query(qid, "remove-query");
+                drifted.insert(qid.clone());
+            }
+        }
+        drifted
+    }
+
     /// Hydrate queries AND apply to CVR + push pokes to clients — the whole
     /// hydrate hot path. Port of napi `HydrateAndSyncTask::compute`.
     ///
@@ -7686,6 +7779,7 @@ impl ViewSyncerService {
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
+        drifted_query_ids: &std::collections::HashSet<String>,
     ) -> Result<(SyncResult, MultiPoker), String> {
         let (sigs, provider) = Self::signature_provider();
         // Port of TS `#addAndRemoveQueries` force-bump (view-syncer.ts:2194-2215):
@@ -7694,15 +7788,20 @@ impl ViewSyncerService {
         // `track_queries`, so a row diff from `received()` would have no new
         // `patchVersion` to attach (the `#assertNewVersion` no-bump wedge). Decide
         // BEFORE `cvr`/`state_version` move into the updater; force the bump after.
-        let force_same_hash_bump =
-            same_hash_rehydration_forces_bump(&cvr, add_queries, remove_queries, &state_version);
+        // `drifted_query_ids` (from `hydrate_unchanged_queries`) selects the reason
+        // label — `row-set-signature-drift`/`mixed` when the re-added query drifted,
+        // `missing-pipeline` when it was merely reaped.
+        let bump_reason = same_hash_rehydration_bump_reason(
+            &cvr,
+            add_queries,
+            remove_queries,
+            &state_version,
+            drifted_query_ids,
+        );
         let mut updater =
             CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, Some(provider));
-        if force_same_hash_bump {
-            // `driftedQueryIDs` is empty until `#hydrateUnchangedQueries` is
-            // ported, so the reason is always `missing-pipeline` — exactly TS's
-            // reason when `drifted == 0` (view-syncer.ts:2207-2212).
-            crate::metrics::record_same_hash_rehydration_version_bump("missing-pipeline");
+        if let Some(reason) = bump_reason {
+            crate::metrics::record_same_hash_rehydration_version_bump(reason);
             updater.ensure_new_version();
         }
 
@@ -8008,6 +8107,9 @@ impl ViewSyncerService {
                 last_connect_time,
                 last_active,
                 ttl_clock,
+                // Removal-only pass: no queries are added, so the same-hash
+                // force-bump never fires — no drifted set to thread.
+                &std::collections::HashSet::new(),
             )
             .await?;
         // Expiry removals need no catch-up (connected clients are current, and
@@ -8296,20 +8398,23 @@ pub fn empty_cvr(id: &str, replica_version: &str) -> CVR {
 }
 
 /// Port of the TS `#addAndRemoveQueries` force-bump guard (view-syncer.ts:
-/// 2182-2201): returns true when an already-gotten, same-transformation-hash
-/// query is being re-executed and `track_queries` would NOT otherwise bump the
-/// `configVersion` — i.e. no `stateVersion` advance, no removals, and no hash
-/// change. In that case the caller must `ensure_new_version()` before
-/// `track_queries` so a row diff produced by `received()` gets a fresh
-/// `patchVersion` to attach to (the `#assertNewVersion` invariant; skipping it
-/// is the prod no-bump wedge on a reaped-pipeline reconnect). Pure, so it can be
-/// unit-tested against the TS golden scenarios.
-fn same_hash_rehydration_forces_bump(
+/// 2182-2214): when an already-gotten, same-transformation-hash query is being
+/// re-executed and `track_queries` would NOT otherwise bump the `configVersion`
+/// (no `stateVersion` advance, no removals, no hash change), the caller must
+/// `ensure_new_version()` before `track_queries` so a row diff from `received()`
+/// gets a fresh `patchVersion` (the `#assertNewVersion` invariant; skipping it is
+/// the prod no-bump wedge). Returns `Some(reason)` when a bump must be forced —
+/// `reason` is TS's `drifted && missing ? 'mixed' : drifted ?
+/// 'row-set-signature-drift' : 'missing-pipeline'` (view-syncer.ts:2203-2212),
+/// keyed off `drifted_query_ids` from `hydrate_unchanged_queries` — else `None`.
+/// Pure, so it can be unit-tested against the TS golden scenarios.
+fn same_hash_rehydration_bump_reason(
     cvr: &CVR,
     add_queries: &[(String, String)],
     remove_queries: &[String],
     state_version: &str,
-) -> bool {
+    drifted_query_ids: &std::collections::HashSet<String>,
+) -> Option<&'static str> {
     let cvr_hash = |id: &str| -> Option<String> {
         cvr.queries
             .get(id)
@@ -8317,16 +8422,33 @@ fn same_hash_rehydration_forces_bump(
     };
     // sameHashRehydratedQueryIDs = addQueries whose CVR-stored transformation
     // hash equals the new one (view-syncer.ts:2182-2186).
-    let any_same_hash = add_queries
+    let same_hash: Vec<&str> = add_queries
         .iter()
-        .any(|(id, hash)| cvr_hash(id).as_deref() == Some(hash.as_str()));
+        .filter(|(id, hash)| cvr_hash(id).as_deref() == Some(hash.as_str()))
+        .map(|(id, _)| id.as_str())
+        .collect();
     // trackQueriesWillBumpVersion (view-syncer.ts:2187-2192).
     let track_queries_will_bump_version = state_version > cvr.version.state_version.as_str()
         || !remove_queries.is_empty()
         || add_queries
             .iter()
             .any(|(id, hash)| cvr_hash(id).as_deref() != Some(hash.as_str()));
-    any_same_hash && !track_queries_will_bump_version
+    if same_hash.is_empty() || track_queries_will_bump_version {
+        return None;
+    }
+    // Reason label (view-syncer.ts:2203-2212).
+    let drifted = same_hash
+        .iter()
+        .filter(|id| drifted_query_ids.contains(**id))
+        .count();
+    let missing = same_hash.len() - drifted;
+    Some(if drifted > 0 && missing > 0 {
+        "mixed"
+    } else if drifted > 0 {
+        "row-set-signature-drift"
+    } else {
+        "missing-pipeline"
+    })
 }
 
 // NOTE: a `parse_existing_rows(json) -> RowRecordMap` helper once lived here
@@ -8350,84 +8472,130 @@ mod engine_tests {
     use rust_cvr::shards::ShardID;
     use std::collections::BTreeMap;
 
-    /// Non-vacuous port guard for the TS `#addAndRemoveQueries` force-bump
-    /// (view-syncer.ts:2182-2201): a same-transformation-hash rehydrate with no
-    /// other bump trigger MUST force a `configVersion` bump — the mechanism that
-    /// prevents the no-bump `#assertNewVersion` wedge on a reaped-pipeline
-    /// reconnect. Reverting `same_hash_rehydration_forces_bump` to `false` makes
-    /// the first assertion fail. The negative branches pin every
-    /// `trackQueriesWillBumpVersion` term so a bump is NOT double-forced.
+    /// Non-vacuous port guard for the TS `#addAndRemoveQueries` force-bump +
+    /// reason (view-syncer.ts:2182-2214): a same-transformation-hash rehydrate
+    /// with no other bump trigger MUST force a `configVersion` bump (the mechanism
+    /// preventing the no-bump `#assertNewVersion` wedge), and the reason label is
+    /// keyed off `driftedQueryIDs` — `row-set-signature-drift` when the re-added
+    /// query drifted, `missing-pipeline` when merely reaped, `mixed` for both.
+    /// Reverting the guard to `None` makes the first assertion fail; the negative
+    /// branches pin every `trackQueriesWillBumpVersion` term.
     #[test]
     fn same_hash_rehydration_forces_bump_matches_ts_guard() {
-        // CVR already has q1 at transformation hash "H", at state version "05".
+        use std::collections::HashSet;
+        let insert_q = |cvr: &mut CVR, id: &str, hash: &str| {
+            cvr.queries.insert(
+                id.to_string(),
+                QueryRecord::Client(ClientQueryRecord {
+                    base: BaseQueryRecord {
+                        id: id.to_string(),
+                        transformation_hash: Some(hash.to_string()),
+                        transformation_version: None,
+                        row_set_signature: None,
+                    },
+                    ast: serde_json::json!({"table": "users"}),
+                    client_state: BTreeMap::new(),
+                    patch_version: None,
+                }),
+            );
+        };
+        // CVR already has q1 at hash "H", state version "05".
         let mut cvr = empty_cvr("cg1", "01");
         cvr.version = CVRVersion {
             state_version: "05".to_string(),
             config_version: None,
         };
-        cvr.queries.insert(
-            "q1".to_string(),
-            QueryRecord::Client(ClientQueryRecord {
-                base: BaseQueryRecord {
-                    id: "q1".to_string(),
-                    transformation_hash: Some("H".to_string()),
-                    transformation_version: None,
-                    row_set_signature: None,
-                },
-                ast: serde_json::json!({"table": "users"}),
-                client_state: BTreeMap::new(),
-                patch_version: None,
-            }),
-        );
+        insert_q(&mut cvr, "q1", "H");
+        let no_drift: HashSet<String> = HashSet::new();
 
-        // Same hash, same stateVersion, no removals, no hash change → force bump.
-        assert!(
-            same_hash_rehydration_forces_bump(
+        // Same hash, same stateVersion, no removals, no hash change, NOT drifted
+        // → force bump with reason `missing-pipeline`.
+        assert_eq!(
+            same_hash_rehydration_bump_reason(
                 &cvr,
                 &[("q1".to_string(), "H".to_string())],
                 &[],
-                "05"
+                "05",
+                &no_drift
             ),
+            Some("missing-pipeline"),
             "same-hash rehydrate with no other bump trigger MUST force a bump"
         );
+        // Same as above but q1 IS in the drifted set → reason `row-set-signature-drift`.
+        let drifted: HashSet<String> = ["q1".to_string()].into_iter().collect();
+        assert_eq!(
+            same_hash_rehydration_bump_reason(
+                &cvr,
+                &[("q1".to_string(), "H".to_string())],
+                &[],
+                "05",
+                &drifted
+            ),
+            Some("row-set-signature-drift"),
+            "a drifted same-hash query bumps with the drift reason"
+        );
+        // Two same-hash queries, one drifted one not → reason `mixed`.
+        insert_q(&mut cvr, "q2", "H");
+        assert_eq!(
+            same_hash_rehydration_bump_reason(
+                &cvr,
+                &[
+                    ("q1".to_string(), "H".to_string()),
+                    ("q2".to_string(), "H".to_string())
+                ],
+                &[],
+                "05",
+                &drifted
+            ),
+            Some("mixed"),
+            "a mix of drifted + reaped same-hash queries → mixed reason"
+        );
         // Changed transformation hash → track_queries bumps → no force.
-        assert!(
-            !same_hash_rehydration_forces_bump(
+        assert_eq!(
+            same_hash_rehydration_bump_reason(
                 &cvr,
                 &[("q1".to_string(), "H2".to_string())],
                 &[],
-                "05"
+                "05",
+                &no_drift
             ),
+            None,
             "a changed transformation hash bumps via track_queries; no force"
         );
         // Advanced stateVersion → track_queries bumps → no force.
-        assert!(
-            !same_hash_rehydration_forces_bump(
+        assert_eq!(
+            same_hash_rehydration_bump_reason(
                 &cvr,
                 &[("q1".to_string(), "H".to_string())],
                 &[],
-                "06"
+                "06",
+                &no_drift
             ),
+            None,
             "an advanced stateVersion bumps via track_queries; no force"
         );
         // A removal present → track_queries bumps → no force.
-        assert!(
-            !same_hash_rehydration_forces_bump(
+        assert_eq!(
+            same_hash_rehydration_bump_reason(
                 &cvr,
                 &[("q1".to_string(), "H".to_string())],
-                &["q2".to_string()],
-                "05"
+                &["qZ".to_string()],
+                "05",
+                &no_drift
             ),
+            None,
             "a removal bumps via track_queries; no force"
         );
         // No already-gotten same-hash query at all → nothing to force.
-        assert!(
-            !same_hash_rehydration_forces_bump(
+        assert_eq!(
+            same_hash_rehydration_bump_reason(
                 &cvr,
                 &[("qX".to_string(), "H".to_string())],
                 &[],
-                "05"
+                "05",
+                &no_drift
             ),
+            None,
             "no already-gotten same-hash query → no force"
         );
     }
@@ -8624,6 +8792,73 @@ mod engine_tests {
         }
     }
 
+    /// Non-vacuous port guard for `hydrate_unchanged_queries` (TS
+    /// `#hydrateUnchangedQueries`, view-syncer.ts:1449): re-hydrate a gotten,
+    /// same-transformation-hash query and compare its freshly-computed row-set
+    /// signature to the CVR-stored one — a MISMATCH drifts (record the drift +
+    /// remove the pipeline so it re-executes), a MATCH does not. Reverting the
+    /// drift branch (never insert into `drifted`) fails the first assertion.
+    #[test]
+    fn hydrate_unchanged_queries_detects_drift() {
+        // Build a fresh engine over an EMPTY users source (so the re-hydrated
+        // row-set signature is 0), with q1 gotten at hash "H", the given stored
+        // signature, and one LIVE (non-inactivated) client.
+        let build = |stored_sig: u64| {
+            let mut pipelines = IvmPipelines::new();
+            pipelines.init(vec![users_spec()], None, "zero").unwrap();
+            let engine = SyncEngine::new(pipelines);
+            let mut cvr = make_cvr();
+            let q = cvr.queries.get_mut("q1").unwrap();
+            q.base_mut().transformation_hash = Some("H".to_string());
+            q.base_mut().row_set_signature =
+                Some(rust_cvr::row_set_signature::format_signature(stored_sig));
+            if let Some(cs) = q.client_state_mut() {
+                cs.insert(
+                    "client1".to_string(),
+                    rust_cvr::schema::types::ClientState {
+                        inactivated_at: None,
+                        ttl: 1000,
+                        version: CVRVersion {
+                            state_version: "00".to_string(),
+                            config_version: None,
+                        },
+                    },
+                );
+            }
+            (engine, cvr)
+        };
+        let executed = vec![(
+            "q1".to_string(),
+            serde_json::json!({"table": "users"}),
+            "H".to_string(),
+        )];
+
+        // Drift: stored (999) != candidate (0) → q1 drifts + pipeline removed.
+        let (mut engine, cvr) = build(999);
+        let drifted = engine.hydrate_unchanged_queries(&cvr, &executed, "00");
+        assert!(
+            drifted.contains("q1"),
+            "a mismatched stored signature must drift"
+        );
+        assert!(
+            engine.pipelines.query_transformation_hash("q1").is_none(),
+            "a drifted query's pipeline is removed for full re-execution"
+        );
+
+        // No drift: stored (0) == candidate (0) → q1 kept, not drifted.
+        let (mut engine, cvr) = build(0);
+        let drifted = engine.hydrate_unchanged_queries(&cvr, &executed, "00");
+        assert!(
+            !drifted.contains("q1"),
+            "a matching stored signature must NOT drift"
+        );
+        assert_eq!(
+            engine.pipelines.query_transformation_hash("q1"),
+            Some("H"),
+            "a non-drifted query keeps its rebuilt pipeline"
+        );
+    }
+
     #[tokio::test]
     async fn hydrate_and_sync_emits_poke_frames() {
         let mut pipelines = IvmPipelines::new();
@@ -8661,6 +8896,7 @@ mod engine_tests {
                 0,
                 0,
                 0,
+                &std::collections::HashSet::new(),
             )
             .await
             .unwrap();
