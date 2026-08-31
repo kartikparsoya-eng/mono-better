@@ -23,6 +23,9 @@ pub mod auth;
 pub mod custom_queries;
 pub mod db;
 pub mod services;
+// Fold of `shared/src/tdigest.ts` (+ centroid.ts / binary-search.ts) — the
+// inspector server-metrics histogram; see `server/inspector_delegate.rs`.
+pub mod tdigest;
 pub mod workers;
 
 // Rust-only infra + the fused per-CG actor core (router).
