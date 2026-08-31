@@ -7701,12 +7701,26 @@ impl ViewSyncerService {
         // together with the row-change count, distinguishes "fetching too many
         // rows" (query-shape / planning) from "slow per-row cold I/O".
         let fetch_started = std::time::Instant::now();
+        // A `received` failure (the CVR version-bump invariant) is a recoverable
+        // error, not a panic — TS's `#assertNewVersion` throws and aborts the
+        // whole pass. Capture the first one, stop feeding the updater, and
+        // surface it below so the caller fails the connection and the client
+        // re-hydrates from the last consistent CVR (no partial flush).
+        let mut cvr_err: Option<String> = None;
         self.pipelines.hydrate(queries, |rc| {
             accumulate_signature(&mut sig_acc, rc);
-            if let Some((ct, qid, table, rk, row)) = row_change_to_maps(rc) {
-                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows);
+            if cvr_err.is_some() {
+                return;
+            }
+            if let Some((ct, qid, table, rk, row)) = row_change_to_maps(rc)
+                && let Err(e) = processor.on_row_change(ct, &qid, &table, rk, row, existing_rows)
+            {
+                cvr_err = Some(e);
             }
         })?;
+        if let Some(e) = cvr_err {
+            return Err(e);
+        }
         crate::trace::note(
             "hydrate-fetch",
             &format!(
@@ -7724,7 +7738,7 @@ impl ViewSyncerService {
         for (qid, hash) in add_queries {
             self.pipelines.set_query_transformation_hash(qid, hash);
         }
-        processor.finish(existing_rows);
+        processor.finish(existing_rows)?;
         let num_changes = processor.total_processed();
         drop(processor);
 
@@ -7863,12 +7877,14 @@ impl ViewSyncerService {
         {
             let mut processor = ChangeProcessor::new(&mut updater, &pokers);
             for (ct, qid, table, rk, row) in collected {
-                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows);
+                // A `received` version-bump failure is recoverable (TS throws);
+                // abort the advance before any flush so the client re-hydrates.
+                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows)?;
             }
             // TS `#advancePipelines` only processes received row changes. It
             // does not reconcile unreferenced rows because no queries are being
             // executed/removed in an advance pass.
-            processor.finish_received(existing_rows);
+            processor.finish_received(existing_rows)?;
             num_changes = processor.total_processed();
         }
 

@@ -1005,15 +1005,27 @@ impl CVRQueryDrivenUpdater {
     }
 
     /// Assert that a new version has been set (trackQueries or ensureNewVersion was called).
-    fn assert_new_version(&self) -> CVRVersion {
-        assert!(
-            cmp_versions(
-                &Some(self.base.orig.version.clone()),
-                &Some(self.base.cvr.version.clone())
-            ) == Ordering::Less,
-            "Expected CVR version to have been bumped above original"
-        );
-        self.base.cvr.version.clone()
+    ///
+    /// Port of TS `#assertNewVersion` (cvr.ts:769). TS uses `assert()`, which
+    /// THROWS a catchable Error; the CVR flush is transactional (store_ops are
+    /// buffered and only drained/committed on success), so the throw aborts the
+    /// update with nothing persisted — the client reconnects and re-hydrates
+    /// from the last consistent CVR. Rust MUST mirror that recoverable throw:
+    /// return `Err`, never `assert!`/panic. A panic here unwinds mid-mutation,
+    /// poisons the CG's locks, and takes down every client on the group; the
+    /// client then re-hydrates the same state and re-panics, wedging until a
+    /// cache clear (prod 2026-08-31 `cvr.rs:1009`). TS-prod logs ZERO of these
+    /// over 7 days precisely because a thrown-and-caught assert is a benign
+    /// retry, not a crash — matching that error semantics is AGENTS.md rule 1.
+    fn assert_new_version(&self) -> Result<CVRVersion, String> {
+        if cmp_versions(
+            &Some(self.base.orig.version.clone()),
+            &Some(self.base.cvr.version.clone()),
+        ) != Ordering::Less
+        {
+            return Err("Expected CVR version to have been bumped above original".to_string());
+        }
+        Ok(self.base.cvr.version.clone())
     }
 
     /// Track rows received from executing queries.
@@ -1023,7 +1035,7 @@ impl CVRQueryDrivenUpdater {
         &mut self,
         rows: &HashMap<String, (RowID, RowUpdate)>, // keyed by rowIDString
         existing_rows: &RowRecordMap,
-    ) -> Vec<PatchToVersion> {
+    ) -> Result<Vec<PatchToVersion>, String> {
         if crate::tracer::enabled() {
             crate::tracer::recv(
                 "QueryUpdater",
@@ -1075,7 +1087,7 @@ impl CVRQueryDrivenUpdater {
                 Some(e) if new_row_version.as_deref() == Some(e.row_version.as_str()) => {
                     e.patch_version.clone()
                 }
-                _ => self.assert_new_version(),
+                _ => self.assert_new_version()?,
             };
 
             // Determine the rowVersion to use for the put.
@@ -1159,7 +1171,7 @@ impl CVRQueryDrivenUpdater {
             }
         }
 
-        patches
+        Ok(patches)
     }
 
     /// Delete rows that are no longer referenced by any query.
@@ -1167,7 +1179,7 @@ impl CVRQueryDrivenUpdater {
     pub fn delete_unreferenced_rows<'a>(
         &mut self,
         existing_rows: impl IntoIterator<Item = &'a RowRecord>,
-    ) -> Vec<PatchToVersion> {
+    ) -> Result<Vec<PatchToVersion>, String> {
         let mut patches: Vec<PatchToVersion> = Vec::new();
 
         if self.removed_or_executed_query_ids.is_empty() {
@@ -1176,7 +1188,7 @@ impl CVRQueryDrivenUpdater {
                 "Expected no received rows for query-less update, got {}",
                 self.received_rows.len()
             );
-            return patches;
+            return Ok(patches);
         }
 
         for existing in existing_rows {
@@ -1217,7 +1229,7 @@ impl CVRQueryDrivenUpdater {
 
             let patch_version = match &new_ref_counts {
                 Some(_) => existing.patch_version.clone(),
-                None => self.assert_new_version(),
+                None => self.assert_new_version()?,
             };
 
             let row_record = RowRecord {
@@ -1257,7 +1269,7 @@ impl CVRQueryDrivenUpdater {
             }
         }
 
-        patches
+        Ok(patches)
     }
 
     /// Flush — persists row-set signatures before base flush.
@@ -2195,7 +2207,7 @@ mod updater_tests {
         rows.insert(id_str, (id, update));
 
         let existing = HashMap::new();
-        let patches = updater.received(&rows, &existing);
+        let patches = updater.received(&rows, &existing).unwrap();
 
         // Should produce a put row patch
         assert_eq!(patches.len(), 1);
@@ -2205,6 +2217,72 @@ mod updater_tests {
             }
             _ => panic!("expected RowPatch::Put"),
         }
+    }
+
+    /// Regression (prod 2026-08-31 `cvr.rs:1009`): `received` must NOT panic
+    /// when a changed row needs a new patchVersion but no version bump happened.
+    /// TS `#assertNewVersion` (cvr.ts:769) throws — recoverable, so the flush
+    /// aborts transactionally and the client re-hydrates; rust must return `Err`,
+    /// never `assert!`/panic. A panic poisons the CG's locks and wedges every
+    /// client on the group until a cache clear — a divergence TS-prod never
+    /// exhibits (0 occurrences over 7 days). Pins the TS-parity error semantics:
+    /// same message, recoverable, transactional (no `store_ops` buffered on the
+    /// failed pass, so nothing is persisted).
+    #[test]
+    fn test_received_no_bump_changed_row_returns_err_not_panic() {
+        let cvr = make_test_cvr(); // stateVersion "v1"
+        // SAME stateVersion → constructor must NOT bump (F-CVR-STORE-12), and no
+        // executed queries means `track_queries` does not lazily bump either.
+        let mut updater = make_query_driven_updater(cvr, "v1");
+        updater.track_queries(&[], &[]);
+
+        let id = RowID {
+            schema: "s".to_string(),
+            table: "t".to_string(),
+            row_key: serde_json::json!({"id": 1}).as_object().unwrap().clone(),
+        };
+        let id_str = crate::row_key::row_id_string(&id);
+
+        // Existing CVR record for the row at rowVersion "rv1".
+        let mut existing = HashMap::new();
+        existing.insert(
+            id_str.clone(),
+            RowRecord {
+                id: id.clone(),
+                row_version: "rv1".to_string(),
+                patch_version: CVRVersion {
+                    state_version: "v1".to_string(),
+                    config_version: None,
+                },
+                ref_counts: Some([("hash1".to_string(), 1)].into_iter().collect()),
+            },
+        );
+
+        // Receive the same row at a NEWER rowVersion "rv2" (a changed row) — this
+        // needs a new patchVersion, so `received` reaches `assert_new_version`.
+        let update = RowUpdate {
+            version: Some("rv2".to_string()),
+            contents: Some(std::sync::Arc::new(
+                serde_json::json!({"id": 1, "name": "x"}),
+            )),
+            ref_counts: [("hash1".to_string(), 1)].into_iter().collect(),
+        };
+        let mut rows = HashMap::new();
+        rows.insert(id_str, (id, update));
+
+        // Must be a graceful Err (TS throw semantics), NOT a panic.
+        let result = updater.received(&rows, &existing);
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("Expected CVR version to have been bumped above original"),
+            "expected recoverable Err on a no-bump changed row (TS #assertNewVersion \
+             throws); Ok/panic here is the prod wedge"
+        );
+        // Transactional: the failed pass buffered no persisted ops.
+        assert!(
+            updater.base.store_ops.is_empty(),
+            "no store_ops may be buffered when the version-bump invariant fails"
+        );
     }
 
     #[test]
@@ -2245,7 +2323,7 @@ mod updater_tests {
         let mut rows = HashMap::new();
         rows.insert(id_str, (id, update));
 
-        let patches = updater.received(&rows, &existing);
+        let patches = updater.received(&rows, &existing).unwrap();
 
         // Should produce a del row patch
         assert_eq!(patches.len(), 1);
@@ -2305,7 +2383,7 @@ mod updater_tests {
                 },
             ),
         );
-        updater.received(&rows1, &existing);
+        updater.received(&rows1, &existing).unwrap();
         assert!(
             updater
                 .received_rows
@@ -2327,7 +2405,7 @@ mod updater_tests {
                 },
             ),
         );
-        updater.received(&rows2, &existing);
+        updater.received(&rows2, &existing).unwrap();
 
         // The last PutRowRecord for R must carry ONLY qB — the retracted qA must
         // NOT be resurrected from `existing` (TS: mergeRefCounts(null, {qB:1})).
@@ -2396,7 +2474,7 @@ mod updater_tests {
         let mut rows = HashMap::new();
         rows.insert(id_str, (id, update));
 
-        let patches = updater.received(&rows, &existing);
+        let patches = updater.received(&rows, &existing).unwrap();
         assert_eq!(patches.len(), 1);
         match &patches[0].patch {
             Patch::Row(RowPatch::Del { .. }) => {}
@@ -2449,7 +2527,7 @@ mod updater_tests {
             ref_counts: Some([("hash1".to_string(), 1)].into_iter().collect()),
         }];
 
-        let patches = updater.delete_unreferenced_rows(&existing);
+        let patches = updater.delete_unreferenced_rows(&existing).unwrap();
 
         // Should produce a del row patch (hash1 was removed)
         assert_eq!(patches.len(), 1);

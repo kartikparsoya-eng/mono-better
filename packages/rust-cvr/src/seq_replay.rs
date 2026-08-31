@@ -252,11 +252,16 @@ pub async fn run(pool: &PgPool, prog: &Program) -> Value {
                     ),
                 );
             }
-            push_patches(&mut patches, updater.received(&rows, &existing));
+            push_patches(
+                &mut patches,
+                updater.received(&rows, &existing).expect("received"),
+            );
             if tx.delete_unreferenced {
                 push_patches(
                     &mut patches,
-                    updater.delete_unreferenced_rows(existing.values()),
+                    updater
+                        .delete_unreferenced_rows(existing.values())
+                        .expect("delete_unreferenced_rows"),
                 );
             }
 

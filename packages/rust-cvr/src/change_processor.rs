@@ -113,7 +113,7 @@ impl<'a> ChangeProcessor<'a> {
         row_key: Map<String, Value>,
         row: Option<Map<String, Value>>,
         existing_rows: &RowRecordMap,
-    ) {
+    ) -> Result<(), String> {
         let row_id = RowID {
             schema: String::new(),
             table: table.to_string(),
@@ -187,49 +187,57 @@ impl<'a> ChangeProcessor<'a> {
         }
 
         if self.rows.len().is_multiple_of(self.cursor_page_size) {
-            self.flush_batch(existing_rows);
+            self.flush_batch(existing_rows)?;
         }
+        Ok(())
     }
 
     /// Flush the current batch to the updater and route patches to pokers.
-    fn flush_batch(&mut self, existing_rows: &RowRecordMap) {
+    ///
+    /// Propagates `updater.received`'s error (the CVR version-bump invariant) as
+    /// a recoverable `Err` instead of a panic — TS's `received` throws and the
+    /// caller aborts the flush transactionally (store_ops undrained). See
+    /// `CVRQueryDrivenUpdater::assert_new_version`.
+    fn flush_batch(&mut self, existing_rows: &RowRecordMap) -> Result<(), String> {
         if self.rows.is_empty() {
-            return;
+            return Ok(());
         }
         self.total += self.rows.len();
 
         // Call updater.received() — direct call, zero boundary crossing
-        let patches: Vec<PatchToVersion> = self.updater.received(&self.rows, existing_rows);
+        let patches: Vec<PatchToVersion> = self.updater.received(&self.rows, existing_rows)?;
         self.rows.clear();
 
         // Route patches to all client handlers — direct call, zero crossing
         for patch in &patches {
             self.pokers.add_patch(patch);
         }
+        Ok(())
     }
 
     /// Final flush after all changes have been processed.
     /// Also calls `delete_unreferenced_rows` and routes those patches.
-    pub fn finish(&mut self, existing_rows: &RowRecordMap) {
-        self.finish_received(existing_rows);
+    pub fn finish(&mut self, existing_rows: &RowRecordMap) -> Result<(), String> {
+        self.finish_received(existing_rows)?;
 
         // delete_unreferenced_rows — borrow the cache's records directly rather
         // than deep-cloning the whole row-record map (which, for a large client
         // group, copied every RowRecord in the CVR on every advance).
         let patches = self
             .updater
-            .delete_unreferenced_rows(existing_rows.values());
+            .delete_unreferenced_rows(existing_rows.values())?;
         for patch in &patches {
             self.pokers.add_patch(patch);
         }
+        Ok(())
     }
 
     /// Flush only the rows received in this pass. Replica advancement executes
     /// no query add/remove set, so (matching TS `#advancePipelines`) it must not
     /// run `deleteUnreferencedRows`; doing so treats a normal advance as a
     /// query-less reconciliation and panics as soon as one row changes.
-    pub fn finish_received(&mut self, existing_rows: &RowRecordMap) {
-        self.flush_batch(existing_rows);
+    pub fn finish_received(&mut self, existing_rows: &RowRecordMap) -> Result<(), String> {
+        self.flush_batch(existing_rows)
     }
 
     /// Total rows processed so far.
@@ -408,14 +416,16 @@ mod tests {
         row.insert("_0_version".to_string(), Value::String("v1".to_string()));
         let mut key = Map::new();
         key.insert("id".to_string(), Value::String("r1".to_string()));
-        processor.on_row_change(
-            RowChangeType::Add,
-            "hash1",
-            "t",
-            key,
-            Some(row),
-            &existing_rows,
-        );
+        processor
+            .on_row_change(
+                RowChangeType::Add,
+                "hash1",
+                "t",
+                key,
+                Some(row),
+                &existing_rows,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -443,15 +453,17 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(
-            RowChangeType::Add,
-            "q1",
-            "users",
-            row_key.clone(),
-            Some(row.clone()),
-            &existing_rows,
-        );
-        processor.finish(&existing_rows);
+        processor
+            .on_row_change(
+                RowChangeType::Add,
+                "q1",
+                "users",
+                row_key.clone(),
+                Some(row.clone()),
+                &existing_rows,
+            )
+            .unwrap();
+        processor.finish(&existing_rows).unwrap();
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
             config_version: Some(2),
@@ -492,23 +504,27 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then REMOVE → refCount goes to 0
-        processor.on_row_change(
-            RowChangeType::Add,
-            "q1",
-            "users",
-            row_key.clone(),
-            Some(row.clone()),
-            &existing_rows,
-        );
-        processor.on_row_change(
-            RowChangeType::Remove,
-            "q1",
-            "users",
-            row_key.clone(),
-            None,
-            &existing_rows,
-        );
-        processor.finish(&existing_rows);
+        processor
+            .on_row_change(
+                RowChangeType::Add,
+                "q1",
+                "users",
+                row_key.clone(),
+                Some(row.clone()),
+                &existing_rows,
+            )
+            .unwrap();
+        processor
+            .on_row_change(
+                RowChangeType::Remove,
+                "q1",
+                "users",
+                row_key.clone(),
+                None,
+                &existing_rows,
+            )
+            .unwrap();
+        processor.finish(&existing_rows).unwrap();
         // `total_processed` counts distinct ROWS flushed (`self.total +=
         // self.rows.len()`), not the number of on_row_change calls. Both changes
         // here target the same row_key, so they collapse into ONE entry — total
@@ -555,23 +571,27 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD from query1 + ADD from query2 → refCounts = {q1: 1, q2: 1}
-        processor.on_row_change(
-            RowChangeType::Add,
-            "q1",
-            "users",
-            row_key.clone(),
-            Some(row.clone()),
-            &existing_rows,
-        );
-        processor.on_row_change(
-            RowChangeType::Add,
-            "q2",
-            "users",
-            row_key.clone(),
-            Some(row.clone()),
-            &existing_rows,
-        );
-        processor.finish(&existing_rows);
+        processor
+            .on_row_change(
+                RowChangeType::Add,
+                "q1",
+                "users",
+                row_key.clone(),
+                Some(row.clone()),
+                &existing_rows,
+            )
+            .unwrap();
+        processor
+            .on_row_change(
+                RowChangeType::Add,
+                "q2",
+                "users",
+                row_key.clone(),
+                Some(row.clone()),
+                &existing_rows,
+            )
+            .unwrap();
+        processor.finish(&existing_rows).unwrap();
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
             config_version: Some(2),
@@ -629,16 +649,18 @@ mod tests {
             let mut row_key = Map::new();
             row_key.insert("id".to_string(), Value::String(format!("row{}", i)));
 
-            processor.on_row_change(
-                RowChangeType::Add,
-                "q1",
-                "users",
-                row_key.clone(),
-                Some(row.clone()),
-                &existing_rows,
-            );
+            processor
+                .on_row_change(
+                    RowChangeType::Add,
+                    "q1",
+                    "users",
+                    row_key.clone(),
+                    Some(row.clone()),
+                    &existing_rows,
+                )
+                .unwrap();
         }
-        processor.finish(&existing_rows);
+        processor.finish(&existing_rows).unwrap();
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
             config_version: Some(2),
@@ -676,15 +698,17 @@ mod tests {
 
         let existing_rows: RowRecordMap = HashMap::new();
 
-        processor.on_row_change(
-            RowChangeType::Add,
-            "q1",
-            "users",
-            row_key.clone(),
-            Some(row.clone()),
-            &existing_rows,
-        );
-        processor.finish(&existing_rows);
+        processor
+            .on_row_change(
+                RowChangeType::Add,
+                "q1",
+                "users",
+                row_key.clone(),
+                Some(row.clone()),
+                &existing_rows,
+            )
+            .unwrap();
+        processor.finish(&existing_rows).unwrap();
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
             config_version: Some(2),
@@ -727,14 +751,16 @@ mod tests {
         let existing_rows: RowRecordMap = HashMap::new();
 
         // ADD then EDIT → refCount stays at 1
-        processor.on_row_change(
-            RowChangeType::Add,
-            "q1",
-            "users",
-            row_key.clone(),
-            Some(row.clone()),
-            &existing_rows,
-        );
+        processor
+            .on_row_change(
+                RowChangeType::Add,
+                "q1",
+                "users",
+                row_key.clone(),
+                Some(row.clone()),
+                &existing_rows,
+            )
+            .unwrap();
 
         // EDIT with updated version
         let mut row2 = Map::new();
@@ -742,15 +768,17 @@ mod tests {
         row2.insert("name".to_string(), Value::String("Bob".to_string()));
         row2.insert("_0_version".to_string(), Value::String("v2".to_string()));
 
-        processor.on_row_change(
-            RowChangeType::Edit,
-            "q1",
-            "users",
-            row_key.clone(),
-            Some(row2.clone()),
-            &existing_rows,
-        );
-        processor.finish(&existing_rows);
+        processor
+            .on_row_change(
+                RowChangeType::Edit,
+                "q1",
+                "users",
+                row_key.clone(),
+                Some(row2.clone()),
+                &existing_rows,
+            )
+            .unwrap();
+        processor.finish(&existing_rows).unwrap();
         pokers.end(CVRVersion {
             state_version: "00".to_string(),
             config_version: Some(2),

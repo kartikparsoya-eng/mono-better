@@ -1300,7 +1300,7 @@ fn parity_check() {
                 .and_then(Value::as_array)
                 .expect("receivedRows"),
         );
-        let recv_patches = updater.received(&rows, &existing);
+        let recv_patches = updater.received(&rows, &existing).unwrap();
         assert_eq!(
             &sorted_norm(recv_patches),
             entry.get("receivedPatches").expect("receivedPatches"),
@@ -1318,7 +1318,7 @@ fn parity_check() {
         let del_patches = if skip_delete {
             Vec::new()
         } else {
-            updater.delete_unreferenced_rows(existing.values())
+            updater.delete_unreferenced_rows(existing.values()).unwrap()
         };
         assert_eq!(
             &sorted_norm(del_patches),

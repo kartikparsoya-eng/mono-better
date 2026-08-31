@@ -132,8 +132,8 @@ async fn flush_matches_ts_golden() {
             );
         }
         let existing: HashMap<String, rust_cvr::schema::types::RowRecord> = HashMap::new();
-        updater.received(&rows, &existing);
-        updater.delete_unreferenced_rows(existing.values());
+        updater.received(&rows, &existing).unwrap();
+        updater.delete_unreferenced_rows(existing.values()).unwrap();
 
         let (cvr_final, _stats) = updater.flush(connect_time as i64, now, now);
         let ops = updater.base.drain_store_ops();
