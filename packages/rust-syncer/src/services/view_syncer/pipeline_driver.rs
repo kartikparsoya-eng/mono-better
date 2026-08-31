@@ -24,8 +24,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use rust_ivm::builder::debug_delegate::{RowCountsBySource, runtime_debug_flags};
+use rust_ivm::builder::debug_delegate::{RowCountsBySource, SharedDebug, runtime_debug_flags};
 use rust_ivm::engine::{Engine, QuerySpec, ScalarResetError};
+use rust_ivm::ivm::change::ChangeType;
 use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
@@ -706,6 +707,50 @@ impl IvmPipelines {
             }
         }
         Ok(())
+    }
+
+    /// Hydrate one AST with an explicit `Debug` delegate attached, collecting the
+    /// ADD rows, for the analyzeQuery path. The engine of a THROWAWAY analysis
+    /// `IvmPipelines` (see `services::analyze::analyze_query`) — never the live
+    /// serving engine. Port of the hydrate half of TS `runAst` (run-ast.ts:118-
+    /// 169): the debug delegate the source records vended-rows / nvisit / plans
+    /// on is `run_ast`'s (TS `host.debug`), read back by the caller afterward.
+    pub fn hydrate_analyze(
+        &mut self,
+        ast_json: &str,
+        debug: SharedDebug,
+    ) -> Result<Vec<(String, Row)>, String> {
+        let ast = parse_ts_ast(ast_json).map_err(|e| format!("AST parse error: {e}"))?;
+        let eng = self
+            .engine
+            .as_mut()
+            .ok_or_else(|| "Engine not initialized".to_string())?;
+        eng.set_analyze_debug(Some(debug));
+
+        let collected: Rc<RefCell<Vec<(String, Row)>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = collected.clone();
+        // TS `runAst` collects every ADD rowChange (main + companion), then dedups
+        // in the loop; the dedup lives in `run_ast`.
+        eng.add_queries_streaming(
+            &[QuerySpec {
+                query_id: "analyze".to_string(),
+                ast,
+            }],
+            move |rc: &RowChange| {
+                if rc.change_type == ChangeType::Add
+                    && let Some(row) = &rc.row
+                {
+                    sink.borrow_mut().push((rc.table.clone(), row.clone()));
+                }
+            },
+        );
+
+        if let Some(eng) = self.engine.as_mut() {
+            eng.set_analyze_debug(None);
+        }
+        Ok(Rc::try_unwrap(collected)
+            .map(|c| c.into_inner())
+            .unwrap_or_else(|rc| rc.borrow().clone()))
     }
 
     /// Advance the replica to head, streaming each `RowChange` to `on_row` and

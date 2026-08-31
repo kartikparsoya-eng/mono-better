@@ -80,11 +80,10 @@ pub async fn handle_inspect(
                 }),
             ))
         }
-        // `analyzeQuery` (query plan / vended-rows analysis) is not ported.
-        // Route through the error op: an `analyze-query` success frame with
-        // an `{error}` payload would fail `analyzeQueryResultSchema` on the
-        // client and hang the RPC.
-        "analyze-query" => Err("analyze-query is not supported by the rust syncer yet".to_string()),
+        // `analyze-query` — port of the TS inspect-handler `analyze-query` case
+        // (inspect-handler.ts:115) → `analyzeQuery`. Runs a throwaway read-only
+        // analysis engine over the replica and returns an `AnalyzeQueryResult`.
+        "analyze-query" => analyze_query_op(cg_id, sync_engine, body).await,
         other => {
             tracing::warn!("CG {cg_id}: unknown inspect op {other:?}");
             Err(format!("unknown inspect op: {other}"))
@@ -97,6 +96,84 @@ pub async fn handle_inspect(
         Err(message) => serde_json::json!({"op": "error", "id": id, "value": message}),
     };
     sync_engine.send_inspect_response(ws_id, frame);
+}
+
+/// Port of the TS inspect-handler `analyze-query` case (inspect-handler.ts:115).
+/// Extracts the AST from the body, then runs [`analyze_query`] over the replica
+/// on a blocking thread (the IVM analysis engine is `!Send`) and returns the
+/// serialized `AnalyzeQueryResult`.
+///
+/// DEFERRED vs TS (labeled): named-query transform (`body.name`/`body.args` →
+/// `transformCustomQuery`) and the read-permission transform (see
+/// `services::run_ast`). Only the legacy `body.ast` path is ported.
+async fn analyze_query_op(
+    cg_id: &str,
+    sync_engine: &ViewSyncerService,
+    body: &serde_json::Value,
+) -> Result<(&'static str, serde_json::Value), String> {
+    if body.get("name").is_some() && body.get("args").is_some() {
+        return Err(
+            "analyze-query for named queries is not yet supported by the rust syncer \
+             (legacy AST only)"
+                .to_string(),
+        );
+    }
+    // TS: `let ast = body.ast ?? body.value`.
+    let ast = match body.get("ast").or_else(|| body.get("value")) {
+        Some(v) if !v.is_null() => v.clone(),
+        _ => {
+            return Err(
+                "AST is required for analyze-query operation. Either provide an AST \
+                 directly or ensure custom query transformation is configured."
+                    .to_string(),
+            );
+        }
+    };
+    let ast_json =
+        serde_json::to_string(&ast).map_err(|e| format!("analyze-query: serialize AST: {e}"))?;
+
+    let replica_path = match sync_engine.replica_path() {
+        Some(p) => p.to_string(),
+        None => {
+            return Err(
+                "analyze-query requires a SQLite replica (not available for in-memory CGs)"
+                    .to_string(),
+            );
+        }
+    };
+    let app_id = sync_engine.app_id().to_string();
+
+    // TS `body.options` defaults: syncedRows=true, vendedRows=false.
+    let opts = body.get("options");
+    let synced_rows = opts
+        .and_then(|o| o.get("syncedRows"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let vended_rows = opts
+        .and_then(|o| o.get("vendedRows"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // The analysis engine is `!Send` (Rc/RefCell IVM), so build + run it on a
+    // blocking thread; only the `Send` result crosses back.
+    let result = tokio::task::spawn_blocking(move || {
+        crate::services::analyze::analyze_query(
+            &replica_path,
+            &app_id,
+            &ast_json,
+            synced_rows,
+            vended_rows,
+        )
+    })
+    .await
+    .map_err(|e| {
+        tracing::warn!("CG {cg_id}: analyze-query task join error: {e}");
+        format!("analyze-query task failed: {e}")
+    })??;
+
+    let value = serde_json::to_value(&result)
+        .map_err(|e| format!("analyze-query: serialize result: {e}"))?;
+    Ok(("analyze-query", value))
 }
 
 /// Build the `queries` inspector value by delegating to the CVR store's

@@ -125,6 +125,66 @@ fn vended_row_counts_track_rows_scanned_only_when_flag_on() {
     f.set_track_rows_vended(prev_rows);
 }
 
+/// End-to-end for the analyzeQuery engine hook: when `set_analyze_debug` attaches
+/// an explicit delegate (the port of TS `runAst`'s `host.debug = new Debug()`),
+/// a normal `add_queries_streaming` hydrate must populate that SAME delegate with
+/// the vended-row counts (during hydrate) AND the nvisit + plans (on fetch drop),
+/// so `run_ast` can read all three back off it. Non-vacuous: reverting the
+/// `analyze_debug` precedence in the engine build leaves the caller's delegate
+/// empty and the vended assertion fails.
+#[test]
+fn set_analyze_debug_populates_the_callers_delegate() {
+    // Table with a non-PK column so the scan genuinely visits rows (NVISIT>1).
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER);")
+        .unwrap();
+    for i in 0..8i64 {
+        conn.execute("INSERT INTO t (id, v) VALUES (?1, ?2)", [i, i * 10])
+            .unwrap();
+    }
+    let src = TableSource::new(
+        std::rc::Rc::new(std::cell::RefCell::new(conn)),
+        "t",
+        HashMap::from([
+            ("id".to_string(), ColumnType::Number { optional: false }),
+            ("v".to_string(), ColumnType::Number { optional: false }),
+        ]),
+        vec!["id".to_string()],
+    );
+    let mut eng = Engine::new(HashMap::from([("t".to_string(), vec!["id".to_string()])]));
+    eng.register_source(Rc::new(RefCell::new(src)));
+    eng.set_unique_keys("t", vec![vec!["id".to_string()]]);
+
+    let debug = Debug::new_shared();
+    eng.set_analyze_debug(Some(debug.clone()));
+    let _ = eng.add_queries_streaming(
+        &[QuerySpec {
+            query_id: "analyze".into(),
+            ast: basic_ast("t"),
+        }],
+        |_rc: &RowChange| {},
+    );
+    eng.set_analyze_debug(None);
+
+    let d = debug.borrow();
+    // Vended-row counts populate during hydrate regardless of scanstatus.
+    let vended = d.get_vended_row_counts();
+    assert!(
+        vended.contains_key("t") && vended["t"].values().copied().sum::<u64>() == 8,
+        "the caller's delegate carries the 8 vended rows; got {vended:?}"
+    );
+    if scanstatus_available() {
+        assert!(
+            d.get_nvisit_counts().contains_key("t"),
+            "the caller's delegate carries the nvisit (dbScansByQuery source)"
+        );
+        assert!(
+            !d.get_sqlite_plans().is_empty(),
+            "the caller's delegate carries the SQLite plans"
+        );
+    }
+}
+
 /// Non-vacuous (when the linked SQLite has SQLITE_ENABLE_STMT_SCANSTATUS): a
 /// `TableSource` fetch carrying a `Debug` must, on drop, record NVISIT (rows
 /// visited) + EXPLAIN via `record_nvisit`/`record_explain` — the port of TS

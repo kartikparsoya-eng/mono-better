@@ -448,6 +448,13 @@ pub struct Engine {
     /// connection whose data advances in place, so engine-lifetime caching is
     /// the equivalent scope). Invalidated when the conn or specs change.
     cached_cost_model: Option<crate::planner::ConnectionCostModel>,
+    /// Analyze-only: an explicit `Debug` delegate attached to every pipeline
+    /// this engine builds, in place of the `trackRowsVended`-flag-gated one.
+    /// Set by the analyzeQuery path (`run_ast`) on a throwaway analysis engine
+    /// so it can read the vended-row / nvisit / plan stats back after hydrating
+    /// — the port of TS `runAst`'s `host.debug = new Debug()` (analyze.ts:74).
+    /// `None` on the live serving engine (no override → flag-gated).
+    analyze_debug: Option<SharedDebug>,
 }
 
 impl Engine {
@@ -466,7 +473,17 @@ impl Engine {
             cost_model_conn: None,
             cost_model_specs: None,
             cached_cost_model: None,
+            analyze_debug: None,
         }
+    }
+
+    /// Attach an explicit debug delegate for the analyzeQuery path (see the
+    /// `analyze_debug` field). Port of setting `host.debug` in TS `runAst`
+    /// (analyze.ts:74). Every subsequent `add_queries_streaming` build attaches
+    /// this delegate to its source connections so the caller can read the
+    /// vended/nvisit/plan stats back off it.
+    pub fn set_analyze_debug(&mut self, debug: Option<SharedDebug>) {
+        self.analyze_debug = debug;
     }
 
     /// Enable query-flip planning (port parity with TS `buildPipeline` →
@@ -790,7 +807,13 @@ impl Engine {
             // (TS resets between queries; rust batches, so a distinct delegate
             // per pipeline is the equivalent). `None` in prod → the source's
             // hot read path pays nothing.
-            let debug: Option<SharedDebug> = if runtime_debug_flags().track_rows_vended() {
+            //
+            // The analyzeQuery path (`run_ast`) instead sets an explicit shared
+            // delegate via `set_analyze_debug` (TS `host.debug = new Debug()`),
+            // which takes precedence so the caller can read stats back after.
+            let debug: Option<SharedDebug> = if let Some(d) = &self.analyze_debug {
+                Some(d.clone())
+            } else if runtime_debug_flags().track_rows_vended() {
                 Some(Debug::new_shared())
             } else {
                 None

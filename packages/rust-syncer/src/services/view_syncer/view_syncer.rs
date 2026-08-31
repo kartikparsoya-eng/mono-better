@@ -816,6 +816,19 @@ impl Drop for ViewSyncerService {
 }
 
 impl ViewSyncerService {
+    /// The SQLite replica path this CG serves, if any (`None` for in-memory
+    /// test/dev CGs). Used by the `analyze-query` inspect op to open its own
+    /// read-only analysis engine — TS `config.replica.file`.
+    pub fn replica_path(&self) -> Option<&str> {
+        self.replica_path.as_deref()
+    }
+
+    /// The app id (schema prefix) — TS `config.app.id`. Needed to open the
+    /// analysis engine's snapshotter over the replica.
+    pub fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
     #[cfg(test)]
     fn new_test(
         cg_id: &str,
@@ -5794,8 +5807,11 @@ mod tests {
     fn inspect_unsupported_and_unknown_ops_answer_with_error_op() {
         let (cell, rt, mut drx) = inspect_test_state();
 
-        // analyze-query is not ported → `{op:"error"}`, not a success frame
-        // carrying an `{error}` payload.
+        // analyze-query IS ported, but a request with no AST must answer with
+        // `{op:"error"}` (AST required) — NOT a success frame carrying an
+        // `{error}` payload, which would fail the client's
+        // `analyzeQueryResultSchema`. (Port of the TS `throw new Error('AST is
+        // required...')`, inspect-handler.ts:131, surfaced through the error op.)
         rt.block_on(on_inbound(
             &cell,
             "c1".into(),
@@ -5809,8 +5825,9 @@ mod tests {
             frame[1]["value"]
                 .as_str()
                 .unwrap()
-                .contains("not supported"),
-            "error value must be a string message"
+                .contains("AST is required"),
+            "error value must be the AST-required message; got {:?}",
+            frame[1]["value"]
         );
 
         // Unknown op (TS `unreachable` throw → catch) → error op, not silence.
