@@ -2574,4 +2574,87 @@ mod updater_tests {
                 .any(|op| matches!(op, StoreOp::UpdateRowSetSignature { .. }))
         );
     }
+
+    /// Non-vacuous guard for the row-set-signature DRIFT branch (cvr.rs
+    /// flush, the `#rowSetSignatureDrifts` mechanism — TS records the metric in
+    /// `#hydrateUnchangedQueries`, rust records it here at flush when the
+    /// provider's freshly-computed signature differs from the CVR-stored one).
+    /// A CHANGED stored signature is a real drift → persist the new value +
+    /// emit the store op; an UNCHANGED one is a no-op (cvr.rs `if stored ==
+    /// Some(sig) { continue }`). Reverting either branch makes an assertion fail.
+    #[test]
+    fn test_flush_records_signature_drift_only_when_changed() {
+        let prior = crate::row_set_signature::format_signature(11111u64);
+
+        // ── Drift: stored signature (11111) differs from the provider (22222).
+        {
+            let mut cvr = make_test_cvr();
+            cvr.queries.insert(
+                "q1".to_string(),
+                QueryRecord::Client(ClientQueryRecord {
+                    base: BaseQueryRecord {
+                        id: "q1".to_string(),
+                        transformation_hash: Some("th1".to_string()),
+                        transformation_version: None,
+                        row_set_signature: Some(prior.clone()),
+                    },
+                    ast: serde_json::json!({"schema": "s", "table": "t"}),
+                    client_state: BTreeMap::new(),
+                    patch_version: Some(CVRVersion {
+                        state_version: "v1".to_string(),
+                        config_version: None,
+                    }),
+                }),
+            );
+            let provider: Box<RowSetSignatureProvider> = Box::new(|_id: &str| Some(22222u64));
+            let mut updater =
+                CVRQueryDrivenUpdater::new(cvr, "v2".to_string(), "r1".to_string(), Some(provider));
+            updater.flush(0, 0, 0);
+            // The drifted signature is persisted to the changed value.
+            let q = updater.base.cvr.queries.get("q1").unwrap();
+            assert_eq!(
+                q.base().row_set_signature.as_deref(),
+                Some(crate::row_set_signature::format_signature(22222u64).as_str()),
+                "a changed signature (drift) must be persisted"
+            );
+            let ops = updater.base.drain_store_ops();
+            assert!(
+                ops.iter()
+                    .any(|op| matches!(op, StoreOp::UpdateRowSetSignature { .. })),
+                "drift must emit an UpdateRowSetSignature store op"
+            );
+        }
+
+        // ── No drift: stored signature equals the provider (11111) → no-op.
+        {
+            let mut cvr = make_test_cvr();
+            cvr.queries.insert(
+                "q1".to_string(),
+                QueryRecord::Client(ClientQueryRecord {
+                    base: BaseQueryRecord {
+                        id: "q1".to_string(),
+                        transformation_hash: Some("th1".to_string()),
+                        transformation_version: None,
+                        row_set_signature: Some(prior.clone()),
+                    },
+                    ast: serde_json::json!({"schema": "s", "table": "t"}),
+                    client_state: BTreeMap::new(),
+                    patch_version: Some(CVRVersion {
+                        state_version: "v1".to_string(),
+                        config_version: None,
+                    }),
+                }),
+            );
+            let provider: Box<RowSetSignatureProvider> = Box::new(|_id: &str| Some(11111u64));
+            let mut updater =
+                CVRQueryDrivenUpdater::new(cvr, "v2".to_string(), "r1".to_string(), Some(provider));
+            updater.flush(0, 0, 0);
+            let ops = updater.base.drain_store_ops();
+            assert!(
+                !ops.iter()
+                    .any(|op| matches!(op, StoreOp::UpdateRowSetSignature { .. })),
+                "an unchanged signature must NOT emit an UpdateRowSetSignature op"
+            );
+        }
+    }
 }

@@ -7104,6 +7104,24 @@ impl ViewSyncerService {
         ttl_clock: TTLClock,
         original_client_versions: std::collections::HashMap<String, NullableCVRVersion>,
     ) -> Result<CVR, String> {
+        // DIVERGENCE (documented, ART-gated): TS `#syncQueryPipelineSet` first
+        // runs `#hydrateUnchangedQueries` (view-syncer.ts:1449) — a PROACTIVE
+        // re-hydrate of every already-gotten same-hash query on EVERY sync, to
+        // detect row-set-signature drift on still-alive pipelines. Rust does NOT
+        // do that proactive pass: it (re-)hydrates a gotten query only when its
+        // pipeline is MISSING or its transformation hash CHANGED (the loop below).
+        // The drift MACHINERY that pass feeds is already present, though: the
+        // `zero.sync.query.row-set-signature-drifts` counter + signature persist
+        // fire from the CVR flush (cvr.rs, via the `signature_provider` populated
+        // in `hydrate_and_sync`), and a drifted re-hydration's rows are re-emitted
+        // by `received()` + the same-hash force-bump — so the reconnect/reap drift
+        // case IS covered. The only thing the proactive pass adds is catching
+        // non-determinism on a LONG-LIVED CG that never re-hydrates (rare), at the
+        // cost of re-executing every query on every sync. Porting it is a
+        // serving-path perf change that must be ART-gated first; until then the
+        // same-hash force-bump reason stays `missing-pipeline` (TS's value when
+        // `driftedQueryIDs` is empty). See parity/ZERO-DIVERGENCE-PLAN.md.
+        //
         // ── Phase 2: query-driven — sync the pipeline to the CVR's FULL query
         // set (port of TS `#syncQueryPipelineSet`). The executed set is derived
         // from `cfg_cvr.queries` — which, after `ensure_client`, includes the
