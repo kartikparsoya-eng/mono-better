@@ -299,7 +299,19 @@ CRATES = {
         # relocations (#recordWebSocketError, #recordViewSyncerLagSamples →
         # observability/metrics.rs; #163 family) + 3 common-name fuzzy
         # collisions (#push/fetch/reset). Growth is new visibility, not drift.
-        "max_misfiled": 30,
+        # 30→31 (2026-08-31, D inspector-metrics port): ONE more common-name
+        # fuzzy collision — `InspectorDelegate.addQuery` (inspector-delegate.ts)
+        # is correctly ported to `server/inspector_delegate.rs::add_query`, but
+        # the fuzzy pass attributes rust `add_query` to `pipeline-driver.ts::
+        # addQuery` (a same-name symbol already covered by the "addquery" alias).
+        # `inspector-delegate.ts`/`shared/src/tdigest.ts` are deliberately NOT
+        # added to `ts_files`: the former would cascade its auth-method fold
+        # (isAuthenticated/… live on ViewSyncerService) as new misfiles, and the
+        # latter is a `packages/shared` path the ZC-relative file-correspondence
+        # can't map (it flags all 19 TDigest methods). The real ports are 1:1
+        # filed (server/inspector_delegate.rs, tdigest.rs); this is matcher noise,
+        # not drift. See parity/INVENTIONS.md I-10.
+        "max_misfiled": 31,
         # rust-syncer replaces the entire TS syncer WORKER process: the WS
         # connection lifecycle (workers/), the view-syncer serving loop +
         # pipeline driver (services/view-syncer/), the read-permission + JWT auth

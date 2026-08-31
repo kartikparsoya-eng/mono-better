@@ -147,34 +147,6 @@ impl InspectorDelegate {
     }
 }
 
-/// Port of `metricsForProtocol` (inspect-handler.ts:193). Protocol `>= 51`: the
-/// new format passes through unchanged. Protocol `< 51`: wrap the scalar
-/// `query-hydration-server-ms` into a one-point TDigest under the old field name
-/// `query-materialization-server`, alongside `query-update-server`, so 1.5
-/// clients can parse the response.
-pub fn metrics_for_protocol(metrics: Option<Value>, protocol_version: u32) -> Option<Value> {
-    match metrics {
-        // TS: `if (protocolVersion >= 51 || metrics === null) return metrics;`.
-        None => None,
-        Some(m) if protocol_version >= 51 => Some(m),
-        Some(m) => {
-            let mut hydrate_digest = TDigest::default();
-            // TS: `if (hydrateMs !== undefined) hydrateDigest.add(hydrateMs);`.
-            if let Some(ms) = m.get("query-hydration-server-ms").and_then(Value::as_f64) {
-                hydrate_digest.add(ms, 1.0);
-            }
-            let update = m
-                .get("query-update-server")
-                .cloned()
-                .unwrap_or_else(|| TDigest::default().to_json_value());
-            Some(json!({
-                "query-materialization-server": hydrate_digest.to_json_value(),
-                "query-update-server": update,
-            }))
-        }
-    }
-}
-
 /// Emit an integer-valued `f64` (a whole-millisecond hydration time) as a JSON
 /// integer, matching JS `JSON.stringify` of a `number`.
 fn number_to_value(n: f64) -> Value {
@@ -239,39 +211,6 @@ mod tests {
         assert_eq!(
             d.get_metrics_json_for_query("q2"),
             Some(json!({"query-hydration-server-ms": 4, "query-update-server": [1000]}))
-        );
-    }
-
-    #[test]
-    fn metrics_for_protocol_new_passes_through_old_wraps_hydration() {
-        let per_query =
-            json!({"query-hydration-server-ms": 9.0, "query-update-server": [1000, 2.0, 1]});
-
-        // Protocol >= 51: unchanged.
-        assert_eq!(
-            metrics_for_protocol(Some(per_query.clone()), 51),
-            Some(per_query.clone())
-        );
-        // null passes through regardless.
-        assert_eq!(metrics_for_protocol(None, 40), None);
-
-        // Protocol < 51: hydration ms wrapped into a one-point digest under the
-        // legacy `query-materialization-server` key.
-        assert_eq!(
-            metrics_for_protocol(Some(per_query), 50),
-            Some(json!({
-                "query-materialization-server": [1000, 9, 1],
-                "query-update-server": [1000, 2.0, 1],
-            }))
-        );
-
-        // Old protocol with NO hydration ms → empty legacy digest.
-        assert_eq!(
-            metrics_for_protocol(Some(json!({"query-update-server": [1000]})), 50),
-            Some(json!({
-                "query-materialization-server": [1000],
-                "query-update-server": [1000],
-            }))
         );
     }
 

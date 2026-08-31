@@ -307,11 +307,8 @@ async fn inspect_queries_value(
             let per_query = delegate
                 .borrow_mut()
                 .get_metrics_json_for_query(&row.query_id);
-            let metrics = crate::server::inspector_delegate::metrics_for_protocol(
-                per_query,
-                protocol_version,
-            )
-            .unwrap_or(serde_json::Value::Null);
+            let metrics = metrics_for_protocol(per_query, protocol_version)
+                .unwrap_or(serde_json::Value::Null);
             if let serde_json::Value::Object(map) = &mut v {
                 // AST fallback: only when the stored `ast` is null/absent.
                 let needs_ast = map.get("ast").is_none_or(serde_json::Value::is_null);
@@ -331,9 +328,78 @@ async fn inspect_queries_value(
     serde_json::Value::Array(out)
 }
 
+/// Port of `metricsForProtocol` (inspect-handler.ts:193). Protocol `>= 51`: the
+/// new format passes through unchanged. Protocol `< 51`: wrap the scalar
+/// `query-hydration-server-ms` into a one-point TDigest under the old field name
+/// `query-materialization-server`, alongside `query-update-server`, so 1.5
+/// clients can parse the response.
+pub fn metrics_for_protocol(
+    metrics: Option<serde_json::Value>,
+    protocol_version: u32,
+) -> Option<serde_json::Value> {
+    use crate::tdigest::TDigest;
+    match metrics {
+        // TS: `if (protocolVersion >= 51 || metrics === null) return metrics;`.
+        None => None,
+        Some(m) if protocol_version >= 51 => Some(m),
+        Some(m) => {
+            let mut hydrate_digest = TDigest::default();
+            // TS: `if (hydrateMs !== undefined) hydrateDigest.add(hydrateMs);`.
+            if let Some(ms) = m
+                .get("query-hydration-server-ms")
+                .and_then(serde_json::Value::as_f64)
+            {
+                hydrate_digest.add(ms, 1.0);
+            }
+            let update = m
+                .get("query-update-server")
+                .cloned()
+                .unwrap_or_else(|| TDigest::default().to_json_value());
+            Some(serde_json::json!({
+                "query-materialization-server": hydrate_digest.to_json_value(),
+                "query-update-server": update,
+            }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Port-parity for `metricsForProtocol` (inspect-handler.ts:193): new protocol
+    /// passes through, `null` passes through, old protocol wraps the scalar
+    /// hydration ms into a one-point legacy digest.
+    #[test]
+    fn metrics_for_protocol_new_passes_through_old_wraps_hydration() {
+        let per_query = serde_json::json!({
+            "query-hydration-server-ms": 9.0,
+            "query-update-server": [1000, 2.0, 1],
+        });
+        // Protocol >= 51: unchanged.
+        assert_eq!(
+            metrics_for_protocol(Some(per_query.clone()), 51),
+            Some(per_query.clone())
+        );
+        // null passes through regardless.
+        assert_eq!(metrics_for_protocol(None, 40), None);
+        // Protocol < 51: hydration ms wrapped under the legacy key.
+        assert_eq!(
+            metrics_for_protocol(Some(per_query), 50),
+            Some(serde_json::json!({
+                "query-materialization-server": [1000, 9, 1],
+                "query-update-server": [1000, 2.0, 1],
+            }))
+        );
+        // Old protocol with NO hydration ms → empty legacy digest.
+        assert_eq!(
+            metrics_for_protocol(Some(serde_json::json!({"query-update-server": [1000]})), 50),
+            Some(serde_json::json!({
+                "query-materialization-server": [1000],
+                "query-update-server": [1000],
+            }))
+        );
+    }
 
     /// Build a replica file with the `_zero.*` metadata, a 3-row `users` table,
     /// and a deployed `{app}.permissions` row holding `permissions_json`.
