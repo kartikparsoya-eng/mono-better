@@ -156,6 +156,8 @@ async fn analyze_query_op(
 
     // The analysis engine is `!Send` (Rc/RefCell IVM), so build + run it on a
     // blocking thread; only the `Send` result crosses back.
+    // A2 wires `permissions` (legacy-query `loadPermissions`); A4 wires `auth`
+    // (the connection's JWT claims). Until then analyze runs without a transform.
     let result = tokio::task::spawn_blocking(move || {
         crate::services::analyze::analyze_query(
             &replica_path,
@@ -163,6 +165,8 @@ async fn analyze_query_op(
             &ast_json,
             synced_rows,
             vended_rows,
+            None,
+            None,
         )
     })
     .await

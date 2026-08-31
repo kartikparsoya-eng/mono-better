@@ -7,15 +7,21 @@
 //! `record_nvisit`/`record_explain` (wired at the TableSource fetch path) a
 //! purpose — `dbScansByQuery` / `sqlitePlans` come from it.
 //!
+//! `applyPermissions` (run-ast.ts:74-90) IS ported: when [`RunAstOptions::apply_permissions`]
+//! is set, the AST is transformed for read-permissions (`transformAndHashQuery`)
+//! before hydration, so the analysis reflects exactly the rows a client may read.
+//!
 //! DEFERRED vs TS `runAst` (labeled, tracked as follow-ups; each needs a
 //! sub-port rust does not yet have):
-//! - `applyPermissions` / `afterPermissions`: the read-permission transform +
-//!   `astToZQL`/`formatOutput` ZQL pretty-printer. Analyze currently runs on the
-//!   AST as given; a `warnings` entry records this.
-//! - `joinPlans`: the planner-debug event serializer (`AccumulatorDebugger` /
-//!   `serializePlanDebugEvents`).
-//! - client->server name mapping (`mapAST` when `!isTransformed`): the caller
-//!   passes a server-named AST (named queries are already transformed).
+//! - `afterPermissions` (B6): the `astToZQL`/`formatOutput` ZQL pretty-printer
+//!   that renders the transformed AST back to ZQL text. The transform itself
+//!   runs; only the human-readable rendering is pending.
+//! - `joinPlans` (B7): the planner-debug event serializer (`AccumulatorDebugger`
+//!   / `serializePlanDebugEvents`).
+//!
+//! NOT NEEDED on this path: client->server name mapping (`mapAST` when
+//! `!isTransformed`). TS `analyzeQuery` is the sole caller and always passes
+//! `isTransformed=true` (analyze.ts:62), so the `mapAST` branch is dead here.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -23,9 +29,34 @@ use std::time::Instant;
 use rust_ivm::builder::debug_delegate::{Debug, SharedDebug};
 use rust_ivm::ivm::data::{Row, Value};
 
+use crate::auth::read_authorizer::transform_and_hash_query;
 use crate::protocol::analyze_query_result::{AnalyzeQueryResult, RowsByQuery, RowsBySource};
 
 use super::view_syncer::pipeline_driver::IvmPipelines;
+
+/// Port of TS `RunAstOptions` (run-ast.ts:34). The rust analysis engine
+/// (`IvmPipelines`) owns `db` / `host` / `tableSpecs` / `costModel` internally
+/// (wired by `IvmPipelines::init`), so this struct carries only the fields
+/// `run_ast` itself consumes: the read-permission transform inputs and the
+/// row-return flags. There is no `clientToServerMapper` field — the sole caller
+/// (`analyze_query`) always hands `run_ast` an already server-named AST (TS
+/// `analyzeQuery` calls `runAst(..., isTransformed=true, ...)` unconditionally,
+/// analyze.ts:62), so TS's `mapAST` branch is dead on this path.
+#[derive(Default)]
+pub struct RunAstOptions<'a> {
+    /// TS `applyPermissions`: transform the AST for read-permissions before
+    /// hydrating. Set iff `permissions` is present (analyze.ts:65).
+    pub apply_permissions: bool,
+    /// TS `auth`: the decoded JWT claims (`authData`) the permission rules bind
+    /// their static parameters against. `None` when unauthenticated.
+    pub auth: Option<&'a serde_json::Value>,
+    /// TS `permissions`: the compiled permissions config.
+    pub permissions: Option<&'a serde_json::Value>,
+    /// TS `syncedRows`: collect the synced rows per table into the result.
+    pub synced_rows: bool,
+    /// TS `vendedRows`: collect the vended (scanned) rows per table.
+    pub vended_rows: bool,
+}
 
 /// Convert an IVM `Value` to its JSON wire form — the analog of TS serializing a
 /// `Row` value for `syncedRows`/`readRows`. Mirrors `ivm_value_to_json` in
@@ -74,22 +105,52 @@ fn rows_by_source_to_json(src: &rust_ivm::builder::debug_delegate::RowsBySource)
 pub fn run_ast(
     pipelines: &mut IvmPipelines,
     ast_json: &str,
-    synced_rows: bool,
-    vended_rows: bool,
+    options: &RunAstOptions,
 ) -> Result<AnalyzeQueryResult, String> {
-    // DEFERRED: read-permission transform (TS `applyPermissions`) — analyze runs
-    // on the AST as given. Surface it the way TS surfaces a missing-auth analyze.
-    let warnings: Vec<String> = vec![
-        "Rust analyze-query does not yet apply read-permissions; results reflect \
-         the query without permission filtering."
-            .to_string(),
-    ];
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Port of run-ast.ts:74-90 — apply read-permissions to the AST before
+    // hydrating so the analysis reflects exactly the rows a client is allowed to
+    // read. `apply_permissions` is set iff permissions are present (TS
+    // analyze.ts:65 `permissions !== undefined`).
+    let transformed_ast_json: String;
+    let hydrate_ast: &str = if options.apply_permissions {
+        // TS: `const auth = options.auth; if (!auth) result.warnings.push(...)`.
+        let auth_data: serde_json::Value = match options.auth {
+            Some(a) => a.clone(),
+            None => {
+                warnings.push(
+                    "No auth data provided. Permission rules will compare to `NULL` \
+                     wherever an auth data field is referenced."
+                        .to_string(),
+                );
+                serde_json::json!({})
+            }
+        };
+        // TS `must(permissions)` — applyPermissions implies permissions present.
+        let permissions = options
+            .permissions
+            .ok_or_else(|| "run_ast: applyPermissions set without permissions".to_string())?;
+        let ast: serde_json::Value =
+            serde_json::from_str(ast_json).map_err(|e| format!("run_ast: parse AST: {e}"))?;
+        // read-authorizer.ts `transformAndHashQuery(..., internalQuery=false)`.
+        let (transformed, _hash) = transform_and_hash_query(&ast, permissions, &auth_data, false);
+        // B6 (deferred, labeled): `result.afterPermissions =
+        //   formatOutput(transformed.table + astToZQL(transformed))` — the
+        //   astToZQL/formatOutput pretty-printer is not yet ported; the transform
+        //   itself (the security-relevant part) runs here.
+        transformed_ast_json = serde_json::to_string(&transformed)
+            .map_err(|e| format!("run_ast: serialize transformed AST: {e}"))?;
+        &transformed_ast_json
+    } else {
+        ast_json
+    };
 
     // TS `host.debug = new Debug()` — run_ast owns the delegate and reads it back.
     let debug: SharedDebug = Debug::new_shared();
 
     let start = Instant::now();
-    let rows = pipelines.hydrate_analyze(ast_json, debug.clone())?;
+    let rows = pipelines.hydrate_analyze(hydrate_ast, debug.clone())?;
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
     // Dedup by table + row (TS `seenByTable`), counting synced rows and (when
@@ -108,7 +169,7 @@ pub fn run_ast(
         }
         seen.insert(key);
         synced_row_count += 1;
-        if synced_rows {
+        if options.synced_rows {
             synced_by_table
                 .entry(table.clone())
                 .or_default()
@@ -126,7 +187,7 @@ pub fn run_ast(
         .sum();
     let db_scans_by_query = d.get_nvisit_counts().clone();
     let sqlite_plans = d.get_sqlite_plans().clone();
-    let read_rows = if vended_rows {
+    let read_rows = if options.vended_rows {
         Some(rows_by_source_to_json(d.get_vended_rows()))
     } else {
         None
@@ -135,7 +196,7 @@ pub fn run_ast(
 
     Ok(AnalyzeQueryResult {
         warnings,
-        synced_rows: if synced_rows {
+        synced_rows: if options.synced_rows {
             Some(synced_by_table)
         } else {
             None
