@@ -8,9 +8,8 @@ use rustc_hash::FxHashMap;
 use rust_ivm::ivm::data::{Node, Row, SortOrder, Value, make_comparator};
 use rust_ivm::ivm::schema::{ColumnType, SourceSchema, System};
 use rust_ivm::ivm::stream::rel_from_vec;
-use rust_ivm::ivm::view::{
-    Format, View, ViewChange, ViewNode, apply_change, default_format, empty_root_entry,
-};
+use rust_ivm::ivm::view::{Format, View, default_format};
+use rust_ivm::ivm::view_apply_change::{ViewChange, ViewNode, apply_change, empty_root_entry};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -259,10 +258,10 @@ fn test_edit_plural_non_pk() {
     root = apply(
         &root,
         &ViewChange::Edit {
-            node: rust_ivm::ivm::view::RowOnlyNode {
+            node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Greg"))]),
             },
-            old_node: rust_ivm::ivm::view::RowOnlyNode {
+            old_node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
             },
         },
@@ -294,10 +293,10 @@ fn test_edit_plural_non_pk() {
     root = apply(
         &root,
         &ViewChange::Edit {
-            node: rust_ivm::ivm::view::RowOnlyNode {
+            node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
             },
-            old_node: rust_ivm::ivm::view::RowOnlyNode {
+            old_node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Greg"))]),
             },
         },
@@ -346,10 +345,10 @@ fn test_edit_plural_primary_key() {
     root = apply(
         &root,
         &ViewChange::Edit {
-            node: rust_ivm::ivm::view::RowOnlyNode {
+            node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("2")), ("name", s("Aaron"))]),
             },
-            old_node: rust_ivm::ivm::view::RowOnlyNode {
+            old_node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
             },
         },
@@ -391,10 +390,10 @@ fn test_edit_singular_non_pk() {
     root = apply(
         &root,
         &ViewChange::Edit {
-            node: rust_ivm::ivm::view::RowOnlyNode {
+            node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Greg"))]),
             },
-            old_node: rust_ivm::ivm::view::RowOnlyNode {
+            old_node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
             },
         },
@@ -435,10 +434,10 @@ fn test_edit_singular_primary_key() {
     root = apply(
         &root,
         &ViewChange::Edit {
-            node: rust_ivm::ivm::view::RowOnlyNode {
+            node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("2")), ("name", s("Greg"))]),
             },
-            old_node: rust_ivm::ivm::view::RowOnlyNode {
+            old_node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                 row: make_row(&[("id", s("1")), ("name", s("Aaron"))]),
             },
         },
@@ -715,10 +714,10 @@ fn test_multiple_entries_plural_athletes() {
     );
 
     let child1 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode {
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
             row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
         },
-        child: rust_ivm::ivm::view::ChildViewChange {
+        child: rust_ivm::ivm::view_apply_change::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Add {
                 node: ViewNode::Lazy(matchup_node),
@@ -744,10 +743,10 @@ fn test_multiple_entries_plural_athletes() {
     );
 
     let child2 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode {
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
             row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
         },
-        child: rust_ivm::ivm::view::ChildViewChange {
+        child: rust_ivm::ivm::view_apply_change::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Add {
                 node: ViewNode::Lazy(matchup_node2),
@@ -776,10 +775,10 @@ fn test_multiple_entries_plural_athletes() {
 
     // Remove matchup d1 → athlete rc=1
     let remove_d1 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode {
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
             row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
         },
-        child: rust_ivm::ivm::view::ChildViewChange {
+        child: rust_ivm::ivm::view_apply_change::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
                 node: ViewNode::Lazy({
@@ -817,10 +816,10 @@ fn test_multiple_entries_plural_athletes() {
 
     // Remove matchup d2 → athletes list empty
     let remove_d2 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode {
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
             row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
         },
-        child: rust_ivm::ivm::view::ChildViewChange {
+        child: rust_ivm::ivm::view_apply_change::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
                 node: ViewNode::Lazy({
@@ -895,10 +894,10 @@ fn test_multiple_entries_singular_athletes() {
         root = apply(
             &root,
             &ViewChange::Child {
-                node: rust_ivm::ivm::view::RowOnlyNode {
+                node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
                     row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
                 },
-                child: rust_ivm::ivm::view::ChildViewChange {
+                child: rust_ivm::ivm::view_apply_change::ChildViewChange {
                     relationship_name: "athletes".to_string(),
                     change: Box::new(ViewChange::Add {
                         node: ViewNode::Lazy(matchup_node),
@@ -923,10 +922,10 @@ fn test_multiple_entries_singular_athletes() {
 
     // Remove d1 → athlete rc=1
     let remove_d1 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode {
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
             row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
         },
-        child: rust_ivm::ivm::view::ChildViewChange {
+        child: rust_ivm::ivm::view_apply_change::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
                 node: ViewNode::Lazy({
@@ -961,10 +960,10 @@ fn test_multiple_entries_singular_athletes() {
 
     // Remove d2 → athlete is None (singular, rc went to 0)
     let remove_d2 = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode {
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
             row: make_row(&[("id", s("e1")), ("name", s("Buffalo Big Board Classic"))]),
         },
-        child: rust_ivm::ivm::view::ChildViewChange {
+        child: rust_ivm::ivm::view_apply_change::ChildViewChange {
             relationship_name: "athletes".to_string(),
             change: Box::new(ViewChange::Remove {
                 node: ViewNode::Lazy({

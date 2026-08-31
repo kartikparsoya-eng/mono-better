@@ -12,9 +12,9 @@ use rust_ivm::ivm::data::Node;
 use rust_ivm::ivm::data::{Row, SortOrder, Value, make_comparator};
 use rust_ivm::ivm::schema::{ColumnType, SourceSchema, System};
 use rust_ivm::ivm::stream::rel_from_vec;
-use rust_ivm::ivm::view::{
-    Format, View, ViewChange, ViewNode, apply_change, apply_changes, change_to_view_change,
-    default_format, empty_root_entry,
+use rust_ivm::ivm::view::{Format, View, default_format};
+use rust_ivm::ivm::view_apply_change::{
+    ViewChange, ViewNode, apply_change, apply_changes, change_to_view_change, empty_root_entry,
 };
 
 use std::collections::HashMap;
@@ -374,8 +374,8 @@ fn test_view_edit_in_place() {
 
     let new_row = make_row(&[("id", Value::F64(1.0)), ("title", Value::Str("new".into()))]);
     let change = ViewChange::Edit {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: new_row },
-        old_node: rust_ivm::ivm::view::RowOnlyNode { row: old_row },
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode { row: new_row },
+        old_node: rust_ivm::ivm::view_apply_change::RowOnlyNode { row: old_row },
     };
 
     let result = apply_change(
@@ -434,8 +434,8 @@ fn test_view_edit_moves_position() {
         ("title", Value::Str("post1-edited".into())),
     ]);
     let change = ViewChange::Edit {
-        node: rust_ivm::ivm::view::RowOnlyNode { row: new_row },
-        old_node: rust_ivm::ivm::view::RowOnlyNode { row: old_row },
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode { row: new_row },
+        old_node: rust_ivm::ivm::view_apply_change::RowOnlyNode { row: old_row },
     };
 
     result = apply_change(
@@ -509,10 +509,10 @@ fn test_view_child_change() {
     let comment_node = make_node(comment_row);
 
     let child_change = ViewChange::Child {
-        node: rust_ivm::ivm::view::RowOnlyNode {
+        node: rust_ivm::ivm::view_apply_change::RowOnlyNode {
             row: make_row(&[("id", Value::F64(1.0))]),
         },
-        child: rust_ivm::ivm::view::ChildViewChange {
+        child: rust_ivm::ivm::view_apply_change::ChildViewChange {
             relationship_name: "comments".to_string(),
             change: Box::new(ViewChange::Add {
                 node: ViewNode::Lazy(comment_node),
@@ -647,7 +647,7 @@ fn test_view_add_expanded_node() {
 
     let root = empty_root_entry();
 
-    let expanded = rust_ivm::ivm::view::ExpandedNode {
+    let expanded = rust_ivm::ivm::view_apply_change::ExpandedNode {
         row: make_row(&[
             ("id", Value::F64(1.0)),
             ("title", Value::Str("expanded".into())),

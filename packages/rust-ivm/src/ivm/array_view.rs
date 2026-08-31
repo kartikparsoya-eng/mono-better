@@ -10,8 +10,9 @@ use std::rc::Rc;
 use crate::ivm::change::Change;
 use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, Shared};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::view::{
-    Entry, Format, View, ViewChange, apply_change, change_to_view_change, empty_root_entry,
+use crate::ivm::view::{Entry, Format, View};
+use crate::ivm::view_apply_change::{
+    ViewChange, apply_change, change_to_view_change, empty_root_entry,
 };
 
 /// A listener callback for view updates.
@@ -107,7 +108,7 @@ impl ArrayView {
         let req = FetchRequest::default();
         for node in crate::ivm::stream::skip_yields(self.input.borrow().fetch(&req)) {
             let change = ViewChange::Add {
-                node: crate::ivm::view::ViewNode::Lazy(node),
+                node: crate::ivm::view_apply_change::ViewNode::Lazy(node),
             };
             self.root = apply_change(
                 &self.root,

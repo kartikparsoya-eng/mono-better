@@ -30,6 +30,7 @@ pub mod trace;
 pub mod union_fan_in;
 pub mod union_fan_out;
 pub mod view;
+pub mod view_apply_change;
 
 pub use array_view::*;
 pub use cap::*;
@@ -60,3 +61,4 @@ pub use take::*;
 pub use union_fan_in::*;
 pub use union_fan_out::*;
 pub use view::*;
+pub use view_apply_change::*;
