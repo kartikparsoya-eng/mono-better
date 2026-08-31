@@ -106,8 +106,8 @@ fn test_chunked_fetch_small_chunk_size() {
         );
     }
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -173,8 +173,8 @@ fn test_chunked_fetch_preserves_order() {
         );
     }
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -220,8 +220,8 @@ fn test_chunked_fetch_single_chunk() {
     add_row(&parent, &[("id", Value::F64(1.0))]);
     add_row(&child, &[("id", Value::F64(1.0)), ("pid", Value::F64(1.0))]);
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -256,8 +256,8 @@ fn test_chunked_fetch_empty_children() {
 
     add_row(&parent, &[("id", Value::F64(1.0))]);
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -308,8 +308,8 @@ fn test_chunked_fetch_multiple_children_per_parent() {
         );
     }
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,

@@ -99,7 +99,7 @@ fn basics() {
 
     let input = ms
         .borrow_mut()
-        .connect(Some(b_then_a_sort()), None, None, None);
+        .connect(Some(b_then_a_sort()), None, None, None, None);
     let view = ArrayView::new(input, list_format());
 
     // Listener captures callCount + a snapshot of the entries it was handed.
@@ -177,7 +177,7 @@ fn single_format_holds_one_then_none() {
 
     let input = ms
         .borrow_mut()
-        .connect(Some(b_then_a_sort()), None, None, None);
+        .connect(Some(b_then_a_sort()), None, None, None, None);
     let view = ArrayView::new(input, single_format());
 
     // callCount + whether the last-notified value was a present single entry.
@@ -235,7 +235,7 @@ fn single_format_second_row_panics() {
     ms.borrow_mut().add_row(row(1.0, "a"));
     let input = ms
         .borrow_mut()
-        .connect(Some(b_then_a_sort()), None, None, None);
+        .connect(Some(b_then_a_sort()), None, None, None, None);
     let _view = ArrayView::new(input, single_format());
     // Second row into a singular view: must panic.
     ms.borrow_mut().push(SourceChange::Add {
@@ -250,7 +250,7 @@ fn hydrate_empty() {
     let ms = table_source();
     let input = ms
         .borrow_mut()
-        .connect(Some(b_then_a_sort()), None, None, None);
+        .connect(Some(b_then_a_sort()), None, None, None, None);
     let view = ArrayView::new(input, list_format());
 
     let count = Rc::new(RefCell::new(0usize));

@@ -108,7 +108,7 @@ fn test_sqlite_fetch_returns_all_rows() {
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
     source.borrow_mut().set_db_path(db_path);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
     let rows: Vec<_> = stream.collect();
 
@@ -131,7 +131,9 @@ fn test_sqlite_fetch_with_order_by() {
     source.borrow_mut().set_db_path(db_path);
 
     let sort = Arc::new(vec![["age".to_string(), "desc".to_string()]]);
-    let input = source.borrow_mut().connect(Some(sort), None, None, None);
+    let input = source
+        .borrow_mut()
+        .connect(Some(sort), None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
     let rows: Vec<_> = stream.collect();
 
@@ -167,7 +169,7 @@ fn test_sqlite_fetch_with_constraint() {
         limit: None,
     };
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let stream = input.borrow().fetch(&req);
     let rows: Vec<_> = stream.collect();
 
@@ -427,7 +429,7 @@ fn test_sqlite_fetch_empty_table() {
     );
     source.borrow_mut().set_db_path(db_path);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
     let rows: Vec<_> = stream.collect();
 
@@ -453,7 +455,7 @@ fn test_sqlite_fetch_nonexistent_table() {
 
     // Match PipelineDriver: SQLite prepare failures propagate; they must never
     // masquerade as an empty result set.
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
     let _: Vec<_> = stream.collect();
 }
@@ -479,12 +481,16 @@ fn test_sqlite_multiple_sources_same_db() {
     posts_source.borrow_mut().set_db_path(db_path);
 
     // Fetch from users
-    let users_input = users_source.borrow_mut().connect(None, None, None, None);
+    let users_input = users_source
+        .borrow_mut()
+        .connect(None, None, None, None, None);
     let users_rows: Vec<_> = users_input.borrow().fetch(&Default::default()).collect();
     assert_eq!(users_rows.len(), 5, "Users: 5 rows");
 
     // Fetch from posts
-    let posts_input = posts_source.borrow_mut().connect(None, None, None, None);
+    let posts_input = posts_source
+        .borrow_mut()
+        .connect(None, None, None, None, None);
     let posts_rows: Vec<_> = posts_input.borrow().fetch(&Default::default()).collect();
     assert_eq!(posts_rows.len(), 5, "Posts: 5 rows");
 }
@@ -577,7 +583,7 @@ fn test_sqlite_no_db_returns_empty() {
     // Without a DB set, fetch should return from in-memory data (which is empty)
     let source = make_source("users", make_columns(), vec!["id".to_string()]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
     let rows: Vec<_> = stream.collect();
 

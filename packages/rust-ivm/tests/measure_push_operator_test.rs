@@ -64,7 +64,9 @@ impl Output for Collector {
 #[test]
 fn records_a_metric_per_push_and_forwards_downstream() {
     let src = make_source();
-    let input = src.borrow_mut().connect(Some(id_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(id_sort()), None, None, None, None);
 
     let entries = Rc::new(RefCell::new(Vec::new()));
     let metrics = Rc::new(RecordingMetrics {

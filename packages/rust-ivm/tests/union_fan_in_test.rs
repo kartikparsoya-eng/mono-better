@@ -74,7 +74,7 @@ fn make_schema(name: &str, pk: &[&str], columns: &[(&str, ColumnType)]) -> Sourc
 
 fn connect_sorted(src: &Rc<RefCell<MemorySource>>, pk: &[&str]) -> Shared<dyn Input> {
     src.borrow_mut()
-        .connect(Some(pk_sort(pk)), None, None, None)
+        .connect(Some(pk_sort(pk)), None, None, None, None)
 }
 
 fn row_id(node: &Node) -> Value {

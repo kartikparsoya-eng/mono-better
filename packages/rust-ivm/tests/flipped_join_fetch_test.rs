@@ -82,8 +82,8 @@ fn setup_flipped_join(
         add_row(&child, row_data);
     }
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -297,8 +297,8 @@ fn test_fetch_compound_key() {
         ],
     );
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -389,8 +389,8 @@ fn test_fetch_many_parents_chunked() {
         );
     }
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -433,8 +433,8 @@ fn test_fetch_hidden_join() {
     add_row(&parent, &[("id", str_val("i1"))]);
     add_row(&child, &[("id", str_val("c1")), ("issueID", str_val("i1"))]);
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -656,8 +656,8 @@ fn setup_group_join(
         }
     }
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,

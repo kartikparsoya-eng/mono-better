@@ -91,7 +91,9 @@ fn collector() -> (FilterOutputHandle, Rc<RefCell<Vec<(ChangeType, String)>>>) {
 #[test]
 fn fan_out_pushes_along_all_paths() {
     let src = make_source();
-    let input = src.borrow_mut().connect(Some(a_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(a_sort()), None, None, None, None);
 
     let start = FilterStart::new(input);
     let start_fi: FilterInputHandle = start.clone();
@@ -142,7 +144,9 @@ fn fan_out_pushes_along_all_paths() {
 #[should_panic(expected = "fan-out must have a corresponding fan-in set!")]
 fn fan_out_push_without_fan_in_panics() {
     let src = make_source();
-    let input = src.borrow_mut().connect(Some(a_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(a_sort()), None, None, None, None);
 
     let start = FilterStart::new(input);
     let start_fi: FilterInputHandle = start.clone();
@@ -166,7 +170,9 @@ fn fan_out_push_without_fan_in_panics() {
 #[test]
 fn fan_in_does_not_duplicate_pushes() {
     let src = make_source();
-    let input = src.borrow_mut().connect(Some(a_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(a_sort()), None, None, None, None);
 
     let start = FilterStart::new(input);
     let start_fi: FilterInputHandle = start.clone();

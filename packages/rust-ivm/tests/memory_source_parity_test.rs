@@ -75,7 +75,7 @@ fn get_row_and_all_rows_reflect_storage() {
 #[test]
 fn gen_push_add_edit_remove_through_a_connection() {
     let mut source = make_source();
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
     let catch = rust_ivm::ivm::catch::Catch::new(input, false);
 
     source.gen_push(SourceChange::Add {
@@ -151,7 +151,7 @@ fn gen_push_add_edit_remove_through_a_connection() {
 #[test]
 fn gen_push_splits_key_changing_edit() {
     let mut source = make_source();
-    let input = source.connect(None, None, None, Some(vec!["name".to_string()]));
+    let input = source.connect(None, None, None, Some(vec!["name".to_string()]), None);
     let catch = rust_ivm::ivm::catch::Catch::new(input, false);
     source.gen_push(SourceChange::Add {
         row: Arc::new(row(&[

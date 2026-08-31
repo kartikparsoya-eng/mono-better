@@ -56,7 +56,7 @@ fn seeded_source() -> Rc<RefCell<MemorySource>> {
         vec!["id".to_string()],
     )));
     // Connect so the source is live, then seed one valid row.
-    source.borrow_mut().connect(None, None, None, None);
+    source.borrow_mut().connect(None, None, None, None, None);
     source.borrow_mut().push(SourceChange::Add {
         row: make_row(&[("id", num(1.0))]),
     });

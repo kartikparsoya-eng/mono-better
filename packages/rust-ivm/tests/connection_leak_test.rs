@@ -174,7 +174,7 @@ use rust_ivm::ivm::source::Source;
 #[test]
 fn filter_end_destroy_reaches_source() {
     let source = make_source("users", &["id"], &["id"]);
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     assert_eq!(source.borrow().connection_count(), 1);
 
     // Identity chain: FilterStart -> FilterEnd directly.
@@ -192,8 +192,8 @@ fn filter_end_destroy_reaches_source() {
 #[test]
 fn fan_in_destroy_reaches_source() {
     let source = make_source("users", &["id"], &["id"]);
-    let branch_a = source.borrow_mut().connect(None, None, None, None);
-    let branch_b = source.borrow_mut().connect(None, None, None, None);
+    let branch_a = source.borrow_mut().connect(None, None, None, None, None);
+    let branch_b = source.borrow_mut().connect(None, None, None, None, None);
     assert_eq!(source.borrow().connection_count(), 2);
 
     let schema = branch_a.borrow().get_schema();

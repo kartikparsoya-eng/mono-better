@@ -102,9 +102,10 @@ fn test_filter_basics_fetch() {
         .collect(),
     );
 
-    let conn = source
-        .borrow_mut()
-        .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
+    let conn =
+        source
+            .borrow_mut()
+            .connect(Some(sort_order(&[("a", "asc")])), None, None, None, None);
     let filter = build_filter_pipeline(conn, |fi| {
         let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
             fi,
@@ -159,9 +160,10 @@ fn test_filter_basics_push() {
         .collect(),
     );
 
-    let conn = source
-        .borrow_mut()
-        .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
+    let conn =
+        source
+            .borrow_mut()
+            .connect(Some(sort_order(&[("a", "asc")])), None, None, None, None);
     let filter = build_filter_pipeline(conn, |fi| {
         let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
             fi,
@@ -238,9 +240,10 @@ fn test_filter_edit_add_passes_filter() {
         );
     }
 
-    let conn = source
-        .borrow_mut()
-        .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
+    let conn =
+        source
+            .borrow_mut()
+            .connect(Some(sort_order(&[("a", "asc")])), None, None, None, None);
     let filter = build_filter_pipeline(conn, |fi| {
         let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
             fi,
@@ -303,9 +306,10 @@ fn test_filter_edit_stops_passing_becomes_remove() {
         );
     }
 
-    let conn = source
-        .borrow_mut()
-        .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
+    let conn =
+        source
+            .borrow_mut()
+            .connect(Some(sort_order(&[("a", "asc")])), None, None, None, None);
     let filter = build_filter_pipeline(conn, |fi| {
         let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
             fi,
@@ -363,9 +367,10 @@ fn test_filter_edit_neither_passes_is_noop() {
         );
     }
 
-    let conn = source
-        .borrow_mut()
-        .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
+    let conn =
+        source
+            .borrow_mut()
+            .connect(Some(sort_order(&[("a", "asc")])), None, None, None, None);
     let filter = build_filter_pipeline(conn, |fi| {
         let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
             fi,
@@ -409,9 +414,10 @@ fn test_filter_edit_both_pass_is_edit() {
         );
     }
 
-    let conn = source
-        .borrow_mut()
-        .connect(Some(sort_order(&[("a", "asc")])), None, None, None);
+    let conn =
+        source
+            .borrow_mut()
+            .connect(Some(sort_order(&[("a", "asc")])), None, None, None, None);
     let filter = build_filter_pipeline(conn, |fi| {
         let f: rust_ivm::ivm::filter_operators::FilterInputHandle = Filter::new(
             fi,

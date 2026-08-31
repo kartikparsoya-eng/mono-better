@@ -87,7 +87,7 @@ fn lazyrows_cursor_pins_wal_and_blocks_checkpoint_until_dropped() {
         columns(),
         vec!["id".to_string()],
     );
-    let input = ts.connect(None, None, None, None);
+    let input = ts.connect(None, None, None, None, None);
     let mut held_stream = input.borrow().fetch(&Default::default());
     // Step exactly one row: begins the read txn, does NOT finalize the cursor.
     let first = held_stream.next();

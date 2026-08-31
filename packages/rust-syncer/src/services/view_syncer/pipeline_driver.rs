@@ -24,6 +24,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use rust_ivm::builder::debug_delegate::{RowCountsBySource, runtime_debug_flags};
 use rust_ivm::engine::{Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::memory_source::MemorySource;
@@ -506,6 +507,55 @@ impl IvmPipelines {
         }
     }
 
+    /// VENDED per-table debug log — port of the `runtimeDebugFlags
+    /// .trackRowCountsVended` block in TS `#addQueryImpl`
+    /// (pipeline-driver.ts:704-721). For a slow query, logs how many rows each
+    /// source table VENDED (scanned) — keyed by SQL — plus the grand total
+    /// "rows considered". This is the query-efficiency diagnostic: a query that
+    /// scans many rows to emit few reveals a missing index / unbounded filter.
+    ///
+    /// Deviation from TS iterating `this.#tables.keys()` (every registered
+    /// source, printing zero-vend tables as `[]`): rust iterates the tables THIS
+    /// query's sources actually prepared (the entries `getVendedRowCounts()`
+    /// holds — `initQuery` seeds one per fetched table). The non-empty VENDED
+    /// lines and `Total rows considered` are identical; only all-zero,
+    /// query-untouched tables are omitted (pure log noise, no diagnostic loss).
+    /// Tables are sorted so the log is deterministic (TS relies on `#tables`
+    /// insertion order; rust's `HashMap` is unordered).
+    fn log_vended_row_counts(
+        query_id: &str,
+        hydration_time_ms: f64,
+        vended: Option<&RowCountsBySource>,
+    ) {
+        let mut total_rows_considered: u64 = 0;
+        if let Some(counts) = vended {
+            let mut tables: Vec<&String> = counts.keys().collect();
+            tables.sort();
+            for table_name in tables {
+                let by_query = &counts[table_name];
+                // TS: `totalRowsConsidered += entries.reduce((a, e) => a + e[1], 0)`.
+                let table_total: u64 = by_query.values().copied().sum();
+                total_rows_considered += table_total;
+                // TS: `lc.info?.(tableName + ' VENDED: ', entries)` — the entries
+                // are the [(sql, count)] pairs for this table.
+                tracing::info!(
+                    query_id,
+                    hydration_time_ms,
+                    table = %table_name,
+                    entries = ?by_query,
+                    "{table_name} VENDED"
+                );
+            }
+        }
+        // TS: `lc.info?.(`Total rows considered: ${totalRowsConsidered}`)`.
+        tracing::info!(
+            query_id,
+            hydration_time_ms,
+            total_rows_considered,
+            "Total rows considered: {total_rows_considered}"
+        );
+    }
+
     /// Port of TS `#destroyPipeline` (pipeline-driver.ts:846): emit the
     /// `query-pipeline-stop` lifecycle event for `query_id`, then tear the
     /// pipeline down. TS's `pipeline.input.destroy()` half is delegated to
@@ -614,6 +664,20 @@ impl IvmPipelines {
                 hydration_row_count: Some(r.hydration_row_count),
                 ..Default::default()
             });
+            // VENDED per-table debug log — port of TS `#addQueryImpl`'s
+            // `runtimeDebugFlags.trackRowCountsVended` block (pipeline-driver.ts:
+            // 704-721). Gated on the flag AND a slow hydrate; reports how many
+            // rows each source table VENDED (scanned) for this query, the
+            // rows-considered diagnostic distinct from the output row count.
+            if runtime_debug_flags().track_row_counts_vended()
+                && r.hydration_time_ms > super::view_syncer::slow_hydrate_threshold_ms()
+            {
+                Self::log_vended_row_counts(
+                    &r.query_id,
+                    r.hydration_time_ms,
+                    r.vended_row_counts.as_ref(),
+                );
+            }
         }
         // A query that started but the engine never registered was aborted
         // mid-stream (cancel-during-hydrate → engine discards partial pipelines
@@ -1184,4 +1248,74 @@ mod tests {
     // `tracing`'s callsite-interest cache is process-global, and other in-process
     // lib tests installing their own subscribers would poison it (the 2-field
     // `-start` callsite got cached disabled by an unrelated test).
+
+    /// Non-vacuous: the `VENDED` per-table debug log (port of TS `#addQueryImpl`
+    /// pipeline-driver.ts:704-721) must, for a slow query, emit a `<table>
+    /// VENDED` line per table AND a `Total rows considered: <sum>` line whose
+    /// value is the grand total across every table+SQL. The synthetic counts
+    /// below total 204 (200 + 4), so a dropped table, a missing line, or a
+    /// wrong sum (e.g. per-table instead of grand-total) all fail distinctly.
+    ///
+    /// Unlike the shared `query pipeline lifecycle` callsite (moved to its own
+    /// integration binary), the `VENDED` / `Total rows considered` callsites are
+    /// UNIQUE to `log_vended_row_counts` and exercised only by this test, so the
+    /// process-global callsite-interest cache cannot be poisoned by another
+    /// test's subscriber. `capture_vended` scopes its own subscriber.
+    #[test]
+    fn log_vended_row_counts_emits_per_table_and_grand_total() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        struct BufGuard(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufGuard;
+            fn make_writer(&'a self) -> BufGuard {
+                BufGuard(self.0.clone())
+            }
+        }
+        impl std::io::Write for BufGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut counts: RowCountsBySource = HashMap::new();
+        counts.insert(
+            "issue".to_string(),
+            HashMap::from([("SELECT * FROM issue WHERE open=?".to_string(), 200u64)]),
+        );
+        counts.insert(
+            "comment".to_string(),
+            HashMap::from([("SELECT * FROM comment".to_string(), 4u64)]),
+        );
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            IvmPipelines::log_vended_row_counts("q1", 1234.0, Some(&counts));
+        });
+
+        let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains("issue VENDED"),
+            "per-table VENDED line for `issue`; got: {logged}"
+        );
+        assert!(
+            logged.contains("comment VENDED"),
+            "per-table VENDED line for `comment`; got: {logged}"
+        );
+        assert!(
+            logged.contains("Total rows considered: 204"),
+            "grand total across all tables (200 + 4); got: {logged}"
+        );
+    }
 }

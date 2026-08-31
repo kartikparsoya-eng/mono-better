@@ -212,12 +212,19 @@ impl MemorySource {
     }
 
     /// Connect a new downstream consumer.
+    ///
+    /// `_debug`: TS `memory-source.ts` stores the `DebugDelegate` on its
+    /// Connection (memory-source.ts:87) but never calls `rowVended`/`initQuery`
+    /// — only the production `TableSource` (`zqlite/table-source.ts`) vends. So
+    /// the delegate is accepted and dropped here; behavior is identical to TS
+    /// (MemorySource never records vended rows).
     pub fn connect(
         &mut self,
         sort: Option<SortOrder>,
         filter_condition: Option<Condition>,
         filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
         split_edit_keys: Option<Vec<String>>,
+        _debug: Option<crate::builder::debug_delegate::SharedDebug>,
     ) -> Shared<dyn Input> {
         let internal_sort = sort
             .clone()
@@ -524,8 +531,15 @@ impl Source for MemorySource {
         filter_condition: Option<Condition>,
         filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
         split_edit_keys: Option<Vec<String>>,
+        debug: Option<crate::builder::debug_delegate::SharedDebug>,
     ) -> Shared<dyn Input> {
-        self.connect(sort, filter_condition, filter_predicate, split_edit_keys)
+        self.connect(
+            sort,
+            filter_condition,
+            filter_predicate,
+            split_edit_keys,
+            debug,
+        )
     }
 
     fn push(&mut self, change: SourceChange) -> Vec<Change> {

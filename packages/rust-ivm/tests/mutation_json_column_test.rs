@@ -82,7 +82,7 @@ fn mutations_source() -> TableSource {
 #[test]
 fn mutations_result_json_column_is_parsed_object_on_fetch() {
     let mut source = mutations_source();
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
     let nodes: Vec<_> = rust_ivm::ivm::stream::skip_yields(stream).collect();
 
@@ -132,7 +132,7 @@ fn untyped_result_column_falls_through_to_string() {
         columns,
         vec!["id".to_string()],
     );
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
     let stream = input.borrow().fetch(&Default::default());
     let nodes: Vec<_> = rust_ivm::ivm::stream::skip_yields(stream).collect();
 

@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use crate::builder::ast::Ast;
 use crate::builder::builder::{BuilderDelegate, build_pipeline};
+use crate::builder::debug_delegate::{Debug, RowCountsBySource, SharedDebug, runtime_debug_flags};
 use crate::ivm::change::Change;
 use crate::ivm::data::{Row, Value};
 use crate::ivm::memory_source::CollectOutput;
@@ -58,6 +59,12 @@ pub struct QueryResult {
     /// (main rows + scalar-subquery companion rows). Port of the TS pipeline
     /// `hydrationRowCount` field (pipeline-driver.ts:774).
     pub hydration_row_count: u64,
+    /// Per-source vended-row counts for this query, when a `Debug` delegate was
+    /// attached (i.e. `runtimeDebugFlags.trackRowsVended`). `Some` mirrors TS
+    /// `debugDelegate.getVendedRowCounts()` snapshot per query (pipeline-driver.ts:
+    /// 712); `None` in prod (flag off). The driver emits the `VENDED` log from
+    /// this, gated on `trackRowCountsVended` + the slow-hydrate threshold.
+    pub vended_row_counts: Option<RowCountsBySource>,
 }
 
 /// Per-query build products carried across the three hydrate phases (build,
@@ -71,6 +78,14 @@ pub(crate) struct Built {
     pub timer: Instant,
     pub companion_rows: Vec<(String, Vec<String>, Row)>,
     pub companions: Vec<CompanionBuilt>,
+    /// The per-query `Debug` delegate this pipeline was built with, when
+    /// `runtimeDebugFlags.trackRowsVended` is on. Attached at build (Phase 1)
+    /// so the source records vended rows during hydrate (Phase 2); snapshotted
+    /// into `QueryResult.vended_row_counts` at register (Phase 3). Mirrors TS
+    /// creating a fresh `Debug` per `#addQueryImpl` (pipeline-driver.ts:616) —
+    /// the per-query isolation TS gets from `debugDelegate.reset()` between
+    /// queries. `None` in prod.
+    pub debug: Option<SharedDebug>,
 }
 
 /// A registered pipeline: the pipeline input + its push collector + schema.
@@ -769,9 +784,21 @@ impl Engine {
             // (parity with TS `buildPipeline` → `planQuery`). No-op when no
             // cost-model connection is configured.
             let ast = self.plan_ast(&ordered);
+            // Port of TS `#addQueryImpl` creating a fresh `Debug` per query when
+            // `runtimeDebugFlags.trackRowsVended` (pipeline-driver.ts:616): a
+            // per-query delegate keeps vended-row counts isolated to this query
+            // (TS resets between queries; rust batches, so a distinct delegate
+            // per pipeline is the equivalent). `None` in prod → the source's
+            // hot read path pays nothing.
+            let debug: Option<SharedDebug> = if runtime_debug_flags().track_rows_vended() {
+                Some(Debug::new_shared())
+            } else {
+                None
+            };
             let mut delegate = EngineDelegate {
                 sources: &self.sources,
                 enable_not_exists: self.enable_not_exists,
+                debug: debug.clone(),
             };
             let pipeline = build_pipeline(&ast, &mut delegate);
 
@@ -790,6 +817,7 @@ impl Engine {
                 timer,
                 companion_rows: resolved.companion_rows,
                 companions: resolved.companions,
+                debug,
             });
         }
 
@@ -917,11 +945,19 @@ impl Engine {
         for b in built {
             let hydration_time_ms = b.timer.elapsed().as_secs_f64() * 1000.0;
             let hydration_row_count = row_counts.get(&b.query_id).copied().unwrap_or(0);
+            // Snapshot this query's vended-row counts (port of TS reading
+            // `debugDelegate.getVendedRowCounts()` per query,
+            // pipeline-driver.ts:712). `None` when the debug flag is off.
+            let vended_row_counts = b
+                .debug
+                .as_ref()
+                .map(|d| d.borrow().get_vended_row_counts().clone());
             results.push(QueryResult {
                 query_id: b.query_id.clone(),
                 changes: Vec::new(),
                 hydration_time_ms,
                 hydration_row_count,
+                vended_row_counts,
             });
 
             let mut live_companions = Vec::with_capacity(b.companions.len());
@@ -1493,6 +1529,9 @@ impl Engine {
             let mut delegate = EngineDelegate {
                 sources,
                 enable_not_exists,
+                // Scalar-subquery resolution is not a client-visible hydrate;
+                // TS builds it without a debug delegate. No vended tracking here.
+                debug: None,
             };
             let input = build_pipeline(&completed, &mut delegate);
 
@@ -1665,6 +1704,10 @@ impl Drop for Engine {
 struct EngineDelegate<'a> {
     sources: &'a HashMap<String, Shared<dyn Source>>,
     enable_not_exists: bool,
+    /// Optional per-query debug delegate threaded into every source connect
+    /// (port of TS `BuilderDelegate.debug`, builder.ts:57). `None` on the
+    /// advance path and in prod hydration (flag off).
+    debug: Option<SharedDebug>,
 }
 
 impl<'a> BuilderDelegate for EngineDelegate<'a> {
@@ -1680,6 +1723,10 @@ impl<'a> BuilderDelegate for EngineDelegate<'a> {
         Rc::new(RefCell::new(
             crate::ivm::memory_storage::MemoryStorage::new(),
         ))
+    }
+
+    fn debug(&self) -> Option<SharedDebug> {
+        self.debug.clone()
     }
 }
 

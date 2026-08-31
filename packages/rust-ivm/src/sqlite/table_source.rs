@@ -23,6 +23,7 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use rustc_hash::FxHashMap;
 
 use crate::builder::ast::Condition;
+use crate::builder::debug_delegate::SharedDebug;
 use crate::ivm::change::{Change, make_add_change, make_edit_change, make_remove_change};
 use crate::ivm::data::{Comparator, Node, Row, SortOrder, Value, compare_values, make_comparator};
 use crate::ivm::filter_push::filter_push;
@@ -65,6 +66,14 @@ struct LazyRows {
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
     table_name: String,
+    /// Optional debug delegate (port of TS `#fetch`'s `connection.debug`,
+    /// zqlite/table-source.ts:284). When present, each vended row is recorded
+    /// via `rowVended`. `None` in prod (trackRowsVended off), so the hot read
+    /// path pays nothing.
+    debug: Option<SharedDebug>,
+    /// The SQL text this cursor runs — the key `rowVended`/`initQuery` count
+    /// under (TS `sqlAndBindings.text`, table-source.ts:295/398).
+    query_text: String,
     /// Rows produced so far — used to THROTTLE the per-fetch economic budget
     /// check (advance_gate) to every 64 rows.
     fetched: u64,
@@ -79,8 +88,12 @@ impl LazyRows {
         column_names: Vec<String>,
         columns: HashMap<String, ColumnType>,
         table_name: String,
+        debug: Option<SharedDebug>,
     ) -> Result<Pin<Box<Self>>, rusqlite::Error> {
         let _t = crate::perf_trace::scope("source.sql_prepare");
+        // The SQL text is the `rowVended`/`initQuery` key (TS uses
+        // `sqlAndBindings.text`). Capture it before `sql` is moved into prepare.
+        let query_text = sql.clone();
         // Hold an immutable RefCell borrow for the entire struct lifetime.
         let guard: Ref<'_, Connection> = conn.borrow();
         let guard_static: Ref<'static, Connection> = unsafe { std::mem::transmute(guard) };
@@ -104,6 +117,14 @@ impl LazyRows {
         };
         let rows_static: rusqlite::Rows<'static> = unsafe { std::mem::transmute(rows) };
 
+        // Port of TS `debug?.initQuery(this.#table, sqlAndBindings.text)`
+        // (zqlite/table-source.ts:295): seed a 0 count for this (table, sql) so
+        // a query that vends nothing still appears in the VENDED report. Runs
+        // after prepare, before the first step — the same point as TS.
+        if let Some(d) = &debug {
+            d.borrow_mut().init_query(&table_name, &query_text);
+        }
+
         Ok(Box::pin(LazyRows {
             rows: Some(rows_static),
             _stmt: stmt_pin,
@@ -112,6 +133,8 @@ impl LazyRows {
             column_names,
             columns,
             table_name,
+            debug,
+            query_text,
             fetched: 0,
             _pin: PhantomPinned,
         }))
@@ -187,6 +210,8 @@ impl Iterator for LazyRowsIter {
         let column_names = &this.column_names;
         let columns = &this.columns;
         let table_name = &this.table_name;
+        let debug = &this.debug;
+        let query_text = &this.query_text;
         let stepped = {
             let _t = crate::perf_trace::scope("source.sql_step");
             rows.next()
@@ -200,7 +225,16 @@ impl Iterator for LazyRowsIter {
                     let value = sqlite_value_to_ivm(val, columns.get(col), table_name, col);
                     map.insert(col.clone(), value);
                 }
-                Some(Arc::new(map))
+                let row: Row = Arc::new(map);
+                // Port of TS `debug?.rowVended(this.#table, query, row)`
+                // (zqlite/table-source.ts:398): count each row the source vends
+                // (scans), keyed by table+SQL. `None` in prod → no-op. The
+                // `Arc` clone is a refcount bump, only taken when debugging.
+                if let Some(d) = debug {
+                    d.borrow_mut()
+                        .row_vended(table_name, query_text, row.clone());
+                }
+                Some(row)
             }
             Ok(None) => None,
             Err(e) => match classify_row_error(&e) {
@@ -228,6 +262,7 @@ fn stream_query(
     column_names: Vec<String>,
     columns: HashMap<String, ColumnType>,
     table_name: String,
+    debug: Option<SharedDebug>,
 ) -> Box<dyn Iterator<Item = Row>> {
     let table_name_for_err = table_name.clone();
     let lazy = match LazyRows::try_new(
@@ -237,6 +272,7 @@ fn stream_query(
         column_names,
         columns,
         table_name,
+        debug,
     ) {
         Ok(lazy) => lazy,
         Err(e) => {
@@ -368,6 +404,10 @@ pub struct TableConnection {
     pub filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
     pub last_pushed_epoch: usize,
     pub output: Option<OutputHandle>,
+    /// Optional debug delegate for this connection. Port of TS `Connection.debug`
+    /// (zqlite/table-source.ts:252). Threaded into every `#fetch` so vended rows
+    /// are counted. `None` in prod (trackRowsVended off).
+    pub debug: Option<SharedDebug>,
 }
 
 /// Shared overlay — accessible by both TableSource (writer) and TableSourceInput (reader)
@@ -514,6 +554,7 @@ impl TableSource {
         filter_condition: Option<Condition>,
         filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
         split_edit_keys: Option<Vec<String>>,
+        debug: Option<SharedDebug>,
     ) -> Shared<dyn Input> {
         let internal_sort = sort
             .clone()
@@ -530,6 +571,9 @@ impl TableSource {
             filter_predicate,
             last_pushed_epoch: 0,
             output: None,
+            // TS stores `debug` on the Connection (table-source.ts:252) so
+            // `#fetch` can read it back per fetch.
+            debug,
         }));
 
         let schema = SourceSchema {
@@ -793,6 +837,9 @@ impl TableSource {
             self.column_names.clone(),
             self.columns.clone(),
             self.table_name.clone(),
+            // TS `#fetch` reads `connection.debug` (table-source.ts:284) and
+            // threads it through the row iterator so each vended row is counted.
+            conn.debug.clone(),
         );
 
         let _t = crate::perf_trace::scope("source.overlay");
@@ -899,6 +946,9 @@ impl Input for TableSourceInput {
             self.column_names.clone(),
             self.columns.clone(),
             self.table_name.clone(),
+            // TS `#fetch` reads `connection.debug` (table-source.ts:284) and
+            // threads it through the row iterator so each vended row is counted.
+            conn.debug.clone(),
         );
 
         let _t = crate::perf_trace::scope("source.overlay");
@@ -1081,8 +1131,15 @@ impl Source for TableSource {
         filter_condition: Option<Condition>,
         filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
         split_edit_keys: Option<Vec<String>>,
+        debug: Option<crate::builder::debug_delegate::SharedDebug>,
     ) -> Shared<dyn Input> {
-        self.connect(sort, filter_condition, filter_predicate, split_edit_keys)
+        self.connect(
+            sort,
+            filter_condition,
+            filter_predicate,
+            split_edit_keys,
+            debug,
+        )
     }
 
     fn push(&mut self, change: SourceChange) -> Vec<Change> {
@@ -1257,6 +1314,7 @@ mod advance_gate_fetch_tests {
             vec!["id".to_string()],
             HashMap::new(),
             "t".to_string(),
+            None,
         )
         .count()
     }
@@ -1306,6 +1364,7 @@ mod advance_gate_fetch_tests {
             vec!["id".to_string(), "name".to_string(), "flag".to_string()],
             columns,
             "u".to_string(),
+            None,
         )
         .collect();
 
@@ -1364,7 +1423,7 @@ mod advance_gate_fetch_tests {
         let second = conn_with_value(2);
         let columns = HashMap::from([("id".to_string(), ColumnType::Number { optional: false })]);
         let mut source = TableSource::new(first, "t", columns, vec!["id".to_string()]);
-        let input = source.connect(None, None, None, None);
+        let input = source.connect(None, None, None, None, None);
 
         let fetch_id = || {
             let rows: Vec<Row> =
@@ -1407,6 +1466,7 @@ mod advance_gate_fetch_tests {
             vec!["no_such_col".to_string()],
             HashMap::new(),
             "t".to_string(),
+            None,
         )
         .count();
     }
@@ -1425,6 +1485,7 @@ mod advance_gate_fetch_tests {
             vec!["id".to_string()],
             HashMap::new(),
             "t".to_string(),
+            None,
         )
         .count();
     }
@@ -1457,6 +1518,7 @@ mod advance_gate_fetch_tests {
                 vec!["id".to_string()],
                 HashMap::new(),
                 "t".to_string(),
+                None,
             )
             .count();
         }));

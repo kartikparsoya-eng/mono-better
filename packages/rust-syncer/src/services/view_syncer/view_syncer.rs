@@ -280,7 +280,11 @@ pub(crate) fn now_ms() -> i64 {
 /// signal operators use to find pathological queries. Port of TS's
 /// `slowHydrateThreshold` (view-syncer.ts / pipeline-driver.ts). Read once from
 /// `ZERO_SLOW_HYDRATE_THRESHOLD_MS` (default 1000), cached.
-fn slow_hydrate_threshold_ms() -> f64 {
+///
+/// `pub(crate)` so the pipeline driver's `VENDED` log gate reads the same
+/// threshold — TS shares one `#logConfig.slowHydrateThreshold` across the
+/// view-syncer's slow-hydrate log and the pipeline-driver's VENDED log.
+pub(crate) fn slow_hydrate_threshold_ms() -> f64 {
     static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *T.get_or_init(|| {
         std::env::var("ZERO_SLOW_HYDRATE_THRESHOLD_MS")

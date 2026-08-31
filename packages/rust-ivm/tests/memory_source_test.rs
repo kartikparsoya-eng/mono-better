@@ -311,7 +311,7 @@ fn test_memory_source_fetch_all() {
         );
     }
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let nodes: Vec<Node> =
         rust_ivm::ivm::stream::skip_yields(input.borrow().fetch(&FetchRequest::default()))
             .collect();
@@ -338,7 +338,7 @@ fn test_memory_source_fetch_with_constraint() {
         );
     }
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("id".to_string(), Value::F64(3.0));
     let req = FetchRequest {
@@ -364,7 +364,7 @@ fn test_memory_source_fetch_with_multi_constraints() {
         add_row(&source, &[("id", Value::F64(i as f64))]);
     }
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
     mc1.insert("id".to_string(), Value::F64(2.0));
@@ -392,7 +392,7 @@ fn test_memory_source_push_add() {
     );
     add_row(&source, &[("id", Value::F64(1.0))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     source.borrow_mut().push(SourceChange::Add {
         row: make_row(&[("id", Value::F64(2.0))]),
@@ -414,7 +414,7 @@ fn test_memory_source_push_remove() {
     add_row(&source, &[("id", Value::F64(1.0))]);
     add_row(&source, &[("id", Value::F64(2.0))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     source.borrow_mut().push(SourceChange::Remove {
         row: make_row(&[("id", Value::F64(1.0))]),
@@ -445,7 +445,7 @@ fn test_memory_source_push_edit() {
         &[("id", Value::F64(1.0)), ("name", str_val("old"))],
     );
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     source.borrow_mut().push(SourceChange::Edit {
         old_row: make_row(&[("id", Value::F64(1.0)), ("name", str_val("old"))]),
@@ -595,7 +595,7 @@ fn test_memory_source_fetch_reverse() {
     for i in 1..=5 {
         add_row(&source, &[("id", Value::F64(i as f64))]);
     }
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let req = FetchRequest {
         reverse: true,
         ..Default::default()
@@ -618,7 +618,7 @@ fn test_memory_source_fetch_with_start_at() {
     for i in 1..=5 {
         add_row(&source, &[("id", Value::F64(i as f64))]);
     }
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let req = FetchRequest {
         start: Some(Start {
             row: make_row(&[("id", Value::F64(3.0))]),
@@ -652,7 +652,7 @@ fn test_memory_source_fetch_with_start_after() {
     for i in 1..=5 {
         add_row(&source, &[("id", Value::F64(i as f64))]);
     }
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let req = FetchRequest {
         start: Some(Start {
             row: make_row(&[("id", Value::F64(3.0))]),
@@ -701,7 +701,7 @@ fn test_memory_source_fetch_with_filter_predicate() {
     });
     let input = source
         .borrow_mut()
-        .connect(None, None, Some(predicate), None);
+        .connect(None, None, Some(predicate), None, None);
     let nodes: Vec<Node> =
         rust_ivm::ivm::stream::skip_yields(input.borrow().fetch(&FetchRequest::default()))
             .collect();
@@ -740,7 +740,7 @@ fn test_memory_source_fetch_with_multi_constraints_compound_key() {
             ],
         );
     }
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
     mc1.insert("a".to_string(), Value::F64(1.0));
@@ -770,7 +770,7 @@ fn test_memory_source_shared_data_visible_after_connect() {
         &[("id", ColumnType::Number { optional: false })],
     );
     add_row(&source, &[("id", Value::F64(1.0))]);
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     add_row(&source, &[("id", Value::F64(2.0))]);
     let nodes: Vec<Node> =
         rust_ivm::ivm::stream::skip_yields(input.borrow().fetch(&FetchRequest::default()))
@@ -792,8 +792,8 @@ fn test_memory_source_multiple_connections_independent() {
     for i in 1..=3 {
         add_row(&source, &[("id", Value::F64(i as f64))]);
     }
-    let input1 = source.borrow_mut().connect(None, None, None, None);
-    let input2 = source.borrow_mut().connect(None, None, None, None);
+    let input1 = source.borrow_mut().connect(None, None, None, None, None);
+    let input2 = source.borrow_mut().connect(None, None, None, None, None);
 
     let nodes1: Vec<Node> =
         rust_ivm::ivm::stream::skip_yields(input1.borrow().fetch(&FetchRequest::default()))

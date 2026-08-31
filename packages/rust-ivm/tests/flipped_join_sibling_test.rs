@@ -96,8 +96,8 @@ fn setup_siblings(
         add_row(&owners, row);
     }
 
-    let issue_input_comments = issues.borrow_mut().connect(None, None, None, None);
-    let comment_input = comments.borrow_mut().connect(None, None, None, None);
+    let issue_input_comments = issues.borrow_mut().connect(None, None, None, None, None);
+    let comment_input = comments.borrow_mut().connect(None, None, None, None, None);
 
     let comments_join = FlippedJoin::new(FlippedJoinArgs {
         parent: issue_input_comments,
@@ -109,8 +109,8 @@ fn setup_siblings(
         system: System::Client,
     });
 
-    let issue_input_owners = issues.borrow_mut().connect(None, None, None, None);
-    let owner_input = owners.borrow_mut().connect(None, None, None, None);
+    let issue_input_owners = issues.borrow_mut().connect(None, None, None, None, None);
+    let owner_input = owners.borrow_mut().connect(None, None, None, None, None);
 
     let owners_join = FlippedJoin::new(FlippedJoinArgs {
         parent: issue_input_owners,

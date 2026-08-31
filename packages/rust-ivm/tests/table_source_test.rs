@@ -51,7 +51,7 @@ fn test_table_source_fetch_all() {
     columns.insert("name".to_string(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
 
     // Fetch all rows
     let stream = input.borrow().fetch(&Default::default());
@@ -78,7 +78,7 @@ fn test_table_source_fetch_with_constraint() {
     columns.insert("name".to_string(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
 
     // Fetch with constraint: id = 2
     let mut constraint = rustc_hash::FxHashMap::default();
@@ -135,7 +135,7 @@ fn test_table_source_fetch_with_filter() {
             value: Value::F64(25.0),
         },
     });
-    let input = source.connect(None, Some(condition), Some(predicate), None);
+    let input = source.connect(None, Some(condition), Some(predicate), None, None);
 
     let stream = input.borrow().fetch(&Default::default());
     let nodes: Vec<_> = rust_ivm::ivm::stream::skip_yields(stream).collect();
@@ -166,7 +166,7 @@ fn test_table_source_fetch_with_order() {
     let sort: rust_ivm::ivm::data::SortOrder =
         Arc::new(vec![["id".to_string(), "asc".to_string()]]);
 
-    let input = source.connect(Some(sort), None, None, None);
+    let input = source.connect(Some(sort), None, None, None, None);
 
     let stream = input.borrow().fetch(&Default::default());
     let nodes: Vec<_> = rust_ivm::ivm::stream::skip_yields(stream).collect();
@@ -202,7 +202,7 @@ fn test_table_source_push_add() {
     let mut source = TableSource::new(db.clone(), "users", columns, vec!["id".to_string()]);
 
     // Connect a pipeline
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
     input
         .borrow_mut()
@@ -243,7 +243,7 @@ fn test_table_source_push_remove() {
 
     let mut source = TableSource::new(db.clone(), "users", columns, vec!["id".to_string()]);
 
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
     input
         .borrow_mut()
@@ -278,7 +278,7 @@ fn test_table_source_push_edit() {
 
     let mut source = TableSource::new(db.clone(), "users", columns, vec!["id".to_string()]);
 
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
     let collector = Rc::new(RefCell::new(CollectOutput::new()));
     input
         .borrow_mut()
@@ -317,7 +317,7 @@ fn test_table_source_fetch_with_multi_constraint() {
     columns.insert("name".to_string(), ColumnType::String { optional: false });
 
     let mut source = TableSource::new(db, "users", columns, vec!["id".to_string()]);
-    let input = source.connect(None, None, None, None);
+    let input = source.connect(None, None, None, None, None);
 
     // Fetch with multi-constraint: id IN (1, 3)
     let mc: rust_ivm::ivm::constraint::MultiConstraint = vec![

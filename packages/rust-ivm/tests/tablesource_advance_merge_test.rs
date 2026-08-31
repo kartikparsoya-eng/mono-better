@@ -102,6 +102,7 @@ fn tablesource_advance_fetch_reflects_add_edit_remove() {
         None,
         None,
         None,
+        None,
     );
 
     // Baseline: fetch reads PREV.

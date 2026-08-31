@@ -93,8 +93,8 @@ fn setup_flipped_join(
         add_row(&child, row_data);
     }
 
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
 
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
@@ -411,8 +411,8 @@ fn test_fetch_during_remove_push_splices_removed_child_at_sorted_position() {
         &child,
         &[("id", str_val("c2b")), ("issueID", str_val("i2"))],
     );
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
         child: child_input,
@@ -501,8 +501,8 @@ fn test_remove_overlay_splice_position_for_unpushed_parent() {
     for k in ["k1", "k2", "k3"] {
         add_row(&child, &[("id", str_val(k)), ("cat", str_val("x"))]);
     }
-    let parent_input = parent.borrow_mut().connect(None, None, None, None);
-    let child_input = child.borrow_mut().connect(None, None, None, None);
+    let parent_input = parent.borrow_mut().connect(None, None, None, None, None);
+    let child_input = child.borrow_mut().connect(None, None, None, None, None);
     let fj = FlippedJoin::new(FlippedJoinArgs {
         parent: parent_input,
         child: child_input,

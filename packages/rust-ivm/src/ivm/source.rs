@@ -81,12 +81,18 @@ pub trait Source {
     fn truncate_connections(&mut self, count: usize);
 
     /// Connect a new downstream consumer.
+    ///
+    /// `debug` is the optional [`DebugDelegate`](crate::builder::debug_delegate::DebugDelegate)
+    /// threaded from the builder (port of TS `Source.connect(..., debug?)`,
+    /// source.ts:72). The production `TableSource` records vended rows through
+    /// it; `MemorySource` holds it without vending (matching memory-source.ts:87).
     fn connect(
         &mut self,
         sort: Option<SortOrder>,
         filter_condition: Option<Condition>,
         filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
         split_edit_keys: Option<Vec<String>>,
+        debug: Option<crate::builder::debug_delegate::SharedDebug>,
     ) -> Shared<dyn Input>;
 
     /// Push a source change through all connections.

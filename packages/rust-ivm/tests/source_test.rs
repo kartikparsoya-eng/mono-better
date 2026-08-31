@@ -89,7 +89,7 @@ fn test_simple_fetch() {
         &["a"],
         &[("a", ColumnType::Number { optional: false })],
     );
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     // Empty initially
     let nodes = fetch_all(&input, &FetchRequest::default());
@@ -177,7 +177,7 @@ fn test_constraint_null_semantics() {
         ],
     );
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     // Constraint b=true → rows with a=1, a=3
     let mut c = Constraint::default();
@@ -269,7 +269,7 @@ fn test_fetch_start_reverse() {
     add_row(&source, &[("a", num(2.0))]);
     add_row(&source, &[("a", num(3.0))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     // start at a=2, reverse → [2] (TS: btree reverse from 2, includes 2, goes backwards)
     let req = FetchRequest {
@@ -334,7 +334,7 @@ fn setup_parents() -> Rc<RefCell<MemorySource>> {
 #[test]
 fn test_mc_single_key_in_list() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
     mc1.insert("id".to_string(), num(4.0));
@@ -359,7 +359,7 @@ fn test_mc_single_key_in_list() {
 #[test]
 fn test_mc_no_matches() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mut mc1 = Constraint::default();
     mc1.insert("id".to_string(), num(99.0));
@@ -378,7 +378,7 @@ fn test_mc_no_matches() {
 #[test]
 fn test_mc_empty_array_noop() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let req = FetchRequest {
         multi_constraints: vec![],
@@ -391,7 +391,7 @@ fn test_mc_empty_array_noop() {
 #[test]
 fn test_mc_empty_entry_ignored() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     // First MultiConstraint is empty (no entries) → skipped/ignored.
     // Second MultiConstraint has id=2 and id=4 → OR'd, matches those rows.
@@ -422,7 +422,7 @@ fn test_mc_empty_entry_ignored() {
 #[test]
 fn test_mc_two_anded() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     // id IN (1,2,3,4) AND org IN ('o-even') → 2, 4
     let mc1: MultiConstraint = (1..=4)
@@ -451,7 +451,7 @@ fn test_mc_two_anded() {
 #[test]
 fn test_mc_with_constraint_anded() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     // active=true AND id IN (1,2,3,4,5) → 1,3,4,5 (excludes 2)
     let mut constraint = Constraint::default();
@@ -484,7 +484,7 @@ fn test_mc_with_constraint_anded() {
 #[test]
 fn test_mc_with_reverse() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mc: MultiConstraint = [1, 3, 5]
         .iter()
@@ -511,7 +511,7 @@ fn test_mc_with_reverse() {
 #[test]
 fn test_mc_with_start_after() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mc: MultiConstraint = [1, 3, 5]
         .iter()
@@ -539,7 +539,7 @@ fn test_mc_with_start_after() {
 #[test]
 fn test_mc_null_entries_never_match() {
     let source = setup_parents();
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mc: MultiConstraint = vec![{
         let mut c = Constraint::default();
@@ -574,7 +574,7 @@ fn test_mc_compound_key() {
             &[("a", num(i as f64)), ("b", s_owned(format!("val{}", i)))],
         );
     }
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
 
     let mc: MultiConstraint = vec![
         {
@@ -620,7 +620,7 @@ fn test_push_duplicate_add_panics() {
     );
     add_row(&source, &[("a", num(1.0))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let _ = input; // keep alive
 
     source.borrow_mut().push(SourceChange::Add {
@@ -636,7 +636,7 @@ fn test_push_remove_missing_panics() {
         &["a"],
         &[("a", ColumnType::Number { optional: false })],
     );
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let _ = input;
 
     source.borrow_mut().push(SourceChange::Remove {
@@ -664,14 +664,14 @@ fn test_per_output_sorts() {
 
     // Connection 1: sort by id asc
     let sort_id = sort_by("id");
-    let input1 = source.borrow_mut().connect(sort_id, None, None, None);
+    let input1 = source.borrow_mut().connect(sort_id, None, None, None, None);
 
     // Connection 2: sort by name asc
     let sort_name: rust_ivm::ivm::data::SortOrder =
         Arc::new(vec![["name".to_string(), "asc".to_string()]]);
     let input2 = source
         .borrow_mut()
-        .connect(Some(sort_name), None, None, None);
+        .connect(Some(sort_name), None, None, None, None);
 
     let nodes1 = fetch_all(&input1, &FetchRequest::default());
     assert_eq!(nodes1.len(), 3);
@@ -715,7 +715,7 @@ fn test_json_type_support() {
         ],
     );
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let nodes = fetch_all(&input, &FetchRequest::default());
     assert_eq!(nodes.len(), 2);
     match nodes[0].row.get("data") {
@@ -741,7 +741,7 @@ fn test_push_with_collect_output() {
     );
     add_row(&source, &[("a", num(1.0))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let output = Rc::new(RefCell::new(CollectOutput::new()));
     input.borrow_mut().set_output(Rc::clone(&output) as _);
 
@@ -823,7 +823,7 @@ fn test_overlay_vs_constraint_c1() {
     add_row(&source, &[("a", num(2.0)), ("b", bool_val(false))]);
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(true));
     let req = FetchRequest {
@@ -848,7 +848,7 @@ fn test_overlay_vs_constraint_c2() {
     add_row(&source, &[("a", num(2.0)), ("b", bool_val(false))]);
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(true));
     let req = FetchRequest {
@@ -874,7 +874,7 @@ fn test_overlay_vs_constraint_c3() {
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(5.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(true));
     let req = FetchRequest {
@@ -901,7 +901,7 @@ fn test_overlay_vs_constraint_c4() {
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(5.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
@@ -928,7 +928,7 @@ fn test_overlay_vs_constraint_c5() {
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(5.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("a".to_string(), num(4.0));
     constraint.insert("b".to_string(), bool_val(false));
@@ -959,7 +959,7 @@ fn test_overlay_vs_mc_add_matching() {
     add_row(&source, &[("a", num(1.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
@@ -999,7 +999,7 @@ fn test_overlay_vs_mc_add_outside_dropped() {
     add_row(&source, &[("a", num(1.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
@@ -1035,7 +1035,7 @@ fn test_overlay_vs_mc_remove_matching() {
     add_row(&source, &[("a", num(2.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(4.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
@@ -1070,7 +1070,7 @@ fn test_overlay_vs_mc_edit_remove_in_add_out() {
     add_row(&source, &[("a", num(1.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(5.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mc: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
@@ -1106,7 +1106,7 @@ fn test_overlay_vs_mc_two_anded() {
     add_row(&source, &[("a", num(1.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(3.0)), ("b", bool_val(false))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mc1: MultiConstraint = vec![
         {
             let mut c = Constraint::default();
@@ -1150,7 +1150,7 @@ fn test_overlay_vs_mc_empty_entry_ignored() {
     let source = make_source_ab();
     add_row(&source, &[("a", num(1.0)), ("b", bool_val(true))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mc: MultiConstraint = vec![];
     let req = FetchRequest {
         multi_constraints: vec![mc],
@@ -1189,7 +1189,7 @@ fn test_constraint_c1() {
     add_row(&source, &[("a", num(6.0)), ("b", s("4000"))]);
     add_row(&source, &[("a", num(7.0)), ("b", s("0000"))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), s("1000"));
     let req = FetchRequest {
@@ -1222,7 +1222,7 @@ fn test_constraint_c1_reverse() {
     add_row(&source, &[("a", num(6.0)), ("b", s("4000"))]);
     add_row(&source, &[("a", num(7.0)), ("b", s("0000"))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), s("1000"));
     let req = FetchRequest {
@@ -1249,7 +1249,7 @@ fn test_constraint_c2() {
     add_row(&source, &[("a", num(6.0)), ("b", bool_val(false))]);
     add_row(&source, &[("a", num(7.0)), ("b", bool_val(false))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
@@ -1275,7 +1275,7 @@ fn test_constraint_c2_reverse() {
     add_row(&source, &[("a", num(6.0)), ("b", bool_val(false))]);
     add_row(&source, &[("a", num(7.0)), ("b", bool_val(false))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
@@ -1306,7 +1306,7 @@ fn test_constraint_c3() {
     add_row(&source, &[("a", num(8.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(9.0)), ("b", bool_val(false))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
@@ -1334,7 +1334,7 @@ fn test_constraint_c3_reverse() {
     add_row(&source, &[("a", num(8.0)), ("b", bool_val(true))]);
     add_row(&source, &[("a", num(9.0)), ("b", bool_val(false))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
@@ -1362,7 +1362,7 @@ fn test_constraint_c4() {
     add_row(&source, &[("a", num(6.0)), ("b", bool_val(false))]);
     add_row(&source, &[("a", num(7.0)), ("b", bool_val(false))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
@@ -1387,7 +1387,7 @@ fn test_constraint_c4_reverse() {
     add_row(&source, &[("a", num(6.0)), ("b", bool_val(false))]);
     add_row(&source, &[("a", num(7.0)), ("b", bool_val(false))]);
 
-    let input = source.borrow_mut().connect(None, None, None, None);
+    let input = source.borrow_mut().connect(None, None, None, None, None);
     let mut constraint = Constraint::default();
     constraint.insert("b".to_string(), bool_val(false));
     let req = FetchRequest {
@@ -1431,7 +1431,9 @@ fn overlay_vs_fetch_start(
     for &v in start_data {
         add_row(&source, &[("a", num(v))]);
     }
-    let input = source.borrow_mut().connect(sort_by("a"), None, None, None);
+    let input = source
+        .borrow_mut()
+        .connect(sort_by("a"), None, None, None, None);
     let req = FetchRequest {
         start: Some(Start {
             row: make_row(&[("a", num(start_val))]),
@@ -1931,7 +1933,7 @@ fn overlay_vs_filter(
     }
     let input = source
         .borrow_mut()
-        .connect(sort_by("a"), None, Some(predicate), None);
+        .connect(sort_by("a"), None, Some(predicate), None, None);
     let spy = OverlaySpy::new(input.clone(), FetchRequest::default());
     input.borrow_mut().set_output(Rc::clone(&spy) as _);
     source.borrow_mut().push(change);

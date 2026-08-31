@@ -52,6 +52,14 @@ pub trait BuilderDelegate {
             crate::ivm::memory_storage::MemoryStorage::new(),
         ))
     }
+
+    /// The debug delegate to thread into every source connection. Port of TS
+    /// `BuilderDelegate.debug?` (builder.ts:57), passed to `source.connect(...,
+    /// delegate.debug)` (builder.ts:316). Default `None` — prod does no
+    /// vended-row tracking. Returns a clone of the shared handle per connect.
+    fn debug(&self) -> Option<crate::builder::debug_delegate::SharedDebug> {
+        None
+    }
 }
 
 /// Build a pipeline from an AST.
@@ -153,9 +161,15 @@ fn build_pipeline_internal(
         Some(split_edit_keys.into_iter().collect::<Vec<_>>())
     };
 
-    let conn = source
-        .borrow_mut()
-        .connect(sort, filter_condition, filter_predicate, split_keys);
+    let conn = source.borrow_mut().connect(
+        sort,
+        filter_condition,
+        filter_predicate,
+        split_keys,
+        // Port of TS `source.connect(..., delegate.debug)` (builder.ts:316):
+        // thread the (optional) debug delegate so the source records vended rows.
+        delegate.debug(),
+    );
     let mut current: Shared<dyn Input> = conn;
 
     // Apply Skip (start/pagination) if specified

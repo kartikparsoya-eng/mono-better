@@ -108,7 +108,7 @@ fn create_and_corrupt(path: &str, n: i64) {
 /// connect a default (PK-sorted) input.
 fn table_input(conn: Rc<RefCell<rusqlite::Connection>>) -> Rc<RefCell<dyn Input>> {
     let mut src = TableSource::new(conn, "t", columns(), vec!["id".to_string()]);
-    src.connect(None, None, None, None)
+    src.connect(None, None, None, None, None)
 }
 
 #[test]

@@ -100,8 +100,10 @@ fn setup_chained(
 
     // Inner join: issueLabel ← label
     // parentKey: labelID (on issueLabel), childKey: id (on label)
-    let il_input_parent = issue_labels.borrow_mut().connect(None, None, None, None);
-    let label_input = labels.borrow_mut().connect(None, None, None, None);
+    let il_input_parent = issue_labels
+        .borrow_mut()
+        .connect(None, None, None, None, None);
+    let label_input = labels.borrow_mut().connect(None, None, None, None, None);
     let inner_join = FlippedJoin::new(FlippedJoinArgs {
         parent: il_input_parent,
         child: label_input,
@@ -114,7 +116,7 @@ fn setup_chained(
 
     // Outer join: issue ← inner_join (issueLabel with labels)
     // parentKey: id (on issue), childKey: issueID (on issueLabel)
-    let issue_input = issues.borrow_mut().connect(None, None, None, None);
+    let issue_input = issues.borrow_mut().connect(None, None, None, None, None);
     let outer_join = FlippedJoin::new(FlippedJoinArgs {
         parent: issue_input,
         child: inner_join.clone(),
@@ -330,8 +332,8 @@ fn test_chained_fetch_compound_key() {
         ],
     );
 
-    let j_input_parent = junction.borrow_mut().connect(None, None, None, None);
-    let t_input = targets.borrow_mut().connect(None, None, None, None);
+    let j_input_parent = junction.borrow_mut().connect(None, None, None, None, None);
+    let t_input = targets.borrow_mut().connect(None, None, None, None, None);
     let _inner = FlippedJoin::new(FlippedJoinArgs {
         parent: j_input_parent,
         child: t_input,
@@ -342,8 +344,8 @@ fn test_chained_fetch_compound_key() {
         system: System::Client,
     });
 
-    let i_input = issues.borrow_mut().connect(None, None, None, None);
-    let j_input_child = junction.borrow_mut().connect(None, None, None, None);
+    let i_input = issues.borrow_mut().connect(None, None, None, None, None);
+    let j_input_child = junction.borrow_mut().connect(None, None, None, None, None);
     let outer = FlippedJoin::new(FlippedJoinArgs {
         parent: i_input,
         child: j_input_child,

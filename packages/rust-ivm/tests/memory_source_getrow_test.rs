@@ -135,7 +135,9 @@ fn id_sort() -> SortOrder {
 #[test]
 fn gen_push_applies_change_and_delivers_to_output() {
     let src = make_source();
-    let input = src.borrow_mut().connect(Some(id_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(id_sort()), None, None, None, None);
     let seen = Rc::new(RefCell::new(Vec::new()));
     let collector: OutputHandle = Rc::new(RefCell::new(Collector { seen: seen.clone() }));
     input.borrow().set_output(collector);

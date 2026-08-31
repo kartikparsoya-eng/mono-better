@@ -71,7 +71,9 @@ fn fetch_logs_fetch_and_fetch_count_and_reemits() {
     let src = make_source();
     src.borrow_mut().add_row(id_row("a"));
     src.borrow_mut().add_row(id_row("b"));
-    let input = src.borrow_mut().connect(Some(id_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(id_sort()), None, None, None, None);
 
     let snitch = Snitch::new(
         input,
@@ -106,7 +108,9 @@ fn fetch_logs_fetch_and_fetch_count_and_reemits() {
 #[test]
 fn push_logs_change_record_and_forwards() {
     let src = make_source();
-    let input = src.borrow_mut().connect(Some(id_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(id_sort()), None, None, None, None);
     let snitch = Snitch::new(input, "s2".to_string(), vec![], vec![LogType::Push]);
 
     let (out, pushes) = collector();
@@ -141,7 +145,9 @@ fn push_logs_change_record_and_forwards() {
 fn log_type_filtering_push_only_ignores_fetch() {
     let src = make_source();
     src.borrow_mut().add_row(id_row("a"));
-    let input = src.borrow_mut().connect(Some(id_sort()), None, None, None);
+    let input = src
+        .borrow_mut()
+        .connect(Some(id_sort()), None, None, None, None);
     let snitch = Snitch::new(input, "s3".to_string(), vec![], vec![LogType::Push]);
 
     let _n: Vec<Node> =

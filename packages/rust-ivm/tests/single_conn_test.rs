@@ -59,7 +59,7 @@ fn test_set_db_path_opens_single_connection() {
         "source must report has_db after set_db_path"
     );
 
-    let conn_handle = source.borrow_mut().connect(None, None, None, None);
+    let conn_handle = source.borrow_mut().connect(None, None, None, None, None);
     let req = FetchRequest::default();
 
     // Fetch 3 times — must reuse same connection
@@ -104,7 +104,7 @@ fn test_no_connection_leak_on_repeated_fetch() {
 
     // Fetch 50 times — must not leak connections or hang
     for attempt in 0..50 {
-        let conn_handle = source.borrow_mut().connect(None, None, None, None);
+        let conn_handle = source.borrow_mut().connect(None, None, None, None, None);
         let stream = conn_handle.borrow().fetch(&FetchRequest::default());
         let rows: Vec<_> = stream.collect();
         assert_eq!(rows.len(), 100, "attempt {} must return 100 rows", attempt);
@@ -154,7 +154,9 @@ fn test_nested_fetch_different_sources_no_deadlock() {
     child_source.borrow_mut().set_db_path(db_path);
 
     // Fetch parent rows
-    let parent_conn = parent_source.borrow_mut().connect(None, None, None, None);
+    let parent_conn = parent_source
+        .borrow_mut()
+        .connect(None, None, None, None, None);
     let parent_stream = parent_conn.borrow().fetch(&FetchRequest::default());
     let parent_rows: Vec<_> = parent_stream.collect();
     assert_eq!(parent_rows.len(), 2, "parent must have 2 rows");
@@ -169,7 +171,9 @@ fn test_nested_fetch_different_sources_no_deadlock() {
         constraint: Some(child_constraint),
         ..Default::default()
     };
-    let child_conn = child_source.borrow_mut().connect(None, None, None, None);
+    let child_conn = child_source
+        .borrow_mut()
+        .connect(None, None, None, None, None);
     let child_stream = child_conn.borrow().fetch(&child_req);
     let child_rows: Vec<_> = child_stream.collect();
     assert_eq!(child_rows.len(), 2, "child must have 2 rows for parent p1");
@@ -198,7 +202,7 @@ fn test_read_only_connection() {
     source.borrow_mut().set_db_path(db_path);
 
     // Fetch works (read)
-    let conn_handle = source.borrow_mut().connect(None, None, None, None);
+    let conn_handle = source.borrow_mut().connect(None, None, None, None, None);
     let stream = conn_handle.borrow().fetch(&FetchRequest::default());
     let rows: Vec<_> = stream.collect();
     assert_eq!(rows.len(), 1, "read must work on read-only connection");
