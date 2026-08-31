@@ -7670,8 +7670,23 @@ impl ViewSyncerService {
         ttl_clock: TTLClock,
     ) -> Result<(SyncResult, MultiPoker), String> {
         let (sigs, provider) = Self::signature_provider();
+        // Port of TS `#addAndRemoveQueries` force-bump (view-syncer.ts:2194-2215):
+        // an already-gotten, same-transformation-hash query re-executed without a
+        // stateVersion/hash change or a removal would NOT bump `configVersion` via
+        // `track_queries`, so a row diff from `received()` would have no new
+        // `patchVersion` to attach (the `#assertNewVersion` no-bump wedge). Decide
+        // BEFORE `cvr`/`state_version` move into the updater; force the bump after.
+        let force_same_hash_bump =
+            same_hash_rehydration_forces_bump(&cvr, add_queries, remove_queries, &state_version);
         let mut updater =
             CVRQueryDrivenUpdater::new(cvr, state_version, replica_version, Some(provider));
+        if force_same_hash_bump {
+            // `driftedQueryIDs` is empty until `#hydrateUnchangedQueries` is
+            // ported, so the reason is always `missing-pipeline` — exactly TS's
+            // reason when `drifted == 0` (view-syncer.ts:2207-2212).
+            crate::metrics::record_same_hash_rehydration_version_bump("missing-pipeline");
+            updater.ensure_new_version();
+        }
 
         let executed_refs: Vec<(&str, &str)> = add_queries
             .iter()
@@ -8262,6 +8277,40 @@ pub fn empty_cvr(id: &str, replica_version: &str) -> CVR {
     }
 }
 
+/// Port of the TS `#addAndRemoveQueries` force-bump guard (view-syncer.ts:
+/// 2182-2201): returns true when an already-gotten, same-transformation-hash
+/// query is being re-executed and `track_queries` would NOT otherwise bump the
+/// `configVersion` — i.e. no `stateVersion` advance, no removals, and no hash
+/// change. In that case the caller must `ensure_new_version()` before
+/// `track_queries` so a row diff produced by `received()` gets a fresh
+/// `patchVersion` to attach to (the `#assertNewVersion` invariant; skipping it
+/// is the prod no-bump wedge on a reaped-pipeline reconnect). Pure, so it can be
+/// unit-tested against the TS golden scenarios.
+fn same_hash_rehydration_forces_bump(
+    cvr: &CVR,
+    add_queries: &[(String, String)],
+    remove_queries: &[String],
+    state_version: &str,
+) -> bool {
+    let cvr_hash = |id: &str| -> Option<String> {
+        cvr.queries
+            .get(id)
+            .and_then(|q| q.base().transformation_hash.clone())
+    };
+    // sameHashRehydratedQueryIDs = addQueries whose CVR-stored transformation
+    // hash equals the new one (view-syncer.ts:2182-2186).
+    let any_same_hash = add_queries
+        .iter()
+        .any(|(id, hash)| cvr_hash(id).as_deref() == Some(hash.as_str()));
+    // trackQueriesWillBumpVersion (view-syncer.ts:2187-2192).
+    let track_queries_will_bump_version = state_version > cvr.version.state_version.as_str()
+        || !remove_queries.is_empty()
+        || add_queries
+            .iter()
+            .any(|(id, hash)| cvr_hash(id).as_deref() != Some(hash.as_str()));
+    any_same_hash && !track_queries_will_bump_version
+}
+
 // NOTE: a `parse_existing_rows(json) -> RowRecordMap` helper once lived here
 // (pre-rust-cvr existing-rows parsing). It had no TS twin — TS loads the CVR
 // row records via `CVRStore.load` — and no remaining caller after `CVRStore`
@@ -8282,6 +8331,88 @@ mod engine_tests {
     use rust_cvr::schema::types::{CVRVersion, version_from_string};
     use rust_cvr::shards::ShardID;
     use std::collections::BTreeMap;
+
+    /// Non-vacuous port guard for the TS `#addAndRemoveQueries` force-bump
+    /// (view-syncer.ts:2182-2201): a same-transformation-hash rehydrate with no
+    /// other bump trigger MUST force a `configVersion` bump — the mechanism that
+    /// prevents the no-bump `#assertNewVersion` wedge on a reaped-pipeline
+    /// reconnect. Reverting `same_hash_rehydration_forces_bump` to `false` makes
+    /// the first assertion fail. The negative branches pin every
+    /// `trackQueriesWillBumpVersion` term so a bump is NOT double-forced.
+    #[test]
+    fn same_hash_rehydration_forces_bump_matches_ts_guard() {
+        // CVR already has q1 at transformation hash "H", at state version "05".
+        let mut cvr = empty_cvr("cg1", "01");
+        cvr.version = CVRVersion {
+            state_version: "05".to_string(),
+            config_version: None,
+        };
+        cvr.queries.insert(
+            "q1".to_string(),
+            QueryRecord::Client(ClientQueryRecord {
+                base: BaseQueryRecord {
+                    id: "q1".to_string(),
+                    transformation_hash: Some("H".to_string()),
+                    transformation_version: None,
+                    row_set_signature: None,
+                },
+                ast: serde_json::json!({"table": "users"}),
+                client_state: BTreeMap::new(),
+                patch_version: None,
+            }),
+        );
+
+        // Same hash, same stateVersion, no removals, no hash change → force bump.
+        assert!(
+            same_hash_rehydration_forces_bump(
+                &cvr,
+                &[("q1".to_string(), "H".to_string())],
+                &[],
+                "05"
+            ),
+            "same-hash rehydrate with no other bump trigger MUST force a bump"
+        );
+        // Changed transformation hash → track_queries bumps → no force.
+        assert!(
+            !same_hash_rehydration_forces_bump(
+                &cvr,
+                &[("q1".to_string(), "H2".to_string())],
+                &[],
+                "05"
+            ),
+            "a changed transformation hash bumps via track_queries; no force"
+        );
+        // Advanced stateVersion → track_queries bumps → no force.
+        assert!(
+            !same_hash_rehydration_forces_bump(
+                &cvr,
+                &[("q1".to_string(), "H".to_string())],
+                &[],
+                "06"
+            ),
+            "an advanced stateVersion bumps via track_queries; no force"
+        );
+        // A removal present → track_queries bumps → no force.
+        assert!(
+            !same_hash_rehydration_forces_bump(
+                &cvr,
+                &[("q1".to_string(), "H".to_string())],
+                &["q2".to_string()],
+                "05"
+            ),
+            "a removal bumps via track_queries; no force"
+        );
+        // No already-gotten same-hash query at all → nothing to force.
+        assert!(
+            !same_hash_rehydration_forces_bump(
+                &cvr,
+                &[("qX".to_string(), "H".to_string())],
+                &[],
+                "05"
+            ),
+            "no already-gotten same-hash query → no force"
+        );
+    }
 
     /// Port of napi `value_to_serde_json` REAL→JSON semantics (TS
     /// `JSON.stringify` of a JS Number): an integral, in-i64-range REAL

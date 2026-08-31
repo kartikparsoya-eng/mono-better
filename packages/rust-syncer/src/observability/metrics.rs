@@ -88,6 +88,7 @@ struct QueryTransformOtel {
     transformation_time: OtelHistogram<f64>,
     hash_changes: Counter<u64>,
     no_ops: Counter<u64>,
+    same_hash_rehydration_version_bumps: Counter<u64>,
 }
 
 fn query_transform_otel() -> &'static QueryTransformOtel {
@@ -113,6 +114,16 @@ fn query_transform_otel() -> &'static QueryTransformOtel {
                 .u64_counter("zero.sync.query.transformation-no-ops")
                 .with_description(
                     "Number of times query transformation resulted in no-op (hash unchanged)",
+                )
+                .build(),
+            same_hash_rehydration_version_bumps: m
+                .u64_counter("zero.sync.query.same-hash-rehydrations-forced-bump")
+                .with_description(
+                    "Number of times query-set reconciliation forced a configVersion bump \
+                     for already-gotten same-transformation-hash query rehydration because \
+                     trackQueries would not otherwise bump. Expected to be near-zero; \
+                     non-zero values indicate pipeline/CVR row-set drift reached query-set \
+                     reconciliation.",
                 )
                 .build(),
         }
@@ -148,6 +159,16 @@ pub fn record_query_transformation_hash_change() {
 /// `#queryTransformationNoOps.add(1)` (no re-hydration needed).
 pub fn record_query_transformation_no_op() {
     query_transform_otel().no_ops.add(1, &[]);
+}
+
+/// Record a forced `configVersion` bump for an already-gotten,
+/// same-transformation-hash query rehydration — TS
+/// `#sameHashRehydrationVersionBumps.add(1, {reason})` (view-syncer.ts:2213).
+/// `reason` is one of `missing-pipeline`, `row-set-signature-drift`, `mixed`.
+pub fn record_same_hash_rehydration_version_bump(reason: &'static str) {
+    query_transform_otel()
+        .same_hash_rehydration_version_bumps
+        .add(1, &[KeyValue::new("reason", reason)]);
 }
 
 /// End-to-end serving-lag instruments — TS view-syncer's `#e2eServingLag`
