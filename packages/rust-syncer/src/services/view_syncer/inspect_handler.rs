@@ -156,16 +156,20 @@ async fn analyze_query_op(
 
     // The analysis engine is `!Send` (Rc/RefCell IVM), so build + run it on a
     // blocking thread; only the `Send` result crosses back.
-    // A2 wires `permissions` (legacy-query `loadPermissions`); A4 wires `auth`
-    // (the connection's JWT claims). Until then analyze runs without a transform.
+    // A4 wires `auth` (the connection's JWT claims); until then analyze binds
+    // permission static-params against NULL.
     let result = tokio::task::spawn_blocking(move || {
+        // TS inspect-handler.ts:135-147 — for a legacy query, load the deployed
+        // permissions from the replica so analyze applies the same read-rules the
+        // client sees. (Named queries skip this — legacyQuery=false; see A3.)
+        let permissions = load_legacy_analyze_permissions(&replica_path, &app_id)?;
         crate::services::analyze::analyze_query(
             &replica_path,
             &app_id,
             &ast_json,
             synced_rows,
             vended_rows,
-            None,
+            permissions,
             None,
         )
     })
@@ -178,6 +182,26 @@ async fn analyze_query_op(
     let value = serde_json::to_value(&result)
         .map_err(|e| format!("analyze-query: serialize result: {e}"))?;
     Ok(("analyze-query", value))
+}
+
+/// Load the deployed permissions for a legacy analyze-query. Port of the
+/// `legacyQuery` block in the TS `analyze-query` case (inspect-handler.ts:135-147):
+/// open the replica, `loadPermissions(app.id)`, use the config when deployed and
+/// log an info line otherwise. A load/parse error propagates to the client as an
+/// `op:error` frame (the TS `try/catch` in `handleInspect`). Runs on the
+/// blocking thread (SQLite I/O).
+fn load_legacy_analyze_permissions(
+    replica_path: &str,
+    app_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let conn = crate::db::lite_tables::open_replica_read_only(replica_path)?;
+    let loaded = crate::load_permissions(&conn, app_id)?;
+    if loaded.permissions.is_none() {
+        tracing::info!(
+            "No permissions loaded; analyze-query will run without applying permissions."
+        );
+    }
+    Ok(loaded.permissions)
 }
 
 /// Build the `queries` inspector value by delegating to the CVR store's
@@ -209,4 +233,88 @@ async fn inspect_queries_value(
         })
         .collect();
     serde_json::Value::Array(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a replica file with the `_zero.*` metadata, a 3-row `users` table,
+    /// and a deployed `{app}.permissions` row holding `permissions_json`.
+    fn build_replica_with_permissions(path: &str, app_id: &str, permissions_json: &str) {
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let _ = conn.pragma_update(None, "journal_mode", "wal2");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "_zero.replicationConfig" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton',
+                replicaVersion TEXT NOT NULL, publications TEXT NOT NULL);
+            CREATE TABLE "_zero.replicationState" (
+                lock TEXT PRIMARY KEY DEFAULT 'singleton', stateVersion TEXT NOT NULL);
+            INSERT INTO "_zero.replicationConfig" VALUES ('singleton', 'v1', '[]');
+            INSERT INTO "_zero.replicationState" VALUES ('singleton', 'v1');
+            CREATE TABLE "users" ("id" "text|NOT_NULL", "name" "text|NOT_NULL", "_0_version" "text");
+            CREATE UNIQUE INDEX "u_id" ON "users" ("id");
+            INSERT INTO "users" VALUES ('u1','Alice','01'),('u2','Bob','01'),('u3','Carol','01');
+            "#,
+        )
+        .unwrap();
+        // The deployed permissions row lives in `{app}.permissions` (loadPermissions).
+        conn.execute_batch(&format!(
+            "CREATE TABLE \"{app_id}.permissions\" (\"lock\" INTEGER PRIMARY KEY, \
+             \"permissions\" TEXT, \"hash\" TEXT);"
+        ))
+        .unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO \"{app_id}.permissions\" (lock, permissions, hash) VALUES (1, ?1, 'h')"
+            ),
+            [permissions_json],
+        )
+        .unwrap();
+    }
+
+    /// A2: the analyze-query handler loads the DEPLOYED permissions from the
+    /// replica (TS inspect-handler.ts:135-147) and applies them. NON-VACUOUS:
+    /// with a deployed permissions doc that grants `users` no select rule, the
+    /// loader returns exactly that doc and analyze filters every row to 0.
+    /// Reverting the loader to return `None` (the pre-A2 state) makes the exact
+    /// equality fail AND makes analyze return 3 rows.
+    #[test]
+    fn legacy_analyze_loads_and_applies_deployed_permissions() {
+        let path = std::env::temp_dir()
+            .join(format!("rs_inspect_a2_{}.db", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        // A valid permissions doc that deploys NO select rule for `users`
+        // (deny-by-default): distinct from "no permissions deployed" (None).
+        let deployed = r#"{"tables":{}}"#;
+        build_replica_with_permissions(&path, "app", deployed);
+
+        // The exact deployed doc is read back (proves the load path runs).
+        let loaded = load_legacy_analyze_permissions(&path, "app").unwrap();
+        assert_eq!(
+            loaded,
+            Some(serde_json::json!({"tables": {}})),
+            "loader must return the deployed permissions doc verbatim"
+        );
+
+        // Applying those permissions denies every `users` row.
+        let ast = serde_json::json!({"table": "users", "orderBy": [["id", "asc"]]}).to_string();
+        let result =
+            crate::services::analyze::analyze_query(&path, "app", &ast, true, false, loaded, None)
+                .unwrap();
+        assert_eq!(
+            result.synced_row_count, 0,
+            "deployed deny-by-default permissions filter every row; got {}",
+            result.synced_row_count
+        );
+
+        for suffix in ["", "-wal", "-wal2", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
+    }
 }
