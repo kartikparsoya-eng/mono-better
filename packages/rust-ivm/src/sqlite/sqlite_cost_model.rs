@@ -449,8 +449,8 @@ pub fn create_sqlite_cost_model_prepared(
     if !scanstatus_available() {
         return Err(
             "SQLite was compiled without SQLITE_ENABLE_STMT_SCANSTATUS; the scanstatus \
-             cost model cannot run (set RUST_IVM_PLANNER_COST_MODEL=count to use the \
-             row-count fallback model)"
+             cost model cannot run — the engine runs UNPLANNED (TS parity; there is no \
+             fallback cost model)"
                 .to_string(),
         );
     }

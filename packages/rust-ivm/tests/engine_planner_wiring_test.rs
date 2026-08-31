@@ -144,31 +144,20 @@ fn engine_plans_with_scanstatus_model_not_count() {
          COUNT(*) model is deciding flips again"
     );
 
-    // 2. RUST_IVM_PLANNER_COST_MODEL=count — the documented escape hatch —
-    //    must select the legacy COUNT model (which refuses this flip).
-    unsafe { std::env::set_var("RUST_IVM_PLANNER_COST_MODEL", "count") };
-    let mut eng_count = Engine::new(primary_keys());
-    eng_count.set_cost_model_conn(conn.clone());
-    eng_count.set_cost_model_table_specs(specs());
-    let count_flips = eng_count.planned_flips_for_test(&ast);
-    unsafe { std::env::remove_var("RUST_IVM_PLANNER_COST_MODEL") };
-    assert_eq!(
-        count_flips,
-        vec![Some(false)],
-        "RUST_IVM_PLANNER_COST_MODEL=count must select the legacy COUNT model"
-    );
-
-    // 3. Conn WITHOUT specs (legacy callers / MemorySource tests) must still
-    //    plan — loud COUNT fallback, never a panic.
+    // 2. Conn WITHOUT specs must run UNPLANNED — TS has no fallback cost model
+    //    (builder.ts:140 `if (costModel)`), and the old COUNT(*) fallback that
+    //    returned [Some(false)] here was the removed rust-only divergence
+    //    (option-b, 2026-08-31). None = no flip assigned = unplanned, never a
+    //    panic, never a different-cost mis-flip.
     let mut eng_nospecs = Engine::new(primary_keys());
     eng_nospecs.set_cost_model_conn(conn.clone());
     assert_eq!(
         eng_nospecs.planned_flips_for_test(&ast),
-        vec![Some(false)],
-        "conn without specs must degrade to the COUNT model, not panic"
+        vec![None],
+        "conn without specs must run UNPLANNED (TS parity), not the COUNT model"
     );
 
-    // 4. No conn at all → no planning (flips untouched: None).
+    // 3. No conn at all → no planning (flips untouched: None).
     let mut eng_none = Engine::new(primary_keys());
     assert_eq!(
         eng_none.planned_flips_for_test(&ast),

@@ -27,7 +27,4 @@ pub use planner_builder::{Plans, apply_plans_to_ast, build_plan_graph, plan_quer
 pub use planner_connection::{ConnectionCostModel, CostModelCost};
 pub use planner_constraint::{PlannerConstraint, merge_constraints};
 pub use planner_node::{Confidence, FanoutCostModel, FanoutEst};
-pub use runtime::{
-    PlanCountCache, create_snapshot_cost_model, create_snapshot_cost_model_cached, flip_order,
-    plan_ast_flips,
-};
+pub use runtime::{create_snapshot_cost_model, flip_order, plan_ast_flips};

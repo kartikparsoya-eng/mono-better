@@ -15,14 +15,14 @@
 //! (true for the prod image, the local wal2 build, and macOS system SQLite).
 //!
 //! `create_snapshot_cost_model` here is the LEGACY row-count model
-//! (filter-blind `COUNT(*)`; constrained read ≈ 1 row; fanout 1.0/none),
-//! selectable via `RUST_IVM_PLANNER_COST_MODEL=count` as an escape hatch, the
-//! loud fallback when scanstatus/specs are unavailable, and still used by the
-//! mock-cost oracle tests. NOTE (2026-08-29): the syncer's `Engine::plan_ast`
-//! silently used THIS model in prod while this header claimed scanstatus was
-//! the default — the cost-model gap behind the 144s flipped-join `tickets`
-//! hydrate. `engine_planner_wiring_test.rs` now pins the engine-level
-//! selection.
+//! (filter-blind `COUNT(*)`; constrained read ≈ 1 row; fanout 1.0/none). As of
+//! 2026-08-31 it is **test-only** (mock-cost oracle differentials): the engine
+//! plans with the scanstatus model or runs UNPLANNED, mirroring TS. The
+//! rust-only auto-fallback + `RUST_IVM_PLANNER_COST_MODEL=count` env that once
+//! silently reached THIS model in prod — the cost-model gap behind the
+//! 2026-08-29 144s flipped-join `tickets` hydrate — were removed (option-b).
+//! `engine_planner_wiring_test.rs` pins the engine selection (scanstatus, or
+//! unplanned when specs/scanstatus are unavailable).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -36,34 +36,20 @@ use crate::planner::{Confidence, ConnectionCostModel, CostModelCost, FanoutEst, 
 /// at the same snapshot version) reuses one `COUNT(*)` per table instead of
 /// re-counting per query. Auto-invalidates when the version bumps (an advance
 /// changed the data) — no explicit advance hook needed.
-pub type PlanCountCache = Rc<RefCell<(String, HashMap<String, f64>)>>;
+type PlanCountCache = Rc<RefCell<(String, HashMap<String, f64>)>>;
 
-/// A cost model backed by a live SQLite connection (the pinned snapshot). Table
-/// row counts are read once and memoised for the duration of one plan.
+/// LEGACY filter-blind `COUNT(*)` cost model — **test-only reference**, NOT
+/// wired into the engine. TS has no such model; prod plans with the scanstatus
+/// model (`sqlite_cost_model.rs`) or runs unplanned when it's unavailable
+/// (`Engine::ensure_cost_model`, mirroring TS `if (costModel)`). Retained only
+/// so the differential tests (`sqlite_cost_model_test`, `planner_runtime_test`)
+/// can prove the scanstatus model plans DIFFERENTLY from this one — i.e. pin
+/// the 2026-08-29 `tickets` mis-flip fix. The rust-only auto-fallback + the
+/// `RUST_IVM_PLANNER_COST_MODEL=count` env that once reached this in prod were
+/// removed 2026-08-31 (option-b: no divergent prod cost model).
 pub fn create_snapshot_cost_model(conn: Rc<RefCell<rusqlite::Connection>>) -> ConnectionCostModel {
     // Fresh per-call cache (tests + callers without a shared cache).
     cost_model_with_cache(conn, Rc::new(RefCell::new((String::new(), HashMap::new()))))
-}
-
-/// Like [`create_snapshot_cost_model`] but reuses `cache` across calls, keyed by
-/// `version`. On a version change the cached counts are dropped (the advance
-/// changed table sizes); within one version every `plan_ast` reuses them. Keeps
-/// the planner's `COUNT(*)`s off the hot path when a client subscribes to many
-/// queries at once: `COUNT(*)` runs at most once per (table, version) rather
-/// than once per table per `addQuery`. Matters in prod where the planner is on.
-pub fn create_snapshot_cost_model_cached(
-    conn: Rc<RefCell<rusqlite::Connection>>,
-    version: &str,
-    cache: PlanCountCache,
-) -> ConnectionCostModel {
-    {
-        let mut c = cache.borrow_mut();
-        if c.0 != version {
-            c.0 = version.to_string();
-            c.1.clear();
-        }
-    }
-    cost_model_with_cache(conn, cache)
 }
 
 fn cost_model_with_cache(

@@ -79,6 +79,9 @@ fn seed() -> Rc<RefCell<Connection>> {
         "#,
     )
     .unwrap();
+    // ANALYZE so the scanstatus cost model has stat data (the prod path; the
+    // COUNT(*) fallback that once planned this without ANALYZE was removed).
+    conn.execute_batch("ANALYZE;").unwrap();
     Rc::new(RefCell::new(conn))
 }
 
@@ -118,6 +121,14 @@ fn mychannelparticipations_redundant_or_exists_emits_no_channels() {
     // is the production fix under test: WITHOUT it the engine builds the
     // redundant OR-EXISTS non-flipped and over-emits the channels backing rows.
     eng.set_cost_model_conn(db.clone());
+    // Real prod path: the scanstatus cost model needs table specs (TS
+    // createSQLiteCostModel parity). The removed COUNT(*) fallback used to plan
+    // this without specs; now no specs ⇒ unplanned ⇒ over-emit, so pin specs.
+    let specs: HashMap<String, HashMap<String, ColumnType>> = sources
+        .iter()
+        .map(|(n, c, _)| (n.to_string(), c.clone()))
+        .collect();
+    eng.set_cost_model_table_specs(specs);
     for (name, c, pk) in sources {
         let ts = TableSource::new(db.clone(), name, c, pk.clone());
         eng.register_source(Rc::new(RefCell::new(ts)));
