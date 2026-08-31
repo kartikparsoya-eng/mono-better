@@ -370,7 +370,6 @@ impl MemorySource {
         };
 
         let data = self.data.clone();
-        let comparator = self.comparator.clone();
         let overlay = self.overlay.clone();
         let db_path = self.db_path.clone();
         let column_names = self.column_names.clone();
@@ -378,7 +377,6 @@ impl MemorySource {
 
         let input: Shared<dyn Input> = Rc::new(RefCell::new(SourceInput {
             data,
-            comparator,
             conn: conn.clone(),
             connections: self.connections.clone(),
             schema,
@@ -674,8 +672,6 @@ impl Source for MemorySource {
 /// SourceInput — implements the Input trait for a connection.
 pub struct SourceInput {
     data: SharedData,
-    #[allow(dead_code)]
-    comparator: Comparator,
     conn: Shared<Connection>,
     /// Back-reference to the owning source's connection list so `destroy()`
     /// can splice this connection out (TS parity).
