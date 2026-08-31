@@ -6,6 +6,7 @@
 //! Wire format: all messages are JSON tuples `["messageType", bodyObject]`.
 //! We use untagged enums + `#[serde(tag = "op")]` to match the TS union types.
 
+pub mod analyze_query_result;
 pub mod change_desired_queries;
 pub mod connect;
 pub mod delete_clients;
@@ -27,6 +28,7 @@ pub mod up;
 pub mod update_auth;
 pub mod version;
 
+pub use analyze_query_result::*;
 pub use change_desired_queries::*;
 pub use connect::*;
 pub use delete_clients::*;

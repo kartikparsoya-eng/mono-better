@@ -74,6 +74,10 @@ struct LazyRows {
     /// The SQL text this cursor runs — the key `rowVended`/`initQuery` count
     /// under (TS `sqlAndBindings.text`, table-source.ts:295/398).
     query_text: String,
+    /// The fetch's bound parameters, retained ONLY when `debug` is present (the
+    /// analyze path), so `Drop` can substitute them into `query_text` for the
+    /// post-execution scanstatus re-read (nvisit/explain). Empty in prod.
+    params: Vec<SqlParam>,
     /// Rows produced so far — used to THROTTLE the per-fetch economic budget
     /// check (advance_gate) to every 64 rows.
     fetched: u64,
@@ -125,6 +129,10 @@ impl LazyRows {
             d.borrow_mut().init_query(&table_name, &query_text);
         }
 
+        // Retain params for the Drop-time scanstatus re-read only on the analyze
+        // path (debug present); prod drops them to keep memory flat.
+        let params = if debug.is_some() { params } else { Vec::new() };
+
         Ok(Box::pin(LazyRows {
             rows: Some(rows_static),
             _stmt: stmt_pin,
@@ -135,9 +143,86 @@ impl LazyRows {
             table_name,
             debug,
             query_text,
+            params,
             fetched: 0,
             _pin: PhantomPinned,
         }))
+    }
+}
+
+impl Drop for LazyRows {
+    fn drop(&mut self) {
+        // Port of the scanstatus half of TS `#fetch`'s `finally` block
+        // (zqlite/table-source.ts:343-372): after the row cursor is drained,
+        // record each scan loop's NVISIT (rows visited) + EXPLAIN text on the
+        // debug delegate, keyed by (table, SQL). Only runs on the analyze path
+        // (debug present); prod (`debug: None`) does nothing.
+        //
+        // TS reads scanStatus off the SAME executed statement; rusqlite exposes
+        // no raw handle for `self._stmt`, so `read_stepped_scanstatus`
+        // re-prepares and re-steps the SQL with the fetch's real params
+        // substituted as literals — a labeled Rust-only mechanism (AGENTS rule
+        // 5). The recorded (table, SQL) key stays the parameterized `query_text`,
+        // matching TS (`sqlAndBindings.text`).
+        let Some(debug) = &self.debug else {
+            return;
+        };
+        let sql = substitute_params(&self.query_text, &self.params);
+        let (total_nvisit, plan_lines) =
+            crate::sqlite::sqlite_cost_model::read_stepped_scanstatus(&self._guard, &sql);
+        let mut d = debug.borrow_mut();
+        // TS: `if (totalNvisit !== 0) debug.recordNVisit(...)`.
+        if total_nvisit != 0 {
+            d.record_nvisit(&self.table_name, &self.query_text, total_nvisit);
+        }
+        // TS: `if (planLines.length > 0) debug.recordExplain(...)`.
+        if !plan_lines.is_empty() {
+            d.record_explain(&self.table_name, &self.query_text, plan_lines);
+        }
+    }
+}
+
+/// Substitute positional `?` params in `sql` with their SQL-literal forms, in
+/// order — used only for the debug-path scanstatus re-read (see
+/// `LazyRows::drop`). The query-builder SQL uses `?` only for values (never
+/// inside string literals), so a sequential replace is safe. Mirrors the
+/// substitution TS's own `explainQueries` fallback uses (explain-queries.ts),
+/// but with the fetch's real values instead of a dummy literal.
+fn substitute_params(sql: &str, params: &[SqlParam]) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut it = params.iter();
+    for ch in sql.chars() {
+        if ch == '?' {
+            match it.next() {
+                Some(p) => out.push_str(&sql_param_literal(p)),
+                None => out.push('?'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn sql_param_literal(p: &SqlParam) -> String {
+    match p {
+        SqlParam::Null => "NULL".to_string(),
+        SqlParam::Int(i) => i.to_string(),
+        SqlParam::F64(f) => {
+            if f.is_finite() {
+                format!("{f}")
+            } else {
+                "NULL".to_string()
+            }
+        }
+        SqlParam::Bool(b) => {
+            if *b {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
+        }
+        SqlParam::Text(s) => format!("'{}'", s.replace('\'', "''")),
     }
 }
 

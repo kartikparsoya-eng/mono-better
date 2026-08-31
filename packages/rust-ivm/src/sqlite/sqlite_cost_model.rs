@@ -56,6 +56,12 @@ const SQLITE_SCANSTAT_COMPLEX: c_int = 1;
 const SQLITE_SCANSTAT_EST: c_int = rusqlite::ffi::SQLITE_SCANSTAT_EST;
 const SQLITE_SCANSTAT_EXPLAIN: c_int = rusqlite::ffi::SQLITE_SCANSTAT_EXPLAIN;
 const SQLITE_SCANSTAT_SELECTID: c_int = rusqlite::ffi::SQLITE_SCANSTAT_SELECTID;
+/// `SQLITE_SCANSTAT_NVISIT` — op 1, the number of rows VISITED by a scan loop
+/// (a `sqlite3_int64`). NOT op 0 (that is `NLOOP`, the number of times the loop
+/// ran — 1 for a single scan). Not in the prebuilt bindings; matches sqlite3.h.
+/// TS reads it via `statement.scanStatus(i, SQLITE_SCANSTAT_NVISIT, 1)` in
+/// `#fetch` (zqlite/table-source.ts:347).
+const SQLITE_SCANSTAT_NVISIT: c_int = 1;
 
 /// True when the linked SQLite was compiled with
 /// `SQLITE_ENABLE_STMT_SCANSTATUS` (scanstatus returns real data).
@@ -199,6 +205,98 @@ pub fn get_scanstatus_loops(
 
     loops.sort_by_key(|l| l.select_id);
     Ok(loops)
+}
+
+/// Prepare `sql`, STEP it to completion, then read each scan loop's post-
+/// execution `NVISIT` (rows visited) + `EXPLAIN` text. Port of the
+/// scanstatus half of TS `TableSource.#fetch`'s `finally` block
+/// (zqlite/table-source.ts:343-372), which reads `scanStatus(i,
+/// SQLITE_SCANSTAT_NVISIT/EXPLAIN, 1)` off the just-executed statement.
+///
+/// Rust-only mechanism (labeled per AGENTS rule 5): TS reads scanstatus off the
+/// SAME executed statement, but rusqlite exposes no raw `sqlite3_stmt` handle
+/// from the fetch's `CachedStatement`, so we re-prepare + re-step the SQL here.
+/// `sql` must already have its parameters substituted as literals (the fetch's
+/// real bindings). Returns `(total_nvisit, plan_lines)`; a best-effort read that
+/// yields `(0, [])` rather than erroring when scanstatus is unavailable or the
+/// prepare fails — a debug read must never fail the analyze.
+pub fn read_stepped_scanstatus(conn: &rusqlite::Connection, sql: &str) -> (u64, Vec<String>) {
+    if !scanstatus_available() {
+        return (0, Vec::new());
+    }
+    let Ok(c_sql) = CString::new(sql) else {
+        return (0, Vec::new());
+    };
+    let mut total_nvisit: u64 = 0;
+    let mut plan_lines: Vec<String> = Vec::new();
+
+    // SAFETY: `db` is the live connection handle owned by `conn` (kept alive by
+    // the borrow for this whole scope); the statement is finalized before
+    // returning on every path.
+    unsafe {
+        let db = conn.handle();
+        let mut stmt: *mut rusqlite::ffi::sqlite3_stmt = std::ptr::null_mut();
+        let rc = rusqlite::ffi::sqlite3_prepare_v2(
+            db,
+            c_sql.as_ptr(),
+            -1,
+            &mut stmt,
+            std::ptr::null_mut(),
+        );
+        if rc != rusqlite::ffi::SQLITE_OK || stmt.is_null() {
+            if !stmt.is_null() {
+                rusqlite::ffi::sqlite3_finalize(stmt);
+            }
+            return (0, Vec::new());
+        }
+
+        // Step to completion so NVISIT reflects the full scan (TS reads scanstatus
+        // after the row iterator is drained). Ignore row/step errors — a partial
+        // scan still yields useful counts, and a debug read must not throw.
+        loop {
+            let step = rusqlite::ffi::sqlite3_step(stmt);
+            if step == rusqlite::ffi::SQLITE_ROW {
+                continue;
+            }
+            break;
+        }
+
+        let mut idx: c_int = 0;
+        loop {
+            let mut nvisit: i64 = 0;
+            let rc = sqlite3_stmt_scanstatus_v2(
+                stmt,
+                idx,
+                SQLITE_SCANSTAT_NVISIT,
+                SQLITE_SCANSTAT_COMPLEX,
+                &mut nvisit as *mut i64 as *mut c_void,
+            );
+            if rc != 0 {
+                break; // end of loops (TS: scanStatus returns undefined)
+            }
+            total_nvisit += nvisit.max(0) as u64;
+
+            let mut explain_ptr: *const c_char = std::ptr::null();
+            sqlite3_stmt_scanstatus_v2(
+                stmt,
+                idx,
+                SQLITE_SCANSTAT_EXPLAIN,
+                SQLITE_SCANSTAT_COMPLEX,
+                &mut explain_ptr as *mut *const c_char as *mut c_void,
+            );
+            if !explain_ptr.is_null() {
+                let s = CStr::from_ptr(explain_ptr).to_string_lossy().into_owned();
+                if !s.is_empty() {
+                    plan_lines.push(s);
+                }
+            }
+            idx += 1;
+        }
+
+        rusqlite::ffi::sqlite3_finalize(stmt);
+    }
+
+    (total_nvisit, plan_lines)
 }
 
 // ---------------------------------------------------------------------------
