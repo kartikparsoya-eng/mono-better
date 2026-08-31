@@ -105,7 +105,7 @@ impl PlannerConnection {
         &mut self,
         branch_pattern: &[usize],
         c: Option<&PlannerConstraint>,
-        _from: Option<&crate::planner::planner_node::PlannerNode>,
+        from: Option<&crate::planner::planner_node::PlannerNode>,
     ) {
         let key = branch_pattern
             .iter()
@@ -114,6 +114,20 @@ impl PlannerConnection {
             .join(",");
         self.constraints.insert(key, c.cloned());
         self.cached_costs.borrow_mut().clear();
+
+        // Port of the `node-constraint` emission (planner-connection.ts:177).
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-constraint",
+                "nodeType": "connection",
+                "node": self.name,
+                "branchPattern": branch_pattern,
+                "constraint": crate::planner::planner_debug::constraint_to_json(c),
+                "from": from
+                    .map(|n| crate::planner::planner_debug::node_kind_str(n.kind()))
+                    .unwrap_or("unknown"),
+            })
+        });
     }
 
     pub fn estimate_cost(
@@ -159,7 +173,52 @@ impl PlannerConnection {
         };
         // TS: `this.#cachedConstraintCosts.set(key, cost)` (planner-connection.ts:226).
         self.cached_costs.borrow_mut().insert(key, cost.clone());
+
+        // Port of the `node-cost` emission (planner-connection.ts:228). Labeled
+        // deviation: TS also carries `filters` (the connection's `Condition`);
+        // rust omits it because the planner's parsed `Condition` does not
+        // round-trip to the TS AST-JSON shape without a dedicated converter, and
+        // it is a secondary debug field. `ordering` (the sort) round-trips
+        // cleanly and IS emitted.
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-cost",
+                "nodeType": "connection",
+                "node": self.name,
+                "branchPattern": branch_pattern,
+                "downstreamChildSelectivity": downstream_child_selectivity,
+                "costEstimate": crate::planner::planner_debug::omit_fanout(&cost),
+                "ordering": self.sort,
+            })
+        });
+
         cost
+    }
+
+    /// Port of `getConstraintsForDebug` (planner-connection.ts:301): the
+    /// per-branch constraint map for the `constraints-propagated` event.
+    pub fn get_constraints_for_debug(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::with_capacity(self.constraints.len());
+        for (key, c) in &self.constraints {
+            obj.insert(
+                key.clone(),
+                crate::planner::planner_debug::constraint_to_json(c.as_ref()),
+            );
+        }
+        serde_json::Value::Object(obj)
+    }
+
+    /// Port of `getConstraintCostsForDebug` (planner-connection.ts:320): the
+    /// per-branch cached cost estimates (fanout omitted) for the debug event.
+    pub fn get_constraint_costs_for_debug(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        for (key, cost) in self.cached_costs.borrow().iter() {
+            obj.insert(
+                key.clone(),
+                crate::planner::planner_debug::omit_fanout(cost),
+            );
+        }
+        serde_json::Value::Object(obj)
     }
 
     pub fn unlimit(&mut self) {

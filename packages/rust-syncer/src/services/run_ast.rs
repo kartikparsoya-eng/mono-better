@@ -23,11 +23,14 @@
 //! `!isTransformed`). TS `analyzeQuery` is the sole caller and always passes
 //! `isTransformed=true` (analyze.ts:62), so the `mapAST` branch is dead here.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::Instant;
 
 use rust_ivm::builder::debug_delegate::{Debug, SharedDebug};
 use rust_ivm::ivm::data::{Row, Value};
+use rust_ivm::planner::{AccumulatorDebugger, serialize_plan_debug_events, with_plan_debugger};
 
 use crate::auth::read_authorizer::transform_and_hash_query;
 use crate::protocol::analyze_query_result::{AnalyzeQueryResult, RowsByQuery, RowsBySource};
@@ -56,6 +59,10 @@ pub struct RunAstOptions<'a> {
     pub synced_rows: bool,
     /// TS `vendedRows`: collect the vended (scanned) rows per table.
     pub vended_rows: bool,
+    /// TS `planDebugger` presence (analyze.ts:55 `joinPlans ? new
+    /// AccumulatorDebugger() : undefined`): when set, an `AccumulatorDebugger` is
+    /// installed for the plan pass and its serialized events fill `joinPlans`.
+    pub join_plans: bool,
 }
 
 /// Convert an IVM `Value` to its JSON wire form — the analog of TS serializing a
@@ -157,9 +164,27 @@ pub fn run_ast(
     // TS `host.debug = new Debug()` — run_ast owns the delegate and reads it back.
     let debug: SharedDebug = Debug::new_shared();
 
+    // TS analyze.ts:55 — `planDebugger = joinPlans ? new AccumulatorDebugger()
+    // : undefined`, passed down to `plan`. Rust installs it via a thread-local
+    // sink around the hydrate (which drives `plan_query`); see planner_debug.rs.
+    let plan_debugger: Option<Rc<RefCell<AccumulatorDebugger>>> = if options.join_plans {
+        Some(Rc::new(RefCell::new(AccumulatorDebugger::new())))
+    } else {
+        None
+    };
+
     let start = Instant::now();
-    let rows = pipelines.hydrate_analyze(hydrate_ast, debug.clone())?;
+    let rows = match &plan_debugger {
+        Some(dbg) => with_plan_debugger(dbg.clone(), || {
+            pipelines.hydrate_analyze(hydrate_ast, debug.clone())
+        })?,
+        None => pipelines.hydrate_analyze(hydrate_ast, debug.clone())?,
+    };
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+    // TS analyze.ts:121-123 — `if (planDebugger) result.joinPlans =
+    // serializePlanDebugEvents(planDebugger.events)`.
+    let join_plans: Option<Vec<serde_json::Value>> =
+        plan_debugger.map(|dbg| serialize_plan_debug_events(&dbg.borrow().events));
 
     // Dedup by table + row (TS `seenByTable`), counting synced rows and (when
     // requested) collecting them per table.
@@ -224,7 +249,7 @@ pub fn run_ast(
         read_row_counts_by_query: Some(read_row_counts_by_query),
         read_row_count: Some(read_row_count),
         db_scans_by_query: Some(db_scans_by_query),
-        join_plans: None,
+        join_plans,
     })
 }
 

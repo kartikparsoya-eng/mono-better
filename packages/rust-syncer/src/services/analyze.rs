@@ -34,6 +34,7 @@ use super::view_syncer::pipeline_driver::IvmPipelines;
 /// handler for legacy queries (TS `loadPermissions`); when present the AST is
 /// transformed for read-permissions. `auth` is the decoded JWT claims of the
 /// requesting connection (TS `ctx.auth?.type === 'jwt' ? ctx.auth : undefined`).
+#[allow(clippy::too_many_arguments)]
 pub fn analyze_query(
     replica_path: &str,
     app_id: &str,
@@ -42,6 +43,7 @@ pub fn analyze_query(
     vended_rows: bool,
     permissions: Option<serde_json::Value>,
     auth: Option<serde_json::Value>,
+    join_plans: bool,
 ) -> Result<AnalyzeQueryResult, String> {
     // TS `computeZqlSpecs(lc, db, ...)` + building `TableSource`s per table.
     let specs = crate::compute_table_specs_from_path(replica_path)
@@ -59,6 +61,7 @@ pub fn analyze_query(
         permissions: permissions.as_ref(),
         synced_rows,
         vended_rows,
+        join_plans,
     };
     let mut result = run_ast(&mut pipelines, ast_json, &options)?;
 

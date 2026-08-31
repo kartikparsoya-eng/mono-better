@@ -88,9 +88,10 @@ fn analyze_applies_read_permissions() {
     let ast = users_ast();
 
     // No permissions passed → no transform → the full table (baseline).
-    let none =
-        rust_syncer::services::analyze::analyze_query(&path, "app", &ast, true, false, None, None)
-            .expect("analyze without permissions");
+    let none = rust_syncer::services::analyze::analyze_query(
+        &path, "app", &ast, true, false, None, None, false,
+    )
+    .expect("analyze without permissions");
     assert_eq!(
         none.synced_row_count, 3,
         "without permissions the analysis sees all 3 rows"
@@ -105,6 +106,7 @@ fn analyze_applies_read_permissions() {
         false,
         Some(anyone_can("users")),
         None,
+        false,
     )
     .expect("analyze with ANYONE_CAN");
     assert_eq!(
@@ -123,6 +125,7 @@ fn analyze_applies_read_permissions() {
         false,
         Some(rust_syncer::deny_all_permissions()),
         None,
+        false,
     )
     .expect("analyze with deny-all");
     assert_eq!(
@@ -174,6 +177,7 @@ fn analyze_binds_auth_data_into_permission_rules() {
         false,
         Some(perms.clone()),
         Some(json!({"name": "Alice"})),
+        false,
     )
     .expect("analyze authed");
     assert_eq!(
@@ -191,6 +195,7 @@ fn analyze_binds_auth_data_into_permission_rules() {
         false,
         Some(perms),
         None,
+        false,
     )
     .expect("analyze anon");
     assert_eq!(
@@ -222,9 +227,10 @@ fn analyze_fills_sqlite_plans_for_every_vended_query() {
     build_users_replica(&path);
     let ast = users_ast();
 
-    let result =
-        rust_syncer::services::analyze::analyze_query(&path, "app", &ast, true, false, None, None)
-            .expect("analyze");
+    let result = rust_syncer::services::analyze::analyze_query(
+        &path, "app", &ast, true, false, None, None, false,
+    )
+    .expect("analyze");
 
     let read_counts = result
         .read_row_counts_by_query
@@ -273,6 +279,7 @@ fn analyze_populates_after_permissions() {
         false,
         Some(anyone_can("users")),
         None,
+        false,
     )
     .expect("analyze with ANYONE_CAN");
     let after = allow
@@ -285,14 +292,128 @@ fn analyze_populates_after_permissions() {
     );
 
     // No permissions applied → afterPermissions omitted (TS leaves it undefined).
-    let none =
-        rust_syncer::services::analyze::analyze_query(&path, "app", &ast, true, false, None, None)
-            .expect("analyze without permissions");
+    let none = rust_syncer::services::analyze::analyze_query(
+        &path, "app", &ast, true, false, None, None, false,
+    )
+    .expect("analyze without permissions");
     assert!(
         none.after_permissions.is_none(),
         "afterPermissions is absent when permissions are not applied; got {:?}",
         none.after_permissions
     );
+
+    cleanup(&path);
+}
+
+/// Build a 2-table replica (`issue` + `comment`, FK `comment.issueId`) so an
+/// EXISTS query produces a flippable semi-join for the planner to enumerate.
+fn build_issues_comments_replica(path: &str) {
+    cleanup(path);
+    let conn = Connection::open(path).unwrap();
+    let _ = conn.pragma_update(None, "journal_mode", "wal2");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE "_zero.replicationConfig" (
+            lock TEXT PRIMARY KEY DEFAULT 'singleton',
+            replicaVersion TEXT NOT NULL, publications TEXT NOT NULL);
+        CREATE TABLE "_zero.replicationState" (
+            lock TEXT PRIMARY KEY DEFAULT 'singleton', stateVersion TEXT NOT NULL);
+        INSERT INTO "_zero.replicationConfig" VALUES ('singleton', 'v1', '[]');
+        INSERT INTO "_zero.replicationState" VALUES ('singleton', 'v1');
+
+        CREATE TABLE "issue" ("id" "text|NOT_NULL", "_0_version" "text");
+        CREATE UNIQUE INDEX "i_id" ON "issue" ("id");
+        INSERT INTO "issue" VALUES ('i1','01'),('i2','01'),('i3','01');
+
+        CREATE TABLE "comment" (
+            "id" "text|NOT_NULL", "issueId" "text|NOT_NULL", "_0_version" "text");
+        CREATE UNIQUE INDEX "c_id" ON "comment" ("id");
+        INSERT INTO "comment" VALUES ('c1','i1','01'),('c2','i1','01'),('c3','i2','01');
+        "#,
+    )
+    .unwrap();
+}
+
+/// `issue.whereExists('comments')` — an EXISTS over the `comment` relationship,
+/// which the planner models as a flippable semi-join.
+fn exists_ast() -> String {
+    json!({
+        "table": "issue",
+        "where": {
+            "type": "correlatedSubquery",
+            "op": "EXISTS",
+            "related": {
+                "correlation": {"parentField": ["id"], "childField": ["issueId"]},
+                "subquery": {"table": "comment", "alias": "zsubq_comments"}
+            }
+        },
+        "orderBy": [["id", "asc"]]
+    })
+    .to_string()
+}
+
+/// B7: with `joinPlans` enabled, `join_plans` carries the planner's decision
+/// trace (attempt-start / plan-complete / best-plan-selected / node-cost) for a
+/// query with a flippable join; with `joinPlans` disabled it is absent.
+/// NON-VACUOUS: reverting the planner instrumentation (or the run_ast wiring)
+/// leaves `join_plans` empty/None and the assertions fail.
+#[test]
+fn analyze_join_plans_emits_planner_events() {
+    let path = tmp_path("joinplans");
+    build_issues_comments_replica(&path);
+    let ast = exists_ast();
+
+    // joinPlans=false → the field is omitted.
+    let off = rust_syncer::services::analyze::analyze_query(
+        &path, "app", &ast, true, false, None, None, false,
+    )
+    .expect("analyze joinPlans off");
+    assert!(
+        off.join_plans.is_none(),
+        "joinPlans disabled ⇒ join_plans is absent; got {:?}",
+        off.join_plans
+    );
+
+    // joinPlans=true → a non-empty event stream with the graph-level events.
+    let on = rust_syncer::services::analyze::analyze_query(
+        &path, "app", &ast, true, false, None, None, true,
+    )
+    .expect("analyze joinPlans on");
+    let events = on
+        .join_plans
+        .expect("joinPlans enabled ⇒ join_plans present");
+    assert!(!events.is_empty(), "the planner emitted at least one event");
+
+    let types: std::collections::HashSet<&str> = events
+        .iter()
+        .filter_map(|e| e.get("type").and_then(|v| v.as_str()))
+        .collect();
+    for expected in [
+        "attempt-start",
+        "plan-complete",
+        "best-plan-selected",
+        "node-cost",
+    ] {
+        assert!(
+            types.contains(expected),
+            "join_plans must contain a {expected:?} event; got types {types:?}"
+        );
+    }
+
+    // The exhaustive planner enumerates 2^1 = 2 flip attempts for one flippable
+    // join, so there are exactly two `attempt-start` events (patterns 0 and 1).
+    let attempts = events
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("attempt-start"))
+        .count();
+    assert_eq!(attempts, 2, "one flippable join ⇒ 2 flip-pattern attempts");
+
+    // node-cost events are stamped with the current attempt number.
+    let stamped = events.iter().any(|e| {
+        e.get("type").and_then(|v| v.as_str()) == Some("node-cost")
+            && e.get("attemptNumber").is_some()
+    });
+    assert!(stamped, "node-cost events are stamped with attemptNumber");
 
     cleanup(&path);
 }

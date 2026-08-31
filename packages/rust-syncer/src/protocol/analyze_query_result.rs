@@ -71,8 +71,9 @@ pub struct AnalyzeQueryResult {
     pub db_scans_by_query: Option<RowCountsBySource>,
 
     /// `PlanDebugEventJSON[]` — the planner-debug event stream (opt-in via
-    /// `joinPlans`). Kept as raw JSON values; the planner-debug serializer is
-    /// deferred (see run_ast).
+    /// `joinPlans`). Kept as raw JSON values, built in the wire shape by the
+    /// ported planner instrumentation (rust-ivm `planner_debug`) +
+    /// `serialize_plan_debug_events`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join_plans: Option<Vec<Value>>,
 }

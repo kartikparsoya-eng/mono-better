@@ -106,8 +106,22 @@ impl PlannerJoin {
         &mut self,
         branch_pattern: &[usize],
         constraint: Option<&PlannerConstraint>,
-        _from: Option<&PlannerNode>,
+        from: Option<&PlannerNode>,
     ) {
+        // Port of the `node-constraint` emission (planner-join.ts:208) — emitted
+        // BEFORE the semi/flipped dispatch. Join uses the node's NAME for `from`
+        // (TS `getNodeName(from)`), unlike connections/fans which use `.kind`.
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-constraint",
+                "nodeType": "join",
+                "node": self.get_name(),
+                "branchPattern": branch_pattern,
+                "constraint": crate::planner::planner_debug::constraint_to_json(constraint),
+                "from": from.map(|n| n.name()).unwrap_or_else(|| "unknown".to_string()),
+            })
+        });
+
         match self.join_type {
             JoinType::Semi => {
                 self.child.propagate_constraints(
@@ -149,7 +163,7 @@ impl PlannerJoin {
         };
         let parent = self.parent.estimate_cost(parent_dcs, branch_pattern);
 
-        match self.join_type {
+        let cost_estimate = match self.join_type {
             JoinType::Semi => {
                 let scan_est = match parent.limit {
                     None => parent.returned_rows,
@@ -197,7 +211,22 @@ impl PlannerJoin {
                     fanout: parent.fanout,
                 }
             }
-        }
+        };
+
+        // Port of the `node-cost` emission (planner-join.ts:408).
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-cost",
+                "nodeType": "join",
+                "node": self.get_name(),
+                "branchPattern": branch_pattern,
+                "downstreamChildSelectivity": downstream_child_selectivity,
+                "costEstimate": crate::planner::planner_debug::omit_fanout(&cost_estimate),
+                "joinType": crate::planner::planner_debug::join_type_str(self.join_type),
+            })
+        });
+
+        cost_estimate
     }
 
     pub fn get_output(&self) -> Option<PlannerNode> {

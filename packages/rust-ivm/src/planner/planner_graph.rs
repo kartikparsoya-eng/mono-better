@@ -169,6 +169,9 @@ impl PlannerGraph {
 
         let mut best_cost = f64::INFINITY;
         let mut best_plan: Option<PlanState> = None;
+        // Tracked only for the `best-plan-selected` debug event (TS
+        // `bestAttemptNumber`); costs nothing when no debugger is active.
+        let mut best_attempt_number: i64 = -1;
 
         // Build the FO→FI cache ONCE before the pattern loop (TS
         // planner-graph.ts:270 "to avoid redundant BFS traversals in each
@@ -178,6 +181,15 @@ impl PlannerGraph {
 
         for pattern in 0..num_patterns {
             self.reset_planning_state();
+
+            // Port of the `attempt-start` emission (planner-graph.ts:283).
+            crate::planner::planner_debug::plan_debug_log(|| {
+                serde_json::json!({
+                    "type": "attempt-start",
+                    "attemptNumber": pattern,
+                    "totalAttempts": num_patterns,
+                })
+            });
 
             for (bit, &join_idx) in flippable_indices.iter().enumerate() {
                 if pattern & (1 << bit) != 0 {
@@ -189,16 +201,63 @@ impl PlannerGraph {
             propagate_unlimit(self);
             self.propagate_constraints();
 
+            // Port of the `constraints-propagated` emission (planner-graph.ts:308).
+            crate::planner::planner_debug::plan_debug_log(|| {
+                let connection_constraints: Vec<serde_json::Value> = self
+                    .connections
+                    .iter()
+                    .map(|c| {
+                        let c = c.borrow();
+                        serde_json::json!({
+                            "connection": c.name,
+                            "constraints": c.get_constraints_for_debug(),
+                            "constraintCosts": c.get_constraint_costs_for_debug(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "type": "constraints-propagated",
+                    "attemptNumber": pattern,
+                    "connectionConstraints": connection_constraints,
+                })
+            });
+
             let total_cost = self.get_total_cost();
+
+            // Port of the `plan-complete` emission (planner-graph.ts:333). The
+            // internal `planSnapshot` is NOT included (TS `serializeEvent` strips
+            // it; rust omits it at the source).
+            crate::planner::planner_debug::plan_debug_log(|| {
+                serde_json::json!({
+                    "type": "plan-complete",
+                    "attemptNumber": pattern,
+                    "totalCost": total_cost,
+                    "flipPattern": pattern,
+                    "joinStates": join_states_json(self),
+                })
+            });
+
             if total_cost < best_cost {
                 best_cost = total_cost;
                 best_plan = Some(self.capture_planning_snapshot());
+                best_attempt_number = pattern as i64;
             }
         }
 
         if let Some(ref plan) = best_plan {
             self.restore_planning_snapshot(plan);
             self.propagate_constraints();
+
+            // Port of the `best-plan-selected` emission (planner-graph.ts:364).
+            crate::planner::planner_debug::plan_debug_log(|| {
+                serde_json::json!({
+                    "type": "best-plan-selected",
+                    "bestAttemptNumber": best_attempt_number,
+                    "totalCost": best_cost,
+                    "flipPattern": best_attempt_number,
+                    "joinStates": join_states_json(self),
+                })
+            });
         } else {
             // TS planner-graph.ts:377-380: reaching here with flippable joins
             // means every candidate cost was NaN — fail loudly instead of
@@ -223,6 +282,22 @@ impl Drop for PlannerGraph {
     fn drop(&mut self) {
         crate::live_count::dec(&crate::live_count::PLANNER_GRAPH);
     }
+}
+
+/// The per-join `{join, type}` list for the `plan-complete` /
+/// `best-plan-selected` debug events (TS `joinStates`).
+fn join_states_json(graph: &PlannerGraph) -> Vec<serde_json::Value> {
+    graph
+        .joins
+        .iter()
+        .map(|j| {
+            let j = j.borrow();
+            serde_json::json!({
+                "join": j.get_name(),
+                "type": crate::planner::planner_debug::join_type_str(j.join_type()),
+            })
+        })
+        .collect()
 }
 
 struct FofiInfo {

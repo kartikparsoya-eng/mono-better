@@ -151,6 +151,11 @@ async fn analyze_query_op(
         .and_then(|o| o.get("vendedRows"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // TS `body.options?.joinPlans` (inspect-handler.ts:158; default false).
+    let join_plans = opts
+        .and_then(|o| o.get("joinPlans"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // The analysis engine is `!Send` (Rc/RefCell IVM), so build + run it on a
     // blocking thread; only the `Send` result crosses back. The connection's
@@ -172,6 +177,7 @@ async fn analyze_query_op(
             vended_rows,
             permissions,
             analyze_auth,
+            join_plans,
         )
     })
     .await
@@ -365,9 +371,10 @@ mod tests {
 
         // Applying those permissions denies every `users` row.
         let ast = serde_json::json!({"table": "users", "orderBy": [["id", "asc"]]}).to_string();
-        let result =
-            crate::services::analyze::analyze_query(&path, "app", &ast, true, false, loaded, None)
-                .unwrap();
+        let result = crate::services::analyze::analyze_query(
+            &path, "app", &ast, true, false, loaded, None, false,
+        )
+        .unwrap();
         assert_eq!(
             result.synced_row_count, 0,
             "deployed deny-by-default permissions filter every row; got {}",

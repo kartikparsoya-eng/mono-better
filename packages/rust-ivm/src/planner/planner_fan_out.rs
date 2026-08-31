@@ -46,8 +46,23 @@ impl PlannerFanOut {
         &self,
         branch_pattern: &[usize],
         constraint: Option<&PlannerConstraint>,
-        _from: Option<&PlannerNode>,
+        from: Option<&PlannerNode>,
     ) {
+        // Port of the `node-constraint` emission (planner-fan-out.ts:44) —
+        // emitted BEFORE recursing into the input. `node` is always "FO".
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-constraint",
+                "nodeType": "fan-out",
+                "node": "FO",
+                "branchPattern": branch_pattern,
+                "constraint": crate::planner::planner_debug::constraint_to_json(constraint),
+                "from": from
+                    .map(|n| crate::planner::planner_debug::node_kind_str(n.kind()))
+                    .unwrap_or("unknown"),
+            })
+        });
+
         self.input
             .propagate_constraints(branch_pattern, constraint, None);
     }
@@ -57,8 +72,23 @@ impl PlannerFanOut {
         downstream_child_selectivity: f64,
         branch_pattern: &[usize],
     ) -> CostEstimate {
-        self.input
-            .estimate_cost(downstream_child_selectivity, branch_pattern)
+        let ret = self
+            .input
+            .estimate_cost(downstream_child_selectivity, branch_pattern);
+
+        // Port of the `node-cost` emission (planner-fan-out.ts:72).
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-cost",
+                "nodeType": "fan-out",
+                "node": "FO",
+                "branchPattern": branch_pattern,
+                "downstreamChildSelectivity": downstream_child_selectivity,
+                "costEstimate": crate::planner::planner_debug::omit_fanout(&ret),
+            })
+        });
+
+        ret
     }
 
     pub fn convert_to_ufo(&mut self) {

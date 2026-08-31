@@ -109,6 +109,20 @@ impl PlannerFanIn {
                 total.selectivity = 1.0 - no_match_prob;
             }
         }
+
+        // Port of the `node-cost` emission (planner-fan-in.ts:182). `node` is the
+        // fan-in type ("FI"/"UFI"), matching TS `this.#type`.
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-cost",
+                "nodeType": "fan-in",
+                "node": format!("{:?}", self.node_type),
+                "branchPattern": branch_pattern,
+                "downstreamChildSelectivity": downstream_child_selectivity,
+                "costEstimate": crate::planner::planner_debug::omit_fanout(&total),
+            })
+        });
+
         total
     }
 
@@ -116,8 +130,23 @@ impl PlannerFanIn {
         &mut self,
         branch_pattern: &[usize],
         constraint: Option<&PlannerConstraint>,
-        _from: Option<&PlannerNode>,
+        from: Option<&PlannerNode>,
     ) {
+        // Port of the `node-constraint` emission (planner-fan-in.ts:201) — emitted
+        // BEFORE the FI/UFI dispatch.
+        crate::planner::planner_debug::plan_debug_log(|| {
+            serde_json::json!({
+                "type": "node-constraint",
+                "nodeType": "fan-in",
+                "node": format!("{:?}", self.node_type),
+                "branchPattern": branch_pattern,
+                "constraint": crate::planner::planner_debug::constraint_to_json(constraint),
+                "from": from
+                    .map(|n| crate::planner::planner_debug::node_kind_str(n.kind()))
+                    .unwrap_or("unknown"),
+            })
+        });
+
         match self.node_type {
             FanInType::FI => {
                 let mut updated = vec![0];
