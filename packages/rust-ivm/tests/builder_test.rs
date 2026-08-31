@@ -15,8 +15,8 @@ use rust_ivm::builder::filter::{TransformedFilters, create_predicate, transform_
 use rust_ivm::builder::like::get_like_predicate;
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::data::{Row, Value};
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {
     let map: FxHashMap<String, Value> = pairs

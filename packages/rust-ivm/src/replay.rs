@@ -23,10 +23,11 @@ use crate::builder::ast::{
 use crate::builder::builder::{BuilderDelegate, build_pipeline, complete_ordering_ast};
 use crate::ivm::catch::{Catch, CaughtChange, CaughtNode};
 use crate::ivm::data::{Row, Value, row as make_row};
+use crate::ivm::memory_source::MemorySource;
 use crate::ivm::operator::{FetchRequest, Shared};
 use crate::ivm::schema::ColumnType;
 use crate::ivm::source::{
-    MemorySource, Source, SourceChange, make_source_change_add, make_source_change_edit,
+    Source, SourceChange, make_source_change_add, make_source_change_edit,
     make_source_change_remove,
 };
 

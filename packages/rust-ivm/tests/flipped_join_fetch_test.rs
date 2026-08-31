@@ -11,9 +11,9 @@ use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::{Node, Row, Value};
 use rust_ivm::ivm::flipped_join::{FlippedJoin, FlippedJoinArgs};
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::operator::{FetchRequest, Input};
 use rust_ivm::ivm::schema::{ColumnType, System};
-use rust_ivm::ivm::source::MemorySource;
 
 #[allow(dead_code)]
 fn make_row(pairs: &[(&str, Value)]) -> Row {

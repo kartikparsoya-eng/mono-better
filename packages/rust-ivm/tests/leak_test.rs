@@ -8,8 +8,9 @@ use std::rc::Rc;
 
 use rust_ivm::builder::ast::Ast;
 use rust_ivm::engine::{Engine, QuerySpec};
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::{MemorySource, Source};
+use rust_ivm::ivm::source::Source;
 
 fn make_engine() -> Engine {
     let mut pks = HashMap::new();

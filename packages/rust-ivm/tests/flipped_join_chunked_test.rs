@@ -12,9 +12,9 @@ use rust_ivm::ivm::data::{Node, Row, Value};
 use rust_ivm::ivm::flipped_join::{
     FlippedJoin, FlippedJoinArgs, set_multi_constraint_chunk_size_for_test,
 };
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::operator::{FetchRequest, Input};
 use rust_ivm::ivm::schema::{ColumnType, System};
-use rust_ivm::ivm::source::MemorySource;
 
 // `set_multi_constraint_chunk_size_for_test` mutates a process-global AtomicUsize.
 // cargo runs the tests in this file on parallel threads, so every test that touches

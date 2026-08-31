@@ -25,9 +25,9 @@ use crate::ivm::join_utils::{
     build_join_constraint, generate_with_overlay_no_yield, is_join_match,
     row_equals_for_compound_key,
 };
+use crate::ivm::memory_source::{NodeCompare, merge_sorted_streams};
 use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::{SourceSchema, System};
-use crate::ivm::source::{NodeCompare, merge_sorted_streams};
 use crate::ivm::stream::{NodeStream, RelStream, count_data, empty_stream, from_vec, skip_yields};
 
 pub type CompoundKey = Vec<String>;

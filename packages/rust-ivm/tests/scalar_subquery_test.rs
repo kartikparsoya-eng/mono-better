@@ -22,8 +22,8 @@ use rust_ivm::builder::ast::{
 };
 use rust_ivm::engine::{Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::data::{Row, Value};
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::ivm::source::make_source_change_edit;
 use rust_ivm::streamer::RowChange;
 

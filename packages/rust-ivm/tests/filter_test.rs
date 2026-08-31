@@ -15,8 +15,8 @@ use rust_ivm::ivm::catch::CaughtChange;
 use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::filter::Filter;
 use rust_ivm::ivm::filter_operators::build_filter_pipeline;
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::ivm::source::{
     make_source_change_add, make_source_change_edit, make_source_change_remove,
 };

@@ -1097,7 +1097,7 @@ mod bound_none_edit_tests {
     use super::*;
     use crate::ivm::change::Change;
     use crate::ivm::data::Node;
-    use crate::ivm::source::EmptyInput;
+    use crate::ivm::memory_source::EmptyInput;
     use rustc_hash::FxHashMap;
 
     struct NoopOutput;

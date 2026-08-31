@@ -72,7 +72,7 @@ fn build_pipeline_internal(
     let source = match delegate.get_source(&ast.table) {
         Some(s) => s,
         None => {
-            return Rc::new(RefCell::new(crate::ivm::source::EmptyInput::new()));
+            return Rc::new(RefCell::new(crate::ivm::memory_source::EmptyInput::new()));
         }
     };
 

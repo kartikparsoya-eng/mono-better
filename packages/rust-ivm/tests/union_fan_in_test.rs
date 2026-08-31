@@ -9,9 +9,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::{Node, SortOrder, Value};
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::operator::{FetchRequest, Input, InputBase, OutputHandle, Shared};
 use rust_ivm::ivm::schema::{ColumnType, SourceSchema, System};
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::ivm::stream::{NodeStream, from_vec};
 use rust_ivm::ivm::union_fan_in::UnionFanIn;
 

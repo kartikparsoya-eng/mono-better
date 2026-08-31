@@ -26,8 +26,9 @@ use std::rc::Rc;
 
 use rust_ivm::engine::{Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::data::{Row, Value};
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::{MemorySource, Source};
+use rust_ivm::ivm::source::Source;
 use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::snapshotter::{SharedConn, Snapshotter};
 use rust_ivm::sqlite::table_source::TableSource;

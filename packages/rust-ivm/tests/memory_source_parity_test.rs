@@ -10,8 +10,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::data::Value;
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::ivm::source::SourceChange;
 
 fn row(pairs: &[(&str, Value)]) -> FxHashMap<String, Value> {

@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use rust_ivm::ivm::data::Value;
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::operator::FetchRequest;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 
 fn make_source(
     name: &str,

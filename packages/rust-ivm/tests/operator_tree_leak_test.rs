@@ -18,8 +18,8 @@ use rustc_hash::FxHashMap;
 use rust_ivm::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition, RelatedSubquery};
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::data::Value;
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::live_count;
 
 /// The census counters are process-global, so these tests must not interleave

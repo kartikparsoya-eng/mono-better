@@ -27,8 +27,8 @@ use rust_ivm::builder::ast::{
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::change::ChangeType;
 use rust_ivm::ivm::data::Value;
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::ivm::source::make_source_change_add;
 use rust_ivm::streamer::RowChange;
 

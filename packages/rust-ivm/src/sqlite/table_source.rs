@@ -796,7 +796,7 @@ impl TableSource {
         );
 
         let _t = crate::perf_trace::scope("source.overlay");
-        crate::ivm::source::apply_source_overlays(
+        crate::ivm::memory_source::apply_source_overlays(
             stream,
             overlay_changes,
             conn.compare_rows.clone(),
@@ -808,7 +808,7 @@ impl TableSource {
             conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
-            crate::ivm::source::HistoricalOverlayContext {
+            crate::ivm::memory_source::HistoricalOverlayContext {
                 change_count: historical_change_count,
                 primary_key: self.primary_key.clone(),
                 sort: conn.internal_sort.clone(),
@@ -902,7 +902,7 @@ impl Input for TableSourceInput {
         );
 
         let _t = crate::perf_trace::scope("source.overlay");
-        crate::ivm::source::apply_source_overlays(
+        crate::ivm::memory_source::apply_source_overlays(
             stream,
             overlay_changes,
             conn.compare_rows.clone(),
@@ -911,7 +911,7 @@ impl Input for TableSourceInput {
             conn.compare_rows.clone(),
             conn.filter_predicate.clone(),
             req,
-            crate::ivm::source::HistoricalOverlayContext {
+            crate::ivm::memory_source::HistoricalOverlayContext {
                 change_count: historical_change_count,
                 primary_key: self.schema.primary_key.clone(),
                 sort: conn.internal_sort.clone(),

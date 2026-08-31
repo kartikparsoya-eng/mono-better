@@ -15,9 +15,10 @@ use crate::builder::ast::Ast;
 use crate::builder::builder::{BuilderDelegate, build_pipeline};
 use crate::ivm::change::Change;
 use crate::ivm::data::{Row, Value};
+use crate::ivm::memory_source::CollectOutput;
 use crate::ivm::operator::{Input, InputBase, Output, OutputHandle, Shared, Storage};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::source::{CollectOutput, Source, SourceChange};
+use crate::ivm::source::{Source, SourceChange};
 use crate::query::complete_ordering::complete_ordering;
 use crate::streamer::{RowChange, Streamer, TableSpecInfo};
 
@@ -1817,8 +1818,8 @@ impl Default for CancellationToken {
 mod scalar_reset_tests {
     use super::*;
     use crate::ivm::data::Node;
+    use crate::ivm::memory_source::MemorySource;
     use crate::ivm::schema::ColumnType;
-    use crate::ivm::source::MemorySource;
 
     struct UnusedPusher;
 

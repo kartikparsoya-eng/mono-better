@@ -11,8 +11,8 @@ use rustc_hash::FxHashMap;
 use rust_ivm::builder::ast::Ast;
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::data::{Row, Value};
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 
 fn make_source(name: &str, pk: &[&str]) -> Rc<RefCell<MemorySource>> {
     let columns: HashMap<String, ColumnType> = pk

@@ -22,8 +22,8 @@ use rust_ivm::builder::ast::{
 };
 use rust_ivm::engine::{Engine, QuerySpec};
 use rust_ivm::ivm::data::Value;
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 
 fn make_source(
     name: &str,

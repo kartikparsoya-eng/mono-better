@@ -10,10 +10,10 @@ use rustc_hash::FxHashMap;
 
 use rust_ivm::ivm::constraint::{Constraint, MultiConstraint};
 use rust_ivm::ivm::data::{Node, Row, Value};
+use rust_ivm::ivm::memory_source::{MemorySource, merge_sorted_streams};
 use rust_ivm::ivm::operator::{Basis, FetchRequest, Start};
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::SourceChange;
-use rust_ivm::ivm::source::{MemorySource, merge_sorted_streams};
 use rust_ivm::ivm::stream::{NodeStream, from_vec};
 
 fn make_row(pairs: &[(&str, Value)]) -> Row {

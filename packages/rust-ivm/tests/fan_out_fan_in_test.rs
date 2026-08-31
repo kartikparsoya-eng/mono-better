@@ -21,9 +21,9 @@ use rust_ivm::ivm::filter::Filter;
 use rust_ivm::ivm::filter_operators::{
     FilterInputHandle, FilterOutput, FilterOutputHandle, FilterStart,
 };
+use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::operator::InputBase;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::MemorySource;
 use rust_ivm::ivm::source::SourceChange;
 
 fn str_val(s: &str) -> Value {

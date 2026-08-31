@@ -10,9 +10,9 @@ use rustc_hash::FxHashMap;
 
 use rust_ivm::builder::ast::{Condition, SimpleCondition, ValuePosition};
 use rust_ivm::ivm::data::Value;
+use rust_ivm::ivm::memory_source::CollectOutput;
 use rust_ivm::ivm::operator::OutputHandle;
 use rust_ivm::ivm::schema::ColumnType;
-use rust_ivm::ivm::source::CollectOutput;
 use rust_ivm::sqlite::table_source::TableSource;
 
 fn create_db_with_table(table_name: &str, columns: &[(&str, &str)]) -> Rc<RefCell<Connection>> {

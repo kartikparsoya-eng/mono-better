@@ -251,7 +251,7 @@ impl Input for UnionFanIn {
             return streams.into_iter().next().unwrap();
         }
 
-        let merged = crate::ivm::source::merge_sorted_streams(streams, compare);
+        let merged = crate::ivm::memory_source::merge_sorted_streams(streams, compare);
 
         let compare_dedup: Rc<dyn Fn(&Node, &Node) -> CmpOrdering> = if reverse2 {
             Rc::new(move |l: &Node, r: &Node| compare_rows2(&r.row, &l.row))
