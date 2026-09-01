@@ -82,6 +82,7 @@ ARG LITESTREAM_VERSION=0.3.13+z0.0.9
 ENV GOTOOLCHAIN=local
 
 RUN go get google.golang.org/grpc@v1.82.1 google.golang.org/api@v0.291.0 \
+    golang.org/x/crypto@v0.55.0 \
     && go mod tidy
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
@@ -94,6 +95,7 @@ WORKDIR /src/
 RUN git clone --depth 1 --branch v0.5.11 https://github.com/benbjohnson/litestream.git
 WORKDIR /src/litestream/
 RUN go get google.golang.org/grpc@v1.82.1 google.golang.org/api@v0.291.0 \
+    golang.org/x/crypto@v0.55.0 \
     && go mod tidy
 ARG LITESTREAM_V5_VERSION=0.5.11
 RUN --mount=type=cache,target=/root/.cache/go-build \
