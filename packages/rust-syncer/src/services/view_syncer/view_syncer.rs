@@ -1537,10 +1537,13 @@ impl ViewSyncerService {
                             }
                             continue;
                         }
+                        // Exact TS wording (view-syncer.ts:841-848): the message
+                        // string mirrors TS verbatim; cg/client go in structured
+                        // fields the way TS passes `{clientID, wsID, message}`.
                         tracing::warn!(
-                            "CG {}: query-transform validation failed transiently for \
-                             client {client_id}; deferring auth maintenance",
-                            self.cg_id
+                            cg_id = %self.cg_id,
+                            client_id = %client_id,
+                            "Scheduled auth revalidation failed; deferring auth maintenance"
                         );
                         lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Revalidate);
                         self.arm_auth_maintenance();
