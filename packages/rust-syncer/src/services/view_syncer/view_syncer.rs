@@ -413,6 +413,43 @@ fn custom_query_context_from(ctx: &CcmConnectionContext) -> Option<CustomQueryCo
     })
 }
 
+/// Format the WARN message TS logs for a per-query custom-query transform
+/// failure. Byte-for-byte port of TS view-syncer.ts:1716:
+///   `Error transforming custom query ${q.name}: ${q.error}${q.details ? ` ${JSON.stringify(q.details)}` : ''}`
+/// `error` is the raw per-query error body returned by the API server
+/// (`{id, name, error, details?}`).
+fn format_transform_error_message(error: &serde_json::Value) -> String {
+    let name = error
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    // TS interpolates `${q.error}`: a JSON string renders as its contents; the
+    // API server returns a string error code (e.g. "app", "http", "zero").
+    let err = match error.get("error") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
+    };
+    // TS: `${q.details ? ` ${JSON.stringify(q.details)}` : ''}` — a leading
+    // space + compact JSON when `details` is present (truthy), else nothing.
+    let details = match error.get("details") {
+        Some(d) if !d.is_null() => format!(" {}", serde_json::to_string(d).unwrap_or_default()),
+        _ => String::new(),
+    };
+    format!("Error transforming custom query {name}: {err}{details}")
+}
+
+/// Handle one errored custom-query transform result. Port of the `'error' in q`
+/// branch of TS `#processTransformedCustomQueries` (view-syncer.ts:1715-1719):
+/// log a WARN (so an operator sees clients hitting invalid/failing custom
+/// queries) AND collect the error to forward to affected clients as a
+/// `transformError`. Before this, rust forwarded to clients but was silent in
+/// the logs — an observability divergence from TS.
+fn record_transform_error(error: serde_json::Value, transform_errors: &mut Vec<serde_json::Value>) {
+    tracing::warn!("{}", format_transform_error_message(&error));
+    transform_errors.push(error);
+}
+
 /// Rust-only adapter (no TS twin): backs the message handler's
 /// `ConnContextManagerDispatch` with the ported [`ConnectionContextManager`], so
 /// the handler's live reads — the mutagen-CRUD auth (`syncer_ws_message_handler.rs`)
@@ -7293,7 +7330,7 @@ impl ViewSyncerService {
                                         executed.push((tq.id, tq.ast, tq.hash))
                                     }
                                     CustomTransformed::Errored { id: _, error } => {
-                                        transform_errors.push(error)
+                                        record_transform_error(error, &mut transform_errors)
                                     }
                                 }
                             }
@@ -9941,5 +9978,79 @@ mod engine_tests {
             }
         }
         assert!(saw_ack, "expected deleteClients ack naming client2");
+    }
+
+    /// NON-VACUOUS (parity fix 2026-09-01): a failed custom-query transform must
+    /// emit the TS WARN AND still forward the error to clients. Port of TS
+    /// `#processTransformedCustomQueries` (view-syncer.ts:1715-1719,
+    /// `lc.warn?.(errorMessage, q)`). Before the fix rust forwarded to clients
+    /// but logged nothing — silent in ops. Revert the `tracing::warn!` in
+    /// `record_transform_error` and the emission assertion fails; break the
+    /// message format and the `format_transform_error_message` asserts fail.
+    #[test]
+    fn record_transform_error_emits_ts_warn_and_forwards() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        struct BufGuard(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufGuard;
+            fn make_writer(&'a self) -> BufGuard {
+                BufGuard(self.0.clone())
+            }
+        }
+        impl std::io::Write for BufGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Exact shape the API server returns for an InputValidationError, as seen
+        // in prod TS logs: {id, name, error:"app", details:{...}}.
+        let err = serde_json::json!({
+            "id": "392e943e2358d54f",
+            "name": "ticketsByIds",
+            "error": "app",
+            "details": {"type": "InputValidationError"}
+        });
+
+        // Pure-format parity (pins the exact TS wording, view-syncer.ts:1716):
+        assert_eq!(
+            format_transform_error_message(&err),
+            "Error transforming custom query ticketsByIds: app {\"type\":\"InputValidationError\"}"
+        );
+        // details absent → no trailing segment (TS `q.details ? ... : ''`).
+        assert_eq!(
+            format_transform_error_message(&serde_json::json!({"name": "q2", "error": "http"})),
+            "Error transforming custom query q2: http"
+        );
+
+        // Emission + forwarding parity:
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let mut forwarded: Vec<serde_json::Value> = Vec::new();
+        tracing::subscriber::with_default(subscriber, || {
+            record_transform_error(err.clone(), &mut forwarded);
+        });
+
+        let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains(
+                "Error transforming custom query ticketsByIds: app {\"type\":\"InputValidationError\"}"
+            ),
+            "expected TS-parity transform-error WARN; got: {logged}"
+        );
+        assert!(logged.contains("WARN"), "must be WARN level; got: {logged}");
+        // Client forwarding is preserved (the pre-fix behavior).
+        assert_eq!(forwarded, vec![err]);
     }
 }
