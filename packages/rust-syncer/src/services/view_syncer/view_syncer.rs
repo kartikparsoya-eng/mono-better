@@ -450,6 +450,49 @@ fn record_transform_error(error: serde_json::Value, transform_errors: &mut Vec<s
     transform_errors.push(error);
 }
 
+/// Outcome of one background-retransform attempt. Mirrors the three control
+/// paths of TS `#runBackgroundRetransform`'s `try/catch` (view-syncer.ts:2695):
+/// the attempt either succeeds (`markBackgroundRetransformSuccess`), throws an
+/// auth error (`isAuthErrorBody` → fail the connection + retry with a
+/// replacement), or throws a transient transform-failed error
+/// (`isTransformFailedError` → defer maintenance).
+#[derive(Debug, Clone)]
+enum RetransformOutcome {
+    Success,
+    /// TS `isAuthErrorBody(e.errorBody)` — carries the auth error body.
+    AuthError(serde_json::Value),
+    /// TS `isTransformFailedError(e)` — a transient / API-down transform failure.
+    TransformFailed(serde_json::Value),
+}
+
+/// Classify a background retransform from the whole-batch custom-query transform
+/// failure (if any) captured during its re-hydrate. Port of TS
+/// `#runBackgroundRetransform`'s catch dispatch (view-syncer.ts:2700-2723):
+/// `isAuthErrorBody(e.errorBody)` → `AuthError`, else `isTransformFailedError(e)`
+/// → `TransformFailed`. `None` (no whole-batch failure recorded → the re-hydrate
+/// did not throw) → `Success`. `is_auth_error_body` is the same predicate TS's
+/// `#runBackgroundRetransform` uses, so the auth/transient split matches TS
+/// exactly (auth.ts `isAuthErrorBody`).
+fn classify_retransform_failure(failure: Option<serde_json::Value>) -> RetransformOutcome {
+    match failure {
+        None => RetransformOutcome::Success,
+        Some(body) if crate::custom_queries::transform_query::is_auth_error_body(&body) => {
+            RetransformOutcome::AuthError(body)
+        }
+        Some(body) => RetransformOutcome::TransformFailed(body),
+    }
+}
+
+/// The message TS logs as `message: e.message` for a retransform failure
+/// (view-syncer.ts:2705/2714). The `TransformFailedBody` carries the human
+/// string in its `message` field; fall back to the compact JSON if absent.
+fn transform_failure_message(body: &serde_json::Value) -> String {
+    match body.get("message").and_then(serde_json::Value::as_str) {
+        Some(m) => m.to_string(),
+        None => body.to_string(),
+    }
+}
+
 /// Rust-only adapter (no TS twin): backs the message handler's
 /// `ConnContextManagerDispatch` with the ported [`ConnectionContextManager`], so
 /// the handler's live reads — the mutagen-CRUD auth (`syncer_ws_message_handler.rs`)
@@ -733,6 +776,23 @@ pub struct ViewSyncerService {
     /// `#scheduleAuthMaintenance`); the revalidate interval itself lives in the
     /// CCM (single owner), not here.
     next_auth_maintenance_at: Option<i64>,
+    /// Rust-only adapter for TS `#syncQueryPipelineSet`'s THROW on a whole-batch
+    /// custom-query transform failure (view-syncer.ts:1983
+    /// `throw new ProtocolErrorWithLevel(result, 'warn')`). `sync_query_pipeline_set`
+    /// forwards per-query transform errors to clients inline and cannot unwind
+    /// across the serial re-hydrate, so it records the whole-batch
+    /// `TransformFailedBody` here; `run_background_retransform` — the only caller
+    /// that inspects it — resets it before its re-hydrate and reads it after, then
+    /// branches exactly like TS `#runBackgroundRetransform`. Serial CG thread ⇒ no
+    /// races. Left `None` on the init / changeDesiredQueries / updateAuth paths,
+    /// which never read it (their whole-batch handling is unchanged).
+    background_retransform_failure: Option<serde_json::Value>,
+    /// Test seam (empty in production): forced outcomes for
+    /// `attempt_background_retransform`, so `run_background_retransform`'s
+    /// mark/warn/fail/retry/defer control flow can be pinned without a live
+    /// query-API round trip. The real capture→classify transport is covered by
+    /// `classify_retransform_failure`'s unit test.
+    forced_retransform_outcomes: std::collections::VecDeque<RetransformOutcome>,
     /// The userID this client group is pinned to (the `sub` of the first authed
     /// connection; `None` for an anonymous group). Admission
     /// (`check_and_pin_user`) guarantees every connection reaching this CG shares
@@ -1031,6 +1091,8 @@ impl ViewSyncerService {
             permissions,
             permissions_hash,
             next_auth_maintenance_at: None,
+            background_retransform_failure: None,
+            forced_retransform_outcomes: std::collections::VecDeque::new(),
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -1578,14 +1640,120 @@ impl ViewSyncerService {
         // re-fetches every query with current auth/permissions.
         let refreshed = lock_unpoisoned(&self.ccm).plan_maintenance();
         if refreshed.due_retransform {
-            let bg = lock_unpoisoned(&self.ccm)
-                .must_get_background_connection_context()
-                .ok();
-            match bg {
-                Some(bg) if self.registered_ws.get(&bg.client_id) == Some(&bg.ws_id) => {
-                    let empty_body = serde_json::json!({});
-                    self.handle_desired_queries(&bg.client_id, &empty_body, true)
-                        .await;
+            self.run_background_retransform().await;
+        }
+
+        // Re-arm from the refreshed plan (TS `#scheduleAuthMaintenance` in the
+        // locked-op `finally`).
+        self.arm_auth_maintenance();
+    }
+
+    /// Fail an auth-maintenance connection: drop it from the CCM (revision-
+    /// guarded), then, if it is still the client's live socket, close that socket
+    /// with `error`. Port of TS `#failMaintenanceConnection` (view-syncer.ts:2786):
+    /// `failConnection` returns falsy when the context was already gone/replaced,
+    /// in which case TS returns WITHOUT failing the socket (`if (!failed) return`)
+    /// — the rust `fail_connection` returns `None` in exactly that case. The
+    /// `client?.wsID === wsID` guard is the `registered_ws` check below.
+    ///
+    /// (The two periodic-revalidation close sites above inline the same shape
+    /// against `fail_connection`; they predate this method and are left as-is to
+    /// keep this fix scoped to the background-retransform path.)
+    fn fail_maintenance_connection(
+        &mut self,
+        conn_ctx: &CcmConnectionContext,
+        error: crate::protocol::ErrorBody,
+    ) {
+        let selector = CcmConnectionSelector {
+            client_id: conn_ctx.client_id.clone(),
+            ws_id: conn_ctx.ws_id.clone(),
+        };
+        // TS `const failed = failConnection(connCtx, revision); if (!failed) return;`
+        if lock_unpoisoned(&self.ccm)
+            .fail_connection(&selector, conn_ctx.revision)
+            .is_none()
+        {
+            return;
+        }
+        // TS `if (client?.wsID === wsID) client.fail(wrapped)` — only fail the
+        // socket that is still the client's current one.
+        if self.registered_ws.get(conn_ctx.client_id.as_str()) == Some(&conn_ctx.ws_id) {
+            if let Some(conn) = self.connections.get(conn_ctx.client_id.as_str()) {
+                conn.close_with_error(error);
+            }
+            self.on_connection_closed(&conn_ctx.client_id, &conn_ctx.ws_id);
+        }
+    }
+
+    /// Re-run the group's query pipelines under a background connection's auth and
+    /// report the outcome. Port of the inner `attemptRetransform` closure of TS
+    /// `#runBackgroundRetransform` (view-syncer.ts:2669): `#syncQueryPipelineSet('all')`
+    /// then `markBackgroundRetransformSuccess`. Here the re-hydrate is
+    /// `handle_desired_queries(_, {}, is_init=true)` (the whole-CG config/hydrate
+    /// pass); its whole-batch transform failure — if any — is captured into
+    /// `background_retransform_failure` and classified, so the caller can act like
+    /// TS's `try/catch` (mark success vs. auth-fail vs. defer). Marking success is
+    /// left to the caller (TS marks inside the closure only when it did not throw).
+    async fn attempt_background_retransform(
+        &mut self,
+        bg: &CcmConnectionContext,
+    ) -> RetransformOutcome {
+        // Test seam: exercise `run_background_retransform`'s control flow without a
+        // live query-API round trip. Empty in production.
+        if let Some(forced) = self.forced_retransform_outcomes.pop_front() {
+            return forced;
+        }
+        // Reset before the re-hydrate so a whole-batch failure recorded on an
+        // earlier init/changeDesiredQueries pass cannot be misread as this
+        // retransform's outcome.
+        self.background_retransform_failure = None;
+        let empty_body = serde_json::json!({});
+        self.handle_desired_queries(&bg.client_id, &empty_body, true)
+            .await;
+        classify_retransform_failure(self.background_retransform_failure.take())
+    }
+
+    /// Run ONE shared background retransform for the client group under the
+    /// selected background connection's auth. Port of TS `#runBackgroundRetransform`
+    /// (view-syncer.ts:2668):
+    ///  - no selected connection → skip (unschedulable until one exists);
+    ///  - loop: attempt under the current bg connection;
+    ///    - success → `markBackgroundRetransformSuccess` + return;
+    ///    - auth error → WARN + `#failMaintenanceConnection` + retry with the
+    ///      replacement connection (or return when none remains);
+    ///    - transform-failed (transient) → WARN + `deferMaintenance('retransform')`
+    ///      + return.
+    ///
+    /// Divergence from TS, labeled: TS bare-returns on "no selected connection" /
+    /// "no replacement" and relies on its deadline getter (which omits the absent
+    /// retransform) to avoid a hot re-arm. Rust's `plan_maintenance` keeps
+    /// `retransform_at` set until a mark/defer moves it, so a bare return here
+    /// would re-arm at delay 0 and spin; rust therefore `defer_maintenance` on
+    /// those exits (the prior inline code did the same). Client-observable
+    /// behavior is unchanged — both eventually retry under a valid credential.
+    async fn run_background_retransform(&mut self) {
+        let mut bg = match lock_unpoisoned(&self.ccm).get_background_connection_context() {
+            Some(c) => c,
+            None => {
+                tracing::debug!(
+                    "CG {}: Skipping background retransform with no selected connection",
+                    self.cg_id
+                );
+                return;
+            }
+        };
+
+        loop {
+            // rust guard: `handle_desired_queries` needs a registered ws; a bg
+            // context whose ws is no longer registered cannot be retransformed.
+            // Treat it as unschedulable → defer (see the method-level note).
+            if self.registered_ws.get(bg.client_id.as_str()) != Some(&bg.ws_id) {
+                lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Retransform);
+                return;
+            }
+
+            match self.attempt_background_retransform(&bg).await {
+                RetransformOutcome::Success => {
                     lock_unpoisoned(&self.ccm).mark_background_retransform_success(
                         &CcmConnectionSelector {
                             client_id: bg.client_id.clone(),
@@ -1593,19 +1761,57 @@ impl ViewSyncerService {
                         },
                         bg.revision,
                     );
+                    return;
                 }
-                _ => {
-                    // No safe background connection right now — defer (TS defers
-                    // via `deferMaintenance('retransform')` when the shared
-                    // retransform cannot run).
+                RetransformOutcome::AuthError(body) => {
+                    // TS view-syncer.ts:2702-2708 (`{clientID, message: e.message}`).
+                    tracing::warn!(
+                        cg_id = %self.cg_id,
+                        client_id = %bg.client_id,
+                        message = %transform_failure_message(&body),
+                        "Background retransform auth failed; failing connection and searching for replacement"
+                    );
+                    self.fail_maintenance_connection(
+                        &bg,
+                        crate::protocol::ErrorBody::unauthorized(
+                            "Connection auth validation failed",
+                        ),
+                    );
+                }
+                RetransformOutcome::TransformFailed(body) => {
+                    // TS view-syncer.ts:2711-2717 (`{clientID, message: e.message}`).
+                    tracing::warn!(
+                        cg_id = %self.cg_id,
+                        client_id = %bg.client_id,
+                        message = %transform_failure_message(&body),
+                        "Background retransform failed; deferring auth maintenance"
+                    );
                     lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Retransform);
+                    return;
+                }
+            }
+
+            // TS `getBackgroundConnectionContext()` after a failed connection: the
+            // CCM re-selected the newest remaining validated connection (or None).
+            match lock_unpoisoned(&self.ccm).get_background_connection_context() {
+                Some(replacement) => {
+                    tracing::debug!(
+                        "CG {}: Retrying background retransform with replacement connection",
+                        self.cg_id
+                    );
+                    bg = replacement;
+                }
+                None => {
+                    tracing::debug!(
+                        "CG {}: No replacement connection available for background retransform",
+                        self.cg_id
+                    );
+                    // rust-scheduler defer (see the method-level note): no bg left.
+                    lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Retransform);
+                    return;
                 }
             }
         }
-
-        // Re-arm from the refreshed plan (TS `#scheduleAuthMaintenance` in the
-        // locked-op `finally`).
-        self.arm_auth_maintenance();
     }
 
     /// Returns the piggybacked `initConnection` message (sec-websocket-protocol
@@ -3682,7 +3888,7 @@ mod tests {
         format!("hdr.{b64}.sig")
     }
 
-    fn pinned_params(client_id: &str, ws_id: &str, user_id: &str) -> ConnectParams {
+    pub(super) fn pinned_params(client_id: &str, ws_id: &str, user_id: &str) -> ConnectParams {
         let mut p = authed_params(client_id, ws_id, &fake_jwt(user_id));
         p.user_id = Some(user_id.to_string());
         p
@@ -3762,7 +3968,7 @@ mod tests {
         }
     }
 
-    fn revalidate_state(
+    pub(super) fn revalidate_state(
         rt: &tokio::runtime::Runtime,
         interval_ms: Option<i64>,
         valid: Arc<std::sync::atomic::AtomicBool>,
@@ -6520,6 +6726,8 @@ impl ViewSyncerService {
             permissions: None,
             permissions_hash: None,
             next_auth_maintenance_at: None,
+            background_retransform_failure: None,
+            forced_retransform_outcomes: std::collections::VecDeque::new(),
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -7345,6 +7553,15 @@ impl ViewSyncerService {
                             for c in &self.clients_for(poke_ws_ids) {
                                 c.send_query_transform_failed_error(&failed);
                             }
+                            // Record the whole-batch failure body for a background
+                            // retransform to branch on (TS `#syncQueryPipelineSet`
+                            // THROWS here, view-syncer.ts:1983; rust cannot unwind
+                            // across the serial re-hydrate so it stashes the body).
+                            // Only `run_background_retransform` reads this — it
+                            // resets the cell before its re-hydrate — so setting it
+                            // on the init/changeDesiredQueries path is a harmless
+                            // no-op there. See `background_retransform_failure`.
+                            self.background_retransform_failure = Some(failed);
                         }
                     }
                 }
@@ -8641,6 +8858,8 @@ mod engine_tests {
     use super::*;
     // The dissolved engine (L9 Stage 3c-iii): tests keep the old name.
     use super::ViewSyncerService as SyncEngine;
+    // Auth-maintenance harness helpers live in the sibling `tests` module.
+    use super::tests::{pinned_params, revalidate_state};
     use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::cvr::CVR;
@@ -10055,5 +10274,203 @@ mod engine_tests {
         assert!(logged.contains("WARN"), "must be WARN level; got: {logged}");
         // Client forwarding is preserved (the pre-fix behavior).
         assert_eq!(forwarded, vec![err]);
+    }
+
+    /// Capture WARN-level logs emitted while running `f`. Used to pin the exact
+    /// TS-parity auth-maintenance warnings.
+    fn capture_warns<F: FnOnce()>(f: F) -> String {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        struct BufGuard(Arc<Mutex<Vec<u8>>>);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+            type Writer = BufGuard;
+            fn make_writer(&'a self) -> BufGuard {
+                BufGuard(self.0.clone())
+            }
+        }
+        impl std::io::Write for BufGuard {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
+
+    /// Pure classifier parity (TS `#runBackgroundRetransform` catch dispatch,
+    /// view-syncer.ts:2700-2723): an auth error body → `AuthError`, a transient
+    /// transform-failed body → `TransformFailed`, and `None` (no throw) →
+    /// `Success`. NON-VACUOUS: mis-map any arm (e.g. treat every failure as
+    /// transient) and the corresponding assert fails.
+    #[test]
+    fn classify_retransform_failure_splits_auth_transient_success() {
+        assert!(matches!(
+            classify_retransform_failure(None),
+            RetransformOutcome::Success
+        ));
+        // {kind: Unauthorized} and http 401/403 are auth (auth.ts isAuthErrorBody).
+        assert!(matches!(
+            classify_retransform_failure(Some(serde_json::json!({"kind": "Unauthorized"}))),
+            RetransformOutcome::AuthError(_)
+        ));
+        assert!(matches!(
+            classify_retransform_failure(Some(serde_json::json!({
+                "kind": "TransformFailed", "reason": "http", "status": 401
+            }))),
+            RetransformOutcome::AuthError(_)
+        ));
+        // A 5xx / non-auth transform failure is transient → deferred, not fatal.
+        assert!(matches!(
+            classify_retransform_failure(Some(serde_json::json!({
+                "kind": "TransformFailed", "reason": "http", "status": 503
+            }))),
+            RetransformOutcome::TransformFailed(_)
+        ));
+        assert!(matches!(
+            classify_retransform_failure(Some(serde_json::json!({
+                "kind": "TransformFailed", "reason": "internal", "message": "boom"
+            }))),
+            RetransformOutcome::TransformFailed(_)
+        ));
+    }
+
+    /// NON-VACUOUS (fix #2, 2026-09-01): a background retransform whose re-hydrate
+    /// hits an AUTH error must NOT mark success — it must WARN, fail the stale
+    /// connection, and retry under a replacement (TS `#runBackgroundRetransform`
+    /// view-syncer.ts:2700-2709,2726-2745). The pre-fix code ran the re-hydrate
+    /// and marked success UNCONDITIONALLY (the 2026-08-27 stale-auth outage
+    /// class): no warn, no fail, no retry. Revert `run_background_retransform` to
+    /// that unconditional mark and every assert below fails.
+    #[test]
+    fn background_retransform_auth_error_fails_connection_and_retries() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        // Two validated connections in the group, both pinned to user-1, so a
+        // failed background connection has a replacement to retry under.
+        let (tx1, _d1) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx1),
+        ));
+        let (tx2, _d2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c2", "ws2", "user-1"),
+            DirectWebSocketSink::new(tx2),
+        ));
+        assert_eq!(state.registered_ws.len(), 2);
+
+        // First attempt: auth error. Second (on the replacement): success.
+        state
+            .forced_retransform_outcomes
+            .push_back(RetransformOutcome::AuthError(
+                serde_json::json!({"kind": "Unauthorized"}),
+            ));
+        state
+            .forced_retransform_outcomes
+            .push_back(RetransformOutcome::Success);
+
+        let logged = capture_warns(|| rt.block_on(state.run_background_retransform()));
+
+        assert!(
+            logged.contains(
+                "Background retransform auth failed; failing connection and searching for replacement"
+            ),
+            "expected the TS auth-fail WARN; got: {logged}"
+        );
+        assert_eq!(
+            state.registered_ws.len(),
+            1,
+            "the auth-failed background connection must be dropped, its replacement kept"
+        );
+        assert!(
+            state.forced_retransform_outcomes.is_empty(),
+            "both attempts must run — the retry under the replacement connection"
+        );
+    }
+
+    /// NON-VACUOUS (fix #2): a background retransform whose re-hydrate hits a
+    /// TRANSIENT transform failure must WARN + defer maintenance and KEEP the
+    /// connection — never mark success, never close the socket (TS
+    /// `#runBackgroundRetransform` view-syncer.ts:2710-2719). Revert to the
+    /// unconditional mark and the WARN assert fails (the old path was silent and
+    /// marked success).
+    #[test]
+    fn background_retransform_transform_failed_defers_and_keeps_connection() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _d) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        assert_eq!(state.registered_ws.len(), 1);
+
+        state
+            .forced_retransform_outcomes
+            .push_back(RetransformOutcome::TransformFailed(
+                serde_json::json!({"kind": "TransformFailed", "reason": "http", "status": 503}),
+            ));
+
+        let logged = capture_warns(|| rt.block_on(state.run_background_retransform()));
+
+        assert!(
+            logged.contains("Background retransform failed; deferring auth maintenance"),
+            "expected the TS transform-failed defer WARN; got: {logged}"
+        );
+        assert_eq!(
+            state.registered_ws.len(),
+            1,
+            "a transient transform failure must NOT close the connection"
+        );
+        assert!(
+            state.forced_retransform_outcomes.is_empty(),
+            "the single attempt must run"
+        );
+    }
+
+    /// A successful background retransform takes the success branch silently:
+    /// no maintenance WARN, connection retained. (The `markBackgroundRetransform
+    /// Success` call itself has no observable deadline effect here because the
+    /// test CCM is built with no retransform interval; the auth/transform-failed
+    /// tests above carry the non-vacuous weight of the fix.)
+    #[test]
+    fn background_retransform_success_is_silent_and_keeps_connection() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _d) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+
+        state
+            .forced_retransform_outcomes
+            .push_back(RetransformOutcome::Success);
+
+        let logged = capture_warns(|| rt.block_on(state.run_background_retransform()));
+
+        assert!(
+            !logged.contains("Background retransform"),
+            "success path must emit no retransform WARN; got: {logged}"
+        );
+        assert_eq!(state.registered_ws.len(), 1);
+        assert!(state.forced_retransform_outcomes.is_empty());
     }
 }
