@@ -10,8 +10,13 @@ name: Rust Syncer
 # Modeled on rust-ivm.yml (pinned action SHAs, persist-credentials: false).
 
 on:
-  push:
-    branches: [rust-cvr-v1.0.0]
+  # Push-triggered CI disabled 2026-09-01: we iterate on rust-cvr-v1.0.0 by
+  # pushing and rebuilding the zero image directly on the test box, so the full
+  # 3-crate check + image build/push on every push only slows the
+  # pull→rebuild→replay loop. Re-enable by uncommenting the two lines below.
+  # Manual (workflow_dispatch), PR, and the nightly schedule are unchanged.
+  # push:
+  #   branches: [rust-cvr-v1.0.0]
   pull_request:
     branches: [rust-cvr-v1.0.0]
   workflow_dispatch:
