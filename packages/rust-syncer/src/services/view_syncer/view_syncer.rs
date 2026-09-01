@@ -1,23 +1,23 @@
-//! Connection router — port of the connection lifecycle in `syncer.ts`.
+//! `ViewSyncerService` — port of
+//! `zero-cache/src/services/view-syncer/view-syncer.ts`.
 //!
-//! Routes incoming WebSocket connections to the appropriate client group. Each
-//! CG runs as a `spawn_local` task on one of the `K` sharded executor threads
-//! (doc 91 — there is no per-CG OS thread). The router maintains a
-//! `DashMap<client_group_id, CGHandle>` for lookup.
+//! The `!Send` serving core that owns ONE client group's world: the IVM
+//! pipelines, the CVR store handle + row cache, the per-client poke sinks, and
+//! the connection/auth state (`ConnectionContextManager`). Everything the client
+//! observes — hydrate, advance, diff, poke, CVR flush, inspector metrics —
+//! happens here, driven by `cg_event_loop` (this file), which runs as a
+//! `spawn_local` task on one of the `K` sharded executor threads (doc 91 — there
+//! is no per-CG OS thread). CVR Postgres I/O is `offload`ed onto the main
+//! multi-thread runtime so it never blocks this serial thread's CPU.
 //!
-//! Connection lifecycle (port of `Syncer.#createConnection`):
-//! 1. Auth validation (JWT) — BEFORE touching existing connections
-//! 2. User ID pinning check — reject if group is pinned to a different user
-//! 3. Close existing connection for same clientID (replacement)
-//! 4. Register connection in context manager
-//! 5. Send `connected` on the ACCEPT task (`handle_connection`), BEFORE the
-//!    connection is handed to the serial CG thread — TS parity with
-//!    `syncer.ts#handleConnection` sending `connection.init()`'s `connected`
-//!    before `await handleInitConnection`. This decouples the connect-ack from
-//!    `config_and_hydrate` (see `handle_connection`; version gate in
-//!    `ws_server::accept_connection`, both TS `Connection.init()` effects).
-//! 6. Create Connection + MessageHandler on the CG thread (version gate only)
-//! 7. Handle piggybacked `initConnection` from sec-websocket-protocol header
+//! What is NOT here (moved out in the L9 refactor, task #160): the connection
+//! ROUTER — accepting a socket, JWT validation, `place_cg`, the
+//! `DashMap<client_group_id, CGHandle>`, and emitting the `connected` ack — lives
+//! in `workers/syncer.rs` (`create_connection`, port of TS
+//! `Syncer.#createConnection`/`handleConnection`). Crucially, the `connected` ack
+//! is sent THERE, on the per-connection accept task, BEFORE the connection is
+//! handed to this serial CG thread — decoupling the connect-ack from
+//! `config_and_hydrate` (TS parity; the 2026-08-27 prod fix, task #152).
 
 use crate::auth::read_authorizer::{hash_of_ast, transform_and_hash_query};
 use crate::custom_queries::transform_query::{

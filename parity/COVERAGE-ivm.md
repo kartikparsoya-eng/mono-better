@@ -43,7 +43,7 @@ Forcing 1:1 filenames here would misrepresent the design.
 
 ### 3. Rust-only infra (no TS origin file)
 `engine/`, `streamer/`, `snapshotter/{diff,spec,snapshotter}.rs`, `bin/`,
-`advance_gate.rs` (fetch-budget gate), `credit.rs`, `otel_metrics.rs`,
+`advance_gate.rs` (fetch-budget gate), `otel_metrics.rs`,
 `perf_trace.rs`, `live_count.rs`, `replay.rs`, `planner/runtime.rs` — transport,
 observability, the actor snapshot runtime, and the SQLite-replica seam. These
 have no single TS origin; they are the port's engine host.

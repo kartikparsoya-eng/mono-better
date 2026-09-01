@@ -1235,10 +1235,10 @@ impl Engine {
         let mut result =
             crate::snapshotter::diff::iterate_diff(&diff, &prev_conn, &curr_conn, |sc| {
                 // A watchdog/consumer cancel is not a successful short stream. In
-                // particular, the boundary callback can cancel after failing to
-                // acquire credit; continuing would mutate the graph to head while
-                // silently dropping the undelivered tail. Fail the advance so the
-                // view-syncer cannot commit a partial CVR.
+                // particular, the boundary callback can cancel on downstream
+                // backpressure/timeout; continuing would mutate the graph to head
+                // while silently dropping the undelivered tail. Fail the advance so
+                // the view-syncer cannot commit a partial CVR.
                 if cancellation_token.is_cancelled() {
                     return Err(crate::snapshotter::DiffError::Other(
                         "advance cancelled before all changes were delivered".to_string(),

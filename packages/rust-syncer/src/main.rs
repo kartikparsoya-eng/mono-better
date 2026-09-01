@@ -153,9 +153,10 @@ fn main() {
     );
 
     // Create the tokio runtime first — it owns the shared CVR pool, and its
-    // handle is injected into each CG's SyncEngine so CVR I/O is offloaded onto
-    // this runtime (`SyncEngine::offload`; the CG executors are current_thread
-    // runtimes that must not poll another reactor's connections — doc 91 §5.1).
+    // handle is injected into each CG's ViewSyncerService so CVR I/O is offloaded
+    // onto this runtime (`ViewSyncerService::offload`; the CG executors are
+    // current_thread runtimes that must not poll another reactor's connections —
+    // doc 91 §5.1).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

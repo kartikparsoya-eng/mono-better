@@ -290,3 +290,50 @@ ZERO-DIVERGENCE-PLAN Part 3 L8 follow-ups.
   `inspect_metrics_returns_delegate_global_aggregates` (op wiring, non-vacuous),
   `hydrate_and_sync_records_inspector_materialization_and_ast` (recording,
   non-vacuous).
+
+## I-11 — Per-row mid-fetch advancement gate (thread-local bridge for TS's `ResetPipelinesSignal`)
+- **Files:** `rust-ivm/src/advance_gate.rs` (the `AdvanceGate` struct + economic
+  budget math + the thread-local gate `arm`/`GateGuard`/`should_stop_fetch`);
+  called from `engine/mod.rs` `advance_to_head_stream` (arms the gate; per-change
+  `advance_reset()` check) and `sqlite/table_source.rs` `LazyRowsIter::next`
+  (per-row `should_stop_fetch()` poll, every 64th row).
+- **No TS twin (mechanism, not logic):** the ECONOMIC-BUDGET LOGIC is a 1:1 port
+  of `pipeline-driver.ts` `#shouldAdvanceYieldMaybeAbortAdvance` / `AdvanceContext`
+  (#6206) — every fn cites its TS name (`projectedAdvancementTimeMs`,
+  `shouldResetProjectedAdvancement`, `shouldResetSlowCurrentChange`,
+  `shouldFinishLateAdvancement`), and the per-change check lives in `engine/mod.rs`
+  (the `pipeline-driver.ts` twin), exactly like TS. What has NO TS twin is the
+  DELIVERY MECHANISM: TS re-checks the budget mid-fetch and `throw`s a
+  `ResetPipelinesSignal` from deep inside the `TableSource` fetch, unwinding to the
+  PipelineDriver. Rust IVM push is INFALLIBLE (operators return `Vec<Change>`, not
+  `Result`), so a leaf fetch cannot throw across it. Instead a **thread-local gate**
+  (advance is single-threaded on the actor thread) is armed by the engine for the
+  advance's duration; the leaf fetch polls `should_stop_fetch()` between rows and,
+  when the budget blows, returns `None` (a normal short-input end-of-stream) and
+  latches `tripped`; the engine checks `tripped_reset()` after the push and resets.
+  A RAII `GateGuard` disarms on scope exit or panic so a later hydrate on the thread
+  can never inherit a stale budget. Housed in its own dependency-free leaf module so
+  BOTH `engine/` (root) and `sqlite/table_source.rs` (leaf) can depend on it without
+  a `sqlite → engine` layering inversion.
+- **Contract (TS-observable):** a mid-fetch budget abort is client-indistinguishable
+  from TS's `ResetPipelinesSignal` — same reset reasons (slow-current-change /
+  projected / timeout / wall-clock ceiling), same thresholds
+  (`MIN_ADVANCEMENT_TIME_LIMIT_MS` = 50, the #6206 projection tunables — the SAME
+  const the per-change arm imports, so per-row and per-change can never trip on
+  different thresholds), and a trip discards the truncated push and rehydrates
+  (`advance_reset_error` → the same `advancement-timeout` reset the per-change arm
+  emits). The gate is inert outside a production advance: hydrate and worker-thread
+  fetches see `None` and read every row (`should_stop_fetch()` == false when
+  unarmed). Rust-only additions beyond TS: the `WallClockCeiling` arm (an absolute
+  exclusion-free bound — TS's budget keeps ticking through delivery, Rust excludes
+  delivery time via `exclude`, so a slow consumer could otherwise hold the WAL
+  snapshot open indefinitely) is a divergence-guard, not a behavior change on the
+  hot path.
+- **Tests:** `advance_gate::tests::*` (the budget-math arms:
+  `slow_current_change_trips_regardless_of_late_finish`, `projected_batch_cost_trips`,
+  `late_advancement_finishes_instead_of_resetting`, `delivery_wait_is_excluded_from_budget`,
+  `should_stop_fetch_is_false_when_unarmed`) + the fetch-integration suite
+  `sqlite::table_source` `advance_gate_fetch_tests`
+  (`fetch_returns_all_rows_when_no_gate_armed`, `fetch_stops_when_gate_over_budget`
+  — non-vacuous: the fetch actually short-circuits mid-stream —,
+  `fetch_resumes_all_rows_after_guard_drops` — the RAII disarm proven).

@@ -15,7 +15,7 @@
 //! `ivm/source.rs`), the `memory-source.ts` → `sqlite/` architectural rewrite
 //! (in-memory overlay replaced by a SQLite-backed source), and the Rust-only
 //! engine host (`engine/`, `streamer/`, `snapshotter/`, `sqlite/`, `bin/`,
-//! `advance_gate.rs`, `credit.rs`, `planner/runtime.rs`, …) with no TS origin.
+//! `advance_gate.rs`, `planner/runtime.rs`, …) with no TS origin.
 
 // The engine graph uses Rc<RefCell> (matching TS's mutable class instances).
 // This is by design — the graph is single-threaded (actor model).
@@ -25,7 +25,6 @@
 
 pub mod advance_gate;
 pub mod builder;
-pub mod credit;
 pub mod engine;
 pub mod ivm;
 pub mod live_count;
