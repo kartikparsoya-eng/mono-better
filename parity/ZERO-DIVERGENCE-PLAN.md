@@ -624,14 +624,27 @@ exact holes this bug used.
 **Measures (M0 top-level; M1-M7 feed its cells).**
 | M | Measure | Question | Status |
 |---|---|---|---|
-| M0 | Port-completeness matrix: responsibility(API/protocol-msg/DB-op/feature-flag/FAILURE-MODE/job/lifecycle-flag+guard) → target → evidence → status | migrated? | building |
-| M1 | Differential count+output oracle (TS passes corpus FIRST, then assert rust==TS per op) | behaves? | building |
-| M2 | Call-guard parity static check (each TS call's enclosing guards ≡ rust's, or justified) | might-run? | building |
-| M3 | State-flag registry (every TS lifecycle flag: set/reset/read → rust counterpart) — a matrix slice | might-run? | building |
-| M4 | Profile-diff gate (rust hot-path self-time vs TS baseline; structural divergence = flag) | behaves? | building |
-| M5 | Ban-unverified-claims guard (parity comments must cite a `.ts:line`) | traceability | building |
-| M6 | Branch/condition coverage gate on ported state logic (both guard branches exercised) | did-run? | building |
-| M7 | Mutation testing (cargo-mutants) on correctness-critical modules — automates prove-on-revert | behaves? | building |
+| M0 | Port-completeness matrix (responsibility→target→evidence→status) | migrated? | seeded (below) |
+| M1 | Differential count+output oracle (TS-as-oracle) | behaves? | **done** `count_oracle.py` (amp invariant; PASS 1.19x, fails pre-fix) |
+| M2 | Call-guard parity static check | might-run? | pending (larger — TS guard extraction) |
+| M3 | State-flag registry (TS lifecycle flags → rust) | might-run? | **done** `state_flag_registry.py` (surfaced #everPoked) |
+| M4 | Profile-diff gate (rust hot-path vs TS baseline) | behaves? | partial (rust flamegraph proven; TS baseline pending) |
+| M5 | Ban-unverified-claims guard (must cite `.ts:line`) | traceability | **done** `ban_unverified_claims.py` (ratchet @122) |
+| M6 | Branch/condition coverage gate on ported state logic | did-run? | pending (larger — llvm-cov branch gate) |
+| M7 | Mutation testing (cargo-mutants) on critical modules | behaves? | **done (harness)** `mutation_smoke.sh` |
+
+M1/M3/M5/M7 wired into `scripts/local-rust-ci.sh` (M1/M7 are ART/offline context).
+
+**M0 seed — responsibilities beyond symbols (grows; graduate to own doc when large):**
+| Responsibility (TS) | Target (rust) | Evidence | Status |
+|---|---|---|---|
+| `#hydrateUnchangedQueries` once/init (gated `#pipelinesSynced`) | `hydrate_unchanged_queries` gated on `pipelines_synced` | test proven-on-revert + M1 amp + ART E2 (p95 6251→474) | complete b8b997674 |
+| Background retransform auth outcome (fail/retry/defer) | `run_background_retransform`+`fail_maintenance_connection` | 3 tests proven-on-revert | complete 6daceb7a |
+| Failed custom-query transform → WARN | `record_transform_error` | emission test | complete 0e5cba1 |
+| `customQueryTransformMode` 'missing' vs 'all' | — (rust transforms ALL every sync) | — | **GAP — fix** |
+| `#everPoked` force-initial / skip-same-version poke | — (none found) | — | **GAP — audit** (M3) |
+| `removeExpiredQueries` gated on `#pipelinesSynced` (TS:643) | ? | — | audit |
+| `updateAuth` validate-if-not-synced (TS:1011) | ? | — | audit |
 
 Done-bar (per responsibility, NOT "100% line"): mapped-or-retired + a verification
 artifact + known-diffs documented+accepted + branch coverage where practical; every
