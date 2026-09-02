@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use rust_ivm::builder::debug_delegate::{RowCountsBySource, SharedDebug, runtime_debug_flags};
-use rust_ivm::engine::HydrateStream;
+use rust_ivm::engine::{AdvanceStream, HydrateStream};
 use rust_ivm::engine::{Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::change::ChangeType;
 use rust_ivm::ivm::data::{Row, Value};
@@ -133,13 +133,15 @@ pub struct HydrateContext {
     pub timer: Rc<dyn Timer>,
 }
 
-/// Port of TS `#advanceContext` (pipeline-driver.ts:276, set at :955-961). Its
-/// timer / progress fields (and the yield arm of
-/// `#shouldAdvanceYieldMaybeAbortAdvance`) arrive with the advance port (D1
-/// phase 2); the abort arms already live in `rust_ivm::advance_gate`. Until
-/// then the presence of the context is what `should_yield` needs: "an advance
-/// is in progress" (answer `false`, not the outside-of-both panic).
-pub struct AdvanceContext {}
+/// Port of TS `#advanceContext` (pipeline-driver.ts:276, set at :955-961):
+/// the caller's time-slice [`Timer`] for the yield arm of
+/// `#shouldAdvanceYieldMaybeAbortAdvance` (:1156 — `checkYield &&
+/// advanceTimer.elapsedLap() > yieldThresholdMs`). TS's other fields
+/// (`totalHydrationTimeMs`, `numChanges`, `pos`, `currentChangeStartMs`) feed
+/// the abort arms, which live in `rust_ivm::advance_gate` (I-11).
+pub struct AdvanceContext {
+    pub timer: Rc<dyn Timer>,
+}
 
 pub struct IvmPipelines {
     engine: Option<Engine>,
@@ -270,10 +272,14 @@ impl IvmPipelines {
             let threshold = yield_threshold_ms.map(|f| f()).unwrap_or(f64::INFINITY);
             return hydrate.timer.elapsed_lap() > threshold;
         }
-        if advance_context.borrow().is_some() {
-            // Advance-time yield arm: D1 phase 2 (the abort arms are the
-            // thread-local `advance_gate`, evaluated in the row-read loop).
-            return false;
+        if let Some(advance) = advance_context.borrow().as_ref() {
+            // Port of the yield arm of TS `#shouldAdvanceYieldMaybeAbortAdvance`
+            // (pipeline-driver.ts:1156): `checkYield && advanceTimer.elapsedLap()
+            // > this.#yieldThresholdMs()`. Its abort arms (:1095-1155) are
+            // evaluated by the thread-local `advance_gate` (I-11) on the same
+            // row-read path that calls this.
+            let threshold = yield_threshold_ms.map(|f| f()).unwrap_or(f64::INFINITY);
+            return advance.timer.elapsed_lap() > threshold;
         }
         panic!("shouldYield called outside of hydration or advancement");
     }
@@ -955,45 +961,44 @@ impl IvmPipelines {
             .unwrap_or_else(|rc| rc.borrow().clone()))
     }
 
-    /// Advance the replica to head, streaming each `RowChange` to `on_row` and
-    /// invoking `on_header(version, num_changes)` once before the rows.
+    /// Advance the replica to head, returning the pull-based change stream. Port
+    /// of TS `advance(timer)` (pipeline-driver.ts:926-947): the header
+    /// (`version`, `numChanges`) is available immediately via
+    /// [`AdvanceChanges::header`]; the changes are produced one per pull and a
+    /// `StreamItem::Yield` is surfaced before a change whenever the yield arm
+    /// of `#shouldAdvanceYieldMaybeAbortAdvance` fires (:975-977), so the
+    /// consumer (`#advancePipelines` → `#processChanges`) can `await` its time
+    /// slice. `timer` is stored in `#advanceContext` (:955-961) for that arm.
     ///
-    /// Port of `AdvanceTask::compute`: an engine panic is caught so it cannot
-    /// cross into the process and abort every CG. A `ScalarResetError` panic
-    /// maps to an in-place `Reset` (rehydrate at curr); any other panic poisons
-    /// the engine and surfaces as `Err` (TS teardown parity — the caller tears
-    /// down and the client reconnects). A `reset_reason` reported by the engine
-    /// also maps to `Reset`.
-    pub fn advance<H, F>(
-        &mut self,
-        mut on_header: H,
-        mut on_row: F,
-    ) -> Result<AdvanceOutcome, String>
-    where
-        H: FnMut(&str, usize),
-        F: FnMut(&RowChange),
-    {
+    /// Port of `AdvanceTask::compute`'s panic handling: an engine panic is
+    /// caught so it cannot cross into the process and abort every CG. A
+    /// `ScalarResetError` panic maps to an in-place `Reset` (rehydrate at
+    /// curr); any other panic poisons the engine and surfaces as `Err` (TS
+    /// teardown parity — the caller tears down and the client reconnects). A
+    /// `reset_reason` reported by the engine also maps to `Reset`. Either is
+    /// delivered by [`AdvanceChanges::finish`].
+    pub fn advance(&mut self, timer: Rc<dyn Timer>) -> Result<AdvanceChanges<'_>, String> {
         if self.poisoned {
             self.poisoned = false;
-            return Ok(AdvanceOutcome::Reset {
-                reason: "schema-change".to_string(),
-                msg: "engine reset after a prior advance panic; rehydrating".to_string(),
+            return Ok(AdvanceChanges {
+                driver: self,
+                stream: None,
+                header: (String::new(), 0),
+                outcome: Some(Ok(AdvanceOutcome::Reset {
+                    reason: "schema-change".to_string(),
+                    msg: "engine reset after a prior advance panic; rehydrating".to_string(),
+                })),
             });
         }
 
         let syncable_tables = self.syncable_tables.clone();
         let all_table_names = self.all_table_names.clone();
-        let mut eng = self
-            .engine
-            .take()
-            .ok_or_else(|| "Engine not initialized".to_string())?;
-        let mut snapshotter = match self.snapshotter.take() {
-            Some(s) => s,
-            None => {
-                self.engine = Some(eng);
-                return Err("Snapshotter not initialized".to_string());
-            }
-        };
+        if self.engine.is_none() {
+            return Err("Engine not initialized".to_string());
+        }
+        if self.snapshotter.is_none() {
+            return Err("Snapshotter not initialized".to_string());
+        }
 
         // TS pipeline-driver.ts:951-961: `assert(this.#hydrateContext === null,
         // 'Cannot advance while hydration is in progress')`, then
@@ -1002,26 +1007,84 @@ impl IvmPipelines {
             self.hydrate_context.borrow().is_none(),
             "Cannot advance while hydration is in progress"
         );
-        *self.advance_context.borrow_mut() = Some(AdvanceContext {});
-        let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            eng.advance_to_head_stream(
-                &mut snapshotter,
+        *self.advance_context.borrow_mut() = Some(AdvanceContext {
+            timer: Rc::clone(&timer),
+        });
+        // The between-change yield arm handed to the engine's stream — the same
+        // `should_yield` the sources consult, evaluated at TS's per-change site
+        // (pipeline-driver.ts:975-977).
+        let should_yield = self
+            .yield_threshold_ms
+            .as_ref()
+            .map(|_| self.should_yield_hook());
+
+        let eng = self.engine.as_mut().expect("checked above");
+        let snapshotter = self.snapshotter.as_mut().expect("checked above");
+        let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eng.start_advance(
+                snapshotter,
                 &syncable_tables,
                 &all_table_names,
-                |version, num_changes| on_header(version, num_changes),
-                |rc| on_row(rc),
+                should_yield,
             )
         }));
+        match started {
+            Ok(Ok(stream)) => {
+                let header = (stream.version().to_string(), stream.num_changes());
+                Ok(AdvanceChanges {
+                    driver: self,
+                    stream: Some(stream),
+                    header,
+                    outcome: None,
+                })
+            }
+            Ok(Err(e)) => {
+                *self.advance_context.borrow_mut() = None;
+                Err(format!("advance failed: {e}"))
+            }
+            Err(payload) => {
+                *self.advance_context.borrow_mut() = None;
+                Err(self
+                    .advance_panic_outcome(payload)
+                    .err()
+                    .unwrap_or_default())
+            }
+        }
+    }
 
-        // Restore engine + snapshotter on every path so a follow-up
-        // reset()/rehydrate can run.
-        self.engine = Some(eng);
-        self.snapshotter = Some(snapshotter);
-        // TS `finally { this.#advanceContext = null; }` (pipeline-driver.ts:1000).
+    /// Map an engine panic to the advance outcome exactly as the callback path
+    /// did: a `ScalarResetError` → in-place `Reset`; anything else poisons the
+    /// engine and surfaces as `Err`.
+    fn advance_panic_outcome(
+        &mut self,
+        payload: Box<dyn std::any::Any + Send>,
+    ) -> Result<AdvanceOutcome, String> {
+        if let Some(msg) = scalar_reset_message(&payload) {
+            Ok(AdvanceOutcome::Reset {
+                reason: "scalar-subquery".to_string(),
+                msg,
+            })
+        } else {
+            // Engine panic (e.g. a source-drift assert): mark poisoned
+            // and surface as a thrown error (TS teardown parity).
+            self.poisoned = true;
+            Err(format!("engine advance panic: {}", panic_message(&payload)))
+        }
+    }
+
+    /// Close the advance: engine phase 3 (restore sources to head, map the
+    /// result), then `finally { this.#advanceContext = null }`
+    /// (pipeline-driver.ts:1000).
+    fn finish_advance(&mut self, stream: AdvanceStream) -> Result<AdvanceOutcome, String> {
+        let result = match self.engine.as_mut() {
+            Some(eng) => eng.finish_advance(stream),
+            None => Err(rust_ivm::snapshotter::DiffError::Other(
+                "Engine not initialized".to_string(),
+            )),
+        };
         *self.advance_context.borrow_mut() = None;
-
-        match advance {
-            Ok(Ok(result)) => {
+        match result {
+            Ok(result) => {
                 if let Some(reason) = result.reset_reason {
                     Ok(AdvanceOutcome::Reset {
                         reason,
@@ -1034,20 +1097,7 @@ impl IvmPipelines {
                     })
                 }
             }
-            Ok(Err(e)) => Err(format!("advance failed: {e}")),
-            Err(payload) => {
-                if let Some(msg) = scalar_reset_message(&payload) {
-                    Ok(AdvanceOutcome::Reset {
-                        reason: "scalar-subquery".to_string(),
-                        msg,
-                    })
-                } else {
-                    // Engine panic (e.g. a source-drift assert): mark poisoned
-                    // and surface as a thrown error (TS teardown parity).
-                    self.poisoned = true;
-                    Err(format!("engine advance panic: {}", panic_message(&payload)))
-                }
-            }
+            Err(e) => Err(format!("advance failed: {e}")),
         }
     }
 
@@ -1148,6 +1198,82 @@ impl Drop for HydrateChanges<'_> {
         if let Some(stream) = self.stream.take() {
             self.driver.finish_hydrate(stream, &self.queries);
         }
+    }
+}
+
+/// The driver-level advance change stream — TS `advance(timer)`'s
+/// `{version, numChanges, changes: Iterable<RowChange | 'yield'>}`
+/// (pipeline-driver.ts:926-947). Wraps the engine's [`AdvanceStream`] with the
+/// driver's panic mapping on every pull (a `ScalarResetError` → `Reset`,
+/// anything else poisons + `Err`, delivered by [`finish`](Self::finish)), and
+/// guarantees the engine's phase 3 (sources back to head, `#advanceContext =
+/// null`) runs exactly once — on `finish`, or on drop if the consumer abandons
+/// the stream (TS `finally`, :1000-1010).
+pub struct AdvanceChanges<'a> {
+    driver: &'a mut IvmPipelines,
+    stream: Option<AdvanceStream>,
+    header: (String, usize),
+    /// Set when the outcome is known before / instead of streaming (a poisoned
+    /// engine, or a panic caught mid-stream).
+    outcome: Option<Result<AdvanceOutcome, String>>,
+}
+
+impl AdvanceChanges<'_> {
+    /// TS `advance()`'s `{version, numChanges}` — the version the snapshot
+    /// advanced TO and the number of changes in the diff.
+    pub fn header(&self) -> (&str, usize) {
+        (&self.header.0, self.header.1)
+    }
+
+    /// Run phase 3 now and return the advance outcome. Dropping the stream runs
+    /// phase 3 too (outcome discarded); this makes it explicit at the call site.
+    pub fn finish(mut self) -> Result<AdvanceOutcome, String> {
+        if let Some(outcome) = self.outcome.take() {
+            self.stream = None;
+            *self.driver.advance_context.borrow_mut() = None;
+            return outcome;
+        }
+        match self.stream.take() {
+            Some(stream) => self.driver.finish_advance(stream),
+            None => Err("advance already finished".to_string()),
+        }
+    }
+}
+
+impl Iterator for AdvanceChanges<'_> {
+    type Item = StreamItem<RowChange>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.outcome.is_some() {
+            return None;
+        }
+        let stream = self.stream.as_mut()?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.next())) {
+            Ok(item) => item,
+            Err(payload) => {
+                // Drop the stream now (its Drop restores the sources to head —
+                // the RefCell borrows a mid-push panic held were released by
+                // the unwind) and hand the mapped outcome to `finish`.
+                self.stream = None;
+                self.outcome = Some(self.driver.advance_panic_outcome(payload));
+                None
+            }
+        }
+    }
+}
+
+impl Drop for AdvanceChanges<'_> {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            if std::thread::panicking() {
+                // Let the engine stream's own Drop restore the sources; the
+                // driver bookkeeping is cleared without touching the engine.
+                drop(stream);
+            } else {
+                let _ = self.driver.finish_advance(stream);
+            }
+        }
+        *self.driver.advance_context.borrow_mut() = None;
     }
 }
 

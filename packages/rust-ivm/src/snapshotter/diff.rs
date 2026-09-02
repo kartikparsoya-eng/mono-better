@@ -279,9 +279,8 @@ fn check_valid(
     Ok(())
 }
 
-/// Iterate the diff, calling `emit` for each Change. Stops on first error
-/// (including ResetPipelinesSignal). Port of TS Diff[Symbol.iterator] and
-/// Go Diff.Each().
+/// Iterate the diff, calling `emit` for each `SnapshotChange` — the eager
+/// composition of [`DiffIter`]. Kept for callers that need no yielding.
 pub fn iterate_diff<F>(
     diff: &DiffOwned,
     prev_conn: &std::cell::RefCell<rusqlite::Connection>,
@@ -291,134 +290,251 @@ pub fn iterate_diff<F>(
 where
     F: FnMut(SnapshotChange) -> Result<(), DiffError>,
 {
-    // NB: borrow the shared snapshot connections only for the duration of each
-    // read (get_row/get_rows/read_changelog all return OWNED data), never across
-    // `emit(...)`. During emit a TableSource may be pointed at this same
-    // connection (set to PREV) and needs to borrow it, so a held borrow here
-    // would RefCell-panic.
-    let permissions_table = format!("{}.permissions", diff.app_id);
+    // The two connections are shared `Rc`s in production; this legacy entry
+    // point only has `&RefCell`s, so it borrows through a non-owning iterator.
     let entries = {
         let _t = crate::perf_trace::scope("advance.diff");
         read_changelog(&curr_conn.borrow(), &diff.prev_version)?
     };
-
-    for e in &entries {
-        // Times the per-entry SnapshotChange read (prev/curr row lookups etc.);
-        // dropped just before `emit` so the push/deliver work is excluded.
-        let diff_scope = crate::perf_trace::scope("advance.diff");
-        // RESET → schema change, abort.
-        if e.op == RESET_OP {
-            return Err(DiffError::Reset(ResetPipelinesSignal {
-                reason: REASON_SCHEMA_CHANGE,
-                msg: format!("schema for table {} has changed", e.table),
-            }));
-        }
-        // TRUNCATE → abort & rehydrate.
-        if e.op == TRUNCATE_OP {
-            return Err(DiffError::Reset(ResetPipelinesSignal {
-                reason: REASON_TRUNCATION,
-                msg: format!("table {} has been truncated", e.table),
-            }));
-        }
-
-        // Non-syncable: skip if known, error if truly unknown.
-        let spec = match diff.syncable_tables.get(&e.table) {
-            Some(s) => &s.table_spec,
-            None => {
-                if diff.all_table_names.contains(&e.table) {
-                    continue;
-                }
-                return Err(DiffError::Other(format!(
-                    "change for unknown table {}",
-                    e.table
-                )));
-            }
-        };
-
-        // Catch-up invariant: every change-log op has stateVersion strictly
-        // greater than the table's minRowVersion.
-        let min = spec.min_row_version.as_deref().unwrap_or("");
-        if min >= e.state_version.as_str() {
-            return Err(DiffError::Other(format!(
-                "unexpected change @{} for table {} with minRowVersion {:?}: {}({})",
-                e.state_version, e.table, spec.min_row_version, e.op, e.row_key
-            )));
-        }
-
-        let row_key = parse_row_key(&e.row_key)?;
-
-        // nextValue: the new contents for a set, None for a delete.
-        let next_raw = if e.op == SET_OP {
-            get_row(&curr_conn.borrow(), spec, &row_key)?
-        } else {
-            None
-        };
-
-        // prevValues: unique-conflicts on a set, or the old row on a delete.
-        let prev_values = if let Some(ref next) = next_raw {
-            get_rows(&prev_conn.borrow(), spec, &spec.unique_keys, next)?
-        } else {
-            let pv = get_row(&prev_conn.borrow(), spec, &row_key)?;
-            pv.map(|v| vec![v]).unwrap_or_default()
-        };
-
-        // A set whose row is missing in curr is a hard inconsistency.
-        if e.op == SET_OP && next_raw.is_none() {
-            return Err(DiffError::Other(format!(
-                "Missing value for {} {}",
-                e.table, e.row_key
-            )));
-        }
-
-        // Match TS exactly: consuming a diff after either snapshot has moved is
-        // an InvalidDiffError, not a recoverable pipeline-reset signal.
-        check_valid(
-            &e.state_version,
-            &e.op,
-            &prev_values,
-            next_raw.as_ref(),
-            &diff.prev_version,
-            &diff.curr_version,
-        )
-        .map_err(DiffError::InvalidDiff)?;
-
-        // No-op filter: delete of a row absent in prev.
-        if prev_values.is_empty() && next_raw.is_none() {
-            continue;
-        }
-
-        // Permissions change → abort & rehydrate.
-        if e.table == permissions_table
-            && let Some(ref next) = next_raw
-        {
-            for pv in &prev_values {
-                let old_perms = pv.get("permissions");
-                let new_perms = next.get("permissions");
-                if old_perms != new_perms {
-                    return Err(DiffError::Reset(ResetPipelinesSignal {
-                        reason: REASON_PERMISSIONS_CHANGE,
-                        msg: format!(
-                            "Permissions have changed {:?} => {:?}",
-                            pv.get("hash"),
-                            next.get("hash")
-                        ),
-                    }));
-                }
-            }
-        }
-
-        let change = SnapshotChange {
-            table: e.table.clone(),
-            prev_values,
-            next_value: next_raw,
-            row_key,
-        };
-        drop(diff_scope);
-
-        emit(change)?;
+    let mut it = DiffIter {
+        diff: DiffRef::Borrowed(diff),
+        prev_conn: ConnRef::Borrowed(prev_conn),
+        curr_conn: ConnRef::Borrowed(curr_conn),
+        permissions_table: format!("{}.permissions", diff.app_id),
+        entries: entries.into_iter(),
+        done: false,
+    };
+    for change in it.by_ref() {
+        emit(change?)?;
     }
-
     Ok(())
+}
+
+enum DiffRef<'a> {
+    Borrowed(&'a DiffOwned),
+    Owned(std::rc::Rc<DiffOwned>),
+}
+
+impl std::ops::Deref for DiffRef<'_> {
+    type Target = DiffOwned;
+    fn deref(&self) -> &DiffOwned {
+        match self {
+            DiffRef::Borrowed(d) => d,
+            DiffRef::Owned(d) => d,
+        }
+    }
+}
+
+enum ConnRef<'a> {
+    Borrowed(&'a std::cell::RefCell<rusqlite::Connection>),
+    Owned(std::rc::Rc<std::cell::RefCell<rusqlite::Connection>>),
+}
+
+impl ConnRef<'_> {
+    fn borrow(&self) -> std::cell::Ref<'_, rusqlite::Connection> {
+        match self {
+            ConnRef::Borrowed(c) => c.borrow(),
+            ConnRef::Owned(c) => c.borrow(),
+        }
+    }
+}
+
+/// Pull-based diff iteration: the per-entry work of `iterate_diff`, one
+/// `SnapshotChange` per `next()`, so the engine's advance can suspend between
+/// changes — TS `#advance` is a generator over `diff` (pipeline-driver.ts:
+/// 948-1000) and yields `'yield'` before a change when the time slice is up
+/// (:975-977). Terminal errors (reset signals, invalid diff, hard errors) are
+/// surfaced once as `Err` and the iterator is then exhausted.
+///
+/// NB: borrows the shared snapshot connections only for the duration of each
+/// read (`get_row`/`get_rows`/`read_changelog` all return OWNED data), never
+/// across the caller's processing of a change. During that processing a
+/// TableSource may be pointed at this same connection (set to PREV) and needs
+/// to borrow it, so a held borrow here would RefCell-panic.
+pub struct DiffIter<'a> {
+    diff: DiffRef<'a>,
+    prev_conn: ConnRef<'a>,
+    curr_conn: ConnRef<'a>,
+    permissions_table: String,
+    entries: std::vec::IntoIter<ChangeLogEntry>,
+    done: bool,
+}
+
+impl DiffIter<'static> {
+    /// Open the iterator over `diff`'s changelog entries (read up front, as
+    /// `iterate_diff` does), owning its inputs so it can live inside an
+    /// engine-level advance stream held across an `.await`.
+    pub fn new(
+        diff: std::rc::Rc<DiffOwned>,
+        prev_conn: std::rc::Rc<std::cell::RefCell<rusqlite::Connection>>,
+        curr_conn: std::rc::Rc<std::cell::RefCell<rusqlite::Connection>>,
+    ) -> Result<Self, DiffError> {
+        let entries = {
+            let _t = crate::perf_trace::scope("advance.diff");
+            read_changelog(&curr_conn.borrow(), &diff.prev_version)?
+        };
+        let permissions_table = format!("{}.permissions", diff.app_id);
+        Ok(DiffIter {
+            diff: DiffRef::Owned(diff),
+            prev_conn: ConnRef::Owned(prev_conn),
+            curr_conn: ConnRef::Owned(curr_conn),
+            permissions_table,
+            entries: entries.into_iter(),
+            done: false,
+        })
+    }
+}
+
+impl Iterator for DiffIter<'_> {
+    type Item = Result<SnapshotChange, DiffError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let Some(e) = self.entries.next() else {
+                self.done = true;
+                return None;
+            };
+            let e = &e;
+            let item: Option<Result<SnapshotChange, DiffError>> = (|| {
+                // Times the per-entry SnapshotChange read (prev/curr row lookups etc.);
+                // dropped just before `emit` so the push/deliver work is excluded.
+                let diff_scope = crate::perf_trace::scope("advance.diff");
+                // RESET → schema change, abort.
+                if e.op == RESET_OP {
+                    return Some(Err(DiffError::Reset(ResetPipelinesSignal {
+                        reason: REASON_SCHEMA_CHANGE,
+                        msg: format!("schema for table {} has changed", e.table),
+                    })));
+                }
+                // TRUNCATE → abort & rehydrate.
+                if e.op == TRUNCATE_OP {
+                    return Some(Err(DiffError::Reset(ResetPipelinesSignal {
+                        reason: REASON_TRUNCATION,
+                        msg: format!("table {} has been truncated", e.table),
+                    })));
+                }
+
+                // Non-syncable: skip if known, error if truly unknown.
+                let spec = match self.diff.syncable_tables.get(&e.table) {
+                    Some(s) => &s.table_spec,
+                    None => {
+                        if self.diff.all_table_names.contains(&e.table) {
+                            return None;
+                        }
+                        return Some(Err(DiffError::Other(format!(
+                            "change for unknown table {}",
+                            e.table
+                        ))));
+                    }
+                };
+
+                // Catch-up invariant: every change-log op has stateVersion strictly
+                // greater than the table's minRowVersion.
+                let min = spec.min_row_version.as_deref().unwrap_or("");
+                if min >= e.state_version.as_str() {
+                    return Some(Err(DiffError::Other(format!(
+                        "unexpected change @{} for table {} with minRowVersion {:?}: {}({})",
+                        e.state_version, e.table, spec.min_row_version, e.op, e.row_key
+                    ))));
+                }
+
+                let row_key = match parse_row_key(&e.row_key) {
+                    Ok(k) => k,
+                    Err(err) => return Some(Err(err.into())),
+                };
+
+                // nextValue: the new contents for a set, None for a delete.
+                let next_raw = if e.op == SET_OP {
+                    match get_row(&self.curr_conn.borrow(), spec, &row_key) {
+                        Ok(v) => v,
+                        Err(err) => return Some(Err(err.into())),
+                    }
+                } else {
+                    None
+                };
+
+                // prevValues: unique-conflicts on a set, or the old row on a delete.
+                let prev_values = if let Some(ref next) = next_raw {
+                    match get_rows(&self.prev_conn.borrow(), spec, &spec.unique_keys, next) {
+                        Ok(v) => v,
+                        Err(err) => return Some(Err(err.into())),
+                    }
+                } else {
+                    match get_row(&self.prev_conn.borrow(), spec, &row_key) {
+                        Ok(pv) => pv.map(|v| vec![v]).unwrap_or_default(),
+                        Err(err) => return Some(Err(err.into())),
+                    }
+                };
+
+                // A set whose row is missing in curr is a hard inconsistency.
+                if e.op == SET_OP && next_raw.is_none() {
+                    return Some(Err(DiffError::Other(format!(
+                        "Missing value for {} {}",
+                        e.table, e.row_key
+                    ))));
+                }
+
+                // Match TS exactly: consuming a diff after either snapshot has moved is
+                // an InvalidDiffError, not a recoverable pipeline-reset signal.
+                if let Err(err) = check_valid(
+                    &e.state_version,
+                    &e.op,
+                    &prev_values,
+                    next_raw.as_ref(),
+                    &self.diff.prev_version,
+                    &self.diff.curr_version,
+                ) {
+                    return Some(Err(DiffError::InvalidDiff(err)));
+                }
+
+                // No-op filter: delete of a row absent in prev.
+                if prev_values.is_empty() && next_raw.is_none() {
+                    return None;
+                }
+
+                // Permissions change → abort & rehydrate.
+                if e.table == self.permissions_table
+                    && let Some(ref next) = next_raw
+                {
+                    for pv in &prev_values {
+                        let old_perms = pv.get("permissions");
+                        let new_perms = next.get("permissions");
+                        if old_perms != new_perms {
+                            return Some(Err(DiffError::Reset(ResetPipelinesSignal {
+                                reason: REASON_PERMISSIONS_CHANGE,
+                                msg: format!(
+                                    "Permissions have changed {:?} => {:?}",
+                                    pv.get("hash"),
+                                    next.get("hash")
+                                ),
+                            })));
+                        }
+                    }
+                }
+
+                let change = SnapshotChange {
+                    table: e.table.clone(),
+                    prev_values,
+                    next_value: next_raw,
+                    row_key,
+                };
+                drop(diff_scope);
+                Some(Ok(change))
+            })();
+            match item {
+                // `continue` inside the closure yields `None` for a skipped entry.
+                None => continue,
+                Some(Err(err)) => {
+                    self.done = true;
+                    return Some(Err(err));
+                }
+                Some(Ok(change)) => return Some(Ok(change)),
+            }
+        }
+    }
 }
 
 /// Error type for diff iteration.

@@ -373,6 +373,15 @@ pub fn arm(gate: Arc<AdvanceGate>) -> GateGuard {
     GateGuard(())
 }
 
+/// Whether a gate is armed on THIS thread. Rust-only (no TS twin): the gate is
+/// a thread-local invention, and this is the observability hook the
+/// `AdvanceStream` tests use to pin that a stream suspended at a `Yield`
+/// leaves the shard thread DISARMED (a neighbouring client group's fetch must
+/// never read a suspended advance's budget).
+pub fn is_armed() -> bool {
+    ADVANCE_GATE.with(|g| g.borrow().is_some())
+}
+
 /// Called from the row-read loop between rows. `true` → the in-flight advance
 /// has blown its economic budget mid-fetch; stop producing rows. Cheap: a
 /// thread-local read; the caller throttles how often it asks.

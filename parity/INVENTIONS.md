@@ -418,15 +418,20 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   `yield_process`, `TIME_SLICE_QUEUE`, the `StreamItem::Yield` arms in
   `hydrate_and_sync` / `hydrate_unchanged_queries`), `services/view_syncer/
   pipeline_driver.rs` (`Timer`, `HydrateContext`/`AdvanceContext`,
-  `should_yield`, `HydrateChanges`), `server/priority_op.rs`, `rust-ivm`
-  `engine::HydrateStream` + `sqlite/table_source.rs` `generate_with_yields`.
+  `should_yield`, `HydrateChanges`, `AdvanceChanges`), `server/priority_op.rs`,
+  `rust-ivm` `engine::HydrateStream` / `engine::AdvanceStream` (+
+  `snapshotter::diff::DiffIter`, `advance_gate::arm` per pull) +
+  `sqlite/table_source.rs` `generate_with_yields`.
 - **What is ported 1:1 (not invented):** every name, threshold and check site —
   `yieldThresholdMs` (zero-config.ts:534, default 10), the two derived
   thresholds and the priority-op selector (server/syncer.ts:209-213/230-233),
   `#shouldYield` (pipeline-driver.ts:1080), `generateWithYields` per row
   between overlay and start (zqlite table-source.ts:314-337/692), the yield
   before the first slice (view-syncer.ts:2259), the `'yield'` arm of
-  `#processChanges` (:2510) and `#hydrateUnchangedQueries` (:1629), and
+  `#processChanges` (:2510) and `#hydrateUnchangedQueries` (:1629), `#advance`
+  as a generator with the between-change yield arm of
+  `#shouldAdvanceYieldMaybeAbortAdvance` (pipeline-driver.ts:948-1000,
+  :975-977, :1156) consumed by `#advancePipelines` (view-syncer.ts:2596), and
   `TimeSliceTimer` (:2943-3010) as the process-time clock per-query hydration
   time is recorded in (pipeline-driver.ts:703).
 - **What has no TS twin (the invention):**
@@ -442,25 +447,45 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
      inside `generateRowChanges`; rust's batched hydrate runs ONE lap across the
      batch and the engine takes per-query deltas of the same clock
      (`HydrateClock`), yielding the same per-query numbers.
+  4. The advance economic budget's per-fetch arm (I-11 `advance_gate`) is a
+     thread-local; TS keeps it in `#advanceContext` on the driver. Because a
+     suspended `AdvanceStream` shares its shard thread with other client
+     groups, the gate is armed only for the duration of each `next()` and
+     DISARMED at every `Yield` (`advance_gate::arm` guard per pull); consumer
+     time between pulls is excluded from the budget, as the callback path's
+     synchronous row delivery was.
 - **Contract:** (a) a hydrate whose lap exceeds the threshold hands the shard's
   event loop to the other ready tasks (other client groups' frames /
   notifications, timers) before its next slice — a co-located client group is
   never frozen for the length of a neighbour's hydrate; (b) yields are control
   flow only: the row set, row order and poke content are identical at any
   threshold; (c) `hydration_time_ms` (hence `total_hydration_time_ms`, the
-  advance economic budget) excludes yielded time.
+  advance economic budget) excludes yielded time; (d) an advance suspended at a
+  yield leaves its shard thread with NO armed advance gate, so a neighbouring
+  client group's hydrate on the same thread can never be truncated by this
+  advance's budget, and a hydrate started after the advance finishes sees no
+  advance context (TS `#advanceContext = null` in `finally`, :1049).
 - **Tests:** `tests/time_slice_yield_test.rs` —
   `hydrate_surfaces_a_yield_per_row_when_the_slice_threshold_is_exceeded` (b +
   the sentinel round-trip: 0 yields on the pre-port shape),
   `a_fresh_lap_under_the_threshold_does_not_yield` (comparison direction),
   `yield_process_lets_a_co_scheduled_task_run_before_the_slice_owner_finishes`
   (a; fails with a no-op yield), `time_slice_timer_excludes_time_spent_yielded`
-  (c; fails with a wall-clock timer); `server::priority_op::tests::
-  priority_op_is_running_only_while_the_op_is_in_flight`.
-- **Known gap (D1 phase 2):** TS also yields BETWEEN advance changes
-  (pipeline-driver.ts:977) and inside a push's fetches (TableSource.push →
-  genPush). Rust's advance is still callback-driven and its `push` is eager, so
-  an advance runs its changes to completion; the already-ported abort arms
-  (I-11 `advance_gate`) bound a pathological change. Closed when the advance
-  is converted to the same pull-based stream.
+  (c; fails with a wall-clock timer),
+  `advance_surfaces_a_yield_per_change_when_the_slice_threshold_is_exceeded`
+  (a+b for advance; 0 yields when the driver passes no hook),
+  `a_hydrate_after_a_finished_advance_uses_its_own_slice_context` (d; panics
+  "Cannot hydrate while advance is in progress" if the context is not
+  cleared); `server::priority_op::tests::
+  priority_op_is_running_only_while_the_op_is_in_flight`; rust-ivm
+  `tests/advance_yield_test.rs` — one `Yield` before every change and the hook
+  asked exactly once per change, `None` → 0 yields, identical rows with and
+  without yields, and `the_advance_gate_is_disarmed_while_the_stream_is_
+  suspended_at_a_yield` (d; fails if the gate guard outlives `next()`).
+- **Known gap (intra-push yields):** TS's `TableSource.push` → `genPush`
+  also yields INSIDE a single change's fetches (the `'yield'` sentinels the
+  sources produce during a push). Rust's operator `push` is eager and drains
+  those sentinels (`skip_yields`), so one change always runs to completion;
+  the ported abort arms (I-11 `advance_gate`, checked per row) bound a
+  pathological change. The between-change yield (D1 phase 2) is ported.
 

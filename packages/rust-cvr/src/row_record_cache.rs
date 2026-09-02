@@ -702,6 +702,14 @@ async fn flush_loop(context: FlushLoopContext) {
         match flush_one_iteration(&pool, &schema, &cvr_id, &version, &pending).await {
             Ok(()) => {
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                // TS row-record-cache.ts:289-291: `flushed ${rows} rows@${version}
+                // (${elapsed} ms)` at INFO — the write-back's own duration, which a
+                // catchup read (`catchupRowPatches` → `await this.flushed()`) and
+                // therefore the client's pokeEnd wait on.
+                eprintln!(
+                    "[cvr] flushed {rows_count} rows@{} ({elapsed_ms:.1} ms) cg={cvr_id}",
+                    version_string(&version)
+                );
 
                 // Advance the flushed version. `pending` was already taken at
                 // snapshot time (see above); rows applied during the tx are in
@@ -745,7 +753,16 @@ async fn flush_one_iteration(
     version: &CVRVersion,
     pending: &HashMap<String, (RowID, Option<RowRecord>)>,
 ) -> Result<(), sqlx::Error> {
+    let acquire_started = std::time::Instant::now();
     let mut tx = pool.begin().await?;
+    let acquire_ms = acquire_started.elapsed().as_secs_f64() * 1000.0;
+    if acquire_ms > 50.0 {
+        // Pool-acquire wait is the one cost of this transaction TS never pays
+        // (postgres.js queues without a bounded pool); surface it when material.
+        eprintln!(
+            "[cvr] row write-back waited {acquire_ms:.1} ms for a pool connection cg={cvr_id}"
+        );
+    }
 
     // SET LOCAL statement_timeout = 0 (matches run-transaction.ts).
     sqlx::query("SET LOCAL statement_timeout = 0")

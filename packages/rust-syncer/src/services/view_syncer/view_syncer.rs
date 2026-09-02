@@ -3792,7 +3792,18 @@ async fn dispatch_cg_message(
 ) -> bool {
     match msg {
         CGMessage::NewConnection { params, sink } => {
+            let accepted_at = std::time::Instant::now();
             let piggyback = state_rc.borrow_mut().on_new_connection(*params, sink).await;
+            if crate::trace::enabled() {
+                let cg_id = state_rc.borrow().cg_id.clone();
+                crate::trace::note(
+                    "cg-new-connection",
+                    &format!(
+                        "cg={cg_id} setup_ms={:.1}",
+                        accepted_at.elapsed().as_secs_f64() * 1000.0
+                    ),
+                );
+            }
             // Piggybacked initConnection: dispatched through the SAME inbound
             // path as a socket frame (TS `Connection.init()` feeds
             // `#handleMessage`), after the setup borrow above is released.
@@ -3808,13 +3819,24 @@ async fn dispatch_cg_message(
         } => {
             let queue_wait = enqueued_at.elapsed();
             let handled_at = std::time::Instant::now();
+            // The frame's message kind (`["changeDesiredQueries", ...]` → the
+            // first string), for the trace only.
+            let kind = if crate::trace::enabled() {
+                text.trim_start_matches(['[', ' ', '"'])
+                    .split('"')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                String::new()
+            };
             on_inbound(state_rc, client_id, ws_id, text).await;
             if crate::trace::enabled() {
                 let cg_id = state_rc.borrow().cg_id.clone();
                 crate::trace::note(
                     "cg-inbound",
                     &format!(
-                        "cg={cg_id} queue_wait_ms={:.1} handle_ms={:.1}",
+                        "cg={cg_id} kind={kind} queue_wait_ms={:.1} handle_ms={:.1}",
                         queue_wait.as_secs_f64() * 1000.0,
                         handled_at.elapsed().as_secs_f64() * 1000.0
                     ),
@@ -3829,10 +3851,12 @@ async fn dispatch_cg_message(
         }
         CGMessage::Notification(n) => {
             let mut merged = n;
+            let mut merged_count = 1u32;
             loop {
                 match rx.try_recv() {
                     Ok(CGMessage::Notification(next)) => {
                         merged = merge_notifications(merged, next);
+                        merged_count += 1;
                     }
                     Ok(other) => {
                         stashed.push_back(other);
@@ -3841,7 +3865,18 @@ async fn dispatch_cg_message(
                     Err(_) => break,
                 }
             }
-            state_rc.borrow_mut().on_notification(merged).await
+            let notified_at = std::time::Instant::now();
+            state_rc.borrow_mut().on_notification(merged).await;
+            if crate::trace::enabled() {
+                let cg_id = state_rc.borrow().cg_id.clone();
+                crate::trace::note(
+                    "cg-notification",
+                    &format!(
+                        "cg={cg_id} merged={merged_count} handle_ms={:.1}",
+                        notified_at.elapsed().as_secs_f64() * 1000.0
+                    ),
+                );
+            }
         }
         CGMessage::Shutdown => {
             state_rc.borrow_mut().shutdown();
@@ -8680,6 +8715,12 @@ impl ViewSyncerService {
             // on every client connect, so the whole group freezes after its
             // first flush with no error logged.
             let mut rows = Vec::new();
+            // Phase timing (trace-only): `open` covers the store lock + the
+            // `flushed()` wait inside `catchup_row_patches` (TS
+            // row-record-cache.ts:361 awaits the deferred write-back before
+            // reading), `read` the page loop, `cfg` the config-patch read.
+            let catchup_open_started = std::time::Instant::now();
+            let catchup_open_ms;
             {
                 let store_guard = store_for_rows.lock().await;
                 let mut cursor = store_guard
@@ -8691,6 +8732,7 @@ impl ViewSyncerService {
                     )
                     .await
                     .map_err(|e| format!("catchup_row_patches: {e}"))?;
+                catchup_open_ms = catchup_open_started.elapsed().as_secs_f64() * 1000.0;
                 while let Some(page) = cursor
                     .next_page()
                     .await
@@ -8699,11 +8741,25 @@ impl ViewSyncerService {
                     rows.extend(page);
                 }
             }
+            let catchup_read_ms =
+                catchup_open_started.elapsed().as_secs_f64() * 1000.0 - catchup_open_ms;
+            let catchup_cfg_started = std::time::Instant::now();
             let store_reader = store_arc.lock().await.catchup_reader();
             let cfg = store_reader
                 .catchup_config_patches(catchup_from.clone(), &cvr.version, current)
                 .await
                 .map_err(|e| format!("catchup_config_patches: {e}"))?;
+            if crate::trace::enabled() {
+                crate::trace::note(
+                    "catchup-rows",
+                    &format!(
+                        "cg={} rows={} catchup_open_ms={catchup_open_ms:.1} catchup_read_ms={catchup_read_ms:.1} catchup_cfg_ms={:.1}",
+                        cvr.id,
+                        rows.len(),
+                        catchup_cfg_started.elapsed().as_secs_f64() * 1000.0
+                    ),
+                );
+            }
             Ok::<_, String>((rows, cfg))
         }?;
 
@@ -9224,19 +9280,51 @@ impl ViewSyncerService {
             serde_json::Map<String, serde_json::Value>,
             Option<serde_json::Map<String, serde_json::Value>>,
         );
-        let mut new_version = String::new();
-        let mut num_changes = 0usize;
         let mut collected: Vec<CollectedChange> = Vec::new();
-        let outcome = self.pipelines.advance(
-            |version, n| {
-                new_version = version.to_string();
-                num_changes = n;
-            },
-            |rc| {
-                accumulate_signature(&mut sig_acc, rc);
-                collected.extend(row_change_to_maps(rc));
-            },
-        )?;
+        // Port of TS `#advancePipelines` (view-syncer.ts:2596-2606): `const
+        // {version, numChanges, changes} = this.#pipelines.advance(timer)`, then
+        // `#processChanges(lc, await timer.start(), changes, ...)` — the timer
+        // starts (after a first yield to the time-slice queue) once the header
+        // is known, and every `'yield'` from the change stream awaits a slice.
+        let timer = Rc::new(TimeSliceTimer::new());
+        let advance_started = std::time::Instant::now();
+        let mut yields = 0u32;
+        let (new_version, num_changes, outcome) = {
+            let mut changes = self.pipelines.advance(Rc::clone(&timer) as Rc<dyn Timer>)?;
+            let (version, n) = changes.header();
+            let (new_version, num_changes) = (version.to_string(), n);
+            timer.start().await;
+            for item in changes.by_ref() {
+                match item {
+                    StreamItem::Yield => {
+                        timer.yield_process().await;
+                        yields += 1;
+                    }
+                    StreamItem::Data(rc) => {
+                        accumulate_signature(&mut sig_acc, &rc);
+                        collected.extend(row_change_to_maps(&rc));
+                    }
+                }
+            }
+            let outcome = changes.finish()?;
+            (new_version, num_changes, outcome)
+        };
+        let mut num_changes = num_changes;
+        let total_process_time_ms = timer.stop();
+        if crate::trace::enabled() {
+            crate::trace::note(
+                "advance-changes",
+                &format!(
+                    "cg={} changes={} rows={} advance_ivm_ms={:.1} process_ms={:.1} yields={}",
+                    self.cg_id,
+                    num_changes,
+                    collected.len(),
+                    advance_started.elapsed().as_secs_f64() * 1000.0,
+                    total_process_time_ms,
+                    yields
+                ),
+            );
+        }
 
         if let AdvanceOutcome::Reset { reason, msg } = outcome {
             // No poke was started (the pokers are built below, after a clean

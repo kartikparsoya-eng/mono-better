@@ -1118,7 +1118,7 @@ impl Engine {
                 let _pipeline_changes = source.borrow_mut().push(change.clone());
                 // Preserve the legacy in-memory API contract. Production
                 // advance_to_head_stream returns this condition explicitly.
-                if let Some(reset) = take_scalar_reset(&self.pipelines) {
+                if let Some(reset) = take_scalar_reset(&self.pipeline_handles()) {
                     std::panic::panic_any(reset);
                 }
 
@@ -1181,13 +1181,11 @@ impl Engine {
     /// Advance to head: Rust derives its own diff from the snapshotter,
     /// pushes the changes through all pipelines, and streams RowChanges.
     ///
-    /// This is the Go-primary architecture: Rust owns the snapshotter,
-    /// derives the diff from `_zero.changeLog2`, and drives the engine.
-    /// TS never computes a diff or sends SourceChange[] — it just calls
-    /// this method and consumes the RowChange stream.
-    ///
-    /// The snapshotter must be initialized and the diff must be valid.
-    /// Returns the new version string on success.
+    /// The eager composition of [`start_advance`](Self::start_advance) → drain
+    /// → [`finish_advance`](Self::finish_advance) for callers that need no
+    /// cooperative yielding. The serving path pulls the [`AdvanceStream`]
+    /// itself so it can await a time slice on each `StreamItem::Yield` (TS
+    /// `#advancePipelines` → `#processChanges`, view-syncer.ts:2596-2606).
     pub fn advance_to_head_stream<F, H>(
         &mut self,
         snapshotter: &mut crate::snapshotter::Snapshotter,
@@ -1200,14 +1198,41 @@ impl Engine {
         F: FnMut(&RowChange),
         H: FnMut(&str, usize),
     {
+        let mut stream = self.start_advance(snapshotter, syncable_tables, all_table_names, None)?;
+        on_header(&stream.version, stream.num_changes);
+        for item in stream.by_ref() {
+            if let crate::ivm::stream::StreamItem::Data(rc) = item {
+                on_row_change(&rc);
+            }
+        }
+        self.finish_advance(stream)
+    }
+
+    /// Open an advance: move the snapshotter to head, diff PREV→CURR, and return
+    /// the pull-based [`AdvanceStream`] that pushes one change per pull. Port of
+    /// the head of TS `advance(timer)` + `#advance` (pipeline-driver.ts:
+    /// 926-961): the snapshot diff, `#advanceContext`, and the per-change loop
+    /// as a generator.
+    ///
+    /// `should_yield` is the between-change yield arm of TS
+    /// `#shouldAdvanceYieldMaybeAbortAdvance` (:975-977, :1156 — `checkYield &&
+    /// advanceTimer.elapsedLap() > yieldThresholdMs`), supplied by the driver;
+    /// the abort arms are the thread-local [`crate::advance_gate`], armed for
+    /// the duration of every `next()` and DISARMED while the stream is
+    /// suspended so a neighbouring client group's fetch on the same shard
+    /// never reads this advance's budget. `None` never yields.
+    pub fn start_advance(
+        &mut self,
+        snapshotter: &mut crate::snapshotter::Snapshotter,
+        syncable_tables: &HashMap<String, crate::snapshotter::spec::LiteAndZqlSpec>,
+        all_table_names: &std::collections::HashSet<String>,
+        should_yield: Option<Rc<dyn Fn() -> bool>>,
+    ) -> Result<AdvanceStream, crate::snapshotter::DiffError> {
         // Reset cancellation at the start of each advance, exactly as
         // `add_queries_streaming` and `advance_streaming` do. This makes the
         // method LOCALLY correct instead of relying on the cross-call invariant
         // that a rehydrate (which resets the token) always runs between an
-        // early-abandoned advance and the next one. Without it, a leftover
-        // cancel from a prior aborted advance would trip the very first diff
-        // callback below ("advance cancelled before all changes were
-        // delivered") if that flow were ever reordered.
+        // early-abandoned advance and the next one.
         self.cancellation_token.reset();
         crate::perf_trace::reset();
         let perf_timer = Instant::now();
@@ -1217,32 +1242,24 @@ impl Engine {
             .advance(syncable_tables, all_table_names)
             .map_err(crate::snapshotter::DiffError::Other)?;
 
-        let new_version = diff.curr_version().to_string();
+        let version = diff.curr_version().to_string();
         let num_changes = diff.changes() as usize;
-
-        // Notify the caller of the header (version + numChanges) BEFORE
-        // iterating the diff. This lets the NAPI layer push the header row
-        // and unblock the JS side so it can start consuming rows while we
-        // continue producing them.
-        on_header(&new_version, num_changes);
 
         // 2. Economic abort — port of TS #shouldAdvanceYieldMaybeAbortAdvance.
         let total_hydration_time_ms = self.total_hydration_time_ms();
         let advance_start = Instant::now();
-        let mut pos = 0usize;
 
-        // Per-FETCH arm of the same economic budget (TS parity, point 2): arm a
-        // thread-local gate that the TableSource row-read loop checks between
-        // rows, so a single fat change (e.g. a big correlated-EXISTS re-fetch) is
+        // Per-FETCH arm of the same economic budget (TS parity, point 2): the
+        // thread-local gate the TableSource row-read loop checks between rows,
+        // so a single fat change (e.g. a big correlated-EXISTS re-fetch) is
         // abandoned mid-fetch instead of grinding to the change boundary. The
-        // per-change check below is the other arm. Disarmed on every exit path.
+        // per-change check in `process_change` is the other arm. Armed by
+        // `AdvanceStream::next` for each pull (never across a suspension).
         let advance_gate = crate::advance_gate::AdvanceGate::new(
             advance_start,
             total_hydration_time_ms,
             num_changes,
         );
-        // Guard disarms the thread-local on scope exit (incl. panic unwind).
-        let _gate_guard = crate::advance_gate::arm(advance_gate.clone());
 
         // 3. Iterate the diff, converting each SnapshotChange to SourceChange(s).
         let prev_conn = snapshotter.prev_conn()?;
@@ -1269,243 +1286,72 @@ impl Engine {
             .iter()
             .map(|(t, s)| (t.clone(), s.borrow().column_types()))
             .collect();
-        let cancellation_token = self.cancellation_token.clone();
-        let mut result =
-            crate::snapshotter::diff::iterate_diff(&diff, &prev_conn, &curr_conn, |sc| {
-                // A watchdog/consumer cancel is not a successful short stream. In
-                // particular, the boundary callback can cancel on downstream
-                // backpressure/timeout; continuing would mutate the graph to head
-                // while silently dropping the undelivered tail. Fail the advance so
-                // the view-syncer cannot commit a partial CVR.
-                if cancellation_token.is_cancelled() {
-                    return Err(crate::snapshotter::DiffError::Other(
-                        "advance cancelled before all changes were delivered".to_string(),
-                    ));
-                }
-                let col_types = table_columns.get(&sc.table);
-                // Publish current progress to the per-fetch gate so its budget check
-                // (run inside the row-read loop during this change's push) uses the
-                // same `pos` as the per-change check below.
-                advance_gate.set_pos(pos);
-                // Smarter load-shedding per-change abort (TS #6206): project the
-                // cost of pushing the remaining backlog and bail if it materially
-                // exceeds a rehydrate, catch a single pathological change, and let
-                // an already-mostly-done advance finish. `advance_reset` owns the
-                // three-arm decision; both this per-change site and the per-fetch
-                // `should_stop_fetch` evaluate the same formula.
-                if let Some(reset) = advance_gate.advance_reset() {
-                    return Err(advance_reset_error(
-                        reset,
-                        advance_gate.elapsed_ms(),
-                        total_hydration_time_ms,
-                        pos,
-                        num_changes,
-                    ));
-                }
-                pos += 1;
 
-                // Per-change wall-clock start for `zero.sync.ivm.advance-time`
-                // (TS `#advanceTime`, pipeline-driver.ts: `const start =
-                // timer.totalElapsed()`). Recorded only on the successful tail
-                // below — the inactive-source early return, like TS's `continue`,
-                // does not record.
-                let change_timer = std::time::Instant::now();
+        let diff_iter = crate::snapshotter::diff::DiffIter::new(
+            Rc::new(diff),
+            prev_conn.clone(),
+            curr_conn.clone(),
+        )?;
 
-                // PipelineDriver creates TableSources lazily and skips a diff entry
-                // when no live pipeline reads that table. Rust keeps schema sources
-                // registered up front, so explicitly distinguish an inactive source
-                // from a live one before validation/push mutates it.
-                if self
-                    .sources
-                    .get(&sc.table)
-                    .is_none_or(|source| !source.borrow().has_active_connections())
-                {
-                    return Ok(());
-                }
+        Ok(AdvanceStream {
+            diff_iter,
+            version,
+            num_changes,
+            sources: self.sources.clone(),
+            pipelines: self.pipeline_handles(),
+            primary_keys: self.primary_keys.clone(),
+            table_specs: self.table_specs.clone(),
+            table_columns,
+            cancellation_token: self.cancellation_token.clone(),
+            advance_gate,
+            total_hydration_time_ms,
+            curr_conn,
+            pos: 0,
+            pending: None,
+            buffered: std::collections::VecDeque::new(),
+            result: None,
+            should_yield,
+            last_return: Instant::now(),
+            perf_timer,
+            restored: false,
+        })
+    }
 
-                // Mark the start of this change's push so the slow-current-change
-                // arm (checked per-row via `should_stop_fetch`) can measure a
-                // single pathological push. Cleared at the change boundary below.
-                // TS `AdvanceContext.currentChangeStartMs = start`.
-                advance_gate.set_current_change_start(advance_gate.elapsed_ms());
-
-                // Port of TS pipeline-driver.ts #advance (744-776): the prev_value
-                // whose PK equals next's PK becomes the EDIT old-row and is NOT
-                // removed; every OTHER prev_value (a different-PK unique conflict) is
-                // removed. Then next → EDIT(that old-row) or ADD. (Previously we
-                // removed ALL prev_values including the same-PK one and used
-                // prev_values[0] as the edit-old — an extra REMOVE + wrong old-row
-                // pick for an in-place update, diverging from TS.)
-                let pk_cols = self
-                    .primary_keys
-                    .get(&sc.table)
-                    .cloned()
-                    .unwrap_or_default();
-                let same_pk =
-                    |pv: &std::collections::HashMap<String, rusqlite::types::Value>| -> bool {
-                        match &sc.next_value {
-                            Some(next) if !pk_cols.is_empty() => pk_cols.iter().all(|col| {
-                                pv.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
-                                    == next
-                                        .get(col)
-                                        .cloned()
-                                        .unwrap_or(rusqlite::types::Value::Null)
-                            }),
-                            _ => false,
-                        }
-                    };
-
-                let mut edit_old_row = None;
-                for prev_row in &sc.prev_values {
-                    if same_pk(prev_row) {
-                        edit_old_row = Some(sqlite_value_to_row(prev_row, col_types));
-                    } else {
-                        // A different-PK prev row displaced by this change is a
-                        // unique-conflict deletion — TS `#conflictRowsDeleted`,
-                        // counted only when the change carries a nextValue
-                        // (pipeline-driver.ts:755-757).
-                        if sc.next_value.is_some() {
-                            crate::otel_metrics::record_conflict_row_deleted();
-                        }
-                        let change = crate::ivm::source::make_source_change_remove(
-                            sqlite_value_to_row(prev_row, col_types),
-                        );
-                        let push_reset = {
-                            let _t = crate::perf_trace::scope("advance.push");
-                            push_source_change(
-                                &self.sources,
-                                &self.pipelines,
-                                &sc.table,
-                                change,
-                                &self.primary_keys,
-                                &self.table_specs,
-                                &mut on_row_change,
-                            )
-                        };
-                        if let Some(reset) = push_reset {
-                            return Err(crate::snapshotter::DiffError::Reset(
-                                crate::snapshotter::ResetPipelinesSignal {
-                                    reason: "scalar-subquery",
-                                    msg: reset.to_string(),
-                                },
-                            ));
-                        }
-                    }
-                }
-
-                if let Some(next) = &sc.next_value {
-                    let row = sqlite_value_to_row(next, col_types);
-                    let change = if let Some(old_row) = edit_old_row {
-                        crate::ivm::source::make_source_change_edit(row, old_row)
-                    } else {
-                        crate::ivm::source::make_source_change_add(row)
-                    };
-                    let push_reset = {
-                        let _t = crate::perf_trace::scope("advance.push");
-                        push_source_change(
-                            &self.sources,
-                            &self.pipelines,
-                            &sc.table,
-                            change,
-                            &self.primary_keys,
-                            &self.table_specs,
-                            &mut on_row_change,
-                        )
-                    };
-                    if let Some(reset) = push_reset {
-                        return Err(crate::snapshotter::DiffError::Reset(
-                            crate::snapshotter::ResetPipelinesSignal {
-                                reason: "scalar-subquery",
-                                msg: reset.to_string(),
-                            },
-                        ));
-                    }
-                }
-
-                // Post-push gate check, WHILE the current-change window is still
-                // set (TS pipeline-driver.ts: `#shouldAdvanceYieldMaybeAbortAdvance`
-                // runs inside the `currentChangeStartMs` scope, after the inner
-                // `pos++` finally). This is the primary firing site of the
-                // slow-current-change arm: a change whose cost lands in operator
-                // compute (not in sampled row fetches) is only observable here,
-                // and once the advance is >=80% complete the late-finish
-                // exception suppresses the other arms — without this check a
-                // single pathological late change escapes reset entirely.
-                // `set_pos(pos)` first: `pos` was already incremented for this
-                // change, matching TS's post-increment value at this check.
-                advance_gate.set_pos(pos);
-                if let Some(reset) = advance_gate.advance_reset() {
-                    return Err(advance_reset_error(
-                        reset,
-                        advance_gate.elapsed_ms(),
-                        total_hydration_time_ms,
-                        pos,
-                        num_changes,
-                    ));
-                }
-
-                // Change boundary: the slow-current-change arm no longer applies
-                // until the next change's push begins. TS resets
-                // `currentChangeStartMs = undefined` after each change.
-                advance_gate.clear_current_change();
-
-                // Per-fetch arm: a fetch during this change's push blew the budget
-                // and ended its stream early (truncated — discarded on rehydrate).
-                // Surface it as the same advancement-timeout reset the per-change
-                // arm produces, so we rehydrate at head rather than emit a partial.
-                if let Some(latched) = advance_gate.tripped_reset() {
-                    // Attribute the arm that latched mid-fetch instead of a
-                    // generic "timed out mid-fetch" (TS throws arm-specific
-                    // messages immediately).
-                    return Err(advance_reset_error(
-                        latched,
-                        advance_gate.elapsed_ms(),
-                        advance_gate.budget_ms(),
-                        pos,
-                        num_changes,
-                    ));
-                }
-
-                if cancellation_token.is_cancelled() {
-                    return Err(crate::snapshotter::DiffError::Other(
-                        "advance cancelled before all changes were delivered".to_string(),
-                    ));
-                }
-
-                // This change fully processed — record its advance time (TS
-                // `#advanceTime.recordMs(elapsed, {table})` at pipeline-driver.ts).
-                crate::otel_metrics::record_ivm_advance(
-                    &sc.table,
-                    change_timer.elapsed().as_secs_f64() * 1000.0,
-                );
-                Ok(())
-            });
-
-        // Restore every TableSource to the CURR (head) snapshot for subsequent
-        // reads (incremental fetches + next hydration), on every path — matches
-        // TS `table.setDB(curr.db.db)` after the change loop.
-        {
-            let _t = crate::perf_trace::scope("advance.setdb");
-            for source in self.sources.values() {
-                source.borrow_mut().set_snapshot_db(curr_conn.clone());
-            }
-        }
+    /// Close an advance: restore every source to the CURR (head) snapshot,
+    /// apply the cancel-after-final-change check, and map the outcome exactly
+    /// as the callback-driven path did (success / reset / hard error). Port of
+    /// the tail of TS `#advance` (`finally` → `table.setDB(curr)`,
+    /// pipeline-driver.ts:1000-1010).
+    pub fn finish_advance(
+        &mut self,
+        mut stream: AdvanceStream,
+    ) -> Result<AdvanceToHeadResult, crate::snapshotter::DiffError> {
+        stream.restore_sources();
+        let mut result = match stream.result.take() {
+            Some(r) => r,
+            // The consumer abandoned the stream before it was exhausted (TS: an
+            // exception thrown out of `#processChanges` abandons the generator
+            // and the advance is not committed).
+            None => Err(crate::snapshotter::DiffError::Other(
+                "advance abandoned before all changes were delivered".to_string(),
+            )),
+        };
 
         // Cancellation can land after the final diff callback (or while its
         // final TSFN delivery is blocked). Never translate that race into Ok.
-        if result.is_ok() && cancellation_token.is_cancelled() {
+        if result.is_ok() && stream.cancellation_token.is_cancelled() {
             result = Err(crate::snapshotter::DiffError::Other(
                 "advance cancelled before all changes were delivered".to_string(),
             ));
         }
 
-        let perf_elapsed_ms = perf_timer.elapsed().as_secs_f64() * 1000.0;
+        let perf_elapsed_ms = stream.perf_timer.elapsed().as_secs_f64() * 1000.0;
         match result {
             Ok(()) => {
                 crate::perf_trace::report("advance", perf_elapsed_ms);
                 Ok(AdvanceToHeadResult {
-                    version: new_version,
-                    num_changes,
+                    version: stream.version.clone(),
+                    num_changes: stream.num_changes,
                     aborted: false,
                     reset_reason: None,
                     reset_msg: None,
@@ -1517,8 +1363,8 @@ impl Engine {
                 // breakdown before returning.
                 crate::perf_trace::report("advance-TRIPPED", perf_elapsed_ms);
                 Ok(AdvanceToHeadResult {
-                    version: new_version,
-                    num_changes: pos,
+                    version: stream.version.clone(),
+                    num_changes: stream.pos,
                     aborted: true,
                     reset_reason: Some(sig.reason.to_string()),
                     reset_msg: Some(sig.msg),
@@ -1529,6 +1375,24 @@ impl Engine {
             // recoverable reset.
             Err(e) => Err(e),
         }
+    }
+
+    fn pipeline_handles(&self) -> Vec<PipelineHandle> {
+        self.pipelines
+            .iter()
+            .map(|entry| PipelineHandle {
+                collector: entry.collector.clone(),
+                query_id: entry.query_id.clone(),
+                companions: entry
+                    .companions
+                    .iter()
+                    .map(|c| CompanionHandle {
+                        output: c.output.clone(),
+                        schema: c.schema.clone(),
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Advance: push source changes through all pipelines.
@@ -1821,7 +1685,7 @@ fn sqlite_value_to_row(
 /// Push a source change through all pipelines and stream RowChanges.
 fn push_source_change(
     sources: &HashMap<String, Shared<dyn Source>>,
-    pipelines: &[PipelineEntry],
+    pipelines: &[PipelineHandle],
     table: &str,
     change: SourceChange,
     primary_keys: &HashMap<String, Vec<String>>,
@@ -1936,7 +1800,7 @@ fn advance_reset_error(
     })
 }
 
-fn take_scalar_reset(pipelines: &[PipelineEntry]) -> Option<ScalarResetError> {
+fn take_scalar_reset(pipelines: &[PipelineHandle]) -> Option<ScalarResetError> {
     for entry in pipelines {
         for companion in &entry.companions {
             if let Some(reset) = companion.output.borrow_mut().reset.take() {
@@ -1945,6 +1809,21 @@ fn take_scalar_reset(pipelines: &[PipelineEntry]) -> Option<ScalarResetError> {
         }
     }
     None
+}
+
+/// The `Rc` handles a push needs from a registered pipeline — its collector,
+/// query id, and companion monitors. Cloned from `PipelineEntry` per advance
+/// so an [`AdvanceStream`] owns everything it touches (no engine borrow), which
+/// is what lets the view-syncer hold it across a time-slice `.await`.
+pub(crate) struct PipelineHandle {
+    collector: Shared<CollectOutput>,
+    query_id: String,
+    companions: Vec<CompanionHandle>,
+}
+
+pub(crate) struct CompanionHandle {
+    output: Shared<CompanionOutput>,
+    schema: SourceSchema,
 }
 
 // ---------------------------------------------------------------------------
@@ -2339,6 +2218,375 @@ impl Iterator for HydrateStream {
                     self.idx += 1;
                     self.phase = HydratePhase::NotStarted;
                 }
+            }
+        }
+    }
+}
+
+/// The pull-based advance — one pushed change's `RowChange`s per pull, with a
+/// `StreamItem::Yield` BEFORE a change whenever the driver's between-change
+/// yield arm fires. This is the rust twin of the generator TS `#advance`
+/// returns (pipeline-driver.ts:948-1000): its loop yields `'yield'` when
+/// `#shouldAdvanceYieldMaybeAbortAdvance()` is true (:975-977), then processes
+/// the change. Every field is owned or `Rc`-cloned (see `PipelineHandle`), so
+/// the view-syncer can hold the stream across the `.await` of its time slice.
+///
+/// The economic budget (`advance_gate`) is thread-local for the row-read
+/// loop's sake; it is armed only for the duration of each `next()` and the
+/// time between pulls — the consumer's `received()`/poke work and any yield —
+/// is excluded from it (the successor of the old per-row delivery exclusion),
+/// while the wall-clock ceiling arm still bounds the whole advance.
+#[must_use = "an AdvanceStream must be passed back to Engine::finish_advance"]
+pub struct AdvanceStream {
+    diff_iter: crate::snapshotter::diff::DiffIter<'static>,
+    version: String,
+    num_changes: usize,
+    sources: HashMap<String, Shared<dyn Source>>,
+    pipelines: Vec<PipelineHandle>,
+    primary_keys: HashMap<String, Vec<String>>,
+    table_specs: HashMap<String, TableSpecInfo>,
+    table_columns: HashMap<String, HashMap<String, crate::ivm::schema::ColumnType>>,
+    cancellation_token: CancellationToken,
+    advance_gate: Arc<crate::advance_gate::AdvanceGate>,
+    total_hydration_time_ms: f64,
+    curr_conn: crate::snapshotter::SharedConn,
+    /// Changes pushed so far (TS `pos`).
+    pos: usize,
+    /// A change whose pre-checks passed but whose slice was up: yielded before,
+    /// processed on the next pull (TS: `yield 'yield'` then fall through).
+    pending: Option<crate::snapshotter::SnapshotChange>,
+    buffered: std::collections::VecDeque<RowChange>,
+    /// Terminal outcome once the diff is exhausted or a reset / error fired.
+    result: Option<Result<(), crate::snapshotter::DiffError>>,
+    should_yield: Option<Rc<dyn Fn() -> bool>>,
+    /// When the previous `next()` returned — the gap until the next pull is
+    /// consumer time, excluded from the economic budget.
+    last_return: Instant,
+    perf_timer: Instant,
+    restored: bool,
+}
+
+impl AdvanceStream {
+    /// The version the snapshot advanced TO (TS `advance()` return `version`).
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Number of changes in the diff (TS `numChanges`).
+    pub fn num_changes(&self) -> usize {
+        self.num_changes
+    }
+
+    /// Restore every TableSource to the CURR (head) snapshot for subsequent
+    /// reads (incremental fetches + next hydration) — TS `table.setDB(curr.db
+    /// .db)` after the change loop. Idempotent; also run on drop so an
+    /// abandoned stream never leaves the sources pointed at PREV.
+    fn restore_sources(&mut self) {
+        if self.restored {
+            return;
+        }
+        self.restored = true;
+        let _t = crate::perf_trace::scope("advance.setdb");
+        for source in self.sources.values() {
+            source.borrow_mut().set_snapshot_db(self.curr_conn.clone());
+        }
+    }
+
+    /// Push one change through the pipelines, buffering its `RowChange`s.
+    /// The per-change body of the former `advance_to_head_stream` closure.
+    fn process_change(
+        &mut self,
+        sc: &crate::snapshotter::SnapshotChange,
+    ) -> Result<(), crate::snapshotter::DiffError> {
+        let advance_gate = &self.advance_gate;
+        let total_hydration_time_ms = self.total_hydration_time_ms;
+        let num_changes = self.num_changes;
+        let pos = self.pos;
+        let col_types = self.table_columns.get(&sc.table);
+
+        // Per-change wall-clock start for `zero.sync.ivm.advance-time`
+        // (TS `#advanceTime`, pipeline-driver.ts: `const start =
+        // timer.totalElapsed()`). Recorded only on the successful tail
+        // below — the inactive-source early return, like TS's `continue`,
+        // does not record.
+        let change_timer = std::time::Instant::now();
+
+        // PipelineDriver creates TableSources lazily and skips a diff entry
+        // when no live pipeline reads that table. Rust keeps schema sources
+        // registered up front, so explicitly distinguish an inactive source
+        // from a live one before validation/push mutates it.
+        if self
+            .sources
+            .get(&sc.table)
+            .is_none_or(|source| !source.borrow().has_active_connections())
+        {
+            return Ok(());
+        }
+
+        // Mark the start of this change's push so the slow-current-change
+        // arm (checked per-row via `should_stop_fetch`) can measure a
+        // single pathological push. Cleared at the change boundary below.
+        // TS `AdvanceContext.currentChangeStartMs = start`.
+        advance_gate.set_current_change_start(advance_gate.elapsed_ms());
+
+        let buffered = &mut self.buffered;
+        // Port of TS pipeline-driver.ts #advance (744-776): the prev_value
+        // whose PK equals next's PK becomes the EDIT old-row and is NOT
+        // removed; every OTHER prev_value (a different-PK unique conflict) is
+        // removed. Then next → EDIT(that old-row) or ADD. (Previously we
+        // removed ALL prev_values including the same-PK one and used
+        // prev_values[0] as the edit-old — an extra REMOVE + wrong old-row
+        // pick for an in-place update, diverging from TS.)
+        let pk_cols = self
+            .primary_keys
+            .get(&sc.table)
+            .cloned()
+            .unwrap_or_default();
+        let same_pk = |pv: &std::collections::HashMap<String, rusqlite::types::Value>| -> bool {
+            match &sc.next_value {
+                Some(next) if !pk_cols.is_empty() => pk_cols.iter().all(|col| {
+                    pv.get(col).cloned().unwrap_or(rusqlite::types::Value::Null)
+                        == next
+                            .get(col)
+                            .cloned()
+                            .unwrap_or(rusqlite::types::Value::Null)
+                }),
+                _ => false,
+            }
+        };
+
+        let mut edit_old_row = None;
+        for prev_row in &sc.prev_values {
+            if same_pk(prev_row) {
+                edit_old_row = Some(sqlite_value_to_row(prev_row, col_types));
+            } else {
+                // A different-PK prev row displaced by this change is a
+                // unique-conflict deletion — TS `#conflictRowsDeleted`,
+                // counted only when the change carries a nextValue
+                // (pipeline-driver.ts:755-757).
+                if sc.next_value.is_some() {
+                    crate::otel_metrics::record_conflict_row_deleted();
+                }
+                let change = crate::ivm::source::make_source_change_remove(sqlite_value_to_row(
+                    prev_row, col_types,
+                ));
+                let push_reset = {
+                    let _t = crate::perf_trace::scope("advance.push");
+                    push_source_change(
+                        &self.sources,
+                        &self.pipelines,
+                        &sc.table,
+                        change,
+                        &self.primary_keys,
+                        &self.table_specs,
+                        &mut |rc| buffered.push_back(rc.clone()),
+                    )
+                };
+                if let Some(reset) = push_reset {
+                    return Err(crate::snapshotter::DiffError::Reset(
+                        crate::snapshotter::ResetPipelinesSignal {
+                            reason: "scalar-subquery",
+                            msg: reset.to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        if let Some(next) = &sc.next_value {
+            let row = sqlite_value_to_row(next, col_types);
+            let change = if let Some(old_row) = edit_old_row {
+                crate::ivm::source::make_source_change_edit(row, old_row)
+            } else {
+                crate::ivm::source::make_source_change_add(row)
+            };
+            let push_reset = {
+                let _t = crate::perf_trace::scope("advance.push");
+                push_source_change(
+                    &self.sources,
+                    &self.pipelines,
+                    &sc.table,
+                    change,
+                    &self.primary_keys,
+                    &self.table_specs,
+                    &mut |rc| buffered.push_back(rc.clone()),
+                )
+            };
+            if let Some(reset) = push_reset {
+                return Err(crate::snapshotter::DiffError::Reset(
+                    crate::snapshotter::ResetPipelinesSignal {
+                        reason: "scalar-subquery",
+                        msg: reset.to_string(),
+                    },
+                ));
+            }
+        }
+
+        // Post-push gate check, WHILE the current-change window is still
+        // set (TS pipeline-driver.ts: `#shouldAdvanceYieldMaybeAbortAdvance`
+        // runs inside the `currentChangeStartMs` scope, after the inner
+        // `pos++` finally). This is the primary firing site of the
+        // slow-current-change arm: a change whose cost lands in operator
+        // compute (not in sampled row fetches) is only observable here,
+        // and once the advance is >=80% complete the late-finish
+        // exception suppresses the other arms — without this check a
+        // single pathological late change escapes reset entirely.
+        // `set_pos(pos)` first: `pos` was already incremented for this
+        // change, matching TS's post-increment value at this check.
+        advance_gate.set_pos(pos);
+        if let Some(reset) = advance_gate.advance_reset() {
+            return Err(advance_reset_error(
+                reset,
+                advance_gate.elapsed_ms(),
+                total_hydration_time_ms,
+                pos,
+                num_changes,
+            ));
+        }
+
+        // Change boundary: the slow-current-change arm no longer applies
+        // until the next change's push begins. TS resets
+        // `currentChangeStartMs = undefined` after each change.
+        advance_gate.clear_current_change();
+
+        // Per-fetch arm: a fetch during this change's push blew the budget
+        // and ended its stream early (truncated — discarded on rehydrate).
+        // Surface it as the same advancement-timeout reset the per-change
+        // arm produces, so we rehydrate at head rather than emit a partial.
+        if let Some(latched) = advance_gate.tripped_reset() {
+            // Attribute the arm that latched mid-fetch instead of a
+            // generic "timed out mid-fetch" (TS throws arm-specific
+            // messages immediately).
+            return Err(advance_reset_error(
+                latched,
+                advance_gate.elapsed_ms(),
+                advance_gate.budget_ms(),
+                pos,
+                num_changes,
+            ));
+        }
+
+        if self.cancellation_token.is_cancelled() {
+            return Err(crate::snapshotter::DiffError::Other(
+                "advance cancelled before all changes were delivered".to_string(),
+            ));
+        }
+
+        // This change fully processed — record its advance time (TS
+        // `#advanceTime.recordMs(elapsed, {table})` at pipeline-driver.ts).
+        crate::otel_metrics::record_ivm_advance(
+            &sc.table,
+            change_timer.elapsed().as_secs_f64() * 1000.0,
+        );
+        Ok(())
+    }
+}
+
+impl Drop for AdvanceStream {
+    fn drop(&mut self) {
+        self.restore_sources();
+    }
+}
+
+impl Iterator for AdvanceStream {
+    type Item = crate::ivm::stream::StreamItem<RowChange>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Consumer time since the last pull (received()/poke work, or a time
+        // slice yielded to a neighbour) is not IVM work: exclude it from the
+        // economic budget, exactly as the callback path excluded synchronous
+        // row delivery. The wall-clock ceiling arm is exclusion-free.
+        self.advance_gate.exclude(self.last_return.elapsed());
+        // Arm the per-fetch gate for THIS pull only. The guard disarms on
+        // return (and on unwind), so a suspended stream never leaves its
+        // budget armed on a shard another client group is hydrating on.
+        let _gate_guard = crate::advance_gate::arm(self.advance_gate.clone());
+        let item = self.next_inner();
+        self.last_return = Instant::now();
+        item
+    }
+}
+
+impl AdvanceStream {
+    fn next_inner(&mut self) -> Option<crate::ivm::stream::StreamItem<RowChange>> {
+        use crate::ivm::stream::StreamItem;
+        loop {
+            if let Some(rc) = self.buffered.pop_front() {
+                let _t = crate::perf_trace::scope("deliver.row");
+                return Some(StreamItem::Data(rc));
+            }
+            if self.result.is_some() {
+                return None;
+            }
+            let sc = match self.pending.take() {
+                // Resuming after a yield: the pre-checks already ran.
+                Some(sc) => sc,
+                None => {
+                    let sc = match self.diff_iter.next() {
+                        None => {
+                            self.result = Some(Ok(()));
+                            continue;
+                        }
+                        Some(Err(e)) => {
+                            self.result = Some(Err(e));
+                            continue;
+                        }
+                        Some(Ok(sc)) => sc,
+                    };
+                    // A watchdog/consumer cancel is not a successful short
+                    // stream. In particular, the boundary callback can cancel
+                    // on downstream backpressure/timeout; continuing would
+                    // mutate the graph to head while silently dropping the
+                    // undelivered tail. Fail the advance so the view-syncer
+                    // cannot commit a partial CVR.
+                    if self.cancellation_token.is_cancelled() {
+                        self.result = Some(Err(crate::snapshotter::DiffError::Other(
+                            "advance cancelled before all changes were delivered".to_string(),
+                        )));
+                        continue;
+                    }
+                    // Publish current progress to the per-fetch gate so its
+                    // budget check (run inside the row-read loop during this
+                    // change's push) uses the same `pos` as the per-change
+                    // check below.
+                    self.advance_gate.set_pos(self.pos);
+                    // Smarter load-shedding per-change abort (TS #6206): project
+                    // the cost of pushing the remaining backlog and bail if it
+                    // materially exceeds a rehydrate, catch a single
+                    // pathological change, and let an already-mostly-done
+                    // advance finish. `advance_reset` owns the three-arm
+                    // decision; both this per-change site and the per-fetch
+                    // `should_stop_fetch` evaluate the same formula.
+                    if let Some(reset) = self.advance_gate.advance_reset() {
+                        self.result = Some(Err(advance_reset_error(
+                            reset,
+                            self.advance_gate.elapsed_ms(),
+                            self.total_hydration_time_ms,
+                            self.pos,
+                            self.num_changes,
+                        )));
+                        continue;
+                    }
+                    // TS pipeline-driver.ts:975-977: "Advance progress is
+                    // checked each time a row is fetched from a TableSource
+                    // during push processing, but some pushes don't read any
+                    // rows. Check progress here before processing the next
+                    // change." — `if (this.#shouldAdvanceYieldMaybeAbortAdvance())
+                    // yield 'yield'`. The abort arms ran just above; this is
+                    // the yield arm.
+                    if self.should_yield.as_ref().is_some_and(|f| f()) {
+                        self.pending = Some(sc);
+                        return Some(StreamItem::Yield);
+                    }
+                    sc
+                }
+            };
+            self.pos += 1;
+            if let Err(e) = self.process_change(&sc) {
+                // A reset invalidates every row produced by this push. Do not
+                // leak a partial change before the reset sentinel.
+                self.buffered.clear();
+                self.result = Some(Err(e));
             }
         }
     }
