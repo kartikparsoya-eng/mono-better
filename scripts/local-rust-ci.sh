@@ -58,5 +58,8 @@ python3 "$ROOT/parity/ban_unverified_claims.py"; chk $? "M5 unverified-claim rat
 step "parity — M3 state-flag registry (TS lifecycle flags have rust counterparts)"
 python3 "$ROOT/parity/state_flag_registry.py"; chk $? "M3 state-flag registry"
 
+step "parity — M2 call-guard parity (TS-gated calls are gated in rust too)"
+python3 "$ROOT/parity/call_guard_parity.py"; chk $? "M2 call-guard parity"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

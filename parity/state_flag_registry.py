@@ -34,8 +34,11 @@ REGISTRY = [
      "closed", "packages/rust-syncer/src/ws_server.rs",
      "ported", "per-connection closed flag on the ws sink"),
     ("#everPoked", "client-handler.ts:126/338",
-     None, "packages/rust-syncer/src/services/view_syncer/client_handler.rs",
-     "audit", "CANDIDATE GAP: no rust counterpart found — verify rust replicates the first-poke/never-poked branch or port it"),
+     "ever_poked", "packages/rust-cvr/src/client_handler.rs",
+     "ported", "AUDITED 2026-09-02: 1:1 in rust-cvr (NOT rust-syncer) — `force_initial_poke = !ever_poked` at start_poke, "
+     "the `cmp > 0 || (cmp == 0 && !force_initial_poke)` NOOP branch, the same guard in `end`, and `ever_poked = true` "
+     "after pokeEnd; NOOP `end` deliberately leaves it unset. The earlier CANDIDATE-GAP verdict was a GUARD bug "
+     "(wrong crate hint + a fallback that only walked rust-syncer), not a port gap"),
     ("#servingLagDistributionCacheClearQueued", "syncer.ts:335/480/483",
      "DISTRIBUTION_CACHE_TTL_MS", "packages/rust-syncer/src/workers/syncer.rs",
      "mechanism", "rust bounds cache-clear rate with a 200ms TTL instead of TS's queued-clear debounce flag; same observable effect"),
@@ -45,17 +48,23 @@ REGISTRY = [
 ]
 
 
+RUST_CRATES = ("packages/rust-syncer/src", "packages/rust-cvr/src", "packages/rust-ivm/src")
+
+
 def rust_symbol_present(symbol: str, hint: str) -> bool:
     path = os.path.join(ROOT, hint)
     targets = [path]
     if not os.path.isfile(path):
-        # hint may be a dir-ish; search the crate
+        # The hint is stale or points at the wrong crate. Fall back to ALL rust
+        # crates — a fallback scoped to one crate turns a mis-hinted row into a
+        # phantom gap (it did, for `#everPoked`, which lives in rust-cvr).
         targets = []
-        base = os.path.join(ROOT, "packages/rust-syncer/src")
-        for dp, _d, fs in os.walk(base):
-            for f in fs:
-                if f.endswith(".rs"):
-                    targets.append(os.path.join(dp, f))
+        for crate in RUST_CRATES:
+            base = os.path.join(ROOT, crate)
+            for dp, _d, fs in os.walk(base):
+                for f in fs:
+                    if f.endswith(".rs"):
+                        targets.append(os.path.join(dp, f))
     pat = re.compile(r"\b" + re.escape(symbol) + r"\b")
     for t in targets:
         try:

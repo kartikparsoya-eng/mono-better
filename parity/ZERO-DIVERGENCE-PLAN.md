@@ -626,14 +626,27 @@ exact holes this bug used.
 |---|---|---|---|
 | M0 | Port-completeness matrix (responsibility→target→evidence→status) | migrated? | seeded (below) |
 | M1 | Differential count+output oracle (TS-as-oracle) | behaves? | **done** `count_oracle.py` (amp invariant; PASS 1.19x, fails pre-fix) |
-| M2 | Call-guard parity static check | might-run? | pending (larger — TS guard extraction) |
+| M2 | Call-guard parity static check | might-run? | **done** `call_guard_parity.py` (TS guards extracted mechanically; catches BOTH 2026-09-02 gate reverts) |
 | M3 | State-flag registry (TS lifecycle flags → rust) | might-run? | **done** `state_flag_registry.py` (surfaced #everPoked) |
-| M4 | Profile-diff gate (rust hot-path vs TS baseline) | behaves? | partial (rust flamegraph proven; TS baseline pending) |
+| M4 | Profile-diff gate (rust hot-path vs TS baseline) | behaves? | **done (rust half)** `profile_diff.py` (parses inferno SVG + folded stacks; validated on the ART capture — it ranks `hydrate_unchanged_queries` at 2.2% self-time pre-fix). GATE pending a TS folded-stack baseline; running it without `--ts` is informational only |
 | M5 | Ban-unverified-claims guard (must cite `.ts:line`) | traceability | **done** `ban_unverified_claims.py` (ratchet @122) |
-| M6 | Branch/condition coverage gate on ported state logic | did-run? | pending (larger — llvm-cov branch gate) |
+| M6 | Branch/condition coverage gate on ported state logic | did-run? | **done** `branch_coverage.sh` (llvm-cov REGION coverage; ratchet @75%, actuals 78-87%) |
 | M7 | Mutation testing (cargo-mutants) on critical modules | behaves? | **done (harness)** `mutation_smoke.sh` |
 
-M1/M3/M5/M7 wired into `scripts/local-rust-ci.sh` (M1/M7 are ART/offline context).
+M2/M3/M5 wired into `scripts/local-rust-ci.sh`; M1/M4/M6/M7 are ART/offline
+context (they need a workload, a profile, or a long run).
+
+M2 keys each guard on (condition, callee, TS enclosing member) — the same guard
+SHAPE can carry different responsibilities (`#pipelinesSynced -> #syncQueryPipelineSet`
+appears at view-syncer.ts:643 AND :1163, and only one of them maps to a rust gate).
+A TS guard with no MAP entry FAILS the build; that is the ratchet.
+
+**Guard bugs found by using the guards (2026-09-02).** Three of the measures
+pointed at `advance_gate.rs`/`client_handler.rs` in the WRONG CRATE and reported
+green anyway — M3 manufactured a phantom `#everPoked` gap, M6 silently skipped the
+file, M7 mutated nothing there. A checker that cannot find its target must FAIL,
+never pass quietly; all three now do (and M2 fails on a callee it cannot find, for
+the same reason).
 
 **M0 seed — responsibilities beyond symbols (grows; graduate to own doc when large):**
 | Responsibility (TS) | Target (rust) | Evidence | Status |
@@ -641,10 +654,14 @@ M1/M3/M5/M7 wired into `scripts/local-rust-ci.sh` (M1/M7 are ART/offline context
 | `#hydrateUnchangedQueries` once/init (gated `#pipelinesSynced`) | `hydrate_unchanged_queries` gated on `pipelines_synced` | test proven-on-revert + M1 amp + ART E2 (p95 6251→474) | complete b8b997674 |
 | Background retransform auth outcome (fail/retry/defer) | `run_background_retransform`+`fail_maintenance_connection` | 3 tests proven-on-revert | complete 6daceb7a |
 | Failed custom-query transform → WARN | `record_transform_error` | emission test | complete 0e5cba1 |
-| `customQueryTransformMode` 'missing' vs 'all' | — (rust transforms ALL every sync) | — | **GAP — fix** |
-| `#everPoked` force-initial / skip-same-version poke | — (none found) | — | **GAP — audit** (M3) |
-| `removeExpiredQueries` gated on `#pipelinesSynced` (TS:643) | ? | — | audit |
-| `updateAuth` validate-if-not-synced (TS:1011) | ? | — | audit |
+| `customQueryTransformMode` 'missing' vs 'all' | `CustomQueryTransformMode` enum threaded to `sync_query_pipeline_set`; mode cited per call site | test proven-on-revert (`custom_query_transform_mode_missing_skips_already_hydrated_queries`) | complete |
+| `#everPoked` force-initial / skip-same-version poke | `ever_poked` in **rust-cvr** `client_handler.rs` | AUDITED — 1:1 (start_poke NOOP branch, `end` guard, set-after-pokeEnd); the M3 "gap" was a guard bug (crate-scoped fallback), now fixed | complete |
+| `removeExpiredQueries` gated on `#pipelinesSynced` (TS:643) | `on_expiry_tick` early-returns (reschedules + keeps CVR) | test proven-on-revert (`expiry_tick_removes_nothing_until_pipelines_are_synced`) | complete |
+| `updateAuth` validate-if-not-synced (TS:1011) | `if !pipelines_synced { validate_connection(...)? }`, failure RETURNS | test proven-on-revert (`update_auth_validates_only_when_pipelines_are_not_synced`) | complete |
+| `#validateConnection` as a 1:1 method (TS:2749) | `validate_connection` -> `Result<bool, Value>`; the 3 inlined copies collapsed onto it | init/updateAuth previously did NO API-server revocation probe at all | complete |
+| `initConnection` validates via `#validateConnection` (TS:942) | — (rust records `client-fallback` inline at connect; NO API-server revocation probe) | — | **GAP — open**: a token that is cryptographically valid but revoked at the app layer is served on connect; TS probes. Deliberately NOT bundled with the 2026-09-02 fixes — it adds an API round-trip to the connect path and needs its own ART measurement |
+| `#validateConnection` threads the API server's authoritative userID | — (`validate_custom_queries` returns opaque `Ok(())`, so rust always records `client-fallback`) | — | **GAP — open** (TS view-syncer.ts:1988-1990) |
+| `#removeExpiredQueries` / `deleteClients` route through `#syncQueryPipelineSet` | — (rust `remove_expired_queries` / `apply_client_deletions` do not sync) | — | **GAP — open**: TS's `'missing'` pass would re-add a CVR custom query absent from the pipeline; rust's dedicated paths do not |
 
 Done-bar (per responsibility, NOT "100% line"): mapped-or-retired + a verification
 artifact + known-diffs documented+accepted + branch coverage where practical; every

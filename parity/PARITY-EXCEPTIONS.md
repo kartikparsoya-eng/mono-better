@@ -17,9 +17,9 @@ Anything not listed here and not STALE/WRONG must match TS.
 ## D-1 · Drain hard deadline (`MAX_DRAIN_MS = 25s`) — F-RT-3
 
 - **TS** (`workers/syncer.ts` `Syncer.drain`): `while (this.#viewSyncers.size) { await forceDrainTimeout }` — drains indefinitely, paced only by `forceDrainTimeout`, with no wall-clock bound.
-- **Rust** (`router.rs` `drain`, `MAX_DRAIN_MS = 25_000`): caps the total drain, then "rehomes remaining groups at once" + `shutdown()`.
+- **Rust** (`workers/syncer.rs` `drain`, `MAX_DRAIN_MS = 25_000`): caps the total drain, then "rehomes remaining groups at once" + `shutdown()`.
 - **Why kept:** deploy orchestrators SIGKILL after a ~30s stop-grace period. Draining indefinitely (TS behavior) risks the orchestrator hard-killing the process mid-sweep, truncating the graceful `shutdown()` + executor join and orphaning in-flight work. The 25s cap keeps the final shutdown graceful. This is a deployment-safety property, not a behavioral choice — matching TS here would reintroduce the hard-kill risk.
-- **Scope:** only observable if a CG is stuck > 25s during drain (TS keeps draining; Rust rehomes). Documented at `router.rs:1011-1018`.
+- **Scope:** only observable if a CG is stuck > 25s during drain (TS keeps draining; Rust rehomes). Documented at `workers/syncer.rs:1229` (`drain`; post-L9 home of the old `router.rs` drain).
 
 ## D-2 · View entry copy-on-write: `Rc::make_mut` vs TS `WeakSet` — F-VIEW-2
 
@@ -36,16 +36,14 @@ Anything not listed here and not STALE/WRONG must match TS.
 
 ## D-4 · `advance_streaming` simplified `should_abort` — F-PD-1/F-PD-2 (non-production only)
 
-- **Context:** the PRODUCTION advance path (`advance_to_head_stream`, used by rust-syncer `pipeline_driver.rs` + `sync_engine.rs`) already implements the FULL TS `#shouldAdvanceYieldMaybeAbortAdvance` via `AdvanceGate` (`advance_gate.rs`) — all four arms + pause-aware timing. That part is faithful; F-PD-1/F-PD-2 were WRONG about it.
+- **Context:** the PRODUCTION advance path (`advance_to_head_stream`, used by rust-syncer `pipeline_driver.rs` + `services/view_syncer/view_syncer.rs`) already implements the FULL TS `#shouldAdvanceYieldMaybeAbortAdvance` via `AdvanceGate` (`advance_gate.rs`, invention I-11) — all four arms + pause-aware timing. That part is faithful; F-PD-1/F-PD-2 were WRONG about it.
 - **The residual:** `Engine::advance_streaming` (and the `Engine::advance()` wrapper) carry a simplified `AdvanceContext::should_abort` (the basic time-budget arm only). These have **no TS twin** — TS has no "apply this explicit change list" advance separate from the snapshotter-driven one; it's a Rust-only convenience used solely by the ART test harness `bin/server.rs` and unit tests, never by the syncer.
 - **Why kept:** on a no-TS-twin Rust helper, the abort is a best-effort safety net; it is time-based (never part of the deterministic row-change trace), so it does not affect oracle parity or any production behavior. Reconciling it to the full `AdvanceGate` would only touch the test/dev path.
 
-## D-5 · ConnectionContextManager reference module — F-CCM-1/2/3/4
+## D-5 · ConnectionContextManager — RETRACTED (2026-09-01: promoted to the single live owner in #155)
 
-- **Status:** `services/view_syncer/connection_context_manager.rs` is an explicitly **UNWIRED reference port** (its own header: "NOT WIRED INTO PRODUCTION — behavior changes belong in `router.rs`, NOT here"). Production installs `PlaceholderConnContextManager`; the live auth model is the per-CG state in `router.rs`.
-- **Production matches TS** on the paths that matter: header filtering via `router.rs::filtered_query_headers` (#6144 `filterHeaders` — F-CCM-2's "real path is correct"); raw-token `authEquals` + signature revalidation + user-pinning in `handle_update_auth`.
-- **F-CCM-1 (decoded-claims boundary) is unreachable:** the consumer is the CRUD mutagen, which is disabled (`create_mutagen` → `None`) so CRUD is Fatal-rejected before auth; custom mutations go through the push relay (`userPushURL`), not a local mutagen. The `ConnContextInfo.auth: Option<String>` raw-token boundary will be widened to carry decoded claims when the mutagen is wired (Phase 4) — there is no consumer to match TS against today.
-- **Why kept:** the divergences are confined to unwired reference code; the live behavior already matches TS. The reference module is reconciled to TS on promotion, per its own header.
+- **No longer a divergence.** When first written, `services/view_syncer/connection_context_manager.rs` was an UNWIRED reference port and production ran `PlaceholderConnContextManager` with a parallel per-CG auth model. Task **#155 (invention I-8)** promoted the ported CCM to the **single live owner** of per-connection auth + custom-query context: `PlaceholderConnContextManager` and the parallel maps (`client_auth`/`client_raw_auth`/`client_query_ctx`) were **DELETED**, and every consumer now reads `must_get_connection_context(...)` at use time (`services/view_syncer/view_syncer.rs`). The live model matches TS `auth.ts` / `transform-query.ts`, so there is nothing to register.
+- **Residual (not a divergence):** the decoded-claims boundary (former F-CCM-1) widens to carry decoded claims only if the CRUD mutagen is wired; today CRUD is Fatal-rejected (`create_mutagen → None`) and custom mutations relay via the push path, so there is no local consumer to reconcile against. See `parity/INVENTIONS.md` **I-8**.
 
 ## D-6 · Row-patch emission order: `HashMap` iteration vs TS `Map` insertion order — F-CVR-6 (caveat)
 
@@ -73,9 +71,9 @@ Anything not listed here and not STALE/WRONG must match TS.
   (client-handler.ts `cookieToVersion` → schema/types.ts `versionFromString`
   throw → `wrapWithProtocolError` → fatal `Internal` error frame + close).
 - **Rust**: the same validation runs at connection REGISTRATION
-  (router.rs `on_new_connection`, right after `connected` is sent) — the
-  router materializes `client_base_versions` at registration, so deferring
-  the throw to init handling would let a poke race an invalid base version.
+  (`workers/syncer.rs` `on_new_connection`, right after `connected` is sent) —
+  registration materializes `client_base_versions`, so deferring the throw to
+  init handling would let a poke race an invalid base version.
 - **Observable difference**: identical frames (`connected` → `["error",
   {kind: Internal, message: <versionFromString error>}]` → close 1000); the
   only divergence is that Rust emits them even if the client never sends an

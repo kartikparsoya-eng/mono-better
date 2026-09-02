@@ -12,7 +12,7 @@ guarantees, error semantics) versus TS.
 ---
 
 ## I-1 — CG serial thread + executor model
-- **Files:** `router.rs` (`dispatch_cg_message`, `run_cg_thread`, executors), `main.rs` runtime sizing.
+- **Files (post-L9):** `workers/cg_executor.rs` (`run_executor`, `SpawnCg`, `spawn_local`), `workers/syncer.rs` (dispatch/routing, `CGHandle` map), `services/view_syncer/view_syncer.rs` (`cg_event_loop`), `config/zero_config.rs` + `main.rs` runtime sizing.
 - **No TS twin:** TS runs one `ViewSyncerService` per client group with a single
   async `#lock`; JS is single-threaded with an event loop. Rust replaces the
   event loop + lock with one OS thread per CG hash-shard running a serial message
@@ -139,7 +139,7 @@ guarantees, error semantics) versus TS.
   (shed → Rehome error frame then close 3000; non-vacuous — a bare close fails it).
 
 ## I-5 — Drop-based teardown (Engine `destroy`)
-- **Files:** `rust-ivm` Engine `Drop`, CG idle reap in `router.rs`.
+- **Files:** `rust-ivm` Engine `Drop` (`engine/mod.rs:1717`), CG idle reap in `workers/syncer.rs`.
 - **No TS twin:** breaks Rc cycles / releases SQLite conns deterministically
   (TS relies on GC). Fires on idle-keepalive reap.
 - **Contract:** teardown is observationally a no-op to a still-connected client;
@@ -150,19 +150,19 @@ guarantees, error semantics) versus TS.
   is the amplifier that made bug-1 catastrophic; keep I-1's ack contract intact.
 
 ## I-6 — CVR write-behind / offload runtime
-- **Files:** `sync_engine.rs` offload, CVR flush actor.
+- **Files:** `services/view_syncer/view_syncer.rs` (`offload`, `flush_to_store`/`flush_ops_to_store`), `rust-cvr` `row_record_cache.rs` write-behind.
 - **No TS twin:** rust offloads CVR I/O to the pool runtime; TS awaits inline.
 - **Contract:** a poke is not sent to a client before the CVR state it reflects
   is durable to the SAME degree TS guarantees (no client observes a version the
   CVR hasn't recorded). Flush ordering per CG preserved.
 - **Enforcement point (located):** the version a client is poked TO must equal
   the version the store actually PERSISTED. `flush_ops_to_store` returns whether
-  the store *materially* flushed (sync_engine.rs:377); every caller that pokes
-  gates the poked cookie on it:
+  the store *materially* flushed (`flush_ops_to_store` → `store_flushed`,
+  view_syncer.rs:6787); every caller that pokes gates the poked cookie on it:
   `cfg_cvr = if store_flushed { bumped } else { cfg.base.orig.clone() }` then
-  `pokers.end(cfg_cvr.version)` (sync_engine.rs:681-690). This is the 1:1 port of
+  `pokers.end(cfg_cvr.version)` (view_syncer.rs). This is the 1:1 port of
   TS `CVRUpdater.flush`'s `if (!flushed) return {cvr: this._orig}` (cvr.ts) —
-  cited at sync_engine.rs:344-347. Adopting the bumped CVR on a no-op flush would
+  cited at view_syncer.rs:6754. Adopting the bumped CVR on a no-op flush would
   advance client cookies past the stored version (the exact "poke to a
   non-durable version" divergence) AND fail the next material flush's version
   guard (`ConcurrentModification`).
@@ -177,7 +177,7 @@ guarantees, error semantics) versus TS.
     client group's `clients` row, so cg1's lmids query sees 0 changes → no-op
     flush), then assert every `pokeEnd` cookie ≤ the PG stored version and none
     reaches the never-persisted "02". Proven to FAIL when the advance-path no-op
-    fallback (sync_engine.rs:1435-1440) is reverted — the poke then carries the
+    fallback (the advance-path no-op branch in view_syncer.rs) is reverted — the poke then carries the
     bumped "02" cookie: "client poked to non-durable version 02; store is at 01".
 
 ## I-7 — Cost-model / flip-planner COUNT(*) caching
@@ -189,8 +189,10 @@ guarantees, error semantics) versus TS.
 - **Tests:** `g8_mychannelparticipations_real_ast`, diff-oracle full-catalog.
 
 ## I-8 — Promote the ported ConnectionContextManager to single live owner
-- **Files:** `services/view_syncer/connection_context_manager.rs` (the ported CCM,
-  now owned by `CgState.ccm: Arc<Mutex<ConnectionContextManager>>`); `router.rs`.
+- **Files (post-L9):** `services/view_syncer/connection_context_manager.rs` (the
+  ported CCM), now owned by `ViewSyncerService.ccm: Arc<Mutex<ConnectionContextManager>>`
+  (`services/view_syncer/view_syncer.rs:432`); connection routing in
+  `workers/syncer.rs`; dispatch adapter (`CcmDispatchAdapter`) in `server/syncer.rs`.
 - **Status (2026-08-27): LARGELY DONE.** The ported CCM is now the single live
   owner of per-connection auth + custom-query context. DELETED the parallel
   `CgState` maps `client_auth`, `client_raw_auth`, and `client_query_ctx` (plus
@@ -206,8 +208,9 @@ guarantees, error semantics) versus TS.
   :306/:324) and the opaque-token updateAuth sub-pin (only JWTs carry a `sub`).
 - **Push-relay + dispatch consolidation — DONE (2026-08-27):** the message
   handler's `ConnContextManagerDispatch` is now backed by the ported CCM via the
-  `CcmDispatchAdapter` (router.rs) instead of `PlaceholderConnContextManager`
-  (which returned `auth:None`). So BOTH the handler's live reads consolidate onto
+  `CcmDispatchAdapter` (`server/syncer.rs`) instead of the former
+  `PlaceholderConnContextManager` (which returned `auth:None`; now deleted). So
+  BOTH the handler's live reads consolidate onto
   the single owner: (a) the mutagen-CRUD auth (`syncer_ws_message_handler.rs`) now
   sees real auth (the placeholder divergence is gone), and (b) the relayed-push
   auth is read FRESH per relay from `must_get_connection_context(sel).auth`
@@ -249,10 +252,11 @@ above; this entry records the explicit coverage so L8 cold rows bind to it:
   keepalive-driven elective drain is not wired. Client-observable contract
   (no mid-work connection loss without Rehome semantics) unchanged.
 
-Known REAL gap tracked separately (NOT invention-covered): the ivm
-filter-pipeline operator protocol (`beginFilter`/`endFilter`/
-`buildFilterPipeline`/`setFilterOutput` + builder DNF simplification) — see
-ZERO-DIVERGENCE-PLAN Part 3 L8 follow-ups.
+Formerly-open gap, now CLOSED (task #157, 2026-09-01 verified): the ivm
+filter-pipeline operator protocol (`begin_filter`/`end_filter`/
+`build_filter_pipeline`/`set_filter_output` + builder DNF simplification) is
+ported and wired at the builder + operator call sites — `builder/builder.rs`
+and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
 
 ## I-10 — Inspector server metrics on the per-CG (not per-worker) delegate; `query-update-server` seam
 - **Files:** `server/inspector_delegate.rs` (the ported `InspectorDelegate`

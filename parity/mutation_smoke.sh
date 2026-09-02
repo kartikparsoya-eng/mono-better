@@ -14,7 +14,7 @@
 #
 # Usage:
 #   parity/mutation_smoke.sh                 # default critical set
-#   FILES="src/services/view_syncer/advance_gate.rs" parity/mutation_smoke.sh
+#   FILES="src/services/view_syncer/pipeline_driver.rs" parity/mutation_smoke.sh
 #   THRESHOLD=0.80 parity/mutation_smoke.sh  # fail if kill-rate below
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,10 +22,12 @@ CRATE="$ROOT/packages/rust-syncer"
 THRESHOLD="${THRESHOLD:-0.75}"
 
 # Correctness-critical, gate/branch-dense files (where a dropped guard hides).
+# NOTE: rust-syncer-relative. `advance_gate.rs` is in rust-ivm, NOT here — the
+# original list named it and cargo-mutants silently mutated nothing for it.
 FILES="${FILES:-\
-src/services/view_syncer/advance_gate.rs \
 src/custom_queries/transform_query.rs \
-src/services/view_syncer/connection_context_manager.rs}"
+src/services/view_syncer/connection_context_manager.rs \
+src/services/view_syncer/query_covering.rs}"
 
 if ! command -v cargo-mutants >/dev/null 2>&1; then
   echo "cargo-mutants not installed; installing (one-time)..."
