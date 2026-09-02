@@ -25,12 +25,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use rust_ivm::builder::debug_delegate::{RowCountsBySource, SharedDebug, runtime_debug_flags};
+use rust_ivm::engine::HydrateStream;
 use rust_ivm::engine::{Engine, QuerySpec, ScalarResetError};
 use rust_ivm::ivm::change::ChangeType;
 use rust_ivm::ivm::data::{Row, Value};
 use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::schema::ColumnType;
 use rust_ivm::ivm::source::Source;
+use rust_ivm::ivm::stream::StreamItem;
 use rust_ivm::snapshotter::spec::{ColumnSchema, LiteAndZqlSpec, TableSpec};
 use rust_ivm::snapshotter::{SharedConn, Snapshotter};
 use rust_ivm::sqlite::table_source::TableSource;
@@ -115,6 +117,30 @@ struct QueryPipelineLifecycleLog {
     pipeline_lifetime_ms: Option<f64>,
 }
 
+/// Port of TS `Timer` (pipeline-driver.ts:158-161): the caller-controlled
+/// process-time timer a hydrate / advance is measured with. `elapsed_lap` is
+/// the current time slice's age (what `should_yield` compares against the
+/// threshold); `total_elapsed` excludes yielded time (what `hydration_time_ms`
+/// and the advance budget are measured in). Implemented by the view-syncer's
+/// `TimeSliceTimer`.
+pub trait Timer {
+    fn elapsed_lap(&self) -> f64;
+    fn total_elapsed(&self) -> f64;
+}
+
+/// Port of TS `#hydrateContext: {timer: Timer} | null` (pipeline-driver.ts:275).
+pub struct HydrateContext {
+    pub timer: Rc<dyn Timer>,
+}
+
+/// Port of TS `#advanceContext` (pipeline-driver.ts:276, set at :955-961). Its
+/// timer / progress fields (and the yield arm of
+/// `#shouldAdvanceYieldMaybeAbortAdvance`) arrive with the advance port (D1
+/// phase 2); the abort arms already live in `rust_ivm::advance_gate`. Until
+/// then the presence of the context is what `should_yield` needs: "an advance
+/// is in progress" (answer `false`, not the outside-of-both panic).
+pub struct AdvanceContext {}
+
 pub struct IvmPipelines {
     engine: Option<Engine>,
     /// Port of TS `PipelineDriver`'s `enablePlanner` ctor param
@@ -157,6 +183,22 @@ pub struct IvmPipelines {
     /// Set when a non-scalar panic was caught mid-advance; forces the next
     /// advance to emit a reset instead of running on a half-mutated graph.
     poisoned: bool,
+    /// Port of TS `#yieldThresholdMs: () => number` (pipeline-driver.ts:274,
+    /// ctor param :304) — the per-call time-slice threshold selector (see
+    /// server/syncer.ts:230-233: the priority-op threshold while a priority op
+    /// is running, else the normal one). `None` (tests / the throwaway analyze
+    /// driver) installs TS's ctor-default `shouldYield = () => false` on every
+    /// source, i.e. never slices.
+    yield_threshold_ms: Option<Rc<dyn Fn() -> f64>>,
+    /// Port of TS `#hydrateContext: {timer: Timer} | null` (pipeline-driver.ts:
+    /// 275/627/809): set for the duration of a hydrate so `should_yield` can
+    /// read the caller's time-slice timer. Shared (`Rc<RefCell>`) with the
+    /// `should_yield` closure installed on every `TableSource` — the rust twin
+    /// of that closure capturing `this` (TS :1071).
+    hydrate_context: Rc<RefCell<Option<HydrateContext>>>,
+    /// Port of TS `#advanceContext` (pipeline-driver.ts:276/955-961/1000); set
+    /// for the duration of an advance (see [`AdvanceContext`]).
+    advance_context: Rc<RefCell<Option<AdvanceContext>>>,
     /// MUST stay the LAST field — dropped after `engine` and `sources` so the
     /// pinned snapshot's `Snapshot::drop` sole-owner loud close runs (see the
     /// struct-level "FIELD ORDER IS LOAD-BEARING" comment).
@@ -183,7 +225,74 @@ impl IvmPipelines {
             query_asts: HashMap::new(),
             query_order: Vec::new(),
             poisoned: false,
+            yield_threshold_ms: None,
+            hydrate_context: Rc::new(RefCell::new(None)),
+            advance_context: Rc::new(RefCell::new(None)),
             snapshotter: None,
+        }
+    }
+
+    /// Install the time-slice threshold selector — the TS ctor's
+    /// `yieldThresholdMs: () => number` param (pipeline-driver.ts:304/316). Must
+    /// be called BEFORE `init` so `build_engine` wires `should_yield` into every
+    /// `TableSource` it creates (TS :1071).
+    pub fn set_yield_threshold_ms(&mut self, yield_threshold_ms: Rc<dyn Fn() -> f64>) {
+        self.yield_threshold_ms = Some(yield_threshold_ms);
+    }
+
+    /// Port of TS `#shouldYield()` (pipeline-driver.ts:1080-1089):
+    /// ```ts
+    /// if (this.#hydrateContext) {
+    ///   return this.#hydrateContext.timer.elapsedLap() > this.#yieldThresholdMs();
+    /// }
+    /// if (this.#advanceContext) {
+    ///   return this.#shouldAdvanceYieldMaybeAbortAdvance();
+    /// }
+    /// throw new Error('shouldYield called outside of hydration or advancement');
+    /// ```
+    pub fn should_yield(&self) -> bool {
+        Self::should_yield_with(
+            &self.hydrate_context,
+            &self.advance_context,
+            self.yield_threshold_ms.as_ref(),
+        )
+    }
+
+    /// The body of [`should_yield`](Self::should_yield) over the shared cells,
+    /// so the per-source closure (TS `() => this.#shouldYield()`) can call it
+    /// without holding a borrow of the driver.
+    fn should_yield_with(
+        hydrate_context: &RefCell<Option<HydrateContext>>,
+        advance_context: &RefCell<Option<AdvanceContext>>,
+        yield_threshold_ms: Option<&Rc<dyn Fn() -> f64>>,
+    ) -> bool {
+        if let Some(hydrate) = hydrate_context.borrow().as_ref() {
+            let threshold = yield_threshold_ms.map(|f| f()).unwrap_or(f64::INFINITY);
+            return hydrate.timer.elapsed_lap() > threshold;
+        }
+        if advance_context.borrow().is_some() {
+            // Advance-time yield arm: D1 phase 2 (the abort arms are the
+            // thread-local `advance_gate`, evaluated in the row-read loop).
+            return false;
+        }
+        panic!("shouldYield called outside of hydration or advancement");
+    }
+
+    /// The per-source `shouldYield` hook — TS `() => this.#shouldYield()`
+    /// passed to every `TableSource` ctor (pipeline-driver.ts:1071). Without a
+    /// threshold selector this is TS's ctor default `() => false`
+    /// (zqlite/src/table-source.ts:103).
+    fn should_yield_hook(&self) -> Rc<dyn Fn() -> bool> {
+        match &self.yield_threshold_ms {
+            None => Rc::new(|| false),
+            Some(threshold) => {
+                let hydrate_context = Rc::clone(&self.hydrate_context);
+                let advance_context = Rc::clone(&self.advance_context);
+                let threshold = Rc::clone(threshold);
+                Rc::new(move || {
+                    Self::should_yield_with(&hydrate_context, &advance_context, Some(&threshold))
+                })
+            }
         }
     }
 
@@ -370,6 +479,9 @@ impl IvmPipelines {
                     columns,
                     column_order,
                     spec.primary_key.clone(),
+                    // TS `#getSource` → `new TableSource(..., () => this.#shouldYield())`
+                    // (pipeline-driver.ts:1071).
+                    self.should_yield_hook(),
                 );
                 Rc::new(RefCell::new(table_source))
             } else {
@@ -615,24 +727,34 @@ impl IvmPipelines {
         }
     }
 
-    /// Hydrate the given queries against the current snapshot, streaming each
-    /// `RowChange` to `on_row` as it is produced. `queries` is a slice of
-    /// `(query_id, ast_json)` where `ast_json` is the TS-shaped transformed AST.
+    /// Hydrate the given queries against the current snapshot, returning the
+    /// pull-based change stream. `queries` is a slice of `(query_id, ast_json)`
+    /// where `ast_json` is the TS-shaped transformed AST.
     ///
-    /// Port of `HydrateTask::compute` / the hydrate half of `HydrateAndSyncTask`.
+    /// Port of TS `addQuery` (pipeline-driver.ts:575-596) → `#addQueryImpl`
+    /// (:598-810) for a batch of queries (the documented `!Send` batching
+    /// invention: rust hydrates the whole query set in one engine call). Like
+    /// the TS generator, the returned [`HydrateChanges`] produces one
+    /// `RowChange` per pull and surfaces a `StreamItem::Yield` whenever a
+    /// `TableSource`'s `should_yield` fired mid-fetch (`generateWithYields`), so
+    /// the consumer (`#processChanges`) can `await timer.yield_process()` before
+    /// pulling again. `timer` is the caller-controlled process-time [`Timer`]
+    /// (TS `addQuery(..., timer, ...)`), stored in `#hydrateContext` for
+    /// `should_yield` (pipeline-driver.ts:627/1080) and handed to the engine as
+    /// the clock each query's `hydration_time_ms` is measured on (:703).
+    ///
     /// Row-set-signature maintenance is intentionally NOT done here — it is
     /// caller-driven (Stage B / view-syncer), matching the napi path.
-    pub fn hydrate<F: FnMut(&RowChange)>(
+    pub fn hydrate(
         &mut self,
         queries: &[(String, String)],
-        mut on_row: F,
-    ) -> Result<(), String> {
+        timer: Rc<dyn Timer>,
+    ) -> Result<HydrateChanges<'_>, String> {
         // Rehydrate rebuilds pipelines fresh, so any poison is cleared.
         self.poisoned = false;
-        let eng = self
-            .engine
-            .as_mut()
-            .ok_or_else(|| "Engine not initialized".to_string())?;
+        if self.engine.is_none() {
+            return Err("Engine not initialized".to_string());
+        }
 
         let mut specs: Vec<QuerySpec> = Vec::with_capacity(queries.len());
         for (query_id, ast_json) in queries {
@@ -647,12 +769,12 @@ impl IvmPipelines {
         // Per-query hydrate lifecycle logging — port of TS
         // `#logQueryPipelineLifecycle` (pipeline-driver.ts:470/608/784/796/815).
         // TS wraps each `addQuery` in a start/finish/failed/aborted envelope; Rust
-        // hydrates the whole query set in ONE `add_queries_streaming` call (the
-        // documented !Send batching invention), so the per-query boundaries come
-        // from the returned `QueryResult`s: `-start` before the batch, `-finish`
-        // (with timing + row count) for each pipeline the engine registered,
-        // `-aborted` for a started-but-unregistered query (cancel-during-hydrate),
-        // and `-failed` on a hydrate panic. This is the always-on analog of TS
+        // hydrates the whole query set in ONE engine call (the documented !Send
+        // batching invention), so the per-query boundaries come from the
+        // returned `QueryResult`s: `-start` before the batch, `-finish` (with
+        // timing + row count) for each pipeline the engine registered, `-aborted`
+        // for a started-but-unregistered query (cancel-during-hydrate), and
+        // `-failed` on a hydrate panic. This is the always-on analog of TS
         // `VENDED` (which is gated behind the `trackRowCountsVended` debug flag) —
         // it makes a slow/heavy query identifiable from logs by time + rows.
         for (query_id, _ast_json) in queries {
@@ -663,27 +785,73 @@ impl IvmPipelines {
             });
         }
 
+        // TS pipeline-driver.ts:623-629.
+        assert!(
+            self.advance_context.borrow().is_none(),
+            "Cannot hydrate while advance is in progress"
+        );
+        *self.hydrate_context.borrow_mut() = Some(HydrateContext {
+            timer: Rc::clone(&timer),
+        });
+
         // A hydrate panic (e.g. a source-drift assert) must roll back the
         // partially-wired source connections before re-throwing, so a follow-up
         // rehydrate builds a clean graph — matching napi `HydrateAndSyncTask`.
+        // The build (phase 1) is guarded here; every later pull is guarded by
+        // `HydrateChanges::next`.
+        let eng = self.engine.as_mut().expect("checked above");
         let checkpoint = eng.source_connection_checkpoint();
-        let hydrated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            eng.add_queries_streaming(&specs, |rc| on_row(rc))
+        let total_elapsed: Rc<dyn Fn() -> f64> = Rc::new(move || timer.total_elapsed());
+        let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eng.start_hydrate(&specs, Some(total_elapsed))
         }));
-        let results = match hydrated {
-            Ok(results) => results,
+        let stream = match started {
+            Ok(stream) => stream,
             Err(payload) => {
-                eng.rollback_source_connections(&checkpoint);
-                for (query_id, _ast_json) in queries {
-                    Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
-                        zero_event: "query-pipeline-hydrate-failed",
-                        query_hash: query_id.clone(),
-                        ..Default::default()
-                    });
-                }
+                self.on_hydrate_panic(&checkpoint, queries);
                 std::panic::resume_unwind(payload);
             }
         };
+        Ok(HydrateChanges {
+            driver: self,
+            stream: Some(stream),
+            checkpoint,
+            queries: queries.to_vec(),
+        })
+    }
+
+    /// Shared by every hydrate panic path (build or a later pull): clear the
+    /// hydrate context (TS `finally`), roll the partially-wired source
+    /// connections back, and emit the `-failed` lifecycle line per query.
+    fn on_hydrate_panic(
+        &mut self,
+        checkpoint: &HashMap<String, usize>,
+        queries: &[(String, String)],
+    ) {
+        *self.hydrate_context.borrow_mut() = None;
+        if let Some(eng) = self.engine.as_mut() {
+            eng.rollback_source_connections(checkpoint);
+        }
+        for (query_id, _ast_json) in queries {
+            Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
+                zero_event: "query-pipeline-hydrate-failed",
+                query_hash: query_id.clone(),
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Phase 3 for the driver: register the pipelines in the engine (or destroy
+    /// them when the stream was cancelled / abandoned), emit the `-finish` /
+    /// `-aborted` lifecycle lines and the VENDED diagnostic, and record the
+    /// hydrated queries. Port of the TS `#addQueryImpl` register tail +
+    /// `finally` (pipeline-driver.ts:723-810).
+    fn finish_hydrate(&mut self, stream: HydrateStream, queries: &[(String, String)]) {
+        *self.hydrate_context.borrow_mut() = None;
+        let Some(eng) = self.engine.as_mut() else {
+            return;
+        };
+        let results = eng.finish_hydrate(stream);
         let finished: HashSet<&str> = results.iter().map(|r| r.query_id.as_str()).collect();
         for r in &results {
             Self::log_query_pipeline_lifecycle(QueryPipelineLifecycleLog {
@@ -720,11 +888,18 @@ impl IvmPipelines {
                 });
             }
         }
-        // Track the newly-hydrated queries so `has_query` reports them. The
-        // transformation hash is recorded by the caller (`hydrate_and_sync`)
-        // right after this returns, via `set_query_transformation_hash`; entries
-        // hydrated directly (tests) keep an empty-string placeholder hash.
+        // Track the newly-hydrated queries so `has_query` reports them — ONLY
+        // the ones the engine registered, exactly as TS adds to `#pipelines`
+        // only on the success path (pipeline-driver.ts:771); a cancelled or
+        // abandoned query has no pipeline and must be re-added by the next
+        // sync. The transformation hash is recorded by the caller
+        // (`hydrate_and_sync`) right after this returns, via
+        // `set_query_transformation_hash`; entries hydrated directly (tests)
+        // keep an empty-string placeholder hash.
         for (query_id, ast_json) in queries {
+            if !finished.contains(query_id.as_str()) {
+                continue;
+            }
             self.active_queries.entry(query_id.clone()).or_default();
             if self
                 .query_asts
@@ -734,7 +909,6 @@ impl IvmPipelines {
                 self.query_order.push(query_id.clone());
             }
         }
-        Ok(())
     }
 
     /// Hydrate one AST with an explicit `Debug` delegate attached, collecting the
@@ -821,6 +995,14 @@ impl IvmPipelines {
             }
         };
 
+        // TS pipeline-driver.ts:951-961: `assert(this.#hydrateContext === null,
+        // 'Cannot advance while hydration is in progress')`, then
+        // `this.#advanceContext = {...}` for the duration of the advance.
+        assert!(
+            self.hydrate_context.borrow().is_none(),
+            "Cannot advance while hydration is in progress"
+        );
+        *self.advance_context.borrow_mut() = Some(AdvanceContext {});
         let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             eng.advance_to_head_stream(
                 &mut snapshotter,
@@ -835,6 +1017,8 @@ impl IvmPipelines {
         // reset()/rehydrate can run.
         self.engine = Some(eng);
         self.snapshotter = Some(snapshotter);
+        // TS `finally { this.#advanceContext = null; }` (pipeline-driver.ts:1000).
+        *self.advance_context.borrow_mut() = None;
 
         match advance {
             Ok(Ok(result)) => {
@@ -905,6 +1089,65 @@ impl IvmPipelines {
         self.active_queries.clear();
         self.query_asts.clear();
         self.query_order.clear();
+    }
+}
+
+/// The driver-level hydrate change stream — TS `addQuery`'s
+/// `Iterable<RowChange | 'yield'>` (pipeline-driver.ts:575-596). Wraps the
+/// engine's [`HydrateStream`] with the driver's panic handling (rollback of the
+/// partially-wired source connections, the `-failed` lifecycle line) on every
+/// pull, and guarantees the engine's phase 3 runs exactly once — on
+/// [`finish`](Self::finish), or on drop if the consumer abandons the stream
+/// (TS's generator `finally`, :801-810: an unfinished hydrate logs `-aborted`
+/// and registers nothing).
+pub struct HydrateChanges<'a> {
+    driver: &'a mut IvmPipelines,
+    stream: Option<HydrateStream>,
+    checkpoint: HashMap<String, usize>,
+    queries: Vec<(String, String)>,
+}
+
+impl HydrateChanges<'_> {
+    /// Run phase 3 now (register / destroy + lifecycle lines). Dropping the
+    /// stream does the same; this makes the point explicit at the call site.
+    pub fn finish(mut self) {
+        if let Some(stream) = self.stream.take() {
+            self.driver.finish_hydrate(stream, &self.queries);
+        }
+    }
+}
+
+impl Iterator for HydrateChanges<'_> {
+    type Item = StreamItem<RowChange>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let stream = self.stream.as_mut()?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.next())) {
+            Ok(item) => item,
+            Err(payload) => {
+                // Roll back BEFORE resuming the unwind. The stream itself is
+                // released by the consumer's frame during that unwind, where
+                // `std::thread::panicking()` is true and the Take/Cap
+                // initial-fetch guards no-op — the same order the old
+                // synchronous `catch_unwind` around the whole hydrate produced.
+                self.driver
+                    .on_hydrate_panic(&self.checkpoint, &self.queries);
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+}
+
+impl Drop for HydrateChanges<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // The panic path already rolled back; `finish_hydrate` must not
+            // touch the half-unwound graph.
+            return;
+        }
+        if let Some(stream) = self.stream.take() {
+            self.driver.finish_hydrate(stream, &self.queries);
+        }
     }
 }
 
@@ -1164,6 +1407,25 @@ pub(crate) fn json_to_value(v: serde_json::Value) -> rust_ivm::ivm::data::Value 
 mod tests {
     use super::*;
 
+    /// Test stand-in for the view-syncer's `TimeSliceTimer`: a single
+    /// never-yielding lap (TS tests pass a `TimeSliceTimer` too).
+    struct WallTimer(std::time::Instant);
+
+    impl Default for WallTimer {
+        fn default() -> Self {
+            WallTimer(std::time::Instant::now())
+        }
+    }
+
+    impl Timer for WallTimer {
+        fn elapsed_lap(&self) -> f64 {
+            self.0.elapsed().as_secs_f64() * 1000.0
+        }
+        fn total_elapsed(&self) -> f64 {
+            self.elapsed_lap()
+        }
+    }
+
     /// Port of TS `ResetPipelinesSignal('scalar-subquery')` classification
     /// (view-syncer.ts reset branch; rust-ivm `ScalarResetError` is its twin):
     /// only a `ScalarResetError` panic payload maps to an in-place reset
@@ -1284,13 +1546,20 @@ mod tests {
         assert!(p.initialized());
 
         let mut count = 0usize;
-        p.hydrate(
-            &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
-            |_rc| {
-                count += 1;
-            },
-        )
-        .unwrap();
+        {
+            let mut changes = p
+                .hydrate(
+                    &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
+                    Rc::new(WallTimer::default()),
+                )
+                .unwrap();
+            for item in changes.by_ref() {
+                if matches!(item, StreamItem::Data(_)) {
+                    count += 1;
+                }
+            }
+            changes.finish();
+        }
         // Empty in-memory source → no rows streamed.
         assert_eq!(count, 0);
 
@@ -1310,9 +1579,10 @@ mod tests {
         let err = p
             .hydrate(
                 &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
-                |_| {},
+                Rc::new(WallTimer::default()),
             )
-            .unwrap_err();
+            .err()
+            .expect("hydrate before init must fail");
         assert!(err.contains("Engine not initialized"));
     }
 

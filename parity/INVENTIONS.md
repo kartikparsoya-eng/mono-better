@@ -200,6 +200,32 @@ guarantees, error semantics) versus TS.
 - **Contract:** a poke is not sent to a client before the CVR state it reflects
   is durable to the SAME degree TS guarantees (no client observes a version the
   CVR hasn't recorded). Flush ordering per CG preserved.
+- **Write-back scheduling (2026-09-03, D2):** TS schedules the row write-back
+  with `this.#setTimeout(() => this.#flush(), 0)` on the client group's OWN
+  event loop (row-record-cache.ts:258); rust `tokio::spawn`s `flush_loop` on
+  the shared runtime (`row_record_cache.rs`), where it runs genuinely
+  concurrently with the group's foreground work. That is a scheduling move
+  (sanctioned: it is the thread approach), so its TS-observable contract is
+  pinned explicitly — everything TS gets for free from single-threading:
+  1. The pending-row snapshot is ATOMIC with respect to `apply()`: the batch a
+     loop iteration writes is exactly what was pending at snapshot time, and
+     rows applied while that transaction is in flight are written by the next
+     iteration, never lost (TS `#flush`'s synchronous `runTx` block,
+     row-record-cache.ts:270-284 — snapshot, `executeRowUpdates`, `#pending.
+     clear()` with nothing able to interleave). Rust: `std::mem::take` under
+     the state lock. **Pinned by** `write_back_keeps_rows_applied_while_a_
+     flush_transaction_is_in_flight` (PG; proven to fail on the old
+     clone-then-clear loop: `["a","b"]` vs `["a","b","c","d"]`).
+  2. `apply()` never waits on an in-flight write-back transaction — the state
+     lock is held only for the snapshot / the version bookkeeping, never across
+     PG I/O (TS: the tx awaits are async; `apply()` runs between them).
+  3. `flushed()` resolves only when `pending_rows_version == flushed_rows_
+     version`, and is awaited before a catchup read (row-record-cache.ts:361 ↔
+     `catchup_row_patches`) and before idle shutdown (view-syncer.ts:736).
+  4. `'allow-defer'` defers while a write-back is in flight (`is_flushing`),
+     so the foreground flush commits only CVR metadata and `pokeEnd` is not
+     behind the row commit (row-record-cache.ts:418-427). Pinned by
+     `execute_row_updates_defers_over_threshold_and_while_flushing`.
 - **Enforcement point (located):** the version a client is poked TO must equal
   the version the store actually PERSISTED. `flush_ops_to_store` returns whether
   the store *materially* flushed (`flush_ops_to_store` → `store_flushed`,
@@ -386,3 +412,55 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   (`fetch_returns_all_rows_when_no_gate_armed`, `fetch_stops_when_gate_over_budget`
   — non-vacuous: the fetch actually short-circuits mid-stream —,
   `fetch_resumes_all_rows_after_guard_drops` — the RAII disarm proven).
+
+## I-12 — IVM time slicing on the shard runtime (`yield_process` ↔ `setImmediate`)
+- **Files:** `services/view_syncer/view_syncer.rs` (`TimeSliceTimer`,
+  `yield_process`, `TIME_SLICE_QUEUE`, the `StreamItem::Yield` arms in
+  `hydrate_and_sync` / `hydrate_unchanged_queries`), `services/view_syncer/
+  pipeline_driver.rs` (`Timer`, `HydrateContext`/`AdvanceContext`,
+  `should_yield`, `HydrateChanges`), `server/priority_op.rs`, `rust-ivm`
+  `engine::HydrateStream` + `sqlite/table_source.rs` `generate_with_yields`.
+- **What is ported 1:1 (not invented):** every name, threshold and check site —
+  `yieldThresholdMs` (zero-config.ts:534, default 10), the two derived
+  thresholds and the priority-op selector (server/syncer.ts:209-213/230-233),
+  `#shouldYield` (pipeline-driver.ts:1080), `generateWithYields` per row
+  between overlay and start (zqlite table-source.ts:314-337/692), the yield
+  before the first slice (view-syncer.ts:2259), the `'yield'` arm of
+  `#processChanges` (:2510) and `#hydrateUnchangedQueries` (:1629), and
+  `TimeSliceTimer` (:2943-3010) as the process-time clock per-query hydration
+  time is recorded in (pipeline-driver.ts:703).
+- **What has no TS twin (the invention):**
+  1. `new Promise(setImmediate)` → `tokio::task::yield_now()`. tokio 1.53
+     defers the yielding task until after the runtime polls its I/O driver
+     (tokio `task/yield_now.rs`), which is the `setImmediate` semantics TS
+     relies on (view-syncer.ts:2845-2857) on a `current_thread` runtime.
+  2. TS's module-global `timeSliceQueue` / `runningPriorityOpCounter` are per
+     sync-worker PROCESS (one event loop); rust's are `thread_local!` per shard
+     (one `current_thread` runtime = one event loop). The scope is the same
+     object on both sides: "the client groups sharing this event loop".
+  3. TS brackets each query with `timer.startWithoutYielding()` / `timer.stop()`
+     inside `generateRowChanges`; rust's batched hydrate runs ONE lap across the
+     batch and the engine takes per-query deltas of the same clock
+     (`HydrateClock`), yielding the same per-query numbers.
+- **Contract:** (a) a hydrate whose lap exceeds the threshold hands the shard's
+  event loop to the other ready tasks (other client groups' frames /
+  notifications, timers) before its next slice — a co-located client group is
+  never frozen for the length of a neighbour's hydrate; (b) yields are control
+  flow only: the row set, row order and poke content are identical at any
+  threshold; (c) `hydration_time_ms` (hence `total_hydration_time_ms`, the
+  advance economic budget) excludes yielded time.
+- **Tests:** `tests/time_slice_yield_test.rs` —
+  `hydrate_surfaces_a_yield_per_row_when_the_slice_threshold_is_exceeded` (b +
+  the sentinel round-trip: 0 yields on the pre-port shape),
+  `a_fresh_lap_under_the_threshold_does_not_yield` (comparison direction),
+  `yield_process_lets_a_co_scheduled_task_run_before_the_slice_owner_finishes`
+  (a; fails with a no-op yield), `time_slice_timer_excludes_time_spent_yielded`
+  (c; fails with a wall-clock timer); `server::priority_op::tests::
+  priority_op_is_running_only_while_the_op_is_in_flight`.
+- **Known gap (D1 phase 2):** TS also yields BETWEEN advance changes
+  (pipeline-driver.ts:977) and inside a push's fetches (TableSource.push →
+  genPush). Rust's advance is still callback-driven and its `push` is eager, so
+  an advance runs its changes to completion; the already-ported abort arms
+  (I-11 `advance_gate`) bound a pathological change. Closed when the advance
+  is converted to the same pull-based stream.
+

@@ -341,6 +341,66 @@ impl Iterator for LazyRowsIter {
     }
 }
 
+/// Port of TS `generateWithYields` (zqlite/src/table-source.ts:692-699):
+///
+/// ```ts
+/// function* generateWithYields(stream: Stream<Node>, shouldYield: () => boolean) {
+///   for (const n of stream) {
+///     if (shouldYield()) {
+///       yield 'yield';
+///     }
+///     yield n;
+///   }
+/// }
+/// ```
+///
+/// `should_yield()` is consulted once per node pulled from `stream`, BEFORE the
+/// node is passed on; `true` inserts one `StreamItem::Yield` ahead of it. The
+/// pipeline driver's `should_yield` compares the current time-slice lap against
+/// `yield_threshold_ms`, so a long fetch is chopped into slices the view-syncer
+/// can await between (`#processChanges`). Sits between the overlay and the
+/// start-bound pass, exactly where TS nests it (`generateWithStart(
+/// generateWithYields(generateWithOverlay(...)))`, table-source.ts:314-337).
+pub(crate) fn generate_with_yields(
+    stream: crate::ivm::stream::NodeStream,
+    should_yield: Rc<dyn Fn() -> bool>,
+) -> crate::ivm::stream::NodeStream {
+    Box::new(GenerateWithYields {
+        inner: stream,
+        should_yield,
+        pending: None,
+    })
+}
+
+struct GenerateWithYields {
+    inner: crate::ivm::stream::NodeStream,
+    should_yield: Rc<dyn Fn() -> bool>,
+    /// The node held back while its preceding `Yield` is delivered.
+    pending: Option<crate::ivm::data::Node>,
+}
+
+impl Iterator for GenerateWithYields {
+    type Item = crate::ivm::stream::StreamItem<crate::ivm::data::Node>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::ivm::stream::StreamItem;
+        if let Some(n) = self.pending.take() {
+            return Some(StreamItem::Data(n));
+        }
+        match self.inner.next()? {
+            StreamItem::Yield => Some(StreamItem::Yield),
+            StreamItem::Data(n) => {
+                if (self.should_yield)() {
+                    self.pending = Some(n);
+                    Some(StreamItem::Yield)
+                } else {
+                    Some(StreamItem::Data(n))
+                }
+            }
+        }
+    }
+}
+
 fn stream_query(
     db: Rc<RefCell<Connection>>,
     query: SqlQuery,
@@ -527,6 +587,13 @@ pub struct TableSource {
     /// PREV snapshot on every fetch and clears them when the snapshot changes.
     applied_changes: Rc<RefCell<Vec<SourceChange>>>,
     push_epoch: usize,
+    /// Port of TS `#shouldYield` (zqlite/src/table-source.ts:85-112): "a
+    /// function called after each row is read from the database, which should
+    /// return true if the source should yield the special 'yield' value".
+    /// Installed by the pipeline driver as `() => this.#shouldYield()`
+    /// (pipeline-driver.ts:1071); the TS ctor default is `() => false`
+    /// (table-source.ts:103), which [`TableSource::new`] mirrors.
+    should_yield: Rc<dyn Fn() -> bool>,
 }
 
 impl TableSource {
@@ -540,7 +607,14 @@ impl TableSource {
         // need the declared (TS `Object.keys`) SELECT order use
         // [`with_column_order`]; this path is used by tests and the columns-less
         // `ZqliteQueryDelegate` stub (which emits `SELECT *`).
-        Self::with_column_order(db, table_name, columns, Vec::new(), primary_key)
+        Self::with_column_order(
+            db,
+            table_name,
+            columns,
+            Vec::new(),
+            primary_key,
+            Rc::new(|| false),
+        )
     }
 
     /// Like [`new`](Self::new) but with an explicit DECLARED column order (TS
@@ -553,6 +627,7 @@ impl TableSource {
         columns: HashMap<String, ColumnType>,
         column_order: Vec<String>,
         primary_key: Vec<String>,
+        should_yield: Rc<dyn Fn() -> bool>,
     ) -> Self {
         let column_names: Vec<String> = if column_order.is_empty() {
             columns.keys().cloned().collect()
@@ -578,6 +653,7 @@ impl TableSource {
             overlay: Rc::new(RefCell::new(None)),
             applied_changes: Rc::new(RefCell::new(Vec::new())),
             push_epoch: 0,
+            should_yield,
         }
     }
 
@@ -713,6 +789,7 @@ impl TableSource {
             filter_condition: filter_condition.clone(),
             overlay: self.overlay.clone(),
             applied_changes: self.applied_changes.clone(),
+            should_yield: self.should_yield.clone(),
         }));
 
         self.connections.borrow_mut().push(conn.clone());
@@ -967,6 +1044,7 @@ impl TableSource {
                 primary_key: self.primary_key.clone(),
                 sort: conn.internal_sort.clone(),
             },
+            Some(self.should_yield.clone()),
         )
     }
 }
@@ -985,6 +1063,9 @@ pub struct TableSourceInput {
     filter_condition: Option<Condition>,
     overlay: SharedOverlay,
     applied_changes: Rc<RefCell<Vec<SourceChange>>>,
+    /// The owning source's `should_yield` (TS reads `this.#shouldYield` inside
+    /// the per-connection `#fetch`, table-source.ts:316/337).
+    should_yield: Rc<dyn Fn() -> bool>,
 }
 
 impl InputBase for TableSourceInput {
@@ -1074,6 +1155,7 @@ impl Input for TableSourceInput {
                 primary_key: self.schema.primary_key.clone(),
                 sort: conn.internal_sort.clone(),
             },
+            Some(self.should_yield.clone()),
         )
     }
 }

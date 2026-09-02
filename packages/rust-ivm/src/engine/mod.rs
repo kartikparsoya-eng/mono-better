@@ -78,6 +78,12 @@ pub(crate) struct Built {
     pub timer: Instant,
     pub companion_rows: Vec<(String, Vec<String>, Row)>,
     pub companions: Vec<CompanionBuilt>,
+    /// Process-time spent building this query's pipeline (phase 1), on the
+    /// caller's clock (see `HydrateClock`). Added to its fetch time so the
+    /// recorded `hydration_time_ms` spans build+fetch per query, as TS's
+    /// `timer.totalElapsed()` does (pipeline-driver.ts:703) — in TS the build
+    /// happens inside the same generator, after the caller started the timer.
+    pub build_ms: f64,
     /// The per-query `Debug` delegate this pipeline was built with, when
     /// `runtimeDebugFlags.trackRowsVended` is on. Attached at build (Phase 1)
     /// so the source records vended rows during hydrate (Phase 2); snapshotted
@@ -807,18 +813,54 @@ impl Engine {
         self.row_set_signatures.remove(query_id);
     }
 
-    /// Build pipelines and hydrate them — STREAMING version.
-    /// Calls `on_row_change` for each RowChange as it's produced, row by row.
-    /// No collecting into Vec — true streaming matching TS generator behavior.
+    /// Build pipelines and hydrate them, calling `on_row_change` for each
+    /// `RowChange` as it is produced. The eager composition of
+    /// [`start_hydrate`](Self::start_hydrate) → drain → [`finish_hydrate`]
+    /// (Self::finish_hydrate) for callers that need no cooperative yielding
+    /// (the legacy in-memory API, analyze, tests). The serving path pulls the
+    /// [`HydrateStream`] itself so it can await a time slice on each
+    /// `StreamItem::Yield` (TS view-syncer `#processChanges`, view-syncer.ts:
+    /// 2508-2512) — yields are dropped here exactly as TS `skipYields` does.
     pub fn add_queries_streaming<F: FnMut(&RowChange)>(
         &mut self,
         queries: &[QuerySpec],
         mut on_row_change: F,
     ) -> Vec<QueryResult> {
+        let mut stream = self.start_hydrate(queries, None);
+        for item in stream.by_ref() {
+            if let crate::ivm::stream::StreamItem::Data(rc) = item {
+                on_row_change(&rc);
+            }
+        }
+        self.finish_hydrate(stream)
+    }
+
+    /// Phase 1 of a hydrate — resolve scalar subqueries and build every
+    /// pipeline (mutates source connections) — returning the pull-based
+    /// [`HydrateStream`] that performs phase 2 (the initial fetch) one item at
+    /// a time. Port of the build half of TS `#addQueryImpl` (pipeline-driver.ts:
+    /// 594-676) for a batch of queries; the batch itself is the documented
+    /// `!Send` batching invention (one call hydrates the whole query set).
+    ///
+    /// `total_elapsed` is the caller's process-time clock — TS `Timer.
+    /// totalElapsed()` (pipeline-driver.ts:158), which the view-syncer's
+    /// `TimeSliceTimer` STOPS while yielded — so each query's recorded
+    /// `hydration_time_ms` is `timer.totalElapsed()` process time exactly as TS
+    /// records it (pipeline-driver.ts:703), not wall time inflated by the
+    /// slices other client groups ran in. That number feeds the advance
+    /// economic budget (`total_hydration_time_ms`), so it must not include
+    /// yielded time. `None` (a caller that never yields) is wall clock, which
+    /// is the same number when nothing yields.
+    pub fn start_hydrate(
+        &mut self,
+        queries: &[QuerySpec],
+        total_elapsed: Option<Rc<dyn Fn() -> f64>>,
+    ) -> HydrateStream {
         // Reset cancellation at the start of hydration.
         self.cancellation_token.reset();
         crate::perf_trace::reset();
         let perf_timer = Instant::now();
+        let clock = HydrateClock::new(total_elapsed);
         for q in queries {
             self.remove_query(&q.query_id);
         }
@@ -832,6 +874,7 @@ impl Engine {
         for q in queries {
             let _t = crate::perf_trace::scope("hydrate.build");
             let timer = Instant::now();
+            let build_start_ms = clock.now_ms();
             // Resolve scalar subqueries against the live sources (`&self`),
             // producing the resolved AST + retained live companion pipelines.
             let resolved = self.resolve_scalar_subqueries(&q.ast);
@@ -881,118 +924,67 @@ impl Engine {
                 collector,
                 schema,
                 timer,
+                build_ms: clock.now_ms() - build_start_ms,
                 companion_rows: resolved.companion_rows,
                 companions: resolved.companions,
                 debug,
             });
         }
 
-        // Phase 2: Hydrate. Sequential — Rc/RefCell are !Send, so all fetch()
-        // calls run on this thread. After the main query rows, emit the matched
-        // scalar-subquery companion rows as ADDs (TS yields them post-hydrate
-        // so the client's own EXISTS rewrite has the row).
-        let primary_keys = self.primary_keys.clone();
-        let table_specs = self.table_specs.clone();
-
-        // Cancellation: the consumer (view-syncer) may abandon a hydrate mid-
-        // stream (client disconnect / teardown). The driver flips this token
-        // via the out-of-band `cancel()`; we check it between rows so we stop
-        // producing promptly instead of materializing the whole result into a
-        // queue nobody drains. A partially-fetched pipeline is left in an
-        // inconsistent operator state, so on cancel we register NOTHING and
-        // destroy what we built (the queries are being discarded anyway).
-        let mut cancelled = false;
-        // Per-query hydration row count (main rows + companion rows). Port of the
-        // TS `hydrationRowCount++` counter in `#addQueryImpl` (pipeline-driver.ts:
-        // 633/686/693) — the payload the driver's `#logQueryPipelineLifecycle`
-        // reports so a slow query is identifiable by rows-considered.
-        let mut row_counts: HashMap<String, u64> = HashMap::new();
-        'hydrate: for b in &built {
-            let _t = crate::perf_trace::scope("hydrate.fetch");
-            let mut b_row_count: u64 = 0;
-            if self.cancellation_token.is_cancelled() {
-                cancelled = true;
-                break 'hydrate;
-            }
-            let stream = b.pipeline.borrow().fetch(&Default::default());
-            let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
-            let mut nodes = crate::ivm::stream::skip_yields(stream);
-            while let Some(node) = nodes.next() {
-                if self.cancellation_token.is_cancelled() {
-                    cancelled = true;
-                    // TS-faithful graceful cancel: the TS view-syncer ALWAYS
-                    // fully drains the hydrate generator, so a Take/Cap stream
-                    // is never abandoned mid-iteration. The Rust `break 'hydrate`
-                    // is a new early-return path with no TS analog; dropping the
-                    // in-flight `nodes` iterator here (limit not reached, input
-                    // not exhausted) would trip the Take/Cap `InitialFetchGuard`
-                    // panic (take.rs:117 / cap.rs). Mirror TS by draining the
-                    // remaining stream to exhaustion (discarding rows — the query
-                    // is being discarded anyway) so the Take sees a normal
-                    // end-of-stream, persists, and its guard no-ops. The
-                    // `cancelled` cleanup below then destroys the pipelines.
-                    // A Take stream abandoned with NO cancel in flight still
-                    // panics (the genuine-bug guard is intact).
-                    drop(node);
-                    for discarded in nodes.by_ref() {
-                        drop(discarded);
-                    }
-                    break 'hydrate;
-                }
-                let change = crate::ivm::change::make_add_change(node);
-                streamer.accumulate(&b.query_id, &b.schema, std::slice::from_ref(&change));
-                for rc in streamer.stream() {
-                    let _t = crate::perf_trace::scope("deliver.row");
-                    b_row_count += 1;
-                    on_row_change(&rc);
-                }
-            }
-
-            // Companion rows: raw ADD RowChanges for each matched subquery row.
-            for (table, schema_pk, row) in &b.companion_rows {
-                // Faithful to TS: the EXISTS companion row is keyed by the
-                // subquery table's OWN primary key, which is always available.
-                // Prefer the top-level `primary_keys` map (the registered PK),
-                // but fall back to the primary key captured from the companion
-                // pipeline's own schema at resolve time (`schema_pk`) — exactly
-                // the `schema.primary_key` fallback the Streamer uses for the
-                // main-hydrate path (streamer/mod.rs). This guarantees a
-                // well-formed row key in the normal path, so the client never
-                // sees `rowKey:"{}"` ("Got undefined").
-                //
-                // The panic below is retained as a NEVER-HAPPEN assertion: it
-                // can only fire if BOTH the map lacks the table AND the source
-                // schema carried no primary key — which is impossible for a
-                // registered source. It stays as a loud guard so a future
-                // wiring regression that emits an empty-PK companion row fails
-                // fast here instead of crashing the client.
-                let pk: &Vec<String> = match primary_keys.get(table) {
-                    Some(pk) if !pk.is_empty() => pk,
-                    _ if !schema_pk.is_empty() => schema_pk,
-                    _ => panic!(
-                        "companion/scalar-EXISTS table {table:?} has no primary \
-                         key in the registered map NOR in its pipeline schema — \
-                         cannot emit its row key (would produce an empty rowKey \
-                         and crash the client). Registered PK tables: {:?}",
-                        primary_keys.keys().collect::<Vec<_>>(),
-                    ),
-                };
-                let row_key = crate::streamer::get_row_key(pk, row);
-                let _t = crate::perf_trace::scope("deliver.row");
-                b_row_count += 1;
-                on_row_change(&RowChange {
-                    change_type: crate::ivm::change::ChangeType::Add,
-                    query_id: b.query_id.clone(),
-                    table: table.clone(),
-                    row_key,
-                    row: Some(row.clone()),
-                    is_hidden: false,
-                });
-            }
-            row_counts.insert(b.query_id.clone(), b_row_count);
+        // Phase 2 is pulled by the caller through the returned stream:
+        // sequential — Rc/RefCell are !Send, so all fetch() calls run on this
+        // thread — and resumable at every `StreamItem::Yield`.
+        HydrateStream {
+            built,
+            idx: 0,
+            phase: HydratePhase::NotStarted,
+            nodes: None,
+            companion_idx: 0,
+            streamer: Streamer::new(self.primary_keys.clone(), self.table_specs.clone()),
+            buffered: std::collections::VecDeque::new(),
+            row_counts: HashMap::new(),
+            hydration_times: HashMap::new(),
+            b_row_count: 0,
+            fetch_start_ms: 0.0,
+            cancelled: false,
+            done: false,
+            cancellation_token: self.cancellation_token.clone(),
+            primary_keys: self.primary_keys.clone(),
+            clock,
+            perf_timer,
         }
+    }
 
-        if cancelled {
+    /// Phase 3 of a hydrate — attach monitoring outputs to companion pipelines
+    /// and register everything — or, when the stream was cancelled or abandoned
+    /// before exhaustion, destroy every pipeline built for it and register
+    /// nothing. Port of the register tail of TS `#addQueryImpl`
+    /// (pipeline-driver.ts:723-790) for the batch. Must be called exactly once
+    /// per [`start_hydrate`](Self::start_hydrate); the pipeline driver's stream
+    /// wrapper guarantees it (including on early drop).
+    pub fn finish_hydrate(&mut self, mut stream: HydrateStream) -> Vec<QueryResult> {
+        if !stream.done && !stream.cancelled {
+            // Abandoned mid-fetch by the consumer (no cancel in flight): drain
+            // the open fetch to exhaustion so a Take/Cap initial-fetch guard
+            // sees a normal end-of-stream — TS always fully drains its
+            // generator — before the pipelines are destroyed below.
+            if let Some(mut nodes) = stream.nodes.take() {
+                for discarded in nodes.by_ref() {
+                    drop(discarded);
+                }
+            }
+        }
+        let HydrateStream {
+            built,
+            row_counts,
+            hydration_times,
+            cancelled,
+            done,
+            perf_timer,
+            ..
+        } = stream;
+
+        if cancelled || !done {
             // Discard everything built this call — no partial pipeline is
             // registered, so a later advance can never run on a half-fetched
             // graph. The consumer will re-add the query on the next connection.
@@ -1009,7 +1001,10 @@ impl Engine {
         // register everything.
         let mut results = Vec::new();
         for b in built {
-            let hydration_time_ms = b.timer.elapsed().as_secs_f64() * 1000.0;
+            let hydration_time_ms = hydration_times
+                .get(&b.query_id)
+                .copied()
+                .unwrap_or_else(|| b.timer.elapsed().as_secs_f64() * 1000.0);
             let hydration_row_count = row_counts.get(&b.query_id).copied().unwrap_or(0);
             // Snapshot this query's vended-row counts (port of TS reading
             // `debugDelegate.getVendedRowCounts()` per query,
@@ -2104,6 +2099,247 @@ mod scalar_reset_tests {
                 "row_signature_unit divergence for table {table:?} rowKey {:?}",
                 case["rowKey"]
             );
+        }
+    }
+}
+
+/// Process-time clock for per-query `hydration_time_ms` (see
+/// [`Engine::start_hydrate`]): the caller's TS-style `Timer.totalElapsed()` when
+/// time-slicing, else wall clock.
+enum HydrateClock {
+    Process(Rc<dyn Fn() -> f64>),
+    Wall(Instant),
+}
+
+impl HydrateClock {
+    fn new(total_elapsed: Option<Rc<dyn Fn() -> f64>>) -> Self {
+        match total_elapsed {
+            Some(f) => HydrateClock::Process(f),
+            None => HydrateClock::Wall(Instant::now()),
+        }
+    }
+
+    fn now_ms(&self) -> f64 {
+        match self {
+            HydrateClock::Process(f) => f(),
+            HydrateClock::Wall(t) => t.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HydratePhase {
+    /// `built[idx]`'s fetch has not been opened yet.
+    NotStarted,
+    /// Draining `built[idx]`'s main fetch (`nodes`).
+    Main,
+    /// Emitting `built[idx]`'s scalar-subquery companion rows.
+    Companions,
+}
+
+/// The pull-based hydrate — phase 2 (initial fetch + materialize) of
+/// [`Engine::start_hydrate`], one `RowChange` per `next()`.
+///
+/// This is the rust twin of the generator TS `#addQueryImpl` returns
+/// (pipeline-driver.ts:594-800, consumed by `#processChanges`, view-syncer.ts:
+/// 2472-2560): a `StreamItem::Yield` is a `TableSource` whose `should_yield`
+/// fired mid-fetch (zqlite `generateWithYields`), propagated up the operator
+/// graph and surfaced here so the consumer can `await` its time slice before
+/// pulling again. Every field is owned or `Rc`-cloned (no engine borrow), which
+/// is what lets the consumer hold the stream across an `.await` on a `!Send`
+/// task while the engine stays free for `finish_hydrate`.
+///
+/// Cancellation (`Engine::cancel`) is honoured between rows exactly as the
+/// callback path did: the in-flight fetch is drained to exhaustion (so a
+/// Take/Cap initial-fetch guard sees a normal end-of-stream — TS always fully
+/// drains its generator), no further query is started, and
+/// [`Engine::finish_hydrate`] then registers nothing.
+#[must_use = "a HydrateStream must be passed back to Engine::finish_hydrate"]
+pub struct HydrateStream {
+    built: Vec<Built>,
+    /// Index into `built` of the query currently being fetched.
+    idx: usize,
+    phase: HydratePhase,
+    /// The in-flight fetch of `built[idx]` while `phase == Main`.
+    nodes: Option<crate::ivm::stream::NodeStream>,
+    /// Next companion row of `built[idx]` to emit while `phase == Companions`.
+    companion_idx: usize,
+    streamer: Streamer,
+    /// `RowChange`s produced by the last accumulated node, drained one per
+    /// `next()` (one node can expand to several rows via relationships).
+    buffered: std::collections::VecDeque<RowChange>,
+    /// Per-query hydration row count (main rows + companion rows). Port of the
+    /// TS `hydrationRowCount++` counter in `#addQueryImpl` (pipeline-driver.ts:
+    /// 633/686/693).
+    row_counts: HashMap<String, u64>,
+    /// Per-query `hydration_time_ms` = build + fetch process time (TS
+    /// `timer.totalElapsed()`, pipeline-driver.ts:703).
+    hydration_times: HashMap<String, f64>,
+    b_row_count: u64,
+    fetch_start_ms: f64,
+    cancelled: bool,
+    /// Every query's stream was exhausted (the only state in which
+    /// `finish_hydrate` registers pipelines).
+    done: bool,
+    cancellation_token: CancellationToken,
+    primary_keys: HashMap<String, Vec<String>>,
+    clock: HydrateClock,
+    perf_timer: Instant,
+}
+
+impl HydrateStream {
+    /// The query whose rows are currently being produced, if any.
+    pub fn current_query_id(&self) -> Option<&str> {
+        self.built.get(self.idx).map(|b| b.query_id.as_str())
+    }
+
+    /// `true` once every query's stream was exhausted (not cancelled).
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// `true` when a cancel was observed mid-stream.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+}
+
+impl Iterator for HydrateStream {
+    type Item = crate::ivm::stream::StreamItem<RowChange>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::ivm::stream::StreamItem;
+        loop {
+            if self.done {
+                return None;
+            }
+            if let Some(rc) = self.buffered.pop_front() {
+                let _t = crate::perf_trace::scope("deliver.row");
+                self.b_row_count += 1;
+                return Some(StreamItem::Data(rc));
+            }
+            if self.idx >= self.built.len() {
+                self.done = true;
+                return None;
+            }
+            match self.phase {
+                HydratePhase::NotStarted => {
+                    // Cancellation: the consumer (view-syncer) may abandon a
+                    // hydrate mid-stream (client disconnect / teardown). The
+                    // driver flips this token via the out-of-band `cancel()`;
+                    // checked between rows so we stop producing promptly instead
+                    // of materializing a result nobody drains.
+                    if self.cancellation_token.is_cancelled() {
+                        self.cancelled = true;
+                        self.done = true;
+                        return None;
+                    }
+                    let b = &self.built[self.idx];
+                    self.fetch_start_ms = self.clock.now_ms();
+                    self.b_row_count = 0;
+                    self.nodes = Some(b.pipeline.borrow().fetch(&Default::default()));
+                    self.phase = HydratePhase::Main;
+                }
+                HydratePhase::Main => {
+                    let nodes = self.nodes.as_mut().expect("Main phase has an open fetch");
+                    if self.cancellation_token.is_cancelled() {
+                        // TS-faithful graceful cancel: the TS view-syncer ALWAYS
+                        // fully drains the hydrate generator, so a Take/Cap
+                        // stream is never abandoned mid-iteration. Dropping the
+                        // in-flight iterator here (limit not reached, input not
+                        // exhausted) would trip the Take/Cap `InitialFetchGuard`
+                        // panic (take.rs:117 / cap.rs). Mirror TS by draining the
+                        // remaining stream to exhaustion (discarding rows — the
+                        // query is being discarded anyway) so the Take sees a
+                        // normal end-of-stream, persists, and its guard no-ops.
+                        // `finish_hydrate` then destroys the pipelines. A Take
+                        // stream abandoned with NO cancel in flight still panics
+                        // (the genuine-bug guard is intact).
+                        for discarded in nodes.by_ref() {
+                            drop(discarded);
+                        }
+                        self.nodes = None;
+                        self.cancelled = true;
+                        self.done = true;
+                        return None;
+                    }
+                    match nodes.next() {
+                        Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                        Some(StreamItem::Data(node)) => {
+                            let change = crate::ivm::change::make_add_change(node);
+                            let b = &self.built[self.idx];
+                            self.streamer.accumulate(
+                                &b.query_id,
+                                &b.schema,
+                                std::slice::from_ref(&change),
+                            );
+                            self.buffered.extend(self.streamer.stream());
+                        }
+                        None => {
+                            self.nodes = None;
+                            self.companion_idx = 0;
+                            self.phase = HydratePhase::Companions;
+                        }
+                    }
+                }
+                HydratePhase::Companions => {
+                    let b = &self.built[self.idx];
+                    if self.companion_idx < b.companion_rows.len() {
+                        // Companion rows: raw ADD RowChanges for each matched
+                        // subquery row, emitted after the main rows (TS yields
+                        // them post-hydrate so the client's own EXISTS rewrite
+                        // has the row).
+                        let (table, schema_pk, row) = &b.companion_rows[self.companion_idx];
+                        self.companion_idx += 1;
+                        // Faithful to TS: the EXISTS companion row is keyed by the
+                        // subquery table's OWN primary key, which is always available.
+                        // Prefer the top-level `primary_keys` map (the registered PK),
+                        // but fall back to the primary key captured from the companion
+                        // pipeline's own schema at resolve time (`schema_pk`) — exactly
+                        // the `schema.primary_key` fallback the Streamer uses for the
+                        // main-hydrate path (streamer/mod.rs). This guarantees a
+                        // well-formed row key in the normal path, so the client never
+                        // sees `rowKey:"{}"` ("Got undefined").
+                        //
+                        // The panic below is retained as a NEVER-HAPPEN assertion: it
+                        // can only fire if BOTH the map lacks the table AND the source
+                        // schema carried no primary key — which is impossible for a
+                        // registered source. It stays as a loud guard so a future
+                        // wiring regression that emits an empty-PK companion row fails
+                        // fast here instead of crashing the client.
+                        let pk: &Vec<String> = match self.primary_keys.get(table) {
+                            Some(pk) if !pk.is_empty() => pk,
+                            _ if !schema_pk.is_empty() => schema_pk,
+                            _ => panic!(
+                                "companion/scalar-EXISTS table {table:?} has no primary \
+                                 key in the registered map NOR in its pipeline schema — \
+                                 cannot emit its row key (would produce an empty rowKey \
+                                 and crash the client). Registered PK tables: {:?}",
+                                self.primary_keys.keys().collect::<Vec<_>>(),
+                            ),
+                        };
+                        let row_key = crate::streamer::get_row_key(pk, row);
+                        let _t = crate::perf_trace::scope("deliver.row");
+                        self.b_row_count += 1;
+                        return Some(StreamItem::Data(RowChange {
+                            change_type: crate::ivm::change::ChangeType::Add,
+                            query_id: b.query_id.clone(),
+                            table: table.clone(),
+                            row_key,
+                            row: Some(row.clone()),
+                            is_hidden: false,
+                        }));
+                    }
+                    // Query done: record its row count and process time
+                    // (build + fetch, TS `timer.totalElapsed()`).
+                    let elapsed = self.clock.now_ms() - self.fetch_start_ms;
+                    self.row_counts.insert(b.query_id.clone(), self.b_row_count);
+                    self.hydration_times
+                        .insert(b.query_id.clone(), b.build_ms + elapsed);
+                    self.idx += 1;
+                    self.phase = HydratePhase::NotStarted;
+                }
+            }
         }
     }
 }

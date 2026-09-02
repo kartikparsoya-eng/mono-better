@@ -142,6 +142,14 @@ pub struct SyncerConfig {
     /// [`apply_runtime_debug_flags`](SyncerConfig::apply_runtime_debug_flags)
     /// flips the process-global flag the VENDED log gate reads.
     pub query_hydration_stats: bool,
+    /// The maximum amount of time in milliseconds that a sync worker will
+    /// spend in IVM (processing query hydration and advancement) before
+    /// yielding to the event loop. Lower values increase responsiveness and
+    /// fairness at the cost of reduced throughput. Port of TS
+    /// `yieldThresholdMs` (zero-config.ts:534, default 10). Env
+    /// `ZERO_YIELD_THRESHOLD_MS`. `server/syncer.rs` derives the two
+    /// per-driver thresholds from it (syncer.ts:209-213).
+    pub yield_threshold_ms: f64,
 }
 
 impl SyncerConfig {
@@ -281,6 +289,11 @@ impl SyncerConfig {
                     v == "true" || v == "1"
                 })
                 .unwrap_or(false),
+            // TS zero-config.ts:534 `v.number().default(10)`.
+            yield_threshold_ms: env::var("ZERO_YIELD_THRESHOLD_MS")
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .unwrap_or(10.0),
         };
         // TS getZeroConfig applies this flag as a side effect of config load.
         config.apply_runtime_debug_flags();

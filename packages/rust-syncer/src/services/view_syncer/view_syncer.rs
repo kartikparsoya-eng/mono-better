@@ -19,10 +19,12 @@
 //! handed to this serial CG thread — decoupling the connect-ack from
 //! `config_and_hydrate` (TS parity; the 2026-08-27 prod fix, task #152).
 
+use super::pipeline_driver::Timer;
 use crate::auth::read_authorizer::{hash_of_ast, transform_and_hash_query};
 use crate::custom_queries::transform_query::{
     CustomQueryContext, CustomQuerySpec, CustomTransformed, transform,
 };
+use crate::server::priority_op::{is_priority_op_running, run_priority_op};
 use crate::services::view_syncer::connection_context_manager::{
     CCMError, ConnectParamsForRegistration, ConnectionContext as CcmConnectionContext,
     ConnectionContextManager, ConnectionSelector as CcmConnectionSelector, ConnectionValidation,
@@ -62,6 +64,7 @@ use rust_cvr::schema::types::{
 use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID};
 use rust_cvr::shards::ShardID;
 use rust_cvr::ttl_clock::TTLClock;
+use rust_ivm::ivm::stream::StreamItem;
 use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -286,6 +289,13 @@ pub struct SyncEngineConfig {
     /// Cost-based query-flip planning (TS `zeroConfig.enableQueryPlanner`,
     /// zero-config.ts:510 default true → PipelineDriver `enablePlanner`).
     pub enable_query_planner: bool,
+    /// The two IVM time-slice thresholds TS `createViewSyncer` derives from
+    /// `config.yieldThresholdMs` (server/syncer.ts:209-213): `max(threshold/4,
+    /// 2)` while a priority op is running on this event loop, `max(threshold,
+    /// 2)` otherwise. The driver's `yield_threshold_ms` selector picks between
+    /// them per call (syncer.ts:230-233).
+    pub priority_op_running_yield_threshold_ms: f64,
+    pub normal_yield_threshold_ms: f64,
     /// Runtime handle for the `block_on` PG I/O edge on the CG thread.
     pub tokio_handle: tokio::runtime::Handle,
     /// Admin password gating the inspector protocol (TS `isAdminPasswordValid`).
@@ -350,6 +360,122 @@ pub(crate) fn slow_hydrate_threshold_ms() -> f64 {
             .and_then(|s| s.parse().ok())
             .unwrap_or(1000.0)
     })
+}
+
+thread_local! {
+    /// Port of TS `timeSliceQueue` (view-syncer.ts:2845-2859): "A global Lock
+    /// acts as a queue to run a single IVM time slice per iteration of the node
+    /// event loop, thus bounding I/O delay to the duration of a single time
+    /// slice." TS's global is per sync-worker process, i.e. per event loop; the
+    /// rust twin is per shard thread — each shard is one `current_thread`
+    /// runtime, i.e. one event loop — so the queue spans exactly the client
+    /// groups that share an event loop on both sides.
+    static TIME_SLICE_QUEUE: Rc<tokio::sync::Mutex<()>> = Rc::new(tokio::sync::Mutex::new(()));
+}
+
+/// Port of TS `yieldProcess` (view-syncer.ts:2861-2863):
+/// `timeSliceQueue.withLock(() => new Promise(setImmediate))`.
+///
+/// tokio's `yield_now` is the `setImmediate` twin: it defers the task until
+/// after the runtime has polled its I/O driver (tokio `task/yield_now.rs`:
+/// "the scheduler ... wakes deferred tasks only after it has run [the
+/// driver]"), so every other ready task on this shard — the other client
+/// groups' inbound frames and notifications, timers — runs before the next
+/// slice: the one-slice-per-event-loop-iteration TS achieves with the
+/// recursive-`setImmediate` note at view-syncer.ts:2853-2857. The FIFO
+/// `tokio::sync::Mutex` is the `Lock`.
+pub(crate) async fn yield_process() {
+    let queue = TIME_SLICE_QUEUE.with(Rc::clone);
+    let _slice = queue.lock().await;
+    tokio::task::yield_now().await;
+}
+
+/// Port of TS `TimeSliceTimer` (view-syncer.ts:2943-3010): process-time
+/// accounting for one IVM pass. `total` accumulates finished laps; `start` is
+/// the running lap's start (`None` = not running, TS `#start === 0`).
+/// `yield_process` stops the lap, yields the time slice, and starts a new one,
+/// so `total_elapsed` EXCLUDES yielded time (what per-query hydration time and
+/// the advance budget are measured in) and `elapsed_lap` is the current
+/// slice's age (what `PipelineDriver#shouldYield` compares to the threshold).
+pub struct TimeSliceTimer {
+    total: std::cell::Cell<f64>,
+    start: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl Default for TimeSliceTimer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TimeSliceTimer {
+    pub fn new() -> Self {
+        TimeSliceTimer {
+            total: std::cell::Cell::new(0.0),
+            start: std::cell::Cell::new(None),
+        }
+    }
+
+    /// TS `start()`: "yield at the very beginning so that the first time slice
+    /// is properly processed by the time-slice queue", then start.
+    pub async fn start(&self) {
+        yield_process().await;
+        self.start_without_yielding();
+    }
+
+    /// TS `startWithoutYielding()`.
+    pub fn start_without_yielding(&self) {
+        self.total.set(0.0);
+        self.start_lap();
+    }
+
+    /// TS `yieldProcess(_msgForTesting?)`: stop the lap, yield, start a lap.
+    pub async fn yield_process(&self) {
+        self.stop_lap();
+        yield_process().await;
+        self.start_lap();
+    }
+
+    fn start_lap(&self) {
+        assert!(self.start.get().is_none(), "already running");
+        self.start.set(Some(std::time::Instant::now()));
+    }
+
+    /// TS `elapsedLap()`.
+    pub fn elapsed_lap(&self) -> f64 {
+        let start = self.start.get().expect("not running");
+        start.elapsed().as_secs_f64() * 1000.0
+    }
+
+    fn stop_lap(&self) {
+        let start = self.start.get().expect("not running");
+        self.total
+            .set(self.total.get() + start.elapsed().as_secs_f64() * 1000.0);
+        self.start.set(None);
+    }
+
+    /// TS `stop()`: returns the total elapsed (process) time.
+    pub fn stop(&self) -> f64 {
+        self.stop_lap();
+        self.total.get()
+    }
+
+    /// TS `totalElapsed()`: valid while running or after `stop`.
+    pub fn total_elapsed(&self) -> f64 {
+        match self.start.get() {
+            None => self.total.get(),
+            Some(start) => self.total.get() + start.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+}
+
+impl Timer for TimeSliceTimer {
+    fn elapsed_lap(&self) -> f64 {
+        TimeSliceTimer::elapsed_lap(self)
+    }
+    fn total_elapsed(&self) -> f64 {
+        TimeSliceTimer::total_elapsed(self)
+    }
 }
 
 /// Balance an admitted connection without allowing duplicate close/error paths
@@ -1111,6 +1237,19 @@ impl ViewSyncerService {
         // TS threads `config.enableQueryPlanner` into the PipelineDriver ctor
         // (server/syncer.ts:222); set before `init` so `build_engine` sees it.
         pipelines.enable_query_planner = config.enable_query_planner;
+        // TS server/syncer.ts:230-233 — the PipelineDriver ctor's
+        // `yieldThresholdMs` selector: the priority-op threshold while a
+        // priority op is running on this event loop, else the normal one. Set
+        // before `init` so `build_engine` wires it into every source.
+        let priority_op_running_yield_threshold_ms = config.priority_op_running_yield_threshold_ms;
+        let normal_yield_threshold_ms = config.normal_yield_threshold_ms;
+        pipelines.set_yield_threshold_ms(Rc::new(move || {
+            if is_priority_op_running() {
+                priority_op_running_yield_threshold_ms
+            } else {
+                normal_yield_threshold_ms
+            }
+        }));
         let tokio_handle = Some(config.tokio_handle.clone());
         let enable_query_covering = config.enable_query_covering;
         let mut initialization_failed = config.initialization_error.is_some();
@@ -3665,7 +3804,23 @@ async fn dispatch_cg_message(
             client_id,
             ws_id,
             text,
-        } => on_inbound(state_rc, client_id, ws_id, text).await,
+            enqueued_at,
+        } => {
+            let queue_wait = enqueued_at.elapsed();
+            let handled_at = std::time::Instant::now();
+            on_inbound(state_rc, client_id, ws_id, text).await;
+            if crate::trace::enabled() {
+                let cg_id = state_rc.borrow().cg_id.clone();
+                crate::trace::note(
+                    "cg-inbound",
+                    &format!(
+                        "cg={cg_id} queue_wait_ms={:.1} handle_ms={:.1}",
+                        queue_wait.as_secs_f64() * 1000.0,
+                        handled_at.elapsed().as_secs_f64() * 1000.0
+                    ),
+                );
+            }
+        }
         CGMessage::ConnectionClosed { client_id, ws_id } => state_rc
             .borrow_mut()
             .delete_client_due_to_disconnect(&client_id, &ws_id),
@@ -3858,6 +4013,8 @@ mod tests {
                 query_config: None,
                 enable_query_covering: true,
                 enable_query_planner: true,
+                priority_op_running_yield_threshold_ms: 2.5,
+                normal_yield_threshold_ms: 10.0,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -3900,6 +4057,8 @@ mod tests {
                 query_config: None,
                 enable_query_covering: true,
                 enable_query_planner: true,
+                priority_op_running_yield_threshold_ms: 2.5,
+                normal_yield_threshold_ms: 10.0,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -4239,6 +4398,8 @@ mod tests {
                 query_config: None,
                 enable_query_covering: true,
                 enable_query_planner: true,
+                priority_op_running_yield_threshold_ms: 2.5,
+                normal_yield_threshold_ms: 10.0,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -6054,6 +6215,8 @@ mod tests {
                 query_config: None,
                 enable_query_covering: true,
                 enable_query_planner: true,
+                priority_op_running_yield_threshold_ms: 2.5,
+                normal_yield_threshold_ms: 10.0,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -6775,6 +6938,8 @@ mod tests {
                 query_config: None,
                 enable_query_covering: true,
                 enable_query_planner: true,
+                priority_op_running_yield_threshold_ms: 2.5,
+                normal_yield_threshold_ms: 10.0,
                 tokio_handle: self.handle.clone(),
                 admin_password: None,
                 server_version: "test".to_string(),
@@ -7439,12 +7604,17 @@ impl ViewSyncerService {
         };
         // Offload the load onto the shared-pool runtime (doc 91 §5.1).
         let load_started = std::time::Instant::now();
-        let result = self
-            .offload(async move {
+        // TS view-syncer.ts:491: `this.#runPriorityOp(lc, 'loading cvr', () =>
+        // this.#cvrStore.load(...))` — IVM on this event loop slices finer
+        // while a connect waits on its CVR.
+        let result = run_priority_op(
+            "loading cvr",
+            self.offload(async move {
                 let mut store = store_arc.lock().await;
                 store.load(last_connect_time).await
-            })
-            .await;
+            }),
+        )
+        .await;
         crate::metrics::record_cvr_load_attempt(
             result.is_ok(),
             load_started.elapsed().as_secs_f64() * 1000.0,
@@ -7597,7 +7767,12 @@ impl ViewSyncerService {
         // `Arc::try_unwrap` once this awaited task drops its clone.
         let expected = expected_current_version.clone();
         let flushed = flushed_cvr;
-        self.offload(async move {
+        // TS `#flushUpdater` wraps EVERY CVR flush (config, hydrate, advance)
+        // in `#runPriorityOp(lc, 'flushing cvr', ...)` (view-syncer.ts:
+        // 1069-1071); this is the one seat all rust flushes pass through.
+        run_priority_op(
+            "flushing cvr",
+            self.offload(async move {
             if !ops.is_empty() {
                 store_arc.lock().await.apply_store_ops(ops);
             }
@@ -7653,7 +7828,8 @@ impl ViewSyncerService {
             // The store applies the row deltas to its own cache inside `flush`
             // (TS cvr-store.ts:1218), so there is nothing to mirror here.
             Ok(store_flushed.is_some())
-        })
+            }),
+        )
         .await
         .inspect(|&store_flushed| {
             // Record material flushes for the router's ttlClock-interval
@@ -8055,11 +8231,25 @@ impl ViewSyncerService {
                     // (view-syncer.ts:1782-1789). Time the API-server round-trip
                     // and tag the outcome; the histogram observes on both paths.
                     let transform_started = std::time::Instant::now();
-                    let transform_result =
-                        transform(ctx, shard, &custom_queries_to_transform).await;
-                    crate::metrics::record_query_transformation_time(
-                        transform_started.elapsed().as_secs_f64() * 1000.0,
+                    // TS view-syncer.ts:1970-1976: `this.#runPriorityOp(lc,
+                    // '#syncQueryPipelineSet transforming custom queries', ...)`.
+                    let transform_result = run_priority_op(
+                        "#syncQueryPipelineSet transforming custom queries",
+                        transform(ctx, shard, &custom_queries_to_transform),
+                    )
+                    .await;
+                    let transform_ms = transform_started.elapsed().as_secs_f64() * 1000.0;
+                    crate::trace::note(
+                        "transform",
+                        &format!(
+                            "cg={} queries={} transform_ms={:.1} ok={}",
+                            self.cg_id,
+                            custom_queries_to_transform.len(),
+                            transform_ms,
+                            transform_result.is_ok()
+                        ),
                     );
+                    crate::metrics::record_query_transformation_time(transform_ms);
                     crate::metrics::record_query_transformation(transform_result.is_ok());
                     match transform_result {
                         Ok(results) => {
@@ -8127,6 +8317,7 @@ impl ViewSyncerService {
                 self.hydrate_unchanged_runs += 1;
             }
             self.hydrate_unchanged_queries(&cfg_cvr, &executed, &state_version)
+                .await
         };
 
         // Drift check: (re-)hydrate a query when it is missing OR its
@@ -8308,9 +8499,19 @@ impl ViewSyncerService {
             let clients = self.get_clients(poke_ws_ids);
             let catchup_from =
                 Self::catchup_floor(&result.cvr.version, &clients, &original_client_versions);
+            let catchup_started = std::time::Instant::now();
             let patches = self
                 .gather_catchup_patches(&result.cvr, &result.cvr.version, &excluded, catchup_from)
                 .await?;
+            crate::trace::note(
+                "catchup",
+                &format!(
+                    "cg={} patches={} catchup_ms={:.1}",
+                    self.cg_id,
+                    patches.len(),
+                    catchup_started.elapsed().as_secs_f64() * 1000.0
+                ),
+            );
             for p in &patches {
                 pokers.add_patch(p);
             }
@@ -8426,9 +8627,19 @@ impl ViewSyncerService {
         // — but against the cycle-start snapshot, since each client's live
         // `version()` has already been advanced by the config/hydrate pokes.
         let catchup_from = Self::catchup_floor(&cvr.version, &clients, original_versions);
+        let catchup_started = std::time::Instant::now();
         let patches = self
             .gather_catchup_patches(cvr, current, exclude_query_hashes, catchup_from)
             .await?;
+        crate::trace::note(
+            "catchup",
+            &format!(
+                "cg={} patches={} catchup_ms={:.1}",
+                self.cg_id,
+                patches.len(),
+                catchup_started.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
         if patches.is_empty() {
             return Ok(());
         }
@@ -8593,7 +8804,7 @@ impl ViewSyncerService {
     /// PERF/ART: this re-executes every alive same-hash pipeline on every sync
     /// (TS's design). It is a serving-path cost that must be confirmed by an ART
     /// gate before deploy; it does not change WHAT a client observes.
-    fn hydrate_unchanged_queries(
+    async fn hydrate_unchanged_queries(
         &mut self,
         cfg_cvr: &CVR,
         executed: &[(String, serde_json::Value, String)],
@@ -8634,13 +8845,36 @@ impl ViewSyncerService {
             // pipeline and checks drift.
             let mut sig_acc: HashMap<String, u64> = HashMap::new();
             let one = [(qid.clone(), transformed_ast.to_string())];
-            if let Err(e) = self
-                .pipelines
-                .hydrate(&one, |rc| accumulate_signature(&mut sig_acc, rc))
+            // TS view-syncer.ts:1608-1637: a fresh `TimeSliceTimer` per query,
+            // `await timer.start()`, and `timer.yieldProcess('yield in
+            // hydrateUnchangedQueries')` on every `'yield'`.
+            let timer = Rc::new(TimeSliceTimer::new());
+            timer.start().await;
+            let mut count = 0usize;
             {
-                tracing::warn!("hydrate_unchanged_queries: hydrate {qid} failed: {e}");
-                continue;
+                let mut changes = match self
+                    .pipelines
+                    .hydrate(&one, Rc::clone(&timer) as Rc<dyn Timer>)
+                {
+                    Ok(changes) => changes,
+                    Err(e) => {
+                        tracing::warn!("hydrate_unchanged_queries: hydrate {qid} failed: {e}");
+                        continue;
+                    }
+                };
+                for item in changes.by_ref() {
+                    match item {
+                        StreamItem::Yield => timer.yield_process().await,
+                        StreamItem::Data(rc) => {
+                            accumulate_signature(&mut sig_acc, &rc);
+                            count += 1;
+                        }
+                    }
+                }
+                changes.finish();
             }
+            let elapsed = timer.total_elapsed();
+            tracing::debug!("hydrated {count} rows for {qid} ({elapsed} ms)");
             self.pipelines.set_query_transformation_hash(qid, new_hash);
             // Inspector recording — port of the `#hydrateUnchangedQueries` tail
             // (view-syncer.ts:1640-1641): `#addQueryMaterializationServerMetric(
@@ -8727,12 +8961,22 @@ impl ViewSyncerService {
         // consumer, `received()`, runs inside `pipelines.hydrate`'s SYNCHRONOUS
         // `FnMut` callback and cannot await. `queries` is included in the guard so
         // the map is always present for any pass that actually hydrates.
+        let rows_started = std::time::Instant::now();
         let existing_rows_owned: Arc<RowRecordMap> =
             if add_queries.is_empty() && remove_queries.is_empty() && queries.is_empty() {
                 Arc::new(HashMap::new())
             } else {
                 self.existing_rows().await.map_err(|e| e.to_string())?
             };
+        crate::trace::note(
+            "hydrate-rows",
+            &format!(
+                "cg={} existing_rows={} existing_rows_ms={:.1}",
+                self.cg_id,
+                existing_rows_owned.len(),
+                rows_started.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
         let existing_rows: &RowRecordMap = &existing_rows_owned;
         let (sigs, provider) = Self::signature_provider();
         // Port of TS `#addAndRemoveQueries` force-bump (view-syncer.ts:2194-2215):
@@ -8794,32 +9038,71 @@ impl ViewSyncerService {
         let fetch_started = std::time::Instant::now();
         // A `received` failure (the CVR version-bump invariant) is a recoverable
         // error, not a panic — TS's `#assertNewVersion` throws and aborts the
-        // whole pass. Capture the first one, stop feeding the updater, and
-        // surface it below so the caller fails the connection and the client
-        // re-hydrates from the last consistent CVR (no partial flush).
+        // whole pass. Capture the first one, stop feeding the updater (but keep
+        // draining, so the engine's fetch reaches a normal end-of-stream for
+        // the Take/Cap initial-fetch guard), and surface it below so the caller
+        // fails the connection and the client re-hydrates from the last
+        // consistent CVR (no partial flush).
         let mut cvr_err: Option<String> = None;
-        self.pipelines.hydrate(queries, |rc| {
-            accumulate_signature(&mut sig_acc, rc);
-            if cvr_err.is_some() {
-                return;
+        // Port of TS `#hydrateAndSync`'s time-slicing (view-syncer.ts:2244-2260)
+        // consumed by `#processChanges` (:2508-2512): one `TimeSliceTimer` for
+        // the pass, `await yieldProcess(lc)` "at the very beginning so that the
+        // first time slice is properly processed by the time-slice queue", then
+        // the change stream is pulled with `timer.yieldProcess()` on every
+        // `'yield'`. The timer is process time (stopped while yielded), which is
+        // what the per-query hydration time (`timer.totalElapsed()`) and the
+        // advance budget are measured in; TS's per-query
+        // `timer.startWithoutYielding()` / `timer.stop()` bracketing becomes
+        // one lap across rust's batched hydrate, with the engine taking
+        // per-query deltas of the same clock.
+        let timer = Rc::new(TimeSliceTimer::new());
+        yield_process().await;
+        timer.start_without_yielding();
+        let mut yields = 0u32;
+        let mut yielded = std::time::Duration::ZERO;
+        {
+            let mut changes = self
+                .pipelines
+                .hydrate(queries, Rc::clone(&timer) as Rc<dyn Timer>)?;
+            for item in changes.by_ref() {
+                match item {
+                    StreamItem::Yield => {
+                        let yielded_at = std::time::Instant::now();
+                        timer.yield_process().await;
+                        yields += 1;
+                        yielded += yielded_at.elapsed();
+                    }
+                    StreamItem::Data(rc) => {
+                        accumulate_signature(&mut sig_acc, &rc);
+                        if cvr_err.is_some() {
+                            continue;
+                        }
+                        if let Some((ct, qid, table, rk, row)) = row_change_to_maps(&rc)
+                            && let Err(e) =
+                                processor.on_row_change(ct, &qid, &table, rk, row, existing_rows)
+                        {
+                            cvr_err = Some(e);
+                        }
+                    }
+                }
             }
-            if let Some((ct, qid, table, rk, row)) = row_change_to_maps(rc)
-                && let Err(e) = processor.on_row_change(ct, &qid, &table, rk, row, existing_rows)
-            {
-                cvr_err = Some(e);
-            }
-        })?;
+            changes.finish();
+        }
+        let total_process_time_ms = timer.stop();
         if let Some(e) = cvr_err {
             return Err(e);
         }
         crate::trace::note(
             "hydrate-fetch",
             &format!(
-                "cg={} queries={} rows={} fetch_materialize_ms={:.1}",
+                "cg={} queries={} rows={} fetch_materialize_ms={:.1} process_ms={:.1} yields={} yielded_ms={:.1}",
                 self.cg_id,
                 queries.len(),
                 processor.total_processed(),
-                fetch_started.elapsed().as_secs_f64() * 1000.0
+                fetch_started.elapsed().as_secs_f64() * 1000.0,
+                total_process_time_ms,
+                yields,
+                yielded.as_secs_f64() * 1000.0
             ),
         );
         // Record the transformation hash each query was hydrated with, so a later
@@ -9680,8 +9963,8 @@ mod engine_tests {
     /// signature to the CVR-stored one — a MISMATCH drifts (record the drift +
     /// remove the pipeline so it re-executes), a MATCH does not. Reverting the
     /// drift branch (never insert into `drifted`) fails the first assertion.
-    #[test]
-    fn hydrate_unchanged_queries_detects_drift() {
+    #[tokio::test]
+    async fn hydrate_unchanged_queries_detects_drift() {
         // Build a fresh engine over an EMPTY users source (so the re-hydrated
         // row-set signature is 0), with q1 gotten at hash "H", the given stored
         // signature, and one LIVE (non-inactivated) client.
@@ -9717,7 +10000,9 @@ mod engine_tests {
 
         // Drift: stored (999) != candidate (0) → q1 drifts + pipeline removed.
         let (mut engine, cvr) = build(999);
-        let drifted = engine.hydrate_unchanged_queries(&cvr, &executed, "00");
+        let drifted = engine
+            .hydrate_unchanged_queries(&cvr, &executed, "00")
+            .await;
         assert!(
             drifted.contains("q1"),
             "a mismatched stored signature must drift"
@@ -9729,7 +10014,9 @@ mod engine_tests {
 
         // No drift: stored (0) == candidate (0) → q1 kept, not drifted.
         let (mut engine, cvr) = build(0);
-        let drifted = engine.hydrate_unchanged_queries(&cvr, &executed, "00");
+        let drifted = engine
+            .hydrate_unchanged_queries(&cvr, &executed, "00")
+            .await;
         assert!(
             !drifted.contains("q1"),
             "a matching stored signature must NOT drift"

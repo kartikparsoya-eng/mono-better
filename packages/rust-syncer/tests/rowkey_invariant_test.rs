@@ -66,21 +66,30 @@ fn emitted_rowkey_cols(shape: &Shape) -> Vec<String> {
     pipelines.set_client_primary_keys(HashMap::from([(shape.table.to_string(), client_pk)]));
 
     let mut cols: Vec<String> = Vec::new();
-    pipelines
-        .hydrate(
-            &[(
-                "q1".to_string(),
-                serde_json::json!({ "table": shape.table }).to_string(),
-            )],
-            |rc| {
-                if rc.table == shape.table && !rc.is_hidden {
-                    let mut c: Vec<String> = rc.row_key.keys().cloned().collect();
-                    c.sort();
-                    cols = c;
-                }
-            },
-        )
-        .unwrap();
+    {
+        let timer = Rc::new(rust_syncer::services::view_syncer::view_syncer::TimeSliceTimer::new());
+        timer.start_without_yielding();
+        let mut changes = pipelines
+            .hydrate(
+                &[(
+                    "q1".to_string(),
+                    serde_json::json!({ "table": shape.table }).to_string(),
+                )],
+                timer,
+            )
+            .unwrap();
+        for item in changes.by_ref() {
+            if let rust_ivm::ivm::stream::StreamItem::Data(rc) = item
+                && rc.table == shape.table
+                && !rc.is_hidden
+            {
+                let mut c: Vec<String> = rc.row_key.keys().cloned().collect();
+                c.sort();
+                cols = c;
+            }
+        }
+        changes.finish();
+    }
     assert!(!cols.is_empty(), "{}: expected a row change", shape.name);
     cols
 }

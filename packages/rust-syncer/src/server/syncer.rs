@@ -157,6 +157,11 @@ impl CGServicesFactory for RealServicesFactory {
             query_config: self.config.query_config.clone(),
             enable_query_covering: self.config.enable_query_covering,
             enable_query_planner: self.config.enable_query_planner,
+            // TS server/syncer.ts:209-213:
+            //   priorityOpRunningYieldThresholdMs = max(yieldThresholdMs / 4, 2)
+            //   normalYieldThresholdMs = max(yieldThresholdMs, 2)
+            priority_op_running_yield_threshold_ms: (self.config.yield_threshold_ms / 4.0).max(2.0),
+            normal_yield_threshold_ms: self.config.yield_threshold_ms.max(2.0),
             tokio_handle: self.tokio_handle.clone(),
             admin_password: self.config.admin_password.clone(),
             server_version: self.config.server_version.clone(),

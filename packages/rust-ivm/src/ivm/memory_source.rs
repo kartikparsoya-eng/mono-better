@@ -975,6 +975,9 @@ pub(crate) fn apply_source_overlay(
 /// PREV snapshot transaction, so later fetches observe the whole advance so
 /// far. Rust's snapshot is read-only; layering the changes here is the exact
 /// read-side equivalent.
+// One parameter per TS-nested generator layer (overlay → yields → start); a
+// struct would only hide the 1:1 correspondence with table-source.ts:314-337.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_source_overlays(
     mut rows: Box<dyn Iterator<Item = Row>>,
     overlay_changes: Vec<SourceChange>,
@@ -983,10 +986,21 @@ pub(crate) fn apply_source_overlays(
     filter_predicate: Option<Arc<dyn Fn(&Row) -> bool>>,
     req: &FetchRequest,
     historical: HistoricalOverlayContext,
+    // TS nests `generateWithYields` between the overlay and `generateWithStart`
+    // in the SQLite `TableSource#fetch` (zqlite/src/table-source.ts:314-337);
+    // MemorySource has no yields (memory-source.ts `#fetch` never calls a
+    // shouldYield), so it passes `None`.
+    should_yield: Option<std::rc::Rc<dyn Fn() -> bool>>,
 ) -> NodeStream {
+    let with_yields = |nodes: NodeStream| -> NodeStream {
+        match &should_yield {
+            Some(f) => crate::sqlite::table_source::generate_with_yields(nodes, f.clone()),
+            None => nodes,
+        }
+    };
     if overlay_changes.is_empty() {
-        let nodes = Box::new(rows.map(|row| StreamItem::Data(Node::new(row))));
-        return generate_with_start(nodes, req.start.clone(), compare, req.reverse);
+        let nodes: NodeStream = Box::new(rows.map(|row| StreamItem::Data(Node::new(row))));
+        return generate_with_start(with_yields(nodes), req.start.clone(), compare, req.reverse);
     }
 
     let count = overlay_changes.len();
@@ -1005,7 +1019,12 @@ pub(crate) fn apply_source_overlays(
             stable_edit,
         );
         if index + 1 == count {
-            return generate_with_start(nodes, req.start.clone(), compare, req.reverse);
+            return generate_with_start(
+                with_yields(nodes),
+                req.start.clone(),
+                compare,
+                req.reverse,
+            );
         }
         rows = Box::new(nodes.filter_map(|item| match item {
             StreamItem::Data(node) => Some(node.row),
@@ -1538,6 +1557,7 @@ mod overlay_tests {
                 primary_key: vec!["id".to_string()],
                 sort,
             },
+            None,
         )
         .filter_map(|item| match item {
             StreamItem::Data(node) => Some(node.row),

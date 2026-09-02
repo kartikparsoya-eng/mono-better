@@ -78,11 +78,20 @@ fn hydrate_emits_query_pipeline_lifecycle_log() {
         // `hydration_row_count` field (of 0). The count's CORRECTNESS on a
         // non-empty source is pinned by the rust-ivm engine test
         // `hydration_row_count_tracks_rows_produced`.
-        p.hydrate(
-            &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
-            |_rc| {},
-        )
-        .unwrap();
+        {
+            let timer = std::rc::Rc::new(
+                rust_syncer::services::view_syncer::view_syncer::TimeSliceTimer::new(),
+            );
+            timer.start_without_yielding();
+            let mut changes = p
+                .hydrate(
+                    &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
+                    timer,
+                )
+                .unwrap();
+            for _ in changes.by_ref() {}
+            changes.finish();
+        }
     });
 
     let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
@@ -121,11 +130,20 @@ fn remove_query_emits_query_pipeline_stop_log() {
     tracing::subscriber::with_default(subscriber, || {
         let mut p = IvmPipelines::new();
         p.init(vec![users_spec()], None, "zero").unwrap();
-        p.hydrate(
-            &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
-            |_rc| {},
-        )
-        .unwrap();
+        {
+            let timer = std::rc::Rc::new(
+                rust_syncer::services::view_syncer::view_syncer::TimeSliceTimer::new(),
+            );
+            timer.start_without_yielding();
+            let mut changes = p
+                .hydrate(
+                    &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
+                    timer,
+                )
+                .unwrap();
+            for _ in changes.by_ref() {}
+            changes.finish();
+        }
         // TS `removeQuery(queryID, stopReason)` → `#destroyPipeline`. TTL/errored
         // removals use the default stop reason `remove-query`.
         p.remove_query("q1", "remove-query");

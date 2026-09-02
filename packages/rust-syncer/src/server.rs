@@ -7,4 +7,5 @@
 
 pub mod inspector_delegate;
 pub mod otel_start;
+pub mod priority_op;
 pub mod syncer;

@@ -51,6 +51,10 @@ pub enum CGMessage {
         client_id: Arc<str>,
         ws_id: Arc<str>,
         text: String,
+        /// When the frame was queued for the CG task (SYNCER_TRACE: the
+        /// dequeue latency is the time this client group's event loop was busy
+        /// — another group's slice, or its own — before this frame ran).
+        enqueued_at: std::time::Instant,
     },
     /// A connection's WS closed (its upstream channel ended).
     ConnectionClosed {
@@ -174,6 +178,7 @@ pub(crate) async fn forward_inbound(
                 client_id: client_id.clone(),
                 ws_id: ws_id.clone(),
                 text,
+                enqueued_at: std::time::Instant::now(),
             })
             .is_err()
         {
