@@ -52,5 +52,8 @@ step "parity — L1 structural guard (misfiled-symbol ratchet, L9)"
 python3 "$ROOT/parity/parity_ledger.py" syncer --enforce-structure > /tmp/l1-structure.out 2>&1; chk $? "L1 structural ratchet"
 tail -1 /tmp/l1-structure.out
 
+step "parity — M5 unverified-claim guard (parity assertions must cite a .ts source)"
+python3 "$ROOT/parity/ban_unverified_claims.py"; chk $? "M5 unverified-claim ratchet"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

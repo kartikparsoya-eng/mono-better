@@ -589,3 +589,50 @@ Everything below is orderable; per-item gates = fmt + clippy(-D warnings) +
 L9 Stages 1–5 all landed (Part 4 records per-stage commits); CVR path verdicts
 in Part 5; L1 structural ratchet wired into local CI; ledger extractor
 brace-bug fixed; L3 pins on the 1:1 tree.
+
+## Part 6 — 2026-09-02 perf-divergence incident + port-completeness reframe
+
+**Incident.** ART prod-replay showed rust p95 5-18× TS. Root cause (CPU-flamegraph +
+log forensics, not guessed): `hydrate_unchanged_queries` (proactive re-materialize of
+every already-gotten pipeline) ran INSIDE `sync_query_pipeline_set` — i.e. on every
+connect/config-change. TS runs `#hydrateUnchangedQueries` ONCE, in the run-loop init
+block gated by `#pipelinesSynced` (view-syncer.ts:568-606). A big CG (644K CVR rows)
+re-materialized fully 15+ times at 20-88s = the p95/p99 tail. Fixed (commit b8b997674):
+`pipelines_synced` flag (1:1 `#pipelinesSynced`), gate + set(TS:606) + reset(TS:575-576),
+non-vacuous test proven-on-revert.
+
+**Why L1-L8 all missed it (same shape as the 2026-08-27 bugs, new dimension).**
+The FUNCTION was ported 1:1 (name/file/body all correct → L1/L2 green). The lost thing
+was the GATE around its CALL — a `#pipelinesSynced` guard that lives in TS's run-loop
+init structure, which rust RE-ARCHITECTED (folded init into config_and_hydrate). L3
+checks EMISSION context (which thread), not call-FREQUENCY/guard parity. So a
+"call-gating divergence" (right function, wrong reachability condition) passed every
+layer. A wrong doc-comment ("re-executes ... on every sync (TS's design)") asserted
+parity WITHOUT citing the TS gate — the HARD-RULE-13 anti-pattern.
+
+**Reframe (the three questions + traceability matrix).** Coverage tells you what code
+RAN, not whether behavior is CORRECT, and you cannot enumerate all paths. Treat a port
+as done via a finite behavioral CONTRACT + evidence across three separate questions:
+  - "what MIGHT run?"  → static reachability (entry-point inventory, call/guard graph)
+  - "what DID run?"    → branch/condition coverage (≫ line) on ported state logic
+  - "does it BEHAVE the same?" → differential/golden/property/fuzz, TS-as-oracle
+Plus "have we migrated every RESPONSIBILITY?" → a traceability MATRIX. Our layers had
+L1(presence)+L2(body)+L3(emission)+L8(exec-count) but no responsibility matrix, no
+branch/condition gate, no differential count/output oracle, no mutation testing — the
+exact holes this bug used.
+
+**Measures (M0 top-level; M1-M7 feed its cells).**
+| M | Measure | Question | Status |
+|---|---|---|---|
+| M0 | Port-completeness matrix: responsibility(API/protocol-msg/DB-op/feature-flag/FAILURE-MODE/job/lifecycle-flag+guard) → target → evidence → status | migrated? | building |
+| M1 | Differential count+output oracle (TS passes corpus FIRST, then assert rust==TS per op) | behaves? | building |
+| M2 | Call-guard parity static check (each TS call's enclosing guards ≡ rust's, or justified) | might-run? | building |
+| M3 | State-flag registry (every TS lifecycle flag: set/reset/read → rust counterpart) — a matrix slice | might-run? | building |
+| M4 | Profile-diff gate (rust hot-path self-time vs TS baseline; structural divergence = flag) | behaves? | building |
+| M5 | Ban-unverified-claims guard (parity comments must cite a `.ts:line`) | traceability | building |
+| M6 | Branch/condition coverage gate on ported state logic (both guard branches exercised) | did-run? | building |
+| M7 | Mutation testing (cargo-mutants) on correctness-critical modules — automates prove-on-revert | behaves? | building |
+
+Done-bar (per responsibility, NOT "100% line"): mapped-or-retired + a verification
+artifact + known-diffs documented+accepted + branch coverage where practical; every
+remaining gap intentional and visible.
