@@ -1467,26 +1467,14 @@ impl ViewSyncerService {
             return;
         }
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        let existing_rows = match self.existing_rows().await {
-            Ok(rows) => rows,
-            Err(e) => {
-                // TS lets a rejected `getRowRecords()` abort the pass; rust fails
-                // the group so clients rehome onto a consistent reload (I-4).
-                tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
-                self.fail_group("CVR row-record load failed");
-                return;
-            }
-        };
-        self.last_row_count = existing_rows.len();
+        // No eager row-map read here. TS's expiry pass reaches the row records
+        // only through `#lookupRowsForExecutedAndRemovedQueries`, which skips the
+        // read entirely unless queries were executed or removed (cvr.ts:661-667);
+        // `hydrate_and_sync` now performs that read behind the same condition.
+        // `#rowCount` is maintained by the store during flush (cvr-store.ts:1068),
+        // not recomputed at the top of every pass.
         match self
-            .remove_expired_queries(
-                cvr,
-                &client_ids,
-                &existing_rows,
-                self.last_connect_time,
-                now,
-                ttl_clock,
-            )
+            .remove_expired_queries(cvr, &client_ids, self.last_connect_time, now, ttl_clock)
             .await
         {
             Ok((cvr, n)) => {
@@ -2494,18 +2482,14 @@ impl ViewSyncerService {
                 .unwrap_or_else(|| cvr.version.state_version.clone());
             let replica_version = self.replica_version.clone();
             // The rows the client already has (from the CVR row cache).
-            let existing_rows = match self.existing_rows().await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    // TS lets a rejected `getRowRecords()` abort the pass; rust
-                    // fails the group so clients rehome onto a consistent
-                    // reload (I-4).
-                    tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
-                    self.fail_group("CVR row-record load failed");
-                    return false;
-                }
-            };
-            self.last_row_count = existing_rows.len();
+            // No eager row-map read. TS reaches the row records only through
+            // `#lookupRowsForExecutedAndRemovedQueries`, which returns without
+            // reading them when nothing was executed or removed — "Query-less
+            // update. This can happen for config only changes." (cvr.ts:661-667).
+            // `hydrate_and_sync` performs that read behind the same condition, so
+            // a config-only pass no longer touches `cvr.rows` at all. `rowCount`
+            // is maintained by the store during flush (cvr-store.ts:1068/:1217),
+            // which is where TS reads it from too.
             // The client's decoded JWT claims (`authData` for permission rules),
             // read from the ConnectionContextManager at use time — TS passes
             // `mustGetConnectionContext(selector).auth?.raw` to the transform,
@@ -2557,7 +2541,6 @@ impl ViewSyncerService {
                     query_ctx.as_ref(),
                     state_version,
                     replica_version,
-                    &existing_rows,
                     self.last_connect_time,
                     now,
                     ttl_clock,
@@ -3277,18 +3260,14 @@ impl ViewSyncerService {
                 .current_version()
                 .unwrap_or_else(|| cvr.version.state_version.clone());
             let replica_version = self.replica_version.clone();
-            let existing_rows = match self.existing_rows().await {
-                Ok(rows) => rows,
-                Err(e) => {
-                    // TS lets a rejected `getRowRecords()` abort the pass; rust
-                    // fails the group so clients rehome onto a consistent
-                    // reload (I-4).
-                    tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
-                    self.fail_group("CVR row-record load failed");
-                    return;
-                }
-            };
-            self.last_row_count = existing_rows.len();
+            // No eager row-map read. TS reaches the row records only through
+            // `#lookupRowsForExecutedAndRemovedQueries`, which returns without
+            // reading them when nothing was executed or removed — "Query-less
+            // update. This can happen for config only changes." (cvr.ts:661-667).
+            // `hydrate_and_sync` performs that read behind the same condition, so
+            // a config-only pass no longer touches `cvr.rows` at all. `rowCount`
+            // is maintained by the store during flush (cvr-store.ts:1068/:1217),
+            // which is where TS reads it from too.
             // authData read from the ConnectionContextManager at use time (TS
             // `mustGetConnectionContext(selector).auth?.raw`, decoded).
             let auth_data = lock_unpoisoned(&self.ccm)
@@ -3329,7 +3308,6 @@ impl ViewSyncerService {
                     query_ctx.as_ref(),
                     state_version,
                     replica_version,
-                    &existing_rows,
                     self.last_connect_time,
                     now,
                     ttl_clock,
@@ -7568,7 +7546,6 @@ impl ViewSyncerService {
         updater: &mut CVRQueryDrivenUpdater,
         flushed_cvr: Arc<CVR>,
         last_connect_time: i64,
-        existing_rows: &RowRecordMap,
     ) -> Result<bool, String> {
         let expected_current_version = updater.base.orig.version.clone();
         self.flush_ops_to_store(
@@ -7576,7 +7553,6 @@ impl ViewSyncerService {
             &expected_current_version,
             flushed_cvr,
             last_connect_time,
-            existing_rows,
         )
         .await
     }
@@ -7598,24 +7574,18 @@ impl ViewSyncerService {
         expected_current_version: &CVRVersion,
         flushed_cvr: Arc<CVR>,
         last_connect_time: i64,
-        existing_rows: &RowRecordMap,
     ) -> Result<bool, String> {
         let Some(store_arc) = self.store.clone() else {
             return Ok(true);
         };
 
-        // Row-write dedup (port of TS `#flush`'s pending-row dedup): drop row ops
-        // that would write nothing new — a record identical to what's already in
-        // the CVR, or an unreferenced row/delete for a row not in the CVR anyway.
-        // Without this, every row touched in a cycle is rewritten even when
-        // unchanged (write amplification that inflates flush latency on hot rows).
-        // Uses the caller's `existing_rows` snapshot (already read for this cycle),
-        // so no extra cache clone is taken here. `force_updates` is never populated
-        // in this port, so no forced-write exception is needed.
-        let ops: Vec<StoreOp> = ops
-            .into_iter()
-            .filter(|op| !row_op_is_noop(op, existing_rows))
-            .collect();
+        // No row-write dedup here. TS prunes pending row records in exactly ONE
+        // place — inside `#flush` (cvr-store.ts:1066-1086) — and that pruning is
+        // ported 1:1 in `CVRStoreHandle::flush_internal`. Running an identical
+        // filter here as well was a rust-only DUPLICATE, and it was the last
+        // consumer forcing every caller to materialise the whole per-CG row map
+        // before the pass, including the config-only passes TS skips entirely
+        // (cvr.ts:661-667). The store reads what it needs from its own cache.
 
         // Offload the whole PG-touching section — apply ops, flush the CVR, and
         // mirror the row deltas back into the read cache — onto the shared-pool
@@ -7722,7 +7692,6 @@ impl ViewSyncerService {
         custom_ctx: Option<&CustomQueryContext>,
         state_version: String,
         replica_version: String,
-        existing_rows: &RowRecordMap,
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
@@ -7743,7 +7712,6 @@ impl ViewSyncerService {
             custom_ctx,
             state_version,
             replica_version,
-            existing_rows,
             last_connect_time,
             last_active,
             ttl_clock,
@@ -7783,7 +7751,6 @@ impl ViewSyncerService {
         custom_ctx: Option<&CustomQueryContext>,
         state_version: String,
         replica_version: String,
-        existing_rows: &RowRecordMap,
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
@@ -7829,7 +7796,6 @@ impl ViewSyncerService {
                 desired_clear,
                 client_schema,
                 profile_id,
-                existing_rows,
                 last_connect_time,
                 last_active,
                 ttl_clock,
@@ -7858,7 +7824,6 @@ impl ViewSyncerService {
             custom_ctx,
             state_version,
             replica_version,
-            existing_rows,
             last_connect_time,
             last_active,
             ttl_clock,
@@ -7883,7 +7848,6 @@ impl ViewSyncerService {
         desired_clear: bool,
         client_schema: Option<ClientSchema>,
         profile_id: Option<&str>,
-        existing_rows: &RowRecordMap,
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
@@ -7939,7 +7903,6 @@ impl ViewSyncerService {
                     &expected_current_version,
                     cfg_arc.clone(),
                     last_connect_time,
-                    existing_rows,
                 )
                 .await?;
             // No-op store flush → stay on the ORIGINAL CVR (TS `flush` returns
@@ -7974,7 +7937,6 @@ impl ViewSyncerService {
         custom_ctx: Option<&CustomQueryContext>,
         state_version: String,
         replica_version: String,
-        existing_rows: &RowRecordMap,
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
@@ -8331,7 +8293,6 @@ impl ViewSyncerService {
                     &[],
                     poke_ws_ids,
                     &queries,
-                    existing_rows,
                     last_connect_time,
                     last_active,
                     ttl_clock,
@@ -8746,12 +8707,33 @@ impl ViewSyncerService {
         remove_queries: &[String],
         client_ids: &[String],
         queries: &[(String, String)],
-        existing_rows: &RowRecordMap,
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
         drifted_query_ids: &std::collections::HashSet<String>,
     ) -> Result<(SyncResult, MultiPoker), String> {
+        // Port of TS `#lookupRowsForExecutedAndRemovedQueries` (cvr.ts:652-667).
+        // TS kicks that off from `trackQueries` and it returns WITHOUT reading the
+        // row cache when nothing was executed or removed — its own comment:
+        // "Query-less update. This can happen for config only changes." The read
+        // therefore belongs HERE, at the seat that holds `executed`/`removed`, not
+        // at the top of the pass: rust used to materialise the whole per-CG row map
+        // for every pass and only then reach the equivalent early return inside
+        // `delete_unreferenced_rows`, so a config-only pass paid a full `cvr.rows`
+        // read that TS provably skips.
+        //
+        // Rust-only shape (rule 5): TS parks an un-awaited Promise in `#existingRows`
+        // and awaits it later. Rust reads it eagerly at this one point because the
+        // consumer, `received()`, runs inside `pipelines.hydrate`'s SYNCHRONOUS
+        // `FnMut` callback and cannot await. `queries` is included in the guard so
+        // the map is always present for any pass that actually hydrates.
+        let existing_rows_owned: Arc<RowRecordMap> =
+            if add_queries.is_empty() && remove_queries.is_empty() && queries.is_empty() {
+                Arc::new(HashMap::new())
+            } else {
+                self.existing_rows().await.map_err(|e| e.to_string())?
+            };
+        let existing_rows: &RowRecordMap = &existing_rows_owned;
         let (sigs, provider) = Self::signature_provider();
         // Port of TS `#addAndRemoveQueries` force-bump (view-syncer.ts:2194-2215):
         // an already-gotten, same-transformation-hash query re-executed without a
@@ -8881,12 +8863,7 @@ impl ViewSyncerService {
         let flushed_arc = Arc::new(flushed_cvr);
         let flush_started = std::time::Instant::now();
         let store_flushed = self
-            .flush_to_store(
-                &mut updater,
-                flushed_arc.clone(),
-                last_connect_time,
-                existing_rows,
-            )
+            .flush_to_store(&mut updater, flushed_arc.clone(), last_connect_time)
             .await?;
         // Phase profiling (SYNCER_TRACE): CVR-store persist cost, split from the
         // fetch/materialize above so total hydration is fully attributed.
@@ -9025,12 +9002,7 @@ impl ViewSyncerService {
         // deep copy); reclaim it after the awaited flush drops its clone.
         let flushed_arc = Arc::new(flushed_cvr);
         let store_flushed = self
-            .flush_to_store(
-                &mut updater,
-                flushed_arc.clone(),
-                last_connect_time,
-                existing_rows,
-            )
+            .flush_to_store(&mut updater, flushed_arc.clone(), last_connect_time)
             .await?;
         // Quiet commit (zero IVM output for this CG, e.g. the batch only touched
         // other groups' rows): the store flush is a no-op, so revert to the
@@ -9067,7 +9039,6 @@ impl ViewSyncerService {
         &mut self,
         cvr: CVR,
         client_ids: &[String],
-        existing_rows: &RowRecordMap,
         last_connect_time: i64,
         last_active: i64,
         ttl_clock: TTLClock,
@@ -9098,7 +9069,6 @@ impl ViewSyncerService {
                 &expired,
                 client_ids,
                 &[],
-                existing_rows,
                 last_connect_time,
                 last_active,
                 ttl_clock,
@@ -9149,7 +9119,9 @@ impl ViewSyncerService {
         // deleteClients produces config ops (client removal + desire
         // inactivation), not row writes — but snapshot the CVR rows anyway so the
         // store flush's row dedup is correct regardless.
-        let existing_rows = self.existing_rows().await.map_err(|e| e.to_string())?;
+        // No eager row-map read: TS's `deleteClients` path routes through
+        // `#handleConfigUpdate` and never touches the row records
+        // (view-syncer.ts:1032-1050).
         let clients = self.get_clients(poke_ws_ids);
         {
             // Like the config poke (`config_poke_targets`): only clients AT the
@@ -9170,7 +9142,6 @@ impl ViewSyncerService {
                     &expected_current_version,
                     cfg_arc.clone(),
                     last_connect_time,
-                    &existing_rows,
                 )
                 .await?;
             // No-op flush (e.g. every requested client was foreign to this
@@ -9348,31 +9319,6 @@ fn row_to_contents(row: &rust_ivm::ivm::data::Row) -> serde_json::Value {
     serde_json::Value::Object(m)
 }
 
-/// Convert a row-record-cache `RowRecord` into the `types::RowRecord` the
-/// updater / ChangeProcessor expect. They differ only in the `ref_counts` map
-/// type (the cache uses `HashMap`, `types::RefCounts` is a `BTreeMap`).
-/// Whether a row op writes nothing new against the current CVR rows — a port of
-/// the two drop conditions in TS `CVRStore.#flush`: (a) an unreferenced row or a
-/// delete for a row that isn't in the CVR anyway, and (b) a record that exactly
-/// equals what's already stored (`deepEqual`). Such ops are pure write
-/// amplification and are filtered out before the store flush.
-fn row_op_is_noop(op: &StoreOp, existing: &RowRecordMap) -> bool {
-    match op {
-        StoreOp::PutRowRecord(r) => {
-            let key = rust_cvr::row_key::row_id_string(&r.id);
-            let ex = existing.get(&key);
-            // (1) unreferenced (tombstone) and not present, or (2) unchanged.
-            (ex.is_none() && r.ref_counts.is_none()) || ex == Some(r)
-        }
-        StoreOp::DelRowRecord(id) => {
-            // Deleting a row that isn't in the CVR is a no-op.
-            let key = rust_cvr::row_key::row_id_string(id);
-            existing.get(&key).is_none()
-        }
-        _ => false,
-    }
-}
-
 /// Build a fresh, empty CVR for a client group (used when there is no store to
 /// load from, e.g. dev/tests). Real deployments load via `SyncEngine::load_cvr`.
 pub fn empty_cvr(id: &str, replica_version: &str) -> CVR {
@@ -9463,9 +9409,8 @@ mod engine_tests {
     use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::cvr::CVR;
-    use rust_cvr::row_key::row_id_string;
+    use rust_cvr::schema::types::CVRVersion;
     use rust_cvr::schema::types::{BaseQueryRecord, ClientQueryRecord, QueryRecord};
-    use rust_cvr::schema::types::{CVRVersion, version_from_string};
     use rust_cvr::shards::ShardID;
     use std::collections::BTreeMap;
 
@@ -9680,71 +9625,6 @@ mod engine_tests {
         panic!("SyncEngine census never returned to baseline: {last:?}");
     }
 
-    fn row_id(id: &str) -> RowID {
-        let mut key = serde_json::Map::new();
-        key.insert("id".to_string(), serde_json::Value::String(id.to_string()));
-        RowID {
-            schema: "public".to_string(),
-            table: "issue".to_string(),
-            row_key: key,
-        }
-    }
-
-    fn row_record(
-        id: &str,
-        patch_version: &str,
-        referenced: bool,
-    ) -> rust_cvr::schema::types::RowRecord {
-        rust_cvr::schema::types::RowRecord {
-            id: row_id(id),
-            row_version: "r1".to_string(),
-            patch_version: version_from_string(patch_version),
-            ref_counts: referenced.then(|| {
-                let mut m = BTreeMap::new();
-                m.insert("q1".to_string(), 1i64);
-                m
-            }),
-        }
-    }
-
-    /// The row-write dedup (TS `#flush`): unchanged records and unreferenced /
-    /// absent-row deletes are no-ops and must be filtered; real adds, changes, and
-    /// deletes of present rows must NOT be filtered.
-    #[test]
-    fn row_op_is_noop_matches_ts_dedup() {
-        let rec = row_record("i1", "01", true);
-        let mut existing: RowRecordMap = HashMap::new();
-        existing.insert(row_id_string(&rec.id), rec.clone());
-
-        // Unchanged record → no-op (dropped).
-        assert!(row_op_is_noop(
-            &StoreOp::PutRowRecord(rec.clone()),
-            &existing
-        ));
-        // Changed record (different patch_version) → NOT a no-op.
-        let changed = row_record("i1", "02", true);
-        assert!(!row_op_is_noop(&StoreOp::PutRowRecord(changed), &existing));
-        // Brand-new referenced row (not in CVR) → NOT a no-op (a real add).
-        let added = row_record("i2", "01", true);
-        assert!(!row_op_is_noop(&StoreOp::PutRowRecord(added), &existing));
-        // Tombstone (unreferenced) for a row not in the CVR → no-op.
-        let ghost_tombstone = row_record("i3", "01", false);
-        assert!(row_op_is_noop(
-            &StoreOp::PutRowRecord(ghost_tombstone),
-            &existing
-        ));
-        // Delete of a present row → NOT a no-op (a real delete).
-        assert!(!row_op_is_noop(
-            &StoreOp::DelRowRecord(row_id("i1")),
-            &existing
-        ));
-        // Delete of an absent row → no-op.
-        assert!(row_op_is_noop(
-            &StoreOp::DelRowRecord(row_id("gone")),
-            &existing
-        ));
-    }
-
     /// A CVR with a single client query `q1` (mirrors rust-cvr's test helper),
     /// so `track_queries` produces a got-query patch.
     fn make_cvr() -> CVR {
@@ -9884,7 +9764,6 @@ mod engine_tests {
             sink,
         );
 
-        let existing_rows: RowRecordMap = HashMap::new();
         let (result, pokers) = engine
             .hydrate_and_sync(
                 make_cvr(),
@@ -9894,7 +9773,6 @@ mod engine_tests {
                 &[],
                 &["ws1".to_string()],
                 &[("q1".to_string(), r#"{"table":"users"}"#.to_string())],
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -9981,7 +9859,6 @@ mod engine_tests {
             sink,
         );
 
-        let existing_rows: RowRecordMap = HashMap::new();
         let ast = r#"{"table":"users"}"#;
         engine
             .hydrate_and_sync(
@@ -9992,7 +9869,6 @@ mod engine_tests {
                 &[],
                 &["ws1".to_string()],
                 &[("q1".to_string(), ast.to_string())],
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10143,7 +10019,6 @@ mod engine_tests {
             args: None,
             ttl: None,
         }];
-        let existing_rows: RowRecordMap = HashMap::new();
 
         let result_cvr = engine
             .config_and_hydrate(
@@ -10161,7 +10036,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10214,7 +10088,6 @@ mod engine_tests {
             shard_num: 0,
         };
         engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
-        let existing_rows: RowRecordMap = HashMap::new();
         let ws = vec!["ws1".to_string()];
 
         // Subscribe q1 with a 1000ms TTL, then unsubscribe it at ttl_clock=0 so
@@ -10241,7 +10114,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10264,7 +10136,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10320,7 +10191,6 @@ mod engine_tests {
         };
         engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
 
-        let existing_rows: RowRecordMap = HashMap::new();
         let ws = vec!["ws1".to_string()];
 
         // 1) Subscribe q1 with a 1000ms TTL.
@@ -10347,7 +10217,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10373,7 +10242,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10384,7 +10252,7 @@ mod engine_tests {
 
         // 3) Not yet expired at ttl_clock=500 (< inactivated_at 0 + ttl 1000).
         let (cvr, removed) = engine
-            .remove_expired_queries(cvr, &ws, &existing_rows, 0, 0, 500)
+            .remove_expired_queries(cvr, &ws, 0, 0, 500)
             .await
             .unwrap();
         assert_eq!(removed, 0);
@@ -10392,7 +10260,7 @@ mod engine_tests {
 
         // 4) Expired at ttl_clock=2000 → removed from pipeline + CVR.
         let (cvr, removed) = engine
-            .remove_expired_queries(cvr, &ws, &existing_rows, 0, 0, 2000)
+            .remove_expired_queries(cvr, &ws, 0, 0, 2000)
             .await
             .unwrap();
         assert_eq!(removed, 1);
@@ -10416,7 +10284,6 @@ mod engine_tests {
             shard_num: 0,
         };
         engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
-        let existing_rows: RowRecordMap = HashMap::new();
 
         // Subscribe q1.
         let cvr = engine
@@ -10441,7 +10308,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10471,7 +10337,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10503,7 +10368,6 @@ mod engine_tests {
         };
         engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
 
-        let existing_rows: RowRecordMap = HashMap::new();
         let put = || {
             vec![DesiredQuerySpec {
                 hash: "q1".to_string(),
@@ -10531,7 +10395,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10557,7 +10420,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10589,7 +10451,6 @@ mod engine_tests {
             app_id: "app".to_string(),
             shard_num: 0,
         };
-        let existing_rows: RowRecordMap = HashMap::new();
         // A custom (named) desired query — `name` set is what makes the CVR
         // record a `QueryRecord::Custom`.
         let custom = |h: &str| DesiredQuerySpec {
@@ -10656,7 +10517,6 @@ mod engine_tests {
                 Some(&ctx),
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10702,7 +10562,6 @@ mod engine_tests {
                 Some(&ctx),
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10745,7 +10604,6 @@ mod engine_tests {
                 Some(&ctx),
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10780,7 +10638,6 @@ mod engine_tests {
         };
         engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
 
-        let existing_rows: RowRecordMap = HashMap::new();
         let ws = ["ws1".to_string()];
         let empty_auth = serde_json::json!({});
         let put = || {
@@ -10810,7 +10667,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10840,7 +10696,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10871,7 +10726,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10901,7 +10755,6 @@ mod engine_tests {
         };
         engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
 
-        let existing_rows: RowRecordMap = HashMap::new();
         let put = || {
             vec![DesiredQuerySpec {
                 hash: "q1".to_string(),
@@ -10928,7 +10781,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -10969,7 +10821,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -11158,7 +11009,6 @@ mod engine_tests {
             Arc::new(DirectWebSocketSink::new(tx2)),
         );
 
-        let existing_rows: RowRecordMap = HashMap::new();
         let q = |h: &str| DesiredQuerySpec {
             hash: h.to_string(),
             ast: Some(serde_json::json!({"table": "users"})),
@@ -11183,7 +11033,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,
@@ -11206,7 +11055,6 @@ mod engine_tests {
                 None,
                 "00".to_string(),
                 "v1".to_string(),
-                &existing_rows,
                 0,
                 0,
                 0,

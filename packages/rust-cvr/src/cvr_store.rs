@@ -682,10 +682,6 @@ impl CVRStoreHandle {
         cvr: &CVR,
         last_connect_time: f64,
     ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
-        // TS `#flush` reads the existing records straight off its own row cache
-        // (cvr-store.ts:1067 `await this.getRowRecords()`); so does this port now
-        // that the store owns the cache.
-        let existing_rows = self.get_row_records().await?;
         // Port of TS `#flush` no-op pruning (cvr-store.ts:1066-1086): before
         // deciding materiality, drop pending row records that would not change
         // the CVR — (a) a delete / unreferenced tombstone for a row that is not
@@ -693,11 +689,17 @@ impl CVRStoreHandle {
         // Without this, redundant re-receives are re-written and tombstones for
         // never-present rows are upserted, producing extra DB rows and spurious
         // catchup row-del patches TS never emits.
-        // TS reads `this.getRowRecords()` from its embedded cache; the Rust
-        // store does not own the cache (single-atomic-writer design), so the
-        // caller passes the snapshot in — same Rust-only architectural pattern
-        // as `delete_unreferenced_rows(existing_rows)`.
+        //
+        // `getRowRecords()` is read INSIDE this branch, exactly as TS does
+        // (`if (this.#pendingRowRecordUpdates.size) { ... await this.getRowRecords() }`,
+        // cvr-store.ts:1066-1067). Hoisting it above the branch — as an earlier
+        // revision did — makes every CONFIG-ONLY flush pay a cache read (and the
+        // first one a full per-CG `cvr.rows` scan) while the store mutex is held,
+        // work TS never performs.
         if !self.pending.pending_row_record_updates.is_empty() {
+            let existing_rows = self.get_row_records().await?;
+            // TS `this.#rowCount = existingRowRecords.size` (cvr-store.ts:1068).
+            self.row_count = existing_rows.len();
             let PendingWrites {
                 pending_row_record_updates,
                 force_updates,

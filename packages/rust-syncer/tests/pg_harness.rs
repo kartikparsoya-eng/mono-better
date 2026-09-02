@@ -1235,7 +1235,6 @@ fn pg_advance_lmid_change_with_no_queries() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::services::view_syncer::view_syncer::{
         CustomQueryTransformMode, ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
@@ -1363,7 +1362,6 @@ fn pg_advance_lmid_change_with_no_queries() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            &RowRecordMap::new(),
             0,
             0,
             0,
@@ -1457,7 +1455,6 @@ fn pg_no_permissions_deployed_denies_client_ast_queries() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::services::view_syncer::view_syncer::{
         CustomQueryTransformMode, ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
@@ -1588,7 +1585,6 @@ fn pg_no_permissions_deployed_denies_client_ast_queries() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            &RowRecordMap::new(),
             0,
             0,
             0,
@@ -1660,7 +1656,6 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::services::view_syncer::view_syncer::{
         CustomQueryTransformMode, ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
@@ -1787,7 +1782,6 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            &RowRecordMap::new(),
             0,
             0,
             0,
@@ -1928,7 +1922,6 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::cvr::RowRecordMap;
     use rust_cvr::schema::types::version_string;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::services::view_syncer::view_syncer::{
@@ -2067,7 +2060,6 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            &RowRecordMap::new(),
             0,
             0,
             0,
@@ -2137,7 +2129,6 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         Some(&hydrate_cookie),
         sink2,
     );
-    let existing_after_advance = rt.block_on(engine.existing_rows()).expect("row cache load");
     let caught_up = rt
         .block_on(engine.config_and_hydrate(
             advanced.cvr,
@@ -2154,7 +2145,6 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
             None,
             "02".to_string(),
             "replica-1".to_string(),
-            &existing_after_advance,
             0,
             0,
             0,
@@ -2348,7 +2338,6 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
 
     use rusqlite::Connection;
     use rust_cvr::client_handler::WebSocketSink;
-    use rust_cvr::cvr::RowRecordMap;
     use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
     use rust_syncer::services::view_syncer::view_syncer::{
         CustomQueryTransformMode, ViewSyncerService as SyncEngine, empty_cvr as empty_engine_cvr,
@@ -2516,7 +2505,6 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
             None,
             "01".to_string(),
             "replica-1".to_string(),
-            &RowRecordMap::new(),
             0,
             0,
             0,

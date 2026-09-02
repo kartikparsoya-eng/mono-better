@@ -11,14 +11,12 @@
 //! the snapshotter/wal2 machinery is only required for `advance`).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use rusqlite::Connection;
 use rust_cvr::client_handler::WebSocketSink;
 use rust_cvr::cvr::DesiredQuerySpec;
-use rust_cvr::cvr::RowRecordMap;
 use rust_cvr::shards::ShardID;
 use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
 use rust_syncer::services::view_syncer::view_syncer::{
@@ -72,7 +70,6 @@ fn hydrate_real_rows_produces_row_pokes() {
         args: None,
         ttl: None,
     }];
-    let existing_rows: RowRecordMap = HashMap::new();
 
     // ANYONE_CAN: client AST queries are always transformed (permissions:None
     // = empty config = deny-all per TS view-syncer.ts:1549 `?? {tables: {}}`).
@@ -99,7 +96,6 @@ fn hydrate_real_rows_produces_row_pokes() {
             None,
             "00".to_string(),
             "01".to_string(),
-            &existing_rows,
             0,
             0,
             0,
@@ -197,7 +193,6 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
     // No client queries at all — only the internal `lmids` / `mutationResults`
     // queries that `ensure_client` creates. They must still hydrate.
     let cvr = empty_cvr("cg1", "01");
-    let existing_rows: RowRecordMap = HashMap::new();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -218,7 +213,6 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
             None,
             "00".to_string(),
             "01".to_string(),
-            &existing_rows,
             0,
             0,
             0,
@@ -309,7 +303,6 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
             ttl: None,
         },
     ];
-    let existing_rows: RowRecordMap = HashMap::new();
 
     // ANYONE_CAN for both queried tables (see hydrate_real_rows comment).
     let anyone_can = serde_json::json!({
@@ -338,7 +331,6 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
             None,
             "00".to_string(),
             "01".to_string(),
-            &existing_rows,
             0,
             0,
             0,
@@ -443,7 +435,6 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
         args: Some(vec![]),
         ttl: None,
     }];
-    let existing_rows: RowRecordMap = HashMap::new();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -465,7 +456,6 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
             Some(&ctx),
             "00".to_string(),
             "01".to_string(),
-            &existing_rows,
             0,
             0,
             0,
@@ -564,7 +554,6 @@ fn partial_success_transform_hydrates_healthy_query() {
         ttl: None,
     };
     let puts = vec![mk("custom_ok", "healthy"), mk("custom_err", "broken")];
-    let existing_rows: RowRecordMap = HashMap::new();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -586,7 +575,6 @@ fn partial_success_transform_hydrates_healthy_query() {
             Some(&ctx),
             "00".to_string(),
             "01".to_string(),
-            &existing_rows,
             0,
             0,
             0,
@@ -696,7 +684,6 @@ fn transform_failure_fails_only_the_offending_connection() {
         args: Some(vec![]),
         ttl: None,
     }];
-    let existing_rows: RowRecordMap = HashMap::new();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -716,7 +703,6 @@ fn transform_failure_fails_only_the_offending_connection() {
         Some(&ctx),
         "00".to_string(),
         "01".to_string(),
-        &existing_rows,
         0,
         0,
         0,
