@@ -584,9 +584,39 @@ impl Engine {
         let Some(model) = self.ensure_cost_model(&conn) else {
             return ast.clone();
         };
+        // TS: `buildPipeline(ast, delegate, queryID, costModel, lc,
+        // planDebugger)` forwards its `planDebugger` option straight into
+        // `planQuery` (builder.ts:141). Rust's engine layer has no such option
+        // parameter — the analyze caller installs the debugger around the whole
+        // hydrate (rust-syncer `run_ast.rs`, whose TS twin is run-ast.ts's
+        // `options.planDebugger`) — so read it back here and pass it EXPLICITLY,
+        // exactly as TS does.
+        let installed = crate::planner::current_plan_debugger();
+        // RUST_IVM_PERF_TRACE additionally attaches a fresh AccumulatorDebugger
+        // so a PRODUCTION query's cost reasoning can be dumped; in TS the same
+        // data comes from `analyzeQuery --join-plans`. Diagnostic only, and only
+        // when the analyze path has not already supplied a debugger.
+        let trace_dbg = (crate::perf_trace::enabled() && installed.is_none()).then(|| {
+            std::rc::Rc::new(std::cell::RefCell::new(
+                crate::planner::AccumulatorDebugger::new(),
+            ))
+        });
+        let plan_debugger: Option<crate::planner::SharedPlanDebugger> = installed.or_else(|| {
+            trace_dbg
+                .clone()
+                .map(|d| d as crate::planner::SharedPlanDebugger)
+        });
         let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::planner::plan_query(ast, model)
+            crate::planner::plan_query(ast, model, plan_debugger)
         }));
+        if let Some(dbg) = trace_dbg.as_ref() {
+            for ev in crate::planner::serialize_plan_debug_events(&dbg.borrow().events) {
+                let s = ev.to_string();
+                if s.contains("node-cost") || s.contains("best-plan-selected") {
+                    eprintln!("[rust-ivm][PLANDBG] {s}");
+                }
+            }
+        }
         match planned {
             Ok(planned) => {
                 // Observability for the planner DECISION, not just whether the

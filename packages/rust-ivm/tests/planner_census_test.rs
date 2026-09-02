@@ -84,7 +84,7 @@ fn census_returns_to_zero_after_completed_and_unwound_plans() {
     for _ in 0..10 {
         let calls = Rc::new(RefCell::new(0));
         let model = counting_model(conn.clone(), calls, 0);
-        let planned = plan_query(&ast, model);
+        let planned = plan_query(&ast, model, None);
         assert!(planned.where_clause.is_some());
     }
     assert_eq!(
@@ -105,8 +105,9 @@ fn census_returns_to_zero_after_completed_and_unwound_plans() {
     for panic_after in 1..8 {
         let calls = Rc::new(RefCell::new(0));
         let model = counting_model(conn.clone(), calls.clone(), panic_after);
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plan_query(&ast, model)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            plan_query(&ast, model, None)
+        }));
         if result.is_ok() {
             // Plan finished before reaching the trigger depth — fine.
             continue;

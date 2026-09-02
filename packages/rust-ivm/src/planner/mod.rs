@@ -27,6 +27,9 @@ pub mod runtime;
 pub use planner_builder::{Plans, apply_plans_to_ast, build_plan_graph, plan_query};
 pub use planner_connection::{ConnectionCostModel, CostModelCost};
 pub use planner_constraint::{PlannerConstraint, merge_constraints};
-pub use planner_debug::{AccumulatorDebugger, serialize_plan_debug_events, with_plan_debugger};
+pub use planner_debug::{
+    AccumulatorDebugger, PlanDebugger, SharedPlanDebugger, current_plan_debugger,
+    install_plan_debugger, serialize_plan_debug_events, with_plan_debugger,
+};
 pub use planner_node::{Confidence, FanoutCostModel, FanoutEst};
 pub use runtime::{create_snapshot_cost_model, flip_order, plan_ast_flips};

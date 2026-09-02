@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use crate::planner::planner_connection::{ConnectionCostModel, PlannerConnection};
 use crate::planner::planner_constraint::PlannerConstraint;
+use crate::planner::planner_debug::SharedPlanDebugger;
 use crate::planner::planner_fan_in::PlannerFanIn;
 use crate::planner::planner_fan_out::PlannerFanOut;
 use crate::planner::planner_join::PlannerJoin;
@@ -151,7 +152,24 @@ impl PlannerGraph {
         }
     }
 
-    pub fn plan(&mut self) {
+    /// Port of `PlannerGraph.plan` (planner-graph.ts:256).
+    ///
+    /// `plan_debugger` is TS's `planDebugger?: PlanDebugger` parameter; it is
+    /// installed as this thread's sink for the duration of the call so the node
+    /// emitters (which rust dispatches through the `PlannerNode` enum rather
+    /// than threading a param into every impl) reach it — see the
+    /// `planner_debug` module doc.
+    ///
+    /// TS's second parameter `lc?: LogContext` is not threaded: no rust crate
+    /// ports `@rocicorp/logger`'s `LogContext` (crate-wide convention —
+    /// warnings go to `eprintln!`), and its only use in this chain is the
+    /// `MAX_FLIPPABLE_JOINS` warning below, which the PRODUCTION caller does
+    /// not emit either (pipeline-driver.ts:642 passes `costModel` but no `lc`,
+    /// so `lc?.warn?.()` at planner-graph.ts:262 is a no-op there). Only the
+    /// analyze path (run-ast.ts:123 passes `lc`) logs it in TS.
+    pub fn plan(&mut self, plan_debugger: Option<SharedPlanDebugger>) {
+        let _installed = plan_debugger.map(crate::planner::planner_debug::install_plan_debugger);
+
         let flippable_indices: Vec<usize> = self
             .joins
             .iter()

@@ -145,7 +145,7 @@ fn test_single_exists_no_flip_when_child_larger() {
     )));
 
     let model = mock_cost_model(vec![("parent", 100.0), ("child", 1000.0)]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(flips.len(), 1, "one EXISTS condition");
     assert_eq!(
@@ -168,7 +168,7 @@ fn test_single_exists_flip_when_child_smaller() {
     )));
 
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(flips.len(), 1, "one EXISTS condition");
     assert_eq!(flips[0], Some(true), "should flip when child is smaller");
@@ -184,7 +184,7 @@ fn test_not_exists_never_flips() {
     )));
 
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(flips.len(), 1);
     assert_eq!(flips[0], Some(false), "NOT EXISTS must never flip");
@@ -203,7 +203,7 @@ fn test_explicit_flip_true_not_changed() {
     // Even though child is larger (would normally not flip),
     // explicit flip=true forces it.
     let model = mock_cost_model(vec![("parent", 100.0), ("child", 1000.0)]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(flips[0], Some(true), "explicit flip=true must be preserved");
 }
@@ -221,7 +221,7 @@ fn test_explicit_flip_false_not_changed() {
     // Even though child is smaller (would normally flip),
     // explicit flip=false prevents it.
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(
         flips[0],
@@ -245,7 +245,7 @@ fn test_multiple_exists_best_combination() {
         ("child_a", 10.0),
         ("child_b", 10000.0),
     ]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(flips.len(), 2, "two EXISTS conditions");
     // The planner should flip child_a (smaller) and not child_b (larger)
@@ -267,7 +267,7 @@ fn test_or_with_correlated_subqueries() {
         ("child_a", 10.0),
         ("child_b", 10000.0),
     ]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(flips.len(), 2, "two EXISTS in OR");
     // At minimum, both should have a definite flip annotation
@@ -316,7 +316,7 @@ fn test_nested_exists() {
         ("child", 50.0),
         ("grandchild", 500.0),
     ]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(
         flips.len(),
@@ -341,7 +341,7 @@ fn test_replanning_planned_ast() {
     )));
 
     let model = mock_cost_model(vec![("parent", 1000.0), ("child", 10.0)]);
-    let planned = plan_query(&ast, model);
+    let planned = plan_query(&ast, model, None);
     let flips = extract_flips(&planned);
     assert_eq!(
         flips[0],

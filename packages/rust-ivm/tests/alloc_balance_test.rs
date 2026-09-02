@@ -257,7 +257,7 @@ fn one_cycle(db_path: &str, cycle: i64) {
                 specs.clone(),
             )
             .unwrap();
-            let planned = rust_ivm::planner::plan_query(&ast, model);
+            let planned = rust_ivm::planner::plan_query(&ast, model, None);
             assert!(planned.where_clause.is_some());
         }
     }

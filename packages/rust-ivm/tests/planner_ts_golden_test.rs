@@ -145,7 +145,7 @@ fn plans_match_ts_golden() {
     for sc in scenarios {
         let name = sc["name"].as_str().unwrap_or("?");
         let ast = json_to_ast(&sc["ast"]);
-        let planned = plan_query(&ast, mock_model(sc["tables"].clone()));
+        let planned = plan_query(&ast, mock_model(sc["tables"].clone()), None);
 
         let mut expected = Vec::new();
         flips_from_json(&sc["plannedAst"], "", &mut expected);

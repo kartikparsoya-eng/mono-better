@@ -117,7 +117,7 @@ fn every_planner_node_frees_when_plans_drop() {
         for sub in p.sub_plans.values_mut() {
             plan_all(sub);
         }
-        p.plan.plan();
+        p.plan.plan(None);
     }
     plan_all(&mut plans);
 
@@ -313,7 +313,7 @@ fn planning_leaves_no_txn_and_never_blocks_checkpoint() {
 
     for _ in 0..20 {
         let model = create_sqlite_cost_model(conn.clone(), specs()).unwrap();
-        let planned = plan_query(&ast, model);
+        let planned = plan_query(&ast, model, None);
         assert!(planned.where_clause.is_some());
     }
 

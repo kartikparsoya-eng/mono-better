@@ -7,6 +7,7 @@ use std::rc::Rc;
 use crate::builder::ast::{Ast, Condition, CorrelatedSubqueryCondition};
 use crate::planner::planner_connection::ConnectionCostModel;
 use crate::planner::planner_constraint::PlannerConstraint;
+use crate::planner::planner_debug::SharedPlanDebugger;
 use crate::planner::planner_fan_in::PlannerFanIn;
 use crate::planner::planner_fan_out::PlannerFanOut;
 use crate::planner::planner_graph::PlannerGraph;
@@ -259,17 +260,30 @@ pub fn build_plan_graph(
     }
 }
 
-fn plan_recursively(plans: &mut Plans) {
+/// Port of `planRecursively` (planner-builder.ts:300).
+///
+/// TS's third parameter `lc?: LogContext` is not threaded — see the note on
+/// [`PlannerGraph::plan`](crate::planner::planner_graph::PlannerGraph::plan).
+fn plan_recursively(plans: &mut Plans, plan_debugger: Option<&SharedPlanDebugger>) {
     for sub in plans.sub_plans.values_mut() {
-        plan_recursively(sub);
+        plan_recursively(sub, plan_debugger);
     }
-    plans.plan.plan();
+    plans.plan.plan(plan_debugger.cloned());
 }
 
-pub fn plan_query(ast: &Ast, model: ConnectionCostModel) -> Ast {
+/// Port of `planQuery` (planner-builder.ts:311).
+///
+/// `plan_debugger` is TS's `planDebugger?: PlanDebugger`. TS's fourth parameter
+/// `lc?: LogContext` is not threaded — see the note on
+/// [`PlannerGraph::plan`](crate::planner::planner_graph::PlannerGraph::plan).
+pub fn plan_query(
+    ast: &Ast,
+    model: ConnectionCostModel,
+    plan_debugger: Option<SharedPlanDebugger>,
+) -> Ast {
     let mut ast = ast.clone();
     let mut plans = build_plan_graph(&mut ast, model, true, None);
-    plan_recursively(&mut plans);
+    plan_recursively(&mut plans, plan_debugger.as_ref());
     apply_plans_to_ast(&ast, &plans)
 }
 

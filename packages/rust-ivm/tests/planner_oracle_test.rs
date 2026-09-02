@@ -133,7 +133,7 @@ fn planner_matches_ts_oracle() {
             })
             .unwrap_or_default();
 
-        let planned = plan_query(&ast, mock_from_costs(costs));
+        let planned = plan_query(&ast, mock_from_costs(costs), None);
         let rust_flips = extract_flips(&planned);
         let ts_flips = expected_by_name
             .get(name)

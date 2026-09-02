@@ -30,7 +30,9 @@ use std::time::Instant;
 
 use rust_ivm::builder::debug_delegate::{Debug, SharedDebug};
 use rust_ivm::ivm::data::{Row, Value};
-use rust_ivm::planner::{AccumulatorDebugger, serialize_plan_debug_events, with_plan_debugger};
+use rust_ivm::planner::{
+    AccumulatorDebugger, SharedPlanDebugger, serialize_plan_debug_events, with_plan_debugger,
+};
 
 use crate::auth::read_authorizer::transform_and_hash_query;
 use crate::protocol::analyze_query_result::{AnalyzeQueryResult, RowsByQuery, RowsBySource};
@@ -165,8 +167,11 @@ pub fn run_ast(
     let debug: SharedDebug = Debug::new_shared();
 
     // TS analyze.ts:55 — `planDebugger = joinPlans ? new AccumulatorDebugger()
-    // : undefined`, passed down to `plan`. Rust installs it via a thread-local
-    // sink around the hydrate (which drives `plan_query`); see planner_debug.rs.
+    // : undefined`, handed to `runAst` as an option and forwarded from there
+    // into `buildPipeline` -> `planQuery` (run-ast.ts:123). Rust's engine layer
+    // has no such option parameter, so the debugger is installed for the
+    // duration of the hydrate and `Engine::plan_ast` reads it back and passes
+    // it EXPLICITLY to `plan_query`, like TS does. See planner_debug.rs.
     let plan_debugger: Option<Rc<RefCell<AccumulatorDebugger>>> = if options.join_plans {
         Some(Rc::new(RefCell::new(AccumulatorDebugger::new())))
     } else {
@@ -175,7 +180,7 @@ pub fn run_ast(
 
     let start = Instant::now();
     let rows = match &plan_debugger {
-        Some(dbg) => with_plan_debugger(dbg.clone(), || {
+        Some(dbg) => with_plan_debugger(dbg.clone() as SharedPlanDebugger, || {
             pipelines.hydrate_analyze(hydrate_ast, debug.clone())
         })?,
         None => pipelines.hydrate_analyze(hydrate_ast, debug.clone())?,

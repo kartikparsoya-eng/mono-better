@@ -12,15 +12,20 @@
 //! is NOT ported: it is not on the `joinPlans` wire path (only
 //! `serializePlanDebugEvents` is called by `analyze.ts`).
 //!
-//! Rust-only adaptation (AGENTS rule 5): TS threads `planDebugger?` as an
-//! explicit parameter through every planner node method (`estimateCost`,
-//! `propagateConstraints`) and the graph's `plan`. The rust planner dispatches
-//! node methods through the `PlannerNode` enum; threading a param through all
-//! impls + the enum + recursion would be a large signature change with NO
-//! behavioral difference. Since the analysis planner runs single-threaded (the
-//! `!Send` analyze engine on one blocking thread), a thread-local sink is
-//! equivalent and localized. The emitted events + their fields/order are 1:1
-//! with TS; only the plumbing (thread-local vs. param) differs.
+//! Rust-only adaptation (AGENTS rule 5), scoped to the NODE methods only: TS
+//! threads `planDebugger?` as an explicit parameter through `planQuery` ->
+//! `planRecursively` -> `PlannerGraph.plan` -> every planner node method
+//! (`estimateCost`, `propagateConstraints`). Rust threads the SAME parameter
+//! through the first three (1:1 signatures — see `plan_query`,
+//! `plan_recursively`, `PlannerGraph::plan`); only the last hop is different,
+//! because the rust planner dispatches node methods through the `PlannerNode`
+//! enum and threading a param through all impls + the enum + recursion would be
+//! a large signature change with NO behavioral difference. `PlannerGraph::plan`
+//! therefore INSTALLS the debugger it is handed as this thread's sink
+//! (`install_plan_debugger`) for the duration of the call, and the node
+//! emitters read it back via `plan_debug_log`. Planning is single-threaded (the
+//! `!Send` engine runs on one blocking thread), so the sink is equivalent and
+//! localized. The emitted events + their fields/order are 1:1 with TS.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -30,6 +35,14 @@ use serde_json::{Value, json};
 use crate::ivm::data::Value as IvmValue;
 use crate::planner::planner_constraint::PlannerConstraint;
 use crate::planner::planner_node::{CostEstimate, JoinType, NodeKind};
+
+/// Port of the `PlanDebugger` interface (planner-debug.ts:135): the sink every
+/// planner event is handed to. TS's `log(event: PlanDebugEvent)` takes the
+/// event object; rust builds events directly in their `PlanDebugEventJSON`
+/// wire shape, so the parameter is a `serde_json::Value`.
+pub trait PlanDebugger {
+    fn log(&mut self, event: Value);
+}
 
 /// Port of `AccumulatorDebugger` (planner-debug.ts:144): collects every event,
 /// tracking the current attempt so `node-cost` / `node-constraint` events (which
@@ -44,9 +57,11 @@ impl AccumulatorDebugger {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
+impl PlanDebugger for AccumulatorDebugger {
     /// Port of `AccumulatorDebugger.log` (planner-debug.ts:148).
-    pub fn log(&mut self, mut event: Value) {
+    fn log(&mut self, mut event: Value) {
         match event.get("type").and_then(Value::as_str) {
             Some("attempt-start") => {
                 if let Some(n) = event.get("attemptNumber").and_then(Value::as_i64) {
@@ -64,11 +79,17 @@ impl AccumulatorDebugger {
     }
 }
 
+/// A `PlanDebugger` handle as the planner passes it around: TS's
+/// `planDebugger?: PlanDebugger` parameter. Shared (`Rc`) because the same sink
+/// is handed to the graph AND read back by the node emitters, and interior-
+/// mutable (`RefCell`) because `log` takes `&mut self`.
+pub type SharedPlanDebugger = Rc<RefCell<dyn PlanDebugger>>;
+
 thread_local! {
-    /// The active debugger for the current thread's planning pass (see the
-    /// module doc for why this is a thread-local rather than a threaded param).
-    static PLAN_DEBUGGER: RefCell<Option<Rc<RefCell<AccumulatorDebugger>>>> =
-        const { RefCell::new(None) };
+    /// The debugger `PlannerGraph::plan` was handed, for the duration of that
+    /// call — the last hop of TS's `planDebugger` parameter (see the module doc
+    /// for why only the node hop uses a thread-local rather than a param).
+    static PLAN_DEBUGGER: RefCell<Option<SharedPlanDebugger>> = const { RefCell::new(None) };
 }
 
 /// Emit a planner debug event if a debugger is active on this thread. `build` is
@@ -82,18 +103,37 @@ pub fn plan_debug_log(build: impl FnOnce() -> Value) {
     });
 }
 
-/// Run `f` with `dbg` installed as the active debugger, restoring the previous
-/// debugger afterward (RAII, panic-safe). Mirrors TS passing `planDebugger`
-/// down a single `plan` call.
-pub fn with_plan_debugger<R>(dbg: Rc<RefCell<AccumulatorDebugger>>, f: impl FnOnce() -> R) -> R {
-    struct Restore(Option<Rc<RefCell<AccumulatorDebugger>>>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            PLAN_DEBUGGER.with(|d| *d.borrow_mut() = self.0.take());
-        }
+/// The debugger installed on this thread, if any. The rust-only engine layer
+/// (`Engine::plan_ast`) reads it here so it can pass it EXPLICITLY to
+/// `plan_query`, exactly as TS's `buildPipeline` forwards its `planDebugger`
+/// option (builder.ts:141).
+pub fn current_plan_debugger() -> Option<SharedPlanDebugger> {
+    PLAN_DEBUGGER.with(|d| d.borrow().clone())
+}
+
+/// Installs `dbg` as this thread's active debugger until the returned guard is
+/// dropped, restoring whatever was installed before (RAII, panic-safe).
+#[must_use = "the debugger is uninstalled as soon as the guard is dropped"]
+pub fn install_plan_debugger(dbg: SharedPlanDebugger) -> InstalledPlanDebugger {
+    InstalledPlanDebugger(PLAN_DEBUGGER.with(|d| d.borrow_mut().replace(dbg)))
+}
+
+/// Guard returned by [`install_plan_debugger`]; restores the previous debugger.
+pub struct InstalledPlanDebugger(Option<SharedPlanDebugger>);
+
+impl Drop for InstalledPlanDebugger {
+    fn drop(&mut self) {
+        PLAN_DEBUGGER.with(|d| *d.borrow_mut() = self.0.take());
     }
-    let prev = PLAN_DEBUGGER.with(|d| d.borrow_mut().replace(dbg));
-    let _restore = Restore(prev);
+}
+
+/// Run `f` with `dbg` installed as the active debugger. Used by the callers that
+/// sit ABOVE the ported planner chain (the analyze path in rust-syncer's
+/// `run_ast`, whose TS twin passes `planDebugger` down through `runAst` ->
+/// `buildPipeline` options) — everything from `plan_query` down takes the
+/// debugger as a parameter like TS does.
+pub fn with_plan_debugger<R>(dbg: SharedPlanDebugger, f: impl FnOnce() -> R) -> R {
+    let _installed = install_plan_debugger(dbg);
     f()
 }
 

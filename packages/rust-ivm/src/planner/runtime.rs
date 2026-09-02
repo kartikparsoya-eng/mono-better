@@ -96,7 +96,7 @@ pub fn plan_ast_flips(
     cost_model: ConnectionCostModel,
 ) -> Vec<Option<bool>> {
     let ast = crate::replay::json_to_ast(ast_json);
-    let planned = plan_query(&ast, cost_model);
+    let planned = plan_query(&ast, cost_model, None);
     flip_order(&planned)
 }
 
