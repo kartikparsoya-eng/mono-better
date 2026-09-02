@@ -114,6 +114,7 @@ impl Exists {
     }
 
     /// Port of TS private `#filter(node, exists?)` (exists.ts:219).
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn filter_inner(&self, node: &Node, exists: Option<bool>) -> bool {
         let exists = exists.unwrap_or_else(|| self.fetch_exists(node));
         if self.not { !exists } else { exists }
@@ -173,6 +174,7 @@ impl FilterOutput for Exists {
     /// Port of TS `filter` (exists.ts:80): consult/populate the per-loop
     /// cache (disabled when keyed by primary key, or mid-push), then AND with
     /// the downstream chain.
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn filter(&self, node: &Node) -> bool {
         let mut exists: Option<bool> = None;
         if !self.no_size_reuse && !self.in_push.get() {

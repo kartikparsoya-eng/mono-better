@@ -12,7 +12,7 @@ non-wal2-test-support = ["rust-ivm/non-wal2-test-support"]
 # flamegraph SVGs from the status port. ~negligible overhead while idle (the
 # profiler only runs during an active /debug/pprof request), so it is safe to
 # bake into initial-testing deploy images via RUST_SYNCER_FEATURES=profiling.
-profiling = ["dep:pprof"]
+profiling = ["dep:pprof", "rust-ivm/profiling"]
 # dhat-heap: build with `--features dhat-heap` to install dhat's heap-profiling
 # global allocator and dump `dhat-heap.json` on graceful shutdown. Off by default
 # (dhat intercepts every allocation, so it carries real overhead) — it exists to

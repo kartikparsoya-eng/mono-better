@@ -1009,6 +1009,7 @@ impl Input for TableSourceInput {
         self.conn.borrow_mut().output = Some(output);
     }
 
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn fetch(&self, req: &FetchRequest) -> NodeStream {
         let conn = self.conn.borrow();
         let order: Vec<(String, String)> = conn

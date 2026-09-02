@@ -588,7 +588,20 @@ impl Engine {
             crate::planner::plan_query(ast, model)
         }));
         match planned {
-            Ok(planned) => planned,
+            Ok(planned) => {
+                // Observability for the planner DECISION, not just whether the
+                // planner ran. `enable_query_planner=true` + no cost-model
+                // degradation warning says the planner executed; it says nothing
+                // about which joins it chose to flip. Gated on
+                // RUST_IVM_PERF_TRACE so it costs nothing in production.
+                if crate::perf_trace::enabled() {
+                    let flips = crate::planner::runtime::flip_order(&planned);
+                    if !flips.is_empty() {
+                        eprintln!("[rust-ivm][PLAN] table={} flips={:?}", planned.table, flips);
+                    }
+                }
+                planned
+            }
             Err(payload) => {
                 if let Some(interrupted) =
                     payload.downcast_ref::<crate::sqlite::sqlite_cost_model::CostProbeInterrupted>()

@@ -12,6 +12,12 @@ path = "src/lib.rs"
 # disables this feature and requires wal2 exactly like the TS Snapshotter.
 default = ["non-wal2-test-support"]
 non-wal2-test-support = []
+# Marks the IVM hot path `#[inline(never)]` so a CPU profiler can attribute
+# self-time INSIDE the engine. Release inlining otherwise collapses join/exists/
+# table-source fetch into the caller, which is why a flamegraph of a slow hydrate
+# showed 83% self in `IvmPipelines::hydrate` and 0 samples in the operators.
+# Enabled transitively by rust-syncer's `profiling` feature; never in prod.
+profiling = []
 
 [[bin]]
 name = "rust-ivm-server"

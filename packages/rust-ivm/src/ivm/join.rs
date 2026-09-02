@@ -317,6 +317,7 @@ impl Input for Join {
         *self.output.borrow_mut() = Some(output);
     }
 
+    #[cfg_attr(feature = "profiling", inline(never))]
     fn fetch(&self, req: &FetchRequest) -> NodeStream {
         self.fetch_lazy(req)
     }
