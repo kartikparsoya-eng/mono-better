@@ -793,6 +793,21 @@ pub struct ViewSyncerService {
     /// query-API round trip. The real capture→classify transport is covered by
     /// `classify_retransform_failure`'s unit test.
     forced_retransform_outcomes: std::collections::VecDeque<RetransformOutcome>,
+    /// Port of TS `#pipelinesSynced` (view-syncer.ts:274). `false` until the CG's
+    /// pipelines are first built from the (possibly populated) CVR; set `true`
+    /// after that init, and reset to `false` only on a pipeline reset
+    /// (`reset_pipelines_and_rehydrate`, TS `#pipelines.reset()` +
+    /// `#pipelinesSynced = false`, view-syncer.ts:575-576). Gates
+    /// `hydrate_unchanged_queries`: TS runs `#hydrateUnchangedQueries` ONCE in the
+    /// run-loop init block (view-syncer.ts:592, guarded by this flag), NOT on
+    /// every connect/config-change — a per-sync re-hydrate re-materialized every
+    /// alive pipeline on each reconnect (the whale-CG 20-88s hydrates, 2026-09-02).
+    pipelines_synced: bool,
+    /// Test observability (increments only when the `hydrate_unchanged_queries`
+    /// gate opens): pins that the proactive re-hydrate runs once per pipeline init,
+    /// not per sync.
+    #[cfg(test)]
+    hydrate_unchanged_runs: u64,
     /// The userID this client group is pinned to (the `sub` of the first authed
     /// connection; `None` for an anonymous group). Admission
     /// (`check_and_pin_user`) guarantees every connection reaching this CG shares
@@ -1093,6 +1108,9 @@ impl ViewSyncerService {
             next_auth_maintenance_at: None,
             background_retransform_failure: None,
             forced_retransform_outcomes: std::collections::VecDeque::new(),
+            pipelines_synced: false,
+            #[cfg(test)]
+            hydrate_unchanged_runs: 0,
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -2969,6 +2987,11 @@ impl ViewSyncerService {
             self.fail_group("Client view pipeline reset failed");
             return;
         }
+        // The pipelines were just cleared — port of TS `#pipelinesSynced = false`
+        // right after `#pipelines.reset()` (view-syncer.ts:575-576). This re-arms
+        // the once-per-init `hydrate_unchanged_queries` so the first re-hydrate
+        // pass below rebuilds every already-gotten query from the CVR.
+        self.pipelines_synced = false;
         // Re-hydrate by re-running the config pass for every connected client
         // with an empty desired-queries patch. Since the pipeline is now empty,
         // Phase 2 re-adds all of the client's (and the internal) queries. The
@@ -6728,6 +6751,9 @@ impl ViewSyncerService {
             next_auth_maintenance_at: None,
             background_retransform_failure: None,
             forced_retransform_outcomes: std::collections::VecDeque::new(),
+            pipelines_synced: false,
+            #[cfg(test)]
+            hydrate_unchanged_runs: 0,
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -7583,7 +7609,27 @@ impl ViewSyncerService {
         // (the loop below then skips them — no bump); drifted ones are removed here
         // and fall through to the loop as `None` (re-added → re-executed via the
         // updater path, with the force-bump reason keyed off this drifted set).
-        let drifted_query_ids = self.hydrate_unchanged_queries(&cfg_cvr, &executed, &state_version);
+        //
+        // TS runs `#hydrateUnchangedQueries` ONCE, in the run-loop init block gated
+        // by `#pipelinesSynced` (view-syncer.ts:568-606); subsequent connects /
+        // changeDesiredQueries call `#syncQueryPipelineSet('missing')` WITHOUT it.
+        // Rust folds config-update + init + missing-add into this one method (called
+        // from `config_and_hydrate` on every connect), so reproduce TS's semantics
+        // by gating on `pipelines_synced`: run the proactive re-hydrate only on the
+        // first sync after (re)init. Skipping it on later syncs does NOT skip
+        // new-query hydration — the drift/add loop below still hydrates any query
+        // missing from the pipeline (TS `'missing'` mode). Without this gate a big
+        // CG re-materialized every alive pipeline on every reconnect (whale-CG
+        // 20-88s hydrates, 2026-09-02).
+        let drifted_query_ids = if self.pipelines_synced {
+            std::collections::HashSet::new()
+        } else {
+            #[cfg(test)]
+            {
+                self.hydrate_unchanged_runs += 1;
+            }
+            self.hydrate_unchanged_queries(&cfg_cvr, &executed, &state_version)
+        };
 
         // Drift check: (re-)hydrate a query when it is missing OR its
         // transformation hash changed (auth re-transform / a new custom AST).
@@ -7717,6 +7763,13 @@ impl ViewSyncerService {
         // fully poked). When nothing needs hydrating, skip straight to catchup —
         // a reconnecting client with an old cookie still needs the row/config
         // patches between its cookie and the current CVR version.
+        //
+        // The pipeline set is now (re)synced for this CG — port of TS
+        // `#pipelinesSynced = true` at the end of the run-loop init block
+        // (view-syncer.ts:606). Gates the once-per-init `hydrate_unchanged_queries`
+        // above; reset to `false` by `reset_pipelines_and_rehydrate` (TS
+        // `#pipelines.reset()` + `#pipelinesSynced = false`, view-syncer.ts:575-576).
+        self.pipelines_synced = true;
         if add_queries.is_empty() {
             self.catchup_clients(
                 &cfg_cvr,
@@ -9838,6 +9891,129 @@ mod engine_tests {
             .unwrap();
         assert!(cvr.queries.contains_key("q1"));
         assert!(cvr.clients.contains_key("client1"));
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-02): `hydrate_unchanged_queries` — the proactive
+    /// re-materialize of every already-gotten pipeline — must run ONCE per pipeline
+    /// init (TS `#hydrateUnchangedQueries` gated by `#pipelinesSynced`,
+    /// view-syncer.ts:568-606), NOT on every connect/config-change. Before the fix
+    /// it ran inside `sync_query_pipeline_set` on every call, re-materializing a big
+    /// CG's whole query set on each reconnect (whale-CG 20-88s hydrates). Revert the
+    /// `pipelines_synced` gate → the counter reaches 2 across two syncs and the
+    /// `== 1` assert fails.
+    #[tokio::test]
+    async fn hydrate_unchanged_runs_once_per_pipeline_init() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+
+        let existing_rows: RowRecordMap = HashMap::new();
+        let ws = ["ws1".to_string()];
+        let empty_auth = serde_json::json!({});
+        let put = || {
+            vec![DesiredQuerySpec {
+                hash: "q1".to_string(),
+                ast: Some(serde_json::json!({"table": "users"})),
+                name: None,
+                args: None,
+                ttl: None,
+            }]
+        };
+
+        assert!(!engine.pipelines_synced, "starts un-synced");
+        let cvr = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &ws,
+                &shard,
+                put(),
+                Vec::new(),
+                false,
+                None,
+                None,
+                &empty_auth,
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(engine.pipelines_synced, "first sync marks pipelines synced");
+        assert_eq!(
+            engine.hydrate_unchanged_runs, 1,
+            "hydrate_unchanged_queries runs on the first (init) sync"
+        );
+
+        // Second sync (reconnect / config re-issue): must NOT re-run it.
+        let cvr = engine
+            .config_and_hydrate(
+                cvr,
+                "client1",
+                &ws,
+                &shard,
+                put(),
+                Vec::new(),
+                false,
+                None,
+                None,
+                &empty_auth,
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.hydrate_unchanged_runs, 1,
+            "a second sync on synced pipelines must NOT re-run the proactive re-hydrate"
+        );
+
+        // A pipeline reset re-arms it (TS `#pipelinesSynced = false` on
+        // `#pipelines.reset()`): simulate the flag reset and re-sync.
+        engine.pipelines_synced = false;
+        let _ = engine
+            .config_and_hydrate(
+                cvr,
+                "client1",
+                &ws,
+                &shard,
+                put(),
+                Vec::new(),
+                false,
+                None,
+                None,
+                &empty_auth,
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.hydrate_unchanged_runs, 2,
+            "after a reset the init re-hydrate runs again"
+        );
     }
 
     #[tokio::test]
