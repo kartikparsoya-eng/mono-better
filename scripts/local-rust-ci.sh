@@ -16,6 +16,30 @@ WAL2="$ROOT/packages/rust-ivm/wal2-sqlite"
     -DSQLITE_THREADSAFE=2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_COLUMN_METADATA \
     -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_DQS=0 && ar rcs libsqlite3.a sqlite3.o )
 export SQLITE3_LIB_DIR="$WAL2" SQLITE3_INCLUDE_DIR="$WAL2" SQLITE3_STATIC=1
+
+step "parity — vendored SQLite == the SQLite the TS zero-cache runs"
+# The planner's cost model IS SQLite's own estimate (scanstatus EST + stat1/stat4),
+# so rust and TS must link the SAME SQLite or their plans can legitimately differ
+# for identical data. TS's is whatever @rocicorp/zero-sqlite3 bundles; ours is
+# packages/rust-ivm/wal2-sqlite. Compare SQLITE_SOURCE_ID, not just the version.
+# Skips (passes) when node_modules is absent.
+ZS=$(ls -d "$ROOT"/node_modules/.pnpm/@rocicorp+zero-sqlite3@*/node_modules/@rocicorp/zero-sqlite3/deps/sqlite3 2>/dev/null | tail -1)
+if [ -n "$ZS" ] && [ -f "$ZS/sqlite3.h" ]; then
+  src_id() { grep -m1 '^#define SQLITE_SOURCE_ID' "$1" | sed 's/.*"\(.*\)".*/\1/'; }
+  ours=$(src_id "$WAL2/sqlite3.h"); theirs=$(src_id "$ZS/sqlite3.h")
+  if [ "$ours" = "$theirs" ]; then
+    echo "vendored SQLite matches zero-sqlite3: $ours"
+    chk 0 "sqlite source-id parity"
+  else
+    echo "MISMATCH — rust links a different SQLite than the TS zero-cache."
+    echo "  rust  (packages/rust-ivm/wal2-sqlite): $ours"
+    echo "  TS    (@rocicorp/zero-sqlite3):        $theirs"
+    echo "  Fix:  cp $ZS/sqlite3.{c,h} $ZS/sqlite3ext.h $WAL2/"
+    chk 1 "sqlite source-id parity"
+  fi
+else
+  echo "SKIP: @rocicorp/zero-sqlite3 not installed (run pnpm install)"
+fi
 # TEST_CVR_PG_URI: set to run PG-gated tests; unset => they skip+pass.
 export TEST_CVR_PG_URI="${TEST_CVR_PG_URI:-}"
 
