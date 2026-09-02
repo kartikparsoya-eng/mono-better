@@ -68,9 +68,13 @@ fn plan_ast_against_replica() {
         })
         .collect();
 
+    // The model keeps only a WEAK ref to the connection (so the snapshotter's
+    // explicit close is not blocked); the caller must hold it strong for the
+    // duration of planning, exactly like the engine does.
     let conn = Rc::new(RefCell::new(conn));
-    let model = create_sqlite_cost_model_prepared(conn, Rc::new(prepare_table_specs(table_specs)))
-        .expect("scanstatus cost model");
+    let model =
+        create_sqlite_cost_model_prepared(conn.clone(), Rc::new(prepare_table_specs(table_specs)))
+            .expect("scanstatus cost model");
 
     // The AST file is an inspector/transform payload: `{queries: [{ast}]}`, or
     // a bare AST.
@@ -90,6 +94,7 @@ fn plan_ast_against_replica() {
         Some(dbg.clone() as rust_ivm::planner::SharedPlanDebugger),
     );
 
+    drop(conn);
     let flips = rust_ivm::planner::flip_order(&planned);
     println!(
         "rust flips={}",
