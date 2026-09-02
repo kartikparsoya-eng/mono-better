@@ -406,3 +406,169 @@ async fn flush_defers_large_row_batches_to_the_write_back_cache() {
         "the background flush advances rowsVersion to the CVR version"
     );
 }
+
+/// Pins the ATOMIC snapshot-and-clear of the pending write-back rows — port of
+/// the synchronous block inside TS `#flush`'s `runTx` callback
+/// (row-record-cache.ts:270-284): `rows = #pending.size`, `executeRowUpdates(tx,
+/// rowsVersion, #pending, 'force')`, `#pending.clear()`. In TS that block cannot
+/// interleave with `apply()`, so a batch applied WHILE the transaction is in
+/// flight (the `'allow-defer'`-while-flushing path, and TS's own comment: "apply()
+/// may have called while the transaction was committing") stays pending and is
+/// written by the next loop iteration.
+///
+/// Non-vacuous: the previous rust loop cloned `pending`, ran the tx, and only
+/// THEN cleared `pending` — wiping batch 2 without ever writing it, then bumping
+/// `rowsVersion` to '03' over an empty map. With that shape this test fails on
+/// the row-set assertion (`["a","b"]`, not `["a","b","c","d"]`).
+///
+/// The in-flight transaction is held open by a side transaction that row-locks
+/// the CVR's `rowsVersion` row: the write-back's FIRST statement is the
+/// `rowsVersion` upsert, so it parks on that lock until the side tx rolls back.
+///
+/// Gated on `TEST_CVR_PG_URI`; skips (passes) when unset.
+#[tokio::test]
+async fn write_back_keeps_rows_applied_while_a_flush_transaction_is_in_flight() {
+    use rust_cvr::row_record_cache::RowRecordCache;
+    use rust_cvr::schema::types::RowRecord;
+
+    let _schema_guard = PG_SCHEMA.lock().await;
+    let uri = match std::env::var("TEST_CVR_PG_URI") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("SKIP write_back_keeps_rows_applied_while_in_flight: TEST_CVR_PG_URI unset");
+            return;
+        }
+    };
+    // write-back tx (parked) + side tx + load + test queries.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(6)
+        .connect(&uri)
+        .await
+        .expect("connect to TEST_CVR_PG_URI");
+
+    sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE"#))
+        .execute(&pool)
+        .await
+        .expect("drop schema");
+    sqlx::raw_sql(include_str!("../agentic/parity/flush-schema.sql"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    // The row the side transaction locks must exist before the write-back
+    // upserts it.
+    sqlx::query(&format!(
+        r#"INSERT INTO "{SCHEMA}"."rowsVersion" ("clientGroupID", "version") VALUES ($1, '01')"#
+    ))
+    .bind(CVR_ID)
+    .execute(&pool)
+    .await
+    .expect("seed rowsVersion");
+
+    let cache = RowRecordCache::new(
+        pool.clone(),
+        SCHEMA.to_string(),
+        CVR_ID.to_string(),
+        rust_cvr::row_record_cache::DEFAULT_DEFERRED_THRESHOLD,
+        Arc::new(|e: String| panic!("fail_service: {e}")),
+        None,
+    );
+    cache.load().await.expect("load empty cache");
+
+    let version = |s: &str| CVRVersion {
+        state_version: s.to_string(),
+        config_version: None,
+    };
+    let record = |id: &str, patch: &str| {
+        let row_id = RowID {
+            schema: String::new(),
+            table: "t".to_string(),
+            row_key: serde_json::json!({"id": id}).as_object().unwrap().clone(),
+        };
+        let rec = RowRecord {
+            id: row_id.clone(),
+            row_version: "r1".to_string(),
+            patch_version: version(patch),
+            ref_counts: Some(serde_json::from_value(serde_json::json!({"q1": 1})).unwrap()),
+        };
+        (row_id, Some(rec))
+    };
+
+    // Side transaction: hold the rowsVersion row lock.
+    let mut side = pool.begin().await.expect("side tx");
+    sqlx::query(&format!(
+        r#"SELECT 1 FROM "{SCHEMA}"."rowsVersion" WHERE "clientGroupID" = $1 FOR UPDATE"#
+    ))
+    .bind(CVR_ID)
+    .execute(&mut *side)
+    .await
+    .expect("lock rowsVersion row");
+
+    // Batch 1: spawns the write-back, whose transaction parks on the lock.
+    cache
+        .apply(
+            vec![record("a", "02"), record("b", "02")],
+            version("02"),
+            false,
+        )
+        .await
+        .expect("apply batch 1");
+    assert!(
+        cache.has_pending_updates().await,
+        "write-back must be in flight"
+    );
+
+    // Wait until the write-back backend is actually parked on the row lock, so
+    // batch 2 provably lands mid-transaction rather than before it started.
+    let parked_sql = r#"SELECT count(*) FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND state = 'active' AND query ILIKE '%rowsVersion%'"#;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let parked: i64 = sqlx::query_scalar(parked_sql)
+            .fetch_one(&pool)
+            .await
+            .expect("pg_stat_activity");
+        if parked >= 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "write-back never parked on the rowsVersion lock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    // Batch 2 lands while batch 1's transaction is in flight.
+    cache
+        .apply(
+            vec![record("c", "03"), record("d", "03")],
+            version("03"),
+            false,
+        )
+        .await
+        .expect("apply batch 2");
+
+    // Release the lock; the loop commits batch 1, then batch 2.
+    side.rollback().await.expect("release lock");
+    cache.flushed().await.expect("write-back completes");
+
+    let ids: Vec<String> = sqlx::query_scalar(&format!(
+        r#"SELECT "rowKey"->>'id' FROM "{SCHEMA}".rows WHERE "clientGroupID" = $1 ORDER BY 1"#
+    ))
+    .bind(CVR_ID)
+    .fetch_all(&pool)
+    .await
+    .expect("select rows");
+    assert_eq!(
+        ids,
+        vec!["a", "b", "c", "d"],
+        "rows applied during the in-flight write-back transaction must be persisted"
+    );
+    let rv: String = sqlx::query_scalar(&format!(
+        r#"SELECT version FROM "{SCHEMA}"."rowsVersion" WHERE "clientGroupID" = $1"#
+    ))
+    .bind(CVR_ID)
+    .fetch_one(&pool)
+    .await
+    .expect("select rowsVersion");
+    assert_eq!(rv, "03", "rowsVersion advances to the last applied version");
+}

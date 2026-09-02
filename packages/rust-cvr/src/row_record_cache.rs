@@ -653,7 +653,27 @@ async fn flush_loop(context: FlushLoopContext) {
         is_flushing,
     } = context;
     loop {
-        let (pending_clone, pending_version) = {
+        // Port of the SYNCHRONOUS block inside TS `#flush`'s `runTx` callback
+        // (row-record-cache.ts:270-284): `rows = #pending.size`, `rowsVersion =
+        // #pendingRowsVersion`, `executeRowUpdates(tx, rowsVersion, #pending,
+        // 'force')`, `#pending.clear()`. Because that block is synchronous, the
+        // snapshot of the pending rows and the clear are ATOMIC with respect to
+        // `apply()` — nothing can be added to `#pending` between them. The
+        // rust twin is `mem::take` under the state lock: the batch this
+        // iteration writes is exactly the set that was pending at snapshot time,
+        // and `pending` is empty again the moment the lock is released. An
+        // `apply(flushed=false)` that lands while the tx below is in flight (the
+        // `'allow-defer'`-while-flushing path) inserts into the FRESH map and is
+        // written by the next iteration (TS: "apply() may have called while the
+        // transaction was committing, which will result in looping to commit the
+        // next #pendingRowsVersion").
+        //
+        // The previous shape — `pending.clone()` here and `pending.clear()`
+        // AFTER the tx — wiped those concurrently-applied rows without ever
+        // writing them: the follow-up iteration saw `pending_rows_version !=
+        // flushed_rows_version`, cloned an EMPTY map, and bumped `rowsVersion`
+        // past rows that never reached `cvr.rows`.
+        let (pending, pending_version) = {
             let mut state = state.lock().await;
             if state.pending_rows_version == state.flushed_rows_version {
                 // Caught up — done.
@@ -661,7 +681,10 @@ async fn flush_loop(context: FlushLoopContext) {
                 is_flushing.store(false, Ordering::SeqCst);
                 return;
             }
-            (state.pending.clone(), state.pending_rows_version.clone())
+            (
+                std::mem::take(&mut state.pending),
+                state.pending_rows_version.clone(),
+            )
         };
 
         let version = match &pending_version {
@@ -674,15 +697,16 @@ async fn flush_loop(context: FlushLoopContext) {
         };
 
         let start = std::time::Instant::now();
-        let rows_count = pending_clone.len();
+        let rows_count = pending.len();
 
-        match flush_one_iteration(&pool, &schema, &cvr_id, &version, &pending_clone).await {
+        match flush_one_iteration(&pool, &schema, &cvr_id, &version, &pending).await {
             Ok(()) => {
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-                // Update state: clear pending, advance flushed version.
+                // Advance the flushed version. `pending` was already taken at
+                // snapshot time (see above); rows applied during the tx are in
+                // the live map and belong to the NEXT iteration.
                 let mut state = state.lock().await;
-                state.pending.clear();
                 state.flushed_rows_version = Some(version.clone());
                 drop(state);
 
