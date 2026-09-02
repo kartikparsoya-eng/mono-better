@@ -55,5 +55,8 @@ tail -1 /tmp/l1-structure.out
 step "parity — M5 unverified-claim guard (parity assertions must cite a .ts source)"
 python3 "$ROOT/parity/ban_unverified_claims.py"; chk $? "M5 unverified-claim ratchet"
 
+step "parity — M3 state-flag registry (TS lifecycle flags have rust counterparts)"
+python3 "$ROOT/parity/state_flag_registry.py"; chk $? "M3 state-flag registry"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail
