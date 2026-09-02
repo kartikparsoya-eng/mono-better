@@ -113,3 +113,7 @@ dhat-heap.json
 **/dhat-heap.json
 packages/rust-ivm/wal2-sqlite/libsqlite3.a
 packages/rust-ivm/wal2-sqlite/sqlite3.o
+
+# Fuzz corpora and crash artifacts are local run state, not source.
+packages/*/fuzz/corpus/
+packages/*/fuzz/artifacts/
