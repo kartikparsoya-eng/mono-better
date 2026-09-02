@@ -21,7 +21,9 @@ use rust_cvr::cvr::DesiredQuerySpec;
 use rust_cvr::cvr::RowRecordMap;
 use rust_cvr::shards::ShardID;
 use rust_syncer::services::view_syncer::pipeline_driver::IvmPipelines;
-use rust_syncer::services::view_syncer::view_syncer::{ViewSyncerService as SyncEngine, empty_cvr};
+use rust_syncer::services::view_syncer::view_syncer::{
+    CustomQueryTransformMode, ViewSyncerService as SyncEngine, empty_cvr,
+};
 use rust_syncer::ws_sink::{DirectWebSocketSink, WsCommand};
 
 #[test]
@@ -91,6 +93,7 @@ fn hydrate_real_rows_produces_row_pokes() {
             Vec::new(),
             false,
             None,
+            CustomQueryTransformMode::All,
             Some(&anyone_can),
             &serde_json::json!({}),
             None,
@@ -209,6 +212,7 @@ fn lmids_internal_query_produces_last_mutation_id_changes() {
             Vec::new(),
             false,
             None,
+            CustomQueryTransformMode::All,
             None,
             &serde_json::json!({}),
             None,
@@ -328,6 +332,7 @@ fn hydrate_multiple_queries_pokes_rows_from_each() {
             Vec::new(),
             false,
             None,
+            CustomQueryTransformMode::All,
             Some(&anyone_can),
             &serde_json::json!({}),
             None,
@@ -454,6 +459,7 @@ fn hydrate_custom_query_resolves_via_transform_and_pokes_rows() {
             Vec::new(),
             false,
             None,
+            CustomQueryTransformMode::All,
             None,
             &serde_json::json!({}),
             Some(&ctx),
@@ -574,6 +580,7 @@ fn partial_success_transform_hydrates_healthy_query() {
             Vec::new(),
             false,
             None,
+            CustomQueryTransformMode::All,
             None,
             &serde_json::json!({}),
             Some(&ctx),
@@ -703,6 +710,7 @@ fn transform_failure_fails_only_the_offending_connection() {
         Vec::new(),
         false,
         None,
+        CustomQueryTransformMode::All,
         None,
         &serde_json::json!({}),
         Some(&ctx),

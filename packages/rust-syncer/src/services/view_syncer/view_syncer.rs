@@ -78,6 +78,24 @@ const TTL_TIMER_HYSTERESIS_MS: i64 = 50;
 /// Interval between periodic ttlClock persistence ticks. Port of TS
 /// `TTL_CLOCK_INTERVAL` (view-syncer.ts:202).
 const TTL_CLOCK_INTERVAL: i64 = 60_000;
+
+/// Whether a `sync_query_pipeline_set` pass re-transforms EVERY custom (named)
+/// query, or only those missing from the pipeline. Port of TS
+/// `type CustomQueryTransformMode = 'all' | 'missing'` (view-syncer.ts:212).
+///
+/// `All` is used where TS re-validates authorization with the user's API server
+/// on every pass — new connections (view-syncer.ts:945), `updateAuth`
+/// (view-syncer.ts:1019), and the background retransform (view-syncer.ts:2670).
+/// `Missing` is the steady-state mode — `changeDesiredQueries`
+/// (view-syncer.ts:978), `deleteClients` (view-syncer.ts:1040), the run-loop
+/// init sync (view-syncer.ts:599), and `#removeExpiredQueries`
+/// (view-syncer.ts:644) — where an already-hydrated custom query keeps its
+/// existing transform instead of paying another API round-trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomQueryTransformMode {
+    All,
+    Missing,
+}
 /// Upper bound on a single eviction-timer delay (matches `rust_cvr::ttl::MAX_TTL_MS`).
 const MAX_TTL_MS: i64 = 600_000;
 /// How long an empty client-group worker stays warm after its latest connection.
@@ -632,7 +650,14 @@ impl ViewSyncerDispatch for CgViewSyncer {
         };
         let body = second_element(msg);
         svc.borrow_mut()
-            .handle_desired_queries(&selector.client_id, &body, false)
+            // TS `changeDesiredQueries` -> `#handleConfigUpdate(..., 'missing', ...)`
+            // (view-syncer.ts:981).
+            .handle_desired_queries(
+                &selector.client_id,
+                &body,
+                false,
+                CustomQueryTransformMode::Missing,
+            )
             .await;
     }
 
@@ -680,7 +705,14 @@ impl ViewSyncerDispatch for CgViewSyncer {
         };
         let body = second_element(msg);
         svc.borrow_mut()
-            .handle_desired_queries(&selector.client_id, &body, true)
+            // TS `initConnection` -> `#handleConfigUpdate(..., 'all', ...)`:
+            // "re transform all on new connections" (view-syncer.ts:949).
+            .handle_desired_queries(
+                &selector.client_id,
+                &body,
+                true,
+                CustomQueryTransformMode::All,
+            )
             .await
     }
 
@@ -808,6 +840,13 @@ pub struct ViewSyncerService {
     /// not per sync.
     #[cfg(test)]
     hydrate_unchanged_runs: u64,
+    /// Test observability: how many times `validate_connection` (TS
+    /// `#validateConnection`) actually ran. Pins the TS gates that decide WHETHER
+    /// to validate — `updateAuth`'s `if (!this.#pipelinesSynced)`
+    /// (view-syncer.ts:1011) above all — which no other observable distinguishes
+    /// without a live query-API round trip.
+    #[cfg(test)]
+    validate_connection_runs: u64,
     /// The userID this client group is pinned to (the `sub` of the first authed
     /// connection; `None` for an anonymous group). Admission
     /// (`check_and_pin_user`) guarantees every connection reaching this CG shares
@@ -1111,6 +1150,8 @@ impl ViewSyncerService {
             pipelines_synced: false,
             #[cfg(test)]
             hydrate_unchanged_runs: 0,
+            #[cfg(test)]
+            validate_connection_runs: 0,
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -1365,6 +1406,18 @@ impl ViewSyncerService {
         };
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
+        // TS `#removeExpiredQueries` syncs the pipeline set ONLY when pipelines
+        // are synced: `if (this.#pipelinesSynced) { await
+        // this.#syncQueryPipelineSet(lc, cvr, 'missing', undefined); }`
+        // (view-syncer.ts:642-645). Before pipelines are initialized there is no
+        // pipeline to remove a query FROM; the timer is still rescheduled below
+        // (TS reschedules outside the `hasExpiredQueries` branch), so the expiry
+        // simply lands on the next tick after init.
+        if !self.pipelines_synced {
+            self.schedule_expire_eviction(&cvr);
+            self.cvr = Some(cvr);
+            return;
+        }
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
         let existing_rows = self.existing_rows().await;
         self.last_row_count = existing_rows.len();
@@ -1564,88 +1617,46 @@ impl ViewSyncerService {
 
         // Probe + record each surviving due connection (TS `#validateConnection`
         // per `dueRevalidations` entry).
-        let shard = self.shard.clone();
-        let plan_by_client: std::collections::HashMap<String, (String, u32)> = plan
+        // TS iterates the plan's `ConnectionContext`s directly; keep the real
+        // contexts (not a fabricated triple) so `validate_connection` sees the
+        // same `revision` TS's `#validateConnection` reads off `connCtx`.
+        let plan_by_client: std::collections::HashMap<String, CcmConnectionContext> = plan
             .due_revalidations
             .iter()
-            .map(|c| (c.client_id.clone(), (c.ws_id.clone(), c.revision)))
+            .map(|c| (c.client_id.clone(), c.clone()))
             .collect();
         for client_id in survivors {
-            let Some((ws_id, revision)) = plan_by_client.get(&client_id).cloned() else {
+            let Some(conn_ctx) = plan_by_client.get(&client_id).cloned() else {
                 continue;
             };
+            let ws_id = conn_ctx.ws_id.clone();
             if self.registered_ws.get(&client_id) != Some(&ws_id) {
                 continue;
             }
-            let selector = CcmConnectionSelector {
-                client_id: client_id.clone(),
-                ws_id: ws_id.clone(),
-            };
-
-            // Server-side revocation probe. Port of TS `#validateConnection` →
-            // `CustomQueryTransformer.validate`: when a custom query API is
-            // configured for this client, POST an empty transform so the API
-            // server can reject a token that is cryptographically valid but
-            // revoked/deauthorized at the app layer (local `validate_auth` above
-            // only catches expiry/signature/user-swap). No query API configured →
-            // no ctx → no probe (the TS `client-fallback` path). An AUTH error
-            // (401/403) invalidates the connection; a transient failure (API down
-            // / 5xx) DEFERS the remaining maintenance — keep the connection and
-            // retry at the deferred deadline (TS `deferMaintenance('revalidate')`
-            // + early return), never close on a blip.
-            let ctx = self.query_context_for(&client_id, &ws_id);
-            if let Some(ctx) = ctx {
-                match crate::custom_queries::transform_query::validate_custom_queries(&ctx, &shard)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(body) => {
-                        if crate::custom_queries::transform_query::is_auth_error_body(&body) {
-                            tracing::warn!(
-                                "CG {}: server-side auth revocation for client {client_id}; closing",
-                                self.cg_id
-                            );
-                            crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
-                            lock_unpoisoned(&self.ccm).fail_connection(&selector, revision);
-                            if let Some(conn) = self.connections.get(&client_id) {
-                                conn.close_with_error(crate::protocol::ErrorBody::unauthorized(
-                                    "Connection auth validation failed",
-                                ));
-                            }
-                            if let Some(ws) = self.registered_ws.get(&client_id).cloned() {
-                                self.on_connection_closed(&client_id, &ws);
-                            }
-                            continue;
-                        }
-                        // Exact TS wording (view-syncer.ts:841-848): the message
-                        // string mirrors TS verbatim; cg/client go in structured
-                        // fields the way TS passes `{clientID, wsID, message}`.
-                        tracing::warn!(
-                            cg_id = %self.cg_id,
-                            client_id = %client_id,
-                            "Scheduled auth revalidation failed; deferring auth maintenance"
-                        );
-                        lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Revalidate);
-                        self.arm_auth_maintenance();
-                        return;
-                    }
+            // TS: `for (const connCtx of plan.dueRevalidations) { try {
+            //        await this.#validateConnection(connCtx); } catch (e) { ... } }`
+            // (view-syncer.ts:836-856). The revocation probe, the auth-error
+            // close and the CCM record all live inside `validate_connection`;
+            // this loop handles only what TS's `catch` handles — a
+            // TransformFailed (API down / 5xx) DEFERS the remaining maintenance
+            // and returns, never closing the connection on a blip.
+            match self.validate_connection(&conn_ctx).await {
+                Ok(true) => {}
+                // Auth error: `validate_connection` already failed + closed it.
+                Ok(false) => continue,
+                Err(_body) => {
+                    // Exact TS wording (view-syncer.ts:841-848): the message
+                    // string mirrors TS verbatim; cg/client go in structured
+                    // fields the way TS passes `{clientID, wsID, message}`.
+                    tracing::warn!(
+                        cg_id = %self.cg_id,
+                        client_id = %client_id,
+                        "Scheduled auth revalidation failed; deferring auth maintenance"
+                    );
+                    lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Revalidate);
+                    self.arm_auth_maintenance();
+                    return;
                 }
-            }
-
-            // Record the successful (re)validation: refreshes `revalidate_at`
-            // and lets the CCM promote/refresh the background connection (TS
-            // `connContextManager.validateConnection(connCtx, revision,
-            // validation)` with the client-fallback kind — the probe returns no
-            // server-validated userID).
-            if let Err(e) = lock_unpoisoned(&self.ccm).validate_connection(
-                &selector,
-                revision,
-                &ConnectionValidation::ClientFallback,
-            ) {
-                tracing::warn!(
-                    "CG {}: recording revalidation failed for client {client_id}: {e:?}",
-                    self.cg_id
-                );
             }
         }
 
@@ -1664,6 +1675,89 @@ impl ViewSyncerService {
         // Re-arm from the refreshed plan (TS `#scheduleAuthMaintenance` in the
         // locked-op `finally`).
         self.arm_auth_maintenance();
+    }
+
+    /// Validate a connection's credential against the query API server and record
+    /// the result on the CCM. Port of TS `ViewSyncerService.#validateConnection`
+    /// (view-syncer.ts:2749-2783).
+    ///
+    /// TS returns `Promise<boolean>` and THROWS on a non-auth failure; the rust
+    /// mapping is `Result<bool, Value>`:
+    ///   * `Ok(true)`  — validated (TS `return true`).
+    ///   * `Ok(false)` — an AUTH error (401/403/AuthInvalidated/Unauthorized)
+    ///     invalidated the connection; `fail_maintenance_connection` already
+    ///     closed it (TS `catch` → `#failMaintenanceConnection` → `return false`).
+    ///   * `Err(body)` — a NON-auth failure (API down / 5xx / malformed). TS
+    ///     rethrows here so each CALLER decides: auth maintenance defers
+    ///     (view-syncer.ts:839-856), init/updateAuth propagate.
+    ///
+    /// Rust limitation (NOT TS parity — do not read this as equivalent): TS uses
+    /// `response.validation`, which can carry the API server's authoritative
+    /// userID; rust's `validate_custom_queries` returns `Ok(())` ("Success is
+    /// intentionally opaque"), so a successful probe still records the
+    /// `client-fallback` kind. Threading the server userID through is tracked as
+    /// an open row in `parity/ZERO-DIVERGENCE-PLAN.md`'s M0 matrix.
+    async fn validate_connection(
+        &mut self,
+        conn_ctx: &CcmConnectionContext,
+    ) -> Result<bool, serde_json::Value> {
+        #[cfg(test)]
+        {
+            self.validate_connection_runs += 1;
+        }
+        let selector = CcmConnectionSelector {
+            client_id: conn_ctx.client_id.clone(),
+            ws_id: conn_ctx.ws_id.clone(),
+        };
+        // TS: `if (this.#customQueryTransformer) { ...validate... } else {
+        //      validation = {kind: 'client-fallback'} }`
+        // Rust's transformer twin is the per-connection `CustomQueryContext`;
+        // `None` (no `userQueryURL` configured) is TS's no-transformer branch.
+        if let Some(ctx) = self.query_context_for(&conn_ctx.client_id, &conn_ctx.ws_id) {
+            let shard = self.shard.clone();
+            if let Err(body) =
+                crate::custom_queries::transform_query::validate_custom_queries(&ctx, &shard).await
+            {
+                // TS throws `ProtocolErrorWithLevel(response, 'warn')` here and
+                // the catch below splits auth-error from everything else.
+                if crate::custom_queries::transform_query::is_auth_error_body(&body) {
+                    // Exact TS wording + structured fields (view-syncer.ts:2769-2777).
+                    tracing::warn!(
+                        cg_id = %self.cg_id,
+                        client_id = %conn_ctx.client_id,
+                        ws_id = %conn_ctx.ws_id,
+                        revision = conn_ctx.revision,
+                        message = %transform_failure_message(&body),
+                        "Connection auth validation failed; invalidating connection"
+                    );
+                    crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+                    self.fail_maintenance_connection(
+                        conn_ctx,
+                        crate::protocol::ErrorBody::unauthorized(
+                            "Connection auth validation failed",
+                        ),
+                    );
+                    return Ok(false);
+                }
+                return Err(body);
+            }
+        }
+
+        // TS `this.connContextManager.validateConnection(connCtx, connCtx.revision,
+        // validation)` — refreshes `revalidate_at` and lets the CCM promote or
+        // refresh the group's background connection.
+        if let Err(e) = lock_unpoisoned(&self.ccm).validate_connection(
+            &selector,
+            conn_ctx.revision,
+            &ConnectionValidation::ClientFallback,
+        ) {
+            tracing::warn!(
+                "CG {}: recording validation failed for client {}: {e:?}",
+                self.cg_id,
+                conn_ctx.client_id
+            );
+        }
+        Ok(true)
     }
 
     /// Fail an auth-maintenance connection: drop it from the CCM (revision-
@@ -1726,8 +1820,16 @@ impl ViewSyncerService {
         // retransform's outcome.
         self.background_retransform_failure = None;
         let empty_body = serde_json::json!({});
-        self.handle_desired_queries(&bg.client_id, &empty_body, true)
-            .await;
+        // TS `#runBackgroundRetransform` -> `#syncQueryPipelineSet(..., 'all', connCtx)`
+        // (view-syncer.ts:2673): the whole point is to re-authorize every custom
+        // query against the refreshed credential.
+        self.handle_desired_queries(
+            &bg.client_id,
+            &empty_body,
+            true,
+            CustomQueryTransformMode::All,
+        )
+        .await;
         classify_retransform_failure(self.background_retransform_failure.take())
     }
 
@@ -2137,6 +2239,10 @@ impl ViewSyncerService {
         client_id: &str,
         body: &serde_json::Value,
         is_init: bool,
+        // TS passes the mode EXPLICITLY at every `#handleConfigUpdate` call site
+        // rather than deriving it (view-syncer.ts:949/981/1023/1043); each rust
+        // caller does the same and cites its TS line.
+        custom_query_transform_mode: CustomQueryTransformMode,
     ) -> bool {
         let Some(ws_id) = self.registered_ws.get(client_id).cloned() else {
             tracing::warn!(
@@ -2324,6 +2430,7 @@ impl ViewSyncerService {
                     dels,
                     clear,
                     client_schema,
+                    custom_query_transform_mode,
                     profile_id.as_deref(),
                     permissions.as_ref(),
                     &auth_data,
@@ -2516,32 +2623,53 @@ impl ViewSyncerService {
                 client_id: client_id.to_string(),
                 ws_id,
             };
-            let mut ccm = lock_unpoisoned(&self.ccm);
-            let _ = ccm.update_auth(
-                &selector,
-                &UpdateAuthBody {
-                    auth: Some(token.to_string()),
-                },
-            );
-            // TS re-validates on updateAuth (view-syncer.ts:1012 →
-            // `connContextManager.validateConnection`): record against the
-            // BUMPED revision so the refreshed credential gets a fresh
-            // `revalidate_at` deadline.
-            if let Ok(ctx) = ccm.must_get_connection_context(&selector)
-                && let Err(e) = ccm.validate_connection(
+            let conn_ctx = {
+                let mut ccm = lock_unpoisoned(&self.ccm);
+                let _ = ccm.update_auth(
                     &selector,
-                    ctx.revision,
-                    &ConnectionValidation::ClientFallback,
-                )
-            {
-                tracing::warn!(
-                    "CG {}: updateAuth validateConnection failed: {e:?}",
-                    self.cg_id
+                    &UpdateAuthBody {
+                        auth: Some(token.to_string()),
+                    },
                 );
+                // Read the context back AFTER the bump so validation is recorded
+                // against the refreshed credential's revision.
+                ccm.must_get_connection_context(&selector).ok()
+            };
+            // TS: "If pipelines are not yet synced, there is no transform request
+            // that can absorb validation, so validate immediately."
+            //   if (!this.#pipelinesSynced) {
+            //     if (!(await this.#validateConnection(connCtx))) return;
+            //   }
+            // (view-syncer.ts:1009-1015). Once pipelines ARE synced the `'all'`
+            // re-transform below carries the validation, and TS deliberately lets
+            // it — validating here as well would record a CLIENT-asserted identity
+            // instead of the API server's, which is what TS's comment at
+            // view-syncer.ts:1988-1990 exists to prevent. A failed validation
+            // RETURNS: no re-transform on a credential that did not validate.
+            if !self.pipelines_synced
+                && let Some(conn_ctx) = conn_ctx
+            {
+                match self.validate_connection(&conn_ctx).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(e) => {
+                        // TS rethrows; the ViewSyncer's caller turns it into a
+                        // failed connection. Rust has no unwind across the serial
+                        // CG task, so warn and stop this updateAuth here.
+                        tracing::warn!(
+                            "CG {}: updateAuth connection validation failed: {e:?}",
+                            self.cg_id
+                        );
+                        return;
+                    }
+                }
             }
         }
         let empty_body = serde_json::json!({});
-        self.handle_desired_queries(client_id, &empty_body, true)
+        // TS `updateAuth` -> `#handleConfigUpdate(..., 'all', ...)`: "Re-transform
+        // all queries so auth-sensitive query expansion matches the newly
+        // validated credential" (view-syncer.ts:1023).
+        self.handle_desired_queries(client_id, &empty_body, true, CustomQueryTransformMode::All)
             .await;
         // Locked-op re-arm (TS `#scheduleAuthMaintenance` in the `finally`).
         self.arm_auth_maintenance();
@@ -3045,6 +3173,12 @@ impl ViewSyncerService {
                     Vec::new(),
                     false,
                     None,
+                    // TS's run-loop init sync re-transforms only what is missing:
+                    // `#hydrateUnchangedQueries` (which just transformed every
+                    // custom query) is followed by
+                    // `#syncQueryPipelineSet(lc, cvr, 'missing', undefined, drifted)`
+                    // (view-syncer.ts:599-605).
+                    CustomQueryTransformMode::Missing,
                     profile_id.as_deref(),
                     permissions.as_ref(),
                     &auth_data,
@@ -4333,6 +4467,72 @@ mod tests {
             state.metrics.snapshot()["authChanges"],
             1,
             "opaque token refresh must trigger a re-transform"
+        );
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-02): `updateAuth` validates the connection ONLY
+    /// when pipelines are not yet synced. TS:
+    /// ```text
+    /// // If pipelines are not yet synced, there is no transform request that
+    /// // can absorb validation, so validate immediately.
+    /// if (!this.#pipelinesSynced) {
+    ///   if (!(await this.#validateConnection(connCtx))) return;
+    /// }
+    /// ```
+    /// (view-syncer.ts:1009-1015). Once synced, the `'all'` re-transform carries
+    /// the validation and TS deliberately does NOT validate here — validating
+    /// anyway records a CLIENT-asserted identity instead of the API server's
+    /// (the hazard view-syncer.ts:1988-1990 calls out).
+    ///
+    /// Before the fix rust validated on EVERY updateAuth. Revert the
+    /// `!self.pipelines_synced` gate → the second half's `== 1` assert fails
+    /// (the counter reaches 2).
+    #[test]
+    fn update_auth_validates_only_when_pipelines_are_not_synced() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+
+        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let mut params = authed_params("c1", "ws1", "opaque-token-1");
+        params.user_id = Some("user-1".to_string());
+        rt.block_on(state.on_new_connection(params, DirectWebSocketSink::new(tx)));
+
+        // Pipelines NOT synced (a connection that has not completed its first
+        // sync): updateAuth must validate immediately.
+        state.pipelines_synced = false;
+        let before = state.validate_connection_runs;
+        rt.block_on(state.handle_update_auth("c1", "opaque-token-2"));
+        assert_eq!(
+            state.validate_connection_runs - before,
+            1,
+            "with pipelines unsynced, updateAuth must validate immediately \
+             (TS view-syncer.ts:1011)"
+        );
+
+        // Pipelines synced (steady state): the `'all'` re-transform absorbs the
+        // validation, so updateAuth must NOT validate here.
+        //
+        // A FRESH connection is required: the barebones test factory's
+        // config/hydrate fails, which tears the first connection down — without
+        // re-registering, `handle_update_auth` would bail at the
+        // `registered_ws` lookup and this half would pass vacuously.
+        let (tx2, _drx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let mut params2 = authed_params("c2", "ws2", "opaque-token-1");
+        params2.user_id = Some("user-1".to_string());
+        rt.block_on(state.on_new_connection(params2, DirectWebSocketSink::new(tx2)));
+        assert!(
+            state.registered_ws.contains_key("c2"),
+            "the second half needs a live connection or it asserts nothing"
+        );
+        state.pipelines_synced = true;
+        let before = state.validate_connection_runs;
+        rt.block_on(state.handle_update_auth("c2", "opaque-token-3"));
+        assert_eq!(
+            state.validate_connection_runs - before,
+            0,
+            "with pipelines synced, TS does NOT validate in updateAuth — the \
+             re-transform carries it (view-syncer.ts:1009-1015)"
         );
     }
 
@@ -5874,6 +6074,7 @@ mod tests {
             "c1",
             &serde_json::json!({"desiredQueriesPatch": []}),
             true,
+            CustomQueryTransformMode::All,
         ));
 
         let error = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command {
@@ -6754,6 +6955,8 @@ impl ViewSyncerService {
             pipelines_synced: false,
             #[cfg(test)]
             hydrate_unchanged_runs: 0,
+            #[cfg(test)]
+            validate_connection_runs: 0,
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -7221,6 +7424,7 @@ impl ViewSyncerService {
         desired_dels: Vec<String>,
         desired_clear: bool,
         client_schema: Option<ClientSchema>,
+        custom_query_transform_mode: CustomQueryTransformMode,
         permissions: Option<&serde_json::Value>,
         auth_data: &serde_json::Value,
         custom_ctx: Option<&CustomQueryContext>,
@@ -7240,6 +7444,7 @@ impl ViewSyncerService {
             desired_dels,
             desired_clear,
             client_schema,
+            custom_query_transform_mode,
             None,
             permissions,
             auth_data,
@@ -7267,6 +7472,12 @@ impl ViewSyncerService {
         // before puts, so a clear+resubscribe patch replaces the whole set).
         desired_clear: bool,
         client_schema: Option<ClientSchema>,
+        // Whether this pass re-transforms EVERY custom query or only those
+        // missing from the pipeline. TS threads this through
+        // `#handleConfigUpdate` -> `#updateCVRConfig` -> `#syncQueryPipelineSet`
+        // (view-syncer.ts:1128/1281/1875); rust's orchestrator hands it to
+        // `sync_query_pipeline_set` directly (the two TS methods it chains).
+        custom_query_transform_mode: CustomQueryTransformMode,
         profile_id: Option<&str>,
         // Read-permission transformation inputs. When `permissions` is `None`
         // (no permissions deployed) client queries are transformed with an
@@ -7347,6 +7558,7 @@ impl ViewSyncerService {
         );
         self.sync_query_pipeline_set(
             cfg_cvr,
+            custom_query_transform_mode,
             poke_ws_ids,
             shard,
             permissions,
@@ -7462,6 +7674,7 @@ impl ViewSyncerService {
     async fn sync_query_pipeline_set(
         &mut self,
         cfg_cvr: CVR,
+        custom_query_transform_mode: CustomQueryTransformMode,
         poke_ws_ids: &[String],
         shard: &ShardID,
         permissions: Option<&serde_json::Value>,
@@ -7522,7 +7735,8 @@ impl ViewSyncerService {
         // leak (served the full table; caught by ART G8 via the #158 rider).
         let empty_permissions = serde_json::json!({"tables": {}});
         let mut executed: Vec<(String, serde_json::Value, String)> = Vec::new();
-        let mut custom_specs: Vec<CustomQuerySpec> = Vec::new();
+        // TS `customQueries` — the CVR's FULL custom-query set (view-syncer.ts:1899).
+        let mut custom_queries: Vec<CustomQuerySpec> = Vec::new();
         for (qid, record) in &cfg_cvr.queries {
             match record {
                 QueryRecord::Internal(r) => {
@@ -7533,7 +7747,7 @@ impl ViewSyncerService {
                     let (ast, hash) = transform_and_hash_query(&r.ast, perms, auth_data, false);
                     executed.push((qid.clone(), ast, hash));
                 }
-                QueryRecord::Custom(r) => custom_specs.push(CustomQuerySpec {
+                QueryRecord::Custom(r) => custom_queries.push(CustomQuerySpec {
                     id: qid.clone(),
                     name: r.name.clone(),
                     args: r.args.clone(),
@@ -7541,20 +7755,54 @@ impl ViewSyncerService {
             }
         }
 
+        // TS emits this warning off the FULL custom-query set, BEFORE the mode
+        // filter (view-syncer.ts:1948-1952): a client asking for named queries
+        // when no query URL is configured is warned regardless of what this pass
+        // would actually re-transform.
+        if !custom_queries.is_empty() && custom_ctx.is_none() {
+            tracing::warn!(
+                "custom queries present but no userQueryURL context; skipping {} query(ies)",
+                custom_queries.len()
+            );
+        }
+
+        // Port of TS `customQueriesToTransform` (view-syncer.ts:1954-1959):
+        //   customQueryTransformMode === 'all'
+        //     ? [...customQueries.values()]
+        //     : [...customQueries.values()].filter(q => !this.#pipelines.queries().has(q.id))
+        // `All` re-transforms every custom query — TS does this on new
+        // connections / `updateAuth` / background retransform so the user's API
+        // server re-authorizes against the current auth context. `Missing`
+        // re-transforms only queries that are not already hydrated, so a
+        // steady-state pass costs no API round-trip for queries already running.
+        // Skipping the filter made every sync re-transform the whole custom set.
+        let custom_queries_to_transform: Vec<CustomQuerySpec> = match custom_query_transform_mode {
+            CustomQueryTransformMode::All => custom_queries,
+            CustomQueryTransformMode::Missing => custom_queries
+                .into_iter()
+                .filter(|q| !self.pipelines.has_query(&q.id))
+                .collect(),
+        };
+
         // Resolve custom queries against the API server. Per-query errors are
         // forwarded to the client as `transformError` (healthy queries proceed);
         // a whole-request failure fails the connection with the transform error.
-        if !custom_specs.is_empty() {
+        // TS: `if (customQueryTransformer && customQueriesToTransform.length > 0)`
+        // (view-syncer.ts:1960) — no transformer configured means no transform at
+        // all (it already warned above).
+        if let Some(ctx) = custom_ctx
+            && !custom_queries_to_transform.is_empty()
+        {
             let mut transform_errors: Vec<serde_json::Value> = Vec::new();
-            match custom_ctx {
-                Some(ctx) => {
+            {
+                {
                     // TS wraps the transform in try/catch/finally, recording
                     // `zero.sync.query.transformations{result}` + timing
                     // (view-syncer.ts:1782-1789). Time the API-server round-trip
                     // and tag the outcome; the histogram observes on both paths.
                     let transform_started = std::time::Instant::now();
                     let transform_result =
-                        transform_custom_queries(ctx, shard, &custom_specs).await;
+                        transform_custom_queries(ctx, shard, &custom_queries_to_transform).await;
                     crate::metrics::record_query_transformation_time(
                         transform_started.elapsed().as_secs_f64() * 1000.0,
                     );
@@ -7591,10 +7839,6 @@ impl ViewSyncerService {
                         }
                     }
                 }
-                None => tracing::warn!(
-                    "custom queries present but no userQueryURL context; skipping {} query(ies)",
-                    custom_specs.len()
-                ),
             }
             if !transform_errors.is_empty() {
                 for c in &self.clients_for(poke_ws_ids) {
@@ -7643,8 +7887,10 @@ impl ViewSyncerService {
         // queries with an existing CVR transform hash (view-syncer.ts:1818-1843).
         // The `Some(_)` arms below imply an existing hash; gate on custom id to
         // match TS (internal/client re-transforms are not counted here).
-        let custom_ids: std::collections::HashSet<&str> =
-            custom_specs.iter().map(|s| s.id.as_str()).collect();
+        let custom_ids: std::collections::HashSet<&str> = custom_queries_to_transform
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
         for (qid, transformed_ast, transformation_hash) in executed {
             let is_custom = custom_ids.contains(qid.as_str());
             // Owned copy: `check_for_thrashing` needs `&mut self` inside the
@@ -9604,6 +9850,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -9634,6 +9881,123 @@ mod engine_tests {
         assert!(
             starts >= 1 && ends >= 1,
             "expected poke frames: {starts} starts, {ends} ends"
+        );
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-02): the TTL expiry tick syncs the pipeline set
+    /// ONLY when pipelines are synced. TS:
+    /// ```text
+    /// // #syncQueryPipelineSet() will remove the expired queries.
+    /// if (this.#pipelinesSynced) {
+    ///   await this.#syncQueryPipelineSet(lc, cvr, 'missing', undefined);
+    /// }
+    /// ```
+    /// (view-syncer.ts:642-645), with the eviction timer rescheduled either way.
+    /// Rust ran `remove_expired_queries` unconditionally. Revert the
+    /// `if !self.pipelines_synced` early return in `on_expiry_tick` → the
+    /// "unsynced tick must not remove" assert fails.
+    #[tokio::test]
+    async fn expiry_tick_removes_nothing_until_pipelines_are_synced() {
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+        let existing_rows: RowRecordMap = HashMap::new();
+        let ws = vec!["ws1".to_string()];
+
+        // Subscribe q1 with a 1000ms TTL, then unsubscribe it at ttl_clock=0 so
+        // it is INACTIVE (still hydrated) and expires at ttl_clock >= 1000.
+        let cvr = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &ws,
+                &shard,
+                vec![DesiredQuerySpec {
+                    hash: "q1".to_string(),
+                    ast: Some(serde_json::json!({"table": "users"})),
+                    name: None,
+                    args: None,
+                    ttl: Some(1000),
+                }],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let cvr = engine
+            .config_and_hydrate(
+                cvr,
+                "client1",
+                &ws,
+                &shard,
+                Vec::new(),
+                vec!["q1".to_string()],
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(engine.pipelines().has_query("q1"), "inactive query lingers");
+
+        // Park the TTL clock past the query's deadline so the tick would expire
+        // it if it ran (`get_ttl_clock` advances by `now - ttl_clock_base`).
+        engine.cvr = Some(cvr);
+        engine.ttl_clock = 2000;
+        engine.ttl_clock_base = now_ms();
+
+        // Pipelines NOT synced → TS skips the sync entirely; the query stays.
+        engine.pipelines_synced = false;
+        engine.on_expiry_tick().await;
+        assert!(
+            engine.pipelines().has_query("q1"),
+            "an unsynced expiry tick must not remove queries (TS view-syncer.ts:643)"
+        );
+        assert!(
+            engine.cvr.is_some(),
+            "the early return must put the CVR back, not drop it"
+        );
+        assert!(
+            engine.expired_queries_timer.is_some(),
+            "TS reschedules the eviction timer even when it skips the sync"
+        );
+
+        // Pipelines synced → the same tick expires it.
+        engine.ttl_clock = 2000;
+        engine.ttl_clock_base = now_ms();
+        engine.pipelines_synced = true;
+        engine.on_expiry_tick().await;
+        assert!(
+            !engine.pipelines().has_query("q1"),
+            "a synced expiry tick must remove the expired query"
         );
     }
 
@@ -9672,6 +10036,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -9697,6 +10062,7 @@ mod engine_tests {
                 vec!["q1".to_string()],
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -9764,6 +10130,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -9793,6 +10160,7 @@ mod engine_tests {
                 Vec::new(),
                 true, // clear
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -9852,6 +10220,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -9877,6 +10246,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -9891,6 +10261,196 @@ mod engine_tests {
             .unwrap();
         assert!(cvr.queries.contains_key("q1"));
         assert!(cvr.clients.contains_key("client1"));
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-02): `customQueryTransformMode` — a `Missing`
+    /// pass must submit ONLY custom queries that are not already hydrated, an
+    /// `All` pass must submit every one. Port of TS `customQueriesToTransform`
+    /// (view-syncer.ts:1954-1959).
+    ///
+    /// Oracle: a `userQueryURL` outside the allow-list fails the transform
+    /// SYNCHRONOUSLY (no network) and the failure body carries `queryIDs` — the
+    /// exact batch that was submitted — which reaches the client as an
+    /// `["error", body]` frame. So the frame IS the "what did we re-transform"
+    /// observable.
+    ///
+    /// Before the fix rust had no mode: every sync re-submitted the whole custom
+    /// set. Revert the `custom_query_transform_mode` filter and the `Missing`
+    /// pass below emits an error frame again → `assert!(missing_err.is_none())`
+    /// fails.
+    #[tokio::test]
+    async fn custom_query_transform_mode_missing_skips_already_hydrated_queries() {
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        let existing_rows: RowRecordMap = HashMap::new();
+        // A custom (named) desired query — `name` set is what makes the CVR
+        // record a `QueryRecord::Custom`.
+        let custom = |h: &str| DesiredQuerySpec {
+            hash: h.to_string(),
+            ast: None,
+            name: Some("myNamedQuery".to_string()),
+            args: Some(vec![]),
+            ttl: None,
+        };
+        // Disallowed URL => `transform_custom_queries` fails without a network
+        // round-trip, carrying the submitted batch in `queryIDs`.
+        let ctx = crate::custom_queries::transform_query::CustomQueryContext {
+            url: "https://mode-filter.example/query".to_string(),
+            allowed_urls: vec!["https://allowed.example/*".to_string()],
+            ..Default::default()
+        };
+        // The submitted batch, read off the client's `["error", body]` frame.
+        let submitted = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| {
+            std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command {
+                WsCommand::Send { msg, .. }
+                    if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
+                {
+                    msg.get(1)
+                        .and_then(|b| b.get("queryIDs"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                }
+                _ => None,
+            })
+        };
+
+        // ── `All`: the custom query IS submitted even though it is hydrated. ──
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        // Pretend `q1` is already running (what a steady-state CG looks like).
+        pipelines.set_query_transformation_hash("q1", "hash-q1");
+        let mut engine = SyncEngine::new(pipelines);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        engine.register_client(
+            "client1",
+            "ws1",
+            "cg1",
+            &shard,
+            None,
+            Arc::new(DirectWebSocketSink::new(tx)),
+        );
+        let _ = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![custom("q1")],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                None,
+                &serde_json::json!({}),
+                Some(&ctx),
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await;
+        assert_eq!(
+            submitted(&mut rx).as_deref(),
+            Some(&["q1".to_string()][..]),
+            "'all' must re-transform an already-hydrated custom query \
+             (TS: \"re transform all on new connections\", view-syncer.ts:949)"
+        );
+
+        // ── `Missing`: the same hydrated query is NOT submitted. ──
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        pipelines.set_query_transformation_hash("q1", "hash-q1");
+        let mut engine = SyncEngine::new(pipelines);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        engine.register_client(
+            "client1",
+            "ws1",
+            "cg1",
+            &shard,
+            None,
+            Arc::new(DirectWebSocketSink::new(tx)),
+        );
+        // Pipelines are already synced in steady state — otherwise
+        // `hydrate_unchanged_queries` runs and muddies the observable.
+        engine.pipelines_synced = true;
+        let _ = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![custom("q1")],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::Missing,
+                None,
+                &serde_json::json!({}),
+                Some(&ctx),
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await;
+        assert!(
+            submitted(&mut rx).is_none(),
+            "'missing' must NOT re-transform a custom query already in the \
+             pipeline (TS `filter(q => !this.#pipelines.queries().has(q.id))`, \
+             view-syncer.ts:1958)"
+        );
+
+        // ── `Missing` still transforms a custom query that is NOT hydrated. ──
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init(vec![users_spec()], None, "zero").unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        engine.register_client(
+            "client1",
+            "ws1",
+            "cg1",
+            &shard,
+            None,
+            Arc::new(DirectWebSocketSink::new(tx)),
+        );
+        engine.pipelines_synced = true;
+        let _ = engine
+            .config_and_hydrate(
+                super::empty_cvr("cg1", "v1"),
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![custom("q2")],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::Missing,
+                None,
+                &serde_json::json!({}),
+                Some(&ctx),
+                "00".to_string(),
+                "v1".to_string(),
+                &existing_rows,
+                0,
+                0,
+                0,
+            )
+            .await;
+        assert_eq!(
+            submitted(&mut rx).as_deref(),
+            Some(&["q2".to_string()][..]),
+            "'missing' must still transform a custom query absent from the pipeline"
+        );
     }
 
     /// NON-VACUOUS (fix, 2026-09-02): `hydrate_unchanged_queries` — the proactive
@@ -9939,6 +10499,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &empty_auth,
                 None,
@@ -9968,6 +10529,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &empty_auth,
                 None,
@@ -9998,6 +10560,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &empty_auth,
                 None,
@@ -10054,6 +10617,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -10094,6 +10658,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -10307,6 +10872,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
@@ -10329,6 +10895,7 @@ mod engine_tests {
                 Vec::new(),
                 false,
                 None,
+                CustomQueryTransformMode::All,
                 None,
                 &serde_json::json!({}),
                 None,
