@@ -339,7 +339,15 @@ impl RowRecordCache {
         // place when no snapshot is outstanding (refcount 1); with a live
         // `get_row_records` snapshot it copies-on-write once — paid only on
         // row-writing flushes, instead of the old deep clone on every read.
-        {
+        //
+        // Skipped entirely when there is nothing to apply. TS runs the equivalent
+        // loop over an empty Map for free (cvr-store.ts:1217 calls `apply`
+        // unconditionally), but in rust `Arc::make_mut` COPIES the whole map
+        // whenever a `get_row_records` snapshot is still alive — which it is for
+        // the duration of a hydrate — so an empty apply would deep-copy the
+        // client group's entire row set to change nothing. The version bookkeeping
+        // below still runs unconditionally, which is the part TS's call is for.
+        if !row_records.is_empty() {
             let cache = Arc::make_mut(state.cache.as_mut().unwrap());
             for (id, row) in &row_records {
                 let id_str = row_id_string(id);
