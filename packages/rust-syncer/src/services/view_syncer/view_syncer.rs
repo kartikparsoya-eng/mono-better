@@ -96,6 +96,47 @@ pub enum CustomQueryTransformMode {
     All,
     Missing,
 }
+
+/// Which TS `ViewSyncerService` method a config pass is standing in for.
+///
+/// Rust-only (AGENTS rule 5), and it exists to RECOVER a TS distinction rather
+/// than invent one: TS has four separate entry points into `#handleConfigUpdate`
+/// — `initConnection` (:945), `changeDesiredQueries` (:978), `updateAuth` (:1019)
+/// and `#runBackgroundRetransform` (:2670) — and they differ in what they do
+/// BEFORE the config update. Only `initConnection` runs the client-schema /
+/// cookie checks and `#validateConnection` (:942). Rust folds all four into
+/// `handle_desired_queries`, and the single `is_init: bool` that stood in for
+/// them conflated "this is initConnection" with "run the config pass even
+/// without a query change", so `updateAuth` and the background retransform were
+/// also running initConnection's cookie + client-schema checks, which their TS
+/// twins do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigPassOrigin {
+    /// TS `initConnection` (view-syncer.ts:945).
+    InitConnection,
+    /// TS `changeDesiredQueries` (view-syncer.ts:978).
+    ChangeDesiredQueries,
+    /// TS `updateAuth` (view-syncer.ts:1019).
+    UpdateAuth,
+    /// TS `#runBackgroundRetransform` (view-syncer.ts:2670).
+    BackgroundRetransform,
+}
+
+impl ConfigPassOrigin {
+    /// The initConnection-only preamble: cookie + client-schema validation and
+    /// `#validateConnection`. TS runs these in `initConnection` and nowhere else.
+    fn is_init_connection(self) -> bool {
+        matches!(self, ConfigPassOrigin::InitConnection)
+    }
+
+    /// Whether the config/hydrate pass runs even with no desired-query change.
+    /// TS's `changeDesiredQueries` is the only entry point that exists solely to
+    /// carry a query change; the other three must re-transform regardless (a new
+    /// connection, a refreshed credential, a background re-authorization).
+    fn forces_config_pass(self) -> bool {
+        !matches!(self, ConfigPassOrigin::ChangeDesiredQueries)
+    }
+}
 /// Upper bound on a single eviction-timer delay (matches `rust_cvr::ttl::MAX_TTL_MS`).
 const MAX_TTL_MS: i64 = 600_000;
 /// How long an empty client-group worker stays warm after its latest connection.
@@ -655,7 +696,7 @@ impl ViewSyncerDispatch for CgViewSyncer {
             .handle_desired_queries(
                 &selector.client_id,
                 &body,
-                false,
+                ConfigPassOrigin::ChangeDesiredQueries,
                 CustomQueryTransformMode::Missing,
             )
             .await;
@@ -710,7 +751,7 @@ impl ViewSyncerDispatch for CgViewSyncer {
             .handle_desired_queries(
                 &selector.client_id,
                 &body,
-                true,
+                ConfigPassOrigin::InitConnection,
                 CustomQueryTransformMode::All,
             )
             .await
@@ -1664,7 +1705,7 @@ impl ViewSyncerService {
         // work — replan before deciding on the group retransform (TS
         // `refreshedPlan`, view-syncer.ts:858). ONE retransform for the group on
         // the background connection's context (TS `#runBackgroundRetransform`),
-        // not one per survivor: `handle_desired_queries(_, {}, changed=true)`
+        // not one per survivor: `handle_desired_queries(_, {}, UpdateAuth)`
         // re-runs the whole CG's config/hydrate pass, so a single call already
         // re-fetches every query with current auth/permissions.
         let refreshed = lock_unpoisoned(&self.ccm).plan_maintenance();
@@ -1801,7 +1842,7 @@ impl ViewSyncerService {
     /// report the outcome. Port of the inner `attemptRetransform` closure of TS
     /// `#runBackgroundRetransform` (view-syncer.ts:2669): `#syncQueryPipelineSet('all')`
     /// then `markBackgroundRetransformSuccess`. Here the re-hydrate is
-    /// `handle_desired_queries(_, {}, is_init=true)` (the whole-CG config/hydrate
+    /// `handle_desired_queries(_, {}, BackgroundRetransform)` (the whole-CG config/hydrate
     /// pass); its whole-batch transform failure — if any — is captured into
     /// `background_retransform_failure` and classified, so the caller can act like
     /// TS's `try/catch` (mark success vs. auth-fail vs. defer). Marking success is
@@ -1826,7 +1867,7 @@ impl ViewSyncerService {
         self.handle_desired_queries(
             &bg.client_id,
             &empty_body,
-            true,
+            ConfigPassOrigin::BackgroundRetransform,
             CustomQueryTransformMode::All,
         )
         .await;
@@ -2081,25 +2122,14 @@ impl ViewSyncerService {
             let auth = resolve_auth(None, user_id, wire, None).unwrap_or(None);
             let mut ccm = lock_unpoisoned(&self.ccm);
             ccm.register_connection(&selector, &reg, auth);
-            // TS validates the new connection right away (initConnection →
-            // `#validateConnection` → `connContextManager.validateConnection`,
-            // view-syncer.ts:942): recording the validation gives the
-            // connection its `revalidate_at` deadline and lets the group
-            // promote a background connection. The transport-level JWT check
-            // already passed upstream; with no server-validated userID in hand
-            // this is the TS `client-fallback` validation.
-            if let Ok(ctx) = ccm.must_get_connection_context(&selector)
-                && let Err(e) = ccm.validate_connection(
-                    &selector,
-                    ctx.revision,
-                    &ConnectionValidation::ClientFallback,
-                )
-            {
-                tracing::warn!(
-                    "CG {}: connect-time validateConnection failed: {e:?}",
-                    self.cg_id
-                );
-            }
+            // NOTE: the connection is registered here but NOT validated. TS
+            // validates in `initConnection` — `#validateConnection` at
+            // view-syncer.ts:942 — not at socket accept, and that ordering is the
+            // point: validation POSTs to the query API server, so doing it here
+            // would validate a socket that has not yet asked for anything.
+            // `handle_desired_queries(ConfigPassOrigin::InitConnection, ..)`
+            // performs it, which is also what records `revalidate_at` and lets
+            // the CCM promote a background connection.
         }
 
         // Recompute the auth-maintenance wakeup now that the CCM has a newly
@@ -2238,7 +2268,7 @@ impl ViewSyncerService {
         &mut self,
         client_id: &str,
         body: &serde_json::Value,
-        is_init: bool,
+        origin: ConfigPassOrigin,
         // TS passes the mode EXPLICITLY at every `#handleConfigUpdate` call site
         // rather than deriving it (view-syncer.ts:949/981/1023/1043); each rust
         // caller does the same and cites its TS line.
@@ -2251,6 +2281,10 @@ impl ViewSyncerService {
             );
             return false;
         };
+        // TS's initConnection-only preamble vs "run the pass anyway"; see
+        // `ConfigPassOrigin`.
+        let is_init = origin.is_init_connection();
+        let force_config_pass = origin.forces_config_pass();
         let (puts, dels, clear) = parse_desired_queries_patch(body);
         // Client push overrides (TS ConnectionContextManager handleInitConnection:
         // `userPushURL` replaces the push target; `userPushHeaders` become
@@ -2373,10 +2407,62 @@ impl ViewSyncerService {
             return false;
         }
 
+        // TS, verbatim (view-syncer.ts:936-944), between the client-schema check
+        // and `#handleConfigUpdate`:
+        //   // Validate auth before sending any data is sent to this connection.
+        //   // the #handleConfigUpdate call below will also transform
+        //   // queries, but that may hit the transform cache so do not rely on
+        //   // it for validation. This also ensures shared maintenance always has
+        //   // a validated connection to fall back to.
+        //   if (!(await this.#validateConnection(connCtx))) {
+        //     return;
+        //   }
+        // The cache point is the whole reason this cannot lean on the `'all'`
+        // re-transform below: a cached transform answers without asking the API
+        // server, so a token revoked at the app layer would be served data.
+        if is_init {
+            let conn_ctx = lock_unpoisoned(&self.ccm)
+                .must_get_connection_context(&CcmConnectionSelector {
+                    client_id: client_id.to_string(),
+                    ws_id: ws_id.clone(),
+                })
+                .ok();
+            if let Some(conn_ctx) = conn_ctx {
+                match self.validate_connection(&conn_ctx).await {
+                    Ok(true) => {}
+                    // Auth error: `validate_connection` already failed the
+                    // connection (TS `#failMaintenanceConnection`).
+                    Ok(false) => return false,
+                    Err(body) => {
+                        // TS rethrows, which fails this connection's downstream
+                        // via `#runInLockForClient`'s catch. Rust cannot unwind
+                        // across the serial CG task, so close the socket with the
+                        // transform failure the same way the transform path does.
+                        tracing::warn!(
+                            cg_id = %self.cg_id,
+                            client_id = %client_id,
+                            message = %transform_failure_message(&body),
+                            "initConnection auth validation failed"
+                        );
+                        // Same emission the whole-batch transform failure uses
+                        // (`ClientHandler::send_query_transform_failed_error` =
+                        // TS `this.fail(new ProtocolError(error))`), so the client
+                        // sees one error shape for a failed transform whether it
+                        // failed during validation or during the transform itself.
+                        for c in &self.clients_for(std::slice::from_ref(&ws_id)) {
+                            c.send_query_transform_failed_error(&body);
+                        }
+                        self.on_connection_closed(client_id, &ws_id);
+                        return false;
+                    }
+                }
+            }
+        }
+
         // Query-config pass (records the client + desired queries, hydrates,
         // then catches the client up). Always runs on initConnection.
         let mut config_accepted = false;
-        if is_init || has_query_change {
+        if force_config_pass || has_query_change {
             let cvr = self.cvr.take().unwrap();
             let state_version = self
                 .pipelines()
@@ -2669,8 +2755,13 @@ impl ViewSyncerService {
         // TS `updateAuth` -> `#handleConfigUpdate(..., 'all', ...)`: "Re-transform
         // all queries so auth-sensitive query expansion matches the newly
         // validated credential" (view-syncer.ts:1023).
-        self.handle_desired_queries(client_id, &empty_body, true, CustomQueryTransformMode::All)
-            .await;
+        self.handle_desired_queries(
+            client_id,
+            &empty_body,
+            ConfigPassOrigin::UpdateAuth,
+            CustomQueryTransformMode::All,
+        )
+        .await;
         // Locked-op re-arm (TS `#scheduleAuthMaintenance` in the `finally`).
         self.arm_auth_maintenance();
     }
@@ -4125,6 +4216,37 @@ mod tests {
         }
     }
 
+    /// Drive the initConnection-time `#validateConnection` (view-syncer.ts:942)
+    /// for a test connection.
+    ///
+    /// TS `registerConnection` leaves a connection UNVALIDATED
+    /// (connection-context-manager.ts:267 sets `revalidateAt: undefined`); it is
+    /// `initConnection` that validates and thereby arms revalidation. Rust used
+    /// to record a `client-fallback` validation at socket accept, which is why
+    /// these tests could assert on maintenance straight after
+    /// `on_new_connection`. Now that the ordering matches TS, they have to
+    /// validate explicitly.
+    ///
+    /// Only the validation half is driven, not the whole config/hydrate pass:
+    /// the barebones test factory's config pass fails and tears the connection
+    /// down, which would mask exactly what these tests assert.
+    pub(super) fn validate_test_connection(
+        rt: &tokio::runtime::Runtime,
+        state: &mut ViewSyncerService,
+        client_id: &str,
+        ws_id: &str,
+    ) {
+        let selector = CcmConnectionSelector {
+            client_id: client_id.to_string(),
+            ws_id: ws_id.to_string(),
+        };
+        let Ok(ctx) = lock_unpoisoned(&state.ccm).must_get_connection_context(&selector) else {
+            return;
+        };
+        let _ = rt.block_on(state.validate_connection(&ctx));
+        state.arm_auth_maintenance();
+    }
+
     pub(super) fn revalidate_state(
         rt: &tokio::runtime::Runtime,
         interval_ms: Option<i64>,
@@ -4239,6 +4361,10 @@ mod tests {
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
+        // TS validates at initConnection, not at socket accept
+        // (connection-context-manager.ts:267 registers with
+        // `revalidateAt: undefined`); arm revalidation the way TS does.
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
         assert_eq!(state.registered_ws.len(), 1);
 
         // Arming happened on connect (interval set + a token present).
@@ -4467,6 +4593,81 @@ mod tests {
             state.metrics.snapshot()["authChanges"],
             1,
             "opaque token refresh must trigger a re-transform"
+        );
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-02): `initConnection` validates the connection
+    /// against the query API server BEFORE any data is sent. TS:
+    /// ```text
+    /// // Validate auth before sending any data is sent to this connection.
+    /// // the #handleConfigUpdate call below will also transform
+    /// // queries, but that may hit the transform cache so do not rely on
+    /// // it for validation. ...
+    /// if (!(await this.#validateConnection(connCtx))) { return; }
+    /// ```
+    /// (view-syncer.ts:936-944). Rust did NOT probe here — it recorded a
+    /// `client-fallback` validation at socket accept and went straight to the
+    /// config pass, so a token that is cryptographically valid but revoked at the
+    /// app layer was served data. Delete the `if is_init { ... validate ... }`
+    /// block in `handle_desired_queries` and the `false` assert below fails
+    /// (the pass is accepted despite the failing probe).
+    #[test]
+    fn init_connection_validates_before_serving_any_data() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        seed_test_client_schema(&mut state);
+
+        let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        // Record a query URL outside the allow-list, the way the handler's
+        // `ccm.initConnection` dispatch does. The probe then fails
+        // SYNCHRONOUSLY (no network) with a `TransformFailed` quoting the URL —
+        // standing in for a token the API server rejects.
+        let selector = CcmConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "ws1".to_string(),
+        };
+        lock_unpoisoned(&state.ccm)
+            .init_connection(
+                &selector,
+                &InitConnectionBody {
+                    user_query_url: Some("https://revoked.example/query".to_string()),
+                    user_query_headers: None,
+                    user_push_url: None,
+                    user_push_headers: None,
+                },
+            )
+            .unwrap();
+
+        let accepted = rt.block_on(state.handle_desired_queries(
+            "c1",
+            &serde_json::json!({"desiredQueriesPatch": []}),
+            ConfigPassOrigin::InitConnection,
+            CustomQueryTransformMode::All,
+        ));
+        assert!(
+            !accepted,
+            "initConnection must NOT proceed to the config/hydrate pass when the \
+             connection fails validation (TS returns; view-syncer.ts:942)"
+        );
+
+        let err = std::iter::from_fn(|| drx.try_recv().ok()).find_map(|command| match command {
+            WsCommand::Send { msg, .. }
+                if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
+            {
+                msg.get(1).cloned()
+            }
+            _ => None,
+        });
+        let err = err.expect("a failed validation must reach the client as an error frame");
+        assert_eq!(err["kind"], "TransformFailed");
+        assert!(
+            !state.registered_ws.contains_key("c1"),
+            "a connection that failed validation must be closed, not left serving"
         );
     }
 
@@ -4862,6 +5063,10 @@ mod tests {
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
+        // TS validates at initConnection, not at socket accept
+        // (connection-context-manager.ts:267 registers with
+        // `revalidateAt: undefined`); arm revalidation the way TS does.
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
         seed_test_client_schema(&mut state);
         let armed_before = state.next_auth_maintenance_at;
         assert!(armed_before.is_some());
@@ -4896,6 +5101,10 @@ mod tests {
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
+        // TS validates at initConnection, not at socket accept
+        // (connection-context-manager.ts:267 registers with
+        // `revalidateAt: undefined`); arm revalidation the way TS does.
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
         seed_test_client_schema(&mut state);
 
         state.next_auth_maintenance_at = None;
@@ -4935,6 +5144,10 @@ mod tests {
             authed_params("c1", "ws1", "tok"),
             DirectWebSocketSink::new(tx),
         ));
+        // TS validates at initConnection, not at socket accept
+        // (connection-context-manager.ts:267 registers with
+        // `revalidateAt: undefined`); arm revalidation the way TS does.
+        validate_test_connection(&rt, &mut disabled, "c1", "ws1");
         assert!(disabled.next_auth_maintenance_at.is_none());
         assert!(disabled.next_auth_maintenance_delay().is_none());
 
@@ -4944,6 +5157,7 @@ mod tests {
         rt.block_on(
             unauthed.on_new_connection(test_params("c2", "ws2"), DirectWebSocketSink::new(tx2)),
         );
+        validate_test_connection(&rt, &mut unauthed, "c2", "ws2");
         assert!(
             unauthed.next_auth_maintenance_at.is_some(),
             "a validated cookie connection gets a revalidate deadline (TS \
@@ -4968,6 +5182,10 @@ mod tests {
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
+        // TS validates at initConnection, not at socket accept
+        // (connection-context-manager.ts:267 registers with
+        // `revalidateAt: undefined`); arm revalidation the way TS does.
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
         seed_test_client_schema(&mut state);
         assert!(state.next_auth_maintenance_at.is_some());
 
@@ -6013,7 +6231,7 @@ mod tests {
         seed_test_client_schema(&mut state);
         let cell = shared(state);
 
-        let (tx, _drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let (tx, mut drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
         let sink = DirectWebSocketSink::new(tx);
         let mut params = test_params("c1", "ws1");
         // Piggyback an initConnection with an empty desired-queries patch and a
@@ -6030,21 +6248,30 @@ mod tests {
             piggyback.expect("on_new_connection must hand back the piggybacked initConnection");
         rt.block_on(on_inbound(&cell, client_id, ws_id, text));
 
-        let state = cell.borrow();
-        let ctx = lock_unpoisoned(&state.ccm)
-            .must_get_connection_context(&CcmConnectionSelector {
-                client_id: "c1".to_string(),
-                ws_id: "ws1".to_string(),
-            })
-            .expect("the connection context must be registered");
-        assert_eq!(
-            ctx.query_context.url.as_deref(),
-            Some("https://api.example.com/z"),
-            "userQueryURL must be recorded through the handler's ccm.initConnection dispatch"
+        // The recorded `userQueryURL` is observed through the initConnection-time
+        // `#validateConnection` probe (view-syncer.ts:942) rather than by reading
+        // the CCM field: with no allow-list configured, the probe fails the URL
+        // check SYNCHRONOUSLY (no network) and the failure message quotes the URL
+        // it tried. That is a stronger assertion than the field — it proves the
+        // recorded URL is the one actually used for the API-server round trip.
+        let err = std::iter::from_fn(|| drx.try_recv().ok()).find_map(|command| match command {
+            WsCommand::Send { msg, .. }
+                if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
+            {
+                msg.get(1).cloned()
+            }
+            _ => None,
+        });
+        let err = err.expect("initConnection must probe the recorded userQueryURL");
+        assert_eq!(err["kind"], "TransformFailed");
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("https://api.example.com/z"),
+            "userQueryURL must be recorded through the handler's ccm.initConnection \
+             dispatch and used for the validation probe; got {err:?}"
         );
-        // The initConnection hydrated the client's (internal) queries, so the
-        // hot-path `hydrations` metric incremented.
-        assert_eq!(state.metrics.snapshot()["hydrations"], 1);
     }
 
     #[test]
@@ -6073,7 +6300,7 @@ mod tests {
         rt.block_on(state.handle_desired_queries(
             "c1",
             &serde_json::json!({"desiredQueriesPatch": []}),
-            true,
+            ConfigPassOrigin::InitConnection,
             CustomQueryTransformMode::All,
         ));
 
@@ -9158,7 +9385,7 @@ mod engine_tests {
     // The dissolved engine (L9 Stage 3c-iii): tests keep the old name.
     use super::ViewSyncerService as SyncEngine;
     // Auth-maintenance harness helpers live in the sibling `tests` module.
-    use super::tests::{pinned_params, revalidate_state};
+    use super::tests::{pinned_params, revalidate_state, validate_test_connection};
     use crate::services::view_syncer::pipeline_driver::{IvmColumnSchema, IvmTableSpec};
     use crate::ws_sink::{DirectWebSocketSink, WsCommand};
     use rust_cvr::cvr::CVR;
@@ -11113,6 +11340,12 @@ mod engine_tests {
             pinned_params("c2", "ws2", "user-1"),
             DirectWebSocketSink::new(tx2),
         ));
+        // "Two VALIDATED connections": TS validates at initConnection, not at
+        // socket accept (view-syncer.ts:942; connection-context-manager.ts:267
+        // registers with `revalidateAt: undefined`), and the CCM only promotes a
+        // background connection from a validated one.
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
+        validate_test_connection(&rt, &mut state, "c2", "ws2");
         assert_eq!(state.registered_ws.len(), 2);
 
         // First attempt: auth error. Second (on the replacement): success.
@@ -11161,6 +11394,10 @@ mod engine_tests {
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
+        // TS validates at initConnection, not at socket accept
+        // (view-syncer.ts:942); the CCM only promotes a background connection
+        // from a validated one, and without one this retransform is a no-op.
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
         assert_eq!(state.registered_ws.len(), 1);
 
         state
@@ -11202,6 +11439,12 @@ mod engine_tests {
             pinned_params("c1", "ws1", "user-1"),
             DirectWebSocketSink::new(tx),
         ));
+        // The CCM only promotes a BACKGROUND connection once one is validated,
+        // and TS validates at initConnection, not at socket accept
+        // (view-syncer.ts:942 / connection-context-manager.ts:267). Without this
+        // the maintenance plan has no background connection and the retransform
+        // is a silent no-op.
+        validate_test_connection(&rt, &mut state, "c1", "ws1");
 
         state
             .forced_retransform_outcomes
