@@ -284,11 +284,19 @@ def read(rel: str, rev: str | None) -> str | None:
 def split_params(sig: str) -> list[str]:
     """Parameter NAMES from a parenthesised list, ignoring types/defaults."""
     out, depth, cur = [], 0, ""
+    prev = ""
     for ch in sig:
         if ch in "([{<":
             depth += 1
         elif ch in ")]}>":
-            depth -= 1
+            # `->` is a return arrow, not a closing bracket. Counting its `>`
+            # unbalanced the depth for any closure-typed parameter
+            # (`f: impl FnMut(&T) -> U`), which split the rest of the signature
+            # at the wrong commas and emitted words from the body as parameter
+            # names -- silently garbling the very list this gate compares.
+            if not (ch == ">" and prev == "-"):
+                depth -= 1
+        prev = ch
         if ch == "," and depth == 0:
             out.append(cur)
             cur = ""
