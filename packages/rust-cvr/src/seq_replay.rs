@@ -325,20 +325,17 @@ pub async fn run(pool: &PgPool, prog: &Program) -> Value {
             (patches, cvr_final)
         };
 
-        // Snapshot for the flush's no-op pruning — the same non-tombstone
-        // row-record set TS's `getRowRecords` cache holds at flush time (a
-        // previously-flushed row must be visible so a tombstone transition is
-        // NOT pruned as "absent").
-        let existing_at_flush = load_existing_rows(pool, &prog.cvr_id).await;
+        // The store reads its own row-record cache for the flush's no-op
+        // pruning (TS `getRowRecords`), so nothing is passed in here.
         let flushed = store
-            .flush(
-                &orig_version,
-                &cvr_final,
-                prog.connect_time,
-                &existing_at_flush,
-            )
+            .flush(&orig_version, &cvr_final, prog.connect_time)
             .await
             .expect("flush");
+        // Sequence replay is a deterministic offline replayer: each step's PG
+        // state must be complete before the next step reads it, so wait out any
+        // write-back the flush deferred. 1:1 with TS's
+        // `await this.#cvrStore.flushed(lc)` (view-syncer.ts:736).
+        store.flushed().await.expect("row write-back");
 
         // No-op flush => TS returns the ORIGINAL cvr (version unchanged).
         let (version, flushed_bool) = match flushed {

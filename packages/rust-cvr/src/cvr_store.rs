@@ -5,6 +5,7 @@
 //! transaction.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +13,7 @@ use sqlx::PgPool;
 
 use crate::client_handler::{Patch, PatchToVersion};
 use crate::cvr::*;
+use crate::row_record_cache::{ExecuteResult, FlushMode, RowRecordCache};
 use crate::schema::cvr::{ClientsRow, DesiresRow, InstancesRow, QueriesRow};
 use crate::schema::types::*;
 use crate::schema::types::{
@@ -105,6 +107,11 @@ pub struct CVRFlushStats {
     pub rows: usize,
     pub rows_deferred: usize,
     pub statements: usize,
+    /// TS `rowsFlushed` (cvr-store.ts:1207): whether the row-record statements
+    /// actually ran in this transaction, or were deferred to the
+    /// `RowRecordCache` write-back. The caller uses it as the `flushed`
+    /// argument to `RowRecordCache::apply`.
+    pub rows_flushed: bool,
 }
 
 // ─── Load result ───────────────────────────────────────────────────────────
@@ -252,6 +259,12 @@ pub struct CVRStoreHandle {
     task_id: String,
     pending: PendingWrites,
     row_count: usize,
+    /// Port of TS `CVRStore.#rowCache` (cvr-store.ts:246): the store OWNS the
+    /// row-record cache and is the only thing that talks to it — `getRowRecords`
+    /// for the flush's no-op pruning, `executeRowUpdates` for the write-or-defer
+    /// decision, `apply` to land the result. Previously the syncer owned it and
+    /// passed both the snapshot and the cache into `flush()`.
+    row_cache: RowRecordCache,
     /// Live-instance census guard (leak hunting). Inc on `new`, dec on Drop.
     _census: crate::live_count::Guard,
 }
@@ -276,7 +289,31 @@ impl Drop for CVRStoreHandle {
 }
 
 impl CVRStoreHandle {
+    /// Port of TS `new CVRStore(...)` (cvr-store.ts:229). TS's constructor also
+    /// takes `failService`, `loadAttemptIntervalMs`, `maxLoadAttempts`,
+    /// `deferredRowFlushThreshold` and `setTimeoutFn`, all with DEFAULTS. Rust
+    /// has no default arguments, so those defaults are applied here — the same
+    /// values TS uses (`DEFAULT_DEFERRED_THRESHOLD` = 100,
+    /// `LOAD_ATTEMPT_INTERVAL_MS`, `MAX_LOAD_ATTEMPTS`) and the same fail
+    /// behavior the one rust caller supplied (log the error). Add explicit
+    /// parameters only when a caller actually needs to override one.
     pub fn new(pool: PgPool, schema: String, cvr_id: String, task_id: String) -> Self {
+        let fail: crate::row_record_cache::FailCallback = Arc::new(|e: String| {
+            eprintln!("[cvr] row cache: {e}");
+        });
+        // TS `#recordAsyncFlushStats` — the write-back flush loop's OTel stats.
+        let metrics: crate::row_record_cache::MetricsCallback =
+            Arc::new(|rows: usize, elapsed_ms: f64| {
+                crate::otel_metrics::record_async_flush_stats(rows as u64, elapsed_ms);
+            });
+        let row_cache = RowRecordCache::new(
+            pool.clone(),
+            schema.clone(),
+            cvr_id.clone(),
+            crate::row_record_cache::DEFAULT_DEFERRED_THRESHOLD,
+            fail,
+            Some(metrics),
+        );
         Self {
             pool,
             schema,
@@ -284,8 +321,45 @@ impl CVRStoreHandle {
             task_id,
             pending: PendingWrites::default(),
             row_count: 0,
+            row_cache,
             _census: crate::live_count::Guard::new(&crate::live_count::CVR_STORE),
         }
+    }
+
+    /// Port of TS `CVRStore.getRowRecords()` (cvr-store.ts:520-521): the row
+    /// records the client already has, read from the owned cache (loaded lazily,
+    /// then kept current by `flush`'s `apply`). `Arc` snapshot — O(1), not a deep
+    /// copy. TS is a bare delegate to `#rowCache.getRowRecords()` and lets a load
+    /// failure reject; so does this.
+    pub async fn get_row_records(&self) -> Result<Arc<HashMap<String, RowRecord>>, CVRStoreError> {
+        Ok(self.row_cache.get_row_records().await?)
+    }
+
+    /// Test-only: seed the owned row cache, standing in for the `cvr.rows` a TS
+    /// test would INSERT before calling `flush`.
+    #[cfg(test)]
+    pub(crate) async fn seed_row_cache_for_test(&self, rows: HashMap<String, RowRecord>) {
+        self.row_cache.seed_for_test(rows).await;
+    }
+
+    /// Port of TS `CVRStore.flushed(lc)` (cvr-store.ts): resolves once the
+    /// write-back has landed every deferred row.
+    pub async fn flushed(&self) -> Result<(), String> {
+        self.row_cache.flushed().await
+    }
+
+    /// Port of TS `CVRStore.catchupRowPatches` (cvr-store.ts:709), which
+    /// delegates straight to `#rowCache.catchupRowPatches`.
+    pub async fn catchup_row_patches(
+        &self,
+        after_version: NullableCVRVersion,
+        up_to_version: &CVRVersion,
+        current: &CVRVersion,
+        exclude_query_hashes: &[String],
+    ) -> Result<crate::row_record_cache::CatchupCursor, sqlx::Error> {
+        self.row_cache
+            .catchup_row_patches(after_version, up_to_version, current, exclude_query_hashes)
+            .await
     }
 
     pub fn has_pending_writes(&self) -> bool {
@@ -584,15 +658,9 @@ impl CVRStoreHandle {
         expected_current_version: &CVRVersion,
         cvr: &CVR,
         last_connect_time: f64,
-        existing_rows: &HashMap<String, RowRecord>,
     ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
         let result = self
-            .flush_internal(
-                expected_current_version,
-                cvr,
-                last_connect_time,
-                existing_rows,
-            )
+            .flush_internal(expected_current_version, cvr, last_connect_time)
             .await;
         match &result {
             Ok(stats) => crate::otel_metrics::record_flush_attempt(
@@ -613,8 +681,11 @@ impl CVRStoreHandle {
         expected_current_version: &CVRVersion,
         cvr: &CVR,
         last_connect_time: f64,
-        existing_rows: &HashMap<String, RowRecord>,
     ) -> Result<Option<CVRFlushStats>, CVRStoreError> {
+        // TS `#flush` reads the existing records straight off its own row cache
+        // (cvr-store.ts:1067 `await this.getRowRecords()`); so does this port now
+        // that the store owns the cache.
+        let existing_rows = self.get_row_records().await?;
         // Port of TS `#flush` no-op pruning (cvr-store.ts:1066-1086): before
         // deciding materiality, drop pending row records that would not change
         // the CVR — (a) a delete / unreferenced tombstone for a row that is not
@@ -1018,18 +1089,46 @@ impl CVRStoreHandle {
             stats.desires += pending.pending_desire_updates.len();
         }
 
-        // 7. Row record upserts and deletes.
+        // 7. Row record upserts and deletes — TS cvr-store.ts:1166
+        // `this.#rowCache.executeRowUpdates(tx, cvr.version, updates,
+        // 'allow-defer')`.
         //
+        // The decision to WRITE or DEFER belongs to the `RowRecordCache` (a
+        // flush already in flight, or a batch over `DEFAULT_DEFERRED_THRESHOLD`
+        // ⇒ defer), which this store OWNS exactly like TS's CVRStore does.
+        // When it defers, NOTHING row-related is written here: not `cvr.rows`,
+        // not `cvr.rowsVersion`. `instances.version` therefore runs ahead of
+        // `rowsVersion.version` until the cache's background flush catches up,
+        // which is exactly TS's design (`load()` retries
+        // `MAX_LOAD_ATTEMPTS` × `LOAD_ATTEMPT_INTERVAL_MS` on
+        // `RowsVersionBehind`). Deferring is what keeps the heavyweight row
+        // commit off the poke's critical path — writing it inline put ~1900
+        // upserts in front of every large hydrate's `pokeEnd`.
+        let row_updates: Vec<(RowID, Option<RowRecord>)> = pending
+            .pending_row_record_updates
+            .values()
+            .map(|(id, r)| (id.clone(), r.clone()))
+            .collect();
+        let row_plan =
+            self.row_cache
+                .execute_row_updates(&cvr.version, &row_updates, FlushMode::AllowDefer);
+        let statements = match row_plan {
+            ExecuteResult::Defer => {
+                stats.rows_deferred = row_updates.len();
+                None
+            }
+            ExecuteResult::Execute(stmts) => Some(stmts),
+        };
+        stats.rows_flushed = statements.is_some();
+
         // The `rows` table has a FOREIGN KEY to `rowsVersion(clientGroupID)`, so
-        // a `rowsVersion` row must exist first. Upsert `rowsVersion` = the CVR
-        // version on EVERY flush (not only when rows change): in this Rust port
-        // the store is the single atomic PG writer (instance + rows + rowsVersion
-        // in one tx; the RowRecordCache write-back is `flushed=true`, cache-only),
-        // so `rowsVersion` must stay in lockstep with `instances.version`. If we
-        // wrote it only on row changes, a config-only advance would leave
-        // `rowsVersion` behind and make every subsequent `load` falsely detect a
-        // rows-behind CVR (see the `RowsVersionBehind` check in `load_once`).
-        {
+        // a `rowsVersion` row must exist first. It is upserted on every
+        // NON-deferred flush (not only when rows change), so a config-only
+        // advance does not leave `rowsVersion` behind and make every subsequent
+        // `load` falsely detect a rows-behind CVR. That matches TS, whose
+        // `executeRowUpdates` also emits the `rowsVersion` upsert as its first
+        // statement regardless of how many row updates there are.
+        if statements.is_some() {
             let rv_sql = format!(
                 r#"INSERT INTO "{}"."rowsVersion" ("clientGroupID", "version")
                    VALUES ($1, $2)
@@ -1042,50 +1141,36 @@ impl CVRStoreHandle {
                 .execute(&mut *tx)
                 .await?;
         }
-        // Row updates, mirroring TS `RowRecordCache.executeRowUpdates`:
-        // - a literal `None` record is a hard DELETE;
-        // - EVERYTHING else — including refCounts-NULL tombstones — is upserted.
-        //   A tombstone stays in the `rows` table carrying the deletion's
-        //   patchVersion, which is precisely what catch-up reads to emit row
-        //   DELs to reconnecting clients. (Hard-deleting tombstones — the
-        //   previous behavior — starved catch-up of DELs: a reconnecting client
-        //   could never learn a row was removed while it was away.) Tombstones
-        //   never reach the row-record cache, whose load filters
-        //   `refCounts IS NOT NULL`.
-        // Upserts are batched into ONE `json_to_recordset` statement (TS shape):
-        // a large hydration previously paid one PG round trip per row while
-        // holding a shared pool connection — the flush-convoy driver behind the
+        // Execute the plan the RowRecordCache handed back. `deletes` are the
+        // literal-`None` records; everything else — INCLUDING refCounts-NULL
+        // tombstones — is upserted, so a tombstone stays in `rows` carrying the
+        // deletion's patchVersion, which is what catchup reads to emit row DELs
+        // to reconnecting clients.
+        //
+        // Both batches collapse to ONE `json_to_recordset` statement. TS emits
+        // one DELETE per row but PIPELINES them through postgres.js, so the
+        // round-trip count matches; semantics are identical (rows matched by
+        // (clientGroupID, schema, table, rowKey) with JSONB rowKey equality).
+        // Sequential awaits here were the flush-convoy driver behind the
         // capacity cliff.
-        let mut upserts: Vec<&RowRecord> = Vec::new();
-        let mut deletes: Vec<Value> = Vec::new();
-        for (row_id, record) in pending.pending_row_record_updates.values() {
-            match record {
-                None => {
-                    // Collect the (schema, table, rowKey) identity; batched below.
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("schema".into(), Value::String(row_id.schema.clone()));
-                    obj.insert("table".into(), Value::String(row_id.table.clone()));
-                    obj.insert(
-                        "rowKey".into(),
-                        serde_json::to_value(&row_id.row_key).unwrap_or(Value::Null),
-                    );
-                    deletes.push(Value::Object(obj));
-                }
-                Some(row) => upserts.push(row),
-            }
-        }
-        // Batch hard DELETEs into ONE statement (was one awaited DELETE per row →
-        // N sequential PG round-trips, the flush-convoy driver behind the sandbox
-        // ~20s hydrate stall on a latent CVR DB). Mirrors the upsert batch below
-        // and TS's pipelined `executeRowUpdates` deletes: identical semantics —
-        // rows are matched by (clientGroupID, schema, table, rowKey) with JSONB
-        // rowKey equality, exactly as the per-row DELETE did — collapsed to one
-        // round-trip via a `json_to_recordset` join.
-        if !deletes.is_empty() {
-            let n = deletes.len();
-            let del_json = Value::Array(deletes);
-            let sql = format!(
-                r#"DELETE FROM "{}".rows AS r
+        if let Some(stmts) = &statements {
+            if !stmts.deletes.is_empty() {
+                let n = stmts.deletes.len();
+                let del_json = Value::Array(
+                    stmts
+                        .deletes
+                        .iter()
+                        .map(|d| {
+                            let mut obj = serde_json::Map::new();
+                            obj.insert("schema".into(), Value::String(d.schema.clone()));
+                            obj.insert("table".into(), Value::String(d.table.clone()));
+                            obj.insert("rowKey".into(), d.row_key.clone());
+                            Value::Object(obj)
+                        })
+                        .collect(),
+                );
+                let sql = format!(
+                    r#"DELETE FROM "{}".rows AS r
                    USING json_to_recordset($1::json) AS d(
                      "schema" TEXT,
                      "table" TEXT,
@@ -1095,30 +1180,25 @@ impl CVRStoreHandle {
                      AND r."schema" = d."schema"
                      AND r."table" = d."table"
                      AND r."rowKey" = d."rowKey""#,
-                self.schema
-            );
-            sqlx::query(&sql)
-                .bind(&del_json)
-                .bind(&self.cvr_id)
-                .execute(&mut *tx)
-                .await?;
-            stats.rows += n;
-        }
-        if !upserts.is_empty() {
-            let rows_json = Value::Array(
-                upserts
-                    .iter()
-                    .map(|r| {
-                        serde_json::to_value(crate::schema::cvr::row_record_to_rows_row(
-                            &self.cvr_id,
-                            r,
-                        ))
-                        .unwrap_or(Value::Null)
-                    })
-                    .collect(),
-            );
-            let sql = format!(
-                r#"INSERT INTO "{}".rows
+                    self.schema
+                );
+                sqlx::query(&sql)
+                    .bind(&del_json)
+                    .bind(&self.cvr_id)
+                    .execute(&mut *tx)
+                    .await?;
+                stats.rows += n;
+            }
+            if !stmts.inserts.is_empty() {
+                let rows_json = Value::Array(
+                    stmts
+                        .inserts
+                        .iter()
+                        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+                        .collect(),
+                );
+                let sql = format!(
+                    r#"INSERT INTO "{}".rows
                    ("clientGroupID", "schema", "table", "rowKey",
                     "rowVersion", "patchVersion", "refCounts")
                    SELECT "clientGroupID", "schema", "table", "rowKey",
@@ -1137,22 +1217,39 @@ impl CVRStoreHandle {
                     "rowVersion" = excluded."rowVersion",
                     "patchVersion" = excluded."patchVersion",
                     "refCounts" = excluded."refCounts""#,
-                self.schema
-            );
-            sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
-            stats.rows += upserts.len();
+                    self.schema
+                );
+                sqlx::query(&sql).bind(&rows_json).execute(&mut *tx).await?;
+                stats.rows += stmts.inserts.len();
+            }
         }
 
         tx.commit().await?;
+
+        // Port of TS cvr-store.ts:1218 `this.#rowCount = await
+        // this.#rowCache.apply(updates, cvr.version, rowsFlushed)`. With
+        // `rows_flushed` the transaction above already persisted the rows, so
+        // this is cache-only; otherwise the cache queues them in `pending` and
+        // spawns the background flush, and the caller's poke goes out without
+        // waiting for the row commit.
+        if !row_updates.is_empty() {
+            match self
+                .row_cache
+                .apply(row_updates, cvr.version.clone(), stats.rows_flushed)
+                .await
+            {
+                Ok(count) => self.row_count = count,
+                Err(e) => eprintln!("[cvr] row cache apply failed: {e}"),
+            }
+        }
 
         // (`self.pending` was consumed by the mem::take above — nothing to clear.)
         stats.statements =
             stats.instances + stats.clients + stats.queries + stats.desires + stats.rows;
 
-        // OTLP: this store is the single atomic PG writer, so every flush here is
-        // the "sync" flush TS records via `recordSyncFlushStats` (flush.type=sync).
-        // The `rows_deferred == 0` row-count gate lives inside the ported fn (1:1
-        // with row-record-cache.ts:144-151).
+        // OTLP: the "sync" flush TS records via `recordSyncFlushStats`
+        // (flush.type=sync). The `rows_deferred == 0` row-count gate lives
+        // inside the ported fn (1:1 with row-record-cache.ts:144-151).
         let elapsed_ms = flush_started.elapsed().as_secs_f64() * 1000.0;
         crate::otel_metrics::record_sync_flush_stats(
             stats.rows as u64,
@@ -2069,11 +2166,16 @@ mod tests {
             },
             ref_counts: Some(BTreeMap::from([("q1".to_string(), 1i64)])),
         };
-        let mut existing_rows: HashMap<String, RowRecord> = HashMap::new();
-        existing_rows.insert(
-            crate::row_key::row_id_string(&existing_id),
-            existing_record.clone(),
-        );
+        // Seed the store's OWN row cache — the store reads `existing_rows` from
+        // it (TS `CVRStore.getRowRecords()` -> `#rowCache`, cvr-store.ts:520), so
+        // this is what a TS test's pre-inserted `cvr.rows` provides. Seeding also
+        // marks the cache loaded, so the pruning path never reaches Postgres.
+        store
+            .seed_row_cache_for_test(HashMap::from([(
+                crate::row_key::row_id_string(&existing_id),
+                existing_record.clone(),
+            )]))
+            .await;
 
         // (a) re-write of an identical record — TS deepEqual prune.
         store.put_row_record(&existing_record);
@@ -2111,11 +2213,51 @@ mod tests {
             state_version: "v1".to_string(),
             config_version: None,
         };
-        let result = store.flush(&expected, &cvr, 0.0, &existing_rows).await;
+        let result = store.flush(&expected, &cvr, 0.0).await;
         assert!(
             matches!(result, Ok(None)),
             "an all-no-op pending row set must be pruned to a no-op flush \
              (TS returns null); got {result:?}"
+        );
+    }
+
+    /// A failure to load the row-record cache must PROPAGATE out of `flush`,
+    /// exactly as TS's `getRowRecords()` rejects (`r.reject(e); throw e;`,
+    /// row-record-cache.ts:208-211) and aborts the pass.
+    ///
+    /// Why this matters beyond error hygiene: `execute_row_updates` prunes a
+    /// tombstone whose row is absent from `existing_rows` (TS's
+    /// `existing === undefined && !row?.refCounts` branch). If a load failure
+    /// degraded to an EMPTY existing-row set, every real tombstone would look
+    /// like a row the CVR never had, get pruned, and the client would never
+    /// receive the row DEL — silent data divergence, reported as a clean flush.
+    ///
+    /// Non-vacuous: restore the `if let Err(e) = load() { return empty }` swallow
+    /// in `get_row_records` and this flush returns `Ok(None)` (the tombstone is
+    /// pruned against the empty set) instead of `Err`, failing the assert. The
+    /// cache is deliberately NOT seeded here, so `load()` hits the unreachable
+    /// `postgresql://localhost/test` pool.
+    #[tokio::test]
+    async fn flush_propagates_a_row_cache_load_failure_instead_of_assuming_no_rows() {
+        let mut store = test_store();
+        let cvr = make_cvr();
+
+        // A tombstone for a row the (unloadable) CVR may well contain.
+        store.del_row_record(&RowID {
+            schema: "public".to_string(),
+            table: "issue".to_string(),
+            row_key: serde_json::json!({"id": "1"}).as_object().unwrap().clone(),
+        });
+
+        let expected = CVRVersion {
+            state_version: "v1".to_string(),
+            config_version: None,
+        };
+        let result = store.flush(&expected, &cvr, 0.0).await;
+        assert!(
+            result.is_err(),
+            "a row-cache load failure must surface as Err (TS rethrows), not be \
+             silently treated as an empty existing-row set; got {result:?}"
         );
     }
 

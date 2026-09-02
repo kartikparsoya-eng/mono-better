@@ -151,7 +151,52 @@ guarantees, error semantics) versus TS.
 
 ## I-6 — CVR write-behind / offload runtime
 - **Files:** `services/view_syncer/view_syncer.rs` (`offload`, `flush_to_store`/`flush_ops_to_store`), `rust-cvr` `row_record_cache.rs` write-behind.
-- **No TS twin:** rust offloads CVR I/O to the pool runtime; TS awaits inline.
+- **No TS twin — what is STILL invented here (2026-09-02, after the write-back
+  fix below):**
+  1. `offload`: the whole PG-touching section (apply ops → store flush → cache
+     apply) runs on the shared multi-thread runtime via `handle.spawn(fut).await`
+     because the CG executor's single-threaded reactor does not drive the shared
+     CVR pool's connections. TS awaits inline in the `#lock`. The CG task still
+     AWAITS it, so this is a thread move, not a concurrency change: per-CG flush
+     ordering is unchanged.
+  2. Bounded flush retry (`MAX_FLUSH_ATTEMPTS = 3`, jittered backoff). TS has no
+     retry — postgres.js queues, so CVR saturation degrades to latency rather
+     than a `fail_group` → rehydrate storm. The retry approximates that with a
+     BOUND, so a genuinely dead CVR still fails the group.
+  3. ~~The store does not OWN the `RowRecordCache`~~ — **CLOSED 2026-09-02.**
+     `CVRStoreHandle` now holds `row_cache` like TS's `CVRStore.#rowCache`
+     (cvr-store.ts:246), builds it in `new()` with TS's default arguments, and
+     is the only thing that touches it: `get_row_records()` for the flush's
+     no-op prune (TS :1067), `execute_row_updates()` for the write-or-defer
+     decision (TS :1166), `apply()` after commit (TS :1218), plus the
+     `flushed()` and `catchup_row_patches()` delegates (TS :709). `flush()` is
+     back to TS's parameter list, the syncer's `row_cache` field is gone, and
+     `execute_row_updates_forced` — which only existed for cache-less callers —
+     is deleted.
+  4. Row DELETEs/upserts are batched into ONE `json_to_recordset` statement each
+     instead of TS's per-row statements. TS pipelines its through postgres.js, so
+     the round-trip count matches; sqlx cannot pipeline, and sequential awaits
+     were the flush-convoy driver behind the capacity cliff.
+- **2026-09-02 — the "single atomic PG writer" part of this invention is GONE,
+  and so is the cache-ownership split (3 above). What remains is `offload`,
+  the bounded flush retry, and statement batching.**
+  Until this commit the store wrote instance + `rows` + `rowsVersion` in ONE
+  transaction on the serving path and called `RowRecordCache::apply(..., true)`,
+  so the ported `execute_row_updates` / `FlushMode::AllowDefer` / background
+  `flush_loop` were dead code. TS defers any batch over
+  `deferredRowFlushThreshold` (100) — `executeRowUpdates` returns `[]`, the
+  transaction commits only CVR metadata, `pokeEnd` fires, and `apply(...,
+  flushed=false)` flushes the rows in the background (row-record-cache.ts:46-60,
+  418-427, 234-260). Rust now asks the cache at the same call site
+  (cvr-store.ts:1166) and honours `Defer`, so a large hydrate's ~1900 row
+  upserts no longer sit in front of the client's poke. Measured shape of the
+  divergence: `getUsersV2` (1,923 rows) server hydration 16.8ms vs TS 17.2ms,
+  but client-observed 271ms vs 53ms.
+- **Durability boundary (now identical to TS):** the poke is gated on the
+  *instance* version being committed, NOT on `cvr.rows`. `rowsVersion` may lag
+  `instances.version` while rows are pending; `CVRStore::load` reconciles by
+  retrying `MAX_LOAD_ATTEMPTS` (10) × `LOAD_ATTEMPT_INTERVAL_MS` (500) on
+  `RowsVersionBehind` — the 1:1 port of TS's load loop.
 - **Contract:** a poke is not sent to a client before the CVR state it reflects
   is durable to the SAME degree TS guarantees (no client observes a version the
   CVR hasn't recorded). Flush ordering per CG preserved.

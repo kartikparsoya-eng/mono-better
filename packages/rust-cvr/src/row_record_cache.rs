@@ -271,19 +271,38 @@ impl RowRecordCache {
         Ok(count)
     }
 
-    /// Mirrors TS `getRowRecords()`. Returns an `Arc` snapshot of the cache
-    /// keyed by `rowIDString` — an O(1) refcount bump, NOT a deep copy. This is
-    /// called once per advance/config/TTL pass per client group; deep-cloning
-    /// the full CVR row set here (the previous behavior) was the dominant
-    /// allocator load at high client counts. Writers use `Arc::make_mut`, so a
-    /// snapshot held across a concurrent write-back sees a stable view.
-    /// Must be called after `load()`.
-    pub async fn get_row_records(&self) -> Arc<HashMap<String, RowRecord>> {
+    /// Port of TS `getRowRecords()` (row-record-cache.ts:215), which is exactly
+    /// `return this.#ensureLoaded()` — so this loads on demand and PROPAGATES a
+    /// load failure, as TS does (`r.reject(e); throw e;`, row-record-cache.ts:208-211).
+    ///
+    /// Returns an `Arc` snapshot of the cache keyed by `rowIDString` — an O(1)
+    /// refcount bump, NOT a deep copy. This is called once per advance/config/TTL
+    /// pass per client group; deep-cloning the full CVR row set here (the previous
+    /// behavior) was the dominant allocator load at high client counts. Writers use
+    /// `Arc::make_mut`, so a snapshot held across a concurrent write-back sees a
+    /// stable view.
+    ///
+    /// There is deliberately NO "not loaded yet → empty map" fallback. An empty
+    /// existing-row set is not a safe default: `execute_row_updates` prunes a
+    /// tombstone whose row is absent from it (TS's
+    /// `existing === undefined && !row?.refCounts` branch), so a swallowed load
+    /// error would silently drop real row DELs and the client would never learn
+    /// the rows are gone.
+    pub async fn get_row_records(&self) -> Result<Arc<HashMap<String, RowRecord>>, sqlx::Error> {
+        self.load().await?;
         let state = self.state.lock().await;
-        match &state.cache {
-            Some(c) => Arc::clone(c),
-            None => Arc::new(HashMap::new()),
-        }
+        Ok(Arc::clone(state.cache.as_ref().expect(
+            "cache is Some after a successful load(); the only None->Some \
+             transition is load() and nothing clears it while loaded",
+        )))
+    }
+
+    /// Test-only: pre-populate the in-memory cache and mark it loaded. Stands in
+    /// for the `cvr.rows` INSERTs a TS test performs before calling `flush`, so a
+    /// unit test can exercise the pruning branches without a live Postgres.
+    #[cfg(test)]
+    pub(crate) async fn seed_for_test(&self, rows: HashMap<String, RowRecord>) {
+        self.state.lock().await.cache = Some(Arc::new(rows));
     }
 
     /// Mirrors TS `apply(rowRecords, rowsVersion, flushed)`.
@@ -444,39 +463,31 @@ impl RowRecordCache {
             return ExecuteResult::Defer;
         }
 
-        let version_str = version_string(version);
         let rows_version = RowsVersionRow {
             client_group_id: self.cvr_id.clone(),
-            version: version_str,
+            version: version_string(version),
         };
-
         let mut deletes = Vec::new();
         let mut inserts = Vec::new();
-
+        // TS row-record-cache.ts:429-449: ONLY a literal `null` record is a
+        // DELETE. A record whose `refCounts` is null is a TOMBSTONE and is
+        // UPSERTED — it stays in `cvr.rows` carrying the deletion's
+        // patchVersion, which is exactly what catchup reads to emit row DELs to
+        // a reconnecting client. (An earlier revision deleted tombstones here;
+        // that would have starved catchup of DELs the moment this path went
+        // live, and it contradicted the store's inline path, which upserted
+        // them.)
         for (id, row) in row_updates {
             match row {
-                None => {
-                    deletes.push(RowKeyRef {
-                        schema: id.schema.clone(),
-                        table: id.table.clone(),
-                        row_key: serde_json::Value::Object(id.row_key.clone()),
-                    });
-                }
-                Some(r) if r.ref_counts.is_none() => {
-                    deletes.push(RowKeyRef {
-                        schema: r.id.schema.clone(),
-                        table: r.id.table.clone(),
-                        row_key: serde_json::Value::Object(r.id.row_key.clone()),
-                    });
-                }
-                Some(r) => {
-                    inserts.push(row_record_to_rows_row(&self.cvr_id, r));
-                }
+                None => deletes.push(RowKeyRef {
+                    schema: id.schema.clone(),
+                    table: id.table.clone(),
+                    row_key: serde_json::Value::Object(id.row_key.clone()),
+                }),
+                Some(r) => inserts.push(row_record_to_rows_row(&self.cvr_id, r)),
             }
         }
-
         let total_count = deletes.len() + inserts.len();
-
         ExecuteResult::Execute(RowUpdateStatements {
             rows_version,
             deletes,
@@ -716,49 +727,59 @@ async fn flush_one_iteration(
         .execute(&mut *tx)
         .await?;
 
-    // 2. Process deletes and inserts.
+    // 2. Process deletes and inserts. Like TS `executeRowUpdates`, ONLY a
+    // literal `null` record is a DELETE; a refCounts-null TOMBSTONE is upserted
+    // so catchup can still emit its row DEL (see `execute_row_updates`).
     let mut inserts: Vec<RowsRow> = Vec::new();
+    let mut deletes: Vec<serde_json::Value> = Vec::new();
 
     for (id, row) in pending.values() {
         match row {
             None => {
-                let delete_sql = format!(
-                    r#"DELETE FROM "{}"."rows"
-                    WHERE "clientGroupID" = $1
-                      AND "schema" = $2
-                      AND "table" = $3
-                      AND "rowKey" = $4"#,
-                    schema
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "schema".into(),
+                    serde_json::Value::String(id.schema.clone()),
                 );
-                sqlx::query(&delete_sql)
-                    .bind(cvr_id)
-                    .bind(&id.schema)
-                    .bind(&id.table)
-                    .bind(serde_json::Value::Object(id.row_key.clone()))
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            Some(r) if r.ref_counts.is_none() => {
-                let delete_sql = format!(
-                    r#"DELETE FROM "{}"."rows"
-                    WHERE "clientGroupID" = $1
-                      AND "schema" = $2
-                      AND "table" = $3
-                      AND "rowKey" = $4"#,
-                    schema
+                obj.insert("table".into(), serde_json::Value::String(id.table.clone()));
+                obj.insert(
+                    "rowKey".into(),
+                    serde_json::Value::Object(id.row_key.clone()),
                 );
-                sqlx::query(&delete_sql)
-                    .bind(cvr_id)
-                    .bind(&r.id.schema)
-                    .bind(&r.id.table)
-                    .bind(serde_json::Value::Object(r.id.row_key.clone()))
-                    .execute(&mut *tx)
-                    .await?;
+                deletes.push(serde_json::Value::Object(obj));
             }
             Some(r) => {
                 inserts.push(row_record_to_rows_row(cvr_id, r));
             }
         }
+    }
+
+    // Batched into ONE statement, exactly like the store's inline path. TS
+    // issues one DELETE per row but PIPELINES them through postgres.js, so this
+    // is the same number of round trips (one), with identical semantics: rows
+    // matched by (clientGroupID, schema, table, rowKey) with JSONB rowKey
+    // equality. Rust cannot pipeline over sqlx, and a sequential await per row
+    // is the flush-convoy shape this port has been bitten by before.
+    if !deletes.is_empty() {
+        let del_json = serde_json::Value::Array(deletes);
+        let del_sql = format!(
+            r#"DELETE FROM "{}".rows AS r
+               USING json_to_recordset($1::json) AS d(
+                 "schema" TEXT,
+                 "table" TEXT,
+                 "rowKey" JSONB
+               )
+               WHERE r."clientGroupID" = $2
+                 AND r."schema" = d."schema"
+                 AND r."table" = d."table"
+                 AND r."rowKey" = d."rowKey""#,
+            schema
+        );
+        sqlx::query(&del_sql)
+            .bind(&del_json)
+            .bind(cvr_id)
+            .execute(&mut *tx)
+            .await?;
     }
 
     // 3. Bulk insert via json_to_recordset (matches TS exactly).
@@ -1087,6 +1108,104 @@ mod tests {
         );
         cache.state.try_lock().unwrap().cache = Some(Arc::new(HashMap::new()));
         cache
+    }
+
+    /// TS `executeRowUpdates` (row-record-cache.ts:429-449) deletes ONLY a
+    /// literal `null` record; a refCounts-null TOMBSTONE is upserted so it stays
+    /// in `cvr.rows` carrying the deletion's patchVersion — which is what
+    /// catchup reads to emit a row DEL to a reconnecting client.
+    ///
+    /// Non-vacuous: restore the `Some(r) if r.ref_counts.is_none() => deletes`
+    /// arm and the tombstone lands in `deletes`, failing both length asserts.
+    /// This path was dead code until the store started consulting the cache, so
+    /// the divergence had never been observable.
+    #[tokio::test]
+    async fn execute_row_updates_upserts_tombstones_and_deletes_only_null_records() {
+        let cache = loaded_cache_for_test();
+        let live = make_record("public", "issue", 1, "v1");
+        let mut tombstone = make_record("public", "issue", 2, "v1");
+        tombstone.ref_counts = None;
+        let removed = make_record("public", "issue", 3, "v1").id;
+
+        let updates = vec![
+            (live.id.clone(), Some(live.clone())),
+            (tombstone.id.clone(), Some(tombstone.clone())),
+            (removed.clone(), None),
+        ];
+        let ExecuteResult::Execute(stmts) =
+            cache.execute_row_updates(&CVRVersion::empty(), &updates, FlushMode::Force)
+        else {
+            panic!("FlushMode::Force must never defer");
+        };
+
+        assert_eq!(
+            stmts.deletes.len(),
+            1,
+            "only the literal `None` record is a DELETE; got {:?}",
+            stmts.deletes
+        );
+        assert_eq!(
+            stmts.deletes[0].row_key,
+            serde_json::Value::Object(removed.row_key.clone())
+        );
+        assert_eq!(
+            stmts.inserts.len(),
+            2,
+            "the refCounts-null tombstone must be UPSERTED alongside the live row"
+        );
+        assert!(
+            stmts.inserts.iter().any(|r| r.ref_counts.is_none()),
+            "the upserted set must carry the tombstone (refCounts NULL), else \
+             catchup can never emit its row DEL"
+        );
+    }
+
+    /// The defer contract the store now depends on (TS row-record-cache.ts:418-427):
+    /// over the threshold, or while a background flush is in flight, an
+    /// `AllowDefer` caller writes NOTHING — that is what keeps the row commit
+    /// off the poke's critical path. `Force` always writes.
+    #[tokio::test]
+    async fn execute_row_updates_defers_over_threshold_and_while_flushing() {
+        let cache = loaded_cache_for_test(); // deferred_threshold = 100
+        let v = CVRVersion::empty();
+        let updates: Vec<(RowID, Option<RowRecord>)> = (0..101)
+            .map(|i| {
+                let r = make_record("public", "issue", i, "v1");
+                (r.id.clone(), Some(r))
+            })
+            .collect();
+
+        assert!(
+            matches!(
+                cache.execute_row_updates(&v, &updates[..100], FlushMode::AllowDefer),
+                ExecuteResult::Execute(_)
+            ),
+            "a batch AT the threshold is written inline (TS: `>` not `>=`)"
+        );
+        assert!(
+            matches!(
+                cache.execute_row_updates(&v, &updates, FlushMode::AllowDefer),
+                ExecuteResult::Defer
+            ),
+            "a batch OVER the threshold defers to the write-back"
+        );
+        assert!(
+            matches!(
+                cache.execute_row_updates(&v, &updates, FlushMode::Force),
+                ExecuteResult::Execute(_)
+            ),
+            "Force ignores the threshold"
+        );
+
+        cache.is_flushing.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(
+                cache.execute_row_updates(&v, &updates[..1], FlushMode::AllowDefer),
+                ExecuteResult::Defer
+            ),
+            "once a flush is in flight ALL allow-defer batches defer, so updates \
+             stay in version order"
+        );
     }
 
     /// Regression: `apply(flushed=true)` must not deadlock. The `flushed=true`

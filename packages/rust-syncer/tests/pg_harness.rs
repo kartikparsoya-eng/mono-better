@@ -213,7 +213,7 @@ fn pg_cvr_store_flush_and_reload_roundtrip() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(&EMPTY_CVR_VERSION, &cfg_cvr, 0.0, &Default::default())
+            .flush(&EMPTY_CVR_VERSION, &cfg_cvr, 0.0)
             .await
             .expect("store flush");
 
@@ -322,7 +322,7 @@ fn pg_cvr_store_deletes_rows() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(&EMPTY_CVR_VERSION, &cvr, 0.0, &Default::default())
+            .flush(&EMPTY_CVR_VERSION, &cvr, 0.0)
             .await
             .expect("flush");
 
@@ -342,7 +342,7 @@ fn pg_cvr_store_deletes_rows() {
             StoreOp::PutRowRecord(mk_row("B", Some(1))),
         ]);
         store
-            .flush(&cvr.version, &cvr, 0.0, &Default::default())
+            .flush(&cvr.version, &cvr, 0.0)
             .await
             .expect("flush puts");
         assert_eq!(row_count(pool.clone()).await, 2, "both rows persisted");
@@ -354,15 +354,11 @@ fn pg_cvr_store_deletes_rows() {
             StoreOp::PutRowRecord(mk_row("A", None)),
             StoreOp::DelRowRecord(mk_row("B", None).id),
         ]);
-        // The tombstone/del flush must see A and B as existing rows (TS's
-        // getRowRecords cache view) or the no-op pruning would drop both.
-        let existing: std::collections::HashMap<String, rust_cvr::schema::types::RowRecord> =
-            [mk_row("A", Some(1)), mk_row("B", Some(1))]
-                .into_iter()
-                .map(|r| (rust_cvr::row_key::row_id_string(&r.id), r))
-                .collect();
+        // The tombstone/del flush must see A and B as existing rows or the
+        // no-op pruning would drop both. The store reads that view off its own
+        // row cache (TS `getRowRecords`), which the flush above populated.
         store
-            .flush(&cvr.version, &cvr, 0.0, &existing)
+            .flush(&cvr.version, &cvr, 0.0)
             .await
             .expect("flush deletes");
         assert_eq!(
@@ -431,7 +427,7 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
             "task-A".to_string(),
         );
         a.apply_store_ops(ops);
-        a.flush(&EMPTY_CVR_VERSION, &cvr_x, 0.0, &Default::default())
+        a.flush(&EMPTY_CVR_VERSION, &cvr_x, 0.0)
             .await
             .expect("A create");
 
@@ -451,7 +447,7 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
             config_version: None,
         };
         a.apply_store_ops(vec![insert_client_op("client2")]);
-        a.flush(&cvr_x.version, &cvr_y, 0.0, &Default::default())
+        a.flush(&cvr_x.version, &cvr_y, 0.0)
             .await
             .expect("A advance");
 
@@ -459,7 +455,7 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
         // has a material write, so it reaches the version guard inside the tx).
         b.apply_store_ops(vec![insert_client_op("client3")]);
         let err = b
-            .flush(&cvr_x.version, &cvr_y, 0.0, &Default::default())
+            .flush(&cvr_x.version, &cvr_y, 0.0)
             .await
             .expect_err("B flush must be rejected");
         assert!(
@@ -481,7 +477,7 @@ fn pg_cvr_store_guard_rejects_concurrent_and_owned() {
         // (again with a material write so the flush reaches the guard).
         a.apply_store_ops(vec![insert_client_op("client4")]);
         let err = a
-            .flush(&cvr_y.version, &cvr_y, 0.0, &Default::default())
+            .flush(&cvr_y.version, &cvr_y, 0.0)
             .await
             .expect_err("A flush must be rejected on ownership");
         assert!(
@@ -540,7 +536,7 @@ fn pg_cvr_store_load_retries_until_rows_catch_up() {
             "task-A".to_string(),
         );
         a.apply_store_ops(ops);
-        a.flush(&EMPTY_CVR_VERSION, &cvr_x, 0.0, &Default::default())
+        a.flush(&EMPTY_CVR_VERSION, &cvr_x, 0.0)
             .await
             .expect("A create");
 
@@ -716,7 +712,7 @@ fn pg_cvr_store_load_grants_and_transfers_ownership() {
         let mut a = store(&pool, "task-A");
         a.apply_store_ops(ops);
         // A connects at time 1000 → its flush grants ownership @1000.
-        a.flush(&EMPTY_CVR_VERSION, &cvr, 1000.0, &Default::default())
+        a.flush(&EMPTY_CVR_VERSION, &cvr, 1000.0)
             .await
             .expect("A create");
         a.load(1000.0).await.expect("A reload (still owner)");
@@ -744,7 +740,7 @@ fn pg_cvr_store_load_grants_and_transfers_ownership() {
         // Queue a material write so the flush reaches the ownership guard.
         a.apply_store_ops(vec![insert_client_op("c2")]);
         let err = a
-            .flush(&cvr.version, &cvr, 1000.0, &Default::default())
+            .flush(&cvr.version, &cvr, 1000.0)
             .await
             .expect_err("stale ex-owner must be rejected");
         assert!(
@@ -806,7 +802,7 @@ fn pg_cvr_store_load_purged_yields_exact_client_not_found_message() {
             "task-A".to_string(),
         );
         a.apply_store_ops(ops);
-        a.flush(&EMPTY_CVR_VERSION, &cvr, 1000.0, &Default::default())
+        a.flush(&EMPTY_CVR_VERSION, &cvr, 1000.0)
             .await
             .expect("A create");
 
@@ -899,7 +895,7 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(&EMPTY_CVR_VERSION, &cvr1, 0.0, &Default::default())
+            .flush(&EMPTY_CVR_VERSION, &cvr1, 0.0)
             .await
             .expect("flush 1");
 
@@ -928,7 +924,7 @@ fn pg_cvr_store_reloads_desire_state_and_inactivation() {
         let ops2 = cfg2.base.drain_store_ops();
         store.apply_store_ops(ops2);
         store
-            .flush(&cvr1.version, &cvr2, 0.0, &Default::default())
+            .flush(&cvr1.version, &cvr2, 0.0)
             .await
             .expect("flush 2");
 
@@ -1401,7 +1397,7 @@ fn pg_advance_lmid_change_with_no_queries() {
         .unwrap();
     }
 
-    let existing = rt.block_on(engine.existing_rows());
+    let existing = rt.block_on(engine.existing_rows()).expect("row cache load");
     let advanced = rt
         .block_on(engine.advance_and_sync(
             hydrated,
@@ -1839,7 +1835,7 @@ fn pg_noop_flush_does_not_poke_client_past_stored_version() {
         )
         .unwrap();
     }
-    let existing = rt.block_on(engine.existing_rows());
+    let existing = rt.block_on(engine.existing_rows()).expect("row cache load");
     let advanced = rt
         .block_on(engine.advance_and_sync(
             hydrated,
@@ -2108,7 +2104,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         .unwrap();
     }
 
-    let existing_before_advance = rt.block_on(engine.existing_rows());
+    let existing_before_advance = rt.block_on(engine.existing_rows()).expect("row cache load");
     let advanced = rt
         .block_on(engine.advance_and_sync(
             hydrated,
@@ -2141,7 +2137,7 @@ fn pg_engine_hydrate_advance_reconnect_and_catchup() {
         Some(&hydrate_cookie),
         sink2,
     );
-    let existing_after_advance = rt.block_on(engine.existing_rows());
+    let existing_after_advance = rt.block_on(engine.existing_rows()).expect("row cache load");
     let caught_up = rt
         .block_on(engine.config_and_hydrate(
             advanced.cvr,
@@ -2251,7 +2247,7 @@ fn pg_quiet_commit_noop_flush_contract() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(&EMPTY_CVR_VERSION, &cvr_v1, 0.0, &Default::default())
+            .flush(&EMPTY_CVR_VERSION, &cvr_v1, 0.0)
             .await
             .expect("initial material flush")
             .expect("initial flush is material");
@@ -2272,7 +2268,7 @@ fn pg_quiet_commit_noop_flush_contract() {
             "a zero-change advance must drain no store ops, got {quiet_ops:?}"
         );
         let flushed = store
-            .flush(&cvr_v1.version, &quiet_cvr, 0.0, &Default::default())
+            .flush(&cvr_v1.version, &quiet_cvr, 0.0)
             .await
             .expect("quiet flush must not error");
         assert!(
@@ -2305,7 +2301,7 @@ fn pg_quiet_commit_noop_flush_contract() {
         ops.push(insert_client_op("client2"));
         store.apply_store_ops(ops);
         store
-            .flush(&cvr_v1.version, &material_cvr, 0.0, &Default::default())
+            .flush(&cvr_v1.version, &material_cvr, 0.0)
             .await
             .expect("material flush after quiet no-op must succeed")
             .expect("material flush is material");
@@ -2321,7 +2317,7 @@ fn pg_quiet_commit_noop_flush_contract() {
         );
         store2.apply_store_ops(vec![insert_client_op("client3")]);
         let err = store2
-            .flush(&quiet_cvr.version, &material_cvr, 0.0, &Default::default())
+            .flush(&quiet_cvr.version, &material_cvr, 0.0)
             .await
             .expect_err("stale expected version must be rejected");
         let msg = format!("{err}");
@@ -2558,7 +2554,7 @@ fn pg_advance_client_pk_col_update_emits_remove_add() {
         .unwrap();
     }
 
-    let existing = rt.block_on(engine.existing_rows());
+    let existing = rt.block_on(engine.existing_rows()).expect("row cache load");
     let _advanced = rt
         .block_on(engine.advance_and_sync(
             hydrated,

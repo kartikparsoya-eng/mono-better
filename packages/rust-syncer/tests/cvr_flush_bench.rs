@@ -160,12 +160,7 @@ fn cvr_flush_roundtrip_bench() {
         );
         store.apply_store_ops(ops);
         store
-            .flush(
-                &EMPTY_CVR_VERSION,
-                &cvr,
-                0.0,
-                &std::collections::HashMap::new(),
-            )
+            .flush(&EMPTY_CVR_VERSION, &cvr, 0.0)
             .await
             .expect("create instance");
 
@@ -194,30 +189,34 @@ fn cvr_flush_roundtrip_bench() {
             store.apply_store_ops(puts);
             let t = std::time::Instant::now();
             store
-                .flush(&cvr.version, &cvr, 0.0, &std::collections::HashMap::new())
+                .flush(&cvr.version, &cvr, 0.0)
                 .await
                 .expect("flush inserts");
+            // The store owns the RowRecordCache, so a batch larger than the TS
+            // `deferredRowFlushThreshold` (100) leaves the flush transaction and
+            // lands in the write-back. Without waiting for it, every N > 100 here
+            // would time the metadata flush only and this gate would stop
+            // measuring the row write at exactly the sizes it exists to guard.
+            store.flushed().await.expect("insert write-back");
             let insert_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-            // DELETE path: N explicit dels -> ONE awaited DELETE per row (N round-trips).
+            // DELETE path: N explicit dels -> ONE batched DELETE ... USING
+            // json_to_recordset (was one awaited DELETE per row).
             let dels: Vec<StoreOp> = (0..n)
                 .map(|i| StoreOp::DelRowRecord(mk_row(&format!("{pfx}r{i}"), None).id))
                 .collect();
             store.apply_store_ops(dels);
             // The delete flush needs the just-inserted rows as its "existing"
-            // snapshot — with an empty one the TS-parity no-op pruning would
-            // drop every delete and the bench would measure nothing.
-            let existing: std::collections::HashMap<String, RowRecord> = (0..n)
-                .map(|i| {
-                    let r = mk_row(&format!("{pfx}r{i}"), Some(1));
-                    (rust_cvr::row_key::row_id_string(&r.id), r)
-                })
-                .collect();
+            // snapshot or the TS-parity no-op pruning drops every delete and the
+            // bench measures nothing. The store now reads that snapshot off its
+            // OWN row cache (TS `getRowRecords`), which the insert flush above
+            // already populated — nothing to pass in.
             let t = std::time::Instant::now();
             store
-                .flush(&cvr.version, &cvr, 0.0, &existing)
+                .flush(&cvr.version, &cvr, 0.0)
                 .await
                 .expect("flush deletes");
+            store.flushed().await.expect("delete write-back");
             let delete_ms = t.elapsed().as_secs_f64() * 1000.0;
 
             eprintln!(
@@ -232,7 +231,10 @@ fn cvr_flush_roundtrip_bench() {
         }
         eprintln!("{}", "-".repeat(92));
         eprintln!(
-            "INSERT = 1 bulk stmt (flat in N); DELETE = N sequential round-trips (linear in N).\n\
+            "Both paths are ONE bulk statement, so both should be flat in N. A DELETE\n\
+             column that grows linearly in N means the per-row DELETE loop is back.\n\
+             Timings include the write-back wait, so they are the durable cost of\n\
+             landing N rows, not just the flush transaction.\n\
              Multiply del us/row by real CVR-DB RTT/local-RTT to project sandbox latency.\n"
         );
 

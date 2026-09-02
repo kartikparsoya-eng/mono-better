@@ -29,6 +29,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const SCHEMA: &str = "roze_1/cvr";
+
+/// Both tests in this file DROP and re-CREATE `SCHEMA`, and cargo runs them on
+/// separate threads. They cannot simply use different schemas — the DDL comes
+/// from `flush-schema.sql`, which hardcodes the schema name the TS golden fixture
+/// generator writes to — so they take turns owning it instead.
+static PG_SCHEMA: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 const CVR_ID: &str = "cg-flush";
 const TASK_ID: &str = "flush-task";
 
@@ -42,6 +49,7 @@ fn row_id_from_json(v: &Value) -> RowID {
 
 #[tokio::test]
 async fn flush_matches_ts_golden() {
+    let _schema_guard = PG_SCHEMA.lock().await;
     let uri = match std::env::var("TEST_CVR_PG_URI") {
         Ok(u) if !u.is_empty() => u,
         _ => {
@@ -143,7 +151,7 @@ async fn flush_matches_ts_golden() {
             config_version: None,
         };
         store
-            .flush(&expected_version, &cvr_final, connect_time, &existing)
+            .flush(&expected_version, &cvr_final, connect_time)
             .await
             .expect("flush");
 
@@ -212,4 +220,189 @@ async fn flush_matches_ts_golden() {
         checked += 1;
     }
     eprintln!("flush differential: {checked} scenarios matched the TS golden");
+}
+
+/// The write-back wiring: a row batch over the `RowRecordCache` deferred
+/// threshold must NOT be written by the flush transaction — not `cvr.rows`, not
+/// `cvr.rowsVersion` — so the client poke that follows the flush is not stuck
+/// behind the row commit. TS does this via
+/// `executeRowUpdates(..., 'allow-defer')` (cvr-store.ts:1166 ->
+/// row-record-cache.ts:418-427); this port's store takes the cache as a
+/// parameter and asks it at the same call site.
+///
+/// Non-vacuous: before the wiring the store always wrote every row inline
+/// (`stats.rows_flushed` did not exist and `cvr.rows` held all 150 rows after
+/// the flush), so every assertion below fails.
+///
+/// The second half pins that deferral is not data loss: `apply(flushed=false)`
+/// queues the rows and the background flush lands them, advancing `rowsVersion`.
+///
+/// Gated on `TEST_CVR_PG_URI`; skips (passes) when unset.
+#[tokio::test]
+async fn flush_defers_large_row_batches_to_the_write_back_cache() {
+    let _schema_guard = PG_SCHEMA.lock().await;
+    let uri = match std::env::var("TEST_CVR_PG_URI") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!("SKIP flush_defers_large_row_batches: TEST_CVR_PG_URI unset");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&uri)
+        .await
+        .expect("connect to TEST_CVR_PG_URI");
+
+    let golden: Value = serde_json::from_str(include_str!("../agentic/parity/flush-fixture.json"))
+        .expect("flush-fixture.json");
+    let connect_time = golden["connectTime"].as_f64().expect("connectTime");
+    let now = golden["now"].as_i64().expect("now");
+    let sc = &golden["scenarios"][0];
+
+    sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE"#))
+        .execute(&pool)
+        .await
+        .expect("drop schema");
+    sqlx::raw_sql(include_str!("../agentic/parity/flush-schema.sql"))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    sqlx::raw_sql(sc["baseSeedSql"].as_str().expect("baseSeedSql"))
+        .execute(&pool)
+        .await
+        .expect("seed");
+
+    let mut store = CVRStoreHandle::new(
+        pool.clone(),
+        SCHEMA.to_string(),
+        CVR_ID.to_string(),
+        TASK_ID.to_string(),
+    );
+    let loaded = store.load(connect_time).await.expect("load");
+    let mut updater =
+        CVRQueryDrivenUpdater::new(loaded.cvr, "02".to_string(), "01".to_string(), None);
+    let executed: Vec<(String, String)> = sc["tracked"]["executed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e[0].as_str().unwrap().to_string(),
+                e[1].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let executed_refs: Vec<(&str, &str)> = executed
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    updater.track_queries(&executed_refs, &[]);
+
+    // 150 rows — comfortably over DEFAULT_DEFERRED_THRESHOLD (100).
+    const N: i64 = 150;
+    let query_id = executed[0].0.clone();
+    let mut rows: HashMap<String, (RowID, RowUpdate)> = HashMap::new();
+    for i in 0..N {
+        let mut row_key = serde_json::Map::new();
+        row_key.insert("id".to_string(), Value::Number(i.into()));
+        let id = RowID {
+            schema: "public".to_string(),
+            table: "issue".to_string(),
+            row_key,
+        };
+        rows.insert(
+            rust_cvr::row_key::row_id_string(&id),
+            (
+                id,
+                RowUpdate {
+                    version: Some("02".to_string()),
+                    contents: Some(Arc::new(serde_json::json!({"id": i}))),
+                    ref_counts: RefCounts::from([(query_id.clone(), 1)]),
+                },
+            ),
+        );
+    }
+    let existing: HashMap<String, rust_cvr::schema::types::RowRecord> = HashMap::new();
+    updater.received(&rows, &existing).unwrap();
+
+    let (cvr_final, _stats) = updater.flush(connect_time as i64, now, now);
+    let ops = updater.base.drain_store_ops();
+    let row_op_count = ops
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                rust_cvr::cvr::StoreOp::PutRowRecord(_) | rust_cvr::cvr::StoreOp::DelRowRecord(_)
+            )
+        })
+        .count();
+    assert_eq!(row_op_count, N as usize, "all {N} rows are pending");
+    store.apply_store_ops(ops);
+
+    let expected_version = CVRVersion {
+        state_version: "01".to_string(),
+        config_version: None,
+    };
+    let stats = store
+        .flush(&expected_version, &cvr_final, connect_time)
+        .await
+        .expect("flush")
+        .expect("material flush");
+
+    assert!(
+        !stats.rows_flushed,
+        "a {N}-row batch must defer, not write inline"
+    );
+    assert_eq!(stats.rows, 0, "no row statements ran in the flush tx");
+    assert_eq!(stats.rows_deferred, N as usize);
+
+    let count: i64 = sqlx::query_scalar(&format!(r#"SELECT count(*) FROM "{SCHEMA}".rows"#))
+        .fetch_one(&pool)
+        .await
+        .expect("count rows");
+    assert_eq!(
+        count, 0,
+        "cvr.rows must be untouched by the deferred flush — writing it inline is \
+         exactly the ~1900-upsert stall in front of a large hydrate's pokeEnd"
+    );
+    let rows_version: Option<String> = sqlx::query_scalar(&format!(
+        r#"SELECT "version" FROM "{SCHEMA}"."rowsVersion""#
+    ))
+    .fetch_optional(&pool)
+    .await
+    .expect("select rowsVersion");
+    assert_ne!(
+        rows_version.as_deref(),
+        Some("02"),
+        "rowsVersion must lag instances.version while rows are pending (that lag \
+         is what `load()` retries on)"
+    );
+
+    // The deferred rows are not lost: `flush` already handed them to the cache
+    // with `flushed=false`, which queued them and spawned the background flush.
+    // `store.flushed()` is TS's `await this.#cvrStore.flushed(lc)`.
+    tokio::time::timeout(std::time::Duration::from_secs(20), store.flushed())
+        .await
+        .expect("background flush timed out")
+        .expect("background flush failed");
+
+    let count: i64 = sqlx::query_scalar(&format!(r#"SELECT count(*) FROM "{SCHEMA}".rows"#))
+        .fetch_one(&pool)
+        .await
+        .expect("count rows");
+    assert_eq!(
+        count, N,
+        "the background flush persisted every deferred row"
+    );
+    let rows_version: String = sqlx::query_scalar(&format!(
+        r#"SELECT "version" FROM "{SCHEMA}"."rowsVersion""#
+    ))
+    .fetch_one(&pool)
+    .await
+    .expect("select rowsVersion");
+    assert_eq!(
+        rows_version, "02",
+        "the background flush advances rowsVersion to the CVR version"
+    );
 }

@@ -55,12 +55,11 @@ use rust_cvr::client_handler::{Patch, PatchToVersion, RowPatch};
 use rust_cvr::cvr::{CVR, DesiredQuerySpec, StoreOp};
 use rust_cvr::cvr::{CVRConfigDrivenUpdater, CVRQueryDrivenUpdater, RowRecordMap};
 use rust_cvr::cvr_store::{CVRStoreError, CVRStoreHandle, InspectQueryRow};
-use rust_cvr::row_record_cache::RowRecordCache;
 use rust_cvr::schema::types::{
     CVRVersion, EMPTY_CVR_VERSION, NullableCVRVersion, cmp_versions, maybe_version_string,
     version_string, version_to_cookie,
 };
-use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID, RowRecord};
+use rust_cvr::schema::types::{ClientSchema, QueryRecord, RowID};
 use rust_cvr::shards::ShardID;
 use rust_cvr::ttl_clock::TTLClock;
 use std::cell::RefCell;
@@ -786,7 +785,6 @@ pub struct ViewSyncerService {
     store: Option<Arc<tokio::sync::Mutex<CVRStoreHandle>>>,
     /// Read-source for `existing_rows` (the row records the client already has).
     /// The store persists the `rows` table; this cache reads it back.
-    row_cache: Option<RowRecordCache>,
     clients: HashMap<String, Arc<ClientHandler>>,
     /// Handle to the shared-pool runtime (the process's main multi-thread
     /// runtime) onto which CVR Postgres I/O is offloaded. The client group runs
@@ -1174,7 +1172,6 @@ impl ViewSyncerService {
             cg_id: cg_id.to_string(),
             pipelines,
             store: None,
-            row_cache: None,
             query_replacements: HashMap::new(),
             clients: HashMap::new(),
             tokio_handle,
@@ -1470,7 +1467,16 @@ impl ViewSyncerService {
             return;
         }
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        let existing_rows = self.existing_rows().await;
+        let existing_rows = match self.existing_rows().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                // TS lets a rejected `getRowRecords()` abort the pass; rust fails
+                // the group so clients rehome onto a consistent reload (I-4).
+                tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
+                self.fail_group("CVR row-record load failed");
+                return;
+            }
+        };
         self.last_row_count = existing_rows.len();
         match self
             .remove_expired_queries(
@@ -2488,7 +2494,17 @@ impl ViewSyncerService {
                 .unwrap_or_else(|| cvr.version.state_version.clone());
             let replica_version = self.replica_version.clone();
             // The rows the client already has (from the CVR row cache).
-            let existing_rows = self.existing_rows().await;
+            let existing_rows = match self.existing_rows().await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    // TS lets a rejected `getRowRecords()` abort the pass; rust
+                    // fails the group so clients rehome onto a consistent
+                    // reload (I-4).
+                    tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
+                    self.fail_group("CVR row-record load failed");
+                    return false;
+                }
+            };
             self.last_row_count = existing_rows.len();
             // The client's decoded JWT claims (`authData` for permission rules),
             // read from the ConnectionContextManager at use time — TS passes
@@ -3132,7 +3148,16 @@ impl ViewSyncerService {
         let cvr = self.cvr.take().unwrap();
 
         let client_ids: Vec<String> = self.registered_ws.values().cloned().collect();
-        let existing_rows = self.existing_rows().await;
+        let existing_rows = match self.existing_rows().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                // TS lets a rejected `getRowRecords()` abort the pass; rust fails
+                // the group so clients rehome onto a consistent reload (I-4).
+                tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
+                self.fail_group("CVR row-record load failed");
+                return;
+            }
+        };
         self.last_row_count = existing_rows.len();
         let now = now_ms();
         let ttl_clock = self.get_ttl_clock(now);
@@ -3252,7 +3277,17 @@ impl ViewSyncerService {
                 .current_version()
                 .unwrap_or_else(|| cvr.version.state_version.clone());
             let replica_version = self.replica_version.clone();
-            let existing_rows = self.existing_rows().await;
+            let existing_rows = match self.existing_rows().await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    // TS lets a rejected `getRowRecords()` abort the pass; rust
+                    // fails the group so clients rehome onto a consistent
+                    // reload (I-4).
+                    tracing::error!("CG {}: existing_rows failed: {e}", self.cg_id);
+                    self.fail_group("CVR row-record load failed");
+                    return;
+                }
+            };
             self.last_row_count = existing_rows.len();
             // authData read from the ConnectionContextManager at use time (TS
             // `mustGetConnectionContext(selector).auth?.raw`, decoded).
@@ -7237,7 +7272,6 @@ impl ViewSyncerService {
             cg_id: String::new(),
             pipelines,
             store: None,
-            row_cache: None,
             query_replacements: HashMap::new(),
             clients: HashMap::new(),
             tokio_handle: None,
@@ -7349,32 +7383,27 @@ impl ViewSyncerService {
     }
 
     /// Read the current row records from the CVR (the client's `existing_rows`).
-    /// The cache is loaded once (lazily) and kept warm; the write-back path
-    /// (`flush_ops_to_store`) applies each flushed row delta to it, so this never
-    /// re-reads Postgres. Empty when there is no store/cache.
+    /// Port of TS's `this.#cvrStore.getRowRecords()` reads: the store owns the
+    /// row-record cache (cvr-store.ts:246) and loads it lazily, keeping it
+    /// current through `flush`'s `apply`, so this never re-reads Postgres after
+    /// the first call. Empty when there is no store.
     ///
     /// Returns an `Arc` snapshot (O(1)) — NOT a deep copy. This runs once per
     /// advance/config/TTL pass per client group; the previous full-map clone was
     /// the dominant per-advance allocation at high client counts.
-    pub async fn existing_rows(&self) -> Arc<RowRecordMap> {
-        let Some(cache) = &self.row_cache else {
-            return Arc::new(HashMap::new());
+    ///
+    /// A load failure PROPAGATES, as TS's rejecting `getRowRecords()` does. It
+    /// must not degrade to an empty map: `execute_row_updates` prunes tombstones
+    /// for rows absent from this set, so an empty existing-row set would silently
+    /// swallow real row DELs.
+    pub async fn existing_rows(&self) -> Result<Arc<RowRecordMap>, CVRStoreError> {
+        let Some(store_arc) = self.store.clone() else {
+            return Ok(Arc::new(HashMap::new()));
         };
         // Offload the (idempotent) cache load + read onto the shared-pool
-        // runtime. `load()` populates the cache on first call and returns early
-        // once loaded; the cache stays current via the write-back in
-        // `flush_ops_to_store`, so we never `clear()` here.
-        let cache = cache.clone();
-        self.offload(async move {
-            if let Err(e) = cache.load().await {
-                tracing::warn!("row cache load failed: {e}");
-                return Arc::new(HashMap::new());
-            }
-            // The cache and updater share one `RowRecord` type, so this is
-            // `RowRecordMap` directly — no per-row conversion.
-            cache.get_row_records().await
-        })
-        .await
+        // runtime — the CG executor's reactor does not drive the CVR pool.
+        self.offload(async move { store_arc.lock().await.get_row_records().await })
+            .await
     }
 
     /// Inspector query view — delegates to `CVRStore::inspect_queries` (the SQL
@@ -7466,20 +7495,10 @@ impl ViewSyncerService {
         // pool per CG previously multiplied connection demand by the number of
         // groups and exhausted Postgres backends, stalling `block_on` acquires on
         // the CG loop. Matches TS's one-pool-per-worker model.
-        let store = CVRStoreHandle::new(pool.clone(), schema.clone(), cvr_id.clone(), task_id);
-        // Row-record cache (reads the `rows` table the store writes). A no-op
-        // fail callback + the async-flush metrics recorder (TS
-        // `#recordAsyncFlushStats`, wired via the write-behind flush loop).
-        let fail: rust_cvr::row_record_cache::FailCallback = Arc::new(|e: String| {
-            tracing::warn!("row cache: {e}");
-        });
-        let metrics: rust_cvr::row_record_cache::MetricsCallback =
-            Arc::new(|rows: usize, elapsed_ms: f64| {
-                rust_cvr::otel_metrics::record_async_flush_stats(rows as u64, elapsed_ms);
-            });
-        let cache = RowRecordCache::new(pool, schema, cvr_id, 100, fail, Some(metrics));
+        // The store builds and owns its RowRecordCache, exactly like TS's
+        // `new CVRStore(...)` does (cvr-store.ts:246).
+        let store = CVRStoreHandle::new(pool, schema, cvr_id, task_id);
         self.store = Some(Arc::new(tokio::sync::Mutex::new(store)));
-        self.row_cache = Some(cache);
         Ok(())
     }
 
@@ -7598,18 +7617,6 @@ impl ViewSyncerService {
             .filter(|op| !row_op_is_noop(op, existing_rows))
             .collect();
 
-        // Extract the row deltas (from the DEDUPED ops) before they are moved into
-        // the store, so we can mirror the same writes into the read cache after
-        // the PG write succeeds.
-        let row_deltas: Vec<(RowID, Option<RowRecord>)> = ops
-            .iter()
-            .filter_map(|op| match op {
-                StoreOp::PutRowRecord(r) => Some((r.id.clone(), Some(r.clone()))),
-                StoreOp::DelRowRecord(id) => Some((id.clone(), None)),
-                _ => None,
-            })
-            .collect();
-
         // Offload the whole PG-touching section — apply ops, flush the CVR, and
         // mirror the row deltas back into the read cache — onto the shared-pool
         // runtime (doc 91 §5.1). The store's `!Send` engine state is not touched
@@ -7618,7 +7625,6 @@ impl ViewSyncerService {
         // `flushed_cvr` is an `Arc<CVR>`: moving it into the task is a refcount
         // bump, not a deep CVR copy — the caller reclaims the CVR via
         // `Arc::try_unwrap` once this awaited task drops its clone.
-        let cache = self.row_cache.clone();
         let expected = expected_current_version.clone();
         let flushed = flushed_cvr;
         self.offload(async move {
@@ -7641,20 +7647,10 @@ impl ViewSyncerService {
                 // promptly rather than wedging. Jitter de-synchronizes the convoy.
                 const MAX_FLUSH_ATTEMPTS: u32 = 3;
                 let mut attempt = 1u32;
-                // Snapshot of the CVR's current row records for the flush's
-                // no-op pruning (TS #flush reads this.getRowRecords() from its
-                // embedded cache; our store doesn't own the cache, so the
-                // snapshot is passed in). O(1) — Arc clone of the cache map.
-                let existing_rows = match &cache {
-                    Some(c) => c.get_row_records().await,
-                    None => Arc::new(HashMap::new()),
-                };
                 let result = loop {
                     let outcome = {
                         let mut store = store_arc.lock().await;
-                        store
-                            .flush(&expected, &flushed, last_connect_time as f64, &existing_rows)
-                            .await
+                        store.flush(&expected, &flushed, last_connect_time as f64).await
                     };
                     match outcome {
                         Ok(r) => break Ok(r),
@@ -7676,33 +7672,17 @@ impl ViewSyncerService {
                     }
                 };
                 crate::metrics::record_cvr_flush_attempt(result.is_ok());
-                result
-                    .map_err(|e| {
-                        // Counted, not just logged: a rising flush-failure rate
-                        // (pool exhaustion, ownership churn) is the leading
-                        // indicator of the fail_group → reconnect storm.
-                        crate::metrics::record_cvr_flush_failure();
-                        format!("store flush: {e}")
-                    })?
-                    .is_some()
+                result.map_err(|e| {
+                    // Counted, not just logged: a rising flush-failure rate
+                    // (pool exhaustion, ownership churn) is the leading
+                    // indicator of the fail_group → reconnect storm.
+                    crate::metrics::record_cvr_flush_failure();
+                    format!("store flush: {e}")
+                })?
             };
-
-            // Write-back: the store just persisted these rows to PG, so update
-            // the in-memory cache with the same deltas (`flushed=true` →
-            // cache-only, no second PG write). Keeps the cache in lockstep so the
-            // next `existing_rows()` needs no reload.
-            if !row_deltas.is_empty()
-                && let Some(cache) = &cache
-            {
-                let ver = flushed.version.clone();
-                // Ensure the cache is loaded before applying (idempotent).
-                if let Err(e) = cache.load().await {
-                    tracing::warn!("row cache load before write-back failed: {e}");
-                } else if let Err(e) = cache.apply(row_deltas, ver, true).await {
-                    tracing::warn!("row cache write-back failed: {e}");
-                }
-            }
-            Ok(store_flushed)
+            // The store applies the row deltas to its own cache inside `flush`
+            // (TS cvr-store.ts:1218), so there is nothing to mirror here.
+            Ok(store_flushed.is_some())
         })
         .await
         .inspect(|&store_flushed| {
@@ -8513,15 +8493,16 @@ impl ViewSyncerService {
         exclude_query_hashes: &[String],
         catchup_from: NullableCVRVersion,
     ) -> Result<Vec<PatchToVersion>, String> {
-        let (Some(store_arc), Some(cache)) = (self.store.clone(), self.row_cache.as_ref()) else {
+        let Some(store_arc) = self.store.clone() else {
             return Ok(Vec::new()); // no store → nothing persisted to catch up from
         };
 
         // Gather the row pages + config patches from PG (async), then release
-        // the cache/store borrows before touching the engine (`getRow`).
-        let cache_ref = cache;
+        // the store borrow before touching the engine (`getRow`).
         let (raw_rows, cfg_patches): (Vec<rust_cvr::schema::cvr::RowsRow>, Vec<PatchToVersion>) = {
-            let mut cursor = cache_ref
+            let store_for_rows = store_arc.clone();
+            let store_guard = store_for_rows.lock().await;
+            let mut cursor = store_guard
                 .catchup_row_patches(
                     catchup_from.clone(),
                     &cvr.version,
@@ -9160,7 +9141,7 @@ impl ViewSyncerService {
         // deleteClients produces config ops (client removal + desire
         // inactivation), not row writes — but snapshot the CVR rows anyway so the
         // store flush's row dedup is correct regardless.
-        let existing_rows = self.existing_rows().await;
+        let existing_rows = self.existing_rows().await.map_err(|e| e.to_string())?;
         let clients = self.get_clients(poke_ws_ids);
         {
             // Like the config poke (`config_poke_targets`): only clients AT the
@@ -9701,8 +9682,12 @@ mod engine_tests {
         }
     }
 
-    fn row_record(id: &str, patch_version: &str, referenced: bool) -> RowRecord {
-        RowRecord {
+    fn row_record(
+        id: &str,
+        patch_version: &str,
+        referenced: bool,
+    ) -> rust_cvr::schema::types::RowRecord {
+        rust_cvr::schema::types::RowRecord {
             id: row_id(id),
             row_version: "r1".to_string(),
             patch_version: version_from_string(patch_version),
