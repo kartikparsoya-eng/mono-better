@@ -1232,15 +1232,19 @@ impl CVRStoreHandle {
         // this is cache-only; otherwise the cache queues them in `pending` and
         // spawns the background flush, and the caller's poke goes out without
         // waiting for the row commit.
-        if !row_updates.is_empty() {
-            match self
-                .row_cache
-                .apply(row_updates, cvr.version.clone(), stats.rows_flushed)
-                .await
-            {
-                Ok(count) => self.row_count = count,
-                Err(e) => eprintln!("[cvr] row cache apply failed: {e}"),
-            }
+        // TS calls this UNCONDITIONALLY (cvr-store.ts:1217), including on a
+        // config-only flush with an empty row map: `apply` is also what advances
+        // the cache's `flushed_rows_version` (and its watch channel) when
+        // `rows_flushed`, so skipping it on an empty map leaves the cache's
+        // recorded version behind the CVR's for every config-only pass. Do not
+        // reintroduce an `is_empty()` guard here.
+        match self
+            .row_cache
+            .apply(row_updates, cvr.version.clone(), stats.rows_flushed)
+            .await
+        {
+            Ok(count) => self.row_count = count,
+            Err(e) => eprintln!("[cvr] row cache apply failed: {e}"),
         }
 
         // (`self.pending` was consumed by the mem::take above — nothing to clear.)

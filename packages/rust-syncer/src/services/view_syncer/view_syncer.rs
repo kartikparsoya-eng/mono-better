@@ -8501,23 +8501,31 @@ impl ViewSyncerService {
         // the store borrow before touching the engine (`getRow`).
         let (raw_rows, cfg_patches): (Vec<rust_cvr::schema::cvr::RowsRow>, Vec<PatchToVersion>) = {
             let store_for_rows = store_arc.clone();
-            let store_guard = store_for_rows.lock().await;
-            let mut cursor = store_guard
-                .catchup_row_patches(
-                    catchup_from.clone(),
-                    &cvr.version,
-                    current,
-                    exclude_query_hashes,
-                )
-                .await
-                .map_err(|e| format!("catchup_row_patches: {e}"))?;
+            // The row cursor borrows the store guard, so it MUST be drained and
+            // dropped inside this scope: `tokio::sync::Mutex` is not reentrant,
+            // and the `catchup_reader()` lock below is the SAME mutex. Holding
+            // the guard across it self-deadlocks the CG task — and catchup runs
+            // on every client connect, so the whole group freezes after its
+            // first flush with no error logged.
             let mut rows = Vec::new();
-            while let Some(page) = cursor
-                .next_page()
-                .await
-                .map_err(|e| format!("catchup rows page: {e}"))?
             {
-                rows.extend(page);
+                let store_guard = store_for_rows.lock().await;
+                let mut cursor = store_guard
+                    .catchup_row_patches(
+                        catchup_from.clone(),
+                        &cvr.version,
+                        current,
+                        exclude_query_hashes,
+                    )
+                    .await
+                    .map_err(|e| format!("catchup_row_patches: {e}"))?;
+                while let Some(page) = cursor
+                    .next_page()
+                    .await
+                    .map_err(|e| format!("catchup rows page: {e}"))?
+                {
+                    rows.extend(page);
+                }
             }
             let store_reader = store_arc.lock().await.catchup_reader();
             let cfg = store_reader

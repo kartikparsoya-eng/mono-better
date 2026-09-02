@@ -41,7 +41,32 @@ else
   echo "SKIP: @rocicorp/zero-sqlite3 not installed (run pnpm install)"
 fi
 # TEST_CVR_PG_URI: set to run PG-gated tests; unset => they skip+pass.
+#
+# Auto-discover a local Postgres so the PG-gated tests actually RUN by default.
+# They are the ONLY coverage for the CVR store <-> row-cache <-> catchup seam,
+# and on 2026-09-02 a re-entrant `tokio::sync::Mutex` lock in the catchup path
+# shipped green precisely because this was unset: every PG test skipped, the
+# in-process suites passed, and the deadlock only surfaced on the ART sandbox as
+# "no rows served". Skipping is still allowed, but it is now LOUD.
+if [ -z "${TEST_CVR_PG_URI:-}" ] && command -v psql >/dev/null 2>&1 \
+   && psql "postgresql://localhost/postgres" -tAc "select 1" >/dev/null 2>&1; then
+  psql "postgresql://localhost/postgres" -tAc \
+    "select 1 from pg_database where datname='rust_cvr_test'" 2>/dev/null | grep -q 1 \
+    || createdb rust_cvr_test >/dev/null 2>&1 || true
+  TEST_CVR_PG_URI="postgresql://localhost/rust_cvr_test"
+  echo "PG-gated tests: auto-discovered local Postgres -> $TEST_CVR_PG_URI"
+fi
 export TEST_CVR_PG_URI="${TEST_CVR_PG_URI:-}"
+if [ -z "$TEST_CVR_PG_URI" ]; then
+  echo ""
+  echo "  ############################################################"
+  echo "  # WARNING: TEST_CVR_PG_URI is unset.                       #"
+  echo "  # Every PG-gated test SKIPPED (they pass vacuously).       #"
+  echo "  # A CVR/catchup deadlock shipped this way on 2026-09-02.   #"
+  echo "  # A green run here does NOT cover the CVR store seam.      #"
+  echo "  ############################################################"
+  echo ""
+fi
 
 for c in rust-ivm rust-cvr; do
   step "$c — fmt / clippy --all-targets -D warnings / test"

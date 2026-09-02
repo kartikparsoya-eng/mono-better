@@ -239,9 +239,18 @@ impl RowRecordCache {
     /// Mirrors TS `#ensureLoaded()` / `load()`. Streams rows in pages of 5000.
     /// Returns the number of rows loaded.
     pub async fn load(&self) -> Result<usize, sqlx::Error> {
-        let mut state = self.state.lock().await;
-        if let Some(cache) = &state.cache {
-            return Ok(cache.len());
+        // Do NOT hold `state` across the streaming query below. TS's
+        // `#ensureLoaded` caches a PROMISE, so concurrent callers await one load
+        // and no lock is held while it runs. Holding this mutex across the fetch
+        // deadlocks: `flush` now calls `get_row_records()` (this) while the store
+        // mutex is held, so a `state` waiter that also needs a pool connection
+        // can never make progress. Take the lock only to check, then again to
+        // install.
+        {
+            let state = self.state.lock().await;
+            if let Some(cache) = &state.cache {
+                return Ok(cache.len());
+            }
         }
 
         let sql = format!(
@@ -266,6 +275,12 @@ impl RowRecordCache {
             cache.insert(key, record);
         }
 
+        let mut state = self.state.lock().await;
+        // Another loader may have won the race while we were fetching; keep its
+        // result so the `Arc` identity stays stable for anyone holding a snapshot.
+        if let Some(existing) = &state.cache {
+            return Ok(existing.len());
+        }
         let count = cache.len();
         state.cache = Some(Arc::new(cache));
         Ok(count)
