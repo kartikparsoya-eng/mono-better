@@ -140,16 +140,16 @@ pub enum CustomTransformed {
 /// Transform a batch of named queries against the user's query API server.
 /// Cached results are reused; only cache-missing queries hit the network.
 /// Returns `Err(TransformFailed body)` on a whole-request failure.
-pub async fn transform_custom_queries(
+pub async fn transform(
     ctx: &CustomQueryContext,
     shard: &ShardID,
-    specs: &[CustomQuerySpec],
+    queries: &[CustomQuerySpec],
 ) -> Result<Vec<CustomTransformed>, Value> {
     let mut results: Vec<CustomTransformed> = Vec::new();
     let mut to_fetch: Vec<&CustomQuerySpec> = Vec::new();
 
     // Split into cached vs. uncached (TS `transform()` cache split).
-    for spec in specs {
+    for spec in queries {
         if let Some(cached) = cache_get(ctx, &spec.id) {
             results.push(CustomTransformed::Ok(cached));
         } else {
@@ -177,7 +177,7 @@ pub async fn transform_custom_queries(
         .map(|s| Value::String(s.id.clone()))
         .collect();
 
-    let response = post_transform(ctx, shard, &body, &query_ids).await?;
+    let response = request_transform(ctx, shard, &body, &query_ids).await?;
 
     // A `QueryResponse` carries `queries: [...]`; a legacy `["transformed", [...]]`
     // tuple is a client-fallback response. Anything else (e.g. a `TransformFailed`
@@ -246,17 +246,14 @@ fn extract_transform_queries(response: &Value) -> Option<Vec<Value>> {
 /// Force the empty `/query` validation request used by auth maintenance. Port of
 /// TS `CustomQueryTransformer.validate` (`transform-query.ts`).
 ///
-/// Kept separate from `transform_custom_queries` because that path short-circuits
+/// Kept separate from `transform` because that path short-circuits
 /// locally on an empty batch (`to_fetch.is_empty()`) and never hits the API
 /// server — but validation MUST make the request so a token revoked/deauthorized
 /// at the app layer (still cryptographically valid) is surfaced by the server.
 /// Success is intentionally opaque (`Ok(())`); callers only care pass/fail.
-pub async fn validate_custom_queries(
-    ctx: &CustomQueryContext,
-    shard: &ShardID,
-) -> Result<(), Value> {
+pub async fn validate(ctx: &CustomQueryContext, shard: &ShardID) -> Result<(), Value> {
     let body = serde_json::json!(["transform", []]);
-    post_transform(ctx, shard, &body, &[]).await.map(|_| ())
+    request_transform(ctx, shard, &body, &[]).await.map(|_| ())
 }
 
 /// Whether an error body denotes an authorization failure. Port of TS
@@ -301,7 +298,7 @@ const RESERVED_PARAMS: [&str; 2] = ["schema", "appID"];
 /// URL allow-check (`urlMatch`), reserved-param guard, composed headers with
 /// TS overwrite precedence, and the 4-attempt retry loop with backoff+jitter
 /// on 5xx / network errors. Appends the `schema` + `appID` query params.
-async fn post_transform(
+async fn request_transform(
     ctx: &CustomQueryContext,
     shard: &ShardID,
     body: &Value,
@@ -360,7 +357,7 @@ async fn post_transform(
     // instead of paying DNS + connect + slow-start on every request (TS's
     // `fetch` shares Node's global agent the same way).
     //
-    // The timeout is NOT optional: `transform_custom_queries` is awaited
+    // The timeout is NOT optional: `transform` is awaited
     // inline on the CG event loop, so a query-API server that accepts the
     // connection and never responds would otherwise freeze that client group
     // FOREVER (its message channel just queues; reconnecting clients land on
@@ -610,7 +607,7 @@ mod tests {
                 args: vec![],
             },
         ];
-        let err = transform_custom_queries(&ctx, &shard, &specs)
+        let err = transform(&ctx, &shard, &specs)
             .await
             .err()
             .expect("transform should fail for a disallowed URL");
@@ -724,7 +721,7 @@ mod tests {
             allowed_urls: vec![ok_url],
             ..CustomQueryContext::default()
         };
-        assert!(validate_custom_queries(&ctx, &shard).await.is_ok());
+        assert!(validate(&ctx, &shard).await.is_ok());
 
         // Auth-revoked path: 401 fails immediately (4xx is never retried) with
         // the reason-http body carrying the status.
@@ -734,7 +731,7 @@ mod tests {
             allowed_urls: vec![unauth_url],
             ..CustomQueryContext::default()
         };
-        let err = validate_custom_queries(&ctx, &shard)
+        let err = validate(&ctx, &shard)
             .await
             .expect_err("401 must fail validation");
         assert_eq!(err["kind"], "TransformFailed");
@@ -768,9 +765,7 @@ mod tests {
         // No specs → returns an empty result without touching the network.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = ctx_at("http://127.0.0.1:1/never");
-        let out = rt
-            .block_on(transform_custom_queries(&ctx, &shard(), &[]))
-            .unwrap();
+        let out = rt.block_on(transform(&ctx, &shard(), &[])).unwrap();
         assert!(out.is_empty());
     }
 
@@ -793,9 +788,7 @@ mod tests {
             name: "myQuery".to_string(),
             args: vec![],
         }];
-        let out = rt
-            .block_on(transform_custom_queries(&ctx, &shard(), &specs))
-            .unwrap();
+        let out = rt.block_on(transform(&ctx, &shard(), &specs)).unwrap();
         assert_eq!(out.len(), 1);
         match &out[0] {
             CustomTransformed::Ok(t) => {

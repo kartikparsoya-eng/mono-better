@@ -12,7 +12,7 @@ use rust_cvr::ttl_clock::TTLClock;
 
 use crate::config::zero_config::is_admin_password_valid;
 use crate::custom_queries::transform_query::{
-    CustomQueryContext, CustomQuerySpec, CustomTransformed, transform_custom_queries,
+    CustomQueryContext, CustomQuerySpec, CustomTransformed, transform,
 };
 
 use super::view_syncer::ViewSyncerService;
@@ -233,7 +233,7 @@ async fn resolve_analyze_ast(
             name: name.to_string(),
             args: args.clone(),
         };
-        let transformed = transform_custom_queries(&ctx, shard, std::slice::from_ref(&spec))
+        let transformed = transform(&ctx, shard, std::slice::from_ref(&spec))
             .await
             .map_err(|e| format!("Error transforming custom query {name}: {e}"))?;
         ast = Some(match transformed.into_iter().next() {

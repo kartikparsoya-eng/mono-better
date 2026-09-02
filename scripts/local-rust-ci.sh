@@ -61,5 +61,8 @@ python3 "$ROOT/parity/state_flag_registry.py"; chk $? "M3 state-flag registry"
 step "parity — M2 call-guard parity (TS-gated calls are gated in rust too)"
 python3 "$ROOT/parity/call_guard_parity.py"; chk $? "M2 call-guard parity"
 
+step "parity — M8 signature differential (mirrored-file twin, 1:1, same parameters)"
+python3 "$ROOT/parity/signature_diff.py"; chk $? "M8 signature differential"
+
 echo; [ $fail -eq 0 ] && echo "LOCAL CI: PASS" || echo "LOCAL CI: FAIL"
 exit $fail

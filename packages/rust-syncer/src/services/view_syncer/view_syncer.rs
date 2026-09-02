@@ -21,7 +21,7 @@
 
 use crate::auth::read_authorizer::{hash_of_ast, transform_and_hash_query};
 use crate::custom_queries::transform_query::{
-    CustomQueryContext, CustomQuerySpec, CustomTransformed, transform_custom_queries,
+    CustomQueryContext, CustomQuerySpec, CustomTransformed, transform,
 };
 use crate::services::view_syncer::connection_context_manager::{
     CCMError, ConnectParamsForRegistration, ConnectionContext as CcmConnectionContext,
@@ -888,6 +888,14 @@ pub struct ViewSyncerService {
     /// without a live query-API round trip.
     #[cfg(test)]
     validate_connection_runs: u64,
+    /// Test observability: how many times the config/hydrate pass actually ran.
+    /// `updateAuth` and the background retransform arrive with an EMPTY body, so
+    /// every "did the re-transform happen?" assertion otherwise has to infer it
+    /// from a side effect — and the `forced_retransform_outcomes` seam skips the
+    /// call entirely, which is how a gate that made both of them no-ops passed
+    /// the existing tests.
+    #[cfg(test)]
+    config_pass_runs: u64,
     /// The userID this client group is pinned to (the `sub` of the first authed
     /// connection; `None` for an anonymous group). Admission
     /// (`check_and_pin_user`) guarantees every connection reaching this CG shares
@@ -1193,6 +1201,8 @@ impl ViewSyncerService {
             hydrate_unchanged_runs: 0,
             #[cfg(test)]
             validate_connection_runs: 0,
+            #[cfg(test)]
+            config_pass_runs: 0,
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -1545,7 +1555,7 @@ impl ViewSyncerService {
     /// `revalidate_at` + the group retransform deadline, with deferral backoff
     /// applied by the CCM), and arm — or disarm when the plan reports no
     /// deadline ("No auth maintenance wakeup scheduled").
-    fn arm_auth_maintenance(&mut self) {
+    fn schedule_auth_maintenance(&mut self) {
         self.next_auth_maintenance_at = lock_unpoisoned(&self.ccm)
             .plan_maintenance()
             .earliest_deadline_at;
@@ -1577,7 +1587,7 @@ impl ViewSyncerService {
     ///    cadence is identical.
     ///
     /// Re-arms the deadline (or clears it if no authed connection remains).
-    async fn on_auth_maintenance_tick(&mut self) {
+    async fn run_auth_maintenance(&mut self) {
         // Plan from the ported CCM (TS `#runAuthMaintenance`, view-syncer.ts:825:
         // `planMaintenance()` → `dueRevalidations` + `dueRetransform`). The CCM
         // owns the deadlines, the deferral backoff, and the background-connection
@@ -1588,7 +1598,7 @@ impl ViewSyncerService {
                 "CG {}: auth maintenance woke up with no due work",
                 self.cg_id
             );
-            self.arm_auth_maintenance();
+            self.schedule_auth_maintenance();
             return;
         }
 
@@ -1647,7 +1657,7 @@ impl ViewSyncerService {
                         conn.close_with_error(error_body);
                     }
                     if let Some(ws_id) = self.registered_ws.get(&client_id).cloned() {
-                        self.on_connection_closed(&client_id, &ws_id);
+                        self.delete_client_due_to_disconnect(&client_id, &ws_id);
                     }
                 }
                 Ok(()) => survivors.push(client_id),
@@ -1695,7 +1705,7 @@ impl ViewSyncerService {
                         "Scheduled auth revalidation failed; deferring auth maintenance"
                     );
                     lock_unpoisoned(&self.ccm).defer_maintenance(MaintenanceKind::Revalidate);
-                    self.arm_auth_maintenance();
+                    self.schedule_auth_maintenance();
                     return;
                 }
             }
@@ -1715,7 +1725,7 @@ impl ViewSyncerService {
 
         // Re-arm from the refreshed plan (TS `#scheduleAuthMaintenance` in the
         // locked-op `finally`).
-        self.arm_auth_maintenance();
+        self.schedule_auth_maintenance();
     }
 
     /// Validate a connection's credential against the query API server and record
@@ -1734,7 +1744,7 @@ impl ViewSyncerService {
     ///
     /// Rust limitation (NOT TS parity — do not read this as equivalent): TS uses
     /// `response.validation`, which can carry the API server's authoritative
-    /// userID; rust's `validate_custom_queries` returns `Ok(())` ("Success is
+    /// userID; rust's `validate` returns `Ok(())` ("Success is
     /// intentionally opaque"), so a successful probe still records the
     /// `client-fallback` kind. Threading the server userID through is tracked as
     /// an open row in `parity/ZERO-DIVERGENCE-PLAN.md`'s M0 matrix.
@@ -1756,8 +1766,7 @@ impl ViewSyncerService {
         // `None` (no `userQueryURL` configured) is TS's no-transformer branch.
         if let Some(ctx) = self.query_context_for(&conn_ctx.client_id, &conn_ctx.ws_id) {
             let shard = self.shard.clone();
-            if let Err(body) =
-                crate::custom_queries::transform_query::validate_custom_queries(&ctx, &shard).await
+            if let Err(body) = crate::custom_queries::transform_query::validate(&ctx, &shard).await
             {
                 // TS throws `ProtocolErrorWithLevel(response, 'warn')` here and
                 // the catch below splits auth-error from everything else.
@@ -1834,7 +1843,7 @@ impl ViewSyncerService {
             if let Some(conn) = self.connections.get(conn_ctx.client_id.as_str()) {
                 conn.close_with_error(error);
             }
-            self.on_connection_closed(&conn_ctx.client_id, &conn_ctx.ws_id);
+            self.delete_client_due_to_disconnect(&conn_ctx.client_id, &conn_ctx.ws_id);
         }
     }
 
@@ -2135,7 +2144,7 @@ impl ViewSyncerService {
         // Recompute the auth-maintenance wakeup now that the CCM has a newly
         // validated connection (TS re-arms via `#scheduleAuthMaintenance` after
         // every locked operation).
-        self.arm_auth_maintenance();
+        self.schedule_auth_maintenance();
 
         // Raw auth/header material captured at connect, forwarded on a relayed
         // custom push so the TS endpoint can rebuild the userPushURL request.
@@ -2239,7 +2248,7 @@ impl ViewSyncerService {
             if let Some(conn) = self.connections.get(&*client_id) {
                 conn.close_with_error(crate::protocol::ErrorBody::internal(e.to_string()));
             }
-            self.on_connection_closed(&client_id, &ws_id);
+            self.delete_client_due_to_disconnect(&client_id, &ws_id);
             return None;
         }
 
@@ -2329,7 +2338,7 @@ impl ViewSyncerService {
                     message,
                 ));
             }
-            self.on_connection_closed(client_id, &ws_id);
+            self.delete_client_due_to_disconnect(client_id, &ws_id);
             return false;
         }
         // The custom-query API context (`userQueryURL` + allowlisted headers)
@@ -2354,7 +2363,12 @@ impl ViewSyncerService {
         // its internal `lmids` / `mutationResults` queries) and caught up on any
         // patches produced while it was disconnected. A `changeDesiredQueries`
         // with no query change and no deletions is a genuine no-op.
-        if !is_init && !has_query_change && !has_deletions {
+        // NB: `force_config_pass`, not `is_init` — `updateAuth` and the background
+        // retransform both arrive with an EMPTY body (no query change, no
+        // deletions) and MUST still run the pass; re-transforming under the
+        // refreshed credential is their entire purpose. Gating this on
+        // `is_init` alone silently made both of them no-ops.
+        if !force_config_pass && !has_query_change && !has_deletions {
             return false;
         }
 
@@ -2371,7 +2385,7 @@ impl ViewSyncerService {
                 if let Some(conn) = self.connections.get(client_id) {
                     conn.close_with_error(crate::protocol::ErrorBody::client_not_found(message));
                 }
-                self.on_connection_closed(client_id, &ws_id);
+                self.delete_client_due_to_disconnect(client_id, &ws_id);
                 return false;
             }
             Err(error) => {
@@ -2392,7 +2406,7 @@ impl ViewSyncerService {
             if let Some(conn) = self.connections.get(client_id) {
                 conn.close_with_error(*error);
             }
-            self.on_connection_closed(client_id, &ws_id);
+            self.delete_client_due_to_disconnect(client_id, &ws_id);
             return false;
         }
         if is_init && cvr.client_schema.is_none() && client_schema.is_none() {
@@ -2403,7 +2417,7 @@ impl ViewSyncerService {
                         .to_string(),
                 ));
             }
-            self.on_connection_closed(client_id, &ws_id);
+            self.delete_client_due_to_disconnect(client_id, &ws_id);
             return false;
         }
 
@@ -2449,10 +2463,10 @@ impl ViewSyncerService {
                         // TS `this.fail(new ProtocolError(error))`), so the client
                         // sees one error shape for a failed transform whether it
                         // failed during validation or during the transform itself.
-                        for c in &self.clients_for(std::slice::from_ref(&ws_id)) {
+                        for c in &self.get_clients(std::slice::from_ref(&ws_id)) {
                             c.send_query_transform_failed_error(&body);
                         }
-                        self.on_connection_closed(client_id, &ws_id);
+                        self.delete_client_due_to_disconnect(client_id, &ws_id);
                         return false;
                     }
                 }
@@ -2463,6 +2477,10 @@ impl ViewSyncerService {
         // then catches the client up). Always runs on initConnection.
         let mut config_accepted = false;
         if force_config_pass || has_query_change {
+            #[cfg(test)]
+            {
+                self.config_pass_runs += 1;
+            }
             let cvr = self.cvr.take().unwrap();
             let state_version = self
                 .pipelines()
@@ -2633,7 +2651,7 @@ impl ViewSyncerService {
                 ));
             }
             if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
-                self.on_connection_closed(client_id, &ws_id);
+                self.delete_client_due_to_disconnect(client_id, &ws_id);
             }
             return;
         }
@@ -2656,7 +2674,7 @@ impl ViewSyncerService {
                 conn.close_with_error(error_body);
             }
             if let Some(ws_id) = self.registered_ws.get(client_id).cloned() {
-                self.on_connection_closed(client_id, &ws_id);
+                self.delete_client_due_to_disconnect(client_id, &ws_id);
             }
             return;
         }
@@ -2763,7 +2781,7 @@ impl ViewSyncerService {
         )
         .await;
         // Locked-op re-arm (TS `#scheduleAuthMaintenance` in the `finally`).
-        self.arm_auth_maintenance();
+        self.schedule_auth_maintenance();
     }
 
     /// Handle an inspector `["inspect", {op, id, ...}]` message. Port of
@@ -2895,7 +2913,7 @@ impl ViewSyncerService {
         // does not clean up, matching TS.
     }
 
-    fn on_connection_closed(&mut self, client_id: &str, ws_id: &str) {
+    fn delete_client_due_to_disconnect(&mut self, client_id: &str, ws_id: &str) {
         crate::trace::note(
             "conn-close",
             &format!("cg={} client={client_id} ws={ws_id}", self.cg_id),
@@ -2980,7 +2998,7 @@ impl ViewSyncerService {
             // the G49 ownership differential (2026-08-28): rust=Rehome, TS=none.
             conn.close("Connection superseded by a newer connection");
         }
-        self.on_connection_closed(client_id, ws_id);
+        self.delete_client_due_to_disconnect(client_id, ws_id);
     }
 
     /// Hot-reload the read-permissions doc if it changed on the replica since
@@ -3397,7 +3415,7 @@ async fn on_inbound(
     if closed {
         state_rc
             .borrow_mut()
-            .on_connection_closed(&client_id, &ws_id);
+            .delete_client_due_to_disconnect(&client_id, &ws_id);
     }
 }
 
@@ -3549,7 +3567,7 @@ pub(crate) async fn cg_event_loop(
                             .next_auth_maintenance_at
                             .is_some_and(|at| at <= now_ms())
                         {
-                            state.on_auth_maintenance_tick().await;
+                            state.run_auth_maintenance().await;
                         }
                         // Fire the eviction timer only when its own deadline has
                         // elapsed (TS `#expiredQueriesTimer` setTimeout callback);
@@ -3637,7 +3655,7 @@ async fn dispatch_cg_message(
         } => on_inbound(state_rc, client_id, ws_id, text).await,
         CGMessage::ConnectionClosed { client_id, ws_id } => state_rc
             .borrow_mut()
-            .on_connection_closed(&client_id, &ws_id),
+            .delete_client_due_to_disconnect(&client_id, &ws_id),
         CGMessage::CloseConnection { client_id, ws_id } => {
             state_rc.borrow_mut().close_connection(&client_id, &ws_id)
         }
@@ -4244,7 +4262,7 @@ mod tests {
             return;
         };
         let _ = rt.block_on(state.validate_connection(&ctx));
-        state.arm_auth_maintenance();
+        state.schedule_auth_maintenance();
     }
 
     pub(super) fn revalidate_state(
@@ -4372,7 +4390,7 @@ mod tests {
 
         // The token expires; the next maintenance tick must drop the connection.
         valid.store(false, Ordering::SeqCst);
-        rt.block_on(state.on_auth_maintenance_tick());
+        rt.block_on(state.run_auth_maintenance());
 
         assert_eq!(
             state.registered_ws.len(),
@@ -4593,6 +4611,71 @@ mod tests {
             state.metrics.snapshot()["authChanges"],
             1,
             "opaque token refresh must trigger a re-transform"
+        );
+    }
+
+    /// NON-VACUOUS (fix, 2026-09-02): `updateAuth` and the background retransform
+    /// carry an EMPTY desired-queries body, and both MUST still run the
+    /// config/hydrate pass — re-transforming every query under the refreshed
+    /// credential is their whole purpose (TS `updateAuth` -> `#handleConfigUpdate`
+    /// with `'all'`, view-syncer.ts:1019-1031; `#runBackgroundRetransform` ->
+    /// `#syncQueryPipelineSet('all')`, view-syncer.ts:2670).
+    ///
+    /// The early return that skips a no-op pass must therefore key off
+    /// `forces_config_pass()`, NOT `is_init_connection()`. Narrow it to
+    /// `is_init` and both paths become silent no-ops — which the
+    /// `forced_retransform_outcomes` seam cannot catch, because it short-circuits
+    /// before `handle_desired_queries` is ever called.
+    #[test]
+    fn empty_body_config_passes_still_run_for_update_auth_and_retransform() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut state = revalidate_state(&rt, Some(300_000), valid);
+        seed_test_client_schema(&mut state);
+
+        let empty = serde_json::json!({});
+        for origin in [
+            ConfigPassOrigin::UpdateAuth,
+            ConfigPassOrigin::BackgroundRetransform,
+        ] {
+            let (tx, _d) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+            rt.block_on(state.on_new_connection(
+                pinned_params("c1", "ws1", "user-1"),
+                DirectWebSocketSink::new(tx),
+            ));
+            let before = state.config_pass_runs;
+            rt.block_on(state.handle_desired_queries(
+                "c1",
+                &empty,
+                origin,
+                CustomQueryTransformMode::All,
+            ));
+            assert_eq!(
+                state.config_pass_runs - before,
+                1,
+                "{origin:?} must run the config/hydrate pass on an empty body"
+            );
+        }
+
+        // The contrast that makes the gate meaningful: a `changeDesiredQueries`
+        // with nothing to change IS a genuine no-op (TS's only entry point that
+        // exists solely to carry a query change).
+        let (tx, _d) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let before = state.config_pass_runs;
+        rt.block_on(state.handle_desired_queries(
+            "c1",
+            &empty,
+            ConfigPassOrigin::ChangeDesiredQueries,
+            CustomQueryTransformMode::Missing,
+        ));
+        assert_eq!(
+            state.config_pass_runs - before,
+            0,
+            "an empty changeDesiredQueries must stay a no-op"
         );
     }
 
@@ -4989,7 +5072,7 @@ mod tests {
         );
 
         // A teardown drops the connection from the CCM (no leaked auth).
-        state.on_connection_closed("c1", "ws1");
+        state.delete_client_due_to_disconnect("c1", "ws1");
         assert!(
             state
                 .ccm
@@ -4997,7 +5080,7 @@ mod tests {
                 .unwrap()
                 .must_get_connection_context(&selector)
                 .is_err(),
-            "on_connection_closed must drop the connection from the CCM"
+            "delete_client_due_to_disconnect must drop the connection from the CCM"
         );
     }
 
@@ -5071,7 +5154,7 @@ mod tests {
         let armed_before = state.next_auth_maintenance_at;
         assert!(armed_before.is_some());
 
-        rt.block_on(state.on_auth_maintenance_tick());
+        rt.block_on(state.run_auth_maintenance());
 
         assert_eq!(
             state.registered_ws.len(),
@@ -5108,13 +5191,13 @@ mod tests {
         seed_test_client_schema(&mut state);
 
         state.next_auth_maintenance_at = None;
-        state.arm_auth_maintenance();
+        state.schedule_auth_maintenance();
         assert!(
             state.next_auth_maintenance_at.is_some(),
-            "arm_auth_maintenance must see the connection's auth via the CCM"
+            "schedule_auth_maintenance must see the connection's auth via the CCM"
         );
 
-        rt.block_on(state.on_auth_maintenance_tick());
+        rt.block_on(state.run_auth_maintenance());
         assert_eq!(
             state.registered_ws.len(),
             1,
@@ -5191,7 +5274,7 @@ mod tests {
 
         // Fire the tick 300s EARLY: the connection's `revalidate_at` is not due,
         // so no revalidation work runs and the connection is untouched.
-        rt.block_on(state.on_auth_maintenance_tick());
+        rt.block_on(state.run_auth_maintenance());
         assert_eq!(state.registered_ws.len(), 1);
         assert_eq!(state.metrics.snapshot()["authRevalidations"], 0);
         // Still armed for the real deadline.
@@ -5306,7 +5389,7 @@ mod tests {
         rt.block_on(state.on_notification(serde_json::json!({"state": "version-ready"})));
 
         // Disconnect unregisters the client.
-        state.on_connection_closed("c1", "ws1");
+        state.delete_client_due_to_disconnect("c1", "ws1");
         assert_eq!(state.registered_ws.len(), 0);
         assert_eq!(state.connections.len(), 0);
     }
@@ -5320,14 +5403,14 @@ mod tests {
     /// hydrate releases — that the serial channel DOES process a message queued
     /// behind a blocked hydrate is the other half, proven by
     /// `connected_ack_is_decoupled_from_a_blocked_cg_hydrate`. This test pins
-    /// THIS half: when that close finally runs, `on_connection_closed` must fully
+    /// THIS half: when that close finally runs, `delete_client_due_to_disconnect` must fully
     /// tear the client down. No per-client state (auth, raw auth, query ctx, push
     /// headers, profile id, base version, sink registration) may leak — a leak
     /// would let a reconnecting client or a later relayed push read stale auth
     /// (the bug-2 class this framework exists to kill).
     ///
     /// NON-VACUOUS: delete any single `self.<map>.remove(client_id)` line from
-    /// `on_connection_closed` and the matching `is_empty()` assertion fails.
+    /// `delete_client_due_to_disconnect` and the matching `is_empty()` assertion fails.
     #[test]
     fn a_close_fully_tears_down_all_per_client_state() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5373,7 +5456,7 @@ mod tests {
 
         // The mid-hydrate cancel, delivered to the serial thread after the
         // hydrate as `ConnectionClosed`.
-        state.on_connection_closed("c1", "ws1");
+        state.delete_client_due_to_disconnect("c1", "ws1");
 
         assert!(state.connections.is_empty(), "connections leaked");
         assert!(state.registered_ws.is_empty(), "registered_ws leaked");
@@ -5482,7 +5565,7 @@ mod tests {
         assert!(state.next_expiry_delay().is_some());
 
         // Last client disconnects → TS `#stopExpireTimer` (view-syncer.ts:767).
-        state.on_connection_closed("c1", "ws1");
+        state.delete_client_due_to_disconnect("c1", "ws1");
         assert!(state.connections.is_empty());
         assert!(
             state.expired_queries_timer.is_none(),
@@ -5671,7 +5754,7 @@ mod tests {
         assert_eq!(state.registered_ws.len(), 1);
 
         // The delayed close event from ws1 must not tear down ws2.
-        state.on_connection_closed("c1", "ws1");
+        state.delete_client_due_to_disconnect("c1", "ws1");
         assert_eq!(
             state.registered_ws.get("c1").map(String::as_str),
             Some("ws2")
@@ -7184,6 +7267,8 @@ impl ViewSyncerService {
             hydrate_unchanged_runs: 0,
             #[cfg(test)]
             validate_connection_runs: 0,
+            #[cfg(test)]
+            config_pass_runs: 0,
             pinned_user_id: None,
             cvr: None,
             e2e_serving_lag:
@@ -7442,7 +7527,7 @@ impl ViewSyncerService {
     /// Resolve handlers by WebSocket id — `self.clients` is keyed by `ws_id`
     /// (see `register_client`), and every caller passes ws ids. The parameter
     /// was previously named `client_ids`, inviting a real keying bug.
-    fn clients_for(&self, ws_ids: &[String]) -> Vec<Arc<ClientHandler>> {
+    fn get_clients(&self, ws_ids: &[String]) -> Vec<Arc<ClientHandler>> {
         ws_ids
             .iter()
             .filter_map(|id| self.clients.get(id).cloned())
@@ -7729,7 +7814,7 @@ impl ViewSyncerService {
         // these ORIGINAL cookies, not the post-poke ones, or a reconnecting client
         // loses the whole `[oldCookie, current]` interval. See `catchup_clients`.
         let original_client_versions: std::collections::HashMap<String, NullableCVRVersion> = self
-            .clients_for(poke_ws_ids)
+            .get_clients(poke_ws_ids)
             .iter()
             .map(|c| (c.ws_id.clone(), c.version()))
             .collect();
@@ -7861,7 +7946,7 @@ impl ViewSyncerService {
             // `catchup_clients`; advancing it here would make every catch-up
             // patch look stale and silently drop the missed rows.
             let clients =
-                Self::config_poke_targets(self.clients_for(poke_ws_ids), &expected_current_version);
+                Self::config_poke_targets(self.get_clients(poke_ws_ids), &expected_current_version);
             let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
             let pokers = MultiPoker::new(&client_refs, cfg_cvr.version.clone());
             for p in &config_patches {
@@ -8029,7 +8114,7 @@ impl ViewSyncerService {
                     // and tag the outcome; the histogram observes on both paths.
                     let transform_started = std::time::Instant::now();
                     let transform_result =
-                        transform_custom_queries(ctx, shard, &custom_queries_to_transform).await;
+                        transform(ctx, shard, &custom_queries_to_transform).await;
                     crate::metrics::record_query_transformation_time(
                         transform_started.elapsed().as_secs_f64() * 1000.0,
                     );
@@ -8051,7 +8136,7 @@ impl ViewSyncerService {
                             // Whole-batch failure (TS throws `TransformFailed` →
                             // the client fails). Surface it and leave existing
                             // pipelines intact.
-                            for c in &self.clients_for(poke_ws_ids) {
+                            for c in &self.get_clients(poke_ws_ids) {
                                 c.send_query_transform_failed_error(&failed);
                             }
                             // Record the whole-batch failure body for a background
@@ -8068,7 +8153,7 @@ impl ViewSyncerService {
                 }
             }
             if !transform_errors.is_empty() {
-                for c in &self.clients_for(poke_ws_ids) {
+                for c in &self.get_clients(poke_ws_ids) {
                     let _ = c.send_query_transform_application_errors(transform_errors.clone());
                 }
             }
@@ -8279,7 +8364,7 @@ impl ViewSyncerService {
             // poke first (the previous shape) advanced every base to the new
             // version and made a separate catch-up poke inert — a reconnecting
             // client silently lost the whole `(oldCookie, current]` interval.
-            let clients = self.clients_for(poke_ws_ids);
+            let clients = self.get_clients(poke_ws_ids);
             let catchup_from =
                 Self::catchup_floor(&result.cvr.version, &clients, &original_client_versions);
             let patches = self
@@ -8390,7 +8475,7 @@ impl ViewSyncerService {
         // against the un-advanced cookies — this snapshot reproduces that.
         original_versions: &std::collections::HashMap<String, NullableCVRVersion>,
     ) -> Result<(), String> {
-        let clients = self.clients_for(poke_ws_ids);
+        let clients = self.get_clients(poke_ws_ids);
         if clients.is_empty() {
             return Ok(());
         }
@@ -8709,7 +8794,7 @@ impl ViewSyncerService {
         let removed_refs: Vec<&str> = remove_queries.iter().map(|s| s.as_str()).collect();
         let (new_version, query_patches) = updater.track_queries(&executed_refs, &removed_refs);
 
-        let clients = self.clients_for(client_ids);
+        let clients = self.get_clients(client_ids);
         let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
         let pokers = MultiPoker::new(&client_refs, new_version);
         for patch in &query_patches {
@@ -8926,7 +9011,7 @@ impl ViewSyncerService {
 
         // Only poke clients that are AT the pre-advance `cvr.version` (see
         // `advance_poke_targets`).
-        let clients = Self::advance_poke_targets(self.clients_for(client_ids), &cvr_version);
+        let clients = Self::advance_poke_targets(self.get_clients(client_ids), &cvr_version);
         let client_refs: Vec<&ClientHandler> = clients.iter().map(|c| c.as_ref()).collect();
         let pokers = MultiPoker::new(&client_refs, pokers_version);
 
@@ -9076,7 +9161,7 @@ impl ViewSyncerService {
         // inactivation), not row writes — but snapshot the CVR rows anyway so the
         // store flush's row dedup is correct regardless.
         let existing_rows = self.existing_rows().await;
-        let clients = self.clients_for(poke_ws_ids);
+        let clients = self.get_clients(poke_ws_ids);
         {
             // Like the config poke (`config_poke_targets`): only clients AT the
             // pre-delete CVR version get this delta poke. A lagging reconnect
@@ -10521,7 +10606,7 @@ mod engine_tests {
             args: Some(vec![]),
             ttl: None,
         };
-        // Disallowed URL => `transform_custom_queries` fails without a network
+        // Disallowed URL => `transform` fails without a network
         // round-trip, carrying the submitted batch in `queryIDs`.
         let ctx = crate::custom_queries::transform_query::CustomQueryContext {
             url: "https://mode-filter.example/query".to_string(),
@@ -10965,7 +11050,7 @@ mod engine_tests {
             std::collections::HashMap::from([("ws1".to_string(), Some(version_from_string("01")))]);
 
         // Simulate the config/hydrate pokes advancing base_version to the new "05".
-        let clients = engine.clients_for(&["ws1".to_string()]);
+        let clients = engine.get_clients(&["ws1".to_string()]);
         clients[0].set_base_version_for_test(version_from_string("05"));
 
         let cvr_version = version_from_string("05");
@@ -11008,7 +11093,7 @@ mod engine_tests {
         engine.register_client("cB", "wsB", "cg1", &shard, Some("03"), mk()); // lagging
         engine.register_client("cC", "wsC", "cg1", &shard, None, mk()); // never poked
 
-        let all = engine.clients_for(&["wsA".to_string(), "wsB".to_string(), "wsC".to_string()]);
+        let all = engine.get_clients(&["wsA".to_string(), "wsB".to_string(), "wsC".to_string()]);
         let targets = SyncEngine::advance_poke_targets(all, &version_from_string("05"));
         let ids: Vec<String> = targets.iter().map(|c| c.ws_id.clone()).collect();
         assert_eq!(
@@ -11038,13 +11123,13 @@ mod engine_tests {
         engine.register_client("lagging", "ws-lagging", "cg1", &shard, Some("01"), mk());
 
         let new_targets = SyncEngine::config_poke_targets(
-            engine.clients_for(&["ws-new".to_string()]),
+            engine.get_clients(&["ws-new".to_string()]),
             &version_from_string("00"),
         );
         assert_eq!(new_targets.len(), 1, "no cookie is TS empty version 00");
 
         let targets = SyncEngine::config_poke_targets(
-            engine.clients_for(&["ws-current".to_string(), "ws-lagging".to_string()]),
+            engine.get_clients(&["ws-current".to_string(), "ws-lagging".to_string()]),
             &version_from_string("02"),
         );
         let ids: Vec<_> = targets.iter().map(|client| client.ws_id.as_str()).collect();

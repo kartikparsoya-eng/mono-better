@@ -20,6 +20,22 @@ use std::sync::{Arc, Mutex};
 
 use crate::snapshotter::spec::LiteAndZqlSpec;
 
+/// The maximum number of prepared statements retained per connection. Port of TS
+/// `DEFAULT_MAX_CACHED_STATEMENTS` (zqlite/src/internal/statement-cache.ts:21).
+///
+/// The cache is PER CONNECTION and shared by every query a client group runs, so
+/// the bound has to cover the whole group's working set of distinct SQL, not one
+/// query's. A miss is not a cheap re-bind: SQLite's `prepare` re-parses the SQL
+/// AND re-runs its own query planner to pick indexes.
+///
+/// This was 64 — a guess "above rusqlite's default 16" rather than the ported TS
+/// value — and a whale client group blew through it. Measured 2026-09-02 on the
+/// ART prod replay: `scopedCollections` (a 3-level nested-EXISTS chain over 6
+/// tables) logged 51,248 statement preparations in ONE hydrate and took ~10s
+/// against TS's ~1.5s for the identical AST and the identical 22,934 rows, with
+/// SQLite's parser (`yy_reduce`) visible in the CPU profile.
+pub const DEFAULT_MAX_CACHED_STATEMENTS: usize = 1_000;
+
 /// Shared handle to a pinned snapshot connection. The TableSources share these
 /// so that, during advance, each source can be pointed at the PREV snapshot
 /// while changes are processed and at CURR afterwards — matching TS
@@ -496,9 +512,8 @@ impl Snapshot {
             .map_err(|e| format!("Snapshot::create open: {}", e))?;
 
         // Statement cache for the fetch hot path (TS parity: zqlite's
-        // StatementCache). Sized above rusqlite's default 16 so a multi-query
-        // CG's distinct fetch shapes don't thrash it.
-        conn.set_prepared_statement_cache_capacity(64);
+        // StatementCache, whose capacity this mirrors exactly).
+        conn.set_prepared_statement_cache_capacity(DEFAULT_MAX_CACHED_STATEMENTS);
 
         conn.pragma_update(None, "synchronous", "OFF")
             .map_err(|e| format!("pragma synchronous: {}", e))?;

@@ -4,7 +4,7 @@
 //! `setAuthenticated` / `clearAuthenticated`, backed by a module-global
 //! `authenticatedClientGroupIDs` set) and `transformCustomQuery` are already
 //! sited on `ViewSyncerService` (`inspector_authenticated` flag) and the
-//! `analyze-query` path (`transform_custom_queries`) respectively, so this
+//! `analyze-query` path (`transform`) respectively, so this
 //! module carries only the server-metrics store + the queryID→AST map.
 //!
 //! Rust-only scope note (AGENTS rule 5): TS constructs ONE `InspectorDelegate`

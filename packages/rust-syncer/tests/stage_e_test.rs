@@ -618,7 +618,7 @@ fn partial_success_transform_hydrates_healthy_query() {
 /// A transform failure during one connection's config pass fails ONLY that
 /// connection — a sibling connection is untouched. Ports view-syncer.pg.test.ts
 /// "transform ... fails only that connection" (#20/#21): the whole-batch failed
-/// error is delivered to `clients_for(poke_ws_ids)`, which is just the failing
+/// error is delivered to `get_clients(poke_ws_ids)`, which is just the failing
 /// client. Uses a one-shot TCP mock returning HTTP 401.
 #[test]
 fn transform_failure_fails_only_the_offending_connection() {

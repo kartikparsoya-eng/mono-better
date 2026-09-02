@@ -56,6 +56,13 @@ impl Database {
     /// Open a database at `path`.
     pub fn new(path: &str) -> Result<Self, DatabaseInitError> {
         let conn = Connection::open(path).map_err(|e| DatabaseInitError(e.to_string()))?;
+        // Same statement-cache capacity as the snapshot connection: this one
+        // backs IVM operator storage (join/exists state), which is every bit as
+        // prepare-heavy. Port of TS `DEFAULT_MAX_CACHED_STATEMENTS`
+        // (zqlite/src/internal/statement-cache.ts:21); rusqlite's default is 16.
+        conn.set_prepared_statement_cache_capacity(
+            crate::snapshotter::snapshotter::DEFAULT_MAX_CACHED_STATEMENTS,
+        );
         // Install a handle so an in-flight query can be cancelled out-of-band.
         let interrupt_handle = crate::sqlite::install_interrupt(&conn);
 

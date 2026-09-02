@@ -50,6 +50,21 @@ MAP = {
         "pipeline sync on #pipelinesSynced; rust's expiry twin is on_expiry_tick -> "
         "remove_expired_queries, gated 2026-09-02",
     ),
+    ("!(await this.#validateConnection(connCtx))", "validateConnection", "initConnection"): (
+        "result-checked", None, "handle_desired_queries", "validate_connection", RS_VIEW_SYNCER,
+        "TS validates BEFORE any data is sent and RETURNS on failure "
+        "(view-syncer.ts:936-944); a cached transform cannot stand in for it. rust "
+        "`handle_desired_queries` must branch on `validate_connection`'s result, not "
+        "discard it. Pinned by `init_connection_validates_before_serving_any_data`.",
+    ),
+    ("await this.#checkForShutdownConditionsInLock()", "checkForShutdownConditionsInLock",
+     "runInLockWithCVR"): (
+        "orchestration", None, None, None, None,
+        "TS re-checks shutdown conditions inside every locked op; rust's idle shutdown is "
+        "driven by the CG executor's keepalive timer (`idle_shutdown_due`), which is "
+        "evaluated on the same serial task between messages. Pinned by "
+        "`idle_shutdown_requires_both_keepalive_expiry_and_zero_admissions`.",
+    ),
     ("this.#pipelinesSynced", "syncQueryPipelineSet", "updateCVRConfig"): (
         "orchestration", "pipelines_synced", None, "sync_query_pipeline_set", RS_VIEW_SYNCER,
         "TS `#updateCVRConfig` syncs the pipeline set only once pipelines are synced "
@@ -160,7 +175,11 @@ def extract_ts_guards(rel: str) -> list[tuple[int, str, str, list[str]]]:
                 if depth <= 0 and j > i:
                     break
                 j += 1
-            calls = sorted(set(re.findall(r"this\.#(\w+)\(", "\n".join(body))))
+            # Calls in the CONDITION count too: TS writes guards both ways —
+            # `if (flag) { this.#f() }` AND `if (!(await this.#f())) return;`.
+            # Reading only the body missed `#validateConnection` entirely, which
+            # is one of the calls this check exists to police.
+            calls = sorted(set(re.findall(r"this\.#(\w+)\(", cond + "\n" + "\n".join(body))))
             if calls:
                 out.append((i + 1, cond, enclosing_member(lines, i), calls))
             i = j
@@ -257,6 +276,42 @@ def rust_calls_are_guarded(
     return (not unguarded, unguarded, True)
 
 
+def rust_call_result_is_checked(rust_file: str, caller: str, callee: str) -> tuple[bool, str]:
+    """Inside rust fn `caller`, is `self.<callee>(..)`'s result BRANCHED ON?
+
+    TS's `if (!(await this.#f(x))) return;` is a guard whose whole content is the
+    result test. The rust twin satisfies it only by matching / testing the value —
+    a bare `self.f(..).await;` statement or `let _ = self.f(..)` ports the CALL
+    while dropping the GUARD, which reads as done and is not.
+    """
+    lines = read(rust_file)
+    fn_re = re.compile(r"^\s*(pub(\(\w+\))? )?(async )?fn %s\s*[(<]" % re.escape(caller))
+    start = next((i for i, l in enumerate(lines) if fn_re.match(l)), None)
+    if start is None:
+        return (False, f"has no fn `{caller}`")
+    call_re = re.compile(r"\bself\.%s\s*\(" % re.escape(callee))
+    depth, entered, seen = 0, False, False
+    for idx in range(start, len(lines)):
+        code = lines[idx].split("//", 1)[0]
+        if call_re.search(code):
+            seen = True
+            # the statement usually begins on this line or the one above
+            ctx = "\n".join(lines[max(start, idx - 2): idx + 1])
+            if re.search(r"let\s+_\s*=", ctx):
+                return (False, f"DISCARDS the result (`let _ = self.{callee}(..)`)")
+            if not re.search(r"\b(match|if|while|let|return)\b|\?", ctx):
+                return (False, f"calls `self.{callee}(..)` as a bare statement "
+                               f"without testing the result")
+        depth += code.count("{") - code.count("}")
+        if code.count("{"):
+            entered = True
+        if entered and depth <= 0:
+            break
+    if not seen:
+        return (False, f"never calls `self.{callee}(..)`")
+    return (True, "")
+
+
 def main() -> int:
     rc = 0
     guards = extract_ts_guards(TS_VIEW_SYNCER)
@@ -296,6 +351,16 @@ def main() -> int:
                           f"rust `self.{rs_callee}(` is UNGUARDED inside `{rs_caller}` at "
                           f"{rs_file}:{bad}")
                     print(f"         expected an enclosing `if` testing `self.{flag}` — {note}")
+            elif status == "result-checked":
+                ok, why = rust_call_result_is_checked(rs_file, rs_caller, rs_callee)
+                if ok:
+                    print(f"  [OK ] #{callee} result-checked in TS ({cond}) -> rust "
+                          f"{rs_caller}() branches on {rs_callee}()")
+                else:
+                    rc = 1
+                    print(f"  [FAIL] TS branches on #{callee} (view-syncer.ts:{ln}) but rust "
+                          f"`{rs_caller}` {why}")
+                    print(f"         {note}")
             else:
                 print(f"  [{status.upper()}] #{callee} ({cond}) — {note}")
                 if not note:
