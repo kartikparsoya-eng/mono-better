@@ -297,11 +297,31 @@ diff-oracle full catalog + mutations) and joins them through the L1 ledger.
   `defer_maintenance` + single background retransform), and an ALREADY-drifted
   ttl fallback between the two ports (cross-impl agreement test, proven
   failing pre-fix).
-- Remaining tracked GAP (not fixed this pass): ivm filter-pipeline operator
-  protocol (`beginFilter`/`endFilter`/`buildFilterPipeline` +
-  DNF `simplifyCondition`) — rust builder uses `apply_filter` chains; value
-  parity holds on the full catalog, operator-graph structure diverges. Own
-  work item. Also: add an AST+permissions catalog case so
+- ~~Remaining tracked GAP: ivm filter-pipeline operator protocol~~ —
+  **STALE CLAIM, RETRACTED 2026-09-02** (AGENTS rule 13). It was fixed without
+  this line being updated, and the stale text was then repeated as a live gap.
+  Verified present and 1:1: `build_filter_pipeline` (filter_operators.rs:275,
+  port of filter-operators.ts:148), `FilterStart`/`FilterEnd`, the
+  `begin_filter`/`end_filter` trait methods (filter_operators.rs:41-43,
+  implemented on `FanOut`/`Exists`/…), `simplify_condition`
+  (query/expression.rs:104), and `apply_where` → `build_filter_pipeline(input,
+  |fi| apply_filter(fi, ...))` mirroring `applyWhere` (builder.ts:399) exactly.
+  `apply_filter` is the port of `applyFilter` (builder.ts:523) — the chain
+  INSIDE the pipeline, which is what TS builds too, not a replacement for it.
+  The one real remainder in this area is narrow: **`BuilderDelegate.addEdge`
+  (builder.ts:87) is not ported** — rust's `BuilderDelegate` has no `add_edge`
+  and `build_filter_pipeline` therefore drops TS's `delegate` parameter. Inert
+  on the server (every server-side delegate implements it as `addEdge() {}` —
+  pipeline-driver.ts:528/663, query-delegate-base.ts:165), so this is an
+  interface-completeness gap, not a behavioral one. NOT ported deliberately:
+  TS's single `InputBase` parameter type spans both `Input` and `FilterInput`,
+  which in rust are `Rc<RefCell<dyn Input>>` and `Rc<RefCell<dyn FilterInput>>`
+  — one signature needs either trait-object upcasting through `RefCell` or
+  `borrow()`ing both operands at every construction site, and the latter adds
+  `BorrowMutError` panic risk during pipeline building for a method that does
+  nothing on the server. Revisit if a rust consumer for the edge stream appears
+  (graph tooling / inspector).
+  Also still open: add an AST+permissions catalog case so
   `transform_and_hash_query` gets traffic.
 - Recapture after the fixes must show the wired symbols hot — that recapture
   is the non-vacuous proof for wiring fixes (the pre-fix capture is the
@@ -663,6 +683,50 @@ the same reason).
 | initConnection-only preamble applied to `updateAuth` / background retransform | `ConfigPassOrigin` splits "is initConnection" from "run the pass anyway"; cookie + client-schema checks now initConnection-only, as in TS | — | complete |
 | `#validateConnection` threads the API server's authoritative userID | — (`validate_custom_queries` returns opaque `Ok(())`, so rust always records `client-fallback`) | — | **GAP — open** (TS view-syncer.ts:1988-1990) |
 | `#removeExpiredQueries` / `deleteClients` route through `#syncQueryPipelineSet` | — (rust `remove_expired_queries` / `apply_client_deletions` do not sync) | — | **GAP — open**: TS's `'missing'` pass would re-add a CVR custom query absent from the pipeline; rust's dedicated paths do not |
+| Cooperative IVM yielding (`yieldThresholdMs`, TS default **10 ms**; **2.5 ms** while a priority op runs, syncer.ts:210-213) | — (`pipelines.hydrate` / `pipelines.advance` take a **sync** `FnMut(&RowChange)` and run to completion inline on the executor thread; no await point exists anywhere in the row path) | — | **GAP — open, highest-value remaining**: see "The yield gap" below |
+
+### The yield gap (identified 2026-09-02, code-confirmed — not yet closed)
+
+**TS.** Long IVM work is chopped into ~10 ms slices. `TableSource.fetch` interleaves a
+literal `'yield'` sentinel into its `Stream<Node>` whenever
+`PipelineDriver.#shouldYield()` says the current lap exceeded `yieldThresholdMs`
+(table-source.ts:692 `generateWithYields`; pipeline-driver.ts:1078). The sentinel
+propagates unchanged up through every `Iterable<RowChange | 'yield'>` in
+pipeline-driver.ts to the view-syncer's row loops, which do
+`await timer.yieldProcess(...)` (view-syncer.ts:1629, :2510). `yieldProcess` is
+`timeSliceQueue.withLock(() => new Promise(setImmediate))` (view-syncer.ts:2861) — a
+**process-global `Lock`** plus one event-loop turn, so every view-syncer in the worker
+takes a FIFO turn at ~10 ms granularity.
+
+**Rust.** There is no yield at all. `pipelines.hydrate(queries, |rc| ...)` and
+`pipelines.advance(...)` (view_syncer.rs:8768, :8919) take a **synchronous**
+`FnMut(&RowChange)` callback; SQLite reads, IVM materialization and the CVR row
+processing all run to completion inline before the call returns.
+
+**Why it is client-observable.** `run_executor` (cg_executor.rs) hosts a hash-shard of
+client groups as `spawn_local` tasks on ONE `current_thread` runtime, and
+`default_num_shards()` = core count. With more client groups than cores — the normal
+case — several CGs share a thread, exactly like TS's worker event loop. TS interleaves
+them every 10 ms; rust does not interleave them at all, so CG-B's poke waits out the
+whole of CG-A's hydration. This is head-of-line blocking between client groups, and it
+is not covered by invention I-1: I-1 buys *socket* liveness (WS I/O is on other
+threads), which is why pings/pongs/acks stay responsive — it says nothing about one
+CG's serving latency depending on another CG's compute.
+
+**Fits the measurements.** `getUsersV2` hydration p50 is at parity (rust 16.8 ms vs TS
+17.2 ms — a CG's own work) while p95 diverges (134 ms vs 26 ms — waiting behind a
+neighbour). Distinct from, and additive to, the CVR write-back deferral fixed
+2026-09-02; that one moved the row-record write off the serving path, this one is about
+who else is stuck behind the compute.
+
+**Why it is not a small fix.** A faithful port needs an await point in the row path,
+which means the hydrate/advance streaming has to become pull-based (TS's generator
+shape) or `async`, from `Engine` outward. `!Send` is not the obstacle — `spawn_local`
+futures need not be `Send` — the obstacle is that the row path is currently
+push-based via a sync callback. Scoped, not started; must land with a non-vacuous
+test that pins CG-B's poke latency as independent of CG-A's hydrate duration on a
+shared executor (the test is the regression gate the fix has to flip).
+
 
 Done-bar (per responsibility, NOT "100% line"): mapped-or-retired + a verification
 artifact + known-diffs documented+accepted + branch coverage where practical; every
