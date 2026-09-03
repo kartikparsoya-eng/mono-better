@@ -28,7 +28,9 @@ use crate::ivm::join_utils::{
 use crate::ivm::memory_source::{NodeCompare, merge_sorted_streams};
 use crate::ivm::operator::{FetchRequest, Input, InputBase, Output, OutputHandle, Shared};
 use crate::ivm::schema::{SourceSchema, System};
-use crate::ivm::stream::{NodeStream, RelStream, count_data, empty_stream, from_vec, skip_yields};
+use crate::ivm::stream::{
+    NodeStream, RelStream, StreamItem, count_data, empty_stream, from_vec, skip_yields,
+};
 
 pub type CompoundKey = Vec<String>;
 
@@ -129,19 +131,38 @@ impl FlippedJoin {
         fj
     }
 
-    fn fetch_batched(&self, req: &FetchRequest, child_nodes: Vec<Node>) -> NodeStream {
+    /// The operator state `#fetchBatched` reads (TS closes over `this`); cloned
+    /// up front so the lazy fetch below can run phase 2 without borrowing the
+    /// operator.
+    fn batch_parts(&self) -> BatchParts {
+        BatchParts {
+            parent_key: self.parent_key.clone(),
+            child_key: self.child_key.clone(),
+            compare_rows: self.schema.compare_rows.clone(),
+            relationship_name: self.relationship_name.clone(),
+            inprogress: self.inprogress_child_change.clone(),
+            inprogress_pos: self.inprogress_child_change_position.clone(),
+            parent: self.parent.clone(),
+            child_schema: self.child.borrow().get_schema(),
+        }
+    }
+
+    /// Port of TS `#fetchBatched` (flipped-join.ts:230-312).
+    fn fetch_batched(parts: BatchParts, req: &FetchRequest, child_nodes: Vec<Node>) -> NodeStream {
         let _t = crate::perf_trace::scope("fjoin.batch_fetch");
-        let parent_key = self.parent_key.clone();
-        let child_key = self.child_key.clone();
+        let BatchParts {
+            parent_key,
+            child_key,
+            compare_rows,
+            relationship_name,
+            inprogress,
+            inprogress_pos,
+            parent,
+            child_schema,
+        } = parts;
         let parent_req_constraint = req.constraint.clone();
-        let compare_rows = self.schema.compare_rows.clone();
-        let relationship_name = self.relationship_name.clone();
-        let inprogress = self.inprogress_child_change.clone();
-        let inprogress_pos = self.inprogress_child_change_position.clone();
-        let parent = self.parent.clone();
-        let child_schema = self.child.borrow().get_schema();
-        let child_key_for_overlay = self.child_key.clone();
-        let parent_key_for_overlay = self.parent_key.clone();
+        let child_key_for_overlay = child_key.clone();
+        let parent_key_for_overlay = parent_key.clone();
         let reverse = req.reverse;
         let incoming_multis = req.multi_constraints.clone();
 
@@ -221,81 +242,83 @@ impl FlippedJoin {
         let child_indexes_by_key = child_indexes_by_key;
         let pk = parent_key.clone();
 
-        Box::new(
-            skip_yields(parent_stream)
-                .flat_map(move |pn| {
-                    let key = canonical_key(&pn.row, &pk);
-                    let idxs = match child_indexes_by_key.get(&key) {
-                        Some(idxs) => idxs,
-                        None => return Vec::new(),
-                    };
-                    let related: Vec<Node> = idxs
-                        .iter()
-                        .map(|&i| child_nodes[i].clone())
-                        .collect::<Vec<Node>>();
+        // TS :288-311: `for (const node of parentStream) { if (node ===
+        // 'yield') { yield 'yield'; continue; } ... }`.
+        Box::new(parent_stream.flat_map(move |item| {
+            let pn = match item {
+                StreamItem::Yield => return vec![StreamItem::Yield],
+                StreamItem::Data(pn) => pn,
+            };
+            let key = canonical_key(&pn.row, &pk);
+            let idxs = match child_indexes_by_key.get(&key) {
+                Some(idxs) => idxs,
+                None => return Vec::new(),
+            };
+            let related: Vec<Node> = idxs
+                .iter()
+                .map(|&i| child_nodes[i].clone())
+                .collect::<Vec<Node>>();
 
-                    let mut overlaid = related;
+            let mut overlaid = related;
 
-                    let inp = inprogress.borrow().clone();
-                    let inp_pos = inprogress_pos.borrow().clone();
-                    if let (Some(change), Some(pos)) = (inp.as_ref(), inp_pos.as_ref()) {
-                        let matches = is_join_match(
-                            &change.node().row,
-                            &child_key_for_overlay,
-                            &pn.row,
-                            &parent_key_for_overlay,
-                        );
-                        if matches {
-                            let has_been_pushed =
-                                (compare_rows_for_overlay)(&pn.row, pos) != CmpOrdering::Greater;
+            let inp = inprogress.borrow().clone();
+            let inp_pos = inprogress_pos.borrow().clone();
+            if let (Some(change), Some(pos)) = (inp.as_ref(), inp_pos.as_ref()) {
+                let matches = is_join_match(
+                    &change.node().row,
+                    &child_key_for_overlay,
+                    &pn.row,
+                    &parent_key_for_overlay,
+                );
+                if matches {
+                    let has_been_pushed =
+                        (compare_rows_for_overlay)(&pn.row, pos) != CmpOrdering::Greater;
 
-                            match change.change_type() {
-                                ChangeType::Remove => {
-                                    if has_been_pushed {
-                                        // TS filters by REFERENCE identity
-                                        // (`n !== inprogressChildChange[NODE]`,
-                                        // flipped-join.ts:358-360): only the
-                                        // node spliced back in by fetch() is
-                                        // removed. Matching by child_key here
-                                        // wrongly dropped every SIBLING child
-                                        // sharing the join key (NEW-6), so a
-                                        // parent with another child vanished
-                                        // from mid-push fetches. The spliced
-                                        // node shares the change node's row
-                                        // `Arc`, so `Arc::ptr_eq` is the Rust
-                                        // twin of the TS `!==`.
-                                        let change_row = change.node().row.clone();
-                                        overlaid.retain(|n| !Arc::ptr_eq(&n.row, &change_row));
-                                    }
-                                }
-                                ChangeType::Add | ChangeType::Edit | ChangeType::Child => {
-                                    if !has_been_pushed {
-                                        let overlay_change = change.clone();
-                                        let cs = child_schema.clone();
-                                        overlaid = crate::ivm::stream::skip_yields(
-                                            generate_with_overlay_no_yield(
-                                                from_vec(overlaid),
-                                                overlay_change,
-                                                &cs,
-                                            ),
-                                        )
-                                        .collect::<Vec<Node>>();
-                                    }
-                                }
+                    match change.change_type() {
+                        ChangeType::Remove => {
+                            if has_been_pushed {
+                                // TS filters by REFERENCE identity
+                                // (`n !== inprogressChildChange[NODE]`,
+                                // flipped-join.ts:358-360): only the
+                                // node spliced back in by fetch() is
+                                // removed. Matching by child_key here
+                                // wrongly dropped every SIBLING child
+                                // sharing the join key (NEW-6), so a
+                                // parent with another child vanished
+                                // from mid-push fetches. The spliced
+                                // node shares the change node's row
+                                // `Arc`, so `Arc::ptr_eq` is the Rust
+                                // twin of the TS `!==`.
+                                let change_row = change.node().row.clone();
+                                overlaid.retain(|n| !Arc::ptr_eq(&n.row, &change_row));
+                            }
+                        }
+                        ChangeType::Add | ChangeType::Edit | ChangeType::Child => {
+                            if !has_been_pushed {
+                                let overlay_change = change.clone();
+                                let cs = child_schema.clone();
+                                overlaid = crate::ivm::stream::skip_yields(
+                                    generate_with_overlay_no_yield(
+                                        from_vec(overlaid),
+                                        overlay_change,
+                                        &cs,
+                                    ),
+                                )
+                                .collect::<Vec<Node>>();
                             }
                         }
                     }
+                }
+            }
 
-                    if overlaid.is_empty() {
-                        Vec::new()
-                    } else {
-                        let rel: RelStream = Rc::new(move || from_vec(overlaid.clone()));
-                        let node = pn.set_relationship(&relationship_name, rel);
-                        vec![node]
-                    }
-                })
-                .map(crate::ivm::stream::StreamItem::Data),
-        )
+            if overlaid.is_empty() {
+                Vec::new()
+            } else {
+                let rel: RelStream = Rc::new(move || from_vec(overlaid.clone()));
+                let node = pn.set_relationship(&relationship_name, rel);
+                vec![StreamItem::Data(node)]
+            }
+        }))
     }
 
     fn push_child_change(&self, change: &Change, pusher: &dyn InputBase) {
@@ -516,17 +539,82 @@ impl Input for FlippedJoin {
             FetchRequest::default()
         };
 
-        let child_input = self.child.borrow();
-        let child_nodes: Vec<Node> =
-            skip_yields(child_input.fetch(&child_req)).collect::<Vec<Node>>();
+        // TS :176-184 collects the child fetch forwarding its `'yield'`s, then
+        // (:195-203) splices the in-flight REMOVE node back in, then streams
+        // `#fetchBatched` — all inside one lazy generator.
+        let child_stream = self.child.borrow().fetch(&child_req);
+        Box::new(FlippedJoinFetch {
+            child_stream: Some(child_stream),
+            child_nodes: Vec::new(),
+            parts: Some(self.batch_parts()),
+            req: req.clone(),
+            child_compare: self.child.borrow().get_schema().compare_rows.clone(),
+            parent_stream: None,
+        })
+    }
+}
 
-        let inprogress = self.inprogress_child_change.borrow().clone();
-        let mut child_nodes = child_nodes;
+/// The operator state `#fetchBatched` closes over in TS.
+struct BatchParts {
+    parent_key: Vec<String>,
+    child_key: Vec<String>,
+    compare_rows: crate::ivm::data::Comparator,
+    relationship_name: String,
+    inprogress: Rc<RefCell<Option<Change>>>,
+    inprogress_pos: Rc<RefCell<Option<Row>>>,
+    parent: Shared<dyn Input>,
+    child_schema: SourceSchema,
+}
+
+/// The generator body of TS `FlippedJoin.fetch` (flipped-join.ts:161-209).
+/// Lazy like the TS generator: nothing runs until the consumer pulls, and the
+/// in-flight child change is read when the child stream is exhausted.
+struct FlippedJoinFetch {
+    child_stream: Option<NodeStream>,
+    child_nodes: Vec<Node>,
+    parts: Option<BatchParts>,
+    req: FetchRequest,
+    child_compare: crate::ivm::data::Comparator,
+    parent_stream: Option<NodeStream>,
+}
+
+impl Iterator for FlippedJoinFetch {
+    type Item = StreamItem<Node>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(parent_stream) = self.parent_stream.as_mut() {
+                return parent_stream.next();
+            }
+            let child_stream = self.child_stream.as_mut()?;
+            match child_stream.next() {
+                Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                Some(StreamItem::Data(node)) => self.child_nodes.push(node),
+                None => {
+                    self.child_stream = None;
+                    let parts = self
+                        .parts
+                        .take()
+                        .expect("flipped-join fetch phase 2 runs once");
+                    let mut child_nodes = std::mem::take(&mut self.child_nodes);
+                    self.splice_inprogress_remove(&parts, &mut child_nodes);
+                    self.parent_stream =
+                        Some(FlippedJoin::fetch_batched(parts, &self.req, child_nodes));
+                }
+            }
+        }
+    }
+}
+
+impl FlippedJoinFetch {
+    /// TS flipped-join.ts:186-203.
+    fn splice_inprogress_remove(&self, parts: &BatchParts, child_nodes: &mut Vec<Node>) {
+        let inprogress = parts.inprogress.borrow().clone();
         if let Some(ref change) = inprogress
             && change.change_type() == ChangeType::Remove
         {
             let removed = change.node().clone();
-            let compare = self.child.borrow().get_schema().compare_rows.clone();
+            let compare = self.child_compare.clone();
             // TS binarySearch (flipped-join.ts:198-201 → shared/binary-search)
             // returns the FIRST index with compare(removed, node) <= 0 — the
             // leftmost sorted insertion point. `partition_point` needs the
@@ -539,8 +627,6 @@ impl Input for FlippedJoin {
                 .partition_point(|n| compare(&removed.row, &n.row) == CmpOrdering::Greater);
             child_nodes.insert(insert_pos, removed);
         }
-
-        self.fetch_batched(req, child_nodes)
     }
 }
 

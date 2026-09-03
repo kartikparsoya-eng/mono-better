@@ -39,13 +39,109 @@ pub trait FilterInput: InputBase {
 pub trait FilterOutput {
     /// We're entering a loop of filtering nodes (e.g. cache for its duration).
     fn begin_filter(&self);
-    fn filter(&self, node: &Node) -> bool;
+    /// TS `filter(node: Node): Generator<'yield', boolean>`
+    /// (filter-operators.ts:37) — see [`FilterResult`].
+    fn filter(&self, node: &Node) -> FilterResult;
     fn end_filter(&self);
     fn push(&self, change: Change, pusher: &dyn InputBase);
 }
 
 pub type FilterInputHandle = Rc<RefCell<dyn FilterInput>>;
 pub type FilterOutputHandle = Rc<RefCell<dyn FilterOutput>>;
+
+/// Port of TS `Generator<'yield', boolean>` — what `FilterOutput::filter`
+/// returns: zero or more `StreamItem::Yield` markers followed by exactly one
+/// `StreamItem::Data(bool)`, the generator's return value. A fetch pulls it
+/// lazily (`FilterStartStream`), so a `'yield'` raised inside an EXISTS child
+/// fetch reaches the view-syncer's time slice exactly as in TS; the push path
+/// (eager in rust — the intra-push yield is the I-12 gap) drains it with
+/// [`resolve_filter`].
+pub type FilterResult = Box<dyn Iterator<Item = StreamItem<bool>>>;
+
+/// A filter generator that returns `value` without yielding.
+pub fn filter_result(value: bool) -> FilterResult {
+    Box::new(std::iter::once(StreamItem::Data(value)))
+}
+
+/// `yield* filter(node)` inside a push generator: drain the markers and return
+/// the generator's value.
+pub fn resolve_filter(mut result: FilterResult) -> bool {
+    loop {
+        match result.next() {
+            Some(StreamItem::Data(value)) => return value,
+            Some(StreamItem::Yield) => continue,
+            None => panic!("filter generator ended without a result"),
+        }
+    }
+}
+
+/// Map a generator's returned value, forwarding its yields.
+pub fn map_filter_result<T: 'static, U: 'static>(
+    inner: Box<dyn Iterator<Item = StreamItem<T>>>,
+    mut f: impl FnMut(T) -> U + 'static,
+) -> Box<dyn Iterator<Item = StreamItem<U>>> {
+    Box::new(inner.map(move |item| match item {
+        StreamItem::Yield => StreamItem::Yield,
+        StreamItem::Data(value) => StreamItem::Data(f(value)),
+    }))
+}
+
+/// Lazy `(yield* first) && (yield* then())` — TS's short-circuiting `&&` over
+/// two filter generators (filter.ts:39, exists.ts:96): `then` runs only if
+/// `first` returned true.
+pub fn filter_and(first: FilterResult, then: Box<dyn FnOnce() -> FilterResult>) -> FilterResult {
+    Box::new(FilterAnd {
+        first: Some(first),
+        then: Some(then),
+        second: None,
+    })
+}
+
+struct FilterAnd {
+    first: Option<FilterResult>,
+    then: Option<Box<dyn FnOnce() -> FilterResult>>,
+    second: Option<FilterResult>,
+}
+
+impl Iterator for FilterAnd {
+    type Item = StreamItem<bool>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(first) = self.first.as_mut() {
+                match first.next() {
+                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                    Some(StreamItem::Data(false)) => {
+                        self.first = None;
+                        self.then = None;
+                        return Some(StreamItem::Data(false));
+                    }
+                    Some(StreamItem::Data(true)) => {
+                        self.first = None;
+                        let then = self
+                            .then
+                            .take()
+                            .expect("filter_and: second generator started twice");
+                        self.second = Some(then());
+                        continue;
+                    }
+                    None => panic!("filter generator ended without a result"),
+                }
+            }
+            if let Some(second) = self.second.as_mut() {
+                match second.next() {
+                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                    Some(StreamItem::Data(value)) => {
+                        self.second = None;
+                        return Some(StreamItem::Data(value));
+                    }
+                    None => panic!("filter generator ended without a result"),
+                }
+            }
+            return None;
+        }
+    }
+}
 
 /// `FilterStart` — adapts a normal `Input` into the filter sub-graph.
 /// Port of TS `FilterStart` (filter-operators.ts:61).
@@ -108,6 +204,7 @@ impl FilterStart {
             inner,
             output,
             ended: false,
+            in_flight: None,
         })
     }
 
@@ -155,6 +252,10 @@ struct FilterStartStream {
     inner: NodeStream,
     output: FilterOutputHandle,
     ended: bool,
+    /// The node whose `filter` generator is in progress (TS
+    /// `if (yield* this.#output.filter(node)) yield node`, :93-96): its
+    /// yields are forwarded before the accept/reject decision is known.
+    in_flight: Option<(Node, FilterResult)>,
 }
 
 impl Iterator for FilterStartStream {
@@ -164,6 +265,19 @@ impl Iterator for FilterStartStream {
             return None;
         }
         loop {
+            if let Some((_, result)) = self.in_flight.as_mut() {
+                match result.next() {
+                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                    Some(StreamItem::Data(keep)) => {
+                        let (node, _) = self.in_flight.take().expect("in-flight filter");
+                        if keep {
+                            return Some(StreamItem::Data(node));
+                        }
+                        continue;
+                    }
+                    None => panic!("filter generator ended without a result"),
+                }
+            }
             match self.inner.next() {
                 None => {
                     self.ended = true;
@@ -172,9 +286,8 @@ impl Iterator for FilterStartStream {
                 }
                 Some(StreamItem::Yield) => return Some(StreamItem::Yield),
                 Some(StreamItem::Data(node)) => {
-                    if self.output.borrow().filter(&node) {
-                        return Some(StreamItem::Data(node));
-                    }
+                    let result = self.output.borrow().filter(&node);
+                    self.in_flight = Some((node, result));
                 }
             }
         }
@@ -252,8 +365,8 @@ struct FilterEndAsFilterOutput {
 impl FilterOutput for FilterEndAsFilterOutput {
     fn begin_filter(&self) {}
     fn end_filter(&self) {}
-    fn filter(&self, _node: &Node) -> bool {
-        true
+    fn filter(&self, _node: &Node) -> FilterResult {
+        filter_result(true)
     }
     fn push(&self, change: Change, _pusher: &dyn InputBase) {
         let end = self.end.borrow();

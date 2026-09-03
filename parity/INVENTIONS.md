@@ -482,10 +482,27 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   asked exactly once per change, `None` → 0 yields, identical rows with and
   without yields, and `the_advance_gate_is_disarmed_while_the_stream_is_
   suspended_at_a_yield` (d; fails if the gate guard outlives `next()`).
+- **Fetch-path forwarding (D1 phase 3):** the sentinel is forwarded through
+  every operator's FETCH exactly as TS: `FlippedJoin.fetch` /
+  `#fetchBatched` (flipped-join.ts:180/289 — lazy `FlippedJoinFetch`),
+  `mergeSortedStreams` (memory-source.ts:1117-1136 — `KWayMerge` primes and
+  refills through a yield-forwarding `pending_pull`), the filter chain's
+  `filter(node): Generator<'yield', boolean>` (filter-operators.ts:37 —
+  `FilterResult`, with `FilterStartStream` holding the in-flight generator,
+  `FanOutFilter`, `filter_and`, and `Exists::fetch_size_stream`, exists.ts:
+  246-262), the join-layer overlays (join-utils.ts:28/149), and the
+  `Streamer` (pipeline-driver.ts:1285-1385 — `StreamerStream`, an explicit-
+  stack walk of `#streamChanges`/`#streamNodes` forwarding child-relationship
+  yields). ART run 20260903-012323 showed `yields=0` on every hydrate of the
+  flipped-EXISTS / EXISTS / related shapes (a 33 s one froze its shard);
+  `rust-ivm/tests/hydrate_yield_prod_shapes_test.rs` pins each shape against
+  a yielding `TableSource`, `tests/flipped_join_chunked_test.rs` carries the
+  TS chunked-yield test + the merge order, all proven on the pre-port sources.
 - **Known gap (intra-push yields):** TS's `TableSource.push` → `genPush`
   also yields INSIDE a single change's fetches (the `'yield'` sentinels the
   sources produce during a push). Rust's operator `push` is eager and drains
-  those sentinels (`skip_yields`), so one change always runs to completion;
-  the ported abort arms (I-11 `advance_gate`, checked per row) bound a
-  pathological change. The between-change yield (D1 phase 2) is ported.
+  those sentinels (`skip_yields` / `resolve_filter` / `Streamer::stream_rows`),
+  so one change always runs to completion; the ported abort arms (I-11
+  `advance_gate`, checked per row) bound a pathological change. The
+  between-change yield (D1 phase 2) is ported.
 

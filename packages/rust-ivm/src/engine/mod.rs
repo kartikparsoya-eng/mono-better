@@ -941,7 +941,7 @@ impl Engine {
             nodes: None,
             companion_idx: 0,
             streamer: Streamer::new(self.primary_keys.clone(), self.table_specs.clone()),
-            buffered: std::collections::VecDeque::new(),
+            streaming: None,
             row_counts: HashMap::new(),
             hydration_times: HashMap::new(),
             b_row_count: 0,
@@ -1137,7 +1137,7 @@ impl Engine {
                             let mut streamer =
                                 Streamer::new(self.primary_keys.clone(), self.table_specs.clone());
                             streamer.accumulate(&entry.query_id, &c.schema, &cc);
-                            for rc in streamer.stream() {
+                            for rc in streamer.stream_rows() {
                                 let _t = crate::perf_trace::scope("deliver.row");
                                 on_row_change(&rc);
                             }
@@ -1745,7 +1745,7 @@ fn push_source_change(
                     } else {
                         let mut streamer = Streamer::new(primary_keys.clone(), table_specs.clone());
                         streamer.accumulate(&entry.query_id, &c.schema, &cc);
-                        streamer.stream()
+                        streamer.stream_rows()
                     }
                 };
                 for rc in streamed {
@@ -2044,9 +2044,10 @@ pub struct HydrateStream {
     /// Next companion row of `built[idx]` to emit while `phase == Companions`.
     companion_idx: usize,
     streamer: Streamer,
-    /// `RowChange`s produced by the last accumulated node, drained one per
-    /// `next()` (one node can expand to several rows via relationships).
-    buffered: std::collections::VecDeque<RowChange>,
+    /// The lazy `streamer.stream()` of the last accumulated node, drained one
+    /// item per `next()` (one node can expand to several rows via
+    /// relationships, and the child fetches it walks can yield).
+    streaming: Option<crate::streamer::StreamerStream>,
     /// Per-query hydration row count (main rows + companion rows). Port of the
     /// TS `hydrationRowCount++` counter in `#addQueryImpl` (pipeline-driver.ts:
     /// 633/686/693).
@@ -2092,10 +2093,17 @@ impl Iterator for HydrateStream {
             if self.done {
                 return None;
             }
-            if let Some(rc) = self.buffered.pop_front() {
-                let _t = crate::perf_trace::scope("deliver.row");
-                self.b_row_count += 1;
-                return Some(StreamItem::Data(rc));
+            if let Some(streaming) = self.streaming.as_mut() {
+                match streaming.next() {
+                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                    Some(StreamItem::Data(rc)) => {
+                        let _t = crate::perf_trace::scope("deliver.row");
+                        self.b_row_count += 1;
+                        return Some(StreamItem::Data(rc));
+                    }
+                    None => self.streaming = None,
+                }
+                continue;
             }
             if self.idx >= self.built.len() {
                 self.done = true;
@@ -2152,7 +2160,7 @@ impl Iterator for HydrateStream {
                                 &b.schema,
                                 std::slice::from_ref(&change),
                             );
-                            self.buffered.extend(self.streamer.stream());
+                            self.streaming = Some(self.streamer.stream());
                         }
                         None => {
                             self.nodes = None;

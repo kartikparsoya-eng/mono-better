@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::ivm::change::Change;
 use crate::ivm::data::{Node, Row};
 use crate::ivm::filter_operators::{
-    FilterInput, FilterInputHandle, FilterOutput, FilterOutputHandle,
+    FilterInput, FilterInputHandle, FilterOutput, FilterOutputHandle, FilterResult, filter_result,
 };
 use crate::ivm::filter_push::filter_push;
 use crate::ivm::operator::{InputBase, Shared};
@@ -72,9 +72,9 @@ impl FilterOutput for Filter {
     }
 
     /// TS: `this.#predicate(node.row) && (yield* this.#output.filter(node))`.
-    fn filter(&self, node: &Node) -> bool {
+    fn filter(&self, node: &Node) -> FilterResult {
         if !(self.predicate)(&node.row) {
-            return false;
+            return filter_result(false);
         }
         let output = self
             .output

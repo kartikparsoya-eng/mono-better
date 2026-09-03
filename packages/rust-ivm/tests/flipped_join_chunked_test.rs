@@ -342,3 +342,154 @@ fn test_chunk_size_getter_setter() {
         256
     );
 }
+
+// ── yield forwarding (port of flipped-join.chunked.test.ts:238-285) ─────────
+
+/// TS `yieldInjector`: an `Input` wrapper that yields `'yield'` before every
+/// row of every fetch — the Input contract requires upstream yields to be
+/// forwarded, so a FlippedJoin over injected parent and child inputs must
+/// surface them (through `mergeSortedStreams` on the chunked path).
+struct YieldInjector {
+    inner: rust_ivm::ivm::operator::Shared<dyn Input>,
+}
+
+impl rust_ivm::ivm::operator::InputBase for YieldInjector {
+    fn get_schema(&self) -> rust_ivm::ivm::schema::SourceSchema {
+        self.inner.borrow().get_schema()
+    }
+    fn destroy(&mut self) {
+        self.inner.borrow_mut().destroy();
+    }
+}
+
+impl Input for YieldInjector {
+    fn set_output(&self, output: rust_ivm::ivm::operator::OutputHandle) {
+        self.inner.borrow().set_output(output);
+    }
+    fn fetch(&self, req: &FetchRequest) -> rust_ivm::ivm::stream::NodeStream {
+        use rust_ivm::ivm::stream::StreamItem;
+        Box::new(self.inner.borrow().fetch(req).flat_map(|item| match item {
+            StreamItem::Data(node) => vec![StreamItem::Yield, StreamItem::Data(node)],
+            StreamItem::Yield => vec![StreamItem::Yield],
+        }))
+    }
+}
+
+#[test]
+fn chunked_fetch_forwards_yields_from_parent_and_child_sub_streams() {
+    let _serial = chunk_serial();
+    let restore = set_multi_constraint_chunk_size_for_test(2);
+    let parent = make_source(
+        "parents",
+        &["id"],
+        &[
+            ("id", ColumnType::Number { optional: false }),
+            ("name", ColumnType::String { optional: false }),
+        ],
+    );
+    let child = make_source(
+        "children",
+        &["id"],
+        &[
+            ("id", ColumnType::Number { optional: false }),
+            ("parent_id", ColumnType::Number { optional: false }),
+        ],
+    );
+    for i in 1..=5 {
+        add_row(
+            &parent,
+            &[
+                ("id", Value::F64(i as f64)),
+                ("name", str_val(&format!("p{}", i))),
+            ],
+        );
+        add_row(
+            &child,
+            &[
+                ("id", Value::F64(i as f64)),
+                ("parent_id", Value::F64(i as f64)),
+            ],
+        );
+    }
+    let parent_input: rust_ivm::ivm::operator::Shared<dyn Input> =
+        Rc::new(RefCell::new(YieldInjector {
+            inner: parent.borrow_mut().connect(None, None, None, None, None),
+        }));
+    let child_input: rust_ivm::ivm::operator::Shared<dyn Input> =
+        Rc::new(RefCell::new(YieldInjector {
+            inner: child.borrow_mut().connect(None, None, None, None, None),
+        }));
+    let fj = FlippedJoin::new(FlippedJoinArgs {
+        parent: parent_input,
+        child: child_input,
+        parent_key: vec!["id".to_string()],
+        child_key: vec!["parent_id".to_string()],
+        relationship_name: "children".to_string(),
+        hidden: false,
+        system: System::Client,
+    });
+
+    // Collect both yields and rows so we can prove yields are forwarded.
+    let mut yields_and_rows: Vec<String> = Vec::new();
+    for item in fj.borrow().fetch(&FetchRequest::default()) {
+        yields_and_rows.push(match item {
+            rust_ivm::ivm::stream::StreamItem::Yield => "yield".to_string(),
+            rust_ivm::ivm::stream::StreamItem::Data(node) => match node.row.get("name") {
+                Some(Value::Str(s)) => s.to_string(),
+                other => panic!("name: {other:?}"),
+            },
+        });
+    }
+    // Rows are still produced in parent compareRows order...
+    let rows: Vec<&String> = yields_and_rows.iter().filter(|x| *x != "yield").collect();
+    assert_eq!(rows, ["p1", "p2", "p3", "p4", "p5"]);
+    // ...and yields are forwarded: 5 from the child fetch + ≥5 from the
+    // parent chunks (TS asserts `>= 10`).
+    let yield_count = yields_and_rows.iter().filter(|x| *x == "yield").count();
+    assert!(yield_count >= 10, "yields forwarded: {yields_and_rows:?}");
+
+    restore();
+}
+
+/// `mergeSortedStreams` (memory-source.ts:1074-1180) primes every stream
+/// (forwarding yields) before the first row, then after each emitted row
+/// refills from that row's stream, forwarding its yields — so for
+/// `[Y a Y c]` and `[Y b]` the merged order is `Y Y a Y b c`.
+#[test]
+fn merge_sorted_streams_forwards_yields_in_ts_order() {
+    use rust_ivm::ivm::data::Node;
+    use rust_ivm::ivm::memory_source::merge_sorted_streams;
+    use rust_ivm::ivm::stream::{NodeStream, StreamItem};
+    let node = |id: f64| Node::new(make_row(&[("id", Value::F64(id))]));
+    let s0: NodeStream = Box::new(
+        vec![
+            StreamItem::Yield,
+            StreamItem::Data(node(1.0)),
+            StreamItem::Yield,
+            StreamItem::Data(node(3.0)),
+        ]
+        .into_iter(),
+    );
+    let s1: NodeStream = Box::new(vec![StreamItem::Yield, StreamItem::Data(node(2.0))].into_iter());
+    let compare: rust_ivm::ivm::memory_source::NodeCompare = Rc::new(|a: &Node, b: &Node| {
+        let x = match a.row.get("id") {
+            Some(Value::F64(f)) => *f,
+            _ => 0.0,
+        };
+        let y = match b.row.get("id") {
+            Some(Value::F64(f)) => *f,
+            _ => 0.0,
+        };
+        x.partial_cmp(&y).unwrap()
+    });
+    let tokens: Vec<String> = merge_sorted_streams(vec![s0, s1], compare)
+        .map(|item| match item {
+            StreamItem::Yield => "Y".to_string(),
+            StreamItem::Data(n) => match n.row.get("id") {
+                Some(Value::F64(f)) => format!("{}", *f as i64),
+                _ => "?".to_string(),
+            },
+        })
+        .collect();
+    assert_eq!(tokens, ["Y", "Y", "1", "Y", "2", "3"]);
+}

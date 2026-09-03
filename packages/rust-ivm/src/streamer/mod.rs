@@ -61,12 +61,17 @@ pub struct TableSpecInfo {
     pub min_row_version: Option<String>,
 }
 
-/// The Streamer — accumulates changes, drains them as RowChanges.
-/// Port of TS `Streamer` class (pipeline-driver.ts:882).
+/// Port of TS `Streamer` (pipeline-driver.ts:1268-1400): `accumulate` records
+/// `(queryID, schema, changes)` triples and `stream()` walks them lazily as
+/// the TS generator does — `#streamChanges` → `#streamNodes`, recursing into
+/// every node's relationships and forwarding the `'yield'`s those child
+/// streams produce (:1361-1364). The rust-only `is_hidden` flag (EXISTS
+/// relationship rows, see `is_exists_condition_rel`) rides along.
 pub struct Streamer {
     primary_keys: HashMap<String, Vec<String>>,
     table_specs: HashMap<String, TableSpecInfo>,
-    accumulated: Vec<RowChange>,
+    /// TS `#changes: [queryID, schema, changes][]`.
+    changes: Vec<(String, SourceSchema, Vec<Change>)>,
 }
 
 impl Streamer {
@@ -77,155 +82,253 @@ impl Streamer {
         Streamer {
             primary_keys,
             table_specs,
-            accumulated: Vec::new(),
+            changes: Vec::new(),
         }
     }
 
-    /// Accumulate changes from a pipeline.
-    /// Port of TS `Streamer.accumulate()`.
+    /// Port of TS `Streamer.accumulate()` (:1276-1283).
     pub fn accumulate(&mut self, query_id: &str, schema: &SourceSchema, changes: &[Change]) {
-        self.stream_changes(query_id, schema, changes, false);
+        self.changes
+            .push((query_id.to_string(), schema.clone(), changes.to_vec()));
     }
 
-    /// Drain all accumulated changes.
-    /// Port of TS `Streamer.stream()`.
-    pub fn stream(&mut self) -> Vec<RowChange> {
-        std::mem::take(&mut self.accumulated)
-    }
-
-    // -- Internal: streamChanges --
-
-    fn stream_changes(
-        &mut self,
-        query_id: &str,
-        schema: &SourceSchema,
-        changes: &[Change],
-        hidden: bool,
-    ) {
-        // We do not sync rows gathered by the permissions system to the client.
-        if schema.system == System::Permissions {
-            return;
+    /// Port of TS `Streamer.stream()` (:1285-1294): a lazy walk of everything
+    /// accumulated so far. Takes the accumulated triples, so a `Streamer`
+    /// reused across nodes (the hydrate path) streams each node's changes once.
+    pub fn stream(&mut self) -> StreamerStream {
+        let mut stack = Vec::new();
+        // Frames are pushed in reverse so the first accumulated triple is on
+        // top of the stack.
+        for (query_id, schema, changes) in std::mem::take(&mut self.changes).into_iter().rev() {
+            stack.push(Frame::Changes {
+                query_id,
+                schema,
+                changes: changes.into_iter(),
+                hidden: false,
+            });
         }
+        StreamerStream {
+            primary_keys: self.primary_keys.clone(),
+            table_specs: self.table_specs.clone(),
+            stack,
+        }
+    }
 
-        for change in changes {
-            match change {
-                Change::Add(node) => {
-                    self.stream_nodes(
-                        query_id,
-                        schema,
-                        ChangeType::Add,
-                        std::iter::once(node),
-                        hidden,
-                    );
-                }
-                Change::Remove(node) => {
-                    self.stream_nodes(
-                        query_id,
-                        schema,
-                        ChangeType::Remove,
-                        std::iter::once(node),
-                        hidden,
-                    );
-                }
-                Change::Edit { node, .. } => {
-                    // EDIT: emit node with empty relationships (no recursion).
-                    let edit_node = Node {
-                        row: node.row.clone(),
-                        relationships: HashMap::new(),
-                        rel_order: Vec::new(),
+    /// `stream()` for the eager push path (`yield*` inside a push generator
+    /// in TS): the child-stream yields are drained — the intra-push yield is
+    /// the documented I-12 gap.
+    pub fn stream_rows(&mut self) -> Vec<RowChange> {
+        self.stream()
+            .filter_map(|item| match item {
+                crate::ivm::stream::StreamItem::Data(rc) => Some(rc),
+                crate::ivm::stream::StreamItem::Yield => None,
+            })
+            .collect()
+    }
+}
+
+/// One generator frame of the TS recursion.
+enum Frame {
+    /// `#streamChanges(queryID, schema, changes)` (:1297-1337).
+    Changes {
+        query_id: String,
+        schema: SourceSchema,
+        changes: std::vec::IntoIter<Change>,
+        hidden: bool,
+    },
+    /// `#streamNodes(queryID, schema, op, nodes)` (:1341-1385): the node
+    /// stream being walked.
+    Nodes {
+        query_id: String,
+        schema: SourceSchema,
+        op: ChangeType,
+        nodes: crate::ivm::stream::NodeStream,
+        hidden: bool,
+    },
+    /// The `for (const [relationship, children] of Object.entries(relationships))`
+    /// loop (:1380-1383) of an emitted node.
+    Relationships {
+        query_id: String,
+        schema: SourceSchema,
+        op: ChangeType,
+        node: Node,
+        rel_idx: usize,
+        hidden: bool,
+    },
+}
+
+/// The lazy `Streamer.stream()` generator.
+pub struct StreamerStream {
+    primary_keys: HashMap<String, Vec<String>>,
+    table_specs: HashMap<String, TableSpecInfo>,
+    stack: Vec<Frame>,
+}
+
+impl Iterator for StreamerStream {
+    type Item = crate::ivm::stream::StreamItem<RowChange>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::ivm::stream::StreamItem;
+        loop {
+            let frame = self.stack.last_mut()?;
+            match frame {
+                Frame::Changes {
+                    query_id,
+                    schema,
+                    changes,
+                    hidden,
+                } => {
+                    // We do not sync rows gathered by the permissions system to
+                    // the client (:1302-1306).
+                    if schema.system == System::Permissions {
+                        self.stack.pop();
+                        continue;
+                    }
+                    let Some(change) = changes.next() else {
+                        self.stack.pop();
+                        continue;
                     };
-                    self.stream_nodes(
-                        query_id,
-                        schema,
-                        ChangeType::Edit,
-                        std::iter::once(&edit_node),
-                        hidden,
-                    );
+                    let (query_id, schema, hidden) = (query_id.clone(), schema.clone(), *hidden);
+                    let next = match change {
+                        Change::Add(node) => Frame::Nodes {
+                            query_id,
+                            schema,
+                            op: ChangeType::Add,
+                            nodes: crate::ivm::stream::from_vec(vec![node]),
+                            hidden,
+                        },
+                        Change::Remove(node) => Frame::Nodes {
+                            query_id,
+                            schema,
+                            op: ChangeType::Remove,
+                            nodes: crate::ivm::stream::from_vec(vec![node]),
+                            hidden,
+                        },
+                        // EDIT: `{row: change[NODE].row, relationships: {}}`
+                        // (:1329-1331) — no recursion.
+                        Change::Edit { node, .. } => Frame::Nodes {
+                            query_id,
+                            schema,
+                            op: ChangeType::Edit,
+                            nodes: crate::ivm::stream::from_vec(vec![Node {
+                                row: node.row.clone(),
+                                relationships: HashMap::new(),
+                                rel_order: Vec::new(),
+                            }]),
+                            hidden,
+                        },
+                        // CHILD: recurse into the child schema with the child
+                        // change (:1319-1327).
+                        Change::Child { node: _, child } => {
+                            let Some(child_schema) =
+                                schema.relationships.get(&child.relationship_name).cloned()
+                            else {
+                                continue;
+                            };
+                            let child_hidden =
+                                hidden || is_exists_condition_rel(&child.relationship_name);
+                            Frame::Changes {
+                                query_id,
+                                schema: child_schema,
+                                changes: vec![child.change.as_ref().clone()].into_iter(),
+                                hidden: child_hidden,
+                            }
+                        }
+                    };
+                    self.stack.push(next);
                 }
-                Change::Child { node: _, child } => {
-                    // CHILD: recurse into the child schema with the child change.
-                    if let Some(child_schema) = schema.relationships.get(&child.relationship_name) {
-                        // The child change is a single change — wrap in a vec.
-                        let child_change = vec![child.change.as_ref().clone()];
-                        let child_hidden =
-                            hidden || is_exists_condition_rel(&child.relationship_name);
-                        self.stream_changes(query_id, child_schema, &child_change, child_hidden);
+                Frame::Nodes {
+                    query_id,
+                    schema,
+                    op,
+                    nodes,
+                    hidden,
+                } => {
+                    // We do not sync rows gathered by the permissions system
+                    // (:1352-1356).
+                    if schema.system == System::Permissions {
+                        self.stack.pop();
+                        continue;
+                    }
+                    match nodes.next() {
+                        None => {
+                            self.stack.pop();
+                            continue;
+                        }
+                        Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                        Some(StreamItem::Data(node)) => {
+                            let op = *op;
+                            let hidden = *hidden;
+                            let table = &schema.table_name;
+                            let pk = self
+                                .primary_keys
+                                .get(table)
+                                .cloned()
+                                .unwrap_or_else(|| schema.primary_key.clone());
+                            let spec = self.table_specs.get(table);
+                            let row_key = get_row_key(&pk, &node.row);
+                            // minRowVersion bumping: for non-REMOVE, bump
+                            // _0_version up to spec.minRowVersion (:1361-1371).
+                            let row = if op != ChangeType::Remove {
+                                bump_row_version(&node.row, spec)
+                            } else {
+                                node.row.clone()
+                            };
+                            // REMOVE carries no row (TS: row: undefined).
+                            let row_opt = if op == ChangeType::Remove {
+                                None
+                            } else {
+                                Some(row)
+                            };
+                            let rc = RowChange {
+                                change_type: op,
+                                query_id: query_id.clone(),
+                                table: table.clone(),
+                                row_key,
+                                row: row_opt,
+                                is_hidden: hidden,
+                            };
+                            // Recurse into relationships after the row
+                            // (:1380-1383), in `rel_order` for determinism.
+                            let rels = Frame::Relationships {
+                                query_id: query_id.clone(),
+                                schema: schema.clone(),
+                                op,
+                                node,
+                                rel_idx: 0,
+                                hidden,
+                            };
+                            self.stack.push(rels);
+                            return Some(StreamItem::Data(rc));
+                        }
                     }
                 }
-            }
-        }
-    }
-
-    // -- Internal: streamNodes --
-
-    fn stream_nodes<'a, I: Iterator<Item = &'a Node>>(
-        &mut self,
-        query_id: &str,
-        schema: &SourceSchema,
-        op: ChangeType,
-        nodes: I,
-        hidden: bool,
-    ) {
-        let table = &schema.table_name;
-
-        // We do not sync rows gathered by the permissions system.
-        if schema.system == System::Permissions {
-            return;
-        }
-
-        let pk = self
-            .primary_keys
-            .get(table)
-            .cloned()
-            .unwrap_or_else(|| schema.primary_key.clone());
-
-        let spec = self.table_specs.get(table).cloned();
-
-        for node in nodes {
-            let row_key = get_row_key(&pk, &node.row);
-
-            // minRowVersion bumping: for non-REMOVE, bump _0_version up to spec.minRowVersion.
-            let row = if op != ChangeType::Remove {
-                bump_row_version(&node.row, spec.as_ref())
-            } else {
-                node.row.clone()
-            };
-
-            // REMOVE carries no row (TS: row: undefined).
-            let row_opt = if op == ChangeType::Remove {
-                None
-            } else {
-                Some(row.clone())
-            };
-
-            self.accumulated.push(RowChange {
-                change_type: op,
-                query_id: query_id.to_string(),
-                table: table.clone(),
-                row_key,
-                row: row_opt,
-                is_hidden: hidden,
-            });
-
-            // Recurse into relationships — emit child rows.
-            // Use rel_order for deterministic iteration order.
-            for rel_name in &node.rel_order {
-                if let Some(rel_fn) = node.relationships.get(rel_name)
-                    && let Some(child_schema) = schema.relationships.get(rel_name)
-                {
-                    let stream = rel_fn();
-                    let child_hidden = hidden || is_exists_condition_rel(rel_name);
-                    // Stream children one at a time rather than collecting
-                    // the whole relationship first (TS streamNodes yields
-                    // per row). Depth-first order is unchanged.
-                    for child in crate::ivm::stream::skip_yields(stream) {
-                        self.stream_nodes(
-                            query_id,
-                            child_schema,
-                            op,
-                            std::iter::once(&child),
-                            child_hidden,
-                        );
+                Frame::Relationships {
+                    query_id,
+                    schema,
+                    op,
+                    node,
+                    rel_idx,
+                    hidden,
+                } => {
+                    let Some(rel_name) = node.rel_order.get(*rel_idx).cloned() else {
+                        self.stack.pop();
+                        continue;
+                    };
+                    *rel_idx += 1;
+                    if let Some(rel_fn) = node.relationships.get(&rel_name)
+                        && let Some(child_schema) = schema.relationships.get(&rel_name)
+                    {
+                        let stream = rel_fn();
+                        let child_hidden = *hidden || is_exists_condition_rel(&rel_name);
+                        let next = Frame::Nodes {
+                            query_id: query_id.clone(),
+                            schema: child_schema.clone(),
+                            op: *op,
+                            nodes: stream,
+                            hidden: child_hidden,
+                        };
+                        self.stack.push(next);
                     }
                 }
             }

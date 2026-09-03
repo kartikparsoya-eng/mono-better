@@ -19,7 +19,7 @@ use rust_ivm::ivm::fan_in::FanIn;
 use rust_ivm::ivm::fan_out::FanOut;
 use rust_ivm::ivm::filter::Filter;
 use rust_ivm::ivm::filter_operators::{
-    FilterInputHandle, FilterOutput, FilterOutputHandle, FilterStart,
+    FilterInputHandle, FilterOutput, FilterOutputHandle, FilterResult, FilterStart, filter_result,
 };
 use rust_ivm::ivm::memory_source::MemorySource;
 use rust_ivm::ivm::operator::InputBase;
@@ -66,8 +66,8 @@ struct Collector {
 impl FilterOutput for Collector {
     fn begin_filter(&self) {}
     fn end_filter(&self) {}
-    fn filter(&self, _node: &Node) -> bool {
-        true
+    fn filter(&self, _node: &Node) -> FilterResult {
+        filter_result(true)
     }
     fn push(&self, change: Change, _pusher: &dyn InputBase) {
         let b = match change.node().row.get("b") {

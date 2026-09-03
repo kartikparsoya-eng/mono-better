@@ -11,7 +11,7 @@ use crate::ivm::change::{Change, ChangeType};
 use crate::ivm::data::Node;
 use crate::ivm::filter_operators::{
     FilterChainPusher, FilterInput, FilterInputHandle, FilterOutput, FilterOutputAsOutput,
-    FilterOutputHandle,
+    FilterOutputHandle, FilterResult,
 };
 use crate::ivm::operator::{InputBase, OutputHandle, Shared};
 use crate::ivm::push_accumulated::push_accumulated_changes;
@@ -113,7 +113,7 @@ impl FilterOutput for FanIn {
     }
 
     /// TS: delegates straight downstream (fan-in.ts:67).
-    fn filter(&self, node: &Node) -> bool {
+    fn filter(&self, node: &Node) -> FilterResult {
         let output = self.output.borrow().clone().expect("FanIn: output not set");
         output.borrow().filter(node)
     }

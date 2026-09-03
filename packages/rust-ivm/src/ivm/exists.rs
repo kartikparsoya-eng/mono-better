@@ -18,9 +18,11 @@ use crate::ivm::change::{Change, ChangeType, make_add_change, make_remove_change
 use crate::ivm::data::{Node, Value};
 use crate::ivm::filter_operators::{
     FilterChainPusher, FilterInput, FilterInputHandle, FilterOutput, FilterOutputHandle,
+    FilterResult, filter_and, filter_result, map_filter_result,
 };
 use crate::ivm::operator::{InputBase, Shared};
 use crate::ivm::schema::SourceSchema;
+use crate::ivm::stream::{NodeStream, StreamItem};
 
 /// Build a cache key from a node's parent join key values.
 /// Port of TS Exists.#getCacheKey (exists.ts:224).
@@ -44,7 +46,10 @@ pub struct Exists {
     output: Rc<RefCell<Option<FilterOutputHandle>>>,
     /// Per-filter-loop cache: cache_key -> exists. Cleared in `end_filter`
     /// (TS exists.ts:76).
-    cache: RefCell<HashMap<String, bool>>,
+    /// Shared with the lazy `filter` generator, which records the fetched
+    /// size once the child stream is exhausted (TS `this.#cache.set(key,
+    /// exists)` after `yield* this.#fetchExists(node)`, exists.ts:86-87).
+    cache: Rc<RefCell<HashMap<String, bool>>>,
     /// True while a push is in flight (TS `#inPush`, exists.ts:39): during a
     /// push, relationships can be inconsistent (changes arrive one node at a
     /// time), so cached-size reuse across rows is disabled.
@@ -81,7 +86,7 @@ impl Exists {
             no_size_reuse,
             schema,
             output: Rc::new(RefCell::new(None)),
-            cache: RefCell::new(HashMap::new()),
+            cache: Rc::new(RefCell::new(HashMap::new())),
             in_push: Cell::new(false),
         }));
         // TS: `input.setFilterOutput(this)`.
@@ -91,8 +96,10 @@ impl Exists {
     }
 
     /// Port of TS `#fetchSize` (exists.ts:248).
-    fn fetch_size(&self, node: &Node) -> usize {
-        let _t = crate::perf_trace::scope("exists.size");
+    /// Port of TS `#fetchSize` (exists.ts:246-262) as the generator it is:
+    /// the child relationship's `'yield'`s are forwarded and the count is the
+    /// generator's return value.
+    fn fetch_size_stream(&self, node: &Node) -> Box<dyn Iterator<Item = StreamItem<usize>>> {
         let rel_fn = node
             .relationships
             .get(&self.relationship_name)
@@ -101,10 +108,30 @@ impl Exists {
                     "Exists: relationship \"{}\" not found on node",
                     self.relationship_name
                 )
-            });
-        rel_fn()
-            .filter(|i| matches!(i, crate::ivm::stream::StreamItem::Data(_)))
-            .count()
+            })
+            .clone();
+        Box::new(FetchSize {
+            stream: Some(rel_fn()),
+            size: 0,
+        })
+    }
+
+    /// `#fetchSize` on the (eager) push path: drain the yields.
+    fn fetch_size(&self, node: &Node) -> usize {
+        let _t = crate::perf_trace::scope("exists.size");
+        let mut stream = self.fetch_size_stream(node);
+        loop {
+            match stream.next() {
+                Some(StreamItem::Data(size)) => return size,
+                Some(StreamItem::Yield) => continue,
+                None => panic!("fetchSize generator ended without a result"),
+            }
+        }
+    }
+
+    /// Port of TS `#fetchExists` (exists.ts:241) as a generator.
+    fn fetch_exists_stream(&self, node: &Node) -> FilterResult {
+        map_filter_result(self.fetch_size_stream(node), |size| size > 0)
     }
 
     /// Port of TS `#fetchExists` (exists.ts:241). (Cannot fetch just 1 node:
@@ -174,30 +201,44 @@ impl FilterOutput for Exists {
     /// Port of TS `filter` (exists.ts:80): consult/populate the per-loop
     /// cache (disabled when keyed by primary key, or mid-push), then AND with
     /// the downstream chain.
+    /// Port of TS `filter` (exists.ts:80-97): resolve `exists` through the
+    /// per-filter-loop cache, then `(yield* this.#filter(node, exists)) &&
+    /// (yield* this.#output.filter(node))` — a lazy generator so the child
+    /// fetch's yields reach the caller.
     #[cfg_attr(feature = "profiling", inline(never))]
-    fn filter(&self, node: &Node) -> bool {
-        let mut exists: Option<bool> = None;
-        if !self.no_size_reuse && !self.in_push.get() {
+    fn filter(&self, node: &Node) -> FilterResult {
+        let exists_stream: FilterResult = if !self.no_size_reuse && !self.in_push.get() {
             let key = get_cache_key(node, &self.parent_join_key);
             let cached = self.cache.borrow().get(&key).copied();
-            exists = Some(match cached {
-                Some(v) => v,
+            match cached {
+                Some(v) => filter_result(v),
                 None => {
-                    let v = self.fetch_exists(node);
-                    self.cache.borrow_mut().insert(key, v);
-                    v
+                    let cache = self.cache.clone();
+                    map_filter_result(self.fetch_exists_stream(node), move |v| {
+                        cache.borrow_mut().insert(key.clone(), v);
+                        v
+                    })
                 }
-            });
-        }
-        if !self.filter_inner(node, exists) {
-            return false;
-        }
+            }
+        } else {
+            // `exists` stays undefined → `#filter(node, exists)` fetches it
+            // (exists.ts:220).
+            self.fetch_exists_stream(node)
+        };
+        let not = self.not;
         let output = self
             .output
             .borrow()
             .clone()
             .expect("Exists: output not set");
-        output.borrow().filter(node)
+        let node = node.clone();
+        filter_and(
+            map_filter_result(
+                exists_stream,
+                move |exists| if not { !exists } else { exists },
+            ),
+            Box::new(move || output.borrow().filter(&node)),
+        )
     }
 
     /// Port of TS `push` (exists.ts:109).
@@ -287,5 +328,29 @@ impl FilterOutput for Exists {
 impl Drop for Exists {
     fn drop(&mut self) {
         crate::live_count::dec(&crate::live_count::EXISTS);
+    }
+}
+
+/// The generator state of TS `#fetchSize` (exists.ts:246-262).
+struct FetchSize {
+    stream: Option<NodeStream>,
+    size: usize,
+}
+
+impl Iterator for FetchSize {
+    type Item = StreamItem<usize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let stream = self.stream.as_mut()?;
+        loop {
+            match stream.next() {
+                Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                Some(StreamItem::Data(_)) => self.size += 1,
+                None => {
+                    self.stream = None;
+                    return Some(StreamItem::Data(self.size));
+                }
+            }
+        }
     }
 }

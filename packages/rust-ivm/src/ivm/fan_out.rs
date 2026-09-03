@@ -14,9 +14,11 @@ use crate::ivm::data::Node;
 use crate::ivm::fan_in::FanIn;
 use crate::ivm::filter_operators::{
     FilterChainPusher, FilterInput, FilterInputHandle, FilterOutput, FilterOutputHandle,
+    FilterResult,
 };
 use crate::ivm::operator::{InputBase, Shared};
 use crate::ivm::schema::SourceSchema;
+use crate::ivm::stream::StreamItem;
 
 /// Port of TS `FanOut` (fan-out.ts:17).
 pub struct FanOut {
@@ -96,15 +98,14 @@ impl FilterOutput for FanOut {
 
     /// TS: OR over branches, short-circuiting on the first accept
     /// (fan-out.ts:62-71).
-    fn filter(&self, node: &Node) -> bool {
-        let mut result = false;
-        for output in self.outputs.borrow().iter() {
-            result = output.borrow().filter(node) || result;
-            if result {
-                return true;
-            }
-        }
-        result
+    fn filter(&self, node: &Node) -> FilterResult {
+        Box::new(FanOutFilter {
+            outputs: self.outputs.borrow().clone(),
+            node: node.clone(),
+            idx: 0,
+            current: None,
+            done: false,
+        })
     }
 
     /// TS: push to every branch, then signal the fan-in (fan-out.ts:73-80).
@@ -122,5 +123,51 @@ impl FilterOutput for FanOut {
         fan_in
             .borrow()
             .fan_out_done_pushing_to_all_branches(change.change_type());
+    }
+}
+
+/// The generator body of TS `FanOut.filter` (fan-out.ts:63-71): `result =
+/// (yield* output.filter(node)) || result; if (result) return true` over the
+/// branches — each branch's yields are forwarded, the first accepting branch
+/// short-circuits.
+struct FanOutFilter {
+    outputs: Vec<FilterOutputHandle>,
+    node: Node,
+    idx: usize,
+    current: Option<FilterResult>,
+    done: bool,
+}
+
+impl Iterator for FanOutFilter {
+    type Item = StreamItem<bool>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.done {
+                return None;
+            }
+            if let Some(current) = self.current.as_mut() {
+                match current.next() {
+                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                    Some(StreamItem::Data(true)) => {
+                        self.done = true;
+                        return Some(StreamItem::Data(true));
+                    }
+                    Some(StreamItem::Data(false)) => {
+                        self.current = None;
+                        self.idx += 1;
+                        continue;
+                    }
+                    None => panic!("filter generator ended without a result"),
+                }
+            }
+            if self.idx < self.outputs.len() {
+                let result = self.outputs[self.idx].borrow().filter(&self.node);
+                self.current = Some(result);
+                continue;
+            }
+            self.done = true;
+            return Some(StreamItem::Data(false));
+        }
     }
 }

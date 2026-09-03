@@ -1375,7 +1375,7 @@ impl Output for CollectOutput {
                 &config.schema,
                 std::slice::from_ref(&change),
             );
-            self.row_changes.extend(streamer.stream());
+            self.row_changes.extend(streamer.stream_rows());
         } else {
             self.changes.push(change);
         }
@@ -1452,41 +1452,30 @@ impl Ord for HeapEntry {
     }
 }
 
+/// The generator state of TS `mergeSortedStreams` (memory-source.ts:1074-1180):
+/// the streams are primed lazily on the first pull and every refill goes
+/// through `pullNext`, which forwards the sub-stream's `'yield'`s to the
+/// caller (`pending_pull` is the stream `pullNext` is currently draining).
 struct KWayMerge {
     streams: Vec<Option<NodeStream>>,
     heap: std::collections::BinaryHeap<HeapEntry>,
     compare: NodeCompare,
+    /// Next stream to prime (TS :1140-1146 primes all streams before the
+    /// first row).
+    priming: usize,
+    /// The stream `pullNext(idx)` is mid-way through: after a primed / emitted
+    /// row, the next node of that stream is pulled — yields first.
+    pending_pull: Option<usize>,
 }
 
 impl KWayMerge {
     fn new(streams: Vec<NodeStream>, compare: NodeCompare) -> Self {
-        let n = streams.len();
-        let mut km = KWayMerge {
+        KWayMerge {
             streams: streams.into_iter().map(Some).collect(),
             heap: std::collections::BinaryHeap::new(),
-            compare: compare.clone(),
-        };
-        for i in 0..n {
-            km.advance(i);
-        }
-        km
-    }
-
-    fn advance(&mut self, idx: usize) {
-        if let Some(stream) = &mut self.streams[idx] {
-            for item in stream.by_ref() {
-                match item {
-                    crate::ivm::stream::StreamItem::Data(n) => {
-                        self.heap.push(HeapEntry {
-                            node: n,
-                            idx,
-                            compare: self.compare.clone(),
-                        });
-                        return;
-                    }
-                    crate::ivm::stream::StreamItem::Yield => continue,
-                }
-            }
+            compare,
+            priming: 0,
+            pending_pull: None,
         }
     }
 }
@@ -1495,12 +1484,44 @@ impl Iterator for KWayMerge {
     type Item = crate::ivm::stream::StreamItem<Node>;
 
     fn next(&mut self) -> Option<crate::ivm::stream::StreamItem<Node>> {
-        match self.heap.pop() {
-            None => None,
-            Some(entry) => {
-                self.advance(entry.idx);
-                Some(crate::ivm::stream::StreamItem::Data(entry.node))
+        use crate::ivm::stream::StreamItem;
+        loop {
+            if let Some(idx) = self.pending_pull {
+                // TS `pullNext(idx)` (:1117-1136).
+                let item = match self.streams[idx].as_mut() {
+                    Some(stream) => stream.next(),
+                    None => None,
+                };
+                match item {
+                    Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                    Some(StreamItem::Data(node)) => {
+                        self.pending_pull = None;
+                        self.heap.push(HeapEntry {
+                            node,
+                            idx,
+                            compare: self.compare.clone(),
+                        });
+                    }
+                    None => {
+                        self.pending_pull = None;
+                        self.streams[idx] = None;
+                    }
+                }
+                continue;
             }
+            if self.priming < self.streams.len() {
+                self.pending_pull = Some(self.priming);
+                self.priming += 1;
+                continue;
+            }
+            // TS :1148-1168: emit the global min, then refill from its stream.
+            return match self.heap.pop() {
+                None => None,
+                Some(entry) => {
+                    self.pending_pull = Some(entry.idx);
+                    Some(StreamItem::Data(entry.node))
+                }
+            };
         }
     }
 }
