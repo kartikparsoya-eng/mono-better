@@ -236,7 +236,7 @@ async fn resolve_analyze_ast(
         let transformed = transform(&ctx, shard, std::slice::from_ref(&spec))
             .await
             .map_err(|e| format!("Error transforming custom query {name}: {e}"))?;
-        ast = Some(match transformed.into_iter().next() {
+        ast = Some(match transformed.result.into_iter().next() {
             Some(CustomTransformed::Ok(tq)) => tq.ast,
             Some(CustomTransformed::Errored { error, .. }) => {
                 return Err(format!("Error transforming custom query {name}: {error}"));
@@ -492,6 +492,9 @@ mod tests {
             origin: None,
             auth: None,
             user_id: None,
+            client_id: String::new(),
+            ws_id: String::new(),
+            revision: 0,
         }
     }
 

@@ -594,6 +594,9 @@ fn custom_query_context_from(ctx: &CcmConnectionContext) -> Option<CustomQueryCo
             .map(|a| a.raw().to_string())
             .filter(|value| !value.is_empty()),
         user_id: ctx.user.id.clone().filter(|value| !value.is_empty()),
+        client_id: ctx.client_id.clone(),
+        ws_id: ctx.ws_id.clone(),
+        revision: ctx.revision,
     })
 }
 
@@ -1934,52 +1937,75 @@ impl ViewSyncerService {
             client_id: conn_ctx.client_id.clone(),
             ws_id: conn_ctx.ws_id.clone(),
         };
-        // TS: `if (this.#customQueryTransformer) { ...validate... } else {
-        //      validation = {kind: 'client-fallback'} }`
-        // Rust's transformer twin is the per-connection `CustomQueryContext`;
-        // `None` (no `userQueryURL` configured) is TS's no-transformer branch.
-        if let Some(ctx) = self.query_context_for(&conn_ctx.client_id, &conn_ctx.ws_id) {
-            let shard = self.shard.clone();
-            if let Err(body) = crate::custom_queries::transform_query::validate(&ctx, &shard).await
-            {
-                // TS throws `ProtocolErrorWithLevel(response, 'warn')` here and
-                // the catch below splits auth-error from everything else.
-                if crate::custom_queries::transform_query::is_auth_error_body(&body) {
-                    // Exact TS wording + structured fields (view-syncer.ts:2769-2777).
-                    tracing::warn!(
-                        cg_id = %self.cg_id,
-                        client_id = %conn_ctx.client_id,
-                        ws_id = %conn_ctx.ws_id,
-                        revision = conn_ctx.revision,
-                        message = %transform_failure_message(&body),
-                        "Connection auth validation failed; invalidating connection"
-                    );
-                    crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
-                    self.fail_maintenance_connection(
-                        conn_ctx,
-                        crate::protocol::ErrorBody::unauthorized(
-                            "Connection auth validation failed",
-                        ),
-                    );
-                    return Ok(false);
+        // TS view-syncer.ts:2751-2760: with a transformer the `/query` probe's
+        // response carries the API server's validation (`server-validated`
+        // with its userID, else `client-fallback`); without one it is
+        // `client-fallback`. Rust's transformer twin is the per-connection
+        // `CustomQueryContext`; `None` (no `userQueryURL` configured) is TS's
+        // no-transformer branch.
+        let validation =
+            if let Some(ctx) = self.query_context_for(&conn_ctx.client_id, &conn_ctx.ws_id) {
+                let shard = self.shard.clone();
+                match crate::custom_queries::transform_query::validate(&ctx, &shard).await {
+                    Err(body) => {
+                        // TS throws `ProtocolErrorWithLevel(response, 'warn')` here and
+                        // the catch below splits auth-error from everything else.
+                        if crate::custom_queries::transform_query::is_auth_error_body(&body) {
+                            // Exact TS wording + structured fields (view-syncer.ts:2769-2777).
+                            tracing::warn!(
+                                cg_id = %self.cg_id,
+                                client_id = %conn_ctx.client_id,
+                                ws_id = %conn_ctx.ws_id,
+                                revision = conn_ctx.revision,
+                                message = %transform_failure_message(&body),
+                                "Connection auth validation failed; invalidating connection"
+                            );
+                            crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+                            self.fail_maintenance_connection(
+                                conn_ctx,
+                                crate::protocol::ErrorBody::unauthorized(
+                                    "Connection auth validation failed",
+                                ),
+                            );
+                            return Ok(false);
+                        }
+                        return Err(body);
+                    }
+                    // TS: `validation = response.validation` (view-syncer.ts:2757).
+                    Ok(validation) => validation,
                 }
-                return Err(body);
-            }
-        }
+            } else {
+                ConnectionValidation::ClientFallback
+            };
 
-        // TS `this.connContextManager.validateConnection(connCtx, connCtx.revision,
-        // validation)` — refreshes `revalidate_at` and lets the CCM promote or
-        // refresh the group's background connection.
-        if let Err(e) = lock_unpoisoned(&self.ccm).validate_connection(
+        // TS view-syncer.ts:2762-2767: `validateConnection` THROWS when the
+        // API server's userID differs from the connection's (`Unauthorized`,
+        // connection-context-manager.ts:420) — that lands in the same catch
+        // as a probe failure: auth error → warn + `#failMaintenanceConnection`
+        // + `false`; anything else propagates.
+        // Bind first: the guard temporary must drop before `self` is borrowed mutably.
+        let recorded = lock_unpoisoned(&self.ccm).validate_connection(
             &selector,
             conn_ctx.revision,
-            &ConnectionValidation::ClientFallback,
-        ) {
-            tracing::warn!(
-                "CG {}: recording validation failed for client {}: {e:?}",
-                self.cg_id,
-                conn_ctx.client_id
-            );
+            &validation,
+        );
+        if let Err(e) = recorded {
+            let body = e.to_error_body();
+            let body_value = serde_json::to_value(&body).unwrap_or_default();
+            if crate::custom_queries::transform_query::is_auth_error_body(&body_value) {
+                tracing::warn!(
+                    cg_id = %self.cg_id,
+                    client_id = %conn_ctx.client_id,
+                    ws_id = %conn_ctx.ws_id,
+                    revision = conn_ctx.revision,
+                    message = %body.message(),
+                    "Connection auth validation failed; invalidating connection"
+                );
+                crate::metrics::Metrics::inc(&self.metrics.auth_revalidation_failures);
+                self.fail_maintenance_connection(conn_ctx, body);
+                return Ok(false);
+            }
+            return Err(body_value);
         }
         Ok(true)
     }
@@ -4572,6 +4598,10 @@ mod tests {
     struct RevalidateFactory {
         handle: tokio::runtime::Handle,
         revalidate_interval_ms: Option<i64>,
+        /// When set, the CCM gets a `FetchConfig` allowing exactly this
+        /// `ZERO_QUERY_URL` (TS: a configured transformer), so a connection's
+        /// `userQueryURL` at that address passes the request-time allow check.
+        query_url: Option<String>,
     }
     impl CGServicesFactory for RevalidateFactory {
         fn create_mutagen(&self, _cg: &str) -> Option<Arc<dyn MutagenDispatch>> {
@@ -4595,7 +4625,13 @@ mod tests {
                 permissions: None,
                 permissions_hash: None,
                 revalidate_interval_ms: self.revalidate_interval_ms,
-                query_config: None,
+                query_config: self.query_url.as_ref().map(|u| FetchConfig {
+                    url: Some(vec![u.clone()]),
+                    api_key: None,
+                    allowed_client_headers: None,
+                    allowed_request_headers: None,
+                    forward_cookies: false,
+                }),
                 enable_query_covering: true,
                 enable_query_planner: true,
                 priority_op_running_yield_threshold_ms: 2.5,
@@ -4658,6 +4694,7 @@ mod tests {
             RevalidateFactory {
                 handle: self.handle.clone(),
                 revalidate_interval_ms: None,
+                query_url: None,
             }
             .create_sync_engine_config(cg)
         }
@@ -4771,9 +4808,20 @@ mod tests {
         interval_ms: Option<i64>,
         valid: Arc<std::sync::atomic::AtomicBool>,
     ) -> ViewSyncerService {
+        revalidate_state_with_query_url(rt, interval_ms, valid, None)
+    }
+
+    /// `revalidate_state` with a configured `ZERO_QUERY_URL` allow-list entry.
+    pub(super) fn revalidate_state_with_query_url(
+        rt: &tokio::runtime::Runtime,
+        interval_ms: Option<i64>,
+        valid: Arc<std::sync::atomic::AtomicBool>,
+        query_url: Option<String>,
+    ) -> ViewSyncerService {
         let factory: Arc<dyn CGServicesFactory> = Arc::new(RevalidateFactory {
             handle: rt.handle().clone(),
             revalidate_interval_ms: interval_ms,
+            query_url,
         });
         ViewSyncerService::new_test(
             "cg1",
@@ -5341,6 +5389,173 @@ mod tests {
     /// Before the fix rust validated on EVERY updateAuth. Revert the
     /// `!self.pipelines_synced` gate → the second half's `== 1` assert fails
     /// (the counter reaches 2).
+    /// Drain every error frame a test sink received, as `["error", body]`
+    /// bodies (a plain `Send`, a `Fail`, or a `FailWithCode`).
+    fn error_bodies(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>,
+    ) -> Vec<serde_json::Value> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|command| match command {
+                WsCommand::Send { msg, .. }
+                    if msg.get(0).and_then(serde_json::Value::as_str) == Some("error") =>
+                {
+                    msg.get(1).cloned()
+                }
+                WsCommand::Fail(e) | WsCommand::FailWithCode { error: e, .. } => {
+                    Some(crate::protocol::error_message(&e)[1].clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Connect `c1`/`ws1` as `user-1` with `userQueryURL` pointing at `url`.
+    fn connect_with_query_url(
+        rt: &tokio::runtime::Runtime,
+        state: &mut ViewSyncerService,
+        url: String,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<WsCommand> {
+        let (tx, drx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        rt.block_on(state.on_new_connection(
+            pinned_params("c1", "ws1", "user-1"),
+            DirectWebSocketSink::new(tx),
+        ));
+        let selector = CcmConnectionSelector {
+            client_id: "c1".to_string(),
+            ws_id: "ws1".to_string(),
+        };
+        lock_unpoisoned(&state.ccm)
+            .init_connection(
+                &selector,
+                &InitConnectionBody {
+                    user_query_url: Some(url),
+                    user_query_headers: None,
+                    user_push_url: None,
+                    user_push_headers: None,
+                },
+            )
+            .unwrap();
+        drx
+    }
+
+    /// TS `#validateConnection` (view-syncer.ts:2749-2767) records the API
+    /// server's `userID` from the `/query` validation response through
+    /// `connContextManager.validateConnection`; a userID that differs from the
+    /// connection's is `Unauthorized` (connection-context-manager.ts:420) →
+    /// `#failMaintenanceConnection`: the client receives the Unauthorized
+    /// error frame, is closed, and initConnection does NOT proceed. Rust
+    /// recorded `client-fallback` unconditionally, so a server answering for a
+    /// DIFFERENT user was silently accepted.
+    #[test]
+    fn init_connection_rejects_a_server_user_id_that_does_not_match() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // Every probe/transform answers for a DIFFERENT user than the JWT's.
+        let url =
+            crate::custom_queries::transform_query::test_support::spawn_http_stub_with(8, |_| {
+                (
+                    "200 OK",
+                    r#"{"kind":"QueryResponse","userID":"someone-else","queries":[]}"#.to_string(),
+                )
+            });
+        let mut state =
+            revalidate_state_with_query_url(&rt, Some(300_000), valid, Some(url.clone()));
+        seed_test_client_schema(&mut state);
+        let mut drx = connect_with_query_url(&rt, &mut state, url);
+        let accepted = rt.block_on(state.handle_desired_queries(
+            "c1",
+            &serde_json::json!({"desiredQueriesPatch": []}),
+            ConfigPassOrigin::InitConnection,
+            CustomQueryTransformMode::All,
+        ));
+        assert!(
+            !accepted,
+            "a server userID mismatch must reject initConnection (TS validateConnection throws Unauthorized)"
+        );
+        let errors = error_bodies(&mut drx);
+        let err = errors
+            .last()
+            .cloned()
+            .expect("the mismatch must reach the client as an error frame");
+        assert_eq!(err["kind"], "Unauthorized", "got {err}");
+        assert_eq!(
+            err["message"],
+            "Connection userID does not match validated server userID."
+        );
+        assert!(
+            !state.registered_ws.contains_key("c1"),
+            "the rejected connection must be closed"
+        );
+    }
+
+    /// TS `#syncQueryPipelineSet` (view-syncer.ts:1984-1992): after an UNCACHED
+    /// custom-query transform the connection is validated with the `userID`
+    /// the API server returned IN THE TRANSFORM RESPONSE. A mismatch is
+    /// `Unauthorized` and throws: that client is failed and none of the batch
+    /// is applied. Pins the transform-response path, not the `/query` probe:
+    /// init validates fine (the server says `user-1`), then a desired-queries
+    /// change transforms against a server that now answers for someone else.
+    #[test]
+    fn desired_queries_transform_rejects_a_server_user_id_that_does_not_match() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        // The empty validation probe answers for user-1 (validates fine); a REAL
+        // transform answers for someone else.
+        let url = crate::custom_queries::transform_query::test_support::spawn_http_stub_with(
+            8,
+            |req| {
+                if req.contains(r#"["transform",[]]"#) {
+                    (
+                        "200 OK",
+                        r#"{"kind":"QueryResponse","userID":"user-1","queries":[]}"#.to_string(),
+                    )
+                } else {
+                    (
+                    "200 OK",
+                    r#"{"kind":"QueryResponse","userID":"someone-else","queries":[{"id":"h1","ast":{"table":"issue"}}]}"#.to_string(),
+                )
+                }
+            },
+        );
+        let mut state =
+            revalidate_state_with_query_url(&rt, Some(300_000), valid, Some(url.clone()));
+        seed_test_client_schema(&mut state);
+        let mut drx = connect_with_query_url(&rt, &mut state, url);
+        let accepted = rt.block_on(state.handle_desired_queries(
+            "c1",
+            &serde_json::json!({"desiredQueriesPatch": []}),
+            ConfigPassOrigin::InitConnection,
+            CustomQueryTransformMode::All,
+        ));
+        assert!(
+            accepted,
+            "a matching server userID validates initConnection"
+        );
+        let _ = error_bodies(&mut drx);
+        rt.block_on(state.handle_desired_queries(
+            "c1",
+            &serde_json::json!({"desiredQueriesPatch": [
+                {"op": "put", "hash": "h1", "name": "myQuery", "args": []}
+            ]}),
+            ConfigPassOrigin::ChangeDesiredQueries,
+            CustomQueryTransformMode::All,
+        ));
+        let errors = error_bodies(&mut drx);
+        let err = errors
+            .iter()
+            .find(|e| e["kind"] == "Unauthorized")
+            .cloned()
+            .unwrap_or_else(|| panic!("the transform-response userID mismatch must fail the client with Unauthorized; got {errors:?}"));
+        assert_eq!(
+            err["message"],
+            "Connection userID does not match validated server userID."
+        );
+        assert!(
+            !state.registered_ws.contains_key("c1"),
+            "the rejected connection must be closed"
+        );
+    }
+
     #[test]
     fn update_auth_validates_only_when_pipelines_are_not_synced() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -8772,15 +8987,65 @@ impl ViewSyncerService {
                     crate::metrics::record_query_transformation_time(transform_ms);
                     crate::metrics::record_query_transformation(transform_result.is_ok());
                     match transform_result {
-                        Ok(results) => {
-                            for r in results {
-                                match r {
-                                    CustomTransformed::Ok(tq) => {
-                                        executed.push((tq.id, tq.ast, tq.hash))
-                                    }
-                                    CustomTransformed::Errored { id, error } => {
-                                        errored_query_ids.push(id);
-                                        record_transform_error(error, &mut transform_errors)
+                        Ok(response) => {
+                            // TS view-syncer.ts:1984-1992: an UNCACHED transform
+                            // validates the connection with the API server's
+                            // authoritative userID (a cached batch re-asserted
+                            // nothing). `validateConnection` THROWS on a userID
+                            // mismatch (`Unauthorized`); TS's `#runInLockForClient`
+                            // catch then fails THAT client (`failConnection` +
+                            // `client.fail`) and none of the batch is applied —
+                            // existing pipelines stay intact. Rust cannot unwind
+                            // across the serial re-hydrate, so it fails the
+                            // connection here and stashes the body like the
+                            // whole-batch failure arm below.
+                            let mut rejected: Option<crate::protocol::ErrorBody> = None;
+                            if !response.cached
+                                && let Some(validation) = &response.validation
+                            {
+                                let sel = CcmConnectionSelector {
+                                    client_id: ctx.client_id.clone(),
+                                    ws_id: ctx.ws_id.clone(),
+                                };
+                                let recorded = lock_unpoisoned(&self.ccm).validate_connection(
+                                    &sel,
+                                    ctx.revision,
+                                    validation,
+                                );
+                                if let Err(e) = recorded {
+                                    rejected = Some(e.to_error_body());
+                                }
+                            }
+                            if let Some(err) = rejected {
+                                tracing::warn!(
+                                    cg_id = %self.cg_id,
+                                    client_id = %ctx.client_id,
+                                    ws_id = %ctx.ws_id,
+                                    revision = ctx.revision,
+                                    message = %err.message(),
+                                    "Connection auth validation failed; invalidating connection"
+                                );
+                                let conn = lock_unpoisoned(&self.ccm).get_connection_context(
+                                    &CcmConnectionSelector {
+                                        client_id: ctx.client_id.clone(),
+                                        ws_id: ctx.ws_id.clone(),
+                                    },
+                                );
+                                if let Some(conn) = conn {
+                                    self.fail_maintenance_connection(&conn, err.clone());
+                                }
+                                self.background_retransform_failure =
+                                    Some(serde_json::to_value(&err).unwrap_or_default());
+                            } else {
+                                for r in response.result {
+                                    match r {
+                                        CustomTransformed::Ok(tq) => {
+                                            executed.push((tq.id, tq.ast, tq.hash))
+                                        }
+                                        CustomTransformed::Errored { id, error } => {
+                                            errored_query_ids.push(id);
+                                            record_transform_error(error, &mut transform_errors)
+                                        }
                                     }
                                 }
                             }

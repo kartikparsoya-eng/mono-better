@@ -2,8 +2,8 @@
 
 _COVERED = reachable (transitive closure over the crate call graph, incl. fn-pointer edges like `.sort_by(cmp_condition)` / `.any(is_always_false)`) from a differential harness: the in-crate `*_parity_against_ts` fixtures (jwt / read-authorizer hash goldens / url_match / query_covering / serving_lag / e2e_serving_lag / parse_int) + the phase/rowkey/stage integration tests. Reachability ≠ every-branch-exercised._
 
-- Rust fns total **541** · ✅ COVERED **498** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
-- Body-differential coverage of the **unit-testable pure surface**: **498/508 = 98%**
+- Rust fns total **543** · ✅ COVERED **500** · 🟥 GAP (pure, untested) **10** · ⚙️ IO (integration diff) **24** · ◻️ infra/metrics **6** · ◻️ documented n/a **3**
+- Body-differential coverage of the **unit-testable pure surface**: **500/510 = 98%**
 
 > ⚠️ **Highest-risk uncovered (build rowKeys/schemas / classify / mutate state — the corruption class):** `merge` (tdigest.rs)
 
@@ -30,7 +30,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `total_queries` | workers/syncer.rs | trivial getter — sums query counts over the registry snapshots |
 | `total_rows` | workers/syncer.rs | trivial getter — sums row counts over the registry snapshots |
 
-## ✅ COVERED — body pinned to TS fixture — 498
+## ✅ COVERED — body pinned to TS fixture — 500
 
 | fn | file | signature |
 |---|---|---|
@@ -128,7 +128,8 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `seed_transform_cache_for_test` | custom_queries/transform_query.rs | `pub fn seed_transform_cache_for_test(ctx: &CustomQueryContext, id: &str, q: &Transforme…` |
 | `set_header` | custom_queries/transform_query.rs | `fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {` |
 | `transform` | custom_queries/transform_query.rs | `pub async fn transform(` |
-| `validate` | custom_queries/transform_query.rs | `pub async fn validate(ctx: &CustomQueryContext, shard: &ShardID) -> Result<(), Value> {` |
+| `validate` | custom_queries/transform_query.rs | `pub async fn validate(` |
+| `validation_of` | custom_queries/transform_query.rs | `fn validation_of(response: &Value) -> ConnectionValidation {` |
 | `compute_table_specs_from_path` | db/lite_tables.rs | `pub fn compute_table_specs_from_path(replica_path: &str) -> Result<Vec<IvmTableSpec>, S…` |
 | `compute_zql_specs` | db/lite_tables.rs | `pub fn compute_zql_specs(conn: &Connection) -> Result<Vec<IvmTableSpec>, String> {` |
 | `list_tables` | db/lite_tables.rs | `fn list_tables(conn: &Connection) -> Result<Vec<String>, String> {` |
@@ -236,7 +237,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `enqueue_push` | services/mutagen/pusher.rs | `fn enqueue_push(` |
 | `fail_downstream` | services/mutagen/pusher.rs | `fn fail_downstream(` |
 | `fan_out_responses` | services/mutagen/pusher.rs | `fn fan_out_responses(sinks: &ConnectionSinks, response: &serde_json::Value) {` |
-| `group_by` | services/mutagen/pusher.rs | `fn group_by<'a, T>(items: impl Iterator<Item = (String, T)>) -> Vec<(String, Vec<T>)> {` |
+| `group_by` | services/mutagen/pusher.rs | `fn group_by<T>(items: impl Iterator<Item = (String, T)>) -> Vec<(String, Vec<T>)> {` |
 | `init_connection` | services/mutagen/pusher.rs | `fn init_connection(&self, _selector: &ConnectionSelector) {}` |
 | `is_push_error_response` | services/mutagen/pusher.rs | `fn is_push_error_response(response: &serde_json::Value) -> bool {` |
 | `mutation_ids_of` | services/mutagen/pusher.rs | `fn mutation_ids_of(push_body: &serde_json::Value) -> Vec<MutationID> {` |
@@ -518,6 +519,7 @@ _COVERED = reachable (transitive closure over the crate call graph, incl. fn-poi
 | `relay_headers_for` | workers/syncer_ws_message_handler.rs | `fn relay_headers_for(` |
 | `with_traceparent` | workers/syncer_ws_message_handler.rs | `fn with_traceparent<F, R>(traceparent: Option<&str>, f: F) -> R` |
 | `drain_until_peer_close` | ws_server.rs | `async fn drain_until_peer_close(` |
+| `elide` | ws_server.rs | `pub(crate) fn elide(val: &str, max_bytes: usize) -> String {` |
 | `is_expected_disconnect` | ws_server.rs | `fn is_expected_disconnect(error: &WebSocketError) -> bool {` |
 | `liveness_timeout_ms` | ws_server.rs | `fn liveness_timeout_ms() -> u64 {` |
 | `now_epoch_ms` | ws_server.rs | `fn now_epoch_ms() -> i64 {` |

@@ -16,6 +16,7 @@
 //! as `Errored` so the caller can forward them to the client via
 //! `transformError` without dropping the healthy queries.
 
+use crate::services::view_syncer::connection_context_manager::ConnectionValidation;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -71,6 +72,14 @@ pub struct CustomQueryContext {
     /// The group's pinned userID — part of the transform cache key (TS
     /// `getCacheKey` includes userID).
     pub user_id: Option<String>,
+    /// The connection this context was resolved from. TS passes its whole
+    /// `ConnectionContext` (clientID / wsID / revision) into `transform` and
+    /// `validate` so a successful UNCACHED transform can `validateConnection`
+    /// it with the API server's userID (view-syncer.ts:1984-1992). Not part of
+    /// the cache key (TS `getCacheKey`).
+    pub client_id: String,
+    pub ws_id: String,
+    pub revision: u32,
 }
 
 /// Insert-or-replace (case-insensitive) — the composition primitive matching
@@ -137,6 +146,34 @@ pub enum CustomTransformed {
     Errored { id: String, error: Value },
 }
 
+/// Port of TS `HashedTransformResponse` (transform-query.ts:43-60), success
+/// arm: `{kind: 'success', result, cached: true} | {…, cached: false,
+/// validation}`. The `failed` arm is [`transform`]'s `Err(TransformFailed body)`.
+pub struct HashedTransformResponse {
+    pub result: Vec<CustomTransformed>,
+    /// Every query was served from the cache — no API round trip, nothing
+    /// re-asserted about the connection.
+    pub cached: bool,
+    /// The API server's validation of this connection; present iff `!cached`.
+    pub validation: Option<ConnectionValidation>,
+}
+
+/// Port of the `validation` derivation in TS `#requestTransform`
+/// (transform-query.ts:214-226): a `QueryResponse` whose `userID !== undefined`
+/// is `server-validated` with that userID (`null` = a logged-out identity is
+/// STILL server-validated); a `QueryResponse` without `userID`, or a legacy
+/// `['transformed', …]` tuple, is `client-fallback`.
+fn validation_of(response: &Value) -> ConnectionValidation {
+    if response.get("kind").and_then(Value::as_str) == Some("QueryResponse")
+        && let Some(user_id) = response.get("userID")
+    {
+        return ConnectionValidation::ServerValidated {
+            validated_user_id: user_id.as_str().map(|s| s.to_string()),
+        };
+    }
+    ConnectionValidation::ClientFallback
+}
+
 /// Transform a batch of named queries against the user's query API server.
 /// Cached results are reused; only cache-missing queries hit the network.
 /// Returns `Err(TransformFailed body)` on a whole-request failure.
@@ -144,7 +181,7 @@ pub async fn transform(
     ctx: &CustomQueryContext,
     shard: &ShardID,
     queries: &[CustomQuerySpec],
-) -> Result<Vec<CustomTransformed>, Value> {
+) -> Result<HashedTransformResponse, Value> {
     let mut results: Vec<CustomTransformed> = Vec::new();
     let mut to_fetch: Vec<&CustomQuerySpec> = Vec::new();
 
@@ -157,7 +194,12 @@ pub async fn transform(
         }
     }
     if to_fetch.is_empty() {
-        return Ok(results);
+        // TS: `{kind: 'success', result: cachedResponses, cached: true}`.
+        return Ok(HashedTransformResponse {
+            result: results,
+            cached: true,
+            validation: None,
+        });
     }
 
     let body = serde_json::json!([
@@ -183,6 +225,7 @@ pub async fn transform(
     // tuple is a client-fallback response. Anything else (e.g. a `TransformFailed`
     // body) fails the whole request.
     let queries = extract_transform_queries(&response).ok_or_else(|| response.clone())?;
+    let validation = validation_of(&response);
 
     for q in queries {
         let id = q
@@ -213,7 +256,11 @@ pub async fn transform(
         results.push(CustomTransformed::Ok(transformed));
     }
 
-    Ok(results)
+    Ok(HashedTransformResponse {
+        result: results,
+        cached: false,
+        validation: Some(validation),
+    })
 }
 
 /// Extract the per-query results from a transform response. Port of the response
@@ -250,10 +297,21 @@ fn extract_transform_queries(response: &Value) -> Option<Vec<Value>> {
 /// locally on an empty batch (`to_fetch.is_empty()`) and never hits the API
 /// server — but validation MUST make the request so a token revoked/deauthorized
 /// at the app layer (still cryptographically valid) is surfaced by the server.
-/// Success is intentionally opaque (`Ok(())`); callers only care pass/fail.
-pub async fn validate(ctx: &CustomQueryContext, shard: &ShardID) -> Result<(), Value> {
+/// Returns the API server's validation of the connection (TS returns the
+/// `TransformResponse`, whose `validation` `#validateConnection` records;
+/// view-syncer.ts:2753-2757). A 200 that is itself a `TransformFailed` body
+/// is the failure (TS `#requestTransform` returns it as-is and the caller
+/// throws on `kind === 'TransformFailed'`).
+pub async fn validate(
+    ctx: &CustomQueryContext,
+    shard: &ShardID,
+) -> Result<ConnectionValidation, Value> {
     let body = serde_json::json!(["transform", []]);
-    request_transform(ctx, shard, &body, &[]).await.map(|_| ())
+    let response = request_transform(ctx, shard, &body, &[]).await?;
+    if response.get("kind").and_then(Value::as_str) == Some("TransformFailed") {
+        return Err(response);
+    }
+    Ok(validation_of(&response))
 }
 
 /// Whether an error body denotes an authorization failure. Port of TS
@@ -561,7 +619,145 @@ pub fn seed_transform_cache_for_test(ctx: &CustomQueryContext, id: &str, q: &Tra
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    /// Scripted HTTP stub: answers the next `responses.len()` connections, in
+    /// order, with `(status, body)`, then exits. Shared by the transform tests
+    /// and the view-syncer validation tests.
+    pub(crate) fn spawn_http_stub_seq(responses: Vec<(&'static str, &'static str)>) -> String {
+        let queue = std::sync::Mutex::new(std::collections::VecDeque::from(responses));
+        let n = queue.lock().unwrap().len();
+        spawn_http_stub_with(n, move |_req| {
+            let (status, body) = queue.lock().unwrap().pop_front().unwrap();
+            (status, body.to_string())
+        })
+    }
+
+    /// Request-aware HTTP stub: answers up to `n` connections, each with
+    /// `respond(request_body)`, then exits. Lets a test tell the empty
+    /// `["transform",[]]` validation probe apart from a real transform.
+    pub(crate) fn spawn_http_stub_with(
+        n: usize,
+        respond: impl Fn(&str) -> (&'static str, String) + Send + 'static,
+    ) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..n {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let (mut header_end, mut content_len) = (None, 0usize);
+                loop {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if header_end.is_none()
+                        && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+                    {
+                        header_end = Some(pos + 4);
+                        let headers = String::from_utf8_lossy(&buf[..pos]).to_lowercase();
+                        content_len = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                    }
+                    if let Some(end) = header_end
+                        && buf.len() >= end + content_len
+                    {
+                        break;
+                    }
+                }
+                let request_body = header_end
+                    .map(|end| String::from_utf8_lossy(&buf[end..]).to_string())
+                    .unwrap_or_default();
+                let (status, body) = respond(&request_body);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}/query")
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    /// TS `HashedTransformResponse` (transform-query.ts:43-60) + the
+    /// `validation` derivation in `#requestTransform` (:214-226): an UNCACHED
+    /// transform carries `cached: false` and the API server's validation —
+    /// `server-validated` with its `userID` — while a fully cached batch is
+    /// `cached: true` with no validation (nothing was re-asserted).
+    #[test]
+    fn transform_carries_the_api_servers_validation_only_when_uncached() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = super::test_support::spawn_http_stub_seq(vec![(
+            "200 OK",
+            r#"{"kind":"QueryResponse","userID":"u1","queries":[{"id":"qv1","ast":{"table":"issue"}}]}"#,
+        )]);
+        let mut ctx = ctx_at(&url);
+        ctx.auth = Some("tok-validation".to_string());
+        let specs = vec![CustomQuerySpec {
+            id: "qv1".to_string(),
+            name: "myQuery".to_string(),
+            args: vec![],
+        }];
+        let first = rt.block_on(transform(&ctx, &shard(), &specs)).unwrap();
+        assert!(!first.cached);
+        assert!(
+            matches!(
+                first.validation,
+                Some(ConnectionValidation::ServerValidated { validated_user_id: Some(ref u) }) if u == "u1"
+            ),
+            "got {:?}",
+            first.validation
+        );
+        assert_eq!(first.result.len(), 1);
+        // Served from the cache: the stub is exhausted, so a request would fail.
+        let second = rt.block_on(transform(&ctx, &shard(), &specs)).unwrap();
+        assert!(second.cached);
+        assert!(second.validation.is_none());
+    }
+
+    /// TS `CustomQueryTransformer.validate` returns the response's validation
+    /// (transform-query.ts:110-114 → `#requestTransform`): a `QueryResponse`
+    /// with `userID: null` is STILL server-validated (a logged-out identity),
+    /// and a legacy `['transformed', …]` tuple is client-fallback.
+    #[test]
+    fn validate_returns_the_api_servers_validation() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let url = super::test_support::spawn_http_stub_seq(vec![
+            (
+                "200 OK",
+                r#"{"kind":"QueryResponse","userID":null,"queries":[]}"#,
+            ),
+            ("200 OK", r#"["transformed",[]]"#),
+        ]);
+        let ctx = ctx_at(&url);
+        let v = rt.block_on(validate(&ctx, &shard())).unwrap();
+        assert!(
+            matches!(
+                v,
+                ConnectionValidation::ServerValidated {
+                    validated_user_id: None
+                }
+            ),
+            "got {v:?}"
+        );
+        let v = rt.block_on(validate(&ctx, &shard())).unwrap();
+        assert!(
+            matches!(v, ConnectionValidation::ClientFallback),
+            "got {v:?}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -766,7 +962,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = ctx_at("http://127.0.0.1:1/never");
         let out = rt.block_on(transform(&ctx, &shard(), &[])).unwrap();
-        assert!(out.is_empty());
+        assert!(out.result.is_empty());
+        assert!(out.cached && out.validation.is_none());
     }
 
     #[test]
@@ -788,7 +985,10 @@ mod tests {
             name: "myQuery".to_string(),
             args: vec![],
         }];
-        let out = rt.block_on(transform(&ctx, &shard(), &specs)).unwrap();
+        let out = rt
+            .block_on(transform(&ctx, &shard(), &specs))
+            .unwrap()
+            .result;
         assert_eq!(out.len(), 1);
         match &out[0] {
             CustomTransformed::Ok(t) => {
@@ -856,6 +1056,9 @@ mod tests {
             origin: Some("https://app".to_string()),
             auth: Some("jwt".to_string()),
             user_id: None,
+            client_id: String::new(),
+            ws_id: String::new(),
+            revision: 0,
         };
         let headers = ctx.composed_headers();
         let get = |name: &str| {
