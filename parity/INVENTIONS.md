@@ -506,3 +506,58 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   `advance_gate`, checked per row) bound a pathological change. The
   between-change yield (D1 phase 2) is ported.
 
+## I-13 — mimalloc as the process-wide Rust allocator (`GLOBAL_ALLOCATOR`)
+- **Files:** `rust-syncer/src/alloc.rs` (`GLOBAL_ALLOCATOR`,
+  `route_sqlite_malloc_through_mimalloc` = SQLite `sqlite3_mem_methods` over
+  mimalloc via `SQLITE_CONFIG_MALLOC`), `rust-syncer/src/main.rs` (the hook is
+  the first statement of `main`; `malloc-trim` thread: `mi_collect(true)` +
+  glibc `malloc_trim`), `rust-syncer/Cargo.toml` (`mimalloc`,
+  `libmimalloc-sys` with `extended`).
+- **What is ported 1:1 (not invented):** nothing — allocation is not part of
+  the TS spec; no TS symbol is involved.
+- **What has no TS twin (the invention):** the whole item. One TS syncer
+  worker is one PROCESS (one V8 heap, one `mm`), so its allocations never
+  contend with another client group's. rust runs ~1000 client-group threads
+  in ONE process: glibc malloc serves the large allocations of a hydrate (row
+  buffers, change vectors) with `mmap`/`munmap`, and every page fault and
+  every `munmap` takes the per-process mmap lock (plus TLB shootdowns to all
+  the process's CPUs). Concurrent hydrates therefore serialize on the kernel,
+  not on IVM work. Measured on the xyne ART 5m trace, image 7f38dffd6, 1024
+  shards (2026-09-03): the same 20K-row query hydrated in 1.2-1.4s when it ran
+  alone (TS: 1.25-1.57s, parity) and in 9-18s (5-10s of it on-CPU) when five
+  ran at once; the process spent 28% of its CPU in the kernel (TS workers:
+  ~9%), the thread of the 640K-row hydrate 33s system vs 11s user with 675K
+  minor faults. `perf` (same image, rust-only storm replay) attributed 48% of
+  the process's samples to glibc malloc/free and its arena lock
+  (`__lll_lock_wait_private`, `pthread_mutex_lock`), 31% to the kernel futex /
+  wakeup paths those locks take, 21% to actual work — so the mechanism is the
+  glibc arena locks (plus their futex traffic), not IVM cost. mimalloc keeps
+  per-thread heaps with a lock-free fast path. SQLite is C and allocates
+  through its own malloc (glibc; compiled `SQLITE_DEFAULT_MEMSTATUS=0`, so no
+  SQLite-side global mutex) and showed up in the same profile, so it is
+  pointed at mimalloc too through `SQLITE_CONFIG_MALLOC`, which SQLite only
+  accepts before its first `sqlite3_initialize` — hence the hook is the first
+  statement of `main`.
+- **Contract:** (a) nothing a client observes changes — frames, row sets,
+  ordering and error semantics are allocation-independent; (b) memory freed by
+  query-TTL expiry / CG teardown is still returned to the OS on the `malloc-trim`
+  cadence (the G6 leak gate keeps its meaning): `mi_collect(true)` for Rust
+  allocations, `malloc_trim` for SQLite's; (c) the profiling `dhat-heap` build
+  installs dhat's allocator instead (and leaves SQLite on glibc) and never both.
+- **Tests:** `rust-syncer/tests/global_allocator_test.rs` —
+  `rust_allocations_come_from_mimalloc_heaps_for_small_and_large_sizes` and
+  `allocations_made_on_other_threads_also_come_from_mimalloc` (fail with the
+  `#[global_allocator]` line removed: `mi_is_in_heap_region` is then false for
+  every Rust pointer), `sqlite_allocations_come_from_mimalloc_after_the_config_hook`
+  (fails with the hook a no-op: `sqlite3_malloc` then returns system memory).
+  (b) is measured by ART G6, not unit-tested.
+- **A/B (same box, same 5m trace, 1024 shards, glibc image 7f38dffd6 → this):**
+  steady p50/p95/p99 54.1/523/3540 → 21.4/245/693 ms (TS in the same windows:
+  42.3/293/1635 and 41.5/261/1465); initial p50/p95 218/3801 → 101/616 (TS
+  153/527 and 153/465); the 23K-row query 1.2 s alone / 9-18 s concurrent →
+  0.61-0.95 s always with cpu ≈ wall; the 640K-row hydrate 37.2 s → 5.9 s (TS
+  11.9 s); per-pass `changeDesiredQueries` handle p50 20.6 → 10.4 ms, queue
+  wait p50 88.7 → 29.5 ms; process CPU for the replay 155 s user + 61 s sys →
+  53 s + 11 s. Pokes/dedup_puts unchanged (3275/9664).
+- **Known gap:** initial-connect p95 is still 1.33× TS (616 vs 465 ms) — the
+  per-pass PG/HTTP round-trip gap (I-12/I-13 do not touch it).

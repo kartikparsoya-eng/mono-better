@@ -57,6 +57,14 @@ jsonwebtoken = "9"
 # glibc malloc_trim for the periodic RSS-return task (linux-gnu only): freed
 # pipeline/row memory otherwise stays in malloc arenas and reads as a leak.
 libc = "0.2"
+# Rust-only (parity/INVENTIONS.md I-13): per-thread-heap global allocator.
+# glibc serves large row buffers with mmap/munmap and every page fault takes the
+# per-process mmap lock, so concurrent hydrates in ONE process stall each other
+# (ART 2026-09-03: 28% sys CPU, the 640K-row hydrate thread 33s sys / 11s user,
+# same 20K-row query 1.2s alone vs 9-18s when 5 ran concurrently). Each TS
+# syncer worker is its own process and never shares that lock.
+mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",

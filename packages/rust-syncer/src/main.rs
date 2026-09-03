@@ -74,6 +74,13 @@ async fn shutdown_signal() -> ShutdownSignal {
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 fn main() {
+    // INVENTIONS.md I-13: SQLite must allocate through mimalloc too, and the
+    // hook is only accepted before the first sqlite3_initialize — so it is the
+    // first statement of the process (before any Connection::open below).
+    #[cfg(not(feature = "dhat-heap"))]
+    if let Err(rc) = rust_syncer::alloc::route_sqlite_malloc_through_mimalloc() {
+        eprintln!("[alloc] SQLITE_CONFIG_MALLOC rejected (rc={rc}); SQLite stays on glibc malloc");
+    }
     // Start the heap profiler first so it observes allocations for the whole
     // process lifetime. The guard lives until `main` returns; on graceful
     // shutdown (ctrl_c / SIGTERM handled below) it drops and writes the profile
@@ -365,19 +372,28 @@ fn main() {
         .await;
     });
 
-    // Periodic glibc malloc_trim: pipeline/row memory freed on query-TTL
-    // expiry and CG teardown stays in malloc's arenas (RSS never falls), which
-    // the ART leak gate (G6) — and any operator watching the pod — reads as an
-    // unbounded leak. Return free arena memory to the OS on a slow cadence;
-    // trim walks the arenas so keep it well off the hot path. glibc-only.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // Periodic allocator trim: pipeline/row memory freed on query-TTL expiry
+    // and CG teardown stays in the allocator's free lists (RSS never falls),
+    // which the ART leak gate (G6) — and any operator watching the pod — reads
+    // as an unbounded leak. Return free memory to the OS on a slow cadence,
+    // well off the hot path. Rust and SQLite allocations both live in mimalloc
+    // (INVENTIONS.md I-13, `alloc.rs`; `mi_collect(true)` releases its retained
+    // segments); `malloc_trim` still covers whatever else in the process uses
+    // glibc malloc (glibc-only).
     std::thread::Builder::new()
         .name("malloc-trim".into())
         .spawn(|| {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(30));
+                #[cfg(not(feature = "dhat-heap"))]
+                // SAFETY: mi_collect is thread-safe; `force` also frees the
+                // segments mimalloc would otherwise retain for reuse.
+                unsafe {
+                    libmimalloc_sys::mi_collect(true);
+                }
                 // SAFETY: malloc_trim is async-signal-unsafe but thread-safe;
                 // calling it from a dedicated thread is the documented use.
+                #[cfg(all(target_os = "linux", target_env = "gnu"))]
                 unsafe {
                     libc::malloc_trim(0);
                 }

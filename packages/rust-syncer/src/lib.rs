@@ -17,6 +17,10 @@
 //! `sync_engine`, `live_count`, `trace`) are Rust-only transport /
 //! observability / process infra with no single TS origin.
 
+/// Rust-only invention I-13 (parity/INVENTIONS.md): process-wide mimalloc for
+/// Rust AND SQLite allocations. No TS twin — see the module doc.
+pub mod alloc;
+
 // TS-mirrored subtrees.
 pub mod ast_to_zql;
 pub mod auth;
