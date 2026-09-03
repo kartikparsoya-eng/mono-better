@@ -148,7 +148,8 @@ pub fn compare_values(a: &Value, b: &Value) -> CmpOrdering {
     }
 }
 
-fn js_typeof(value: &Value) -> &'static str {
+/// JS `typeof v` for a ZQL value.
+pub(crate) fn js_typeof(value: &Value) -> &'static str {
     match value {
         Value::Null | Value::Json(_) => "object",
         Value::Bool(_) => "boolean",
@@ -157,7 +158,8 @@ fn js_typeof(value: &Value) -> &'static str {
     }
 }
 
-fn js_value_string(value: &Value) -> String {
+/// JS `String(v)` for a ZQL value.
+pub(crate) fn js_value_string(value: &Value) -> String {
     match value {
         Value::Json(raw) => serde_json::from_str(raw)
             .map(|value| js_json_string(&value))
@@ -173,6 +175,24 @@ fn js_value_string(value: &Value) -> String {
         }
         Value::Str(value) => value.to_string(),
     }
+}
+
+/// Port of TS `invalidType(v, t)` (shared/src/asserts.ts:38-46) — the message
+/// `assertString`/`assertNumber`/… throw with.
+pub(crate) fn invalid_type(value: &Value, expected: &str) -> String {
+    let mut s = String::from("Invalid type: ");
+    match value {
+        Value::Null => s.push_str("null"),
+        other => {
+            s.push_str(js_typeof(other));
+            s.push_str(" `");
+            s.push_str(&js_value_string(other));
+            s.push('`');
+        }
+    }
+    s.push_str(", expected ");
+    s.push_str(expected);
+    s
 }
 
 fn js_json_string(value: &serde_json::Value) -> String {

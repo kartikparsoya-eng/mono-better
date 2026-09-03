@@ -9,6 +9,12 @@ pub struct ShardID {
     pub shard_num: u32,
 }
 
+/// Port of TS `appSchema({appID})` (shards.ts:59-62): the app's own PG schema
+/// name is the appID itself.
+pub fn app_schema(shard: &ShardID) -> String {
+    shard.app_id.clone()
+}
+
 pub fn upstream_schema(shard: &ShardID) -> String {
     format!("{}_{}", shard.app_id, shard.shard_num)
 }

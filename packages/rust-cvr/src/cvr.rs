@@ -21,6 +21,7 @@ use crate::client_handler::{Patch, PatchToVersion, RowPatch, RowPatchInfo};
 use crate::cvr_store::CVRFlushStats;
 use crate::shards::ShardID;
 use crate::shards::upstream_schema;
+use crate::shared::string_compare::string_compare;
 
 use crate::schema::types::*;
 use crate::ttl::{DEFAULT_TTL_MS, TTL, clamp_ttl, compare_ttl};
@@ -564,9 +565,10 @@ impl CVRConfigDrivenUpdater {
         let new_version = self.base.ensure_new_version();
 
         // Update desiredQueryIDs: sorted union of current and needed. Both are
-        // HashSets, so the union is already duplicate-free — just sort it.
+        // HashSets, so the union is already duplicate-free — just sort it
+        // (TS cvr.ts:376 `toSorted(union(current, needed), stringCompare)`).
         let mut combined: Vec<String> = current.union(&needed).cloned().collect();
-        combined.sort();
+        combined.sort_by(|a, b| string_compare(a, b));
         self.base
             .cvr
             .clients
@@ -677,9 +679,10 @@ impl CVRConfigDrivenUpdater {
 
         let new_version = self.base.ensure_new_version();
 
-        // Update desiredQueryIDs: sorted difference.
+        // Update desiredQueryIDs: sorted difference (TS cvr.ts:445-448
+        // `toSorted(difference(current, remove), stringCompare)`).
         let mut remaining: Vec<String> = current.difference(&remove).cloned().collect();
-        remaining.sort();
+        remaining.sort_by(|a, b| string_compare(a, b));
         self.base
             .cvr
             .clients

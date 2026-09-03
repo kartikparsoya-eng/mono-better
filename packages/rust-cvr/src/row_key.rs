@@ -36,6 +36,7 @@ use serde_json::{Map, Value};
 use std::sync::OnceLock;
 
 use crate::schema::types::RowID;
+use crate::shared::string_compare::string_compare;
 
 pub type RowKey = Map<String, Value>;
 pub type RowKeyType = serde_json::Map<String, Value>;
@@ -49,7 +50,9 @@ pub type RowKeyType = serde_json::Map<String, Value>;
 /// gets a deterministic order.
 pub fn normalized_key_order(key: &RowKey) -> Vec<(&String, &Value)> {
     let mut entries: Vec<(&String, &Value)> = key.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
+    // TS row-key.ts:31 sorts with `a < b ? -1 : a > b ? 1 : 0` — JS string
+    // order, i.e. `string_compare`, not byte order.
+    entries.sort_by(|a, b| string_compare(a.0, b.0));
     entries
 }
 
@@ -208,6 +211,21 @@ mod tests {
         let entries = normalized_key_order(&m);
         let keys: Vec<&String> = entries.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    /// TS `normalizedKeyOrder` sorts with `a < b ? -1 : a > b ? 1 : 0`
+    /// (row-key.ts:31) — JS UTF-16 order, so U+1F600 precedes U+FF01. Byte
+    /// order (`str::cmp`) puts them the other way round.
+    #[test]
+    fn test_normalized_key_order_uses_js_string_order() {
+        let mut key = RowKey::new();
+        key.insert("\u{FF01}".to_string(), Value::from(1));
+        key.insert("\u{1F600}".to_string(), Value::from(2));
+        let ordered: Vec<&str> = normalized_key_order(&key)
+            .into_iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["\u{1F600}", "\u{FF01}"]);
     }
 
     #[test]

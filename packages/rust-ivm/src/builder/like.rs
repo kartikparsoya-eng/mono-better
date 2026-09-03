@@ -13,16 +13,16 @@ pub type SimplePredicate = Box<dyn Fn(&crate::ivm::data::Value) -> bool>;
 /// `flags` = "" for LIKE (case-sensitive), "i" for ILIKE (case-insensitive).
 /// Port of TS `getLikePredicate` (like.ts:4).
 pub fn get_like_predicate(pattern: &crate::ivm::data::Value, flags: &str) -> SimplePredicate {
-    let pattern_str = match pattern {
-        crate::ivm::data::Value::Str(s) => s.to_string(),
-        _ => panic!("LIKE pattern must be a string"),
-    };
+    // TS `getLikeOp(String(pattern), flags)` (like.ts:8): JS string coercion.
+    let pattern_str = crate::ivm::data::js_value_string(pattern);
 
     let op = get_like_op(&pattern_str, flags);
     Box::new(move |lhs: &crate::ivm::data::Value| {
+        // TS `assertString(lhs)` (like.ts:10) throws `invalidType` — mirrored
+        // as a panic (the operator idiom for TS throws, caught at the CG).
         let lhs_str = match lhs {
             crate::ivm::data::Value::Str(s) => s.to_string(),
-            _ => return false,
+            other => panic!("{}", crate::ivm::data::invalid_type(other, "string")),
         };
         op(&lhs_str)
     })
@@ -124,5 +124,35 @@ mod tests {
         // ASCII sanity.
         assert!(ilike("HELLO%", "hello world"));
         assert!(!ilike("bye%", "hello"));
+    }
+}
+
+#[cfg(test)]
+mod coercion_tests {
+    use super::*;
+    use crate::ivm::data::Value;
+    use std::sync::Arc;
+
+    /// TS `getLikePredicate` calls `getLikeOp(String(pattern), flags)`
+    /// (like.ts:8): a non-string pattern is coerced with JS `String()`, never
+    /// rejected.
+    #[test]
+    fn pattern_is_coerced_with_js_string_semantics() {
+        let p = get_like_predicate(&Value::F64(1.0), "");
+        assert!(p(&Value::Str(Arc::from("1"))));
+        assert!(!p(&Value::Str(Arc::from("2"))));
+        let p = get_like_predicate(&Value::Bool(true), "");
+        assert!(p(&Value::Str(Arc::from("true"))));
+        let p = get_like_predicate(&Value::F64(1.5), "");
+        assert!(p(&Value::Str(Arc::from("1.5"))));
+    }
+
+    /// TS `assertString(lhs)` (like.ts:10) throws `invalidType` on a
+    /// non-string lhs; rust returned `false` (row silently filtered).
+    #[test]
+    #[should_panic(expected = "Invalid type: number `1`, expected string")]
+    fn non_string_lhs_asserts_like_ts() {
+        let p = get_like_predicate(&Value::Str(Arc::from("1%")), "");
+        p(&Value::F64(1.0));
     }
 }

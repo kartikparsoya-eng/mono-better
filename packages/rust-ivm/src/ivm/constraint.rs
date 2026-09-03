@@ -2,6 +2,7 @@
 
 use crate::builder::ast::{Condition, SimpleCondition, ValuePosition};
 use crate::ivm::data::{Value, values_equal};
+use rust_cvr::shared::string_compare::string_compare;
 
 /// A constraint: column-name → value. Maps to TS `Constraint` (constraint.ts:5).
 pub type Constraint = rustc_hash::FxHashMap<String, Value>;
@@ -41,9 +42,10 @@ pub fn constraint_matches_primary_key(constraint: &Constraint, primary: &[String
     if constraint_keys.len() != primary.len() {
         return false;
     }
-    constraint_keys.sort();
+    // TS `constraintKeys.sort(stringCompare)` (constraint.ts:65).
+    constraint_keys.sort_by(|a, b| string_compare(a, b));
     let mut sorted_primary: Vec<String> = primary.to_vec();
-    sorted_primary.sort();
+    sorted_primary.sort_by(|a, b| string_compare(a, b));
     for (ck, pk) in constraint_keys.iter().zip(sorted_primary.iter()) {
         if ck.as_str() != pk.as_str() {
             return false;
@@ -78,9 +80,10 @@ pub fn key_matches_primary_key(key: impl IntoIterator<Item = String>, primary: &
     if constraint_keys.len() != primary.len() {
         return false;
     }
-    constraint_keys.sort();
+    // TS `constraintKeys.sort(stringCompare)` (constraint.ts:65).
+    constraint_keys.sort_by(|a, b| string_compare(a, b));
     let mut sorted_primary: Vec<String> = primary.to_vec();
-    sorted_primary.sort();
+    sorted_primary.sort_by(|a, b| string_compare(a, b));
     for (ck, pk) in constraint_keys.iter().zip(sorted_primary.iter()) {
         if ck != pk {
             return false;

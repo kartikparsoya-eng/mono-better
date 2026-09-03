@@ -27,6 +27,7 @@ pub mod schema;
 /// `agentic/parity/seq/`). Shared by the `cvr_seq_replay` bin and the CI gate.
 pub mod seq_replay;
 pub mod shards;
+pub mod shared;
 pub mod tracer;
 pub mod ttl;
 pub mod ttl_clock;

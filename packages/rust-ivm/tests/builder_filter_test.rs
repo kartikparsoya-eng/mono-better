@@ -366,10 +366,38 @@ fn test_get_like_predicate_escaped_percent() {
     assert!(!pred(&Value::Str("1000".into())));
 }
 
+/// TS `getLikePredicate`'s returned predicate starts with `assertString(lhs)`
+/// (like.ts:10): a non-string operand is a THROWN `invalidType` error, not a
+/// `false` (the pre-2026-09-04 rust behavior this test used to pin). Nulls
+/// never reach it — `createPredicate` short-circuits a null lhs to `false`
+/// (filter.ts:90 / filter.rs), pinned by `test_like_null_lhs_is_false_before_the_assert`.
 #[test]
-fn test_get_like_predicate_non_string_returns_false() {
+#[should_panic(expected = "Invalid type: number `1`, expected string")]
+fn test_get_like_predicate_non_string_asserts_like_ts() {
     let pred = get_like_predicate(&Value::Str("hello".into()), "");
-    assert!(!pred(&Value::F64(1.0)));
-    assert!(!pred(&Value::Null));
-    assert!(!pred(&Value::Bool(true)));
+    pred(&Value::F64(1.0));
+}
+
+#[test]
+#[should_panic(expected = "Invalid type: boolean `true`, expected string")]
+fn test_get_like_predicate_bool_asserts_like_ts() {
+    let pred = get_like_predicate(&Value::Str("hello".into()), "");
+    pred(&Value::Bool(true));
+}
+
+#[test]
+fn test_like_null_lhs_is_false_before_the_assert() {
+    let cond = Condition::Simple(SimpleCondition {
+        op: "LIKE".to_string(),
+        left: ValuePosition::Column {
+            name: "name".to_string(),
+        },
+        right: ValuePosition::Literal {
+            value: Value::Str("h%".into()),
+        },
+    });
+    let pred = create_predicate(&cond);
+    let mut row = FxHashMap::default();
+    row.insert("name".to_string(), Value::Null);
+    assert!(!pred(&Arc::new(row)));
 }
