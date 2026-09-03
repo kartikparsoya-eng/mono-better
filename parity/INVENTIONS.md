@@ -588,3 +588,40 @@ and `ivm/{filter,filter_operators,exists,fan_in,fan_out}.rs`.
   old 60_000 default). (a) end-to-end is measured by the ART head-to-head:
   rust pokes/puts must equal TS's for the same trace.
 - **Known gap:** none.
+
+## I-15 — eager first pipeline sync inside the config pass (vs TS's state-loop first sync)
+- **Files:** `rust-syncer/src/services/view_syncer/view_syncer.rs`
+  (`config_and_hydrate_with_profile`: `handle_config_update` →
+  `sync_query_pipeline_set` unconditionally; `on_notification` →
+  `advance_and_sync` only advances).
+- **What is ported 1:1 (not invented):** `#handleConfigUpdate` →
+  `#syncQueryPipelineSet` once pipelines are synced (view-syncer.ts:1163),
+  `#advancePipelines` on `version-ready` (:569), the config poke / sync poke
+  contents and order within a pass.
+- **What has no TS twin (the invention):** WHEN the very first sync of a
+  client group runs. TS's `#handleConfigUpdate` skips the sync while
+  `#pipelinesSynced` is false; the first init + `#hydrateUnchangedQueries` +
+  `#syncQueryPipelineSet('missing')` happens in the `#stateChanges` loop
+  (view-syncer.ts:538-606) on the replica state the subscription replays at
+  start, which RACES the client's next frames through the same lock. rust
+  runs that first sync synchronously at the end of the initConnection pass.
+  Client-visible consequence (2026-09-03 frame capture, xyne ART harness whose
+  initConnection carries an EMPTY desired set): rust sends one extra empty
+  poke (pokeStart/pokeEnd, no part) at the replica version right after the
+  initial 00:01 poke and its first config poke is numbered from that state
+  version; TS (in that harness timing) sends the config poke first and folds
+  the state-version jump into the sync poke. With a real zero-client the
+  initConnection carries the desired set and both sides emit the same two
+  pokes (config, then sync). Porting the laziness would make a client's first
+  hydration depend on a notification that must then be guaranteed at spawn
+  — a rule-8 execution-order change for a harness-only difference — so it is
+  registered instead of ported.
+- **Contract:** (a) the set and order of pokes per pass is TS's; (b) the only
+  permitted deviation is at most ONE extra empty poke directly after the
+  initial poke of a connection whose initConnection carried no queries; (c) a
+  connection whose initConnection carries queries produces frames identical
+  to TS.
+- **Tests:** xyne-art `tools/frameseq_gate.py` counts this exact shape as
+  `known(K1)` and fails on anything else; `hydrate_real_rows_produces_row_pokes`
+  (stage_e) pins (c)'s poke contents.
+- **Known gap:** none beyond (b).
