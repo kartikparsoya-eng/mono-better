@@ -10,14 +10,14 @@
 //! node at the correct position based on the comparator.
 //! `generateWithOverlayUnordered` — for unsorted streams: uses PK equality.
 
-use std::cell::{Cell, RefCell};
 use std::cmp::Ordering as CmpOrdering;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ivm::change::{Change, ChangeType};
 use crate::ivm::data::{Comparator, Node, Row, Value, compare_values, values_equal};
 use crate::ivm::schema::SourceSchema;
-use crate::ivm::stream::{NodeStream, RelStream, skip_yields};
+use crate::ivm::stream::{NodeStream, RelStream};
 
 /// Check if two rows are equal for a compound key.
 /// Port of TS `rowEqualsForCompoundKey` (join-utils.ts:232).
@@ -69,267 +69,307 @@ pub fn build_join_constraint(
     Some(constraint)
 }
 
-/// Generate with overlay — for sorted streams.
-/// Port of TS `generateWithOverlay` (join-utils.ts:23).
-///
-/// Splices the overlay change into the stream at the correct sorted position:
-/// - ADD: skip the node if it matches (already being added), yield at end if not found
-/// - REMOVE: yield the removed node when we pass its position, suppress the matching node
-/// - EDIT: yield old_node at its position, suppress new_node at its position
-/// - CHILD: replace the matching node's relationship with an overlaid stream
+/// Port of TS `generateWithOverlay` (join-utils.ts:19-125) — the join-layer
+/// overlay for SORTED child streams. During a push the in-flight change is
+/// already in the source, so for parents the push has not reached yet the
+/// join UNDOES it in the fetched stream: an ADD overlay suppresses the equal
+/// node, a REMOVE overlay re-inserts the removed node at its sorted position,
+/// an EDIT re-inserts the old row and suppresses the new one, and a CHILD
+/// overlay wraps the matching node's relationship in the same generator.
+/// `'yield'` markers pass through (:28-31). The generator asserts the overlay
+/// was applied once the stream is exhausted (:104-123) — as in TS, that
+/// trailing work runs only if the consumer iterates to completion.
 pub fn generate_with_overlay(
     stream: NodeStream,
     overlay: Change,
     schema: &SourceSchema,
 ) -> NodeStream {
-    let compare = schema.compare_rows.clone();
-    let rels = schema.relationships.clone();
+    Box::new(GenerateWithOverlay {
+        stream,
+        overlay,
+        compare: schema.compare_rows.clone(),
+        relationships: schema.relationships.clone(),
+        applied: false,
+        edit_old_applied: false,
+        edit_new_applied: false,
+        pending: std::collections::VecDeque::new(),
+        done: false,
+    })
+}
 
-    let overlay_type = overlay.change_type();
-    let overlay_node = overlay.node().clone();
-    let overlay_old_node = overlay.old_node().cloned();
+/// The generator state of TS `generateWithOverlay`: `applied`,
+/// `editOldApplied`, `editNewApplied` (join-utils.ts:24-26) plus the items a
+/// single loop iteration produced ahead of the node it is processing
+/// (`pending` — a TS iteration can `yield` up to twice).
+struct GenerateWithOverlay {
+    stream: NodeStream,
+    overlay: Change,
+    compare: Comparator,
+    relationships: HashMap<String, SourceSchema>,
+    applied: bool,
+    edit_old_applied: bool,
+    edit_new_applied: bool,
+    pending: std::collections::VecDeque<crate::ivm::stream::StreamItem<Node>>,
+    done: bool,
+}
 
-    // Lazy streaming — port of TS generateWithOverlay generator.
-    // Uses a state machine that splices the overlay into the stream.
-    use crate::ivm::stream::StreamItem;
+impl Iterator for GenerateWithOverlay {
+    type Item = crate::ivm::stream::StreamItem<Node>;
 
-    match overlay_type {
-        ChangeType::Add => {
-            let applied = Rc::new(Cell::new(false));
-            let applied2 = applied.clone();
-            let compare2 = compare.clone();
-            let overlay_node2 = overlay_node.clone();
-            let inner = skip_yields(stream).flat_map(move |node| {
-                let mut out: Vec<StreamItem<Node>> = Vec::new();
-                if !applied2.get() {
-                    let cmp = compare2(&overlay_node2.row, &node.row);
-                    if cmp == CmpOrdering::Equal {
-                        applied2.set(true);
-                    } else if cmp == CmpOrdering::Less {
-                        applied2.set(true);
-                        out.push(StreamItem::Data(overlay_node2.clone()));
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::ivm::stream::StreamItem;
+        loop {
+            if let Some(item) = self.pending.pop_front() {
+                return Some(item);
+            }
+            if self.done {
+                return None;
+            }
+            let node = match self.stream.next() {
+                Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                Some(StreamItem::Data(node)) => node,
+                None => {
+                    self.done = true;
+                    // join-utils.ts:104-118.
+                    if !self.applied {
+                        match &self.overlay {
+                            Change::Remove(overlay_node) => {
+                                self.applied = true;
+                                self.pending
+                                    .push_back(StreamItem::Data(overlay_node.clone()));
+                            }
+                            Change::Edit { old_node, .. } => {
+                                assert!(
+                                    self.edit_new_applied,
+                                    "edit overlay: new node must be applied before old node"
+                                );
+                                self.edit_old_applied = true;
+                                self.applied = true;
+                                self.pending.push_back(StreamItem::Data(old_node.clone()));
+                            }
+                            Change::Add(_) | Change::Child { .. } => {}
+                        }
+                    }
+                    assert!(
+                        self.applied,
+                        "overlayGenerator: overlay was never applied to any fetched node"
+                    );
+                    continue;
+                }
+            };
+            let mut yield_node = true;
+            if !self.applied {
+                match &self.overlay {
+                    Change::Add(overlay_node) => {
+                        if (self.compare)(&overlay_node.row, &node.row) == CmpOrdering::Equal {
+                            self.applied = true;
+                            yield_node = false;
+                        }
+                    }
+                    Change::Remove(overlay_node) => {
+                        if (self.compare)(&overlay_node.row, &node.row) == CmpOrdering::Less {
+                            self.applied = true;
+                            self.pending
+                                .push_back(StreamItem::Data(overlay_node.clone()));
+                        }
+                    }
+                    Change::Edit {
+                        node: overlay_node,
+                        old_node,
+                    } => {
+                        if !self.edit_old_applied
+                            && (self.compare)(&old_node.row, &node.row) == CmpOrdering::Less
+                        {
+                            self.edit_old_applied = true;
+                            if self.edit_new_applied {
+                                self.applied = true;
+                            }
+                            self.pending.push_back(StreamItem::Data(old_node.clone()));
+                        }
+                        if !self.edit_new_applied
+                            && (self.compare)(&overlay_node.row, &node.row) == CmpOrdering::Equal
+                        {
+                            self.edit_new_applied = true;
+                            if self.edit_old_applied {
+                                self.applied = true;
+                            }
+                            yield_node = false;
+                        }
+                    }
+                    Change::Child {
+                        node: overlay_node,
+                        child,
+                    } => {
+                        if (self.compare)(&overlay_node.row, &node.row) == CmpOrdering::Equal {
+                            self.applied = true;
+                            // TS: `node.relationships[relationshipName]()` and
+                            // `schema.relationships[relationshipName]` are
+                            // dereferenced unconditionally (:80-91) — a missing
+                            // relationship is a programming error there too.
+                            let rel_name = child.relationship_name.clone();
+                            let existing_rel = node
+                                .relationships
+                                .get(&rel_name)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    panic!("overlayGenerator: relationship {rel_name} not found on node")
+                                });
+                            let child_schema = self
+                                .relationships
+                                .get(&rel_name)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    panic!("overlayGenerator: relationship {rel_name} not found in schema")
+                                });
+                            let inner_change = child.change.clone();
+                            let overlaid_rel: RelStream = Rc::new(move || {
+                                generate_with_overlay(
+                                    existing_rel(),
+                                    (*inner_change).clone(),
+                                    &child_schema,
+                                )
+                            });
+                            self.pending.push_back(StreamItem::Data(
+                                node.clone().set_relationship(&rel_name, overlaid_rel),
+                            ));
+                            yield_node = false;
+                        }
                     }
                 }
-                out.push(StreamItem::Data(node));
-                out
-            });
-            // Handle the case where overlay_node goes at the end
-            let trailing = Rc::new(RefCell::new(if applied.get() {
-                None
-            } else {
-                Some(overlay_node.clone())
-            }));
-            let trailing2 = trailing.clone();
-            Box::new(inner.chain(std::iter::from_fn(move || {
-                trailing2.borrow_mut().take().map(StreamItem::Data)
-            })))
-        }
-        ChangeType::Remove => {
-            let applied = Rc::new(Cell::new(false));
-            let applied_for_trailing = applied.clone();
-            let compare2 = compare.clone();
-            let overlay_node2 = overlay_node.clone();
-            let inner = skip_yields(stream).filter_map(move |node| {
-                if !applied.get() && compare2(&overlay_node2.row, &node.row) == CmpOrdering::Less {
-                    applied.set(true);
-                }
-                // Skip the node that matches the overlay (the removed node)
-                if compare2(&overlay_node2.row, &node.row) == CmpOrdering::Equal {
-                    None // suppress
-                } else {
-                    Some(StreamItem::Data(node))
-                }
-            });
-            // After stream, if not applied, yield the removed node (TS does this)
-            let trailing = Rc::new(RefCell::new(if applied_for_trailing.get() {
-                None
-            } else {
-                Some(overlay_node.clone())
-            }));
-            let trailing2 = trailing.clone();
-            Box::new(inner.chain(std::iter::from_fn(move || {
-                trailing2.borrow_mut().take().map(StreamItem::Data)
-            })))
-        }
-        ChangeType::Edit => {
-            let old_node = overlay_old_node.unwrap();
-            let edit_old_applied = Rc::new(Cell::new(false));
-            let edit_new_applied = Rc::new(Cell::new(false));
-            let compare2 = compare.clone();
-            let old_node2 = old_node.clone();
-            let overlay_node2 = overlay_node.clone();
-            let eoa = edit_old_applied.clone();
-            let ena = edit_new_applied.clone();
-            let inner = skip_yields(stream).flat_map(move |node| {
-                let mut out: Vec<StreamItem<Node>> = Vec::new();
-                if !eoa.get() && compare2(&old_node2.row, &node.row) == CmpOrdering::Less {
-                    eoa.set(true);
-                    out.push(StreamItem::Data(old_node2.clone()));
-                }
-                if !ena.get() && compare2(&overlay_node2.row, &node.row) == CmpOrdering::Equal {
-                    ena.set(true);
-                    // suppress old version of node
-                } else {
-                    out.push(StreamItem::Data(node));
-                }
-                out
-            });
-            // Handle remaining: if edit_new_applied but not edit_old_applied,
-            // yield old_node at end
-            let trailing = Rc::new(RefCell::new({
-                // If edit_new was applied but edit_old wasn't, we need to yield old_node
-                if edit_new_applied.get() && !edit_old_applied.get() {
-                    Some(old_node.clone())
-                } else {
-                    None
-                }
-            }));
-            let trailing2 = trailing.clone();
-            Box::new(inner.chain(std::iter::from_fn(move || {
-                trailing2.borrow_mut().take().map(StreamItem::Data)
-            })))
-        }
-        ChangeType::Child => {
-            let child_data = match &overlay {
-                Change::Child { child, .. } => child,
-                _ => unreachable!(),
-            };
-            let rel_name = child_data.relationship_name.clone();
-            let inner_change = child_data.change.clone();
-            let child_schema = rels.get(&rel_name).cloned();
-            let applied = Rc::new(Cell::new(false));
-            let compare2 = compare.clone();
-            let overlay_node2 = overlay_node.clone();
-            let rel_name2 = rel_name.clone();
-            let inner_change2 = inner_change.clone();
-            let child_schema2 = child_schema.clone();
-            let applied2 = applied.clone();
-            let inner = skip_yields(stream).map(move |node| {
-                if !applied2.get() && compare2(&overlay_node2.row, &node.row) == CmpOrdering::Equal
-                {
-                    applied2.set(true);
-                    // Replace the matching node's relationship with overlaid stream
-                    let existing_rel_fn = node.relationships.get(&rel_name2).cloned();
-                    let inner_change3 = inner_change2.clone();
-                    let child_schema3 = child_schema2.clone();
-                    let rel_name3 = rel_name2.clone();
-                    let overlaid_rel: RelStream =
-                        Rc::new(move || match (&existing_rel_fn, &child_schema3) {
-                            (Some(rel_fn), Some(cs)) => {
-                                generate_with_overlay(rel_fn(), inner_change3.as_ref().clone(), cs)
-                            }
-                            _ => crate::ivm::stream::empty_stream(),
-                        });
-                    let new_node = node.clone().set_relationship(&rel_name3, overlaid_rel);
-                    StreamItem::Data(new_node)
-                } else {
-                    StreamItem::Data(node)
-                }
-            });
-            Box::new(inner)
+            }
+            if yield_node {
+                self.pending.push_back(StreamItem::Data(node));
+            }
         }
     }
 }
 
-/// Generate with overlay — for unordered streams (no sort).
-/// Port of TS `generateWithOverlayUnordered` (join-utils.ts:130).
-///
-/// Uses PK equality instead of comparator position:
-/// - REMOVE/EDIT: eagerly inject old node at start
-/// - ADD/EDIT: suppress the matching PK in the stream
-/// - CHILD: replace matching PK's relationship
+/// Port of TS `generateWithOverlayUnordered` (join-utils.ts:134-202) — the
+/// join-layer overlay for UNSORTED child streams (a Cap'd EXISTS child, whose
+/// schema has no `sort`). Eager-injects the undone REMOVE / EDIT-old node
+/// first, then streams the input suppressing the ADD / EDIT-new node or
+/// wrapping the CHILD node's relationship, matching on primary-key equality
+/// instead of comparator position. `'yield'` markers pass through (:149-152);
+/// the trailing assert (:199-202) runs when the stream is exhausted.
 pub fn generate_with_overlay_unordered(
     stream: NodeStream,
     overlay: Change,
     schema: &SourceSchema,
 ) -> NodeStream {
     use crate::ivm::stream::StreamItem;
-    let pk = schema.primary_key.clone();
-    let rels = schema.relationships.clone();
-    let overlay_type = overlay.change_type();
-    let overlay_node = overlay.node().clone();
-    let overlay_old_node = overlay.old_node().cloned();
-
-    // Lazy port of TS `generateWithOverlayUnordered` (join-utils.ts:134): a
-    // generator that eager-injects for REMOVE/EDIT, streams the input applying
-    // inline suppression / child-overlay, and asserts at the end that the
-    // overlay was applied. Previously this collected the whole child stream up
-    // front, breaking the streaming invariant for unordered (Cap'd EXISTS)
-    // children.
-
-    // Eager inject for REMOVE/EDIT, yielded before the body.
-    let mut lead: Vec<StreamItem<Node>> = Vec::new();
-    match overlay_type {
-        ChangeType::Remove => lead.push(StreamItem::Data(overlay_node.clone())),
-        ChangeType::Edit => {
-            if let Some(old) = &overlay_old_node {
-                lead.push(StreamItem::Data(old.clone()));
-            }
-        }
-        _ => {}
+    let mut lead: std::collections::VecDeque<StreamItem<Node>> = std::collections::VecDeque::new();
+    // Eager inject (:140-144).
+    match &overlay {
+        Change::Remove(overlay_node) => lead.push_back(StreamItem::Data(overlay_node.clone())),
+        Change::Edit { old_node, .. } => lead.push_back(StreamItem::Data(old_node.clone())),
+        Change::Add(_) | Change::Child { .. } => {}
     }
+    Box::new(GenerateWithOverlayUnordered {
+        stream,
+        overlay,
+        primary_key: schema.primary_key.clone(),
+        relationships: schema.relationships.clone(),
+        suppressed: false,
+        lead,
+        done: false,
+    })
+}
 
-    let child = match &overlay {
-        Change::Child { child, .. } => Some(child.clone()),
-        _ => None,
-    };
+struct GenerateWithOverlayUnordered {
+    stream: NodeStream,
+    overlay: Change,
+    primary_key: Vec<String>,
+    relationships: HashMap<String, SourceSchema>,
+    suppressed: bool,
+    lead: std::collections::VecDeque<crate::ivm::stream::StreamItem<Node>>,
+    done: bool,
+}
 
-    let suppressed = Rc::new(Cell::new(false));
-    let sup_body = suppressed.clone();
-    let overlay_node2 = overlay_node.clone();
+impl Iterator for GenerateWithOverlayUnordered {
+    type Item = crate::ivm::stream::StreamItem<Node>;
 
-    let body = skip_yields(stream).filter_map(move |node| {
-        if !sup_body.get() {
-            match overlay_type {
-                ChangeType::Add | ChangeType::Edit
-                    if row_equals_for_compound_key(&overlay_node2.row, &node.row, &pk) =>
-                {
-                    sup_body.set(true);
-                    return None; // suppress the superseded/added row
-                }
-                ChangeType::Child
-                    if row_equals_for_compound_key(&overlay_node2.row, &node.row, &pk) =>
-                {
-                    sup_body.set(true);
-                    let cd = child.as_ref().expect("child overlay without ChildData");
-                    let rel_name = cd.relationship_name.clone();
-                    let inner_change = cd.change.clone();
-                    let child_schema = rels.get(&rel_name).cloned();
-                    let existing_rel_fn = node.relationships.get(&rel_name).cloned();
-                    let rel_name3 = rel_name.clone();
-                    let overlaid_rel: RelStream =
-                        Rc::new(move || match (&existing_rel_fn, &child_schema) {
-                            (Some(rel_fn), Some(cs)) => {
-                                generate_with_overlay(rel_fn(), inner_change.as_ref().clone(), cs)
-                            }
-                            _ => crate::ivm::stream::empty_stream(),
-                        });
-                    let new_node = node.clone().set_relationship(&rel_name3, overlaid_rel);
-                    return Some(StreamItem::Data(new_node));
-                }
-                _ => {}
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::ivm::stream::StreamItem;
+        loop {
+            if let Some(item) = self.lead.pop_front() {
+                return Some(item);
             }
-        }
-        Some(StreamItem::Data(node))
-    });
-
-    // Assert-at-end, mirroring the trailing TS assert. Runs lazily when the
-    // consumer exhausts the stream.
-    let mut inner = lead.into_iter().chain(body);
-    let mut asserted = false;
-    Box::new(std::iter::from_fn(move || match inner.next() {
-        Some(item) => Some(item),
-        None => {
-            if !asserted {
-                asserted = true;
-                assert!(
-                    suppressed.get() || overlay_type == ChangeType::Remove,
-                    "unordered overlay: overlay was never applied"
-                );
+            if self.done {
+                return None;
             }
-            None
+            let node = match self.stream.next() {
+                Some(StreamItem::Yield) => return Some(StreamItem::Yield),
+                Some(StreamItem::Data(node)) => node,
+                None => {
+                    self.done = true;
+                    assert!(
+                        self.suppressed || self.overlay.change_type() == ChangeType::Remove,
+                        "overlayGenerator: overlay was never applied to any fetched node"
+                    );
+                    return None;
+                }
+            };
+            if !self.suppressed {
+                match &self.overlay {
+                    Change::Add(overlay_node)
+                    | Change::Edit {
+                        node: overlay_node, ..
+                    } => {
+                        if row_equals_for_compound_key(
+                            &overlay_node.row,
+                            &node.row,
+                            &self.primary_key,
+                        ) {
+                            self.suppressed = true;
+                            continue;
+                        }
+                    }
+                    Change::Child {
+                        node: overlay_node,
+                        child,
+                    } => {
+                        if row_equals_for_compound_key(
+                            &overlay_node.row,
+                            &node.row,
+                            &self.primary_key,
+                        ) {
+                            self.suppressed = true;
+                            let rel_name = child.relationship_name.clone();
+                            let existing_rel = node
+                                .relationships
+                                .get(&rel_name)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    panic!("overlayGenerator: relationship {rel_name} not found on node")
+                                });
+                            let child_schema = self
+                                .relationships
+                                .get(&rel_name)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    panic!("overlayGenerator: relationship {rel_name} not found in schema")
+                                });
+                            let inner_change = child.change.clone();
+                            // TS wraps the child stream in the ORDERED
+                            // generator here too (:182-190).
+                            let overlaid_rel: RelStream = Rc::new(move || {
+                                generate_with_overlay(
+                                    existing_rel(),
+                                    (*inner_change).clone(),
+                                    &child_schema,
+                                )
+                            });
+                            return Some(StreamItem::Data(
+                                node.clone().set_relationship(&rel_name, overlaid_rel),
+                            ));
+                        }
+                    }
+                    Change::Remove(_) => {}
+                }
+            }
+            return Some(StreamItem::Data(node));
         }
-    }))
+    }
 }
 
 /// Generate with start — applies a start position to a sorted stream.
