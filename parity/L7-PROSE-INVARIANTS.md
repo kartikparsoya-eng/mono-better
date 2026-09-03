@@ -36,7 +36,7 @@ grep -rnE '//.*(immediately|before .*hydrat|must not block|per push|per connecti
   are on the accept path; the shed error is on the writer task. See INVENTIONS.md
   I-1's "three decoupled emissions". Tests: `on_inbound_ping_answers_pong`,
   `send_error_and_close_sends_error_frame_then_close_3000`,
-  `slow_client_shed_closes_with_rehome_error_then_close_3000`. A protocol error
+  `slow_client_shed_closes_with_rehome_error_then_close_1011`. A protocol error
   generated while PROCESSING client A's message is serialized on the CG thread —
   faithful (TS also runs `handleMessage` before it can throw, and the throw only
   closes A's own connection, not B's).

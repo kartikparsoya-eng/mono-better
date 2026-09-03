@@ -3656,9 +3656,13 @@ pub(crate) async fn cg_event_loop(
             }
             drop(global);
             decrement_nonzero(&state.connection_count);
-            sink.fail(crate::protocol::ErrorBody::internal(
-                "Failed to initialize the client-group sync engine",
-            ));
+            // TS Connection#closeWithError: error frame, then ws.close() with no status.
+            sink.fail_with_code(
+                crate::protocol::ErrorBody::internal(
+                    "Failed to initialize the client-group sync engine",
+                ),
+                None,
+            );
         }
         state_rc
             .borrow()
@@ -6042,7 +6046,7 @@ mod tests {
         let mut saw_close = false;
         while let Ok(cmd) = drx.try_recv() {
             match cmd {
-                WsCommand::Fail(_) => saw_error_frame = true,
+                WsCommand::Fail(_) | WsCommand::FailWithCode { .. } => saw_error_frame = true,
                 WsCommand::Send { msg, .. } => {
                     if msg.get(0).and_then(|v| v.as_str()) == Some("error") {
                         saw_error_frame = true;
@@ -6361,12 +6365,19 @@ mod tests {
         let mut saw_rehome = false;
         let mut saw_overloaded = false;
         while let Ok(cmd) = sink2.try_recv() {
-            if let WsCommand::Fail(body) = cmd {
-                match body.kind() {
-                    crate::protocol::ErrorKind::Rehome => saw_rehome = true,
-                    crate::protocol::ErrorKind::ServerOverloaded => saw_overloaded = true,
-                    _ => {}
+            // A connect-time rejection closes 3000 (TS syncer.ts `ws.close(3000, ...)`).
+            let body = match cmd {
+                WsCommand::Fail(body) => body,
+                WsCommand::FailWithCode { error, code } => {
+                    assert_eq!(code, Some(3000), "connect-time reject must close 3000");
+                    error
                 }
+                _ => continue,
+            };
+            match body.kind() {
+                crate::protocol::ErrorKind::Rehome => saw_rehome = true,
+                crate::protocol::ErrorKind::ServerOverloaded => saw_overloaded = true,
+                _ => {}
             }
         }
         assert!(saw_rehome, "overflow must Rehome (load-shed)");

@@ -46,14 +46,14 @@ guarantees, error semantics) versus TS.
     thread. Pinned by `send_error_and_close_sends_error_frame_then_close_3000` and
     `malformed_base_cookie_closes_with_internal_error`. A shed error (slow-client)
     is emitted from the writer task — pinned by
-    `slow_client_shed_closes_with_rehome_error_then_close_3000` (see I-4).
+    `slow_client_shed_closes_with_rehome_error_then_close_1011` (see I-4).
     Message-*processing* errors (a throw inside `handleMessage`) ARE serialized on
     the CG thread — faithful, because TS also runs `handleMessage` before it can
     throw, and the throw only closes the SAME client's connection (per-client, not
     cross-client).
 - **Tests:** `router::tests::connected_ack_is_decoupled_from_a_blocked_cg_hydrate`
   (ack independence), `on_inbound_ping_answers_pong` (pong reply),
-  `slow_client_shed_closes_with_rehome_error_then_close_3000` (shed error frame),
+  `slow_client_shed_closes_with_rehome_error_then_close_1011` (shed error frame),
   `send_error_and_close_sends_error_frame_then_close_3000` (connect-time error
   ordering). Pong keepalive liveness is structural (writer task, ws_server.rs:474)
   — the L7 prose-invariant checklist carries its citation.
@@ -146,9 +146,15 @@ guarantees, error semantics) versus TS.
 - **Contract:** frame order out equals enqueue order; a shed closes with the SAME
   error TS emits for a connection it can no longer serve (Rehome,
   view-syncer.ts:473 / cvr-store.ts:1373) — an `["error",{kind:"Rehome"}]` frame
-  FIRST, then close 3000. No frame reordering vs the sync push path.
+  FIRST, then close 1011 (TS `downstream.fail` → `closeWithError` INTERNAL_ERROR; 2026-09-03, was 3000)
+  with the reason elided to 123 bytes (TS `elide(errMsg, 123)`, types/ws.ts:23 — an
+  over-long close payload makes browsers fail the socket with 1002 instead of
+  delivering our close; `ws_server::elide` is the TS-golden port, pinned by
+  `elide_byte_count` + the long-reason case in `writer_close_codes_follow_the_ts_path`)
+  and the TS warn line `closing connection to client with error` (log-signature
+  parity for the prod A/B). No frame reordering vs the sync push path.
 - **Tests:** `ws_server` frame-order tests +
-  `ws_server::tests::slow_client_shed_closes_with_rehome_error_then_close_3000`
+  `ws_server::tests::slow_client_shed_closes_with_rehome_error_then_close_1011`
   (shed → Rehome error frame then close 3000; non-vacuous — a bare close fails it).
 
 ## I-5 — Drop-based teardown (Engine `destroy`)

@@ -835,8 +835,10 @@ impl Syncer {
     /// may require HTTP fetches (JWKS).
     pub async fn create_connection(&self, ctx: ConnectionContext) {
         if self.shutting_down.load(Ordering::SeqCst) {
-            ctx.sink
-                .fail(crate::protocol::ErrorBody::rehome("Server is draining"));
+            ctx.sink.fail_with_code(
+                crate::protocol::ErrorBody::rehome("Server is draining"),
+                Some(3000), // connect-time rejection: TS syncer.ts ws.close(3000, ...)
+            );
             return;
         }
         let client_id = ctx.params.client_id.clone();
@@ -873,8 +875,8 @@ impl Syncer {
                              cg={client_group_id}, client={client_id}, user={user_id:?}"
                     );
                     crate::metrics::record_ws_connection_failure(pv, "auth");
-                    // Send error and close.
-                    ctx.sink.fail(error_body);
+                    // Send error and close 3000 (TS syncer.ts:610 `ws.close(3000, ...)`).
+                    ctx.sink.fail_with_code(error_body, Some(3000));
                     return;
                 }
             }
@@ -896,7 +898,8 @@ impl Syncer {
                 // executor-shutdown Errs from get_or_create_cg.
                 tracing::warn!("rehoming connection for {client_group_id}: {message}");
                 crate::metrics::record_ws_connection_failure(pv, "rehome");
-                ctx.sink.fail(crate::protocol::ErrorBody::rehome(message));
+                ctx.sink
+                    .fail_with_code(crate::protocol::ErrorBody::rehome(message), Some(3000));
                 return;
             }
         };
@@ -926,7 +929,8 @@ impl Syncer {
                 );
                 decrement_nonzero(&cg_handle.connection_count);
                 crate::metrics::record_ws_connection_failure(pv, "user_mismatch");
-                ctx.sink.fail(error);
+                // TS syncer.ts:639 `ws.close(3000, error.message)`.
+                ctx.sink.fail_with_code(error, Some(3000));
                 return;
             }
         }
@@ -1015,9 +1019,12 @@ impl Syncer {
                     lock_unpoisoned(&self.group_auth_states).remove(&client_group_id);
                 }
                 if let CGMessage::NewConnection { sink, .. } = err.0 {
-                    sink.fail(crate::protocol::ErrorBody::rehome(
-                        "Client-group worker restarted; reconnect required",
-                    ));
+                    sink.fail_with_code(
+                        crate::protocol::ErrorBody::rehome(
+                            "Client-group worker restarted; reconnect required",
+                        ),
+                        Some(3000), // connect-time rejection
+                    );
                 }
             }
         }

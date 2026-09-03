@@ -395,7 +395,8 @@ async fn run_ws_writer(
                 }
                 let _ = ws_writer.send(Message::Close(Some(
                     tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                        code: CloseCode::from(3000u16),
+                        // TS: the shed is a downstream failure → closeWithError → 1011.
+                        code: CloseCode::from(1011u16),
                         reason: "slow client".into(),
                     }
                 ))).await;
@@ -429,12 +430,44 @@ async fn run_ws_writer(
                             r#"["error",{"kind":"Internal","message":"error"}]"#.to_string()
                         });
                         let _ = ws_writer.send(Message::Text(text)).await;
+                        // TS closeWithError (types/ws.ts:11-24): warn log, then
+                        // close INTERNAL_ERROR 1011 with the error text elided to
+                        // 123 bytes (`endpoint` = `ws.url ?? 'client'`; server-side
+                        // sockets have no url).
+                        tracing::warn!(
+                            kind = ?error.kind(),
+                            error = %error.message(),
+                            "closing connection to client with error"
+                        );
                         let _ = ws_writer.send(Message::Close(Some(
                             tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                                code: CloseCode::from(3000u16),
-                                reason: error.message().to_string().into(),
+                                code: CloseCode::from(1011u16),
+                                reason: elide(error.message(), 123).into(),
                             }
                         ))).await;
+                        break;
+                    }
+                    Some(WsCommand::FailWithCode { error, code }) => {
+                        let msg = error_message(&error);
+                        let text = serde_json::to_string(&msg).unwrap_or_else(|_| {
+                            r#"["error",{"kind":"Internal","message":"error"}]"#.to_string()
+                        });
+                        let _ = ws_writer.send(Message::Text(text)).await;
+                        let close = match code {
+                            // connect-time rejection: TS syncer.ts `ws.close(3000, message)`.
+                            // NOTE (flagged divergence): TS passes the message
+                            // un-elided and the `ws` lib throws RangeError past 123
+                            // bytes; rust elides so the close is always delivered.
+                            Some(code) => Message::Close(Some(
+                                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                    code: CloseCode::from(code),
+                                    reason: elide(error.message(), 123).into(),
+                                },
+                            )),
+                            // TS Connection#closeWithError → ws.close(): no status
+                            None => Message::Close(None),
+                        };
+                        let _ = ws_writer.send(close).await;
                         break;
                     }
                     Some(WsCommand::CloseWithCode { code, reason }) => {
@@ -447,12 +480,10 @@ async fn run_ws_writer(
                         break;
                     }
                     Some(WsCommand::Close(reason)) => {
-                        let _ = ws_writer.send(Message::Close(Some(
-                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                                code: CloseCode::from(1000u16),
-                                reason: reason.into(),
-                            }
-                        ))).await;
+                        // TS Connection.close() → ws.close() with no status
+                        // (workers/connection.ts:182); the reason is logged, not sent.
+                        tracing::info!("closing connection: {reason}");
+                        let _ = ws_writer.send(Message::Close(None)).await;
                         break;
                     }
                     None => break,
@@ -663,7 +694,7 @@ async fn send_error_and_close(
         .send(Message::Close(Some(
             tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: CloseCode::from(3000u16),
-                reason: error.message().to_string().into(),
+                reason: elide(error.message(), 123).into(),
             },
         )))
         .await;
@@ -746,9 +777,39 @@ where
     }
 }
 
+/// Port of TS `elide` (types/strings.ts:1), folded into its consumer — the
+/// crate has no `types/` twin. Close-frame reasons must be ≤ 123 BYTES
+/// (RFC 6455 control-frame payload ≤ 125 incl. the 2-byte code); TS
+/// `closeWithError` elides the error text to 123 (types/ws.ts:23). Byte-aware:
+/// trims whole chars until `val + "..."` fits.
+pub(crate) fn elide(val: &str, max_bytes: usize) -> String {
+    if val.len() <= max_bytes {
+        return val.to_string();
+    }
+    // TS: `val.substring(0, maxBytes - 3)` — a CHAR count, then shrink by bytes.
+    let mut val: String = val.chars().take(max_bytes.saturating_sub(3)).collect();
+    while val.len() + 3 > max_bytes {
+        val.pop();
+    }
+    val + "..."
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TS-golden (types/strings.test.ts "elide byte count"): ASCII elides to
+    /// exactly 123 chars; full-width (3-byte) chars trim to ≤ 123 BYTES.
+    #[test]
+    fn elide_byte_count() {
+        let ascii = elide(&format!("fo{}", "o".repeat(150)), 123);
+        assert_eq!(ascii, format!("fo{}...", "o".repeat(118)));
+        assert_eq!(ascii.len(), 123);
+        let full = elide(&format!("こんにちは{}", "あ".repeat(150)), 123);
+        assert_eq!(full, format!("こんにちは{}...", "あ".repeat(35)));
+        assert!(full.len() <= 123);
+        assert_eq!(elide("short", 123), "short");
+    }
 
     #[test]
     fn classifies_normal_transport_disconnects_as_expected() {
@@ -919,7 +980,7 @@ mod tests {
     /// kind, or drop the error frame, and the `kind == "Rehome"` / frame-present
     /// assertions fail. (Verified by reverting to a bare close.)
     #[tokio::test]
-    async fn slow_client_shed_closes_with_rehome_error_then_close_3000() {
+    async fn slow_client_shed_closes_with_rehome_error_then_close_1011() {
         use futures_util::StreamExt as _;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -977,13 +1038,136 @@ mod tests {
         match second {
             Message::Close(Some(cf)) => assert_eq!(
                 u16::from(cf.code),
-                3000,
-                "shed close must be 3000 (backoff), got {:?}",
+                1011,
+                "shed goes through TS downstream.fail → closeWithError → INTERNAL_ERROR 1011 \
+                 (types/streams.ts:91, types/ws.ts:7), got {:?}",
                 cf.code
             ),
-            other => panic!("expected close 3000 after the Rehome error, got {other:?}"),
+            other => panic!("expected close 1011 after the Rehome error, got {other:?}"),
         }
         let _ = server.await;
+    }
+
+    /// Close codes are per TS path: a downstream `Fail` closes 1011 (TS
+    /// `closeWithError` default INTERNAL_ERROR, types/ws.ts:7 via
+    /// types/streams.ts:91); a connect-time rejection closes 3000 (TS
+    /// syncer.ts:610/639 `ws.close(3000, message)`); a connection-level error
+    /// or a normal close sends NO status (TS `Connection.close()` →
+    /// `ws.close()`, workers/connection.ts:182, → peer sees 1005).
+    #[tokio::test]
+    async fn writer_close_codes_follow_the_ts_path() {
+        use futures_util::StreamExt as _;
+        async fn run(cmds: Vec<WsCommand>) -> Vec<Message> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let (w, _r) = ws.split();
+                let (tx, rx) = mpsc::unbounded_channel::<WsCommand>();
+                let (kill_tx, kill_rx) = watch::channel(false);
+                let limits = Arc::new(SinkLimits {
+                    depth: Arc::new(AtomicI64::new(0)),
+                    hwm: 1_000_000,
+                    bytes: Arc::new(AtomicI64::new(0)),
+                    byte_hwm: i64::MAX,
+                    kill: kill_tx,
+                    shed_counted: std::sync::atomic::AtomicBool::new(false),
+                });
+                let last = Arc::new(AtomicI64::new(now_epoch_ms()));
+                let writer = tokio::spawn(run_ws_writer(w, rx, limits, kill_rx, last));
+                for c in cmds {
+                    let _ = tx.send(c);
+                }
+                let _ = writer.await;
+            });
+            let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
+                .await
+                .unwrap();
+            let mut out = Vec::new();
+            while let Ok(Some(Ok(m))) =
+                tokio::time::timeout(Duration::from_secs(5), ws.next()).await
+            {
+                let done = matches!(m, Message::Close(_));
+                out.push(m);
+                if done {
+                    break;
+                }
+            }
+            let _ = server.await;
+            out
+        }
+        let err = ErrorBody::basic(crate::protocol::ErrorKind::Internal, "boom".to_string());
+        // downstream fail → error frame + 1011
+        let fr = run(vec![WsCommand::Fail(err.clone())]).await;
+        assert!(
+            matches!(&fr[0], Message::Text(_)),
+            "error frame first, got {fr:?}"
+        );
+        match &fr[1] {
+            Message::Close(Some(cf)) => assert_eq!(
+                u16::from(cf.code),
+                1011,
+                "Fail must close 1011, got {:?}",
+                cf.code
+            ),
+            other => panic!("expected close 1011, got {other:?}"),
+        }
+        // TS closeWithError: `ws.close(code, elide(errMsg, 123))` — a long
+        // error text must NOT produce an over-long close reason (RFC 6455:
+        // control payload ≤ 125 bytes; browsers fail the socket with 1002
+        // instead of delivering our close).
+        let long = "x".repeat(300);
+        let fr = run(vec![WsCommand::Fail(ErrorBody::basic(
+            crate::protocol::ErrorKind::Internal,
+            long.clone(),
+        ))])
+        .await;
+        match &fr[1] {
+            Message::Close(Some(cf)) => {
+                assert_eq!(cf.reason.as_ref(), elide(&long, 123));
+                assert!(cf.reason.len() <= 123, "reason {} bytes", cf.reason.len());
+            }
+            other => panic!("expected close 1011 with an elided reason, got {other:?}"),
+        }
+        // connect-time rejection → error frame + 3000
+        let fr = run(vec![WsCommand::FailWithCode {
+            error: err.clone(),
+            code: Some(3000),
+        }])
+        .await;
+        match &fr[1] {
+            Message::Close(Some(cf)) => assert_eq!(
+                u16::from(cf.code),
+                3000,
+                "connect-time must close 3000, got {:?}",
+                cf.code
+            ),
+            other => panic!("expected close 3000, got {other:?}"),
+        }
+        // connection-level error → error frame + close with NO status
+        let fr = run(vec![WsCommand::FailWithCode {
+            error: err,
+            code: None,
+        }])
+        .await;
+        assert!(
+            matches!(&fr[0], Message::Text(_)),
+            "error frame first, got {fr:?}"
+        );
+        assert!(
+            matches!(&fr[1], Message::Close(None)),
+            "Connection#closeWithError → ws.close() with no status, got {:?}",
+            fr[1]
+        );
+        // normal close → NO status (TS Connection.close() → ws.close())
+        let fr = run(vec![WsCommand::Close("bye".to_string())]).await;
+        assert!(
+            matches!(&fr[0], Message::Close(None)),
+            "Connection.close() → ws.close() with no status, got {:?}",
+            fr[0]
+        );
     }
 }
 

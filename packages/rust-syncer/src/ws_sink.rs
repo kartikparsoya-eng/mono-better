@@ -31,9 +31,19 @@ pub enum WsCommand {
     /// recorded at enqueue; the writer subtracts EXACTLY this value from the
     /// byte counter on dequeue (symmetric accounting → no drift).
     Send { msg: Value, est_bytes: usize },
-    /// Send an error message and close with code 3000.
+    /// Send an error message and close with code 1011 — TS `closeWithError`'s
+    /// default `INTERNAL_ERROR` (types/ws.ts:7), the code every view-syncer
+    /// downstream failure takes (`downstream.fail` → types/streams.ts:91):
+    /// `ClientHandler.fail`, `#failDownstream`, slow-client shed.
     Fail(ErrorBody),
-    /// Close the WebSocket (graceful).
+    /// Send an error message and close with an explicit code: `Some(3000)` for
+    /// connect-time rejections (TS syncer.ts:610/639 `ws.close(3000, msg)`),
+    /// `None` for a connection-level error (TS `Connection#closeWithError` →
+    /// `sendError` + `close()` → `ws.close()` with NO status,
+    /// workers/connection.ts:331/182).
+    FailWithCode { error: ErrorBody, code: Option<u16> },
+    /// Close the WebSocket with NO status code — TS `Connection.close()` →
+    /// `ws.close()` (workers/connection.ts:182); the reason is logged, not sent.
     Close(String),
     /// Close with an explicit RFC 6455 code (e.g. 1009 Message Too Big).
     /// Needed because the split READ half cannot write: the reader detects
@@ -117,9 +127,15 @@ impl DirectWebSocketSink {
     // and no callers — removed as dead drift. `push` / `push_sized` are the
     // live paths.
 
-    /// Send an error message and close the connection with code 3000.
+    /// Send an error message and close the connection with code 1011 (TS
+    /// `closeWithError` INTERNAL_ERROR — see `WsCommand::Fail`).
     pub fn fail(&self, error: ErrorBody) {
         let _ = self.send_command(WsCommand::Fail(error));
+    }
+    /// Send an error message and close with an explicit close code
+    /// (`Some(3000)` connect-time, `None` = no status; see `WsCommand::FailWithCode`).
+    pub fn fail_with_code(&self, error: ErrorBody, code: Option<u16>) {
+        let _ = self.send_command(WsCommand::FailWithCode { error, code });
     }
 
     /// Close the connection gracefully.
