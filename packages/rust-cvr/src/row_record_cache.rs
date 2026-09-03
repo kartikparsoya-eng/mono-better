@@ -210,7 +210,7 @@ const CATCHUP_PAGE_SIZE: usize = 10000;
 pub const DEFAULT_DEFERRED_THRESHOLD: usize = 100;
 
 /// The idle-in-transaction timeout (matches TS `run-transaction.ts`).
-const IDLE_TX_TIMEOUT_MS: u32 = 60_000;
+pub(crate) const IDLE_TX_TIMEOUT_MS: u32 = 60_000;
 
 impl RowRecordCache {
     pub fn new(
@@ -764,11 +764,11 @@ async fn flush_one_iteration(
         );
     }
 
-    // SET LOCAL statement_timeout = 0 (matches run-transaction.ts).
+    // SET LOCAL statement_timeout = 0 + idle timeout (matches run-transaction.ts:
+    // 47-55; TS pipelines both, rust awaits each).
     sqlx::query("SET LOCAL statement_timeout = 0")
         .execute(&mut *tx)
         .await?;
-    // SET LOCAL idle_in_transaction_session_timeout = 60000.
     sqlx::query(&format!(
         "SET LOCAL idle_in_transaction_session_timeout = {}",
         IDLE_TX_TIMEOUT_MS

@@ -769,6 +769,24 @@ impl CVRStoreHandle {
 
         let mut stats = CVRFlushStats::default();
         let mut tx = self.pool.begin().await?;
+        // Port of TS `runTx` (run-transaction.ts:37-56): every zero-cache
+        // transaction disables the session `statement_timeout` (providers set
+        // one at the database level) and bounds an orphaned transaction with
+        // `idle_in_transaction_session_timeout`. TS fires both without
+        // awaiting (pipelined); rust awaits them in order on the same
+        // connection — the same statements reach the server before the guard.
+
+        // TS runTx fires both `SET LOCAL`s without awaiting (run-transaction.ts:
+        // 47-55) — pipelined; rust awaits each (two round trips).
+        sqlx::query("SET LOCAL statement_timeout = 0")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!(
+            "SET LOCAL idle_in_transaction_session_timeout = {}",
+            crate::row_record_cache::IDLE_TX_TIMEOUT_MS
+        ))
+        .execute(&mut *tx)
+        .await?;
 
         // ── Version + ownership guard (port of TS `#checkVersionAndOwnership`) ──
         // Lock the instance row and refuse to write if (a) another task now owns
@@ -1350,9 +1368,25 @@ impl CVRStoreHandle {
 
     async fn load_once(&mut self, last_connect_time: f64) -> Result<LoadResult, CVRStoreError> {
         let mut tx = self.pool.begin().await?;
+        // TS `runTx(this.#db, ..., {mode: Mode.READONLY})` (cvr-store.ts:332-387):
+        // `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`, then runTx's
+        // `SET LOCAL statement_timeout = 0` + idle timeout (run-transaction.ts:
+        // 37-56).
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
             .await?;
+
+        // TS runTx fires both `SET LOCAL`s without awaiting (run-transaction.ts:
+        // 47-55) — pipelined; rust awaits each (two round trips).
+        sqlx::query("SET LOCAL statement_timeout = 0")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!(
+            "SET LOCAL idle_in_transaction_session_timeout = {}",
+            crate::row_record_cache::IDLE_TX_TIMEOUT_MS
+        ))
+        .execute(&mut *tx)
+        .await?;
 
         // Load instance. LEFT JOIN the rows table's version so we can detect a
         // rows-behind CVR (the previous owner's pending row writes not yet
@@ -1650,9 +1684,24 @@ impl CVRStoreHandle {
         let end = version_string(up_to_version);
 
         let mut tx = self.pool.begin().await?;
+        // TS `new TransactionPool(lc, {mode: Mode.READONLY}).run(db)`
+        // (cvr-store.ts:740/1296) → `runTx(db, worker, {mode})`
+        // (transaction-pool.ts:285): READONLY plus runTx's two SET LOCALs.
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             .execute(&mut *tx)
             .await?;
+
+        // TS runTx fires both `SET LOCAL`s without awaiting (run-transaction.ts:
+        // 47-55) — pipelined; rust awaits each (two round trips).
+        sqlx::query("SET LOCAL statement_timeout = 0")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(&format!(
+            "SET LOCAL idle_in_transaction_session_timeout = {}",
+            crate::row_record_cache::IDLE_TX_TIMEOUT_MS
+        ))
+        .execute(&mut *tx)
+        .await?;
 
         // Check version
         let check_sql = format!(

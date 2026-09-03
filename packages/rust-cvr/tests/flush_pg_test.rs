@@ -572,3 +572,152 @@ async fn write_back_keeps_rows_applied_while_a_flush_transaction_is_in_flight() 
     .expect("select rowsVersion");
     assert_eq!(rv, "03", "rowsVersion advances to the last applied version");
 }
+
+/// TS `runTx` (run-transaction.ts:37-47) runs `SET LOCAL statement_timeout =
+/// 0` inside every transaction, so a provider-level `statement_timeout` never
+/// cancels a CVR flush that is waiting on the instance row lock (the
+/// `#checkVersionAndOwnership` `SELECT ... FOR UPDATE`). This pins the same
+/// for `flush_internal`: with a 50 ms session timeout on the store's pool and
+/// the instance row locked by a side transaction for ~400 ms, the flush must
+/// wait and succeed instead of failing with "canceling statement due to
+/// statement timeout" (which it did before the `SET LOCAL` was ported).
+///
+/// Gated on `TEST_CVR_PG_URI`; skips (passes) when unset.
+#[tokio::test]
+async fn config_flush_disables_the_session_statement_timeout_like_ts_run_tx() {
+    let _schema_guard = PG_SCHEMA.lock().await;
+    let uri = match std::env::var("TEST_CVR_PG_URI") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!(
+                "SKIP config_flush_disables_the_session_statement_timeout: TEST_CVR_PG_URI unset"
+            );
+            return;
+        }
+    };
+    // Setup + side transaction: no timeout.
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&uri)
+        .await
+        .expect("connect to TEST_CVR_PG_URI");
+    // The store's pool: every session starts with a 50 ms statement timeout,
+    // as a managed provider might configure at the database level.
+    let store_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::query("SET statement_timeout = 50")
+                    .execute(conn)
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .connect(&uri)
+        .await
+        .expect("connect store pool");
+
+    let golden: Value = serde_json::from_str(include_str!("../agentic/parity/flush-fixture.json"))
+        .expect("flush-fixture.json");
+    let connect_time = golden["connectTime"].as_f64().expect("connectTime");
+    let now = golden["now"].as_i64().expect("now");
+    let sc = &golden["scenarios"].as_array().expect("scenarios")[0];
+
+    sqlx::query(&format!(r#"DROP SCHEMA IF EXISTS "{SCHEMA}" CASCADE"#))
+        .execute(&admin)
+        .await
+        .expect("drop schema");
+    sqlx::raw_sql(include_str!("../agentic/parity/flush-schema.sql"))
+        .execute(&admin)
+        .await
+        .expect("create schema");
+    sqlx::raw_sql(sc["baseSeedSql"].as_str().expect("baseSeedSql"))
+        .execute(&admin)
+        .await
+        .expect("seed");
+
+    let mut store = CVRStoreHandle::new(
+        store_pool.clone(),
+        SCHEMA.to_string(),
+        CVR_ID.to_string(),
+        TASK_ID.to_string(),
+    );
+    let loaded = store.load(connect_time).await.expect("load");
+    let mut updater =
+        CVRQueryDrivenUpdater::new(loaded.cvr, "02".to_string(), "01".to_string(), None);
+    let executed: Vec<(String, String)> = sc["tracked"]["executed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e[0].as_str().unwrap().to_string(),
+                e[1].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let executed_refs: Vec<(&str, &str)> = executed
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    updater.track_queries(&executed_refs, &[]);
+    // The scenario's received rows make the flush material (a config-only
+    // no-op flush never opens a transaction, cvr-store.ts:1088-1097).
+    let mut rows: HashMap<String, (RowID, RowUpdate)> = HashMap::new();
+    for r in sc["received"].as_array().unwrap() {
+        let id = row_id_from_json(&r["id"]);
+        let id_str = rust_cvr::row_key::row_id_string(&id);
+        let ref_counts: RefCounts =
+            serde_json::from_value(r["refCounts"].clone()).expect("refCounts");
+        rows.insert(
+            id_str,
+            (
+                id,
+                RowUpdate {
+                    version: Some("02".to_string()),
+                    contents: Some(Arc::new(r["contents"].clone())),
+                    ref_counts,
+                },
+            ),
+        );
+    }
+    let existing: HashMap<String, rust_cvr::schema::types::RowRecord> = HashMap::new();
+    updater.received(&rows, &existing).unwrap();
+    let (cvr_final, _stats) = updater.flush(connect_time as i64, now, now);
+    let ops = updater.base.drain_store_ops();
+    store.apply_store_ops(ops);
+    let expected_version = CVRVersion {
+        state_version: "01".to_string(),
+        config_version: None,
+    };
+
+    // Side transaction: hold the instance row lock for ~400 ms, then release.
+    let mut side = admin.begin().await.expect("side tx");
+    sqlx::query(&format!(
+        r#"SELECT 1 FROM "{SCHEMA}".instances WHERE "clientGroupID" = $1 FOR UPDATE"#
+    ))
+    .bind(CVR_ID)
+    .execute(&mut *side)
+    .await
+    .expect("lock instance row");
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        side.rollback().await.expect("release lock");
+    });
+
+    let started = std::time::Instant::now();
+    let result = store
+        .flush(&expected_version, &cvr_final, connect_time)
+        .await;
+    let waited = started.elapsed();
+    release.await.unwrap();
+    assert!(
+        waited >= std::time::Duration::from_millis(300),
+        "the flush must have blocked on the locked instance row (waited {waited:?}) — otherwise this test proves nothing"
+    );
+    assert!(
+        result.is_ok(),
+        "flush must wait for the lock instead of being cancelled by the session statement_timeout: {:?}",
+        result.err()
+    );
+}
