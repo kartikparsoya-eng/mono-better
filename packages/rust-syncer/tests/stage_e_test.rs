@@ -537,6 +537,14 @@ fn partial_success_transform_hydrates_healthy_query() {
         shard_num: 0,
     };
     engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+    // A sibling socket of the SAME client group that never desired the erroring
+    // query. TS routes `transformError` by the query's CVR clientState
+    // (`#sendQueryTransformErrorToClients` → `getAffectedClientIDs`,
+    // view-syncer.ts:1728), so the sibling is poked (got-del is group-wide)
+    // but must NOT receive the error frame (frame-capture #4, 2026-09-03).
+    let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+    let sink2: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx2));
+    engine.register_client("client2", "ws2", "cg1", &shard, None, sink2);
 
     let ctx = rust_syncer::custom_queries::transform_query::CustomQueryContext {
         url: format!("http://{addr}/transform"),
@@ -563,7 +571,7 @@ fn partial_success_transform_hydrates_healthy_query() {
         .block_on(engine.config_and_hydrate(
             cvr,
             "client1",
-            &["ws1".to_string()],
+            &["ws1".to_string(), "ws2".to_string()],
             &shard,
             puts,
             Vec::new(),
@@ -599,6 +607,20 @@ fn partial_success_transform_hydrates_healthy_query() {
     while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
         frames.push(v);
     }
+    let mut sibling: Vec<serde_json::Value> = Vec::new();
+    while let Ok(WsCommand::Send { msg: v, .. }) = rx2.try_recv() {
+        sibling.push(v);
+    }
+    assert!(
+        !sibling.iter().any(|v| v[0] == "transformError"),
+        "TS #sendQueryTransformErrorToClients delivers the transformError only to clients in the \
+         query's clientState; the sibling never desired custom_err. sibling frames={sibling:?}"
+    );
+    assert_eq!(
+        frames.iter().filter(|v| v[0] == "transformError").count(),
+        1,
+        "the desiring client gets exactly one transformError frame"
+    );
     let saw_healthy_row = frames.iter().any(|v| {
         v[0] == "pokePart" && {
             let s = serde_json::to_string(v).unwrap();

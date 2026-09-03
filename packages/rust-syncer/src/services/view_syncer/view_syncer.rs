@@ -634,6 +634,15 @@ fn record_transform_error(error: serde_json::Value, transform_errors: &mut Vec<s
     transform_errors.push(error);
 }
 
+/// Rust-only adapter for the TS union parameter of
+/// `#sendQueryTransformErrorToClients` (`ErroredQuery[] | TransformFailedBody`,
+/// view-syncer.ts:1730): `Failed` = the whole-batch `TransformFailedBody`
+/// (carries `queryIDs`), `Application` = per-query `ErroredQuery` bodies.
+enum QueryTransformErrors<'a> {
+    Failed(&'a serde_json::Value),
+    Application(&'a [serde_json::Value]),
+}
+
 /// Outcome of one background-retransform attempt. Mirrors the three control
 /// paths of TS `#runBackgroundRetransform`'s `try/catch` (view-syncer.ts:2695):
 /// the attempt either succeeds (`markBackgroundRetransformSuccess`), throws an
@@ -7804,6 +7813,88 @@ impl ViewSyncerService {
     /// Resolve handlers by WebSocket id — `self.clients` is keyed by `ws_id`
     /// (see `register_client`), and every caller passes ws ids. The parameter
     /// was previously named `client_ids`, inviting a real keying bug.
+    /// Port of TS `#sendQueryTransformErrorToClients` (view-syncer.ts:1728-1766).
+    /// A custom-query transform error is delivered ONLY to the clients whose CVR
+    /// `clientState` desires that query (TS `getAffectedClientIDs`), grouped per
+    /// client for application errors — never to every poked socket. The got-del
+    /// poke is client-group-wide, so a sibling socket that never desired the
+    /// erroring query sees the del but must NOT see a `transformError`
+    /// (frame-capture #4, 2026-09-03: rust over-emitted 12 such frames on
+    /// cg art-tr40b3c943258c). `custom_query_map` is the sync's CVR snapshot
+    /// (TS builds `customQueries` from `cvr.queries` at the top of
+    /// `#syncQueryPipelineSet`).
+    fn send_query_transform_error_to_clients(
+        &self,
+        custom_query_map: &BTreeMap<String, QueryRecord>,
+        error_or_errors: QueryTransformErrors<'_>,
+    ) {
+        let get_affected_client_ids = |query_ids: &[&str]| -> Vec<String> {
+            let mut client_ids: Vec<String> = Vec::new();
+            for query_id in query_ids {
+                match custom_query_map.get(*query_id) {
+                    Some(QueryRecord::Custom(q)) => {
+                        for id in q.client_state.keys() {
+                            if !client_ids.contains(id) {
+                                client_ids.push(id.clone());
+                            }
+                        }
+                    }
+                    // TS: `assert(q, 'got an error for query ... that does not map
+                    // back to a custom query')` — cannot happen (the ids come from
+                    // the custom queries this sync just transformed); log, don't
+                    // take the CG thread down.
+                    _ => tracing::error!(
+                        "got an error for query {query_id} that does not map back to a custom query"
+                    ),
+                }
+            }
+            client_ids
+        };
+        // TS `this.#clients.get(clientId)` (a Map keyed by clientID). Rust keys
+        // sockets by ws_id: the current socket for a clientID is the registered
+        // one, else any handler carrying that clientID (fixtures register
+        // handlers without the router's ws registration).
+        let client_handler = |client_id: &str| -> Option<Arc<ClientHandler>> {
+            self.registered_ws
+                .get(client_id)
+                .and_then(|ws_id| self.clients.get(ws_id))
+                .or_else(|| self.clients.values().find(|c| c.client_id == client_id))
+                .cloned()
+        };
+        match error_or_errors {
+            QueryTransformErrors::Failed(failed) => {
+                let query_ids: Vec<&str> = failed
+                    .get("queryIDs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                for client_id in get_affected_client_ids(&query_ids) {
+                    if let Some(c) = client_handler(&client_id) {
+                        c.send_query_transform_failed_error(failed);
+                    }
+                }
+            }
+            QueryTransformErrors::Application(errors) => {
+                let mut app_error_groups: BTreeMap<String, Vec<serde_json::Value>> =
+                    BTreeMap::new();
+                for err in errors {
+                    let id = err.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    for client_id in get_affected_client_ids(&[id]) {
+                        app_error_groups
+                            .entry(client_id)
+                            .or_default()
+                            .push(err.clone());
+                    }
+                }
+                for (client_id, errs) in app_error_groups {
+                    if let Some(c) = client_handler(&client_id) {
+                        let _ = c.send_query_transform_application_errors(errs);
+                    }
+                }
+            }
+        }
+    }
+
     fn get_clients(&self, ws_ids: &[String]) -> Vec<Arc<ClientHandler>> {
         ws_ids
             .iter()
@@ -8414,9 +8505,10 @@ impl ViewSyncerService {
                             // Whole-batch failure (TS throws `TransformFailed` →
                             // the client fails). Surface it and leave existing
                             // pipelines intact.
-                            for c in &self.get_clients(poke_ws_ids) {
-                                c.send_query_transform_failed_error(&failed);
-                            }
+                            self.send_query_transform_error_to_clients(
+                                &cfg_cvr.queries,
+                                QueryTransformErrors::Failed(&failed),
+                            );
                             // Record the whole-batch failure body for a background
                             // retransform to branch on (TS `#syncQueryPipelineSet`
                             // THROWS here, view-syncer.ts:1983; rust cannot unwind
@@ -8431,9 +8523,10 @@ impl ViewSyncerService {
                 }
             }
             if !transform_errors.is_empty() {
-                for c in &self.get_clients(poke_ws_ids) {
-                    let _ = c.send_query_transform_application_errors(transform_errors.clone());
-                }
+                self.send_query_transform_error_to_clients(
+                    &cfg_cvr.queries,
+                    QueryTransformErrors::Application(&transform_errors),
+                );
             }
         }
 
