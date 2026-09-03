@@ -8202,6 +8202,11 @@ impl ViewSyncerService {
         // leak (served the full table; caught by ART G8 via the #158 rider).
         let empty_permissions = serde_json::json!({"tables": {}});
         let mut executed: Vec<(String, serde_json::Value, String)> = Vec::new();
+        // TS `erroredQueryIDs` = `#processTransformedCustomQueries` return value
+        // (`appQueryErrors.map(q => q.id)`, view-syncer.ts:1723) → joined into
+        // `removeQueriesQueryIds` (:2066) so the errored query is removed from
+        // the CVR and its got-`del` is poked in this pass.
+        let mut errored_query_ids: Vec<String> = Vec::new();
         // TS `customQueries` — the CVR's FULL custom-query set (view-syncer.ts:1899).
         let mut custom_queries: Vec<CustomQuerySpec> = Vec::new();
         for (qid, record) in &cfg_cvr.queries {
@@ -8295,7 +8300,8 @@ impl ViewSyncerService {
                                     CustomTransformed::Ok(tq) => {
                                         executed.push((tq.id, tq.ast, tq.hash))
                                     }
-                                    CustomTransformed::Errored { id: _, error } => {
+                                    CustomTransformed::Errored { id, error } => {
+                                        errored_query_ids.push(id);
                                         record_transform_error(error, &mut transform_errors)
                                     }
                                 }
@@ -8359,6 +8365,21 @@ impl ViewSyncerService {
 
         // Drift check: (re-)hydrate a query when it is missing OR its
         // transformation hash changed (auth re-transform / a new custom AST).
+        // Port of TS `removeQueriesQueryIds` (view-syncer.ts:2062-2067): the
+        // expired queries (`expired(ttlClock, q)`) plus the errored custom
+        // queries, removed in THIS sync pass — `trackQueries(removed)` deletes
+        // them from the CVR and pokes their got-`del`. The TTL scheduler pass
+        // (`remove_expired_queries`) only guarantees a pass runs at expiry.
+        let mut remove_queries: Vec<String> = rust_cvr::cvr::get_inactive_queries(&cfg_cvr)
+            .into_iter()
+            .filter(|q| q.inactivated_at + q.ttl <= ttl_clock)
+            .map(|q| q.hash)
+            .collect();
+        for id in errored_query_ids {
+            if !remove_queries.contains(&id) {
+                remove_queries.push(id);
+            }
+        }
         let mut add_queries: Vec<(String, String)> = Vec::new();
         let mut queries: Vec<(String, String)> = Vec::new();
         // The to-be-hydrated queries with their parsed ASTs, kept for the
@@ -8374,6 +8395,11 @@ impl ViewSyncerService {
             .map(|s| s.id.as_str())
             .collect();
         for (qid, transformed_ast, transformation_hash) in executed {
+            // TS `addQueries` filter (view-syncer.ts:2074-2075): a query in the
+            // removal set is never (re-)added in the same pass.
+            if remove_queries.contains(&qid) {
+                continue;
+            }
             let is_custom = custom_ids.contains(qid.as_str());
             // Owned copy: `check_for_thrashing` needs `&mut self` inside the
             // changed-hash arm, which a live `&self.pipelines` borrow forbids.
@@ -8498,7 +8524,7 @@ impl ViewSyncerService {
         // above; reset to `false` by `reset_pipelines_and_rehydrate` (TS
         // `#pipelines.reset()` + `#pipelinesSynced = false`, view-syncer.ts:575-576).
         self.pipelines_synced = true;
-        if add_queries.is_empty() {
+        if add_queries.is_empty() && remove_queries.is_empty() {
             self.catchup_clients(
                 &cfg_cvr,
                 &cfg_cvr.version,
@@ -8510,15 +8536,22 @@ impl ViewSyncerService {
             Ok(cfg_cvr)
         } else {
             let excluded: Vec<String> = add_queries.iter().map(|(id, _)| id.clone()).collect();
+            // TS `#catchupClients(lc, cvr, finalVersion, addQueries ids, pokers)`
+            // (view-syncer.ts:2350-2356): `cvr` is the PRE-hydrate snapshot, so
+            // the catch-up scan's upper bound is the version BEFORE this pass
+            // (config patches ≤ it) while `current` is the flushed final
+            // version. Bounding at the final version replayed the got-`put`
+            // just tracked in this pass as a duplicate entry.
+            let pre_hydrate_version = cfg_cvr.version.clone();
             let (result, pokers) = self
                 .hydrate_and_sync(
                     cfg_cvr,
                     state_version,
                     replica_version,
                     &add_queries,
-                    // Removals are TTL-scheduler-driven (a `del` only inactivates
-                    // the desired query above); nothing is removed here.
-                    &[],
+                    // TS `removeQueries` (view-syncer.ts:2062-2067): expired +
+                    // errored, tracked as removed in this pass (got `del` poked).
+                    &remove_queries,
                     poke_ws_ids,
                     &queries,
                     last_connect_time,
@@ -8535,10 +8568,15 @@ impl ViewSyncerService {
             // client silently lost the whole `(oldCookie, current]` interval.
             let clients = self.get_clients(poke_ws_ids);
             let catchup_from =
-                Self::catchup_floor(&result.cvr.version, &clients, &original_client_versions);
+                Self::catchup_floor(&pre_hydrate_version, &clients, &original_client_versions);
             let catchup_started = std::time::Instant::now();
             let patches = self
-                .gather_catchup_patches(&result.cvr, &result.cvr.version, &excluded, catchup_from)
+                .gather_catchup_patches(
+                    &pre_hydrate_version,
+                    &result.cvr.version,
+                    &excluded,
+                    catchup_from,
+                )
                 .await?;
             crate::trace::note(
                 "catchup",
@@ -8666,7 +8704,7 @@ impl ViewSyncerService {
         let catchup_from = Self::catchup_floor(&cvr.version, &clients, original_versions);
         let catchup_started = std::time::Instant::now();
         let patches = self
-            .gather_catchup_patches(cvr, current, exclude_query_hashes, catchup_from)
+            .gather_catchup_patches(&cvr.version, current, exclude_query_hashes, catchup_from)
             .await?;
         crate::trace::note(
             "catchup",
@@ -8697,7 +8735,7 @@ impl ViewSyncerService {
     /// persisted to catch up from).
     async fn gather_catchup_patches(
         &mut self,
-        cvr: &CVR,
+        up_to_version: &CVRVersion,
         current: &CVRVersion,
         exclude_query_hashes: &[String],
         catchup_from: NullableCVRVersion,
@@ -8728,7 +8766,7 @@ impl ViewSyncerService {
                 let mut cursor = store_guard
                     .catchup_row_patches(
                         catchup_from.clone(),
-                        &cvr.version,
+                        up_to_version,
                         current,
                         exclude_query_hashes,
                     )
@@ -8748,7 +8786,7 @@ impl ViewSyncerService {
             let catchup_cfg_started = std::time::Instant::now();
             let store_reader = store_arc.lock().await.catchup_reader();
             let cfg = store_reader
-                .catchup_config_patches(catchup_from.clone(), &cvr.version, current)
+                .catchup_config_patches(catchup_from.clone(), up_to_version, current)
                 .await
                 .map_err(|e| format!("catchup_config_patches: {e}"))?;
             if crate::trace::enabled() {
@@ -8756,7 +8794,7 @@ impl ViewSyncerService {
                     "catchup-rows",
                     &format!(
                         "cg={} rows={} catchup_open_ms={catchup_open_ms:.1} catchup_read_ms={catchup_read_ms:.1} catchup_cfg_ms={:.1}",
-                        cvr.id,
+                        self.cg_id,
                         rows.len(),
                         catchup_cfg_started.elapsed().as_secs_f64() * 1000.0
                     ),

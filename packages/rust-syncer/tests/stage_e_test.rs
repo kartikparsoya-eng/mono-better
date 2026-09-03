@@ -588,18 +588,68 @@ fn partial_success_transform_hydrates_healthy_query() {
         "healthy custom query should be recorded"
     );
 
-    let mut saw_healthy_row = false;
+    // TS removes the errored query from the CVR in the same pass
+    // (`removeQueriesQueryIds` = expired ∪ erroredQueryIDs, view-syncer.ts:2062-2067
+    // → `#trackRemoved` deletes it, :742-757).
+    assert!(
+        !result_cvr.queries.contains_key("custom_err"),
+        "the errored custom query must be removed from the CVR (TS #trackRemoved)"
+    );
+    let mut frames: Vec<serde_json::Value> = Vec::new();
     while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
-        if v[0] == "pokePart" {
-            let s = serde_json::to_string(&v).unwrap();
-            if s.contains("\"i1\"") && s.contains("healthy issue") {
-                saw_healthy_row = true;
-            }
-        }
+        frames.push(v);
     }
+    let saw_healthy_row = frames.iter().any(|v| {
+        v[0] == "pokePart" && {
+            let s = serde_json::to_string(v).unwrap();
+            s.contains("\"i1\"") && s.contains("healthy issue")
+        }
+    });
     assert!(
         saw_healthy_row,
         "the healthy query's row must still hydrate despite the sibling's transform error"
+    );
+    // The client is told the query errored (`transformError`) and then, in the
+    // sync poke, that the server dropped it (got-`del`) — the exact frame
+    // sequence TS emits (captured per client on the xyne ART sandbox:
+    // transformError → pokeStart → pokePart{gotQueriesPatch:[del]} → pokeEnd).
+    // Before this port rust sent the transformError and no del, so the client
+    // kept the query as pending/got forever.
+    let err_idx = frames
+        .iter()
+        .position(|v| v[0] == "transformError")
+        .expect("a transformError frame for custom_err");
+    let del_idx = frames.iter().position(|v| {
+        v[0] == "pokePart"
+            && v[1]
+                .get("gotQueriesPatch")
+                .and_then(|g| g.as_array())
+                .is_some_and(|g| {
+                    g.iter()
+                        .any(|e| e["op"] == "del" && e["hash"] == "custom_err")
+                })
+    });
+    let del_idx = del_idx.unwrap_or_else(|| {
+        panic!("expected a gotQueriesPatch del for custom_err after the transformError; frames={frames:?}")
+    });
+    assert!(
+        del_idx > err_idx,
+        "TS sends the transformError before the poke carrying the got-del"
+    );
+    let got_puts_for_err = frames
+        .iter()
+        .filter(|v| v[0] == "pokePart")
+        .filter_map(|v| {
+            v[1].get("gotQueriesPatch")
+                .and_then(|g| g.as_array())
+                .cloned()
+        })
+        .flatten()
+        .filter(|e| e["op"] == "put" && e["hash"] == "custom_err")
+        .count();
+    assert_eq!(
+        got_puts_for_err, 0,
+        "an errored query is never reported as got"
     );
 }
 
@@ -727,3 +777,161 @@ fn transform_failure_fails_only_the_offending_connection() {
 
 // `SharedConn` is `Rc<RefCell<rusqlite::Connection>>`; alias locally for clarity.
 type SharedConnAlias = Rc<RefCell<Connection>>;
+
+mod common;
+
+/// PG-gated (`TEST_CVR_PG_URI`): the catch-up scan that closes a hydrate pass
+/// must not replay the got-`put` this very pass just tracked. TS
+/// `#catchupClients(lc, cvr, finalVersion, addQueries ids, pokers)`
+/// (view-syncer.ts:2350-2356) bounds the config-patch scan at the PRE-hydrate
+/// CVR version; bounding it at the final version made every hydrate poke carry
+/// the new query's got-`put` TWICE (every pass of the xyne ART frame capture;
+/// TS once). Needs the real store: without PG the catch-up scan is empty and
+/// the duplicate cannot appear, which is why the store-less tests never saw it.
+#[test]
+fn pg_catchup_after_hydrate_does_not_replay_the_got_put_just_poked() {
+    let Some(uri) = common::pg_uri() else {
+        eprintln!(
+            "SKIP pg_catchup_after_hydrate_does_not_replay_the_got_put_just_poked: TEST_CVR_PG_URI not set"
+        );
+        return;
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        let schema = "stage_e_catchup_window";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&uri)
+            .await
+            .expect("connect TEST_CVR_PG_URI");
+        sqlx::raw_sql(&common::cvr_ddl(schema))
+            .execute(&pool)
+            .await
+            .expect("create CVR schema");
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE "issue" (
+                "id"    "text|NOT_NULL",
+                "title" "text",
+                "_0_version" "text",
+                PRIMARY KEY ("id")
+            );
+            INSERT INTO "issue" ("id", "title", "_0_version") VALUES
+                ('i1', 'first issue', '01'),
+                ('i2', 'second issue', '01');
+            "#,
+        )
+        .unwrap();
+        let specs = rust_syncer::compute_zql_specs(&conn).unwrap();
+        let shared_conn: SharedConnAlias = Rc::new(RefCell::new(conn));
+        let mut pipelines = IvmPipelines::new();
+        pipelines.init_from_connection(specs, shared_conn).unwrap();
+        let mut engine = SyncEngine::new(pipelines);
+        engine
+            .set_cvr_store(
+                pool.clone(),
+                schema.to_string(),
+                "cg1".to_string(),
+                "task-0".to_string(),
+            )
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        let sink: Arc<dyn WebSocketSink> = Arc::new(DirectWebSocketSink::new(tx));
+        let shard = ShardID {
+            app_id: "app".to_string(),
+            shard_num: 0,
+        };
+        engine.register_client("client1", "ws1", "cg1", &shard, None, sink);
+        let anyone_can = serde_json::json!({
+            "tables": {"issue": {"row": {"select": [["allow", {"type": "and", "conditions": []}]]}}}
+        });
+        let put = |hash: &str, ast: serde_json::Value| DesiredQuerySpec {
+            hash: hash.to_string(),
+            ast: Some(ast),
+            name: None,
+            args: None,
+            ttl: None,
+        };
+        // Pass 1: the first query is hydrated and its got-put poked + flushed.
+        let cvr1 = engine
+            .config_and_hydrate(
+                empty_cvr("cg1", "01"),
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![put("q_all", serde_json::json!({"table": "issue"}))],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                Some(&anyone_can),
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "01".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        while rx.try_recv().is_ok() {}
+        // Pass 2: a second query. Its got-put must be poked exactly once, and
+        // pass 1's got-put (already delivered) must not be replayed.
+        let _cvr2 = engine
+            .config_and_hydrate(
+                cvr1,
+                "client1",
+                &["ws1".to_string()],
+                &shard,
+                vec![put(
+                    "q_desc",
+                    serde_json::json!({"table": "issue", "orderBy": [["id", "desc"]]}),
+                )],
+                Vec::new(),
+                false,
+                None,
+                CustomQueryTransformMode::All,
+                Some(&anyone_can),
+                &serde_json::json!({}),
+                None,
+                "00".to_string(),
+                "01".to_string(),
+                0,
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        let mut got: Vec<(String, String)> = Vec::new();
+        while let Ok(WsCommand::Send { msg: v, .. }) = rx.try_recv() {
+            if v[0] == "pokePart"
+                && let Some(gq) = v[1].get("gotQueriesPatch").and_then(|g| g.as_array())
+            {
+                for e in gq {
+                    got.push((
+                        e["op"].as_str().unwrap_or("").to_string(),
+                        e["hash"].as_str().unwrap_or("").to_string(),
+                    ));
+                }
+            }
+        }
+        let q_desc_puts = got
+            .iter()
+            .filter(|(op, h)| op == "put" && h == "q_desc")
+            .count();
+        assert_eq!(
+            q_desc_puts, 1,
+            "pass 2 must poke q_desc's got-put exactly once (TS); got={got:?}"
+        );
+        assert!(
+            !got.iter().any(|(_, h)| h == "q_all"),
+            "pass 2 must not replay pass 1's got-put for q_all; got={got:?}"
+        );
+    });
+}

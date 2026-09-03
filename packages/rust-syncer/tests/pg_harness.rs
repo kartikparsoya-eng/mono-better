@@ -33,6 +33,9 @@
 //! model: non-worker thread + `Handle::block_on` + real flush + catchup) and
 //! `pg_repro_failed_flush_does_not_hang` (liveness on flush failure).
 
+mod common;
+use common::{cvr_ddl, pg_uri};
+
 use std::collections::BTreeMap;
 
 use rust_cvr::cvr::CVRConfigDrivenUpdater;
@@ -40,94 +43,6 @@ use rust_cvr::cvr::{CVR, DesiredQuerySpec};
 use rust_cvr::cvr_store::CVRStoreHandle;
 use rust_cvr::schema::types::{CVRVersion, EMPTY_CVR_VERSION};
 use rust_cvr::shards::ShardID;
-
-fn pg_uri() -> Option<String> {
-    std::env::var("TEST_CVR_PG_URI")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
-/// The CVR schema DDL for `schema`, ported from `cvr.ts` (column-faithful to
-/// what `CVRStoreHandle` reads/writes).
-fn cvr_ddl(schema: &str) -> String {
-    format!(
-        r#"
-DROP SCHEMA IF EXISTS "{schema}" CASCADE;
-CREATE SCHEMA "{schema}";
-
-CREATE TABLE "{schema}".instances (
-  "clientGroupID"  TEXT PRIMARY KEY,
-  "version"        TEXT NOT NULL,
-  "lastActive"     TIMESTAMPTZ NOT NULL,
-  "ttlClock"       DOUBLE PRECISION NOT NULL DEFAULT 0,
-  "replicaVersion" TEXT,
-  "owner"          TEXT,
-  "grantedAt"      TIMESTAMPTZ,
-  "clientSchema"   JSONB,
-  "profileID"      TEXT,
-  "deleted"        BOOL DEFAULT FALSE
-);
-
-CREATE TABLE "{schema}".clients (
-  "clientGroupID" TEXT,
-  "clientID"      TEXT,
-  PRIMARY KEY ("clientGroupID", "clientID"),
-  CONSTRAINT fk_clients_client_group FOREIGN KEY ("clientGroupID")
-    REFERENCES "{schema}".instances ("clientGroupID") ON DELETE CASCADE
-);
-
-CREATE TABLE "{schema}".queries (
-  "clientGroupID"         TEXT,
-  "queryHash"             TEXT,
-  "clientAST"             JSONB,
-  "queryName"             TEXT,
-  "queryArgs"             JSON,
-  "patchVersion"          TEXT,
-  "transformationHash"    TEXT,
-  "transformationVersion" TEXT,
-  "internal"              BOOL,
-  "deleted"               BOOL,
-  "rowSetSignature"       TEXT,
-  PRIMARY KEY ("clientGroupID", "queryHash"),
-  CONSTRAINT fk_queries_client_group FOREIGN KEY ("clientGroupID")
-    REFERENCES "{schema}".instances ("clientGroupID") ON DELETE CASCADE
-);
-
-CREATE TABLE "{schema}".desires (
-  "clientGroupID"   TEXT,
-  "clientID"        TEXT,
-  "queryHash"       TEXT,
-  "patchVersion"    TEXT NOT NULL,
-  "deleted"         BOOL,
-  "ttl"             INTERVAL,
-  "ttlMs"           DOUBLE PRECISION,
-  "inactivatedAt"   TIMESTAMPTZ,
-  "inactivatedAtMs" DOUBLE PRECISION,
-  PRIMARY KEY ("clientGroupID", "clientID", "queryHash"),
-  CONSTRAINT fk_desires_query FOREIGN KEY ("clientGroupID", "queryHash")
-    REFERENCES "{schema}".queries ("clientGroupID", "queryHash") ON DELETE CASCADE
-);
-
-CREATE TABLE "{schema}"."rowsVersion" (
-  "clientGroupID" TEXT PRIMARY KEY,
-  "version"       TEXT NOT NULL
-);
-
-CREATE TABLE "{schema}".rows (
-  "clientGroupID" TEXT,
-  "schema"        TEXT,
-  "table"         TEXT,
-  "rowKey"        JSONB,
-  "rowVersion"    TEXT NOT NULL,
-  "patchVersion"  TEXT NOT NULL,
-  "refCounts"     JSONB,
-  PRIMARY KEY ("clientGroupID", "schema", "table", "rowKey"),
-  CONSTRAINT fk_rows_client_group FOREIGN KEY ("clientGroupID")
-    REFERENCES "{schema}"."rowsVersion" ("clientGroupID") ON DELETE CASCADE
-);
-"#
-    )
-}
 
 /// A minimal MATERIAL buffered write (a client insert). `store.flush` only opens
 /// its transaction — and thus only runs the version/ownership guard — when there
